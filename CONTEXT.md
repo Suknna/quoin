@@ -216,13 +216,13 @@ _Avoid_: 知识候选、知识导入批次、原地覆盖、混合 embedding gen
 ## 存储、保留与部署
 
 **Artifact 提交**：
-Artifact 先写入 Quoin 数据卷的临时文件，完成写入和 `fsync` 后按 SHA-256 原子 rename 为不可变文件，随后 SQLite 事务才提交引用。未完成上传、hash/大小校验或引用事务的文件不能被成功 Attempt 引用；工作区、staging、失败上传和无权威记录引用的孤立文件可自动清理。
+Artifact 的临时文件与最终文件必须位于同一文件系统：完成写入与 hash/大小校验后 `fsync` 临时文件，按 SHA-256 原子 rename 为不可变文件，再 `fsync` 最终父目录；只有父目录同步成功后 SQLite 事务才提交引用。引用事务失败后该文件作为无权威记录引用的孤立文件清理。未完成上传、校验、目录同步或引用事务的文件不能被成功 Attempt 引用；工作区、staging 和失败上传可自动清理。
 
 **在线保留**：
 结构化告警、调查、消息、诊断、报告、反馈、知识、Text Attachment 和 Knowledge Import Batch 原文长期保留。截图、Playwright trace 与大型工具响应正文等生成型大 Artifact 默认保留 90 天，使用一个部署级天数配置；到期后保留元数据、SHA-256、来源、时间和“正文已过期”状态。Raw Playwright trace 固定为敏感诊断 Artifact：官方 Trace Viewer 可查看完整 DOM snapshot、console、request/response headers 与 body，因此 trace 不进入模型上下文、普通附件、FTS 或通用 read/grep；Operator 只看结构化动作日志、错误和显式截图，raw trace 仅 Admin 经审计下载。实现验收必须在锁定版本注入 sentinel Cookie、Authorization header、DOM token 和响应内容，生成真实 trace 检查 ZIP。撤回消息、停用系统或停止复用知识不删除来源历史。备份保留 30 份是独立规则。
 
 **一致备份**：
-自动备份通过独立空闲 SQLite 连接执行 `VACUUM INTO` 生成单文件一致快照，再从快照枚举精确 Artifact hash 集合；Artifact GC 与复制阶段互斥。备份复制校验快照引用的 Artifact，最后原子发布 DB/Artifact SHA-256 manifest；任一引用缺失整次失败，新备份校验成功后才清理超出 30 份旧备份。Attempt 工作区、临时文件、FTS5/embedding 派生索引和 Browser profile 不进入备份。Admin 可浏览、显式下载和立即触发备份，下载审计；恢复只由拥有 PVC/数据目录和根密钥 Secret 权限的部署操作者在 Quoin 停机时执行，Web Admin Session 不是恢复权限。备份目录只允许 Quoin UID 与部署操作者访问，Artifact 路径仅由 hash 推导。恢复后保持维护状态并暂停调度：清除全部 Web Session；通过 TTY 选择一个恢复 Admin 并设临时密码，其他用户待 Admin 重新确认启用；Runtime、Stele service token 和告警源 Bearer 全部失效并重新注册/轮换；Connection 密文保留但标记 `RevalidationRequired`；Browser Identity 变 `AuthenticationRequired`。Admin 检查后才退出恢复维护状态。
+自动备份通过独立空闲 SQLite 连接执行 `VACUUM INTO` 生成单文件一致快照，再从快照枚举精确 Artifact hash 集合；Artifact GC 与复制阶段互斥。备份复制校验快照引用的 Artifact，最后以“临时文件写入并 `fsync` → 原子 rename → rename 后 `fsync` 父目录”的顺序耐久发布 DB/Artifact SHA-256 manifest；任一引用缺失或目录同步失败整次失败，新备份校验成功后才清理超出 30 份旧备份。FTS5 与 embedding 不是恢复业务事实所必需的权威数据；采用同库布局时，FTS5 shadow tables 与 embedding BLOB 会随 `VACUUM INTO` 物理进入快照，恢复后可校验、丢弃并重建。Attempt 工作区、临时文件和 Browser profile 不进入备份。Admin 可浏览、显式下载和立即触发备份，下载审计；恢复只由拥有 PVC/数据目录和根密钥 Secret 权限的部署操作者在 Quoin 停机时执行，Web Admin Session 不是恢复权限。备份目录只允许 Quoin UID 与部署操作者访问，Artifact 路径仅由 hash 推导。恢复后保持维护状态并暂停调度：清除全部 Web Session；通过 TTY 选择一个恢复 Admin 并设临时密码，其他用户待 Admin 重新确认启用；Runtime、Stele service token 和告警源 Bearer 全部失效并重新注册/轮换；Connection 密文保留但标记 `RevalidationRequired`；Browser Identity 变 `AuthenticationRequired`。Admin 检查后才退出恢复维护状态。
 
 **单组件拓扑**：
 第一版固定 Quoin、Plinth、Lintel、Stele 各一个 active replica，不提供 replicas 或 HPA 配置。Helm 与 Compose 均采用零重叠替换；Kubernetes Deployment 使用 `Recreate`。Quoin 持有 `quoin-data` 进程锁，Plinth/Lintel 持有各自状态目录锁，第二实例无法取得锁时启动失败。SQLite WAL 数据卷只支持本地或块存储，不支持 NFS/SMB；CSI 支持时优先 `ReadWriteOncePod`，否则使用 `ReadWriteOnce + Recreate + 应用锁`。Stele 无 PVC。
