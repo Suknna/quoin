@@ -1,2 +1,3 @@
 # Local agent runtime artifacts
 .pi-subagents/
+.pi/subagents/
