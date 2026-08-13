@@ -30,21 +30,27 @@ PRAGMA foreign_keys = ON;
 -- ============================================================================
 
 CREATE TABLE users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  username      TEXT NOT NULL UNIQUE,                       -- 稳定登录名，只禁用不删除
-  display_name  TEXT NOT NULL,
-  role          TEXT NOT NULL CHECK (role IN ('admin','operator')),
-  enabled       INTEGER NOT NULL CHECK (enabled IN (0,1)),
-  auth_revision INTEGER NOT NULL DEFAULT 1 CHECK (auth_revision > 0),
-  password_phc  TEXT NOT NULL CHECK (length(password_phc) > 0), -- Argon2id PHC，格式见 security.md
-  created_at    TEXT NOT NULL,
-  updated_at    TEXT NOT NULL
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  username                   TEXT NOT NULL UNIQUE,          -- 稳定登录名，只禁用不删除
+  display_name               TEXT NOT NULL,
+  role                       TEXT NOT NULL CHECK (role IN ('admin','operator')),
+  enabled                    INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  auth_revision              INTEGER NOT NULL DEFAULT 1 CHECK (auth_revision > 0),
+  password_phc               TEXT NOT NULL CHECK (length(password_phc) > 0), -- Argon2id PHC，格式见 security.md
+  password_change_required   INTEGER NOT NULL DEFAULT 0 CHECK (password_change_required IN (0,1)), -- 首次/强制改密（离线创建、Admin 重置、备份恢复置位）
+  password_change_required_at TEXT,                        -- 置位时间；成功改密在同一事务清除标志（DATA-AUTH-001）
+  created_at                 TEXT NOT NULL,
+  updated_at                 TEXT NOT NULL,
+  CHECK (
+    (password_change_required = 1 AND password_change_required_at IS NOT NULL)
+    OR (password_change_required = 0 AND password_change_required_at IS NULL)
+  )
 ) STRICT;
 
 CREATE TABLE sessions (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   user_id              INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  session_token        BLOB NOT NULL UNIQUE CHECK (length(session_token) = 32), -- __Host-quoin-session 值（仅存服务端）
+  session_token_digest BLOB NOT NULL UNIQUE CHECK (length(session_token_digest) = 32), -- raw 32-byte bearer 的 SHA-256 digest；raw bearer 只存在于 Cookie 与认证瞬间内存（DATA-AUTH-003）
   auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
   created_at           TEXT NOT NULL,
   last_active_at       TEXT NOT NULL,
@@ -246,6 +252,21 @@ CREATE TABLE alert_change_log (
   committed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 ) STRICT;
 CREATE INDEX idx_alert_change_log_occurrence ON alert_change_log (occurrence_id);
+
+-- 有界派生任务变更日志：id 即单调递增 task_change_seq（AUTOINCREMENT，同事务分配、永不复用）；
+-- 与权威对象的状态/阶段变化同一事务写入；可清理（保留窗口由部署配置）、可丢弃、可重建，
+-- 不是任务历史权威源（DATA-SSE-004/005/006）。object_type/object_id 为多态引用，由应用类型化校验。
+CREATE TABLE task_change_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  object_type  TEXT NOT NULL CHECK (object_type IN
+    ('initial_analysis','execution_attempt','inspection_run','inspection_report',
+     'tool_call','knowledge_import_batch','knowledge_candidate','browser_operation')),
+  object_id    INTEGER NOT NULL,
+  change_type  TEXT NOT NULL CHECK (change_type IN ('created','state_changed')),
+  row_version  INTEGER NOT NULL CHECK (row_version >= 1),
+  committed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+) STRICT;
+CREATE INDEX idx_task_change_log_object ON task_change_log (object_type, object_id);
 
 -- ============================================================================
 -- 4. 初步分析、调查与附件
@@ -496,6 +517,7 @@ CREATE TABLE browser_operations (
   started_at        TEXT NOT NULL,
   ended_at          TEXT,
   result            TEXT CHECK (result IS NULL OR result IN ('success','failed','cancelled','interrupted')),
+  row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   new_generation_id INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   trace_artifact_id INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   log_json          TEXT CHECK (log_json IS NULL OR json_valid(log_json)),
@@ -602,6 +624,7 @@ CREATE TABLE tool_calls (
   tool_version   TEXT,
   arguments_json TEXT NOT NULL CHECK (json_valid(arguments_json)),
   status         TEXT NOT NULL CHECK (status IN ('pending','succeeded','failed','cancelled')),
+  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   result_json    TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
   error_detail   TEXT,
   created_at     TEXT NOT NULL,
@@ -645,11 +668,21 @@ CREATE TABLE inspection_reports (
 -- 9. Artifact 与来源材料引用
 -- ============================================================================
 
+-- 物理 blob：每份内容唯一规范持久副本；sha256/storage_key 全局唯一（DATA-ARTIFACT-002）。
+-- 本表不可改写；物理文件只在无任何逻辑引用且与备份/GC 互斥时清理（DATA-ARTIFACT-004）。
+CREATE TABLE artifact_blobs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  sha256      TEXT NOT NULL UNIQUE CHECK (length(sha256) = 64),
+  size_bytes  INTEGER NOT NULL CHECK (size_bytes >= 0),
+  storage_key TEXT NOT NULL UNIQUE,              -- 仅由 hash 推导的路径
+  created_at  TEXT NOT NULL
+) STRICT;
+
+-- 逻辑 Artifact：同一 blob 可被多个逻辑引用，以不同 owner/kind/sensitive/retention 表达
+-- 访问与保留规则（DATA-ARTIFACT-003）；访问、过期、下载授权与审计按本表裁决。
 CREATE TABLE artifacts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  sha256         TEXT NOT NULL UNIQUE CHECK (length(sha256) = 64),
-  size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
-  storage_key    TEXT NOT NULL UNIQUE,              -- 仅由 hash 推导的路径
+  blob_id        INTEGER NOT NULL REFERENCES artifact_blobs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)), -- raw trace 固定 sensitive=1
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
@@ -658,9 +691,11 @@ CREATE TABLE artifacts (
   expires_at     TEXT,
   body_expired   INTEGER NOT NULL DEFAULT 0 CHECK (body_expired IN (0,1)),
   created_at     TEXT NOT NULL,
-  created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT
+  created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CHECK (kind <> 'trace' OR sensitive = 1)
 ) STRICT;
 CREATE INDEX idx_artifacts_owner ON artifacts (owner_type, owner_id);
+CREATE INDEX idx_artifacts_blob ON artifacts (blob_id);
 
 -- ============================================================================
 -- 10. 知识沉淀
@@ -670,6 +705,7 @@ CREATE TABLE knowledge_import_batches (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   source_material_id INTEGER NOT NULL UNIQUE REFERENCES source_materials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   state              TEXT NOT NULL CHECK (state IN ('Processing','AwaitingConfirmation','Failed','Completed','Cancelled')),
+  row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   generation         INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
   created_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at         TEXT NOT NULL
@@ -682,6 +718,7 @@ CREATE TABLE knowledge_candidates (
   source_id               INTEGER NOT NULL,
   generation              INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
   state                   TEXT NOT NULL CHECK (state IN ('AwaitingConfirmation','Confirmed','Excluded','Superseded','SourceInvalid')),
+  row_version             INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   original_suggestion_json TEXT NOT NULL CHECK (json_valid(original_suggestion_json)), -- 模型原始建议不可变
   draft_title             TEXT,
   draft_body              TEXT,
@@ -976,10 +1013,13 @@ CREATE TRIGGER trg_observed_resources_no_identity_update BEFORE UPDATE OF
   business_system_id, discovery_key, identity_key, identity_digest, created_at ON observed_resources
 BEGIN SELECT RAISE(ABORT, 'observed_resource identity is immutable'); END;
 
--- 12.12 Artifact：内容寻址字段不可变，只允许保留字段（expires_at/body_expired）变化
-CREATE TRIGGER trg_artifacts_no_content_update BEFORE UPDATE OF
-  sha256, size_bytes, storage_key, kind, sensitive, retention_kind, owner_type, owner_id, created_by, created_at ON artifacts
-BEGIN SELECT RAISE(ABORT, 'artifact content addressing is immutable'); END;
+-- 12.12 Artifact：物理 blob 身份不可改写；逻辑 Artifact 的来源字段不可改写，
+-- 只允许保留字段（expires_at/body_expired）变化（DATA-ARTIFACT-003/005）
+CREATE TRIGGER trg_artifact_blobs_no_update BEFORE UPDATE ON artifact_blobs
+BEGIN SELECT RAISE(ABORT, 'artifact_blob content addressing is immutable'); END;
+CREATE TRIGGER trg_artifacts_origin_immutable BEFORE UPDATE OF
+  blob_id, kind, sensitive, retention_kind, owner_type, owner_id, created_by, created_at ON artifacts
+BEGIN SELECT RAISE(ABORT, 'artifact logical origin is immutable'); END;
 
 -- 12.13 浏览器操作：边界字段不可变，结果/结束时间可更新
 CREATE TRIGGER trg_browser_operations_no_origin_update BEFORE UPDATE OF
@@ -1110,6 +1150,8 @@ CREATE TRIGGER trg_browser_identities_no_delete BEFORE DELETE ON browser_identit
 BEGIN SELECT RAISE(ABORT, 'browser_identities history is not deletable'); END;
 CREATE TRIGGER trg_browser_operations_no_delete BEFORE DELETE ON browser_operations
 BEGIN SELECT RAISE(ABORT, 'browser_operations history is not deletable'); END;
+CREATE TRIGGER trg_artifacts_no_delete BEFORE DELETE ON artifacts
+BEGIN SELECT RAISE(ABORT, 'artifact metadata is permanent; only physical blobs may be GC-cleaned'); END;
 CREATE TRIGGER trg_inspection_runs_no_delete BEFORE DELETE ON inspection_runs
 BEGIN SELECT RAISE(ABORT, 'inspection_runs history is not deletable'); END;
 CREATE TRIGGER trg_execution_attempts_no_delete BEFORE DELETE ON execution_attempts
@@ -1259,3 +1301,91 @@ BEGIN SELECT RAISE(ABORT, 'business_system_config_version superseded is terminal
 CREATE TRIGGER trg_business_config_versions_no_unpublish BEFORE UPDATE OF state ON business_system_config_versions
 WHEN OLD.state = 'published' AND NEW.state = 'draft'
 BEGIN SELECT RAISE(ABORT, 'published config version cannot return to draft'); END;
+
+-- 12.29 任务变更日志：与权威对象状态/阶段变化同一事务派生（可丢弃、可重建；
+-- DELETE 允许保留窗口 GC；UPDATE 禁止）。row_version 由应用在同一 UPDATE 中递增
+-- （SQLite 触发器不支持 SET NEW；DATA-SSE-005）。
+CREATE TRIGGER trg_task_change_log_no_update BEFORE UPDATE ON task_change_log
+BEGIN SELECT RAISE(ABORT, 'task_change_log is append-only (deletion allowed for retention GC)'); END;
+CREATE TRIGGER trg_task_change_log_initial_analysis_insert AFTER INSERT ON initial_analyses
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('initial_analysis', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_initial_analysis_state AFTER UPDATE OF state ON initial_analyses
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('initial_analysis', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_attempt_insert AFTER INSERT ON execution_attempts
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('execution_attempt', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_attempt_state AFTER UPDATE OF state ON execution_attempts
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('execution_attempt', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_run_insert AFTER INSERT ON inspection_runs
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('inspection_run', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_run_state AFTER UPDATE OF state ON inspection_runs
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('inspection_run', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_report_insert AFTER INSERT ON inspection_reports
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('inspection_report', NEW.id, 'created', 1);
+END;
+CREATE TRIGGER trg_task_change_log_tool_insert AFTER INSERT ON tool_calls
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('tool_call', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_tool_status AFTER UPDATE OF status ON tool_calls
+WHEN NEW.status <> OLD.status
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('tool_call', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_batch_insert AFTER INSERT ON knowledge_import_batches
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('knowledge_import_batch', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_batch_state AFTER UPDATE OF state ON knowledge_import_batches
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('knowledge_import_batch', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_candidate_insert AFTER INSERT ON knowledge_candidates
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('knowledge_candidate', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_candidate_state AFTER UPDATE OF state ON knowledge_candidates
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('knowledge_candidate', NEW.id, 'state_changed', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_browser_insert AFTER INSERT ON browser_operations
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('browser_operation', NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_task_change_log_browser_result AFTER UPDATE OF result ON browser_operations
+WHEN NEW.result IS NOT NULL AND (OLD.result IS NULL OR NEW.result <> OLD.result)
+BEGIN
+  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
+  VALUES ('browser_operation', NEW.id, 'state_changed', NEW.row_version);
+END;
