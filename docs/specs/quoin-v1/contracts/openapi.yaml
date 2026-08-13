@@ -423,8 +423,9 @@ paths:
         单条 UPDATE 把 slot 置为 revoked 并清空 current/pending 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
         自动 retire 该 slot 全部未退休凭据；被引用行在指针清空前禁止手动 retire，DATA-RUNTIME-001/002），同时生成内存短生命周期、
         单次使用的一次性注册令牌 reveal handle（HTTP-COMMAND-012）。响应只含非秘密元数据；首次实时响应可能
-        携带 registrationTokenHandle（registrationTokenAvailable=true），由 `revealRuntimeRegistrationToken`
-        一次性换取 raw 注册令牌；命令重放返回 registrationTokenAvailable=false 且无 handle，绝不重新生成。
+         携带 registrationTokenHandle（registrationTokenAvailable=true），由 `revealRuntimeRegistrationToken`
+         一次性换取 raw 注册令牌（绑定 slot 与该 slot 下一个 credential generation）；命令重放返回
+         registrationTokenAvailable=false 且无 handle，绝不重新生成。
         长期服务 token 只经已认证 gRPC 控制面下发/轮换（runtime-protocol.md），不进入 HTTP 响应。
       parameters:
         - $ref: '#/components/parameters/RuntimeSlot'
@@ -4424,16 +4425,20 @@ components:
           description: replaceRuntimeSlot 首次实时响应返回的一次性句柄；不接受 slot 本身（HTTP-COMMAND-012）。
     RuntimeRegistrationTokenRevealResult:
       type: object
-      required: [slot, registrationToken]
+      required: [slot, generation, registrationToken]
       additionalProperties: false
       properties:
         slot:
           type: string
           enum: [plinth, lintel]
           description: handle 绑定的 slot（reveal 路由无 slot 路径参数，slot 由 handle 携带）。
+        generation:
+          type: integer
+          minimum: 1
+          description: 注册令牌绑定的 credential generation；Register 请求必须回显同一值（HTTP-COMMAND-012、RUNTIME-REG-002）。
         registrationToken:
           type: string
-          description: 一次性注册令牌；仅此一次返回，绑定 slot，内存短生命周期；不进入日志、审计或命令结果（HTTP-COMMAND-012）。
+          description: 一次性注册令牌（32 随机字节 base64url 无填充文本）；仅此一次返回，绑定 slot 与 generation，内存短生命周期；不进入日志、审计或命令结果（HTTP-COMMAND-012、RUNTIME-AUTH-006）。
     RuntimeStatus:
       type: object
       required: [plinth, lintel]

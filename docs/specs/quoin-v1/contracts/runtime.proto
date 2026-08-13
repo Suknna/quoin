@@ -1,0 +1,701 @@
+// Quoin v1 四组件 gRPC 协议机器契约（唯一机器权威，SPEC-VERSION-002：package quoin.runtime.v1）。
+// 职责划分（SPEC-AUTHORITY-002）：本文件只承载 service、RPC、message、stream 与 wire-level
+// 枚举；握手顺序、身份裁决、lease/fencing、调和、跨流事务、提交顺序裁决、凭据 grant 生命周期
+// 与故障语义由 docs/specs/quoin-v1/runtime-protocol.md（CATEGORY=RUNTIME）承载，不在本文件重复。
+//
+// 字段编号策略（RUNTIME-VERSION-002）：字段编号一经分配永不复用；删除字段必须使用 reserved
+// 声明并保留编号；oneof 成员与普通字段共享所在 message 的编号空间。流式服务中的消息方向
+// 由 message 类型名与 runtime-protocol.md 的收发方表格表达，不通过字段命名表达。
+//
+// 身份：Runtime（Plinth/Lintel）主动出站拨号 Quoin；TLS 只承担服务端身份与传输保护，
+// 不建立 mTLS 客户端身份（CONTEXT「服务身份」）。长期 Bearer 经 gRPC metadata
+// （authorization: Bearer <base64url 无填充文本>）认证，不出现在任何消息体中；一次性注册
+// 令牌只在 Register 请求中出现一次，新长期 token 只在 RegisterRuntimeResponse / IssueToken
+// 中出现一次（RUNTIME-AUTH-002/006、RUNTIME-REG-002/004）。所有 token 都是 32 随机字节的
+// base64url（无填充）ASCII 文本；数据库只存解码后 32 字节的 SHA-256 digest（DATA-RUNTIME-002）。
+//
+// 内容 digest（AttemptInputSnapshot.content_digest / ResultPayload.content_digest 等）是原始
+// 32 字节二进制 SHA-256，用 bytes 承载；token 是文本编码，用 string 承载（RUNTIME-AUTH-006）。
+
+syntax = "proto3";
+
+package quoin.runtime.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/Suknna/quoin/gen/runtime/v1;runtimev1";
+
+// ============================================================================
+// 服务
+// ============================================================================
+
+// Runtime 控制面：注册（unary bootstrap）、长期双向控制流（Connect）与任务级连接凭据
+// grant 获取（unary，supervisor-only）。Connect 是 Runtime 侧出站发起的 bidi stream；
+// Bearer 经 metadata 认证，首帧必须是 Hello。
+service RuntimeControl {
+  // 注册：以一次性注册令牌（绑定 slot + generation，RUNTIME-REG-001/002）换取长期服务
+  // token。slot 必须处于 unregistered/revoked 注册窗口；成功后创建已确认 credential 并返回
+  // 长期 token。失败使用 canonical gRPC status（RUNTIME-ERROR-001）。
+  rpc Register(RegisterRuntimeRequest) returns (RegisterRuntimeResponse);
+
+  // 长期控制流：双向 ControlEnvelope，承载任务派发/接受/进度/结果/取消/调和、跨 Runtime
+  // 子执行请求/结果与 token 轮换（RUNTIME-CTRL-001/009）。同 slot 同时至多一条活动控制流。
+  rpc Connect(stream ControlEnvelope) returns (stream ControlEnvelope);
+
+  // 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
+  // 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
+  // 可用，终态即清除。worker 进程不得调用本 RPC；Lintel 无连接凭据，请求一律 PERMISSION_DENIED。
+  rpc FetchCredentialGrant(FetchCredentialGrantRequest) returns (FetchCredentialGrantResponse);
+}
+
+// 浏览器隧道：每个活动 BrowserSession 一条独立 bidi stream；noVNC/RFB 字节透明中继，
+// Quoin 不解析内容（RUNTIME-BROWSER-001/003）。首帧必须是 open。
+service BrowserTunnel {
+  rpc Open(stream BrowserEnvelope) returns (stream BrowserEnvelope);
+}
+
+// Artifact 上传：独立 client-streaming；首帧必须是 header；整单重传，无 offset 续传
+// （RUNTIME-UPLOAD-001/002）。upload_id 在重试生命周期内稳定，同摘要重试幂等。
+service ArtifactService {
+  rpc Upload(stream ArtifactUploadFrame) returns (ArtifactUploadResult);
+}
+
+// Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
+// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带 release_version，
+// 与 Quoin 严格相等（RUNTIME-STELE-005、RUNTIME-VERSION-001）。
+service SteleRelay {
+  // 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
+  // （RUNTIME-STELE-002）。
+  rpc GetCredentialSnapshot(GetCredentialSnapshotRequest) returns (GetCredentialSnapshotResponse);
+
+  // 精确原始 Delivery 转交；relay_id 幂等；credential_id + credential_snapshot_version
+  // 必填（RUNTIME-STELE-003/004）。
+  rpc Deliver(DeliveryRelayRequest) returns (DeliveryRelayResponse);
+}
+
+// ============================================================================
+// 身份与通用枚举
+// ============================================================================
+
+// 固定两个逻辑 Runtime slot（CONTEXT「服务身份」）。对应 SQL runtime_slots.slot
+// 与 OpenAPI RuntimeSlot 枚举的字符串 'plinth' / 'lintel'。
+enum RuntimeSlot {
+  RUNTIME_SLOT_UNSPECIFIED = 0;
+  RUNTIME_SLOT_PLINTH = 1;
+  RUNTIME_SLOT_LINTEL = 2;
+}
+
+// execution_attempts.attempt_type 的 wire 表达（DATA-ATTEMPT-002）。
+enum AttemptType {
+  ATTEMPT_TYPE_UNSPECIFIED = 0;
+  ATTEMPT_TYPE_INITIAL_ANALYSIS = 1;
+  ATTEMPT_TYPE_INVESTIGATION = 2;
+  ATTEMPT_TYPE_INSPECTION_ANALYSIS = 3;
+  ATTEMPT_TYPE_INSPECTION_COLLECTION = 4;
+  ATTEMPT_TYPE_BROWSER_EXPLORATION = 5;
+}
+
+// execution_attempts.scope_type 的 wire 表达（DATA-ATTEMPT-002）。
+enum ScopeType {
+  SCOPE_TYPE_UNSPECIFIED = 0;
+  SCOPE_TYPE_ANALYSIS = 1;
+  SCOPE_TYPE_INVESTIGATION = 2;
+  SCOPE_TYPE_RUN = 3;
+  SCOPE_TYPE_RUN_CHECK = 4;
+}
+
+// execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。
+enum TerminationReason {
+  TERMINATION_REASON_UNSPECIFIED = 0;
+  TERMINATION_REASON_TIMEOUT = 1;
+  TERMINATION_REASON_RATE_LIMITED = 2;
+  TERMINATION_REASON_PROVIDER_UNAVAILABLE = 3;
+  TERMINATION_REASON_INVALID_RESPONSE = 4;
+  TERMINATION_REASON_TOOL_ERROR = 5;
+  TERMINATION_REASON_ARTIFACT_COMMIT_FAILED = 6;
+  TERMINATION_REASON_CANCELLED = 7;
+  TERMINATION_REASON_CONNECTION_DISABLED = 8;
+  TERMINATION_REASON_BUSINESS_SYSTEM_DISABLED = 9;
+  TERMINATION_REASON_LEASE_EXPIRED = 10;
+  TERMINATION_REASON_REPLACED = 11;
+  TERMINATION_REASON_REVOKED = 12;
+}
+
+// ResultProposal 的结果分类（RUNTIME-TASK-008）。
+enum AttemptOutcome {
+  ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  ATTEMPT_OUTCOME_SUCCEEDED = 1;
+  ATTEMPT_OUTCOME_FAILED = 2;
+}
+
+// Hello 拒绝原因（RUNTIME-CTRL-002/003）；detail 在 runtime-protocol.md 定义。
+enum HelloRejectReason {
+  HELLO_REJECT_REASON_UNSPECIFIED = 0;
+  HELLO_REJECT_REASON_TOKEN_INVALID = 1;
+  HELLO_REJECT_REASON_SLOT_REVOKED = 2;
+  HELLO_REJECT_REASON_VERSION_MISMATCH = 3;
+  HELLO_REJECT_REASON_EPOCH_STALE = 4;
+}
+
+// Runtime 拒绝接受派发的原因（RUNTIME-TASK-004）。
+enum AttemptRejectReason {
+  ATTEMPT_REJECT_REASON_UNSPECIFIED = 0;
+  ATTEMPT_REJECT_REASON_NO_CAPACITY = 1;        // 暂无可执行容量；Attempt 保持 Assigned，可幂等重派
+  ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED = 2;  // 输入/快照不受支持；Attempt 转 Failed
+  ATTEMPT_REJECT_REASON_INTERNAL = 3;           // Runtime 内部错误；Attempt 转 Failed
+}
+
+// artifacts.kind 的 wire 表达（DATA-ARTIFACT-003）。
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_ATTACHMENT = 1;
+  ARTIFACT_KIND_SCREENSHOT = 2;
+  ARTIFACT_KIND_TRACE = 3;
+  ARTIFACT_KIND_TOOL_RESULT = 4;
+  ARTIFACT_KIND_REPORT_FILE = 5;
+}
+
+// artifacts.retention_kind 的 wire 表达（DATA-ARTIFACT-003）。
+enum RetentionKind {
+  RETENTION_KIND_UNSPECIFIED = 0;
+  RETENTION_KIND_LONG_TERM = 1;
+  RETENTION_KIND_GENERATED = 2;
+}
+
+// runtime_artifact_uploads rejected 原因（RUNTIME-UPLOAD-004/005）。
+enum UploadRejectReason {
+  UPLOAD_REJECT_REASON_UNSPECIFIED = 0;
+  UPLOAD_REJECT_REASON_SHA256_MISMATCH = 1;
+  UPLOAD_REJECT_REASON_SIZE_MISMATCH = 2;
+  UPLOAD_REJECT_REASON_ATTEMPT_NOT_RUNNING = 3; // Attempt 非 Running（未派发/终态/替换后 ABA）
+  UPLOAD_REJECT_REASON_BOOT_MISMATCH = 4;
+  UPLOAD_REJECT_REASON_EPOCH_MISMATCH = 5;
+  UPLOAD_REJECT_REASON_METADATA_MISMATCH = 6;   // kind/retention/sensitive/owner 与 artifacts 不符
+  UPLOAD_REJECT_REASON_TERMINAL_OR_CANCELLED = 7;
+  UPLOAD_REJECT_REASON_INTERNAL = 8;
+}
+
+// Quoin 主动结束控制流的原因（RUNTIME-CTRL-007 / RUNTIME-REVOKE-001）。
+enum GoAwayReason {
+  GO_AWAY_REASON_UNSPECIFIED = 0;
+  GO_AWAY_REASON_SHUTTING_DOWN = 1;    // Quoin 有序停机（服务端不可用，可重试）
+  GO_AWAY_REASON_VERSION_MISMATCH = 2; // 版本不匹配（不应发生：握手已拒绝）
+  GO_AWAY_REASON_REVOKED = 3;          // 凭据吊销（拒绝重连）
+  GO_AWAY_REASON_ROTATED = 4;          // 长期 token 已轮换（以新 token 重连）
+  GO_AWAY_REASON_REPLACED = 5;         // slot 被替换（以新注册令牌重新注册）
+}
+
+// BrowserSession 关闭原因（RUNTIME-BROWSER-004/005/007）。
+enum BrowserCloseReason {
+  BROWSER_CLOSE_REASON_UNSPECIFIED = 0;
+  BROWSER_CLOSE_REASON_CLIENT_CLOSED = 1;   // 浏览器侧关闭（WebSocket 关闭）
+  BROWSER_CLOSE_REASON_SESSION_REVOKED = 2; // 会话/操作被吊销
+  BROWSER_CLOSE_REASON_GRACE_EXPIRED = 3;   // 重附着宽限期到期（同 boot 瞬时断线）
+  BROWSER_CLOSE_REASON_SLOT_REVOKED = 4;    // Lintel slot 凭据吊销
+  BROWSER_CLOSE_REASON_SLOT_REPLACED = 5;   // Lintel slot 被替换
+  BROWSER_CLOSE_REASON_SHUTDOWN = 6;        // 有序停机
+  BROWSER_CLOSE_REASON_NEW_BOOT = 7;        // Lintel 新 boot 被接受：旧 boot 会话立即关闭、身份锁释放
+}
+
+// 跨 Runtime 浏览器子执行请求的封闭拒绝原因（RUNTIME-CROSS-002）。
+enum BrowserSubExecutionRejectReason {
+  BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED = 0;
+  BROWSER_SUB_EXECUTION_REJECT_REASON_PARENT_NOT_RUNNING = 1; // 父 Attempt 不属于 Plinth、非 Running 或已取消
+  BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED = 2;  // 参数 schema/digest/引用无效
+  BROWSER_SUB_EXECUTION_REJECT_REASON_STALE_STREAM = 3;       // 请求来自已被替换的 boot/epoch
+  BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL = 4;           // 持久化或派发内部错误
+}
+
+// Stele Delivery 结果分类（RUNTIME-STELE-004；对应 HTTP 语义：ACCEPTED=204，
+// REJECTED=4xx 不重试，UNAVAILABLE=5xx 由 Alertmanager 重试）。
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_ACCEPTED = 1;
+  DELIVERY_STATUS_REJECTED = 2;
+  DELIVERY_STATUS_UNAVAILABLE = 3;
+}
+
+// ============================================================================
+// 注册（bootstrap）
+// ============================================================================
+
+// Register 请求：一次性注册令牌（HTTP-COMMAND-012 的 reveal 产物，绑定 slot + generation）
+// 单次消费；不携带长期 Bearer（尚未拥有）。release_version 必须与 Quoin 严格相等。
+message RegisterRuntimeRequest {
+  RuntimeSlot slot = 1;
+  string one_time_token = 2;   // 一次性注册令牌：32 随机字节的 base64url 无填充文本（RUNTIME-AUTH-006）
+  uint64 generation = 3;       // 令牌绑定的 credential generation（>= 1）；必须与 Quoin 内存令牌记录一致
+  string boot_id = 4;          // 每次进程启动重新生成（RUNTIME-CTRL-004）
+  string release_version = 5;  // 与 Quoin 严格相等，不做协商（RUNTIME-VERSION-001）
+}
+
+// Register 响应：长期服务 token 仅此一次返回；supervisor 必须原子持久化到权限 0600
+// 的专用状态卷（RUNTIME-REG-002）。响应丢失时不得重放一次性令牌——slot 已 registered
+// 的恢复路径是 Admin 重新执行 replaceRuntimeSlot（HTTP-COMMAND-012）。
+message RegisterRuntimeResponse {
+  RuntimeSlot slot = 1;
+  uint64 generation = 2;         // 与请求一致（runtime_credentials.generation）
+  string long_term_token = 3;    // 新长期 token：base64url 无填充文本；仅经 TLS 返回，不进入日志/审计
+}
+
+// ============================================================================
+// 控制流（RuntimeControl.Connect）
+// ============================================================================
+
+// 双向控制信封：所有消息（含 Hello）都携带 envelope 字段；领域载荷在 msg oneof。
+// 收发方归属、顺序与验证规则由 runtime-protocol.md 定义（RUNTIME-CTRL-001/009）：
+// message_id 当前连接内单调唯一（去重）；connection_epoch/boot_id 除 Hello 外必须等于
+// 接收流上下文；correlation_id 关联请求-响应对（0 = 无）。
+message ControlEnvelope {
+  uint64 message_id = 1;         // 当前连接（slot+boot+epoch）内、按方向单调递增且唯一（RUNTIME-CTRL-009）
+  uint64 connection_epoch = 2;   // 除 Hello 外必须等于接收流上下文的 epoch；不一致丢弃/仅审计
+  uint64 correlation_id = 3;     // 请求-响应对关联（RUNTIME-CTRL-009）；0 = 无
+  string boot_id = 4;            // 除 Hello 外必须等于接收流上下文的 boot_id；不一致丢弃/仅审计
+  oneof msg {
+    // --- 握手（RUNTIME-CTRL-002/003）---
+    Hello hello = 10;              // Runtime -> Quoin；首帧必须为 hello
+    HelloAck hello_ack = 11;       // Quoin -> Runtime；握手裁决
+
+    // --- 活性与容量（RUNTIME-CTRL-005）---
+    Heartbeat heartbeat = 12;      // 双向；只更新瞬时投影，不落库
+
+    // --- 任务派发与调和（RUNTIME-TASK-001..007）---
+    DispatchAttempt dispatch_attempt = 13;   // Quoin -> Runtime；Assigned -> Accept/Reject
+    AttemptAccept attempt_accept = 14;       // Runtime -> Quoin；accepted_at + Running
+    AttemptReject attempt_reject = 15;       // Runtime -> Quoin；保持 Assigned 或转 Failed
+    AttemptProgress attempt_progress = 16;   // Runtime -> Quoin；显示性阶段，非权威
+    ReconcileRequest reconcile_request = 17; // Quoin -> Runtime；重连调和
+    ReconcileReport reconcile_report = 18;   // Runtime -> Quoin；实际运行集合
+
+    // --- 结果与取消（RUNTIME-TASK-008/012 / RUNTIME-CANCEL-001..003）---
+    ResultProposal result_proposal = 19;     // Runtime -> Quoin；按提交顺序裁决
+    ResultAck result_ack = 20;               // Quoin -> Runtime；裁决结果
+    CancelAttempt cancel_attempt = 21;       // Quoin -> Runtime；fence 已提交后发出
+    CancelAck cancel_ack = 22;               // Runtime -> Quoin；已停止
+
+    // --- 长期 token 轮换（RUNTIME-REG-004/005）---
+    IssueToken issue_token = 23;             // Quoin -> Runtime；下发新 token
+    TokenPersisted token_persisted = 24;     // Runtime -> Quoin；持久化确认
+
+    // --- 跨 Runtime 子执行（RUNTIME-CROSS-001..004）---
+    RequestBrowserSubExecution request_browser_sub_execution = 25; // Plinth -> Quoin
+    BrowserSubExecutionAck browser_sub_execution_ack = 26;         // Quoin -> Plinth
+    ToolResultDelivery tool_result_delivery = 27;                  // Quoin -> Plinth；子执行结果
+
+    // --- 连接终结（RUNTIME-CTRL-007 / RUNTIME-REVOKE-001）---
+    GoAway go_away = 28;                     // Quoin -> Runtime；尽力而为的通知，关闭是权威
+  }
+}
+
+// 握手首帧：Bearer 已由 metadata 认证；本帧声明 slot/连接身份与版本。
+message Hello {
+  RuntimeSlot slot = 1;
+  string boot_id = 2;              // 每次进程启动重新生成
+  uint64 connection_epoch = 3;     // 每次连接递增，>= 1（RUNTIME-CTRL-004）
+  string release_version = 4;      // 与 Quoin 严格相等
+  repeated int64 active_attempts = 5; // 上次连接仍在执行的 attempt（调和输入，可空）
+}
+
+// 握手裁决：accepted=true 后连接成为该 slot 当前活动控制流；
+// accepted=false 携带拒绝原因（RUNTIME-CTRL-002/003）。
+message HelloAck {
+  bool accepted = 1;
+  HelloRejectReason reject_reason = 2;
+  uint64 last_connection_epoch = 3; // accepted 时携带该 slot 最近一次连接 epoch（调和参考）
+}
+
+// 心跳：更新瞬时连接投影（connected/lastSeenAt）；不写 runtime_slots.row_version
+// （DATA-RUNTIME-001）；周期为部署配置，不在协议冻结数值（RUNTIME-CTRL-005）。
+message Heartbeat {
+  uint64 seq = 1;                  // 当前连接内单调递增
+  repeated int64 active_attempts = 2; // Runtime 当前正在执行的 attempt（调和输入）
+  Capacity capacity = 3;           // 剩余容量上报（部署内部）
+}
+
+// 容量投影（部署内部）：只用于派发决策提示，不是权威事实（RUNTIME-CTRL-005）。
+message Capacity {
+  uint32 running = 1;
+  uint32 max = 2;                  // 部署配置的并发上限
+}
+
+// 派发：Quoin 先持久化 Attempt（Assigned，带 slot/boot/epoch/lease）后发送本消息
+// （RUNTIME-TASK-001/002）。重复投递按 attempt_id + boot/epoch 幂等。
+// 任务执行输入由 input（AttemptInputSnapshot）完整携带；连接秘密不在本消息，
+// 经 FetchCredentialGrant 由 supervisor 按 grant_id 获取（RUNTIME-GRANT-001）。
+message DispatchAttempt {
+  int64 attempt_id = 1;            // execution_attempts.id
+  AttemptType attempt_type = 2;
+  ScopeType scope_type = 3;
+  int64 scope_id = 4;
+  string check_key = 5;            // 子 Attempt（run_check）时非空；否则空
+  google.protobuf.Timestamp lease_deadline = 6; // 有限 lease 截止；时长数值为部署配置
+  AttemptInputSnapshot input = 7;  // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
+  int64 requested_by_tool_call_id = 8; // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
+}
+
+// 任务执行输入快照：Quoin 在派发事务中冻结的规范结构化输入（非秘密），对端按
+// schema_kind 解析 canonical_json 重建执行上下文；content_digest 必须等于
+// SHA-256(canonical_json)。artifact_refs 是只读 Artifact 引用；connection_grants
+// 是非秘密 grant 引用，秘密由 supervisor 经 FetchCredentialGrant 获取（RUNTIME-TASK-011、
+// RUNTIME-GRANT-001/002）。
+message AttemptInputSnapshot {
+  string schema_kind = 1;          // 输入 schema 标识（如 "investigation_v1"）；非空
+  bytes canonical_json = 2;        // 非秘密规范结构化输入（冻结）
+  bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
+  repeated ArtifactRef artifact_refs = 4;     // 输入引用的只读 Artifact（可空）
+  repeated ConnectionGrant connection_grants = 5; // 非秘密 grant 引用（可空）
+}
+
+// 输入引用的 Artifact（只读；正文访问按 DATA-ARTIFACT-003 裁决）。
+message ArtifactRef {
+  int64 artifact_id = 1;           // artifacts.id
+  string role = 2;                 // 输入中的角色（如 "attachment"、"source"）
+}
+
+// 任务级连接凭据 grant 引用（非秘密；RUNTIME-GRANT-001）。grant_id 由 Quoin 生成，
+// 在 Attempt 内存生命周期内有效；绑定派发时的 connection_revision_id 与
+// credential_generation_id（DATA-CONN-002）。
+message ConnectionGrant {
+  string grant_id = 1;             // Quoin 生成的单次 grant 标识（attempt 内唯一）
+  int64 connection_revision_id = 2; // connections.current_revision_id 绑定
+  int64 credential_generation_id = 3; // credential_generations.id 绑定
+  string purpose = 4;              // 非秘密用途说明（如 "promql_query"、"chat_completion"）
+}
+
+// 接受：Quoin 写 accepted_at 并转 Running（RUNTIME-TASK-004）。
+message AttemptAccept {
+  int64 attempt_id = 1;
+}
+
+// 拒绝：NO_CAPACITY 保持 Assigned 可幂等重派；INPUT_UNSUPPORTED/INTERNAL 转 Failed
+// （RUNTIME-TASK-004）。
+message AttemptReject {
+  int64 attempt_id = 1;
+  AttemptRejectReason reason = 2;
+}
+
+// 显示性进度：权威进度由 tool_calls/evidence 持久记录承担，本消息不入权威历史
+// （RUNTIME-TASK-010）。
+message AttemptProgress {
+  int64 attempt_id = 1;
+  string stage = 2;                // 显示性阶段名（由 #13/#14 承接具体值）
+  int64 tool_call_id = 3;          // 相关 tool_call（可 0）
+}
+
+// 调和请求：重连后 Quoin 列出该 slot 当前 active（Assigned/Running/Cancelling）
+// 的 attempt；同 boot 不重派（RUNTIME-TASK-005）。
+message ReconcileRequest {
+  repeated int64 active_attempt_ids = 1;
+}
+
+// 调和报告：Runtime 实际正在执行的 attempt（RUNTIME-TASK-005）。
+message ReconcileReport {
+  repeated int64 running_attempt_ids = 1;
+}
+
+// 结果提议：Runtime 结束运行并提议结果；Quoin 按 attempt_id + boot + epoch 幂等并
+// 按 SQLite 提交顺序与 cancellation fence 裁决（RUNTIME-TASK-008 / RUNTIME-CANCEL-002）。
+// outcome=SUCCEEDED 时 payload 必填（RUNTIME-TASK-012）；outcome=FAILED 时
+// termination_reason 必填。
+message ResultProposal {
+  int64 attempt_id = 1;
+  string boot_id = 2;
+  uint64 connection_epoch = 3;
+  AttemptOutcome outcome = 4;
+  TerminationReason termination_reason = 5; // outcome=FAILED 时必填
+  repeated int64 artifact_ids = 6;          // 经 ArtifactService 提交并返回的引用（可空）
+  ResultPayload payload = 7;                // 规范结构化输出；SUCCEEDED 必填（RUNTIME-TASK-012）
+}
+
+// 结果载荷：与 attempt_type 对应的规范结构化输出（assistant message / report content /
+// analysis output / browser 操作结果），由 Quoin 校验 schema_kind 与 content_digest 后
+// 原子持久化到对应领域记录（RUNTIME-TASK-012）。不依赖未定义实现层的补通道。
+message ResultPayload {
+  string schema_kind = 1;          // 输出 schema 标识（如 "assistant_message_v1"、"inspection_report_v1"）；非空
+  bytes canonical_json = 2;        // 非秘密规范结构化输出
+  bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
+}
+
+// 结果裁决：accepted=true 表示 Quoin 已提交该结果；false 表示迟到（旧 epoch/已取消/
+// lease 已到期），Runtime 只审计（RUNTIME-CANCEL-002/003）。
+message ResultAck {
+  int64 attempt_id = 1;
+  bool accepted = 2;
+  string detail = 3;               // 面向 Runtime 日志的非权威说明
+}
+
+// 取消：Quoin 先事务提交 cancellation fence（Cancelling）再发送本消息
+// （RUNTIME-CANCEL-001）。
+message CancelAttempt {
+  int64 attempt_id = 1;
+}
+
+// 确认已停止；Quoin 转 Cancelled（RUNTIME-CANCEL-003）。
+message CancelAck {
+  int64 attempt_id = 1;
+}
+
+// 下发新长期 token（两阶段轮换第一步）：仅经已认证控制流发送；token 只存在于
+// supervisor 内存与本消息（RUNTIME-REG-004）。
+message IssueToken {
+  uint64 generation = 1;           // runtime_credentials.generation（pending 行）
+  string token = 2;                // 新长期 token：base64url 无填充文本；不进入日志/审计
+}
+
+// Runtime 已原子持久化新 token 到 0600 状态卷（两阶段轮换第二步）；Quoin 据此写
+// confirmed_at 并提升（RUNTIME-REG-004）。
+message TokenPersisted {
+  uint64 generation = 1;
+}
+
+// 连接终结通知：尽力而为；实际关闭由 Quoin 执行，客户端不得依赖本消息送达
+// （RUNTIME-REVOKE-001）。
+message GoAway {
+  GoAwayReason reason = 1;
+  string detail = 2;
+}
+
+// ============================================================================
+// 跨 Runtime 子执行（Plinth -> Quoin -> Lintel）
+// ============================================================================
+
+// Plinth -> Quoin：请求浏览器工具子执行（RUNTIME-CROSS-001/004）。Quoin 在同一事务
+// 持久化父 Attempt 的 tool_calls 行（status=pending）与 browser_exploration 子 Attempt
+// （requested_by_tool_call_id = 新 tool_call id），随后派发 lintel 并以
+// BrowserSubExecutionAck 应答。幂等：相同 (parent_attempt_id, request_id) 重放返回原
+// tool_call_id 与 child_attempt_id；旧 epoch/boot 的请求按 RUNTIME-CTRL-009 丢弃。
+message RequestBrowserSubExecution {
+  string request_id = 1;           // 父 Attempt 内唯一（写入 params 快照并持久化，幂等键）
+  int64 parent_attempt_id = 2;     // 父 Plinth Attempt（execution_attempts.id）
+  BrowserSubExecutionInput input = 3; // 冻结的非秘密浏览器工具参数快照
+}
+
+// 浏览器工具参数快照（非秘密）；content_digest 必须等于 SHA-256(canonical_json)。
+message BrowserSubExecutionInput {
+  string schema_kind = 1;          // "browser_tool_v1"；非空
+  bytes canonical_json = 2;        // 冻结参数（含 request_id、identity 或 journey 引用等）
+  bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
+  int64 identity_id = 4;           // browser_identities.id
+}
+
+// Quoin -> Plinth：子执行请求裁决。accepted=true 时携带新建 tool_call_id 与
+// child_attempt_id；reject_reason 为拒绝原因（旧流 fence、父 Attempt 非 plinth/非
+// Running、输入不支持、父已取消等）。
+message BrowserSubExecutionAck {
+  string request_id = 1;
+  int64 parent_attempt_id = 2;
+  bool accepted = 3;
+  int64 tool_call_id = 4;          // accepted 时：新建 tool_calls.id（status=pending）
+  int64 child_attempt_id = 5;      // accepted 时：browser_exploration 子 Attempt id
+  BrowserSubExecutionRejectReason reject_reason = 6; // accepted=false 时必填；封闭原因，UNSPECIFIED 拒绝
+}
+
+// Quoin -> Plinth：子执行完成后的工具结果交付（RUNTIME-CROSS-004）。Quoin 在子 Attempt
+// 结果提交事务内更新 tool_calls 状态并持久化浏览器操作结果后发送；父 Attempt 据此继续
+// 模型循环。correlation_id 关联原 RequestBrowserSubExecution。
+message ToolResultDelivery {
+  int64 tool_call_id = 1;          // 父 Attempt 的 tool_calls.id
+  bool success = 2;
+  string error_detail = 3;         // 失败时的非秘密错误说明
+  int64 child_attempt_id = 4;      // 对应子 Attempt
+  repeated int64 evidence_ids = 5; // 子 Attempt 提交的证据引用（可空）
+  ResultPayload payload = 6;       // 浏览器工具结构化结果（可空）
+}
+
+// ============================================================================
+// 连接凭据 grant（RuntimeControl.FetchCredentialGrant）
+// ============================================================================
+
+// grant 获取请求（supervisor-only，RUNTIME-GRANT-001..003）：必须携带派发时下发的
+// grant_id 与 Attempt/boot/epoch 上下文；Quoin 校验 Attempt Running 且绑定一致。
+message FetchCredentialGrantRequest {
+  string grant_id = 1;
+  int64 attempt_id = 2;
+  string boot_id = 3;
+  uint64 connection_epoch = 4;
+}
+
+// grant 响应：非秘密 revision 配置投影 + 解密后的类型化秘密。仅经 TLS 返回一次成功
+// 载荷；supervisor 只在 Attempt 内存中使用，完成即清除，不落盘、不进入日志/审计
+// （RUNTIME-GRANT-002/003）。secret oneof 按 connection_type 选择。
+message FetchCredentialGrantResponse {
+  string grant_id = 1;
+  int64 attempt_id = 2;
+  int64 connection_revision_id = 3;     // connections.current_revision_id 绑定
+  int64 credential_generation_id = 4;   // credential_generations.id 绑定
+  string connection_type = 5;           // "thanos" | "kubernetes" | "model_provider"（connections.type）
+  bytes revision_config_json = 6;       // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
+  oneof secret {
+    ThanosCredentialSecret thanos = 7;
+    KubernetesCredentialSecret kubernetes = 8;
+    ModelProviderCredentialSecret model_provider = 9;
+  }
+}
+
+// thanos 连接秘密（与 OpenAPI ThanosConnectionInput 秘密字段一致；仅 supervisor 内存）。
+message ThanosCredentialSecret {
+  string username = 1;
+  string password = 2;
+  string bearer_token = 3;             // 仅 Bearer 模式使用（二选一）
+}
+
+// kubernetes 连接秘密：kubeconfig 正文（仅 supervisor 内存）。
+message KubernetesCredentialSecret {
+  string kubeconfig = 1;
+}
+
+// model_provider 连接秘密：API key（仅 supervisor 内存）。
+message ModelProviderCredentialSecret {
+  string api_key = 1;
+}
+
+// ============================================================================
+// 浏览器隧道（BrowserTunnel.Open）
+// ============================================================================
+
+// 双向浏览器信封：open/open_ack 只各出现一次且必须为首两帧；其余为 data/heartbeat/
+// close。noVNC/RFB 字节在 data.payload 中透明中继（RUNTIME-BROWSER-003）。
+message BrowserEnvelope {
+  oneof msg {
+    BrowserSessionOpen open = 1;       // Lintel -> Quoin；首帧
+    BrowserSessionOpenAck open_ack = 2; // Quoin -> Lintel
+    BrowserFrameData data = 3;          // 双向
+    BrowserHeartbeat heartbeat = 4;     // 双向
+    BrowserSessionClose close = 5;      // 双向；随后关闭流
+  }
+}
+
+// 会话打开：声明对应的持久 Browser Operation（browser_operations.id）、身份、slot
+// 与连接身份（RUNTIME-BROWSER-002）。slot 必须为 LINTEL（DATA-RUNTIME-001b）。
+message BrowserSessionOpen {
+  int64 operation_id = 1;          // browser_operations.id（持久审计权威）
+  int64 identity_id = 2;           // browser_identities.id
+  RuntimeSlot slot = 3;
+  string boot_id = 4;
+  uint64 connection_epoch = 5;
+  string reconnect_session_id = 6; // 同 boot 宽限期内重附着时携带；新建时为空
+}
+
+// 会话打开确认：返回瞬时 session_id 与重附着宽限期截止（数值为部署配置）。
+// 宽限期只适用于同 boot 瞬时断线（RUNTIME-BROWSER-004/007）。
+message BrowserSessionOpenAck {
+  string session_id = 1;           // 瞬时 BrowserSession ID（内存投影）
+  google.protobuf.Timestamp reconnect_deadline = 2; // 宽限期截止；到期释放身份锁
+}
+
+// noVNC/RFB 原始字节：Quoin 透明中继，不解析、不校验内容（RUNTIME-BROWSER-003）。
+message BrowserFrameData {
+  bytes payload = 1;
+}
+
+// 会话心跳：维持隧道活性；只更新瞬时投影（RUNTIME-BROWSER-004）。
+message BrowserHeartbeat {
+  uint64 seq = 1;
+}
+
+// 会话关闭：任一方可发起；关闭后必须结束流（RUNTIME-BROWSER-004/005/007）。
+message BrowserSessionClose {
+  BrowserCloseReason reason = 1;
+  string detail = 2;
+}
+
+// ============================================================================
+// Artifact 上传（ArtifactService.Upload）
+// ============================================================================
+
+// client-stream 帧：首帧必须为 header，随后 0..N 个 chunk，可选的 end 帧；
+// Quoin 在收到 size_bytes 字节或 end 帧后裁决（RUNTIME-UPLOAD-001）。
+message ArtifactUploadFrame {
+  oneof frame {
+    ArtifactUploadHeader header = 1;
+    ArtifactUploadChunk chunk = 2;
+    ArtifactUploadEnd end = 3;
+  }
+}
+
+// 上传头：冻结上传身份与目标元数据；来源字段在 ledger 中不可改写
+// （DATA-ARTIFACT-006）。
+message ArtifactUploadHeader {
+  string upload_id = 1;            // Runtime 生成；重试生命周期内稳定
+  int64 attempt_id = 2;            // execution_attempts.id
+  string boot_id = 3;
+  uint64 connection_epoch = 4;     // >= 1
+  string owner_type = 5;           // artifacts.owner_type（如 investigation_message、browser_operation）
+  int64 owner_id = 6;              // artifacts.owner_id
+  ArtifactKind kind = 7;
+  RetentionKind retention_kind = 8;
+  bool sensitive = 9;              // trace 必须 true（DATA-ARTIFACT-003）
+  uint64 size_bytes = 10;
+  bytes sha256 = 11;               // 完整内容 SHA-256（32 字节）
+}
+
+// 数据块：offset 必须连续（从 0 开始按序到达）；payload 长度部署受限（RUNTIME-UPLOAD-006）。
+message ArtifactUploadChunk {
+  uint64 offset = 1;
+  bytes payload = 2;
+}
+
+// 结束帧（可选）：显式声明已上传字节数；Quoin 同时接受"收到 size_bytes 字节即判完成"。
+message ArtifactUploadEnd {
+  uint64 uploaded_size_bytes = 1;
+}
+
+// 上传结果：committed=true 返回 artifact_id；rejected 携带原因（RUNTIME-UPLOAD-004/005）。
+message ArtifactUploadResult {
+  string upload_id = 1;
+  bool committed = 2;
+  int64 artifact_id = 3;           // committed 时返回 artifacts.id
+  UploadRejectReason reject_reason = 4;
+}
+
+// ============================================================================
+// Stele 告警接入（SteleRelay）
+// ============================================================================
+
+// 快照请求：release_version 必填且与 Quoin 严格相等（RUNTIME-STELE-005）。
+message GetCredentialSnapshotRequest {
+  string release_version = 1;
+}
+
+// 版本化只读快照：Stele 仅内存缓存；Deliver 必须回传 snapshot_version
+// （DATA-ALERT-008）。quoin_release_version 供 Stele 快速核对（RUNTIME-STELE-005）。
+message GetCredentialSnapshotResponse {
+  uint64 snapshot_version = 1;     // 单调递增；Deliver 回传
+  repeated AlertSourceSnapshot sources = 2;
+  string quoin_release_version = 3; // Quoin 当前 release_version（严格相等核对）
+}
+
+// 单个逻辑告警源的非秘密投影（对应 alert_sources 的 enabled 与 active 凭据 digest）。
+message AlertSourceSnapshot {
+  int64 source_id = 1;             // alert_sources.id
+  string source_key = 2;
+  string protocol = 3;             // v1: alertmanager
+  bool enabled = 4;
+  repeated CredentialDigestEntry credentials = 5; // 仅 active 凭据（<=2）
+}
+
+// active 凭据 digest 条目：Stele 提交 Delivery 时回传 credential_id 与快照版本。
+message CredentialDigestEntry {
+  int64 credential_id = 1;         // alert_source_credentials.id
+  bytes digest = 2;                // 32-byte Bearer digest
+}
+
+// Delivery 转交：精确原始 body；relay_id 幂等；release_version 必填且严格相等
+// （CONTEXT「Stele」、RUNTIME-STELE-003/005）。
+message DeliveryRelayRequest {
+  string relay_id = 1;             // Stele 每次外部请求生成；内部重试复用
+  int64 source_id = 2;
+  int64 credential_id = 3;         // 必填（DATA-ALERT-008）
+  uint64 credential_snapshot_version = 4; // 必填，>= 1（DATA-ALERT-008）
+  string protocol = 5;             // v1: alertmanager
+  bytes body = 6;                  // 精确原始请求体（可能非 UTF-8）
+  google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
+  string release_version = 8;      // 与 Quoin 严格相等（RUNTIME-STELE-005）
+}
+
+// Delivery 结果：ACCEPTED=204；REJECTED=4xx 不重试；UNAVAILABLE=5xx 重试
+// （RUNTIME-STELE-004）。
+message DeliveryRelayResponse {
+  DeliveryStatus status = 1;
+  string detail = 2;               // 面向 Stele 日志的非权威说明
+}
