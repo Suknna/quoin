@@ -416,7 +416,16 @@ paths:
       operationId: replaceRuntimeSlot
       x-external-dependency: true
       summary: 替换 Runtime slot（Admin；状态卷丢失时重建，不创建第二个 Runtime）
-      description: 一次性注册令牌经 Runtime 控制面（runtime-protocol.md）交换，不进入 HTTP 响应；本操作只返回 slot 状态。
+      description: |
+        幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-010）：同一事务先确认
+        fence（DATA-RUNTIME-001b：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），
+        且 lintel 另无任何 active Browser Operation（result IS NULL）），否则返回 409 active_conflict 且不得先行吊销；通过后
+        单条 UPDATE 把 slot 置为 revoked 并清空 current/pending 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
+        自动 retire 该 slot 全部未退休凭据；被引用行在指针清空前禁止手动 retire，DATA-RUNTIME-001/002），同时生成内存短生命周期、
+        单次使用的一次性注册令牌 reveal handle（HTTP-COMMAND-012）。响应只含非秘密元数据；首次实时响应可能
+        携带 registrationTokenHandle（registrationTokenAvailable=true），由 `revealRuntimeRegistrationToken`
+        一次性换取 raw 注册令牌；命令重放返回 registrationTokenAvailable=false 且无 handle，绝不重新生成。
+        长期服务 token 只经已认证 gRPC 控制面下发/轮换（runtime-protocol.md），不进入 HTTP 响应。
       parameters:
         - $ref: '#/components/parameters/RuntimeSlot'
       requestBody:
@@ -433,17 +442,50 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '200':
-          description: slot 已进入替换流程。
+          description: slot 已进入替换流程；首次实时响应可能携带 registrationTokenHandle。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RuntimeSlot'
+                $ref: '#/components/schemas/RuntimeSlotReplacement'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/runtime-slots/registration-token/reveal:
+    post:
+      tags: [adminops]
+      operationId: revealRuntimeRegistrationToken
+      summary: 一次性显示 Runtime 注册令牌（Admin；消费单次 reveal handle）
+      description: |
+        非领域写命令（HTTP-COMMAND-012）：不携带 clientCommandId；路由无 slot 路径参数，只接受
+        replaceRuntimeSlot 首次实时响应返回的内存短生命周期、单次使用的 registrationTokenHandle，
+        不接受 slot 本身。handle 与 raw 注册令牌均不落盘（SQLite、client_commands、日志、审计、
+        Artifact、响应快照均禁止）；handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeRegistrationTokenRevealRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 一次性返回 raw 注册令牌；消费后 handle 立即失效。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeRegistrationTokenRevealResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '410':
+          $ref: '#/components/responses/Gone'
   /api/v1/alerts:
     get:
       tags: [alerts]
@@ -2629,8 +2671,8 @@ paths:
     get:
       tags: [adminops]
       operationId: listCredentialGenerations
-      summary: 凭据 generation 历史（游标分页，仅非秘密元数据）
-      description: 详情只返回 generationCount；历史经本接口有界读取；密文永不下发（HTTP-PAGE-005）。
+      summary: 凭据 generation 历史（游标分页，仅非秘密标识）
+      description: 详情只返回 generationCount；历史经本接口有界读取；密文与内部元数据永不下发（HTTP-PAGE-005）。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
         - $ref: '#/components/parameters/Cursor'
@@ -2643,6 +2685,7 @@ paths:
               schema:
                 type: object
                 required: [items]
+                additionalProperties: false
                 properties:
                   items:
                     type: array
@@ -4109,6 +4152,7 @@ components:
                 - $ref: '#/components/schemas/RowVersionConflict'
                 - $ref: '#/components/schemas/HeadConflict'
                 - $ref: '#/components/schemas/CurrentPointerConflict'
+                - $ref: '#/components/schemas/RuntimeSlotConflict'
       description: 409 冲突响应的专用包络：conflict 块按 code 判别联合（HTTP-ERROR-004/007）。
     FieldError:
       type: object
@@ -4157,6 +4201,33 @@ components:
         rowVersion:
           type: integer
           description: 当前权威 row_version（供客户端重试回填）。
+        detail:
+          type: string
+          description: 人类可读冲突说明（HTTP-ERROR-004）。
+      not:
+        properties:
+          objectType:
+            const: runtime_slot
+        required: [objectType]
+      description: 通用聚合 row_version/active 冲突；objectType 为 runtime_slot 的冲突必须使用 RuntimeSlotConflict（slot 是稳定 key 而非数字 locator）。
+    RuntimeSlotConflict:
+      type: object
+      required: [code, objectType, slot, rowVersion]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [row_version_conflict, active_conflict]
+        objectType:
+          type: string
+          const: runtime_slot
+        slot:
+          type: string
+          enum: [plinth, lintel]
+          description: 冲突的 Runtime slot 稳定 key（替代通用 objectId，HTTP-ERROR-004）。
+        rowVersion:
+          type: integer
+          description: 当前权威 runtime_slots.row_version（供客户端重试回填）。
         detail:
           type: string
           description: 人类可读冲突说明（HTTP-ERROR-004）。
@@ -4229,7 +4300,8 @@ components:
           description: 直接修复入口（路由或操作引用）。
     RuntimeSlot:
       type: object
-      required: [slot, state, credentialGeneration, rowVersion]
+      required: [slot, state, currentGeneration, rowVersion, connected]
+      additionalProperties: false
       properties:
         slot:
           type: string
@@ -4237,18 +4309,135 @@ components:
         state:
           type: string
           enum: [unregistered, registered, revoked]
-        credentialGeneration:
+          description: 持久注册/凭据状态（DATA-RUNTIME-001）；registered 表示 current 指针非空且指向本 slot 未退休凭据，不代表当前在线。
+        currentGeneration:
           type: integer
           minimum: 0
+          description: 从 runtime_slots.current_credential_id 指向的 runtime_credentials.generation 投影（指针是唯一权威，DATA-RUNTIME-001）；0 = 无 current 指针。
+        pendingGeneration:
+          type: integer
+          minimum: 1
+          description: 从 runtime_slots.pending_credential_id 指向的 runtime_credentials.generation 投影；两阶段轮换中待确认的 generation（仅 registered 且轮换期间存在；DATA-RUNTIME-002）。
         rowVersion:
           type: integer
           minimum: 1
-          description: 替换命令并发前提与响应版本（HTTP-COMMAND-002）。
+          description: 注册/替换/轮换命令并发前提与响应版本（HTTP-COMMAND-002）。
+        connected:
+          type: boolean
+          description: 瞬时连接投影（内存，非持久权威）：控制流当前是否在线。必填；false 时不得携带 bootId/connectionEpoch/lastSeenAt。
+        bootId:
+          type: string
+          description: 瞬时连接投影：当前控制流 Runtime boot ID（仅 connected=true 时存在）。
+        connectionEpoch:
+          type: integer
+          minimum: 1
+          description: 瞬时连接投影：当前控制流递增 connection epoch（仅 connected=true 时存在）。
         lastSeenAt:
           $ref: '#/components/schemas/Timestamp'
+          description: 瞬时连接投影：最近心跳时间（内存，非持久权威；仅 connected=true 时存在）。
+      allOf:
+        - if:
+            properties:
+              state:
+                const: registered
+            required: [state]
+          then:
+            properties:
+              currentGeneration:
+                minimum: 1
+        - if:
+            properties:
+              state:
+                enum: [unregistered, revoked]
+            required: [state]
+          then:
+            properties:
+              currentGeneration:
+                const: 0
+              pendingGeneration: false
+        - if:
+            properties:
+              connected:
+                const: true
+            required: [connected]
+          then:
+            properties:
+              bootId: {}
+              connectionEpoch: {}
+              lastSeenAt: {}
+            required: [bootId, connectionEpoch, lastSeenAt]
+        - if:
+            properties:
+              connected:
+                const: false
+            required: [connected]
+          then:
+            properties:
+              bootId: false
+              connectionEpoch: false
+              lastSeenAt: false
+    RuntimeSlotReplacement:
+      type: object
+      required: [slot, state, currentGeneration, rowVersion, registrationTokenAvailable]
+      additionalProperties: false
+      properties:
+        slot:
+          type: string
+          enum: [plinth, lintel]
+        state:
+          type: string
+          const: revoked
+          description: 替换后 slot 恒为 revoked，等待新 Runtime 用注册令牌注册（DATA-RUNTIME-001）。
+        currentGeneration:
+          type: integer
+          const: 0
+          description: 替换后 current/pending 指针皆空，恒为 0。
+        rowVersion:
+          type: integer
+          minimum: 1
+        registrationTokenAvailable:
+          type: boolean
+          description: 仅首次实时响应为 true（同次请求后立即生成内存 revealHandle）；命令重放恒为 false（HTTP-COMMAND-012）。
+        registrationTokenHandle:
+          type: string
+          description: 不透明、内存中短生命周期、单次使用的 reveal 句柄；仅 registrationTokenAvailable=true 时存在；不落盘（SQLite/日志/审计/Artifact/命令结果均禁止）（HTTP-COMMAND-012）。
+      allOf:
+        - if:
+            properties:
+              registrationTokenAvailable:
+                const: true
+            required: [registrationTokenAvailable]
+          then:
+            properties:
+              registrationTokenHandle: {}
+            required: [registrationTokenHandle]
+          else:
+            properties:
+              registrationTokenHandle: false
+    RuntimeRegistrationTokenRevealRequest:
+      type: object
+      required: [registrationTokenHandle]
+      additionalProperties: false
+      properties:
+        registrationTokenHandle:
+          type: string
+          description: replaceRuntimeSlot 首次实时响应返回的一次性句柄；不接受 slot 本身（HTTP-COMMAND-012）。
+    RuntimeRegistrationTokenRevealResult:
+      type: object
+      required: [slot, registrationToken]
+      additionalProperties: false
+      properties:
+        slot:
+          type: string
+          enum: [plinth, lintel]
+          description: handle 绑定的 slot（reveal 路由无 slot 路径参数，slot 由 handle 携带）。
+        registrationToken:
+          type: string
+          description: 一次性注册令牌；仅此一次返回，绑定 slot，内存短生命周期；不进入日志、审计或命令结果（HTTP-COMMAND-012）。
     RuntimeStatus:
       type: object
       required: [plinth, lintel]
+      additionalProperties: false
       properties:
         plinth:
           $ref: '#/components/schemas/RuntimeSlot'
@@ -5301,19 +5490,20 @@ components:
           $ref: '#/components/schemas/Timestamp'
     GenerationSummary:
       type: object
-      required: [id, generationSeq, metaJson, createdAt]
+      required: [id, generationSeq, createdAt]
+      additionalProperties: false
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
         generationSeq:
           type: integer
           minimum: 1
-        metaJson:
-          type: object
-          additionalProperties: true
-          description: 服务端生成的非秘密元数据（创建时间/轮换原因等）；密文永不下发、永不返回。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+        createdBy:
+          $ref: '#/components/schemas/LocatorId'
+          description: 创建者用户 locator（可选，非秘密）。
+      description: 凭据 generation 的非秘密标识投影；密文与内部元数据永不下发、永不返回（DATA-CONN-001/004）。
     ThanosConnectionNonSecret:
       type: object
       required: [type, baseUrl]
@@ -5548,6 +5738,8 @@ components:
                 const: true
             required: [revealAvailable]
           then:
+            properties:
+              revealHandle: {}
             required: [revealHandle]
           else:
             properties:
@@ -5555,6 +5747,7 @@ components:
     RevealCredentialRequest:
       type: object
       required: [revealHandle]
+      additionalProperties: false
       properties:
         revealHandle:
           type: string

@@ -72,15 +72,46 @@ CREATE TABLE user_viewed (
 ) STRICT;
 CREATE INDEX idx_user_viewed_user ON user_viewed (user_id);
 
+-- Runtime 注册与长期服务 token 凭据（CONTEXT「服务身份」）：注册状态与 Admin 并发前提
+-- （row_version）是持久权威；在线连接、boot/epoch、心跳 last_seen 是瞬时投影（内存），不落库
+-- ——避免心跳改写 Admin row_version（DATA-RUNTIME-001）。当前 active 长期 token 的唯一权威是
+-- runtime_slots.current_credential_id（单一 owner-side current authority，DATA-RUNTIME-001）；
+-- 两阶段轮换的待确认 token 由 pending_credential_id 单行表达。runtime_credentials 行只记录
+-- 不可变 generation 生命周期历史（confirmed_at/retired_at 事实），不存在与指针并列的第二权威。
 CREATE TABLE runtime_slots (
-  slot                 TEXT PRIMARY KEY CHECK (slot IN ('plinth','lintel')),
-  state                TEXT NOT NULL DEFAULT 'unregistered' CHECK (state IN ('unregistered','registered','revoked')),
-  token_digest         BLOB CHECK (token_digest IS NULL OR length(token_digest) = 32), -- 长期 token 只存 digest
-  credential_generation INTEGER NOT NULL DEFAULT 0 CHECK (credential_generation >= 0),
-  row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 替换命令并发前提（DATA-ROWVER-001）
-  last_seen_at         TEXT,
-  created_at           TEXT NOT NULL
+  slot                  TEXT PRIMARY KEY CHECK (slot IN ('plinth','lintel')),
+  state                 TEXT NOT NULL DEFAULT 'unregistered' CHECK (state IN ('unregistered','registered','revoked')),
+  current_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  pending_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 注册/替换/轮换命令并发前提（DATA-ROWVER-001）
+  created_at            TEXT NOT NULL,
+  CHECK (
+    (state IN ('unregistered','revoked') AND current_credential_id IS NULL AND pending_credential_id IS NULL)
+    OR (state = 'registered' AND current_credential_id IS NOT NULL)
+  ),
+  CHECK (current_credential_id IS NULL OR pending_credential_id IS NULL OR current_credential_id <> pending_credential_id) -- current/pending 不得指向同一行
 ) STRICT;
+
+-- Runtime 长期服务 token 的不可变 credential generation 历史（两阶段轮换：下发新 token -> Runtime
+-- 持久化确认 -> 原子切换指针并吊销旧 token，CONTEXT「服务身份」）。本表只保存不可变来源字段
+-- （slot/generation/token_digest/created_at）与两个一次性生命周期事实：confirmed_at（NULL ->
+-- 时间戳，一次，Runtime 持久化确认）与 retired_at（NULL -> 时间戳，一次，吊销）；两个时间
+-- 均不可回退、不可改写。current/pending 选择完全由 runtime_slots 指针承载，本表不宣称任何
+-- 状态（DATA-RUNTIME-002）。一次性注册令牌不落库（内存短生命周期、单次使用，HTTP-COMMAND-012）；
+-- 本表只保存长期 token digest。
+CREATE TABLE runtime_credentials (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  slot         TEXT NOT NULL REFERENCES runtime_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  generation   INTEGER NOT NULL CHECK (generation >= 1),
+  token_digest BLOB NOT NULL CHECK (length(token_digest) = 32), -- 长期 token 只存 digest
+  created_at   TEXT NOT NULL,
+  confirmed_at TEXT,   -- Runtime 持久化确认时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
+  retired_at   TEXT,   -- 吊销时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
+  row_version  INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- DATA-ROWVER-001
+  UNIQUE (slot, generation)
+) STRICT;
+CREATE INDEX idx_runtime_credentials_slot ON runtime_credentials (slot, generation);
+CREATE INDEX idx_runtime_credentials_confirmed ON runtime_credentials (slot, confirmed_at);
 
 -- ============================================================================
 -- 2. 领域写命令账本与审计
@@ -156,8 +187,8 @@ CREATE TABLE alert_deliveries (
   id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   relay_id                   TEXT NOT NULL UNIQUE,   -- Stele relay id，重试幂等键
   source_id                  INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  credential_id              INTEGER REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  credential_snapshot_version INTEGER,               -- Stele 提交的只读快照版本
+  credential_id              INTEGER NOT NULL REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每次 Delivery 必带认证元数据（DATA-ALERT-008）
+  credential_snapshot_version INTEGER NOT NULL CHECK (credential_snapshot_version >= 1), -- Stele 提交的只读快照版本
   protocol                   TEXT NOT NULL CHECK (protocol IN ('alertmanager')),
   body                       BLOB NOT NULL,          -- 精确原始 body 字节（可能非 UTF-8），直接存 SQLite（非 Artifact）
   body_size_bytes            INTEGER NOT NULL CHECK (body_size_bytes >= 0),
@@ -166,7 +197,13 @@ CREATE TABLE alert_deliveries (
   group_key                  TEXT,
   received_at                TEXT NOT NULL,          -- Stele 接收时间
   committed_at               TEXT NOT NULL,           -- Quoin 提交时间（提交顺序裁决依据）
-  CHECK (length(body) = body_size_bytes)              -- BLOB 长度以字节计（SQLite length() 对 BLOB 返回字节数）
+  CHECK (length(body) = body_size_bytes),             -- BLOB 长度以字节计（SQLite length() 对 BLOB 返回字节数）
+  -- integrity 与 status 必须一致（DATA-ALERT-001/003）：不可枚举记 Rejected Delivery（rejected/rejected）；
+  -- 顶层可解析或截断仍正常处理（complete|truncated 只配 processed）。
+  CHECK (
+    (integrity = 'rejected' AND status = 'rejected')
+    OR (integrity IN ('complete','truncated') AND status = 'processed')
+  )
 ) STRICT;
 CREATE INDEX idx_alert_deliveries_source ON alert_deliveries (source_id, committed_at DESC);
 
@@ -501,7 +538,6 @@ CREATE TABLE credential_generations (
   connection_id  INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   generation_seq INTEGER NOT NULL CHECK (generation_seq >= 1),
   ciphertext     BLOB NOT NULL,                     -- AEAD 密文（envelope 见 security.md）
-  meta_json      TEXT NOT NULL CHECK (json_valid(meta_json)), -- 非秘密元数据
   created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at     TEXT NOT NULL,
   UNIQUE (connection_id, generation_seq)
@@ -531,6 +567,7 @@ CREATE TABLE browser_profile_generations (
 CREATE TABLE browser_operations (
   id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   identity_id       INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id        INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- exploration/journey 对应执行尝试；manual_login 无（DATA-BROWSER-003）
   kind              TEXT NOT NULL CHECK (kind IN ('manual_login','exploration','journey')),
   actor_type        TEXT NOT NULL CHECK (actor_type IN ('user','service','system')),
   actor_id          INTEGER NOT NULL,
@@ -541,6 +578,7 @@ CREATE TABLE browser_operations (
   new_generation_id INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   trace_artifact_id INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   log_json          TEXT CHECK (log_json IS NULL OR json_valid(log_json)),
+  CHECK (kind = 'manual_login' OR attempt_id IS NOT NULL), -- 非人工登录的浏览器操作必须绑定执行尝试
   CHECK (result IS NULL OR ended_at IS NOT NULL) -- 结果一旦产生即结束，必须带结束时间
 ) STRICT;
 CREATE INDEX idx_browser_operations_identity ON browser_operations (identity_id, started_at);
@@ -597,6 +635,8 @@ CREATE TABLE execution_attempts (
   check_key                TEXT,   -- 非空 = 子 Attempt（run_check，不参与 active 唯一约束）；空 = 参与
   state                    TEXT NOT NULL CHECK (state IN ('Queued','Assigned','Running','Cancelling','Succeeded','Failed','Cancelled','Interrupted')),
   row_version              INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  runtime_slot             TEXT CHECK (runtime_slot IN ('plinth','lintel')), -- 派发绑定的 Runtime；一旦绑定不可改（DATA-ATTEMPT-001/007）
+  requested_by_tool_call_id INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 跨 Runtime 子执行：Plinth Tool Call 请求 Lintel（DATA-ATTEMPT-007）
   connection_revision_id   INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id INTEGER REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_epoch         INTEGER,
@@ -608,7 +648,26 @@ CREATE TABLE execution_attempts (
   termination_reason       TEXT CHECK (termination_reason IS NULL OR termination_reason IN
                              ('timeout','rate_limited','provider_unavailable','invalid_response','tool_error','artifact_commit_failed',
                               'cancelled','connection_disabled','business_system_disabled','lease_expired','replaced','revoked')),
-  created_at               TEXT NOT NULL
+  created_at               TEXT NOT NULL,
+  CHECK (
+    (state = 'Queued' AND runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL)
+    OR (state = 'Assigned' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NULL)
+    OR (state IN ('Running','Cancelling') AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NOT NULL)
+    OR (state IN ('Succeeded','Failed','Cancelled','Interrupted') AND (
+      -- 终态只允许两种完整形态（DATA-ATTEMPT-001）：从未派发（绑定五字段全空），
+      -- 或曾派发（runtime_slot/boot_id/connection_epoch/lease_until 完整非空；accepted_at 可空=
+      -- Assigned 直接终结，非空=曾 Running/Cancelling）。绝不允许任意部分绑定。
+      (runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL)
+      OR (runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL)
+    ))
+  ),
+  CHECK (connection_epoch IS NULL OR connection_epoch >= 1), -- 递增 connection epoch 必须为正（DATA-ATTEMPT-001）
+  CHECK (requested_by_tool_call_id IS NULL OR attempt_type = 'browser_exploration'), -- 只有浏览器探索可作为跨 Runtime 子执行
+  CHECK ( -- Attempt 类型与 Runtime slot 的固定映射（DATA-ATTEMPT-001）：浏览器类只派发 lintel，模型/Agent 类只派发 plinth；未派发（runtime_slot IS NULL）不受限
+    runtime_slot IS NULL
+    OR (attempt_type IN ('browser_exploration','inspection_collection') AND runtime_slot = 'lintel')
+    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis') AND runtime_slot = 'plinth')
+  )
 ) STRICT;
 CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (scope_type, scope_id)
   WHERE state IN ('Queued','Assigned','Running','Cancelling') AND check_key IS NULL;
@@ -716,6 +775,35 @@ CREATE TABLE artifacts (
 ) STRICT;
 CREATE INDEX idx_artifacts_owner ON artifacts (owner_type, owner_id);
 CREATE INDEX idx_artifacts_blob ON artifacts (blob_id);
+
+-- Runtime Artifact 上传 ledger：上传身份与重试幂等权威（DATA-ARTIFACT-006）。upload_id 由
+-- Runtime 生成并在整个重试生命周期保持稳定；同 upload_id 同摘要重试返回原 artifact_id，
+-- 同 upload_id 不同摘要/owner 冲突拒绝；v1 整单重传，不做 offset 续传。
+CREATE TABLE runtime_artifact_uploads (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  upload_id      TEXT NOT NULL UNIQUE,
+  attempt_id     INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  boot_id        TEXT NOT NULL,  -- 与 Attempt 派发绑定的 boot_id；不可改（DATA-ARTIFACT-006）
+  connection_epoch INTEGER NOT NULL CHECK (connection_epoch >= 1), -- 旧 epoch 上传只审计、拒绝提交
+  owner_type     TEXT NOT NULL,
+  owner_id       INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
+  retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
+  sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)),
+  size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
+  sha256         TEXT NOT NULL CHECK (length(sha256) = 64),
+  state          TEXT NOT NULL CHECK (state IN ('uploading','committed','rejected')),
+  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  artifact_id    INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at     TEXT NOT NULL,
+  committed_at   TEXT,
+  -- 状态-结果双向一致（DATA-ARTIFACT-006）：committed 必须带 artifact_id 与 committed_at；
+  -- uploading/rejected 必须两者皆无（不允许引用已提交 Artifact 或伪造提交时间）。
+  CHECK (state <> 'committed' OR (artifact_id IS NOT NULL AND committed_at IS NOT NULL)),
+  CHECK (state = 'committed' OR (artifact_id IS NULL AND committed_at IS NULL)),
+  CHECK (kind <> 'trace' OR sensitive = 1)
+) STRICT;
+CREATE INDEX idx_runtime_artifact_uploads_attempt ON runtime_artifact_uploads (attempt_id, created_at);
 
 -- ============================================================================
 -- 10. 知识沉淀
@@ -1183,6 +1271,12 @@ BEGIN SELECT RAISE(ABORT, 'reusable_knowledge row_version must increase exactly 
 CREATE TRIGGER trg_backup_settings_row_version_increment BEFORE UPDATE ON backup_settings
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'backup_settings row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_runtime_credentials_row_version_increment BEFORE UPDATE ON runtime_credentials
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'runtime_credentials row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_row_version_increment BEFORE UPDATE ON runtime_artifact_uploads
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_uploads row_version must increase exactly by 1'); END;
 
 -- 12.23c 既有可观察/可取消对象：应用在同一条 UPDATE 中递增 row_version（SQLite 触发器无法 SET NEW），
 -- 触发器强制恰好 +1（DATA-ROWVER-001 / DATA-SSE-005）。变更日志表（alert_change_log/task_change_log）
@@ -1383,10 +1477,12 @@ BEGIN SELECT RAISE(ABORT, 'backups is append-only'); END;
 -- Runtime slot 是固定键（CONTEXT「服务身份」）
 CREATE TRIGGER trg_runtime_slots_slot_immutable BEFORE UPDATE OF slot ON runtime_slots
 BEGIN SELECT RAISE(ABORT, 'runtime_slot key is fixed'); END;
--- 浏览器操作：result 一旦产生即终态不可变，且必须带 ended_at（DATA-BROWSER-003）
-CREATE TRIGGER trg_browser_operations_result_immutable BEFORE UPDATE OF result ON browser_operations
-WHEN OLD.result IS NOT NULL AND NEW.result <> OLD.result
-BEGIN SELECT RAISE(ABORT, 'browser_operation result is final once set'); END;
+-- 浏览器操作：result 一旦产生即终态不可变，且必须带 ended_at（DATA-BROWSER-003）。
+-- result 非空后，result 与 ended_at 都完全冻结：清空（result=NULL/ended_at=NULL）或改写均拒绝——
+-- 用 IS NOT 做 NULL-safe 比较，避免 NULL 比较短路放行“复活”回 active（重新阻塞 lintel 替换 fence）。
+CREATE TRIGGER trg_browser_operations_result_immutable BEFORE UPDATE OF result, ended_at ON browser_operations
+WHEN OLD.result IS NOT NULL AND (NEW.result IS NOT OLD.result OR NEW.ended_at IS NOT OLD.ended_at)
+BEGIN SELECT RAISE(ABORT, 'browser_operation result is final once set; result/ended_at cannot be cleared or rewritten'); END;
 -- Embedding generation 来源字段不可变；vector_dim 一旦设置或该 generation 已有 embeddings 即不可变更
 CREATE TRIGGER trg_embedding_generations_origin_immutable BEFORE UPDATE OF
   model_name, model_version, generation, created_at ON embedding_generations
@@ -1516,3 +1612,273 @@ BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
   VALUES ('browser_operation', NEW.id, 'state_changed', NEW.row_version);
 END;
+
+-- 12.30 Runtime 注册/凭据状态机与 Artifact 上传 ledger（DATA-RUNTIME-001/002、DATA-ARTIFACT-006）
+-- runtime_slots 持久状态转换：unregistered -> registered（注册成功）、registered -> revoked（替换）、
+-- revoked -> registered（替换后注册）。在线连接/心跳是瞬时投影，不落库；current/pending 凭据指针
+-- 由 runtime_slots 单行拥有（单一 current authority，DATA-RUNTIME-001）。
+CREATE TRIGGER trg_runtime_slots_state_transition BEFORE UPDATE OF state ON runtime_slots
+WHEN OLD.state <> NEW.state AND NOT (
+  (OLD.state = 'unregistered' AND NEW.state IN ('registered','revoked'))
+  OR (OLD.state = 'registered' AND NEW.state = 'revoked')
+  OR (OLD.state = 'revoked' AND NEW.state = 'registered')
+)
+BEGIN SELECT RAISE(ABORT, 'runtime_slot state transition only unregistered->registered/revoked, registered->revoked, revoked->registered'); END;
+
+-- current 指针必须属于同一 slot 且 confirmed_at 非空、retired_at 为空（当前可用长期 token）；
+-- pending 指针必须属于同一 slot、retired_at 为空（可已确认或未确认）。registered ⇔ current 非空
+-- （表 CHECK），unregistered/revoked ⇔ current/pending 皆空（表 CHECK）——每个语句/提交点
+-- registered iff current 非空 iff 指向本 slot 已确认未退休凭据（DATA-RUNTIME-001/002）。
+CREATE TRIGGER trg_runtime_slots_current_owner_insert AFTER INSERT ON runtime_slots
+WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
+     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime_slots.current_credential_id must reference a confirmed, unretired credential of the same slot'); END;
+CREATE TRIGGER trg_runtime_slots_current_owner_update AFTER UPDATE OF current_credential_id ON runtime_slots
+WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
+     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime_slots.current_credential_id must reference a confirmed, unretired credential of the same slot'); END;
+CREATE TRIGGER trg_runtime_slots_pending_owner_insert AFTER INSERT ON runtime_slots
+WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime_slots.pending_credential_id must reference an unretired credential of the same slot'); END;
+CREATE TRIGGER trg_runtime_slots_pending_owner_update AFTER UPDATE OF pending_credential_id ON runtime_slots
+WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime_slots.pending_credential_id must reference an unretired credential of the same slot'); END;
+
+-- registered slot 的 pending 指针禁止非 NULL -> 另一个非 NULL 直接换绑：必须先 pending->NULL
+-- （AFTER 触发器 trg_runtime_slots_abort_retire_pending 自动 retire 原 pending），再 NULL->new
+-- （DATA-RUNTIME-002）。合法提升（current = 原 pending 且 pending 清空）不受影响（NEW.pending IS NULL）。
+CREATE TRIGGER trg_runtime_slots_pending_no_direct_swap BEFORE UPDATE OF pending_credential_id ON runtime_slots
+WHEN OLD.pending_credential_id IS NOT NULL
+  AND NEW.pending_credential_id IS NOT NULL
+  AND NEW.pending_credential_id IS NOT OLD.pending_credential_id
+BEGIN SELECT RAISE(ABORT, 'runtime slot pending can only be cleared before pointing to another credential (no direct swap)'); END;
+
+-- B: registered slot 更换 current 只能是“提升 pending”（DATA-RUNTIME-002）：OLD.pending 非空、
+-- NEW.current = OLD.pending、NEW.pending 清空，单条 UPDATE 原子完成。禁止绕 pending 直切、
+-- 禁止先清 pending 后另行切换 current。初次注册（unregistered->registered）与替换后重新注册
+-- （revoked->registered）不受此限——注册窗口由 trg_runtime_credentials_insert_confirmed_registration_only 限定。
+-- current_owner 与 promote 触发器覆盖不同的非法类别且不依赖同类触发器的执行次序：
+-- 目标非法（未确认/跨 slot/已退休）最终由 current_owner 拒绝；目标合法但绕 pending 的直切
+-- 最终由本触发器拒绝。任一 RAISE(ABORT) 都回滚整条 UPDATE 及此前触发器产生的退休副作用；
+-- 只有全部验证通过的合法提升才会保留 promotion_retire_old 的更新。
+CREATE TRIGGER trg_runtime_slots_promote_requires_pending AFTER UPDATE OF current_credential_id ON runtime_slots
+WHEN OLD.state = 'registered' AND NEW.state = 'registered'
+  AND NEW.current_credential_id IS NOT OLD.current_credential_id
+  AND EXISTS (
+    SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
+      AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
+  )
+  AND (
+    OLD.pending_credential_id IS NULL
+    OR NEW.current_credential_id IS NOT OLD.pending_credential_id
+    OR NEW.pending_credential_id IS NOT NULL
+  )
+BEGIN SELECT RAISE(ABORT, 'runtime slot current can only change by atomically promoting the pending credential (current=pending, pending=NULL)'); END;
+
+-- C: retirement 是指针转移的机械副作用（AFTER 触发器），应用不得事后手动 retire 被引用行
+-- （trg_runtime_credentials_no_retire_while_referenced 兜底）。提升：旧 current 自动退休；
+-- 中止：被清空的 pending 自动退休；替换：该 slot 全部未退休凭据自动退休。时间使用与全库一致
+-- 的 UTC 表达（strftime，同 committed_at DEFAULT）。自动 retire 恰好递增 row_version
+-- （trg_runtime_credentials_row_version_increment），且不会命中 no_retire_while_referenced——
+-- 触发器执行时该行已不再被 current/pending 引用。
+CREATE TRIGGER trg_runtime_slots_promotion_retire_old AFTER UPDATE OF current_credential_id ON runtime_slots
+WHEN OLD.state = 'registered' AND NEW.state = 'registered'
+  AND OLD.current_credential_id IS NOT NULL
+  AND NEW.current_credential_id IS NOT OLD.current_credential_id
+BEGIN
+  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
+  WHERE id = OLD.current_credential_id AND retired_at IS NULL;
+END;
+CREATE TRIGGER trg_runtime_slots_abort_retire_pending AFTER UPDATE OF pending_credential_id ON runtime_slots
+WHEN OLD.pending_credential_id IS NOT NULL AND NEW.pending_credential_id IS NULL
+  AND NEW.current_credential_id IS OLD.current_credential_id
+BEGIN
+  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
+  WHERE id = OLD.pending_credential_id AND retired_at IS NULL;
+END;
+CREATE TRIGGER trg_runtime_slots_replace_retire_all AFTER UPDATE OF state ON runtime_slots
+WHEN NEW.state = 'revoked' AND OLD.state <> 'revoked'
+BEGIN
+  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
+  WHERE slot = NEW.slot AND retired_at IS NULL;
+END;
+
+-- runtime_credentials：来源字段（slot/generation/token_digest/created_at）不可改写；历史不可删除；
+-- confirmed_at 与 retired_at 均为一次性生命周期事实（NULL -> 时间戳），不可回退、不可改写
+-- （DATA-RUNTIME-002）。被 current 或 pending 指针引用的 credential 禁止设置 retired_at——
+-- 吊销只能经指针转移的机械副作用发生（promotion/abort/replace 的 AFTER 触发器）；
+-- 每个语句/提交点指针有效。
+CREATE TRIGGER trg_runtime_credentials_origin_immutable BEFORE UPDATE OF
+  slot, generation, token_digest, created_at ON runtime_credentials
+BEGIN SELECT RAISE(ABORT, 'runtime_credential origin is immutable'); END;
+CREATE TRIGGER trg_runtime_credentials_no_delete BEFORE DELETE ON runtime_credentials
+BEGIN SELECT RAISE(ABORT, 'runtime_credentials history is not deletable'); END;
+CREATE TRIGGER trg_runtime_credentials_confirmed_once BEFORE UPDATE OF confirmed_at ON runtime_credentials
+WHEN OLD.confirmed_at IS NOT NULL AND NEW.confirmed_at IS NOT OLD.confirmed_at
+BEGIN SELECT RAISE(ABORT, 'runtime_credential confirmed_at is a one-time fact and cannot be rewritten'); END;
+CREATE TRIGGER trg_runtime_credentials_retired_once BEFORE UPDATE OF retired_at ON runtime_credentials
+WHEN OLD.retired_at IS NOT NULL AND NEW.retired_at IS NOT OLD.retired_at
+BEGIN SELECT RAISE(ABORT, 'runtime_credential retired_at is a one-time fact and cannot be rewritten'); END;
+CREATE TRIGGER trg_runtime_credentials_no_retire_while_referenced BEFORE UPDATE OF retired_at ON runtime_credentials
+WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL AND EXISTS
+  (SELECT 1 FROM runtime_slots s WHERE s.slot = OLD.slot AND (s.current_credential_id = OLD.id OR s.pending_credential_id = OLD.id))
+BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be retired while referenced by current or pending pointer'); END;
+-- 已退休凭据不可再确认（retire 是终态：中止的 pending 或已吊销的历史行不得复活为可用凭据）；
+-- 同一条 UPDATE 同时写 confirmed_at 与 retired_at 同样拒绝。确认与吊销互斥且各一次。
+CREATE TRIGGER trg_runtime_credentials_no_confirm_after_retire BEFORE UPDATE OF confirmed_at ON runtime_credentials
+WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND (OLD.retired_at IS NOT NULL OR NEW.retired_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be confirmed after retirement'); END;
+-- 凭据不得“出生即退休”：INSERT 时 retired_at 必须为 NULL（生命周期只允许从 NULL -> 时间戳的
+-- UPDATE 推进，DATA-RUNTIME-002）。confirmed_at 可非 NULL（初次注册）也可 NULL（轮换 pending）。
+CREATE TRIGGER trg_runtime_credentials_insert_not_retired BEFORE INSERT ON runtime_credentials
+WHEN NEW.retired_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be created already retired'); END;
+-- A: 确认（confirmed_at NULL -> 时间戳）的唯一合法路径是“该 credential 正被同 slot 的
+-- pending_credential_id 引用”（轮换确认）。初次注册/替换后注册允许 INSERT 时 confirmed_at 非空，
+-- 但仅当 slot 当前为 unregistered/revoked 且 current/pending 皆空（注册窗口）；
+-- registered slot 不得 INSERT 已确认孤儿（轮换必须从 pending 确认，不能绕 pending）。
+CREATE TRIGGER trg_runtime_credentials_confirm_requires_pending BEFORE UPDATE OF confirmed_at ON runtime_credentials
+WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND NOT EXISTS (
+  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.pending_credential_id = NEW.id
+)
+BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be confirmed unless referenced by the slot pending pointer'); END;
+CREATE TRIGGER trg_runtime_credentials_insert_confirmed_registration_only BEFORE INSERT ON runtime_credentials
+WHEN NEW.confirmed_at IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot
+    AND s.state IN ('unregistered','revoked')
+    AND s.current_credential_id IS NULL AND s.pending_credential_id IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential can only be inserted for first or replacement registration (slot unregistered/revoked with no pointers)'); END;
+
+-- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
+-- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
+-- 必须 state='Running' 且 runtime_slot/boot_id/connection_epoch 全部非空且与 upload 一致
+-- （旧 Attempt 已终态/未派发/替换后 ABA/epoch 不符一律拒绝 commit，只能 rejected）；
+-- artifact_id/committed_at 一旦提交不可改；历史不可删除（DATA-ARTIFACT-006）。
+CREATE TRIGGER trg_runtime_artifact_uploads_origin_immutable BEFORE UPDATE OF
+  upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, retention_kind, sensitive, size_bytes, sha256, created_at ON runtime_artifact_uploads
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload origin is immutable'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_insert_state BEFORE INSERT ON runtime_artifact_uploads
+WHEN NEW.state <> 'uploading'
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload must be created as uploading'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_state_transition BEFORE UPDATE OF state ON runtime_artifact_uploads
+WHEN OLD.state <> NEW.state AND NOT (OLD.state = 'uploading' AND NEW.state IN ('committed','rejected'))
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload state transition only uploading->committed/rejected'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_commit_attempt BEFORE UPDATE OF state ON runtime_artifact_uploads
+WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  JOIN artifacts ar ON ar.id = NEW.artifact_id
+  JOIN artifact_blobs b ON b.id = ar.blob_id
+  WHERE a.id = NEW.attempt_id
+    AND a.state = 'Running'
+    AND a.runtime_slot IS NOT NULL
+    AND a.boot_id IS NOT NULL AND a.boot_id = NEW.boot_id
+    AND a.connection_epoch IS NOT NULL AND a.connection_epoch = NEW.connection_epoch
+    AND ar.kind = NEW.kind
+    AND ar.retention_kind = NEW.retention_kind
+    AND ar.sensitive = NEW.sensitive
+    AND ar.owner_type = NEW.owner_type
+    AND ar.owner_id = NEW.owner_id
+    AND b.sha256 = NEW.sha256
+    AND b.size_bytes = NEW.size_bytes
+)
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires the attempt Running with matching non-null boot_id/connection_epoch and an artifact exactly matching kind/retention_kind/sensitive/owner_type/owner_id/sha256/size_bytes'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_result_immutable BEFORE UPDATE OF artifact_id, committed_at ON runtime_artifact_uploads
+WHEN OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.committed_at IS NOT OLD.committed_at)
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload result is immutable once committed'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_no_delete BEFORE DELETE ON runtime_artifact_uploads
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_uploads ledger is not deletable'); END;
+
+-- 替换 fence（Q237「有 active task 时必须先等待完成或明确取消才能替换」）：
+-- Execution Attempt 可由 Plinth 或 Lintel 承载（browser_exploration 与巡检 Journey 的子 Attempt
+-- 绑定 Lintel，CONTEXT「执行尝试」）；Browser Operation 全部由 Lintel 承载。任意 slot 置 revoked 前
+-- 必须没有绑定该 slot 的 active Attempt（Assigned/Running/Cancelling）；此外 lintel 还必须没有
+-- active Browser Operation（browser_operations.result IS NULL，直接检查，不通过 Attempt 推断——
+-- manual_login、Queued/未派发 Attempt 或已终态 Attempt 上仍活跃的浏览器操作同样拦截）。
+-- 应用事务先检查并拒绝（409 active_conflict），本触发器是机械兑底；正常替换流程中不存在 active。
+CREATE TRIGGER trg_runtime_slots_no_replace_with_active BEFORE UPDATE OF state ON runtime_slots
+WHEN NEW.state = 'revoked' AND (
+  EXISTS (SELECT 1 FROM execution_attempts a WHERE a.runtime_slot = NEW.slot AND a.state IN ('Assigned','Running','Cancelling'))
+  OR (NEW.slot = 'lintel' AND EXISTS (SELECT 1 FROM browser_operations bo WHERE bo.result IS NULL))
+)
+BEGIN SELECT RAISE(ABORT, 'runtime slot cannot be replaced while active attempts on the slot or active browser operations (lintel) exist'); END;
+
+-- 派发 fence：Attempt 只能派发到 state='registered' 且 current 指针指向本 slot 已确认未退休凭据的 slot
+-- （DATA-ATTEMPT-001/DATA-RUNTIME-001）。与 replace 事务按 SQLite 提交顺序裁决：replace 先提交则
+-- 本触发器拒绝后续派发；派发先提交则 trg_runtime_slots_no_replace_with_active 拒绝替换。
+-- INSERT（直接带绑定）与 UPDATE（Queued->Assigned 设置绑定）两条路径都覆盖。
+CREATE TRIGGER trg_execution_attempts_slot_registered BEFORE INSERT ON execution_attempts
+WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runtime_slots s JOIN runtime_credentials c ON c.id = s.current_credential_id
+  WHERE s.slot = NEW.runtime_slot AND s.state = 'registered' AND c.slot = s.slot
+    AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
+CREATE TRIGGER trg_execution_attempts_slot_registered_update BEFORE UPDATE OF runtime_slot ON execution_attempts
+WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runtime_slots s JOIN runtime_credentials c ON c.id = s.current_credential_id
+  WHERE s.slot = NEW.runtime_slot AND s.state = 'registered' AND c.slot = s.slot
+    AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
+
+-- 派发绑定（runtime_slot/boot_id/connection_epoch/accepted_at）一旦设置不可改；
+-- lease_until 可由心跳续期（可再生，row_version 照常递增）；requested_by_tool_call_id 不可改。
+CREATE TRIGGER trg_execution_attempts_runtime_binding_immutable BEFORE UPDATE OF runtime_slot, boot_id, connection_epoch, accepted_at ON execution_attempts
+WHEN (OLD.runtime_slot IS NOT NULL AND NEW.runtime_slot IS NOT OLD.runtime_slot)
+  OR (OLD.boot_id IS NOT NULL AND NEW.boot_id IS NOT OLD.boot_id)
+  OR (OLD.connection_epoch IS NOT NULL AND NEW.connection_epoch IS NOT OLD.connection_epoch)
+  OR (OLD.accepted_at IS NOT NULL AND NEW.accepted_at IS NOT OLD.accepted_at)
+BEGIN SELECT RAISE(ABORT, 'execution_attempt runtime binding is immutable once set'); END;
+-- 跨 Runtime 子执行请求方闭合（DATA-ATTEMPT-007）：requested_by_tool_call_id 非空时必须指向
+-- 已派发到 plinth 的父 Attempt 的 tool_call（INSERT 时父 runtime_slot 已设置且不可再改，
+-- 因此 INSERT 检查足够，无后期漂移）；创建后完全不可改——NULL->非NULL（晚绑定）、
+-- 非NULL->NULL/另一值均拒绝，仅同值/同 NULL 的 no-op 允许（IS 比较）。不建立通用任务 DAG。
+CREATE TRIGGER trg_execution_attempts_requestor_plinth BEFORE INSERT ON execution_attempts
+WHEN NEW.requested_by_tool_call_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM tool_calls tc
+  JOIN execution_attempts parent ON parent.id = tc.attempt_id
+  WHERE tc.id = NEW.requested_by_tool_call_id
+    AND parent.runtime_slot = 'plinth'
+)
+BEGIN SELECT RAISE(ABORT, 'cross-runtime sub-execution requestor must be a tool call of a plinth-dispatched parent attempt'); END;
+CREATE TRIGGER trg_execution_attempts_requestor_immutable BEFORE UPDATE OF requested_by_tool_call_id ON execution_attempts
+WHEN NOT (OLD.requested_by_tool_call_id IS NEW.requested_by_tool_call_id)
+BEGIN SELECT RAISE(ABORT, 'execution_attempt requestor tool call is immutable once set'); END;
+
+-- browser_operations 与执行尝试的严格绑定（DATA-BROWSER-003）：manual_login 无 attempt；
+-- exploration -> browser_exploration（scope investigation，非 run_check 子 Attempt）；
+-- journey -> inspection_collection（scope run_check 子 Attempt，check_key 非空）；
+-- attempt_id 一旦设置不可改；kind 已由 trg_browser_operations_no_origin_update 冻结。
+CREATE TRIGGER trg_browser_operations_attempt_binding_insert BEFORE INSERT ON browser_operations
+WHEN NOT (
+  (NEW.kind = 'manual_login' AND NEW.attempt_id IS NULL)
+  OR (NEW.kind = 'exploration' AND NEW.attempt_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM execution_attempts a
+        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
+          AND a.scope_type = 'investigation' AND a.check_key IS NULL))
+  OR (NEW.kind = 'journey' AND NEW.attempt_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM execution_attempts a
+        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+          AND a.scope_type = 'run_check' AND a.check_key IS NOT NULL))
+)
+BEGIN SELECT RAISE(ABORT, 'browser_operation kind requires a matching execution_attempt binding'); END;
+CREATE TRIGGER trg_browser_operations_attempt_binding_update BEFORE UPDATE OF attempt_id ON browser_operations
+WHEN OLD.attempt_id IS NULL AND NEW.attempt_id IS NOT NULL AND NOT (
+  (NEW.kind = 'exploration' AND EXISTS (
+     SELECT 1 FROM execution_attempts a
+     WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
+       AND a.scope_type = 'investigation' AND a.check_key IS NULL))
+  OR (NEW.kind = 'journey' AND EXISTS (
+     SELECT 1 FROM execution_attempts a
+     WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+       AND a.scope_type = 'run_check' AND a.check_key IS NOT NULL))
+)
+BEGIN SELECT RAISE(ABORT, 'browser_operation attempt binding must match kind'); END;
+CREATE TRIGGER trg_browser_operations_attempt_immutable BEFORE UPDATE OF attempt_id ON browser_operations
+WHEN OLD.attempt_id IS NOT NULL AND NEW.attempt_id IS NOT OLD.attempt_id
+BEGIN SELECT RAISE(ABORT, 'browser_operation attempt binding is immutable once set'); END;
