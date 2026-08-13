@@ -39,6 +39,7 @@ CREATE TABLE users (
   password_phc               TEXT NOT NULL CHECK (length(password_phc) > 0), -- Argon2id PHC，格式见 security.md
   password_change_required   INTEGER NOT NULL DEFAULT 0 CHECK (password_change_required IN (0,1)), -- 首次/强制改密（离线创建、Admin 重置、备份恢复置位）
   password_change_required_at TEXT,                        -- 置位时间；成功改密在同一事务清除标志（DATA-AUTH-001）
+  row_version                INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 用户行并发前提；与 auth_revision 独立（DATA-AUTH-004）
   created_at                 TEXT NOT NULL,
   updated_at                 TEXT NOT NULL,
   CHECK (
@@ -76,6 +77,7 @@ CREATE TABLE runtime_slots (
   state                TEXT NOT NULL DEFAULT 'unregistered' CHECK (state IN ('unregistered','registered','revoked')),
   token_digest         BLOB CHECK (token_digest IS NULL OR length(token_digest) = 32), -- 长期 token 只存 digest
   credential_generation INTEGER NOT NULL DEFAULT 0 CHECK (credential_generation >= 0),
+  row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 替换命令并发前提（DATA-ROWVER-001）
   last_seen_at         TEXT,
   created_at           TEXT NOT NULL
 ) STRICT;
@@ -132,6 +134,7 @@ CREATE TABLE alert_sources (
   source_key  TEXT NOT NULL UNIQUE,                 -- 稳定用户 key，退役不复用
   protocol    TEXT NOT NULL CHECK (protocol IN ('alertmanager')), -- v1 仅 alertmanager
   enabled     INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable 命令并发前提（DATA-ALERT-010）
   created_at  TEXT NOT NULL,
   disabled_at TEXT,
   CHECK (enabled = 1 OR disabled_at IS NOT NULL)
@@ -142,6 +145,7 @@ CREATE TABLE alert_source_credentials (
   source_id  INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   digest     BLOB NOT NULL CHECK (length(digest) = 32), -- 32-byte Bearer 只存 digest
   state      TEXT NOT NULL CHECK (state IN ('Active','Retired')),
+  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 吊销命令并发前提（DATA-ALERT-009）
   created_at TEXT NOT NULL,
   retired_at TEXT,
   CHECK ((state = 'Retired' AND retired_at IS NOT NULL) OR (state = 'Active' AND retired_at IS NULL))
@@ -235,15 +239,18 @@ CREATE TABLE alert_intake_issues (
   detail_json       TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
   acknowledged_at   TEXT,
   acknowledged_by   INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   created_at        TEXT NOT NULL,
   CHECK (kind <> 'delivery_truncated' OR delivery_id IS NOT NULL),
-  CHECK (kind = 'delivery_truncated' OR delivery_item_id IS NOT NULL)
+  CHECK (kind = 'delivery_truncated' OR delivery_item_id IS NOT NULL),
+  CHECK ((acknowledged_at IS NULL AND acknowledged_by IS NULL) OR (acknowledged_at IS NOT NULL AND acknowledged_by IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_alert_intake_issue_truncated ON alert_intake_issues (delivery_id) WHERE kind = 'delivery_truncated';
 CREATE INDEX idx_alert_intake_issues_source ON alert_intake_issues (source_id, created_at);
 
 -- 有界派生变更日志：id 即单调递增 change_seq（AUTOINCREMENT，同事务分配、永不复用）；
--- 可清理（保留窗口由部署配置），不是告警历史权威源。
+-- 可清理（保留窗口由部署配置），不是告警历史权威源。最新行（MAX(id)）是回放 high-water，
+-- 由触发器强制保留、永不删除（trg_alert_change_log_no_delete_latest，DATA-SSE-009）。
 CREATE TABLE alert_change_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   occurrence_id INTEGER NOT NULL REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -347,6 +354,7 @@ CREATE TABLE label_contracts (
   contract_json TEXT NOT NULL CHECK (json_valid(contract_json)),
   digest        TEXT NOT NULL CHECK (length(digest) = 64),
   state         TEXT NOT NULL CHECK (state IN ('draft','active','retired')),
+  row_version   INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 激活命令并发前提（DATA-CONFIG-005）
   created_at    TEXT NOT NULL,
   activated_at  TEXT,
   activated_by  INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -354,11 +362,21 @@ CREATE TABLE label_contracts (
 ) STRICT;
 CREATE UNIQUE INDEX ux_label_contract_active ON label_contracts (state) WHERE state = 'active';
 
+-- Label Contract 当前指针单行聚合：激活命令的并发前提权威（DATA-CONFIG-005/006）。
+-- current_contract_id 必须指向 active 契约（触发器强制）。
+CREATE TABLE label_contract_state (
+  id                  INTEGER PRIMARY KEY CHECK (id = 1),
+  current_contract_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  row_version         INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  updated_at          TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE business_systems (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   key                       TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
   display_name              TEXT NOT NULL,
   enabled                   INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 系统行并发前提（DATA-CONFIG-005）
   current_config_version_id INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL
 ) STRICT;
@@ -461,6 +479,7 @@ CREATE TABLE connections (
   name                              TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
   type                              TEXT NOT NULL CHECK (type IN ('thanos','kubernetes','model_provider')),
   enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  row_version                       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable/rotate 命令并发前提（DATA-CONN-005）
   revalidation_required             INTEGER NOT NULL DEFAULT 0 CHECK (revalidation_required IN (0,1)),
   current_revision_id               INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   current_credential_generation_id  INTEGER REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -494,6 +513,7 @@ CREATE TABLE browser_identities (
   name                          TEXT NOT NULL,
   start_url                     TEXT NOT NULL,
   state                         TEXT NOT NULL CHECK (state IN ('Ready','AuthenticationRequired')),
+  row_version                   INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 配置/发布 generation 命令并发前提（DATA-BROWSER-004）
   current_profile_generation_id INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                    TEXT NOT NULL
 ) STRICT;
@@ -738,6 +758,7 @@ CREATE INDEX idx_knowledge_candidates_source ON knowledge_candidates (source_typ
 CREATE TABLE reusable_knowledge (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   current_version_id INTEGER REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 同时最多一个 current
+  row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- current 指针切换并发前提（DATA-KNOWLEDGE-007）
   created_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at         TEXT NOT NULL
 ) STRICT;
@@ -761,6 +782,7 @@ CREATE TABLE knowledge_versions (
 CREATE TABLE knowledge_version_retrieval_state (
   knowledge_version_id INTEGER PRIMARY KEY REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   exited       INTEGER NOT NULL DEFAULT 0 CHECK (exited IN (0,1)),
+  row_version  INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- stop-reuse 命令并发前提（DATA-KNOWLEDGE-007）
   exited_at    TEXT,
   exit_reason  TEXT CHECK (exit_reason IS NULL OR exit_reason IN ('source_rejected','stopped')),
   updated_at   TEXT NOT NULL,
@@ -831,6 +853,7 @@ CREATE TABLE backup_settings (
   schedule_cron   TEXT,
   timezone        TEXT NOT NULL DEFAULT 'UTC',
   retention_count INTEGER NOT NULL DEFAULT 30 CHECK (retention_count >= 1),
+  row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 设置更新并发前提（DATA-BACKUP-008）
   updated_by      INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   updated_at      TEXT NOT NULL
 ) STRICT;
@@ -1048,9 +1071,14 @@ CREATE TRIGGER trg_alert_source_credentials_max2_update BEFORE UPDATE OF state O
 WHEN NEW.state = 'Active' AND (SELECT COUNT(*) FROM alert_source_credentials
      WHERE source_id = NEW.source_id AND state = 'Active') >= 2
 BEGIN SELECT RAISE(ABORT, 'at most two active credentials per source'); END;
-CREATE TRIGGER trg_alert_source_credentials_no_reactivate BEFORE UPDATE OF state ON alert_source_credentials
-WHEN OLD.state = 'Retired' AND NEW.state = 'Active'
-BEGIN SELECT RAISE(ABORT, 'retired credential cannot be reactivated'); END;
+-- 唯一合法 UPDATE 是 Active -> Retired；这直接表达完整前向状态机，而非依赖多个否定守卫。
+CREATE TRIGGER trg_alert_source_credentials_update_is_retirement BEFORE UPDATE ON alert_source_credentials
+WHEN NOT (OLD.state = 'Active' AND NEW.state = 'Retired')
+BEGIN SELECT RAISE(ABORT, 'credential update must be Active -> Retired'); END;
+-- 合法退休必须恰好递增 row_version（吊销命令在同一 UPDATE 中递增；DATA-ALERT-009）。
+CREATE TRIGGER trg_alert_source_credentials_row_version_increment BEFORE UPDATE ON alert_source_credentials
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'credential row_version must increase exactly by 1'); END;
 -- retired_at 由应用在同一 UPDATE 中写入（SQLite 触发器不支持 SET NEW）。
 
 -- 12.17 告警发生：禁止已恢复再打开；row_version/last_state_change_at/resolved_at 由应用在
@@ -1122,6 +1150,104 @@ CREATE TRIGGER trg_observed_resource_identity_labels_no_update BEFORE UPDATE ON 
 BEGIN SELECT RAISE(ABORT, 'observed_resource_identity_labels are immutable'); END;
 CREATE TRIGGER trg_observed_resource_identity_labels_no_delete BEFORE DELETE ON observed_resource_identity_labels
 BEGIN SELECT RAISE(ABORT, 'observed_resource_identity_labels are immutable'); END;
+
+-- 12.23b 可变聚合行版本：任何 UPDATE 必须恰好递增 row_version（应用在同一条 UPDATE 中递增；
+-- 陈旧 expected 值在 WHERE 中比较后命中 0 行，由应用映射 409；DATA-ROWVER-001）
+CREATE TRIGGER trg_users_row_version_increment BEFORE UPDATE ON users
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'users row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_runtime_slots_row_version_increment BEFORE UPDATE ON runtime_slots
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'runtime_slots row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_alert_sources_row_version_increment BEFORE UPDATE ON alert_sources
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'alert_sources row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_label_contracts_row_version_increment BEFORE UPDATE ON label_contracts
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'label_contracts row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_business_systems_row_version_increment BEFORE UPDATE ON business_systems
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'business_systems row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_connections_row_version_increment BEFORE UPDATE ON connections
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'connections row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_browser_identities_row_version_increment BEFORE UPDATE ON browser_identities
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'browser_identities row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_knowledge_version_retrieval_state_row_version_increment BEFORE UPDATE ON knowledge_version_retrieval_state
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'knowledge_version_retrieval_state row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_reusable_knowledge_row_version_increment BEFORE UPDATE ON reusable_knowledge
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'reusable_knowledge row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_backup_settings_row_version_increment BEFORE UPDATE ON backup_settings
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'backup_settings row_version must increase exactly by 1'); END;
+
+-- 12.23c 既有可观察/可取消对象：应用在同一条 UPDATE 中递增 row_version（SQLite 触发器无法 SET NEW），
+-- 触发器强制恰好 +1（DATA-ROWVER-001 / DATA-SSE-005）。变更日志表（alert_change_log/task_change_log）
+-- 的 row_version 列是事件载荷（记录事件时对象版本），日志本身不可变，不适用本规则。
+CREATE TRIGGER trg_alert_occurrences_row_version_increment BEFORE UPDATE ON alert_occurrences
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'alert_occurrences row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_initial_analyses_row_version_increment BEFORE UPDATE ON initial_analyses
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'initial_analyses row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_browser_operations_row_version_increment BEFORE UPDATE ON browser_operations
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'browser_operations row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_inspection_runs_row_version_increment BEFORE UPDATE ON inspection_runs
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'inspection_runs row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_execution_attempts_row_version_increment BEFORE UPDATE ON execution_attempts
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'execution_attempts row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_tool_calls_row_version_increment BEFORE UPDATE ON tool_calls
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'tool_calls row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_knowledge_import_batches_row_version_increment BEFORE UPDATE ON knowledge_import_batches
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'knowledge_import_batches row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_knowledge_candidates_row_version_increment BEFORE UPDATE ON knowledge_candidates
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'knowledge_candidates row_version must increase exactly by 1'); END;
+
+-- 12.23d 告警接入问题确认：单向粘性状态机（未确认 -> 已确认；不可取消确认、不可改派），
+-- 确认与取消确认字段成对出现（CHECK），任何 UPDATE 恰好递增 row_version（DATA-ALERT-011）。
+CREATE TRIGGER trg_alert_intake_issues_row_version_increment BEFORE UPDATE ON alert_intake_issues
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'alert_intake_issues row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_alert_intake_issues_ack_sticky BEFORE UPDATE OF acknowledged_at, acknowledged_by ON alert_intake_issues
+WHEN OLD.acknowledged_at IS NOT NULL AND
+     (NEW.acknowledged_at IS NULL OR NEW.acknowledged_at <> OLD.acknowledged_at OR NEW.acknowledged_by <> OLD.acknowledged_by)
+BEGIN SELECT RAISE(ABORT, 'intake issue acknowledgement is sticky'); END;
+
+-- 12.23e Label Contract 当前指针单行聚合：恰好 +1、不可删除、指针必须指向 active 契约（DATA-CONFIG-005/006）。
+CREATE TRIGGER trg_label_contract_state_row_version_increment BEFORE UPDATE ON label_contract_state
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'label_contract_state row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_label_contract_state_no_delete BEFORE DELETE ON label_contract_state
+BEGIN SELECT RAISE(ABORT, 'label_contract_state is a single-row table'); END;
+CREATE TRIGGER trg_label_contract_state_pointer_insert AFTER INSERT ON label_contract_state
+WHEN NEW.current_contract_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.current_contract_id AND lc.state = 'active')
+BEGIN SELECT RAISE(ABORT, 'label_contract_state.current_contract_id must reference an active contract'); END;
+CREATE TRIGGER trg_label_contract_state_pointer_update AFTER UPDATE OF current_contract_id ON label_contract_state
+WHEN NEW.current_contract_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.current_contract_id AND lc.state = 'active')
+BEGIN SELECT RAISE(ABORT, 'label_contract_state.current_contract_id must reference an active contract'); END;
+
+-- 12.23f 变更流回放水位（DATA-SSE-009）：不建第二张水位表。日志最新行（MAX(id)）即
+-- high-water，由 BEFORE DELETE 触发器强制保留（禁止删除最新行）；旧行仍可 GC 删除。
+-- high_water = COALESCE(MAX(change_log.id),0)，oldest_available = COALESCE(MIN(change_log.id),0)，
+-- 均直接取自日志本身；最新行保留保证 high_water 自首个事件后永不回退。
+-- 客户端游标过期判定见 HTTP-SSE-009 两条件谓词（cursor < high_water AND cursor < oldest - 1）。
+CREATE TRIGGER trg_alert_change_log_no_delete_latest BEFORE DELETE ON alert_change_log
+WHEN OLD.id = (SELECT MAX(id) FROM alert_change_log)
+BEGIN SELECT RAISE(ABORT, 'alert_change_log latest row is the replay high-water and cannot be deleted'); END;
+CREATE TRIGGER trg_task_change_log_no_delete_latest BEFORE DELETE ON task_change_log
+WHEN OLD.id = (SELECT MAX(id) FROM task_change_log)
+BEGIN SELECT RAISE(ABORT, 'task_change_log latest row is the replay high-water and cannot be deleted'); END;
 
 -- 12.24 持久历史禁止物理删除（tombstone-only；可清理的派生/会话表除外）
 CREATE TRIGGER trg_users_no_delete BEFORE DELETE ON users
@@ -1303,8 +1429,9 @@ WHEN OLD.state = 'published' AND NEW.state = 'draft'
 BEGIN SELECT RAISE(ABORT, 'published config version cannot return to draft'); END;
 
 -- 12.29 任务变更日志：与权威对象状态/阶段变化同一事务派生（可丢弃、可重建；
--- DELETE 允许保留窗口 GC；UPDATE 禁止）。row_version 由应用在同一 UPDATE 中递增
--- （SQLite 触发器不支持 SET NEW；DATA-SSE-005）。
+-- DELETE 允许保留窗口 GC，但最新行（MAX(id)，回放 high-water）不可删除
+-- （trg_task_change_log_no_delete_latest，DATA-SSE-009）；UPDATE 禁止。
+-- row_version 由应用在同一 UPDATE 中递增（SQLite 触发器不支持 SET NEW；DATA-SSE-005）。
 CREATE TRIGGER trg_task_change_log_no_update BEFORE UPDATE ON task_change_log
 BEGIN SELECT RAISE(ABORT, 'task_change_log is append-only (deletion allowed for retention GC)'); END;
 CREATE TRIGGER trg_task_change_log_initial_analysis_insert AFTER INSERT ON initial_analyses

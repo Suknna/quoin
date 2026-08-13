@@ -17,6 +17,7 @@
 - **DATA-AUTH-001 —** `users` **MUST** 持久化 `password_change_required` 与 `password_change_required_at`：离线创建首个 Admin、Admin 离线重置密码与备份恢复流程 **MUST** 在同一事务置位（`password_change_required=1` 时必须有置位时间戳，CHECK 强制）；成功改密 **MUST** 在同一事务清除标志；清除标志 **MUST NOT** 由其他业务命令隐式完成。（来源：CONTEXT「本地账号认证」「管理员离线恢复」「一致备份」）
 - **DATA-AUTH-002 —** `password_change_required=1` 的用户登录后 **MUST** 只获得受限 Session：**MUST** 只能调用自身状态读取、改密与登出；权限层 **MUST** 以该持久状态裁决，**MUST NOT** 依赖前端隐藏入口。（来源：CONTEXT「本地账号认证」「管理员离线恢复」）
 - **DATA-AUTH-003 —** `sessions` **MUST** 只保存 raw 32-byte bearer 的固定长度 SHA-256 digest（`session_token_digest`，UNIQUE、BLOB 32 字节）；raw bearer **MUST** 只存在于浏览器 Cookie 与认证瞬间内存，**MUST NOT** 写入 SQLite、日志或审计。（来源：CONTEXT「同源 Web 会话」「模型调用边界」）
+- **DATA-AUTH-004 —** `users.row_version` **MUST** 从 1 起始、与 `auth_revision` 相互独立，任何允许的 UPDATE **MUST** 恰好递增 1（`trg_users_row_version_increment`）；`updateUser`/`resetUserPassword` 等修改用户状态的命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）；`auth_revision` 仍由账号变更事务按既有规则递增并撤销 Session，两者 **MUST NOT** 混用（HTTP-COMMAND-002）。（来源：CONTEXT「本地账号认证」、Issue #10 复审）
 
 ## 3. 技术 locator 与身份规则
 
@@ -36,6 +37,8 @@
 - **DATA-COMMAND-004 —** 确定性业务拒绝（版本冲突、fence 拒绝、校验失败）**MUST** 以 `outcome='rejected_known'` 持久化结果；基础设施失败或提交结果未知 **MUST NOT** 被伪造为权威成功或失败，调用方 **MUST** 复用同一 `client_command_id` 重试。（来源：CONTEXT「领域写命令契约」）
 - **DATA-COMMAND-005 —** 修改当前状态或当前版本指针的命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较；纯追加创建 **MUST NOT** 强制 expected version。（来源：CONTEXT「领域写命令契约」）
 - **DATA-COMMAND-006 —** 调度器创建定时 Run **MUST** 使用 `(business_system_id, plan_key, scheduled_for)` 确定性键（`ux_inspection_run_scheduled` 部分唯一索引），该键在 Run 进入任何终态后仍 **MUST NOT** 被复用（不补跑）；同一事务 **MUST** 绑定当时生效的 `config_version_id` 与 `label_contract_version_id`。（来源：CONTEXT「领域写命令契约」「巡检运行」）
+- **DATA-COMMAND-008 —** 语义 no-op（请求字段存在但值未变化）**MUST** 幂等成功返回当前对象：**MUST NOT** 执行 UPDATE、递增 `row_version`、产生 SSE 变更事件或重复写成功审计；命令账本仍记录并重放确定性结果（DATA-COMMAND-003/004）。（来源：Issue #10 复审）
+- **DATA-ROWVER-001 —** 每个可变聚合根 **MUST** 持久化独立 `row_version`（从 1 起始，CHECK `>= 1`）并配恰好递增 1 的 BEFORE UPDATE 触发器（`WHEN NEW.row_version <> OLD.row_version + 1` 时 RAISE）：`users`（与 `auth_revision` 独立）、`runtime_slots`、`alert_sources`、`alert_source_credentials`、`alert_occurrences`、`alert_intake_issues`、`initial_analyses`、`browser_identities`、`browser_operations`、`inspection_runs`、`execution_attempts`、`tool_calls`、`label_contracts`、`label_contract_state`、`business_systems`、`connections`、`reusable_knowledge`、`knowledge_version_retrieval_state`、`knowledge_import_batches`、`knowledge_candidates`、`backup_settings`（触发器名 `trg_<table>_row_version_increment`）；应用在同一条 UPDATE 的 WHERE/SET 中比较并递增 `row_version`（SQLite 触发器无法 SET NEW），触发器验证恰好 +1；`alert_change_log`/`task_change_log` 的 `row_version` 列是事件载荷（记录事件时对象版本），日志本身不可变，**MUST NOT** 适用本规则。修改状态/current 指针的命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005），陈旧值命中 0 行由应用映射 409；纯追加创建 **MUST NOT** 强制 expected version。（来源：CONTEXT「领域写命令契约」、Issue #10 复审）
 
 ## 5. 审计与执行溯源
 
@@ -54,7 +57,9 @@
 - **DATA-ALERT-006 —** 每个有效项 **MUST** 形成不可变 `alert_observations`，记录 `effect`（`initial_firing`/`repeat_firing`/`resolved`/`resolved_first`/`late_firing_after_resolved`）；resolved-first 与 resolved 后迟到 firing **MUST** 保留观察且迟到 firing 不重开 Occurrence。`observed_state` 与 `effect` **MUST** 一致（`firing` 只对应三种 firing effect，`resolved` 只对应 `resolved`/`resolved_first`，schema CHECK 强制）。（来源：CONTEXT「告警观察」）
 - **DATA-ALERT-007 —** 影响告警列表的 Occurrence 变更 **MUST** 在同一事务内维护 `row_version`（应用在 UPDATE 中递增）、`last_state_change_at`/`resolved_at`，并由触发器（`trg_alert_change_log_insert`/`trg_alert_change_log_state`）写入 `alert_change_log`。（来源：CONTEXT「实时投影」「告警列表与详情」；Rationale：SQLite 触发器不支持 `SET NEW`，时间与版本字段由应用在同一条 UPDATE 中维护。）
 - **DATA-ALERT-008 —** Delivery 事务 **MUST** 重验来源启用、凭据有效性与归属（`credential_id` + 快照版本）；Delivery 与凭据吊销按 SQLite 提交顺序裁决，**MUST NOT** 使用墙钟宽限期。（来源：CONTEXT「告警源凭据投影」）
-- **DATA-ALERT-009 —** 每个来源轮换期间 **MUST** 最多同时两个 `Active` 凭据（触发器强制），Retired 凭据 **MUST NOT** 复活；`retired_at` 由应用在状态变更 UPDATE 中写入，且 `state` 与 `retired_at` 的一致性 **MUST** 由 CHECK 强制（Retired 必须有 `retired_at`，Active 必须无）；凭据来源字段（`source_id`/`digest`）与历史 **MUST** 不可改写、不可删除（`trg_alert_source_credentials_origin_immutable`、`trg_alert_source_credentials_no_delete`）。（来源：CONTEXT「告警源凭据投影」）
+- **DATA-ALERT-009 —** 每个来源轮换期间 **MUST** 最多同时两个 `Active` 凭据（触发器强制），凭据唯一合法的 UPDATE **MUST** 是 `Active -> Retired`（`trg_alert_source_credentials_update_is_retirement`），因此 Retired 凭据 **MUST NOT** 复活或再被更新；`retired_at` 由应用在状态变更 UPDATE 中写入，且 `state` 与 `retired_at` 的一致性 **MUST** 由 CHECK 强制（Retired 必须有 `retired_at`，Active 必须无）；凭据 `row_version` **MUST** 从 1 起始，合法退休 **MUST** 恰好递增 1（`trg_alert_source_credentials_row_version_increment`）；吊销命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005），同一事务写入 `retired_at`、递增 `row_version` 并提交命令结果；相同命令 ID 重放 **MUST** 返回原结果（DATA-COMMAND-003），新命令针对已 Retired 凭据 **MUST** 冲突；凭据来源字段（`source_id`/`digest`）与历史 **MUST** 不可改写、不可删除（`trg_alert_source_credentials_origin_immutable`、`trg_alert_source_credentials_no_delete`）。（来源：CONTEXT「告警源凭据投影」）
+- **DATA-ALERT-010 —** `alert_sources.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；enable/disable 命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）。（来源：CONTEXT「告警源凭据投影」、Issue #10 复审）
+- **DATA-ALERT-011 —** 告警接入问题确认 **MUST** 是单向粘性状态机：`alert_intake_issues` 只允许 `未确认 -> 已确认`，`acknowledged_at` 与 `acknowledged_by` **MUST** 成对出现（CHECK 强制），已确认 **MUST NOT** 取消确认或改派（`trg_alert_intake_issues_ack_sticky`）；`row_version` 从 1 起始、任何 UPDATE 恰好递增 1（`trg_alert_intake_issues_row_version_increment`）；确认命令 **MUST** 携带 `expected_row_version`（`acknowledgeIntakeIssue` 使用 `VersionedCommandRequest`）并在同一 UPDATE 的 WHERE 中比较，陈旧值 409（DATA-COMMAND-005）。（来源：CONTEXT「告警接入问题」、Issue #10 复审）
 
 ## 7. 初步分析与调查
 
@@ -72,6 +77,8 @@
 - **DATA-CONFIG-002 —** Label Contract 联合激活 **MUST** 原子：零启用业务系统时首个契约经静态校验直接激活；有启用系统时只有全部系统准备并验证兼容版本后，**MUST** 在同一事务切换契约 current 与全部兼容配置版本；任一失败 **MUST** 全部继续使用旧版本。已开始的 Run **MUST** 继续绑定旧版本，契约变更 **MUST NOT** 重写历史 label 快照。`retired` 契约 **MUST** 不可再激活（`trg_label_contracts_retired_immutable`）。（来源：CONTEXT「标签契约」）
 - **DATA-CONFIG-003 —** 配置版本与契约正文 **MUST** 不可变（触发器只允许 `state`/发布字段变化）；digest **MUST** 覆盖全部语义内容；上传 **MUST** 只解析一次并保存原文、parser/schema 版本与类型结构，运行 **MUST** 只使用类型结构。（来源：CONTEXT「业务系统配置版本」）
 - **DATA-CONFIG-004 —** discovery/plan/check 使用跨版本稳定的用户 key（`config_discoveries.discovery_key` 等），显示名可改、key 不可复用；每个版本内 `UNIQUE (config_version_id, key)`。（来源：CONTEXT「业务系统配置版本」「巡检计划」「巡检项」）
+- **DATA-CONFIG-005 —** `business_systems.row_version` 与 `label_contracts.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；Label Contract 激活命令 **MUST** 携带目标草稿契约 `expected_row_version` 与每个受影响系统的 `expected_current_config_version_id`（可为 null），并在同一事务内重验全部前提后原子切换（DATA-TX-007）；发布命令沿用 `expected_current_published_version_id`（DATA-CONFIG-001）。（来源：CONTEXT「标签契约」「业务系统配置版本」、Issue #10 复审）
+- **DATA-CONFIG-006 —** Label Contract 当前指针 **MUST** 由单行聚合 `label_contract_state`（`id=1`）承载：`current_contract_id` 必须指向 `active` 契约（`trg_label_contract_state_pointer_insert/update`），`row_version` 从 1 起始、任何 UPDATE 恰好递增 1、行不可删除；激活命令 **MUST** 同时携带 `expected_state_row_version` 与 `expected_current_contract_version_id`（可为 null，表示当前无已激活契约）并在 `WHERE` 中比较，防两个基于同一旧 current 的并发激活互相静默覆盖（后提交者 0 行映射 409 `current_pointer_conflict`）；state 指针更新与契约 `state='active'` 切换、逐系统配置版本切换处于同一事务（DATA-TX-007/008）。（来源：CONTEXT「标签契约」、Issue #10 复审）
 
 ## 9. 观测资源
 
@@ -85,12 +92,14 @@
 - **DATA-CONN-002 —** Attempt 派发前 **MUST** 在同一事务中检查连接启用并绑定实际 revision/generation；停用连接 **MUST** 阻止新派发，已接受 Attempt 使用内存旧快照完成（`ConnectionDisabled` 终止原因）。（来源：CONTEXT「连接」「执行尝试」）
 - **DATA-CONN-003 —** `revalidation_required=1` 的连接 **MUST** 阻止一切新派发，直到 Admin 显式成功重验后才清除标志；恢复流程按 DATA-BACKUP-005 置位。（来源：CONTEXT「一致备份」、Issue #9 确认）
 - **DATA-CONN-004 —** 密文的 AEAD envelope、密钥管理与格式由 `security.md`（#16）定义；本 Schema 只保存 `ciphertext BLOB` 与非秘密 `meta_json`。（来源：CONTEXT「模型调用边界」「连接」）
+- **DATA-CONN-005 —** HTTP 连接创建/轮换输入 **MUST** 是封闭类型化判别联合（HTTP-COMMAND-010），服务端 **MUST NOT** 保存任意客户端对象：`connection_revisions.config_json` **MUST** 是服务端从已验证非秘密字段生成、按类型校验的类型化投影（`ThanosConnectionNonSecret`/`KubernetesConnectionNonSecret`/`ModelProviderConnectionNonSecret`），**MUST NOT** 包含秘密字段；秘密 **MUST** 只进入 `credential_generations` 密文。`connections.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；enable/disable/rotate 命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）。（来源：CONTEXT「连接」「模型调用边界」、Issue #10 复审）
 
 ## 11. 浏览器身份
 
 - **DATA-BROWSER-001 —** 每个 Business System **MUST** 恰好一个 Browser Identity（UNIQUE）；`browser_profile_generations` 不可变，只有显式发布生成新 generation；Quoin **MUST NOT** 保存 profile 内容（备份不含 profile）。（来源：CONTEXT「浏览器身份」）
 - **DATA-BROWSER-002 —** 卷丢失、损坏或升级不兼容 **MUST** 使身份进入 `AuthenticationRequired`；重新登录恢复路径按 DATA-BACKUP-005 与「浏览器身份」执行。（来源：CONTEXT「浏览器身份」「一致备份」）
 - **DATA-BROWSER-003 —** 同一身份的登录、巡检、探索 **MUST** 独占串行；`browser_operations` 记录三类操作边界（人工登录不记录键盘/截图/trace；Exploration 每 Attempt 一份 trace；Journey 失败时保留 trace），必要 Artifact 上传失败 **MUST** 标记证据不完整。操作 `result` 一旦产生 **MUST** 终态不可变且必须带 `ended_at`（CHECK + `trg_browser_operations_result_immutable`）。（来源：CONTEXT「浏览器身份」「浏览器操作记录」）
+- **DATA-BROWSER-004 —** `browser_identities.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；`configureBrowserIdentity`（已有身份时）与 `publishBrowserProfileGeneration` 命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）。（来源：CONTEXT「浏览器身份」、Issue #10 复审）
 
 ## 12. 巡检运行与执行尝试
 
@@ -117,18 +126,21 @@
 - **DATA-KNOWLEDGE-004 —** Candidate 模型原始建议 **MUST** 不可变（触发器），用户修改产生递增 `draft_revision`；同一整理流程只有最新 generation 的最新草稿可确认；确认 **MUST** 携带命令 ID 与 expected revision，stale revision **MUST** 冲突；每个 Candidate **MUST** 最多创建一个 Reusable Knowledge（`ux_knowledge_candidate_confirmed`）。Candidate 来源类型与 `diagnosis_feedback` 目标类型统一为 `initial_analysis_output`/`inspection_report`/`investigation_message`；导入批次候选使用 `source_material` 且必须有 `import_batch_id`（schema CHECK 强制）。Candidate 终态（`Confirmed`/`Excluded`/`Superseded`/`SourceInvalid`）**MUST** 不可变（`trg_knowledge_candidates_terminal_immutable`）。（来源：CONTEXT「知识候选」）
 - **DATA-KNOWLEDGE-005 —** 批量确认 **MUST** 在单个事务校验全部 expected revision，全成或全不成；Batch 只在当前 generation 中仍可操作的 Candidate 上计算完成状态；`SourceInvalid` 是不可确认终态，`Cancelled` 是 batch 级 fence（禁止后续编辑/确认但保留 Candidate）。Batch 终态（`Failed`/`Completed`/`Cancelled`）**MUST** 不可变（`trg_knowledge_import_batches_terminal_immutable`）。（来源：CONTEXT「知识导入批次」）
 - **DATA-KNOWLEDGE-006 —** 相同命令 **MUST NOT** 重复创建 Knowledge；**MUST NOT** 按标题、正文 hash 或 embedding 相似度自动合并。（来源：CONTEXT「知识导入批次」「知识候选」）
+- **DATA-KNOWLEDGE-007 —** `reusable_knowledge.row_version` 与 `knowledge_version_retrieval_state.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；`stopKnowledgeReuse` 命令 **MUST** 携带版本行 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）；Knowledge current 指针切换仍按 DATA-TX-008 原子执行。（来源：CONTEXT「可复用知识」「诊断反馈」、Issue #10 复审）
 
 ## 15. 派生索引：FTS5、Embedding 与 SSE
 
 - **DATA-DERIVED-001 —** `knowledge_fts` **MUST** 采用 external-content trigram 并随 `knowledge_search_docs` 在触发器内同步（insert/update/delete）；FTS 索引 **MUST** 可校验、丢弃并重建（rebuild 命令）。查询 **MUST** 针对 FTS5 表使用 `MATCH`（或 FTS5 表上的 LIKE）；普通 content 表上的 LIKE **MUST NOT** 被假定走 trigram 索引（#20 实测：planner 不改写）。（来源：CONTEXT「可复用知识」、Issue #20 s4）
 - **DATA-EMBED-001 —** Embedding 键 **MUST** 为 `(knowledge_version_id, embedding_model_generation)`；提交时 **MUST** 复核版本/generation 并丢弃迟到结果；`Pending/Failed` **MUST NOT** 撤销正式知识。状态与向量由 schema 强制一致（`ready` 必须有非空且 4 字节对齐的向量，`pending`/`failed` 必须无向量）；向量字节长度与 generation `vector_dim` 一致（触发器校验）。（来源：CONTEXT「可复用知识」）
 - **DATA-EMBED-002 —** 换模型 **MUST** 完整构建新 generation、校验后原子切换（`ux_embedding_generation_current`）；一次 cosine 检索 **MUST NOT** 混用 generation；程序 **MUST NOT** 设阈值或固定融合排名。`embedding_generations` 的 model/version/generation **MUST** 不可变；`vector_dim` 一旦设置或该 generation 已有 embeddings **MUST** 不可变更（`trg_embedding_generations_origin_immutable`、`trg_embedding_generations_vector_dim_immutable`）。（来源：CONTEXT「可复用知识」）
-- **DATA-SSE-001 —** `alert_change_log` **MUST** 追加且禁止 UPDATE（触发器），其 `id`（AUTOINCREMENT）即单调递增 `alert_change_seq`，在同一事务内由数据库分配、永不复用；HTTP 快照 `snapshot_seq` **MUST** 取当前最大 `alert_change_log.id`。（来源：CONTEXT「实时投影」）
-- **DATA-SSE-002 —** 客户端 `after`/`Last-Event-ID` 游标小于保留窗口内最小 `id` 时 **MUST** 返回 `resync_required`；日志按部署配置保留有界窗口（GC 可 DELETE）；日志可丢弃、可重建，**MUST NOT** 成为告警历史权威源。（来源：CONTEXT「实时投影」）
+- **DATA-SSE-001 —** `alert_change_log` **MUST** 追加且禁止 UPDATE（触发器），其 `id`（AUTOINCREMENT）即单调递增 `alert_change_seq`，在同一事务内由数据库分配、永不复用；最新行（`MAX(id)`）**MUST** 由触发器保留、**MUST NOT** 被 GC 删除（`trg_alert_change_log_no_delete_latest`）；HTTP 快照 `snapshot_seq` **MUST** 取当前最大 `alert_change_log.id`。（来源：CONTEXT「实时投影」）
+- **DATA-SSE-002 —** 客户端 `after`/`Last-Event-ID` 游标过期判定 **MUST** 使用 last-seen 谓词（DATA-SSE-009）：`high_water > 0` 时 `cursor < high_water AND cursor < oldest_available - 1` 判定过期；`high_water = 0` 时只有 `cursor = 0` 为当前。过期游标 **MUST** 触发 `resync_required`（HTTP-SSE-003 区分头前 410 与流内事件）；日志按部署配置保留有界窗口（旧行 GC 可 DELETE，最新行除外），可丢弃、可重建，**MUST NOT** 成为告警历史权威源。（来源：CONTEXT「实时投影」）
 - **DATA-SSE-003 —** 变更事件只携带 Occurrence ID、变化类型（`created`/`state_changed`）与 row version；客户端按 sequence 与 row version 幂等应用，详情在版本变化后重新读取。（来源：CONTEXT「实时投影」）
 - **DATA-SSE-004 —** `task_change_log` **MUST** 是任务快照/SSE 的有界派生变更投影：Initial Analysis、Execution Attempt、Inspection Run/Report、Tool Call、Knowledge Import Batch/Candidate 与 Browser Operation 的创建与状态/阶段变化 **MUST** 在同一事务内写入 `object_type`/`object_id`/`row_version`/`change_type`（触发器保证）；其 `id`（AUTOINCREMENT）即单调递增 `task_change_seq`，**MUST NOT** 被复用；**MUST** 禁止 UPDATE，**MAY** 按保留窗口 DELETE（GC）；可丢弃、可重建，**MUST NOT** 成为任务历史权威源。（来源：CONTEXT「调查与巡检工作区」「后台任务提示」）
-- **DATA-SSE-005 —** 所有可观察任务对象 **MUST** 携带 `row_version`：`initial_analyses`、`execution_attempts`、`inspection_runs`、`tool_calls`、`knowledge_import_batches`、`knowledge_candidates`、`browser_operations`（schema 已统一）；`row_version` **MUST** 由应用在每次状态 UPDATE 中显式递增，`expected_row_version` 的比较与递增在同一条 UPDATE 的 WHERE/SET 中完成（SQLite 触发器不支持 `SET NEW`）。（来源：CONTEXT「调查与巡检工作区」「领域写命令契约」）
-- **DATA-SSE-006 —** 任务快照/SSE 客户端契约与告警一致：进入页面 **MUST** 先读 HTTP 快照（`snapshot_seq` 取当前最大 `task_change_log.id`）再建立 SSE；重连 **MUST** 使用 `Last-Event-ID`；游标过期 **MUST** 返回 `resync_required` 并重新读取完整快照；事件只传对象 ID、变化类型与 row version。（来源：CONTEXT「调查与巡检工作区」「实时投影」）
+- **DATA-SSE-005 —** 所有可观察任务对象 **MUST** 携带 `row_version`：`initial_analyses`、`execution_attempts`、`inspection_runs`、`tool_calls`、`knowledge_import_batches`、`knowledge_candidates`、`browser_operations`（schema 已统一）；`row_version` **MUST** 由应用在每次状态 UPDATE 中显式递增，`expected_row_version` 的比较与递增在同一条 UPDATE 的 WHERE/SET 中完成（SQLite 触发器不支持 `SET NEW`），并由 `trg_*_row_version_increment` 触发器验证恰好 +1（DATA-ROWVER-001）。（来源：CONTEXT「调查与巡检工作区」「领域写命令契约」）
+- **DATA-SSE-006 —** 任务快照/SSE 客户端契约与告警一致：进入页面 **MUST** 先读 HTTP 快照（`snapshot_seq` 取当前最大 `task_change_log.id`，最新行由 `trg_task_change_log_no_delete_latest` 保留）再建立 SSE；重连 **MUST** 使用 `Last-Event-ID`；游标过期 **MUST** 返回 `resync_required` 并重新读取完整快照；事件只传对象 ID、变化类型与 row version。（来源：CONTEXT「调查与巡检工作区」「实时投影」）
+- **DATA-SSE-007 —** 任务快照 **MUST** 是有界集合（HTTP-PAGE-007）：只包含 active 任务对象与当前用户已终态但尚未查看（`user_viewed` 投影）的任务对象；用户打开/标记查看后终态任务离开快照；快照按游标分页遍历，**MUST NOT** 返回历史 Report/Candidate/Attempt 等长期对象的全量集合。（来源：CONTEXT「调查与巡检工作区」「后台任务提示」、Issue #10 复审）
+- **DATA-SSE-009 —** 变更流回放水位 **MUST** 直接由日志本身派生，**MUST NOT** 建立第二张水位表：`high_water = COALESCE(MAX(change_log.id),0)`，`oldest_available = COALESCE(MIN(change_log.id),0)`；`alert_change_log`/`task_change_log` 各自的最新行 **MUST** 永远保留（`trg_alert_change_log_no_delete_latest`/`trg_task_change_log_no_delete_latest` 拒绝删除 `MAX(id)`），旧行仍可 GC 删除——因此 `high_water` 自首个事件后 **MUST NOT** 回退，`oldest_available` 只可能不降。客户端 `after`/`Last-Event-ID` 过期判定 **MUST** 使用 last-seen 谓词且以减法避免溢出：`high_water = 0`（从未分配任何 change_seq）时只有 `cursor = 0` 为当前；`high_water > 0` 时 `cursor < high_water AND cursor < oldest_available - 1` 判定过期（头前 410 / 流内 `resync_required`，HTTP-SSE-002/003）。推论：首事件后（`oldest = high = 1`）`after=0` 有效并回放首事件；`after = oldest - 1` 有效并回放 `oldest`；`after ≤ oldest - 2` 过期；`cursor == high_water`（刚取回的快照游标）恒为当前；全 GC 至仅剩最新行后 `oldest == high_water`，`after = high_water - 1` 仍可回放最新行，不存在 410 活锁。应用/客户端 **MUST NOT** 虚构水位（不存在可写的水位表）。（来源：CONTEXT「实时投影」、Issue #10 复审）
 
 ## 16. Artifact 与保留
 
@@ -147,6 +159,7 @@
 - **DATA-BACKUP-005 —** 恢复后 **MUST** 保持维护状态并暂停调度：清除全部 Web Session；通过 TTY 选择恢复 Admin 并设临时密码；Runtime、Stele service token 与告警源 Bearer 全部失效并重新注册/轮换；Connection 密文保留但置 `revalidation_required=1`（DATA-CONN-003 阻断派发）；Browser Identity 置 `AuthenticationRequired`；Admin 检查后才退出维护状态。（来源：CONTEXT「一致备份」）
 - **DATA-BACKUP-006 —** 备份目录只允许 Quoin UID 与部署操作者访问；恢复只由拥有 PVC/数据目录与根密钥权限的部署操作者在停机时执行；Admin 可浏览、显式下载和立即触发备份，下载审计。（来源：CONTEXT「一致备份」）
 - **DATA-BACKUP-007 —** 备份记录（`backups`）**MUST** 追加且不可改写（`trg_backups_no_update`）；`status='succeeded'` **MUST** 带 `db_sha256`、`manifest_sha256` 与 `manifest_path`（CHECK 强制），`failed` 记录保留 `error_detail`。（来源：CONTEXT「一致备份」、Issue #20）
+- **DATA-BACKUP-008 —** `backup_settings.row_version` **MUST** 从 1 起始、任何 UPDATE 恰好递增 1（触发器）；`updateBackupSettings` 命令 **MUST** 携带 `expected_row_version` 并在同一 UPDATE 的 WHERE 中比较（DATA-COMMAND-005）。（来源：CONTEXT「一致备份」、Issue #10 复审）
 
 ## 18. 迁移与 Schema 版本
 
@@ -155,7 +168,7 @@
 - **DATA-MIGRATION-003 —** 每个 migration **MUST** 在独占数据库状态下单独原子提交；`migration_ledger` **MUST** 追加记录 migration ID 与 digest（追加触发器）；未知版本、新于程序的版本或 digest 不匹配 **MUST** 拒绝启动。（来源：Issue #9 Q9.2、CONTEXT「健康语义」）
 - **DATA-MIGRATION-004 —** 迁移中途失败 **MUST** 保持 Not Ready，可从最后成功版本重试或恢复升级前备份；接受新写入后 **MUST NOT** 只回滚镜像，**MUST** 显式恢复升级前备份。（来源：CONTEXT「协调升级」）
 - **DATA-MIGRATION-005 —** 迁移完成后的最终结构 **MUST** 与从当前 `contracts/sql/schema.sql` 干净创建的库在表/列/约束/索引上等价（DATA-VALIDATION-003 验证）。（来源：[Issue #9](https://github.com/Suknna/quoin/issues/9) Q9.2）
-- **DATA-MIGRATION-006 —** `schema_state` 单行（`id=1`）记录当前 schema 版本与 digest；干净创建时 **MUST** 初始化 `schema_state` 与 `runtime_slots` 固定两行（`plinth`/`lintel`）；Quoin 取得数据目录锁并完成 migration 前 **MUST NOT** Ready。（来源：CONTEXT「健康语义」）
+- **DATA-MIGRATION-006 —** `schema_state` 单行（`id=1`）记录当前 schema 版本与 digest；干净创建时 **MUST** 初始化 `schema_state`、`runtime_slots` 固定两行（`plinth`/`lintel`）与 `label_contract_state` 单行（回放水位由变更日志最新行自身承载，无独立表）。Quoin 取得数据目录锁并完成 migration 前 **MUST NOT** Ready。（来源：CONTEXT「健康语义」）
 
 ## 19. 事务程序与提交顺序裁决
 
@@ -181,6 +194,6 @@
 ## 20. 验证要求
 
 - **DATA-VALIDATION-001 —** 本 Schema **MUST** 在锁定 modernc SQLite 构建（v1.56.0，SQLite 3.53.3，`ENABLE_FTS5`）与开发用 SQLite（3.50+）上均可完整执行，并 `PRAGMA integrity_check`、`PRAGMA foreign_key_check` 通过。（来源：[Issue #20](https://github.com/Suknna/quoin/issues/20)、[Issue #9](https://github.com/Suknna/quoin/issues/9)）
-- **DATA-VALIDATION-002 —** 专项约束验证 **MUST** 覆盖：locator 不复用；命令唯一键；摘要长度；审计/证据/报告/知识版本/连接 revision/凭据 generation 追加不可变；active 部分唯一（IA、Attempt、Run）；定时 Run 唯一；指纹 8 字节；labels JSON；凭据最多两 Active 且不可复活；FTS5 增删改同步；检索退出粘性；FK RESTRICT 阻断删除；json_valid 拒绝非法 JSON；Evidence 正文位置唯一；强制改密状态一致性（标志与时间戳双向一致）；Session digest 长度 32 且唯一；`task_change_log` 与状态变化同事务、append-only、GC 可删除；同一 blob 被多个 owner/kind/retention 逻辑引用；trace 必须 `sensitive=1`；逻辑 Artifact 元数据不可删除；`artifact_blobs` 不可改写。（来源：[Issue #9](https://github.com/Suknna/quoin/issues/9) 交付纪律）
+- **DATA-VALIDATION-002 —** 专项约束验证 **MUST** 覆盖：locator 不复用；命令唯一键；摘要长度；审计/证据/报告/知识版本/连接 revision/凭据 generation 追加不可变；active 部分唯一（IA、Attempt、Run）；定时 Run 唯一；指纹 8 字节；labels JSON；凭据最多两 Active 且不可复活；FTS5 增删改同步；检索退出粘性；FK RESTRICT 阻断删除；json_valid 拒绝非法 JSON；Evidence 正文位置唯一；强制改密状态一致性（标志与时间戳双向一致）；Session digest 长度 32 且唯一；`task_change_log` 与状态变化同事务、append-only、GC 可删除；同一 blob 被多个 owner/kind/retention 逻辑引用；trace 必须 `sensitive=1`；逻辑 Artifact 元数据不可删除；`artifact_blobs` 不可改写；全部 row_version 聚合（users、runtime_slots、alert_sources、label_contracts、business_systems、connections、browser_identities、reusable_knowledge、knowledge_version_retrieval_state、backup_settings 及既有实体）精确 +1 递增（跳变/no-op/缺少递增拒绝）且陈旧 expected 值更新 0 行；`connections.config_json` 只保存类型化非秘密投影（任意对象/秘密写入拒绝）；告警接入问题确认单向粘性（不可取消/改派、字段成对、陈旧 expected 0 行）；`label_contract_state` 单行（指针必须指向 active 契约、精确 +1、不可删除、并发激活后提交者 0 行）；变更日志回放水位：`alert_change_log`/`task_change_log` 最新行不可删除（high-water 保留）、旧行可 GC 删除、GC 后 `MAX(id)` 不回退、`MIN(id)` 反映保留窗口、首事件后 `after=0` 有效并回放首事件、`after=oldest-1` 有效并回放 `oldest`、`after=oldest-2` 过期、快照游标（`cursor==high_water`）恒为当前、不存在可写的水位表（`stream_watermark_events` 不得存在）。（来源：[Issue #9](https://github.com/Suknna/quoin/issues/9) 交付纪律、Issue #10 复审）
 - **DATA-VALIDATION-003 —** 迁移验证 **MUST** 从每个已发布历史 fixture 升级到当前版本，并断言最终 `sqlite_master`（表/列/约束/索引/触发器）与当前 `schema.sql` 干净创建等价（DATA-MIGRATION-005）。（来源：[Issue #9](https://github.com/Suknna/quoin/issues/9) Q9.2）
 - **DATA-VALIDATION-004 —** 备份/恢复验证 **MUST** 演练中断的 `VACUUM INTO`（kill -9）并证明 manifest+checksum 门槛拒绝损坏/空快照（DATA-BACKUP-004）。（来源：[Issue #20](https://github.com/Suknna/quoin/issues/20) s8）

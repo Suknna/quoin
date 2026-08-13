@@ -1,0 +1,5769 @@
+openapi: 3.1.0
+info:
+  title: Quoin v1 API
+  version: 1.0.0-draft
+  description: |
+    Quoin v1 HTTP 与实时 API 的唯一机器权威（SPEC-VERSION-002 要求 /api/v1）。
+    语义、跨请求事务、认证/会话、错误分类、回放/resync、上传下载、取消 fence、
+    noVNC 升级关系与兼容性由 docs/specs/quoin-v1/http-api.md（CATEGORY=HTTP）承载；
+    本文件只承载路由、方法、字段、状态码与可机械表达的 HTTP 契约。
+    领域语义权威为 CONTEXT.md；持久化语义权威为 persistence.md 与 contracts/sql/schema.sql。
+servers:
+  - url: /
+security:
+  - sessionCookie: []
+tags:
+  - name: auth
+    description: 登录、登出、当前用户、密码与 Session 管理
+  - name: admin
+    description: Admin 用户与审计管理
+  - name: setup
+    description: 首次设置与就绪状态
+  - name: alerts
+    description: 告警列表、详情、初步分析与接入问题
+  - name: investigations
+    description: 调查对话、附件、Undo 与执行尝试
+  - name: inspections
+    description: 巡检运行、报告与分析
+  - name: knowledge
+    description: 知识浏览、导入批次、候选确认与反馈
+  - name: config
+    description: 业务系统 YAML、Label Contract、浏览器身份与观测资源
+  - name: adminops
+    description: 连接、模型供应商、告警源、Runtime、备份与凭据管理
+  - name: files
+    description: Artifact 与来源材料的上传下载
+  - name: realtime
+    description: SSE 变更流
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      x-external-dependency: true
+      summary: 登录并签发 Session Cookie
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功；Set-Cookie 写入 __Host-quoin-session（Secure HttpOnly SameSite=Lax Path=/）。
+          headers:
+            Set-Cookie:
+              description: 32-byte opaque session bearer 的 Cookie；raw bearer 不进入任何持久存储或日志（DATA-AUTH-003）。
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 登出并撤销当前 Session
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '204':
+          description: 当前 Session 已撤销；Set-Cookie 清除 __Host-quoin-session。
+          headers:
+            Set-Cookie:
+              description: 清除 __Host-quoin-session（Max-Age=0）。
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentUser
+      summary: 当前用户与强制改密状态
+      description: 受限 Session（password_change_required=1）唯一允许的读操作之一（HTTP-AUTH-006）。
+      responses:
+        '200':
+          description: 当前用户信息。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/password:
+    put:
+      tags: [auth]
+      operationId: changeOwnPassword
+      summary: 修改当前用户密码
+      description: 成功改密在同一事务清除 password_change_required（DATA-AUTH-001）；撤销除当前外的其他 Session 并更新当前 Session revision（CONTEXT「本地账号认证」）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '204':
+          description: 密码已修改，强制改密标志已清除。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/sessions:
+    get:
+      tags: [auth]
+      operationId: listOwnSessions
+      summary: 列出当前用户的全部 Session
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 当前用户的 Session 分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionInfo'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/sessions/{sessionId}/revoke:
+    post:
+      tags: [auth]
+      operationId: revokeOwnSession
+      summary: 撤销当前用户的其他 Session（不得撤销当前 Session）
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '204':
+          description: 目标 Session 已撤销；其 SSE/WebSocket 立即关闭。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/admin/users:
+    get:
+      tags: [admin]
+      operationId: listUsers
+      summary: 列出用户（Admin）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 用户分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin]
+      operationId: createUser
+      summary: 创建用户（Admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '201':
+          description: 用户已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/admin/users/{userId}:
+    patch:
+      tags: [admin]
+      operationId: updateUser
+      summary: 更新用户显示名/启用状态/角色（Admin）
+      description: 禁用或降级最后一个有效 Admin 必须冲突（DATA-TX-014）；账号变更事务递增 auth_revision 并撤销该用户全部 Session（CONTEXT「本地账号认证」）。
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '200':
+          description: 更新后的用户。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/admin/users/{userId}/reset-password:
+    post:
+      tags: [admin]
+      operationId: resetUserPassword
+      summary: Admin 重置用户密码（置位强制改密并撤销全部 Session）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CommandBase'
+                - $ref: '#/components/schemas/ExpectedRowVersion'
+                - $ref: '#/components/schemas/ResetPasswordRequest'
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '204':
+          description: 密码已重置；password_change_required=1；该用户全部 Session 已撤销。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/admin/users/{userId}/revoke-sessions:
+    post:
+      tags: [admin]
+      operationId: revokeUserSessions
+      summary: 撤销某用户全部 Session（Admin）
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '204':
+          description: 该用户全部 Session 已撤销；对应 SSE/WebSocket 立即关闭。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/audit-events:
+    get:
+      tags: [admin]
+      operationId: listAuditEvents
+      summary: 审计事件列表（全部登录用户可读）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: actorType
+          in: query
+          schema:
+            type: string
+            enum: [user, service, system]
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+        - name: to
+          in: query
+          schema:
+            $ref: '#/components/schemas/Timestamp'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 追加型审计事件列表（按提交时间倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEventSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/setup:
+    get:
+      tags: [setup]
+      operationId: getSetupStatus
+      summary: 依赖驱动的首次设置清单与能力就绪状态
+      description: 从权威状态派生；Admin 看到全部项目，Operator 只看到需要 Operator 处理的项目（CONTEXT「首次设置投影」）。
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 设置清单。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/runtime:
+    get:
+      tags: [setup]
+      operationId: getRuntimeStatus
+      summary: Plinth/Lintel Runtime slot 状态
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 两个固定 Runtime slot 的状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/runtime-slots/{slot}/replace:
+    post:
+      tags: [adminops]
+      operationId: replaceRuntimeSlot
+      x-external-dependency: true
+      summary: 替换 Runtime slot（Admin；状态卷丢失时重建，不创建第二个 Runtime）
+      description: 一次性注册令牌经 Runtime 控制面（runtime-protocol.md）交换，不进入 HTTP 响应；本操作只返回 slot 状态。
+      parameters:
+        - $ref: '#/components/parameters/RuntimeSlot'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: slot 已进入替换流程。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeSlot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alerts:
+    get:
+      tags: [alerts]
+      operationId: listAlerts
+      summary: 告警快照列表（含 snapshot_seq 与 row_version；游标绑定快照 seq）
+      description: |
+        默认只返回 Firing；Resolved 通过 state 过滤。普通列表不包含 IdentityConflict 等接入问题（CONTEXT「告警列表与详情」）。
+        快照契约（HTTP-PAGE-006/HTTP-SSE-001）：snapshotSeq 取当前最大 alert_change_log.id（最新行由触发器保留，DATA-SSE-009；当前最大
+        alert_change_log.id，DATA-SSE-009）；首响应生成服务端签名的短有效期游标（绑定首页 snapshotSeq 与键集位置），
+        后续页回传同一 snapshotSeq，客户端以首页 snapshotSeq 建立 SSE（after）——分页期间的变化由事件回放补齐，无漏更新；
+        游标过期返回 410（resource_expired），客户端重新从首页读取。
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [Firing, Resolved]
+        - name: businessSystemKey
+          in: query
+          schema:
+            $ref: '#/components/schemas/StableKey'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '410':
+          $ref: '#/components/responses/Gone'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 告警快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/alerts/{occurrenceId}:
+    get:
+      tags: [alerts]
+      operationId: getAlertOccurrence
+      summary: 告警详情（labels、Delivery 时间线、观测、匹配资源、分析与调查）
+      description: Occurrence resolved 后仍可读取并明确标记已恢复（CONTEXT「告警列表与详情」）。
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 告警详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertOccurrenceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/observations:
+    get:
+      tags: [alerts]
+      operationId: listAlertObservations
+      summary: Occurrence 观测时间线（不可变追加；游标分页，按 committedAt 倒序）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 观测分页列表（每次送达一条不可变观测）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ObservationSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/investigations:
+    get:
+      tags: [alerts]
+      operationId: listOccurrenceInvestigations
+      summary: 关联该 Occurrence 的调查列表（游标分页）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 关联调查分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InvestigationSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/analyses:
+    get:
+      tags: [alerts]
+      operationId: listInitialAnalyses
+      summary: Initial Analysis 历史列表（游标分页，按创建时间倒序）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Initial Analysis 分页列表（终态不可变历史）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InitialAnalysisSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [alerts]
+      operationId: createInitialAnalysis
+      x-external-dependency: true
+      summary: 创建 Initial Analysis（命令幂等；双击/重试返回同一记录）
+      description: 同一 Occurrence 同时最多一个 active Initial Analysis（DATA-ANALYSIS-001）；重复命令返回原记录。
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 已受理；返回持久化的 Initial Analysis。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitialAnalysisDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/alerts/{occurrenceId}/analyses/{analysisId}:
+    get:
+      tags: [alerts]
+      operationId: getInitialAnalysis
+      summary: Initial Analysis 详情（状态、Attempt、封存输出）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/AnalysisId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Initial Analysis 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitialAnalysisDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/analyses/{analysisId}/attempts:
+    get:
+      tags: [alerts]
+      operationId: listInitialAnalysisAttempts
+      summary: Initial Analysis 的执行 Attempt 历史（游标分页，每次重试新增一条）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/AnalysisId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Attempt 分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AttemptSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/analyses/{analysisId}/retry:
+    post:
+      tags: [alerts]
+      operationId: retryInitialAnalysis
+      x-external-dependency: true
+      summary: 技术失败重试（同一 Initial Analysis 下创建新 Attempt，复用输入快照）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/AnalysisId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 新 Attempt 已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitialAnalysisDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alerts/{occurrenceId}/analyses/{analysisId}/cancel:
+    post:
+      tags: [alerts]
+      operationId: cancelInitialAnalysis
+      x-external-dependency: true
+      summary: 取消 Initial Analysis（独立幂等 cancellation fence）
+      description: 先事务提交 fence；成功与取消按 SQLite 提交顺序裁决（DATA-TX-005）；成功先提交时返回已完成对象而非 409（HTTP-COMMAND-005）。
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/AnalysisId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: fence 已提交或命令已裁决；返回当前权威对象。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitialAnalysisDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alerts/{occurrenceId}/analyses/{analysisId}/knowledge-candidates:
+    post:
+      tags: [alerts]
+      operationId: createAnalysisKnowledgeCandidate
+      summary: 从 Initial Analysis 输出生成知识候选（最终分析区的“整理为知识”操作）
+      description: Initial Analysis 与 Inspection Report 在最终分析区提供次要“整理为知识”操作（CONTEXT「知识候选」）。
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/AnalysisId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: 候选已创建（AwaitingConfirmation）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/alerts/{occurrenceId}/reanalyze:
+    post:
+      tags: [alerts]
+      operationId: reanalyzeAlert
+      x-external-dependency: true
+      summary: 成功后重新分析（创建新的 Initial Analysis，旧结果保留）
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 新的 Initial Analysis 已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitialAnalysisDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alerts/intake-issues:
+    get:
+      tags: [alerts]
+      operationId: listAlertIntakeIssues
+      summary: 告警接入问题列表（IdentityConflict/FingerprintMismatch/DeliveryTruncated）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 接入问题分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntakeIssueSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/alerts/intake-issues/{issueId}/acknowledge:
+    post:
+      tags: [alerts]
+      operationId: acknowledgeIntakeIssue
+      summary: Admin 确认接入问题（单向粘性：未确认 -> 已确认，不可取消/改派；携带 expected rowVersion）
+      description: 已确认问题不可取消确认或改派（DATA-ALERT-011）；陈旧 expectedRowVersion 返回 409；相同命令 ID 重放返回原结果。
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '204':
+          description: 已确认；后续再次发生会重新出现。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/investigations:
+    get:
+      tags: [investigations]
+      operationId: listInvestigations
+      summary: 调查列表
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 调查分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InvestigationSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [investigations]
+      operationId: createInvestigation
+      summary: 创建调查
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 调查已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvestigationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/investigations/{investigationId}:
+    get:
+      tags: [investigations]
+      operationId: getInvestigation
+      summary: 调查详情（消息、head、active Attempt、工具时间线）
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 调查详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvestigationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/investigations/{investigationId}/messages:
+    get:
+      tags: [investigations]
+      operationId: listInvestigationMessages
+      summary: 调查消息历史（游标分页）
+      description: 详情只返回 messageCount；历史经本接口有界读取（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 消息分页列表（seq 升序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MessageSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [investigations]
+      operationId: sendInvestigationMessage
+      x-external-dependency: true
+      summary: 发送消息（单事务追加消息并创建 Execution Attempt）
+      description: 携带 client_command_id 与 expected_head_message_id；head 已变化返回 409（DATA-INVEST-001）。重复命令返回原结果，绝不重新执行（HTTP-COMMAND-003/HTTP-STREAM-004）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: 消息与 Attempt 已原子持久化。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/investigations/{investigationId}/messages/{messageId}/stream:
+    post:
+      tags: [investigations]
+      operationId: streamInvestigationMessage
+      x-external-dependency: true
+      summary: assistant-ui UI Message Stream（POST fetch；text/event-stream）
+      description: |
+        打开该消息对应 Attempt 的 ui-message-stream（x-vercel-ai-ui-message-stream: v1）。
+        只附着已存在的 Attempt，绝不重新创建或重新派发（HTTP-STREAM-004）。终态 Attempt 的
+        重放立即输出反映已提交权威状态的终止帧，不重新执行。传输断开只分离观察者，不取消任务
+        （HTTP-STREAM-006）。域内取消必须使用 cancellation fence 命令（HTTP-COMMAND-005）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/MessageId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: "ui-message-stream 帧流（SSE framing；data: 行；以 [DONE] 或 error+[DONE] 终止）。"
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                const: text/event-stream
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Vercel-Ai-Ui-Message-Stream:
+              schema:
+                type: string
+                const: 'v1'
+            X-Accel-Buffering:
+              schema:
+                type: string
+                const: 'no'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "帧正文为 assistant-stream 0.3.37 ui-message-stream JSON 行与 data: [DONE]；逐事件 flush。具体帧契约见 http-api.md HTTP-STREAM-001/002。"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/investigations/{investigationId}/attempts:
+    get:
+      tags: [investigations]
+      operationId: listInvestigationAttempts
+      summary: 调查执行尝试历史（游标分页）
+      description: 详情只返回 attemptCount；历史经本接口有界读取（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 执行尝试分页列表（createdAt 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AttemptSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/investigations/{investigationId}/undo:
+    post:
+      tags: [investigations]
+      operationId: undoInvestigationMessage
+      x-external-dependency: true
+      summary: Undo 最新用户回合（同一事务撤回依赖并取消 active Attempt）
+      description: 只允许撤回当前有效对话的最新用户回合；撤回后该回合及其后继成为只读分支，迟到结果只留审计（DATA-INVEST-002）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UndoRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Undo 已提交；返回更新后的调查。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvestigationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/investigations/{investigationId}/attempts/{attemptId}/cancel:
+    post:
+      tags: [investigations]
+      operationId: cancelInvestigationAttempt
+      x-external-dependency: true
+      summary: 取消调查 active Attempt（cancellation fence）
+      description: 成功先提交则返回已完成；取消先提交则迟到结果不产生有效输出（DATA-TX-005）。不得复用已 abort 的流请求 signal（HTTP-STREAM-005）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 返回当前权威 Attempt。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/investigations/{investigationId}/attempts/{attemptId}/retry:
+    post:
+      tags: [investigations]
+      operationId: retryInvestigationAttempt
+      x-external-dependency: true
+      summary: 重试失败的调查 Attempt（创建新 Attempt）
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 新 Attempt 已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/investigations/{investigationId}/attachments:
+    post:
+      tags: [investigations]
+      operationId: uploadInvestigationAttachment
+      x-external-dependency: true
+      summary: 流式上传文本附件到 staging（multipart；正文作为 Artifact）
+      description: 每条消息最多一个附件；正文须有效 UTF-8、无 NUL、默认 ≤10 MiB；文件名只是审计元数据（DATA-ATTACH-001）。上传结果由后续 send-message 原子消费（HTTP-FILE-001/002）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, clientCommandId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 纯文本附件（不依赖扩展名判断内容）。
+                clientCommandId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）。
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: staging Artifact 已登记。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/investigations/{investigationId}/attachments/{attachmentId}:
+    get:
+      tags: [investigations]
+      operationId: getInvestigationAttachment
+      summary: 附件元数据
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/AttachmentId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 附件元数据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/investigations/{investigationId}/knowledge-candidates:
+    post:
+      tags: [investigations]
+      operationId: createInvestigationKnowledgeCandidate
+      summary: 从用户明确选择的调查回合生成知识候选
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCandidateRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: 候选已创建（AwaitingConfirmation）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/inspections/runs:
+    get:
+      tags: [inspections]
+      operationId: listInspectionRuns
+      summary: 巡检运行列表
+      parameters:
+        - name: businessSystemKey
+          in: query
+          schema:
+            $ref: '#/components/schemas/StableKey'
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [Queued, WaitingForCapacity, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 巡检运行分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InspectionRunSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [inspections]
+      operationId: triggerManualInspectionRun
+      x-external-dependency: true
+      summary: 人工触发巡检 Run（同一计划最多一个 active Run）
+      description: 重复触发返回当前 active Run 或 409（DATA-INSPECT-001）；定时创建由调度器使用确定性键（DATA-COMMAND-006）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualRunRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: Run 已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/inspections/runs/{runId}:
+    get:
+      tags: [inspections]
+      operationId: getInspectionRun
+      summary: 巡检 Run 详情（状态、检查结果、缺口、报告版本）
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Run 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/inspections/runs/{runId}/cancel:
+    post:
+      tags: [inspections]
+      operationId: cancelInspectionRun
+      x-external-dependency: true
+      summary: 取消巡检 Run（cancellation fence；已完成检查保留）
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 返回当前权威 Run。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/inspections/runs/{runId}/analyze:
+    post:
+      tags: [inspections]
+      operationId: retryInspectionAnalysis
+      x-external-dependency: true
+      summary: 重试分析（复用原 Evidence，创建新 Report 版本；不重新采证）
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 新分析 Attempt 已受理；Report 仅在分析成功后产生（DATA-REPORT-001）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/inspections/runs/{runId}/rerun:
+    post:
+      tags: [inspections]
+      operationId: rerunInspection
+      x-external-dependency: true
+      summary: 重新采证（创建新 Run 并以 rerun_of 引用旧 Run）
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '202':
+          description: 新 Run 已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/inspections/runs/{runId}/reports:
+    get:
+      tags: [inspections]
+      operationId: listInspectionReports
+      summary: Run 的报告版本列表（不可变历史）
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 报告版本分页列表（最新在前）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReportSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/inspections/runs/{runId}/reports/{reportVersion}:
+    get:
+      tags: [inspections]
+      operationId: getInspectionReport
+      summary: 不可变 Report 版本详情
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/ReportVersion'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Report 版本详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/inspections/runs/{runId}/reports/{reportVersion}/knowledge-candidates:
+    post:
+      tags: [inspections]
+      operationId: createReportKnowledgeCandidate
+      summary: 从巡检报告版本生成知识候选
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/ReportVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: 候选已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge:
+    get:
+      tags: [knowledge]
+      operationId: searchKnowledge
+      summary: 知识检索（FTS5 trigram 与 embedding cosine 由模型综合；程序不设阈值）
+      description: 只返回当前、未停用、来源有效、未 exit 的版本（DATA-KNOWLEDGE-002/003）。
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 检索结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeSearchResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/knowledge/items/{knowledgeId}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledge
+      summary: 知识聚合详情（版本历史与当前指针）
+      parameters:
+        - $ref: '#/components/parameters/KnowledgeId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 知识详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/knowledge/items/{knowledgeId}/versions:
+    get:
+      tags: [knowledge]
+      operationId: listKnowledgeVersions
+      summary: 知识版本历史（游标分页）
+      description: 详情只返回 versionCount；历史经本接口有界读取（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/KnowledgeId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 版本分页列表（versionSeq 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/KnowledgeVersionSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/knowledge/items/{knowledgeId}/versions/{versionId}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeVersion
+      summary: 不可变 KnowledgeVersion 详情
+      parameters:
+        - $ref: '#/components/parameters/KnowledgeId'
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 版本详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeVersionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/knowledge/items/{knowledgeId}/versions/{versionId}/stop-reuse:
+    post:
+      tags: [knowledge]
+      operationId: stopKnowledgeReuse
+      summary: 停止复用（版本退出检索；粘性不可自动复活）
+      description: exit 一旦发生永不自动复活；恢复复用必须创建并确认新版本（DATA-KNOWLEDGE-003）。
+      parameters:
+        - $ref: '#/components/parameters/KnowledgeId'
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '204':
+          description: 版本已退出检索。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/import-batches:
+    post:
+      tags: [knowledge]
+      operationId: importKnowledgeBatch
+      x-external-dependency: true
+      summary: 创建知识导入批次（粘贴原文）
+      description: 原文与候选确认前不参与检索（DATA-KNOWLEDGE-005）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImportBatchRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '202':
+          description: 批次已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportBatchDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/knowledge/import-batches/{batchId}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeImportBatch
+      summary: 导入批次详情（候选列表）
+      parameters:
+        - $ref: '#/components/parameters/BatchId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 批次详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportBatchDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/knowledge/import-batches/{batchId}/confirm:
+    post:
+      tags: [knowledge]
+      operationId: confirmKnowledgeBatch
+      x-external-dependency: true
+      summary: 批量确认（单事务校验全部 expected revision；全成或全不成）
+      description: stale revision 冲突并返回最新草稿（DATA-TX-010）；Cancelled 是 batch 级 fence（DATA-KNOWLEDGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/BatchId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmCandidatesRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 批量确认结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportBatchDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/import-batches/{batchId}/cancel:
+    post:
+      tags: [knowledge]
+      operationId: cancelKnowledgeImportBatch
+      summary: 取消导入批次（batch 级 fence；禁止后续编辑/确认但保留 Candidate）
+      description: Cancelled 是 batch 级 fence（DATA-KNOWLEDGE-005）；携带 clientCommandId 与 expectedRowVersion（DATA-COMMAND-005）。
+      parameters:
+        - $ref: '#/components/parameters/BatchId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 批次已取消（或命令已按提交顺序裁决）；返回当前权威对象。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportBatchDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/candidates/{candidateId}:
+    patch:
+      tags: [knowledge]
+      operationId: editKnowledgeCandidateDraft
+      summary: 编辑候选草稿（递增 draft_revision；携带 expected revision）
+      parameters:
+        - $ref: '#/components/parameters/CandidateId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CandidateDraftEditRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 更新后的候选。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    post:
+      tags: [knowledge]
+      operationId: confirmKnowledgeCandidate
+      summary: 确认单个候选（携带 client_command_id 与 expected revision）
+      description: 每个 Candidate 最多创建一个 Reusable Knowledge；相同命令重试返回原 Knowledge ID（DATA-KNOWLEDGE-004）。
+      parameters:
+        - $ref: '#/components/parameters/CandidateId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmCandidateRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 确认结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/candidates/{candidateId}/exclude:
+    post:
+      tags: [knowledge]
+      operationId: excludeKnowledgeCandidate
+      summary: 排除候选（用户选择；与 SourceInvalid/Cancelled 语义分离）
+      parameters:
+        - $ref: '#/components/parameters/CandidateId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CommandBase'
+                - $ref: '#/components/schemas/ExpectedRowVersion'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 候选已排除。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/feedback:
+    post:
+      tags: [knowledge]
+      operationId: appendDiagnosisFeedback
+      summary: 追加诊断反馈（append-only；目标为不可变诊断输出）
+      description: 目标精确指向 Initial Analysis 成功输出、Inspection Report 版本或 Investigation 消息/Attempt 输出（CONTEXT「诊断反馈」）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CommandBase'
+                - $ref: '#/components/schemas/FeedbackRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 反馈事件已追加；返回事件记录与最新投影。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/business-systems:
+    get:
+      tags: [config]
+      operationId: listBusinessSystems
+      summary: 业务系统列表
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 业务系统分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BusinessSystemSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/business-systems/{systemKey}:
+    get:
+      tags: [config]
+      operationId: getBusinessSystem
+      summary: 业务系统详情（当前配置、discovery、plan、浏览器身份）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 业务系统详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusinessSystemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/config:
+    post:
+      tags: [config]
+      operationId: uploadBusinessSystemConfig
+      x-external-dependency: true
+      summary: 上传业务系统 YAML（multipart 流式；只解析一次并保存草稿）
+      description: 首次上传创建 Disabled 系统与第一份不可变草稿；解析一次保存原文/parser/schema 版本/digest/类型结构（DATA-CONFIG-003）。未知字段、重复 key、anchor/alias/merge、第二文档必须拒绝。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, clientCommandId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 单个 UTF-8 YAML 文档。
+                clientCommandId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）；内容 hash 相同仍按命令键去重。
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 草稿已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigVersionDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    get:
+      tags: [config]
+      operationId: listBusinessSystemConfigs
+      summary: 业务系统配置版本历史
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 配置版本分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConfigVersionSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/config/{versionId}:
+    get:
+      tags: [config]
+      operationId: getBusinessSystemConfig
+      summary: 配置版本详情/导出（原文 YAML 与解析元数据）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 配置版本详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigVersionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/config/{versionId}/publish:
+    post:
+      tags: [config]
+      operationId: publishBusinessSystemConfig
+      summary: 发布配置版本（expected current published version ID；事务重验并切换）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishConfigRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 已发布并切换 current 指针。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusinessSystemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run:
+    post:
+      tags: [config]
+      operationId: runConfigTestRun
+      summary: 对指定草稿版本执行 Test Run（精确绑定草稿）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '202':
+          description: Test Run 已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/business-systems/{systemKey}/resources:
+    get:
+      tags: [config]
+      operationId: listObservedResources
+      summary: 观测资源列表（当前与历史）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - name: current
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 观测资源分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ObservedResourceSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/browser-identity:
+    get:
+      tags: [config]
+      operationId: getBrowserIdentity
+      summary: 浏览器身份详情（generation/状态/起始 URL）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 浏览器身份详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserIdentitySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [config]
+      operationId: configureBrowserIdentity
+      summary: 创建/配置浏览器身份（Admin）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserIdentityConfig'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 身份已创建/更新。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserIdentitySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/browser-login/{systemKey}:
+    get:
+      tags: [config]
+      operationId: enterBrowserLogin
+      x-external-dependency: true
+      summary: 进入实时 noVNC 登录页面（返回页面所需的会话状态）
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 登录会话状态（不含 profile 内容；profile 在 lintel-state 卷）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [identityId, state]
+                properties:
+                  identityId:
+                    $ref: '#/components/schemas/LocatorId'
+                  state:
+                    type: string
+                    enum: [Ready, AuthenticationRequired]
+                  currentGeneration:
+                    type: integer
+                    minimum: 0
+                  reconnectDeadline:
+                    $ref: '#/components/schemas/Timestamp'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/browser-login/{systemKey}/ws:
+    get:
+      tags: [config]
+      operationId: browserLoginWebSocket
+      x-external-dependency: true
+      summary: noVNC WebSocket 升级（101；二进制字节中继，不做协议解析）
+      description: |
+        同 Origin 且带有效 Session Cookie；握手额外校验 Origin 等于配置的公共 Origin
+        （HTTP-NOVNC-002）。101 后为 noVNC→x0vncserver 字节流，由 Quoin 经 Runtime
+        通道中继给 Lintel（HTTP-NOVNC-003）；gRPC 内部机制属于 runtime-protocol.md，
+        不在本契约建模。Session 吊销立即关闭该 WebSocket（HTTP-NOVNC-004）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '101':
+          description: Switching Protocols；后续为二进制 WebSocket 帧流。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/browser-login/{systemKey}/publish-generation:
+    post:
+      tags: [config]
+      operationId: publishBrowserProfileGeneration
+      x-external-dependency: true
+      summary: 显式发布浏览器 profile generation（人工登录后）
+      description: 只有显式发布才形成新 generation；自动变化不制造版本（CONTEXT「浏览器身份」）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: generation 已发布。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserIdentitySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/label-contracts:
+    get:
+      tags: [config]
+      operationId: listLabelContracts
+      summary: Label Contract 版本列表
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 契约版本分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LabelContractSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [config]
+      operationId: createLabelContractDraft
+      summary: 创建 Label Contract 草稿（Admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LabelContractDraft'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 草稿已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabelContractDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/label-contracts/{contractVersion}:
+    get:
+      tags: [config]
+      operationId: getLabelContract
+      summary: Label Contract 版本详情
+      parameters:
+        - $ref: '#/components/parameters/ContractVersion'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 契约详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabelContractDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/label-contracts/{contractVersion}/activate:
+    post:
+      tags: [config]
+      operationId: activateLabelContract
+      summary: 原子激活 Label Contract（全部启用系统兼容版本同一事务切换）
+      description: 零启用系统时静态校验即可激活；任一系统未就绪则全部继续使用旧版本（DATA-CONFIG-002 / DATA-TX-007）。
+      parameters:
+        - $ref: '#/components/parameters/ContractVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivateLabelContractRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 已原子激活。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabelContractDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/connections:
+    get:
+      tags: [adminops]
+      operationId: listConnections
+      summary: 连接列表（全部登录用户可读）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 连接分页列表（不返回任何秘密）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConnectionSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [adminops]
+      operationId: createConnection
+      x-external-dependency: true
+      summary: 创建连接（Admin）
+      description: 非秘密配置形成 ConnectionRevision；秘密由服务端加密为 CredentialGeneration（DATA-CONN-001/004）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConnectionRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '201':
+          description: 连接已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/connections/{connectionName}:
+    get:
+      tags: [adminops]
+      operationId: getConnection
+      summary: 连接详情（revision/generation 历史，非秘密）
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 连接详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/connections/{connectionName}/revisions:
+    get:
+      tags: [adminops]
+      operationId: listConnectionRevisions
+      summary: 连接 revision 历史（游标分页，非秘密）
+      description: 详情只返回 revisionCount；历史经本接口有界读取（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: revision 分页列表（revisionSeq 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RevisionSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/connections/{connectionName}/generations:
+    get:
+      tags: [adminops]
+      operationId: listCredentialGenerations
+      summary: 凭据 generation 历史（游标分页，仅非秘密元数据）
+      description: 详情只返回 generationCount；历史经本接口有界读取；密文永不下发（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: generation 分页列表（generationSeq 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GenerationSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/connections/{connectionName}/rotate:
+    post:
+      tags: [adminops]
+      operationId: rotateConnectionCredential
+      x-external-dependency: true
+      summary: 轮换连接凭据（Admin；创建新 revision/generation 并原子切换 current）
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateConnectionRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 轮换完成；旧秘密不再下发。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/connections/{connectionName}/enable:
+    post:
+      tags: [adminops]
+      operationId: enableConnection
+      x-external-dependency: true
+      summary: 启用连接并清除 RevalidationRequired（Admin）
+      description: 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 连接已启用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/connections/{connectionName}/disable:
+    post:
+      tags: [adminops]
+      operationId: disableConnection
+      x-external-dependency: true
+      summary: 停用连接（Admin；阻止新派发，已接受 Attempt 完成）
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 连接已停用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/model-providers:
+    get:
+      tags: [adminops]
+      operationId: listModelProviders
+      summary: 模型供应商连接列表（/v1/models 能力由 ConnectionRevision 实测）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 模型供应商连接分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConnectionSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/model-providers/{connectionName}/models:
+    get:
+      tags: [adminops]
+      operationId: listProviderModels
+      x-external-dependency: true
+      summary: 供应商模型 ID 列表（只列举 ID；能力按 ConnectionRevision 实测）
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 模型 ID 分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: string
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alert-sources:
+    get:
+      tags: [adminops]
+      operationId: listAlertSources
+      summary: 逻辑告警源列表
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 告警源分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AlertSourceSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [adminops]
+      operationId: createAlertSource
+      summary: 创建逻辑告警源（Admin；两段式：先建凭据元数据，再经一次性 reveal 显示 Bearer）
+      description: Quoin 生成 32-byte 高熵 Bearer 并只保存 digest。命令响应只含非秘密元数据；首次实时响应携带内存短生命周期、单次使用的 revealHandle，由 `revealAlertSourceCredential` 一次性换取 raw Bearer（HTTP-COMMAND-008）。命令重放返回 revealAvailable=false 且无 handle，绝不重新创建凭据。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAlertSourceRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '201':
+          description: 来源与首个凭据已创建；首次实时响应可能携带 revealHandle（revealAvailable=true）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSourceCredentialMetadata'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alert-sources/{sourceKey}:
+    get:
+      tags: [adminops]
+      operationId: getAlertSource
+      summary: 告警源详情（凭据状态，不含 digest）
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 告警源详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSourceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alert-sources/{sourceKey}/credentials:
+    get:
+      tags: [adminops]
+      operationId: listAlertSourceCredentials
+      summary: 告警源凭据历史（游标分页，仅状态与版本）
+      description: 详情只返回 credentialCount；历史经本接口有界读取；digest 永不下发（HTTP-PAGE-005）。
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 凭据分页列表（createdAt 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CredentialSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alert-sources/{sourceKey}/rotate:
+    post:
+      tags: [adminops]
+      operationId: rotateAlertSourceCredential
+      summary: 轮换告警源 Bearer（Admin；两段式：先建新凭据元数据，再经一次性 reveal 显示 Bearer）
+      description: 轮换期最多短期并存新旧两个有效凭据；吊销旧凭据必须在新凭据确认使用后（CONTEXT「告警源凭据投影」）。响应只含非秘密元数据；首次实时响应携带内存短生命周期、单次使用的 revealHandle，由 `revealAlertSourceCredential` 一次性换取 raw Bearer（HTTP-COMMAND-008）。命令重放返回 revealAvailable=false 且无 handle，绝不重新创建凭据。
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 新凭据已创建；首次实时响应可能携带 revealHandle（revealAvailable=true）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSourceCredentialMetadata'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alert-sources/{sourceKey}/credentials/{credentialId}/retire:
+    post:
+      tags: [adminops]
+      operationId: retireAlertSourceCredential
+      summary: 吊销告警源凭据（Admin；Active -> Retired）
+      description: |
+        领域写命令（HTTP-COMMAND-009）：携带 clientCommandId 与 expectedRowVersion（DATA-ALERT-009）。
+        仅允许 Active -> Retired：同一事务写入 retiredAt 并递增凭据 rowVersion；凭据必须属于路径中的
+        sourceKey（跨来源 404）。相同命令 ID 重放返回原结果（HTTP-COMMAND-003）；新命令针对已 Retired
+        凭据返回 409（row_version_conflict）。吊销与 Delivery 按 DATA-TX-003 提交顺序裁决。
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+        - $ref: '#/components/parameters/CredentialId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireCredentialRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '200':
+          description: 凭据已吊销；返回当前权威 CredentialSummary（rowVersion 已递增）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alert-sources/credentials/reveal:
+    post:
+      tags: [adminops]
+      operationId: revealAlertSourceCredential
+      summary: 一次性显示新建凭据的 Bearer（Admin；消费单次 reveal handle）
+      description: |
+        非领域写命令（HTTP-COMMAND-008）：不携带 clientCommandId；只接受创建/轮换命令
+        首次实时响应中返回的内存短生命周期、单次使用的 revealHandle，不接受 source/credential ID。
+        handle 与 raw Bearer 均不落盘（SQLite、client_commands、日志、审计、Artifact、响应快照均禁止）；
+        handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevealCredentialRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 一次性返回 raw Bearer；消费后 handle 立即失效。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevealCredentialResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '410':
+          $ref: '#/components/responses/Gone'
+  /api/v1/alert-sources/{sourceKey}/enable:
+    post:
+      tags: [adminops]
+      operationId: enableAlertSource
+      summary: 重新启用告警源（Admin；不改变 source_id）
+      description: 停用后重新启用不改变 source_id（CONTEXT「稳定身份保留」）。
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 来源已重新启用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSourceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/alert-sources/{sourceKey}/disable:
+    post:
+      tags: [adminops]
+      operationId: disableAlertSource
+      summary: 停用告警源（Admin）
+      parameters:
+        - $ref: '#/components/parameters/SourceKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 来源已停用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSourceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/backups:
+    get:
+      tags: [adminops]
+      operationId: listBackups
+      summary: 备份记录列表（Admin）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 备份记录分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BackupSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [adminops]
+      operationId: triggerBackup
+      x-external-dependency: true
+      summary: 立即触发备份（Admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '202':
+          description: 备份已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/backups/{backupId}:
+    get:
+      tags: [adminops]
+      operationId: getBackup
+      summary: 备份记录详情（Admin）
+      parameters:
+        - $ref: '#/components/parameters/BackupId'
+      responses:
+        '200':
+          description: 备份记录详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/backups/{backupId}/download:
+    get:
+      tags: [adminops]
+      operationId: downloadBackup
+      x-external-dependency: true
+      summary: 下载备份归档（Admin；下载审计）
+      parameters:
+        - $ref: '#/components/parameters/BackupId'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '200':
+          description: 备份 manifest 与数据库快照归档的流式下载（经审计）。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+  /api/v1/backups/settings:
+    get:
+      tags: [adminops]
+      operationId: getBackupSettings
+      summary: 备份设置（Admin）
+      responses:
+        '200':
+          description: 备份设置。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      tags: [adminops]
+      operationId: updateBackupSettings
+      summary: 更新备份设置（Admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackupSettingsUpdate'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '200':
+          description: 设置已更新。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/artifacts:
+    post:
+      tags: [files]
+      operationId: uploadArtifactStaging
+      x-external-dependency: true
+      summary: 流式上传文件到 staging（multipart；登记 Artifact 元数据）
+      description: 完成写入与 hash/大小校验后 fsync→rename→dir-fsync→同一事务登记（DATA-ARTIFACT-001）；随后由引用命令（消息附件、配置上传等）原子消费。失败上传可自动清理。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, clientCommandId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                clientCommandId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）。
+                kind:
+                  type: string
+                  enum: [attachment, screenshot, trace, tool_result, report_file]
+                filename:
+                  type: string
+                  description: 仅作审计元数据；不得拼入存储路径。
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: staging Artifact 已登记。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
+  /api/v1/artifacts/{artifactId}:
+    get:
+      tags: [files]
+      operationId: getArtifactMetadata
+      summary: Artifact 元数据（访问按逻辑所有者授权）
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Artifact 元数据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/artifacts/{artifactId}/content:
+    get:
+      tags: [files]
+      operationId: downloadArtifactContent
+      x-external-dependency: true
+      summary: 流式下载 Artifact 正文（授权按逻辑所有者；sensitive trace 仅 Admin 经审计下载）
+      description: Raw Playwright trace 固定 sensitive=1，仅 Admin 经审计下载（DATA-ARTIFACT-003）。正文已过期返回 410；下载不经由 hash/path 授权入口。
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '200':
+          description: 正文流式下载。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+                description: 内容 SHA-256（弱校验，仅缓存用途）。
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+  /api/v1/source-materials/{materialId}:
+    get:
+      tags: [files]
+      operationId: getSourceMaterial
+      summary: 来源材料元数据（字节/来源/上传者/时间）
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 来源材料元数据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceMaterialSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/source-materials/{materialId}/content:
+    get:
+      tags: [files]
+      operationId: downloadSourceMaterialContent
+      summary: 下载来源材料原文
+      description: 仅 knowledge_import 来源材料有正文（直接存 SQLite）；text_attachment 正文经 Artifact 下载（DATA-ATTACH-001）。
+      parameters:
+        - $ref: '#/components/parameters/MaterialId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 来源材料原文（UTF-8 文本）。
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/me/unviewed:
+    get:
+      tags: [auth]
+      operationId: listUnviewedNotifications
+      summary: 当前用户未查看标记（后台任务终态徽标）
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 未查看对象分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UnviewedNotification'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/me/viewed:
+    put:
+      tags: [auth]
+      operationId: markNotificationViewed
+      summary: 标记对象已查看（不删除历史）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/CommandBase'
+                - $ref: '#/components/schemas/MarkViewedRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '204':
+          description: 已标记。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/templates/business-system:
+    get:
+      tags: [config]
+      operationId: downloadBusinessSystemTemplate
+      summary: 下载业务系统 YAML 起始模板
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: YAML 模板。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/templates/label-contract:
+    get:
+      tags: [config]
+      operationId: downloadLabelContractTemplate
+      summary: 下载 Label Contract 起始模板
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: YAML 模板。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/templates/journey-catalog:
+    get:
+      tags: [config]
+      operationId: downloadJourneyCatalogTemplate
+      summary: 下载 Journey Catalog 起始模板
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: YAML 模板。
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/tasks/snapshot:
+    get:
+      tags: [realtime]
+      operationId: getTaskSnapshot
+      summary: 后台任务快照（有界：active 任务 + 当前用户终态未查看任务；游标绑定快照 seq）
+      description: |
+        进入任务页面先读本快照再建立 streamTaskEvents（after=snapshotSeq），消除 T1/T2/T3 漏更新（DATA-SSE-006/HTTP-SSE-008）。
+        有界集合（HTTP-PAGE-007）：只包含 active 任务对象与当前用户已终态但尚未查看（user_viewed 投影）的任务对象；
+        用户打开/标记查看后终态任务离开快照。items 按游标分页遍历；snapshotSeq 取当前最大 task_change_log.id（最新行由触发器保留，DATA-SSE-009），
+        全部页回传同一值；游标过期返回 410（resource_expired），客户端重新从首页读取。
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '410':
+          $ref: '#/components/responses/Gone'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 当前可观察任务对象引用与 snapshot_seq。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/alerts/events:
+    get:
+      tags: [realtime]
+      operationId: streamAlertEvents
+      x-external-dependency: true
+      x-sse-event-data:
+        change:
+          $ref: '#/components/schemas/AlertChangeEvent'
+        resync_required:
+          $ref: '#/components/schemas/ResyncRequiredEvent'
+      summary: 告警变更 SSE（快照后建立；after 查询参数；重连使用 Last-Event-ID）
+      description: |
+        SSE 事件格式（HTTP-SSE-002）：
+        event: change
+        id: <alert_change_seq>
+        data: {"seq":"123","type":"created|state_changed","occurrenceId":"42","rowVersion":3}
+
+        游标过期分两种边界（HTTP-SSE-002/003）：
+        1) 游标在响应头写出前已判定过期（last-seen 谓词：high_water > 0 时 cursor < high_water AND cursor < oldest_available - 1；high_water = 0 时仅 cursor = 0 有效）→ 直接返回 410 problem+json，不写流；
+        2) 流已建立后才判定过期 → 发送 event: resync_required 与 data: {"type":"resync_required"} 后关闭连接，不返回 410。
+
+        heartbeat 为纯传输注释（: comment），不持久化（HTTP-SSE-005）。
+        每个事件必须带 id: 行（HTTP-SSE-003）。
+      parameters:
+        - name: after
+          in: query
+          description: 上次收到的最大 alert_change_seq（十进制字符串，可为 0）；与 Last-Event-ID 同时存在时以 Last-Event-ID 为准（HTTP-SSE-003）。游标在响应头写出前已判定过期时返回 410；流建立后过期则发送 resync_required 事件并关闭连接（HTTP-SSE-002）。
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+        - name: Last-Event-ID
+          in: header
+          description: 原生 EventSource 重连自动携带的上次事件 id（HTTP-SSE-003）；存在时优先于 after 查询参数；游标过期语义与 after 相同。
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: text/event-stream 变更流。
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                const: text/event-stream
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Accel-Buffering:
+              schema:
+                type: string
+                const: 'no'
+          content:
+            text/event-stream:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AlertChangeEvent'
+                  - $ref: '#/components/schemas/ResyncRequiredEvent'
+                description: "每条 data: 行的 JSON 载荷为 AlertChangeEvent（event: change）或 ResyncRequiredEvent（event: resync_required）；framing（event:/id:/data:）与逐事件 flush 见 HTTP-SSE-002。"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+  /api/v1/tasks/events:
+    get:
+      tags: [realtime]
+      operationId: streamTaskEvents
+      x-external-dependency: true
+      x-sse-event-data:
+        change:
+          $ref: '#/components/schemas/TaskChangeEvent'
+        resync_required:
+          $ref: '#/components/schemas/ResyncRequiredEvent'
+      summary: 后台任务变更 SSE（快照后建立；after 查询参数；重连使用 Last-Event-ID）
+      description: |
+        SSE 事件格式（HTTP-SSE-006）：
+        event: change
+        id: <task_change_seq>
+        data: {"seq":"123","objectType":"execution_attempt","objectId":"7","changeType":"created|state_changed","rowVersion":2}
+
+        游标过期分两种边界（HTTP-SSE-002/003）：
+        1) 游标在响应头写出前已判定过期 → 直接返回 410 problem+json，不写流；
+        2) 流已建立后才判定过期 → 发送 event: resync_required 与 data: {"type":"resync_required"} 后关闭连接，不返回 410。
+
+        token delta/高频动画不持久化、不进入事件（HTTP-SSE-007）。
+      parameters:
+        - name: after
+          in: query
+          description: 上次收到的最大 task_change_seq（十进制字符串，可为 0）；与 Last-Event-ID 同时存在时以 Last-Event-ID 为准（HTTP-SSE-003）。游标在响应头写出前已判定过期时返回 410；流建立后过期则发送 resync_required 事件并关闭连接（HTTP-SSE-002）。
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+        - name: Last-Event-ID
+          in: header
+          description: 原生 EventSource 重连自动携带的上次事件 id（HTTP-SSE-003）；存在时优先于 after 查询参数；游标过期语义与 after 相同。
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+      responses:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: text/event-stream 变更流。
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                const: text/event-stream
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Accel-Buffering:
+              schema:
+                type: string
+                const: 'no'
+          content:
+            text/event-stream:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TaskChangeEvent'
+                  - $ref: '#/components/schemas/ResyncRequiredEvent'
+                description: "每条 data: 行的 JSON 载荷为 TaskChangeEvent（event: change）或 ResyncRequiredEvent（event: resync_required）；framing（event:/id:/data:）与逐事件 flush 见 HTTP-SSE-006。"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-quoin-session
+      description: 32-byte opaque Session bearer 的 HttpOnly Secure SameSite=Lax Cookie；raw bearer 只存在于浏览器与认证瞬间内存（DATA-AUTH-003）。
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。
+      schema:
+        $ref: '#/components/schemas/Cursor'
+    Limit:
+      name: limit
+      in: query
+      description: 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    OccurrenceId:
+      name: occurrenceId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    AnalysisId:
+      name: analysisId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    IssueId:
+      name: issueId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    InvestigationId:
+      name: investigationId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    MessageId:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    AttemptId:
+      name: attemptId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    ReportVersion:
+      name: reportVersion
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    KnowledgeId:
+      name: knowledgeId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    VersionId:
+      name: versionId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    BatchId:
+      name: batchId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    CandidateId:
+      name: candidateId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    SystemKey:
+      name: systemKey
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/StableKey'
+    ContractVersion:
+      name: contractVersion
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    ConnectionName:
+      name: connectionName
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/StableKey'
+    SourceKey:
+      name: sourceKey
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/StableKey'
+    CredentialId:
+      name: credentialId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    AttachmentId:
+      name: attachmentId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    BackupId:
+      name: backupId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    MaterialId:
+      name: materialId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    RuntimeSlot:
+      name: slot
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [plinth, lintel]
+  responses:
+    BadRequest:
+      description: 请求语法错误（400）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    Unauthorized:
+      description: 未认证或 Session 无效（401）；统一失败信息，不区分用户不存在/密码错误/禁用。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    Forbidden:
+      description: 权限不足或受限 Session（403）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    NotFound:
+      description: 资源不存在（404）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    Conflict:
+      description: 版本/幂等/active 冲突（409）；冲突信息包含当前对象与版本（HTTP-ERROR-004）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ConflictErrorModel'
+    Gone:
+      description: 资源已过期或回放游标不再可用（410）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    PayloadTooLarge:
+      description: 超过请求体/文件大小上限（413）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    UnsupportedMedia:
+      description: 不支持的媒体类型（415）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    Unprocessable:
+      description: 语法有效但领域/校验失败（422）；field_errors 逐项给出路径、原因与修复提示。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    RateLimited:
+      description: 部署级速率限制（429）。
+      headers:
+        Retry-After:
+          description: 重试等待时间（HTTP 日期或延迟秒数；HTTP-ERROR-006）。
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+    ServiceUnavailable:
+      description: 服务不可用/维护中（503）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
+  schemas:
+    LocatorId:
+      type: string
+      description: 64-bit 技术 locator 的十进制字符串表示（DATA-IDENT-002）；词法范围限定为有符号 64-bit 正整数 1..9223372036854775807（SQLite INTEGER / Go / Proto int64 上限），无前导零，超出 JS 安全整数仍必须按字符串处理。
+      pattern: '^(([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]))$'
+      example: '9223372036854775807'
+    NullableLocatorId:
+      anyOf:
+        - $ref: '#/components/schemas/LocatorId'
+        - type: 'null'
+      description: 可空 locator；null 表示“当前无该对象”（如新调查无 head、首次发布无当前已发布版本）。JSON Schema 2020-12 表达，不使用已废弃的 nullable 关键字。
+    ChangeSeq:
+      type: string
+      description: 单调递增序列（alert_change_log.id / task_change_log.id）的十进制字符串表示；"0" 表示日志为空（空库/无任务），事件中的 seq 恒 ≥1；词法范围限定为有符号 64-bit 非负整数 0..9223372036854775807。超出 JS 安全整数仍必须按字符串处理（HTTP-SCOPE-002）。
+      pattern: '^(0|([1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]))$'
+      example: '0'
+    StableKey:
+      type: string
+      minLength: 1
+      maxLength: 200
+      description: 用户维护的稳定 key（业务系统 key、连接名、告警源 key 等）。
+    Cursor:
+      type: string
+      description: 不透明分页游标；绑定过滤器与排序（跨排序/过滤变化无效，HTTP-PAGE-001）。快照列表（listAlerts/getTaskSnapshot）的游标额外绑定首页 snapshotSeq、由服务端签名并带短有效期，过期返回 410（resource_expired），客户端重新从首页读取（HTTP-PAGE-006）。
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC3339 UTC 时间（如 2026-08-13T02:00:00.123456789Z）。
+    CommandBase:
+      type: object
+      required: [clientCommandId]
+      properties:
+        clientCommandId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: 客户端生成、用户不可见的幂等命令 ID；按 (principal, client_command_id) 唯一（HTTP-COMMAND-001）。
+    ExpectedRowVersion:
+      type: object
+      required: [expectedRowVersion]
+      properties:
+        expectedRowVersion:
+          type: integer
+          minimum: 1
+          description: 修改当前状态/current 指针命令的并发前提；包含在请求摘要中（HTTP-COMMAND-002）。
+    CommandRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+    VersionedCommandRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+      description: 修改当前状态/current 指针但非取消语义的领域命令（HTTP-COMMAND-002）。
+    CancelRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          maxLength: 200
+        password:
+          type: string
+          maxLength: 1024
+          description: 15–128 Unicode 字符（NFC 规范化后校验）；弱密码检查与有界冷却由部署层执行。
+    UserSummary:
+      type: object
+      required: [id, username, displayName, role, enabled, authRevision, rowVersion, passwordChangeRequired]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        username:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator]
+        enabled:
+          type: boolean
+        authRevision:
+          type: integer
+          minimum: 1
+          description: 账号变更裁决依据（DATA-TX-002）；与 rowVersion 相互独立：authRevision 由账号变更事务递增，rowVersion 由任何用户行 UPDATE 恰好递增 1。
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 用户行并发前提（HTTP-COMMAND-002）；与 authRevision 独立，任何 UPDATE 恰好递增 1（DATA-AUTH-004）。
+        passwordChangeRequired:
+          type: boolean
+          description: 受限 Session 依据（DATA-AUTH-001/002）。
+    PasswordChangeRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+          description: 15–128 Unicode 字符；成功改密在同一事务清除强制改密标志并撤销其他 Session。
+    SessionInfo:
+      type: object
+      required: [id, createdAt, lastActiveAt, idleExpiresAt, absoluteExpiresAt, current]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        lastActiveAt:
+          $ref: '#/components/schemas/Timestamp'
+        idleExpiresAt:
+          $ref: '#/components/schemas/Timestamp'
+        absoluteExpiresAt:
+          $ref: '#/components/schemas/Timestamp'
+        current:
+          type: boolean
+          description: 是否为当前请求使用的 Session。
+    CreateUserRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [username, displayName, role, password]
+          properties:
+            username:
+              type: string
+              maxLength: 200
+            displayName:
+              type: string
+              maxLength: 200
+            role:
+              type: string
+              enum: [admin, operator]
+            password:
+              type: string
+              description: 15–128 Unicode 字符。
+    UpdateUserRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          properties:
+            displayName:
+              type: string
+              maxLength: 200
+            enabled:
+              type: boolean
+            role:
+              type: string
+              enum: [admin, operator]
+          anyOf:
+            - required: [displayName]
+            - required: [enabled]
+            - required: [role]
+      description: 至少提供一个变更字段（anyOf 强制）；expectedRowVersion 取当前 UserSummary.rowVersion（与 authRevision 独立）；禁用/降级最后一个有效 Admin 冲突（DATA-TX-014）。
+    ResetPasswordRequest:
+      type: object
+      required: [newPassword]
+      properties:
+        newPassword:
+          type: string
+          description: 临时密码；重置后 password_change_required=1 并要求首次登录修改（CONTEXT「管理员离线恢复」）。
+    ErrorModel:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+          description: 稳定机器错误码（HTTP-ERROR-002）。
+        message:
+          type: string
+          description: 面向人的普通语言错误说明（先说明影响与恢复方式，不暴露内部细节）。
+        requestId:
+          type: string
+          description: 本次请求的关联 ID（供排查）。
+        retryable:
+          type: boolean
+          description: 使用同一 client_command_id 重试是否安全（HTTP-ERROR-005）。
+        fieldErrors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+    ConflictErrorModel:
+      allOf:
+        - $ref: '#/components/schemas/ErrorModel'
+        - type: object
+          required: [conflict]
+          properties:
+            conflict:
+              oneOf:
+                - $ref: '#/components/schemas/CommandIdReuseConflict'
+                - $ref: '#/components/schemas/RowVersionConflict'
+                - $ref: '#/components/schemas/HeadConflict'
+                - $ref: '#/components/schemas/CurrentPointerConflict'
+      description: 409 冲突响应的专用包络：conflict 块按 code 判别联合（HTTP-ERROR-004/007）。
+    FieldError:
+      type: object
+      required: [path, reason]
+      properties:
+        path:
+          type: string
+          description: 字段路径（如 config.discoveries[0].identityLabels）。
+        reason:
+          type: string
+        remediation:
+          type: string
+          description: 可操作修复提示。
+    CommandIdReuseConflict:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          const: command_id_reused
+          description: 相同 client_command_id 但不同请求摘要（HTTP-COMMAND-003）；纯追加命令可能无结果对象，因此不强制 objectType/objectId/版本字段。
+        clientCommandId:
+          type: string
+          description: 冲突的命令 ID。
+        objectType:
+          type: string
+          description: 原命令结果对象类型（无结果对象时省略）。
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        detail:
+          type: string
+          description: 人类可读冲突说明（HTTP-ERROR-004）。
+    RowVersionConflict:
+      type: object
+      required: [code, objectType, objectId, rowVersion]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [row_version_conflict, active_conflict]
+        objectType:
+          type: string
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        rowVersion:
+          type: integer
+          description: 当前权威 row_version（供客户端重试回填）。
+        detail:
+          type: string
+          description: 人类可读冲突说明（HTTP-ERROR-004）。
+    HeadConflict:
+      type: object
+      required: [code, objectType, objectId, headMessageId]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          const: head_conflict
+        objectType:
+          type: string
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        headMessageId:
+          $ref: '#/components/schemas/NullableLocatorId'
+          description: 当前 head 消息 locator；null 表示当前无 head（调查已撤回全部消息）。
+        detail:
+          type: string
+          description: 人类可读冲突说明（HTTP-ERROR-004）。
+    CurrentPointerConflict:
+      type: object
+      required: [code, objectType, objectId, currentVersionId]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          const: current_pointer_conflict
+        objectType:
+          type: string
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        currentVersionId:
+          $ref: '#/components/schemas/NullableLocatorId'
+          description: 当前已发布配置版本/当前激活契约 locator；null 表示当前无该指针目标（首次发布前）。
+        detail:
+          type: string
+          description: 人类可读冲突说明（HTTP-ERROR-004）。
+    SetupResponse:
+      type: object
+      required: [items, alertingAvailable, inspectionAvailable]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SetupItem'
+        alertingAvailable:
+          type: boolean
+        inspectionAvailable:
+          type: boolean
+    SetupItem:
+      type: object
+      required: [id, label, state]
+      properties:
+        id:
+          type: string
+          description: 稳定项目 ID（如 model-provider、thanos-connection、kubernetes-connection、plinth、lintel、label-contract、business-system、browser-identity、alert-source、backup-target）。
+        label:
+          type: string
+        state:
+          type: string
+          enum: [ready, missing, pending, error]
+        dependencies:
+          type: array
+          items:
+            type: string
+        action:
+          type: string
+          description: 直接修复入口（路由或操作引用）。
+    RuntimeSlot:
+      type: object
+      required: [slot, state, credentialGeneration, rowVersion]
+      properties:
+        slot:
+          type: string
+          enum: [plinth, lintel]
+        state:
+          type: string
+          enum: [unregistered, registered, revoked]
+        credentialGeneration:
+          type: integer
+          minimum: 0
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 替换命令并发前提与响应版本（HTTP-COMMAND-002）。
+        lastSeenAt:
+          $ref: '#/components/schemas/Timestamp'
+    RuntimeStatus:
+      type: object
+      required: [plinth, lintel]
+      properties:
+        plinth:
+          $ref: '#/components/schemas/RuntimeSlot'
+        lintel:
+          $ref: '#/components/schemas/RuntimeSlot'
+    AlertSnapshot:
+      type: object
+      required: [snapshotSeq, items]
+      properties:
+        snapshotSeq:
+          $ref: '#/components/schemas/ChangeSeq'
+          description: 快照绑定的 alert_change_seq（首页取当前最大 alert_change_log.id；全部页回传同一值，DATA-SSE-009）；客户端以它建立 SSE（after），分页期间的变更经事件回放补齐（HTTP-PAGE-006）。
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertOccurrenceSummary'
+        nextCursor:
+          $ref: '#/components/schemas/Cursor'
+          description: 绑定首页 snapshotSeq 的短有效期快照游标（HTTP-PAGE-006）；过期返回 410。
+    AlertOccurrenceSummary:
+      type: object
+      required: [id, state, rowVersion, firstSeenAt, lastStateChangeAt, labels]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [Firing, Resolved]
+        rowVersion:
+          type: integer
+          minimum: 1
+        businessSystemKey:
+          $ref: '#/components/schemas/StableKey'
+        firstSeenAt:
+          $ref: '#/components/schemas/Timestamp'
+        lastStateChangeAt:
+          $ref: '#/components/schemas/Timestamp'
+        resolvedAt:
+          $ref: '#/components/schemas/Timestamp'
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+    AlertOccurrenceDetail:
+      allOf:
+        - $ref: '#/components/schemas/AlertOccurrenceSummary'
+        - type: object
+          required: [observationCount, initialAnalysisCount, investigationCount]
+          properties:
+            observationCount:
+              type: integer
+              minimum: 0
+              description: 不可变观测总数；完整时间线经 listAlertObservations 游标读取。
+            matchedResource:
+              $ref: '#/components/schemas/ObservedResourceSummary'
+            initialAnalysisCount:
+              type: integer
+              minimum: 0
+              description: Initial Analysis 历史总数；经 listInitialAnalyses 游标读取。
+            investigationCount:
+              type: integer
+              minimum: 0
+              description: 关联调查总数；经 listOccurrenceInvestigations 游标读取。
+    ObservationSummary:
+      type: object
+      required: [id, observedState, startsAt, receivedAt, committedAt, effect]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        observedState:
+          type: string
+          enum: [firing, resolved]
+        startsAt:
+          $ref: '#/components/schemas/Timestamp'
+        endsAt:
+          $ref: '#/components/schemas/Timestamp'
+        receivedAt:
+          $ref: '#/components/schemas/Timestamp'
+        committedAt:
+          $ref: '#/components/schemas/Timestamp'
+        effect:
+          type: string
+          enum: [initial_firing, repeat_firing, resolved, resolved_first, late_firing_after_resolved]
+    InitialAnalysisSummary:
+      type: object
+      required: [id, state, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [Queued, Running, Succeeded, Failed, Cancelled, Interrupted]
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    InitialAnalysisDetail:
+      allOf:
+        - $ref: '#/components/schemas/InitialAnalysisSummary'
+        - type: object
+          required: [attemptCount]
+          properties:
+            attemptCount:
+              type: integer
+              minimum: 0
+              description: 执行 Attempt 总数；完整历史经 listInitialAnalysisAttempts 游标读取。
+            output:
+              $ref: '#/components/schemas/AnalysisOutput'
+    AnalysisOutput:
+      type: object
+      required: [id, modelId, content, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        modelId:
+          type: string
+        content:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    AttemptSummary:
+      type: object
+      required: [id, type, state, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        type:
+          type: string
+          enum: [initial_analysis, investigation, inspection_analysis, inspection_collection, browser_exploration]
+        state:
+          type: string
+          enum: [Queued, Assigned, Running, Cancelling, Succeeded, Failed, Cancelled, Interrupted]
+        rowVersion:
+          type: integer
+          minimum: 1
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+        endedAt:
+          $ref: '#/components/schemas/Timestamp'
+        terminationReason:
+          type: string
+          enum: [timeout, rate_limited, provider_unavailable, invalid_response, tool_error, artifact_commit_failed, cancelled, connection_disabled, business_system_disabled, lease_expired, replaced, revoked]
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    IntakeIssueSummary:
+      type: object
+      required: [id, kind, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        kind:
+          type: string
+          enum: [identity_conflict, fingerprint_mismatch, delivery_truncated]
+        deliveryId:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        acknowledgedAt:
+          $ref: '#/components/schemas/Timestamp'
+        acknowledgedBy:
+          $ref: '#/components/schemas/LocatorId'
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 确认命令并发前提（DATA-ALERT-011）。
+    InvestigationSummary:
+      type: object
+      required: [id, createdAt, createdBy]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        createdBy:
+          $ref: '#/components/schemas/LocatorId'
+        headMessageId:
+          $ref: '#/components/schemas/LocatorId'
+        activeAttemptId:
+          $ref: '#/components/schemas/LocatorId'
+    InvestigationDetail:
+      allOf:
+        - $ref: '#/components/schemas/InvestigationSummary'
+        - type: object
+          required: [messageCount, attemptCount]
+          properties:
+            messageCount:
+              type: integer
+              minimum: 0
+              description: 当前调查的消息总数；历史经 listInvestigationMessages 游标分页读取（HTTP-PAGE-005）。
+            attemptCount:
+              type: integer
+              minimum: 0
+              description: 当前调查的执行尝试总数；历史经 listInvestigationAttempts 游标分页读取（HTTP-PAGE-005）。
+    MessageSummary:
+      type: object
+      required: [id, seq, role, status, content, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        seq:
+          type: integer
+          minimum: 1
+        role:
+          type: string
+          enum: [user, assistant]
+        status:
+          type: string
+          enum: [active, withdrawn]
+        content:
+          type: string
+        parentMessageId:
+          $ref: '#/components/schemas/LocatorId'
+        attachmentId:
+          $ref: '#/components/schemas/LocatorId'
+        attemptId:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    SendMessageRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedHeadMessageId, content]
+          properties:
+            expectedHeadMessageId:
+              $ref: '#/components/schemas/NullableLocatorId'
+              description: 并发前提；null 表示当前无 head（新调查或已撤回全部消息后的第一条消息），其余情况必须为当前 head locator（DATA-INVEST-001）。head 已变化返回 409。
+            content:
+              type: string
+              minLength: 1
+              maxLength: 262144
+            attachmentId:
+              $ref: '#/components/schemas/LocatorId'
+              description: 先前上传的 staging Artifact（每条消息最多一个）。
+    StreamRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [protocol]
+          properties:
+            protocol:
+              type: string
+              const: ui-message-stream
+              description: 显式锁定协议，不依赖自动检测（Issue #3）。
+            messages:
+              type: array
+              description: 非权威投影（HTTP-STREAM-004）；assistant-ui adapter 请求体中的客户端消息视图，服务端忽略并以 Quoin 持久 head 重建输入。
+              items:
+                type: object
+                additionalProperties: true
+                properties:
+                  id:
+                    type: string
+                  role:
+                    type: string
+                  content:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        type:
+                          type: string
+                        text:
+                          type: string
+            tools:
+              type: object
+              additionalProperties: true
+              description: 非权威投影；原型证据（34a46c7 server/main.go Tools map[string]any）中 adapter 真实请求体的 tools 为 JSON object，声明为数组会拒绝真实 adapter 请求。服务端工具 schema 为权威。
+            runConfig:
+              type: object
+              additionalProperties: true
+              description: 非权威投影。
+            system:
+              type: string
+              description: 非权威投影。
+            parentId:
+              type: string
+              description: 非权威投影（assistant-ui 消息树父节点）。
+            threadId:
+              type: string
+              description: 非权威投影（assistant-ui 线程标识）。
+            unstable_assistantMessageId:
+              type: string
+              description: 非权威投影（assistant-ui 客户端占位消息 ID）。
+      description: |
+        adapter 兼容面：字段形态取自 Issue #18 证据 commit 34a46c7 的服务器输入结构（Huma v2.39.1 严格校验要求
+        接受 adapter 真实请求体）；原型锁定的消费端为 @assistant-ui/react 0.15.14（lockfile 精确版本；Issue #18
+        resolution 评论中的 0.12.6 为转录笔误，@assistant-ui/react-data-stream 才是 0.12.26）。
+        这些字段全部是非权威投影：服务端以宽松结构解析（additionalProperties 默认允许），输入 MUST 由 Quoin
+        从当前有效 Investigation head、持久消息、Artifact 与服务端工具 schema 重建；客户端携带值不参与生成。
+        本 Schema 不声称是 adapter 请求体的完整镜像（未对每个传递字段做正反例验证），只覆盖证据中出现的字段。
+    UndoRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedHeadMessageId]
+          properties:
+            expectedHeadMessageId:
+              $ref: '#/components/schemas/LocatorId'
+    CreateCandidateRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [sourceType, sourceId]
+          properties:
+            sourceType:
+              type: string
+              enum: [initial_analysis_output, inspection_report, investigation_message]
+            sourceId:
+              $ref: '#/components/schemas/LocatorId'
+    InspectionRunSummary:
+      type: object
+      required: [id, businessSystemKey, planKey, state, rowVersion, triggerKind, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        businessSystemKey:
+          $ref: '#/components/schemas/StableKey'
+        planKey:
+          $ref: '#/components/schemas/StableKey'
+        state:
+          type: string
+          enum: [Queued, WaitingForCapacity, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
+        rowVersion:
+          type: integer
+          minimum: 1
+        triggerKind:
+          type: string
+          enum: [schedule, manual]
+        scheduledFor:
+          $ref: '#/components/schemas/Timestamp'
+        evidenceAt:
+          $ref: '#/components/schemas/Timestamp'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    InspectionRunDetail:
+      allOf:
+        - $ref: '#/components/schemas/InspectionRunSummary'
+        - type: object
+          required: [checks, reportCount]
+          properties:
+            checks:
+              type: array
+              items:
+                $ref: '#/components/schemas/CheckResultSummary'
+            reportCount:
+              type: integer
+              minimum: 0
+              description: 报告版本总数；完整版本历史经 listInspectionReports 游标读取。
+    CheckResultSummary:
+      type: object
+      required: [checkKey, status]
+      properties:
+        checkKey:
+          $ref: '#/components/schemas/StableKey'
+        status:
+          type: string
+          enum: [ok, error, gap]
+        evidenceId:
+          $ref: '#/components/schemas/LocatorId'
+        gapReason:
+          type: string
+    ReportSummary:
+      type: object
+      required: [version, createdAt, modelId]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        modelId:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    ReportDetail:
+      type: object
+      required: [runId, version, evidenceDigest, modelId, content, createdAt]
+      properties:
+        runId:
+          $ref: '#/components/schemas/LocatorId'
+        version:
+          type: integer
+          minimum: 1
+        evidenceDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        modelId:
+          type: string
+        content:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    ManualRunRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [businessSystemKey, planKey]
+          properties:
+            businessSystemKey:
+              $ref: '#/components/schemas/StableKey'
+            planKey:
+              $ref: '#/components/schemas/StableKey'
+    KnowledgeSearchResult:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/KnowledgeSummary'
+        nextCursor:
+          $ref: '#/components/schemas/Cursor'
+    KnowledgeSummary:
+      type: object
+      required: [id, title, currentVersionId, currentVersionSeq, eligible]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        title:
+          type: string
+        currentVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentVersionSeq:
+          type: integer
+          minimum: 1
+        eligible:
+          type: boolean
+          description: current ∧ 未停用 ∧ 来源有效 ∧ 未 exit（DATA-KNOWLEDGE-002）。
+    KnowledgeDetail:
+      type: object
+      required: [id, currentVersionId, versionCount]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        currentVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        versionCount:
+          type: integer
+          minimum: 0
+          description: 版本总数；历史经 listKnowledgeVersions 游标分页读取（HTTP-PAGE-005）。
+    KnowledgeVersionSummary:
+      type: object
+      required: [id, versionSeq, title, createdAt, eligible, rowVersion]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        versionSeq:
+          type: integer
+          minimum: 1
+        title:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        eligible:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 版本行并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）。
+    KnowledgeVersionDetail:
+      type: object
+      required: [id, versionSeq, title, body, createdAt, eligible, rowVersion]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        versionSeq:
+          type: integer
+          minimum: 1
+        title:
+          type: string
+        body:
+          type: string
+        scope:
+          type: object
+          additionalProperties: true
+        conditions:
+          type: object
+          additionalProperties: true
+        limitations:
+          type: object
+          additionalProperties: true
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        eligible:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 版本行并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）。
+    ImportBatchRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [text]
+          properties:
+            text:
+              type: string
+              minLength: 1
+              description: 用户主动粘贴的原文（Source Material）。
+    ImportBatchSummary:
+      type: object
+      required: [id, state, rowVersion, generation, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [Processing, AwaitingConfirmation, Failed, Completed, Cancelled]
+        rowVersion:
+          type: integer
+          minimum: 1
+        generation:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    ImportBatchDetail:
+      allOf:
+        - $ref: '#/components/schemas/ImportBatchSummary'
+        - type: object
+          required: [candidates]
+          properties:
+            candidates:
+              type: array
+              items:
+                $ref: '#/components/schemas/CandidateSummary'
+    CandidateSummary:
+      type: object
+      required: [id, sourceType, sourceId, state, rowVersion, generation, draftRevision]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        sourceType:
+          type: string
+          enum: [initial_analysis_output, inspection_report, investigation_message, source_material]
+        sourceId:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [AwaitingConfirmation, Confirmed, Excluded, Superseded, SourceInvalid]
+        rowVersion:
+          type: integer
+          minimum: 1
+        generation:
+          type: integer
+          minimum: 1
+        draftRevision:
+          type: integer
+          minimum: 0
+        draftTitle:
+          type: string
+        draftBody:
+          type: string
+        confirmedKnowledgeId:
+          $ref: '#/components/schemas/LocatorId'
+    CandidateDraftEditRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedRevision]
+          properties:
+            expectedRevision:
+              type: integer
+              minimum: 0
+              description: stale revision 冲突（DATA-KNOWLEDGE-004）。
+            title:
+              type: string
+            body:
+              type: string
+          anyOf:
+            - required: [title]
+            - required: [body]
+      description: 至少提供一个草稿变更字段（anyOf 强制），防止无变化编辑。
+    ConfirmCandidateRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedRevision]
+          properties:
+            expectedRevision:
+              type: integer
+              minimum: 0
+    ConfirmCandidatesRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [candidateId, expectedRevision]
+                properties:
+                  candidateId:
+                    $ref: '#/components/schemas/LocatorId'
+                  expectedRevision:
+                    type: integer
+                    minimum: 0
+    FeedbackRequest:
+      type: object
+      required: [targetType, targetId, value]
+      properties:
+        targetType:
+          type: string
+          enum: [initial_analysis_output, inspection_report, investigation_message]
+        targetId:
+          $ref: '#/components/schemas/LocatorId'
+        value:
+          type: string
+          enum: [adopted, executed, verified_effective, rejected]
+    FeedbackSummary:
+      type: object
+      required: [id, targetType, targetId, value, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        targetType:
+          type: string
+          enum: [initial_analysis_output, inspection_report, investigation_message]
+        targetId:
+          $ref: '#/components/schemas/LocatorId'
+        value:
+          type: string
+          enum: [adopted, executed, verified_effective, rejected]
+        createdBy:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    TaskSnapshot:
+      type: object
+      required: [snapshotSeq, items]
+      properties:
+        snapshotSeq:
+          $ref: '#/components/schemas/ChangeSeq'
+          description: 快照绑定的 task_change_seq（首页取当前最大 task_change_log.id；全部页回传同一值，DATA-SSE-009）；建立 streamTaskEvents 时作为 after。
+        items:
+          type: array
+          description: 有界集合（HTTP-PAGE-007）：active 任务 + 当前用户终态未查看任务；按 nextCursor 分页遍历。
+          items:
+            $ref: '#/components/schemas/TaskObjectRef'
+        nextCursor:
+          $ref: '#/components/schemas/Cursor'
+          description: 绑定首页 snapshotSeq 的短有效期快照游标（HTTP-PAGE-006）；过期返回 410。
+    TaskObjectRef:
+      type: object
+      required: [objectType, objectId, rowVersion]
+      properties:
+        objectType:
+          type: string
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation]
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 快照时该对象的权威 row_version；客户端按 rowVersion 幂等应用事件（HTTP-SSE-003）。
+    BusinessSystemSummary:
+      type: object
+      required: [key, displayName, enabled, rowVersion]
+      properties:
+        key:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 系统行并发前提（HTTP-COMMAND-002）。
+        currentConfigVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        browserIdentityState:
+          type: string
+          enum: [Ready, AuthenticationRequired, none]
+    BusinessSystemDetail:
+      allOf:
+        - $ref: '#/components/schemas/BusinessSystemSummary'
+        - type: object
+          required: [timezone, refreshIntervalSeconds]
+          properties:
+            timezone:
+              type: string
+              description: IANA 时区。
+            refreshIntervalSeconds:
+              type: integer
+              minimum: 1
+            configVersionCount:
+              type: integer
+              minimum: 0
+              description: 配置版本总数；历史经 listBusinessSystemConfigs 游标分页读取（HTTP-PAGE-005）。
+            discoveries:
+              type: array
+              items:
+                $ref: '#/components/schemas/DiscoverySummary'
+            plans:
+              type: array
+              items:
+                $ref: '#/components/schemas/PlanSummary'
+            browserIdentity:
+              $ref: '#/components/schemas/BrowserIdentitySummary'
+    DiscoverySummary:
+      type: object
+      required: [discoveryKey, displayName, identityLabels, refreshIntervalSeconds]
+      properties:
+        discoveryKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        identityLabels:
+          type: array
+          items:
+            type: string
+        refreshIntervalSeconds:
+          type: integer
+          minimum: 1
+    PlanSummary:
+      type: object
+      required: [planKey, displayName, timezone]
+      properties:
+        planKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        cron:
+          type: string
+          description: 标准五字段 cron；缺省表示仅人工运行。
+        timezone:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckSummary'
+    CheckSummary:
+      type: object
+      required: [checkKey, displayName, analysisQuestion, kind]
+      properties:
+        checkKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        analysisQuestion:
+          type: string
+        kind:
+          type: string
+          enum: [promql, browser]
+        expression:
+          type: string
+        journeyId:
+          type: string
+    ConfigVersionSummary:
+      type: object
+      required: [id, versionSeq, state, createdAt, digest]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        versionSeq:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [draft, published, superseded]
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        parserVersion:
+          type: string
+        schemaVersion:
+          type: string
+    ConfigVersionDetail:
+      allOf:
+        - $ref: '#/components/schemas/ConfigVersionSummary'
+        - type: object
+          required: [yamlBody]
+          properties:
+            yamlBody:
+              type: string
+              description: 上传的原始 YAML 正文（可导出；运行只使用类型结构）。
+            baseVersionId:
+              $ref: '#/components/schemas/LocatorId'
+    PublishConfigRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedCurrentPublishedVersionId]
+          properties:
+            expectedCurrentPublishedVersionId:
+              $ref: '#/components/schemas/NullableLocatorId'
+              description: 并发前提；null 表示当前无已发布版本（首次发布），其余情况必须为当前已发布版本 ID；不匹配返回 409（DATA-CONFIG-001）。
+    ObservedResourceSummary:
+      type: object
+      required: [id, discoveryKey, identityLabels, current]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        discoveryKey:
+          $ref: '#/components/schemas/StableKey'
+        identityLabels:
+          type: object
+          additionalProperties:
+            type: string
+          description: 身份 labels 的排序键值（identity_key 是相等性权威；DATA-OBSERVED-001）。
+        displayName:
+          type: string
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+        current:
+          type: boolean
+        stale:
+          type: boolean
+        lastSuccessfulRefreshAt:
+          $ref: '#/components/schemas/Timestamp'
+    BrowserIdentitySummary:
+      type: object
+      required: [id, name, startUrl, state]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        name:
+          type: string
+        startUrl:
+          type: string
+          format: uri
+        state:
+          type: string
+          enum: [Ready, AuthenticationRequired]
+        currentGeneration:
+          type: integer
+          minimum: 0
+    BrowserIdentityConfig:
+      oneOf:
+        - $ref: '#/components/schemas/BrowserIdentityCreate'
+        - $ref: '#/components/schemas/BrowserIdentityUpdate'
+      description: 创建（身份不存在）与更新（身份已存在）两种形态按 expectedRowVersion 存在性判别；更新形态必须携带 expectedRowVersion（HTTP-COMMAND-002/DATA-BROWSER-004）。
+    BrowserIdentityCreate:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [name, startUrl]
+          properties:
+            name:
+              type: string
+            startUrl:
+              type: string
+              format: uri
+              description: Admin 管理的起始 URL（不含用户密码或任意绝对导航范围之外的内容）。
+      unevaluatedProperties: false
+    BrowserIdentityUpdate:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          required: [name, startUrl]
+          properties:
+            name:
+              type: string
+            startUrl:
+              type: string
+              format: uri
+              description: Admin 管理的起始 URL（不含用户密码或任意绝对导航范围之外的内容）。
+      unevaluatedProperties: false
+    LabelContractSummary:
+      type: object
+      required: [version, state, createdAt, rowVersion]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [draft, active, retired]
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 契约行并发前提（激活命令使用，HTTP-COMMAND-002）。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        activatedAt:
+          $ref: '#/components/schemas/Timestamp'
+    LabelContractDetail:
+      allOf:
+        - $ref: '#/components/schemas/LabelContractSummary'
+        - type: object
+          required: [contractJson, digest]
+          properties:
+            contractJson:
+              type: object
+              additionalProperties: true
+            digest:
+              type: string
+              pattern: '^[0-9a-f]{64}$'
+    LabelContractDraft:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [contractJson]
+          properties:
+            contractJson:
+              type: object
+              additionalProperties: true
+              description: Label Contract 的机器可验证结构（与 contracts/schemas 保持一致）。
+    ActivateLabelContractRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedStateRowVersion, expectedCurrentContractVersionId, expectedTargetRowVersion, compatibleVersions]
+          properties:
+            expectedStateRowVersion:
+              type: integer
+              minimum: 1
+              description: label_contract_state 单行聚合的并发前提（DATA-CONFIG-006）；陈旧值 409（current_pointer_conflict），防止并发激活基于同一旧 current 静默互相覆盖。
+            expectedCurrentContractVersionId:
+              $ref: '#/components/schemas/NullableLocatorId'
+              description: 当前激活契约版本；无已激活契约时显式 null；与 label_contract_state.current_contract_id 不匹配返回 409。
+            expectedTargetRowVersion:
+              type: integer
+              minimum: 1
+              description: 目标契约草稿行（label_contracts.row_version）的并发前提；陈旧值 409（row_version_conflict）。
+            compatibleVersions:
+              type: array
+              description: 启用业务系统的兼容目标配置版本与逐系统并发前提；零启用系统时必须为空数组；全部就绪才原子激活（DATA-CONFIG-002）。
+              items:
+                type: object
+                required: [businessSystemKey, configVersionId, expectedCurrentConfigVersionId, expectedBusinessSystemRowVersion]
+                properties:
+                  businessSystemKey:
+                    $ref: '#/components/schemas/StableKey'
+                  configVersionId:
+                    $ref: '#/components/schemas/LocatorId'
+                  expectedCurrentConfigVersionId:
+                    $ref: '#/components/schemas/NullableLocatorId'
+                    description: 该业务系统当前已发布配置版本并发前提；null 表示当前无已发布版本；不匹配返回 409（DATA-CONFIG-002）。
+                  expectedBusinessSystemRowVersion:
+                    type: integer
+                    minimum: 1
+                    description: 该业务系统行（business_systems.row_version）的并发前提；陈旧值 409。
+      description: 多聚合并发前提（DATA-CONFIG-005/006）：state 单行聚合 + 目标草稿契约行 + 每个受影响系统的 current 配置与行版本，同一事务重验后原子切换（DATA-TX-007）；任一前提陈旧全部回滚。
+    ConnectionSummary:
+      oneOf:
+        - $ref: '#/components/schemas/ThanosConnectionSummary'
+        - $ref: '#/components/schemas/KubernetesConnectionSummary'
+        - $ref: '#/components/schemas/ModelProviderConnectionSummary'
+      description: 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。
+    ThanosConnectionSummary:
+      type: object
+      required: [name, type, enabled, rowVersion, config]
+      properties:
+        name:
+          $ref: '#/components/schemas/StableKey'
+        type:
+          type: string
+          const: thanos
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 连接行并发前提（enable/disable/rotate 命令使用，HTTP-COMMAND-002）。
+        revalidationRequired:
+          type: boolean
+        currentRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentCredentialGenerationId:
+          $ref: '#/components/schemas/LocatorId'
+        config:
+          $ref: '#/components/schemas/ThanosConnectionNonSecret'
+    KubernetesConnectionSummary:
+      type: object
+      required: [name, type, enabled, rowVersion, config]
+      properties:
+        name:
+          $ref: '#/components/schemas/StableKey'
+        type:
+          type: string
+          const: kubernetes
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+        revalidationRequired:
+          type: boolean
+        currentRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentCredentialGenerationId:
+          $ref: '#/components/schemas/LocatorId'
+        config:
+          $ref: '#/components/schemas/KubernetesConnectionNonSecret'
+    ModelProviderConnectionSummary:
+      type: object
+      required: [name, type, enabled, rowVersion, config]
+      properties:
+        name:
+          $ref: '#/components/schemas/StableKey'
+        type:
+          type: string
+          const: model_provider
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+        revalidationRequired:
+          type: boolean
+        currentRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentCredentialGenerationId:
+          $ref: '#/components/schemas/LocatorId'
+        config:
+          $ref: '#/components/schemas/ModelProviderConnectionNonSecret'
+    ConnectionDetail:
+      allOf:
+        - $ref: '#/components/schemas/ConnectionSummary'
+        - type: object
+          required: [revisionCount, generationCount]
+          properties:
+            revisionCount:
+              type: integer
+              minimum: 0
+              description: revision 总数；历史经 listConnectionRevisions 游标分页读取（HTTP-PAGE-005）。
+            generationCount:
+              type: integer
+              minimum: 0
+              description: generation 总数；历史经 listCredentialGenerations 游标分页读取（HTTP-PAGE-005）。
+    RevisionSummary:
+      type: object
+      required: [id, revisionSeq, config, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        revisionSeq:
+          type: integer
+          minimum: 1
+        config:
+          oneOf:
+            - $ref: '#/components/schemas/ThanosConnectionNonSecret'
+            - $ref: '#/components/schemas/KubernetesConnectionNonSecret'
+            - $ref: '#/components/schemas/ModelProviderConnectionNonSecret'
+          description: 该 revision 的服务端生成类型化非秘密投影（DATA-CONN-005）；不得包含秘密。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    GenerationSummary:
+      type: object
+      required: [id, generationSeq, metaJson, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        generationSeq:
+          type: integer
+          minimum: 1
+        metaJson:
+          type: object
+          additionalProperties: true
+          description: 服务端生成的非秘密元数据（创建时间/轮换原因等）；密文永不下发、永不返回。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    ThanosConnectionNonSecret:
+      type: object
+      required: [type, baseUrl]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: thanos
+        baseUrl:
+          type: string
+          format: uri
+          description: Thanos Query 入口 URL（实现 Prometheus HTTP v1 API）。
+        tlsCaPem:
+          type: string
+          description: 自定义 CA 的 PEM 正文（非秘密）。
+        tlsServerName:
+          type: string
+          description: TLS ServerName 覆盖（非秘密）。
+        tlsSkipVerify:
+          type: boolean
+          description: 跳过 TLS 校验（仅 Admin 明确接受风险时设置；非秘密）。
+        username:
+          type: string
+          description: HTTP Basic Auth 用户名（非秘密）。
+    KubernetesConnectionNonSecret:
+      type: object
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: kubernetes
+        contextName:
+          type: string
+          description: kubeconfig 中使用的 context 名（非秘密；缺省使用当前 context）。
+        defaultNamespace:
+          type: string
+          description: 只读调查的默认命名空间（非秘密）。
+    ModelProviderConnectionNonSecret:
+      type: object
+      required: [type, baseUrl, chatModelId, contextBudgetTokens, maxOutputTokens]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: model_provider
+        baseUrl:
+          type: string
+          format: uri
+          description: OpenAI-compatible endpoint 基 URL。
+        chatModelId:
+          type: string
+          description: 对话模型 ID（必须存在于 GET /v1/models；能力经 ConnectionRevision 实测）。
+        embeddingModelId:
+          type: string
+          description: 嵌入模型 ID（可选；能力经实测）。
+        contextBudgetTokens:
+          type: integer
+          minimum: 1
+          description: 人工配置的上下文预算（非秘密；模型能力实测见 research/model-provider-eino）。
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+          description: 人工配置的最大输出预算。
+        toolsEnabled:
+          type: boolean
+          description: 是否允许工具调用（连接验证时实测；不依赖模型名称推断）。
+    ThanosConnectionInput:
+      type: object
+      required: [type, baseUrl]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: thanos
+        baseUrl:
+          type: string
+          format: uri
+        tlsCaPem:
+          type: string
+        tlsServerName:
+          type: string
+        tlsSkipVerify:
+          type: boolean
+        username:
+          type: string
+        password:
+          type: string
+          description: HTTP Basic Auth 密码（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃，DATA-CONN-004）。
+    KubernetesConnectionInput:
+      type: object
+      required: [type, kubeconfig]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: kubernetes
+        contextName:
+          type: string
+        defaultNamespace:
+          type: string
+        kubeconfig:
+          type: string
+          description: kubeconfig 正文（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
+    ModelProviderConnectionInput:
+      type: object
+      required: [type, baseUrl, chatModelId, contextBudgetTokens, maxOutputTokens]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: model_provider
+        baseUrl:
+          type: string
+          format: uri
+        chatModelId:
+          type: string
+        embeddingModelId:
+          type: string
+        contextBudgetTokens:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+        toolsEnabled:
+          type: boolean
+        apiKey:
+          type: string
+          description: API key（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
+    ConnectionInput:
+      oneOf:
+        - $ref: '#/components/schemas/ThanosConnectionInput'
+        - $ref: '#/components/schemas/KubernetesConnectionInput'
+        - $ref: '#/components/schemas/ModelProviderConnectionInput'
+      description: "按 type 封闭的判别联合（additionalProperties 为 false）：非秘密配置字段与秘密字段在同一变体内声明，未知字段与跨类型字段被拒绝（DATA-CONN-005）。"
+    CreateConnectionRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [name, connection]
+          properties:
+            name:
+              $ref: '#/components/schemas/StableKey'
+            connection:
+              $ref: '#/components/schemas/ConnectionInput'
+    RotateConnectionRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          required: [connection]
+          properties:
+            connection:
+              $ref: '#/components/schemas/ConnectionInput'
+              description: 新 revision/generation 的完整配置；expectedRowVersion 取当前 ConnectionSummary.rowVersion。
+    AlertSourceSummary:
+      type: object
+      required: [key, protocol, enabled, createdAt, rowVersion]
+      properties:
+        key:
+          $ref: '#/components/schemas/StableKey'
+        protocol:
+          type: string
+          enum: [alertmanager]
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 来源行并发前提（enable/disable 命令使用，HTTP-COMMAND-002）。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        disabledAt:
+          $ref: '#/components/schemas/Timestamp'
+    AlertSourceDetail:
+      allOf:
+        - $ref: '#/components/schemas/AlertSourceSummary'
+        - type: object
+          required: [credentialCount]
+          properties:
+            credentialCount:
+              type: integer
+              minimum: 0
+              description: 凭据总数；历史经 listAlertSourceCredentials 游标分页读取（HTTP-PAGE-005）。
+    CredentialSummary:
+      type: object
+      required: [id, state, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [Active, Retired]
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 吊销命令并发前提与响应版本（DATA-ALERT-009）。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        retiredAt:
+          $ref: '#/components/schemas/Timestamp'
+    CreateAlertSourceRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [key, protocol]
+          properties:
+            key:
+              $ref: '#/components/schemas/StableKey'
+            protocol:
+              type: string
+              enum: [alertmanager]
+    AlertSourceCredentialMetadata:
+      type: object
+      required: [sourceKey, credentialId, revealAvailable]
+      properties:
+        sourceKey:
+          $ref: '#/components/schemas/StableKey'
+        credentialId:
+          $ref: '#/components/schemas/LocatorId'
+        revealAvailable:
+          type: boolean
+          description: 仅首次实时响应为 true（同次请求创建/轮换后立即生成内存 revealHandle）；命令重放恒为 false（HTTP-COMMAND-008）。
+        revealHandle:
+          type: string
+          description: 不透明、内存中短生命周期、单次使用的 reveal 句柄；仅 revealAvailable=true 时存在；不落盘（SQLite/日志/审计/Artifact/命令结果均禁止）（HTTP-COMMAND-008）。
+      allOf:
+        - if:
+            properties:
+              revealAvailable:
+                const: true
+            required: [revealAvailable]
+          then:
+            required: [revealHandle]
+          else:
+            properties:
+              revealHandle: false
+    RevealCredentialRequest:
+      type: object
+      required: [revealHandle]
+      properties:
+        revealHandle:
+          type: string
+          description: 创建/轮换命令首次实时响应返回的一次性句柄；不接受 source/credential ID（HTTP-COMMAND-008）。
+    RevealCredentialResult:
+      type: object
+      required: [credentialId, bearerToken]
+      properties:
+        credentialId:
+          $ref: '#/components/schemas/LocatorId'
+        bearerToken:
+          type: string
+          description: 32-byte 高熵 Bearer；仅此一次返回；数据库只存 digest（CONTEXT「告警源凭据投影」）；不进入日志、审计或命令结果（HTTP-COMMAND-008）。
+    RetireCredentialRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+    BackupSummary:
+      type: object
+      required: [id, status, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        status:
+          type: string
+          enum: [succeeded, failed]
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        dbSha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        manifestSha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        artifactCount:
+          type: integer
+          minimum: 0
+        errorDetail:
+          type: string
+    BackupSettings:
+      type: object
+      required: [enabled, timezone, retentionCount, rowVersion]
+      properties:
+        enabled:
+          type: boolean
+        scheduleCron:
+          type: string
+          description: 缺省表示仅手动触发。
+        timezone:
+          type: string
+        retentionCount:
+          type: integer
+          minimum: 1
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: 设置行并发前提（updateBackupSettings 使用，HTTP-COMMAND-002）。
+    BackupSettingsUpdate:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          properties:
+            enabled:
+              type: boolean
+            scheduleCron:
+              type: [string, 'null']
+              description: null 表示清除定时（仅手动触发）。
+            timezone:
+              type: string
+            retentionCount:
+              type: integer
+              minimum: 1
+          anyOf:
+            - required: [enabled]
+            - required: [scheduleCron]
+            - required: [timezone]
+            - required: [retentionCount]
+      description: 至少提供一个设置字段（anyOf 强制），防止无变化更新；expectedRowVersion 取当前 BackupSettings.rowVersion。
+    ArtifactSummary:
+      type: object
+      required: [id, kind, sensitive, retentionKind, ownerType, ownerId, sizeBytes, sha256, bodyExpired, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        kind:
+          type: string
+          enum: [attachment, screenshot, trace, tool_result, report_file]
+        sensitive:
+          type: boolean
+        retentionKind:
+          type: string
+          enum: [long_term, generated]
+        ownerType:
+          type: string
+          description: 逻辑所有者类型（investigation_message、evidence、browser_operation 等）。
+        ownerId:
+          $ref: '#/components/schemas/LocatorId'
+        sizeBytes:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        bodyExpired:
+          type: boolean
+        expiresAt:
+          $ref: '#/components/schemas/Timestamp'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    SourceMaterialSummary:
+      type: object
+      required: [id, kind, digest, sizeBytes, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        kind:
+          type: string
+          enum: [text_attachment, knowledge_import]
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        sizeBytes:
+          type: integer
+          minimum: 0
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    UnviewedNotification:
+      type: object
+      required: [objectType, objectId]
+      properties:
+        objectType:
+          type: string
+          enum: [initial_analysis, investigation, inspection_run, knowledge_import_batch]
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          description: 权威对象当前终态（显示用）。
+    MarkViewedRequest:
+      type: object
+      required: [objectType, objectId]
+      properties:
+        objectType:
+          type: string
+          enum: [initial_analysis, investigation, inspection_run, knowledge_import_batch]
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+    AuditEventSummary:
+      type: object
+      required: [id, actorType, actorId, action, outcome, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        actorType:
+          type: string
+          enum: [user, service, system]
+        actorId:
+          $ref: '#/components/schemas/LocatorId'
+        action:
+          type: string
+        outcome:
+          type: string
+          enum: [success, failure, rejected, unknown]
+        clientCommandId:
+          type: string
+        domainRefType:
+          type: string
+        domainRefId:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    AlertChangeEvent:
+      type: object
+      required: [seq, type, occurrenceId, rowVersion]
+      properties:
+        seq:
+          $ref: '#/components/schemas/ChangeSeq'
+          description: "alert_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。"
+        type:
+          type: string
+          enum: [created, state_changed]
+        occurrenceId:
+          $ref: '#/components/schemas/LocatorId'
+        rowVersion:
+          type: integer
+          minimum: 1
+    TaskChangeEvent:
+      type: object
+      required: [seq, objectType, objectId, changeType, rowVersion]
+      properties:
+        seq:
+          $ref: '#/components/schemas/ChangeSeq'
+          description: "task_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。"
+        objectType:
+          type: string
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation]
+        objectId:
+          $ref: '#/components/schemas/LocatorId'
+        changeType:
+          type: string
+          enum: [created, state_changed]
+        rowVersion:
+          type: integer
+          minimum: 1
+    ResyncRequiredEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: resync_required
