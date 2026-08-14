@@ -31,6 +31,11 @@
 contracts/
 ├── openapi.yaml
 ├── runtime.proto
+├── quoin/
+│   └── plinth/
+│       └── worker/
+│           └── v1/
+│               └── agent_worker.proto
 ├── schemas/
 │   └── *.schema.json
 └── sql/
@@ -41,6 +46,7 @@ contracts/
 | --- | --- |
 | `contracts/openapi.yaml` | HTTP 路由、方法、输入输出结构、状态码和可机械表达的 HTTP 契约 |
 | `contracts/runtime.proto` | 四组件 gRPC service、RPC、message、stream 与 wire-level 枚举 |
+| `contracts/quoin/plinth/worker/v1/agent_worker.proto` | Plinth supervisor ↔ worker 本地 stdio framed protobuf message 与 wire-level 枚举 |
 | `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog 及其他独立文档格式 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
@@ -52,7 +58,8 @@ contracts/
 | --- | --- | --- |
 | 领域术语、业务概念、产品边界和稳定业务规则 | [`CONTEXT.md`](../../../CONTEXT.md) | 规格引用对应标题，不重新定义同义概念 |
 | HTTP 字段、类型、路由和状态码 | `contracts/openapi.yaml` | `http-api.md` 解释跨请求语义、事务和状态转换 |
-| gRPC service、message、字段、枚举与 stream 形状 | `contracts/runtime.proto` | `runtime-protocol.md` 解释握手、lease、fencing、重连和调和 |
+| 跨组件 gRPC service、message、字段、枚举与 stream 形状 | `contracts/runtime.proto` | `runtime-protocol.md` 解释握手、lease、fencing、重连和调和 |
+| Plinth supervisor ↔ worker 本地 stdio message、字段与枚举 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | `architecture.md` 解释 framing、sandbox、执行顺序和故障语义 |
 | YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | `inspection-config.md` 解释发布、兼容、运行和错误语义 |
 | SQLite 表、列、索引、外键和数据库约束 | `contracts/sql/schema.sql` | `persistence.md` 解释聚合、事务、生命周期和迁移约束 |
 | 跨协议不变量、事务边界、状态转换、权限、运行行为和无法由单份机器契约表达的约束 | 对应主题 Markdown | 机器契约只承载其可机械表达部分 |

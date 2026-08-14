@@ -65,7 +65,9 @@ CREATE INDEX idx_sessions_expiry ON sessions (absolute_expires_at);
 CREATE TABLE user_viewed (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   user_id     INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  object_type TEXT NOT NULL CHECK (object_type IN ('initial_analysis','investigation','inspection_run','knowledge_import_batch')),
+  object_type TEXT NOT NULL CHECK (object_type IN
+    ('initial_analysis','investigation','execution_attempt','inspection_run','inspection_report','tool_call',
+     'knowledge_import_batch','knowledge_candidate','browser_operation','config_test_run')),
   object_id   INTEGER NOT NULL,
   viewed_at   TEXT NOT NULL,
   UNIQUE (user_id, object_type, object_id)
@@ -168,7 +170,7 @@ CREATE TABLE alert_sources (
   row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable 命令并发前提（DATA-ALERT-010）
   created_at  TEXT NOT NULL,
   disabled_at TEXT,
-  CHECK (enabled = 1 OR disabled_at IS NOT NULL)
+  CHECK ((enabled = 1 AND disabled_at IS NULL) OR (enabled = 0 AND disabled_at IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE alert_source_credentials (
@@ -332,7 +334,7 @@ CREATE INDEX idx_initial_analysis_occurrence ON initial_analyses (occurrence_id,
 CREATE TABLE initial_analysis_outputs (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   analysis_id INTEGER NOT NULL UNIQUE REFERENCES initial_analyses(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首个成功封存，一个分析最多一个输出
-  attempt_id  INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id  INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   model_id    TEXT NOT NULL,
   content     TEXT NOT NULL,
   created_at  TEXT NOT NULL
@@ -348,6 +350,7 @@ CREATE TABLE investigations (
 CREATE TABLE investigation_messages (
   id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   investigation_id  INTEGER NOT NULL REFERENCES investigations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id        INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   seq               INTEGER NOT NULL CHECK (seq >= 1),
   role              TEXT NOT NULL CHECK (role IN ('user','assistant')),
   status            TEXT NOT NULL CHECK (status IN ('active','withdrawn')),
@@ -355,9 +358,30 @@ CREATE TABLE investigation_messages (
   client_command_id TEXT,
   parent_message_id INTEGER REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at        TEXT NOT NULL,
-  UNIQUE (investigation_id, seq)
+  UNIQUE (investigation_id, seq),
+  UNIQUE (attempt_id, role)
 ) STRICT;
 CREATE INDEX idx_investigation_messages_parent ON investigation_messages (parent_message_id);
+CREATE INDEX idx_investigation_messages_attempt ON investigation_messages (attempt_id);
+
+-- Investigation 可由既有产品对象进入，也可无来源直接进入纯 Chat；来源是在创建事务中可写入多条、
+-- 此后不可改写的显式谱系，不是进入对话前的选择向导。
+CREATE TABLE investigation_source_links (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  investigation_id    INTEGER NOT NULL REFERENCES investigations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  occurrence_id       INTEGER REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  initial_analysis_id INTEGER REFERENCES initial_analyses(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id         INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  inspection_report_id INTEGER REFERENCES inspection_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  linked_by           INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  linked_at           TEXT NOT NULL,
+  CHECK ((occurrence_id IS NOT NULL) + (initial_analysis_id IS NOT NULL) +
+         (evidence_id IS NOT NULL) + (inspection_report_id IS NOT NULL) = 1)
+) STRICT;
+CREATE UNIQUE INDEX ux_investigation_source_occurrence ON investigation_source_links (investigation_id, occurrence_id) WHERE occurrence_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_investigation_source_analysis ON investigation_source_links (investigation_id, initial_analysis_id) WHERE initial_analysis_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_investigation_source_evidence ON investigation_source_links (investigation_id, evidence_id) WHERE evidence_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_investigation_source_report ON investigation_source_links (investigation_id, inspection_report_id) WHERE inspection_report_id IS NOT NULL;
 
 CREATE TABLE text_attachments (
   id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -566,6 +590,58 @@ CREATE TABLE credential_generations (
   UNIQUE (connection_id, generation_seq)
 ) STRICT;
 
+-- model_provider 的能力只由真实黑盒探测写入，不接受客户端自报 toolsEnabled/streamingEnabled。
+CREATE TABLE model_provider_capabilities (
+  id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  connection_revision_id        INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  credential_generation_id      INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  probe_attempt_id              INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  probe_version                 TEXT NOT NULL,
+  chat_model_id                 TEXT NOT NULL,
+  embedding_model_id            TEXT NOT NULL,
+  context_budget_tokens         INTEGER NOT NULL CHECK (context_budget_tokens >= 1),
+  max_output_tokens             INTEGER NOT NULL CHECK (max_output_tokens >= 1),
+  streaming_supported           INTEGER NOT NULL CHECK (streaming_supported IN (0,1)),
+  native_tool_calling_supported INTEGER NOT NULL CHECK (native_tool_calling_supported IN (0,1)),
+  multi_tool_call_supported     INTEGER NOT NULL CHECK (multi_tool_call_supported IN (0,1)),
+  cancellation_observed         INTEGER NOT NULL CHECK (cancellation_observed IN (0,1)),
+  usage_observed                INTEGER NOT NULL CHECK (usage_observed IN (0,1)),
+  request_id_observed           INTEGER NOT NULL CHECK (request_id_observed IN (0,1)),
+  embedding_supported           INTEGER NOT NULL CHECK (embedding_supported IN (0,1)),
+  embedding_vector_dim          INTEGER CHECK (embedding_vector_dim IS NULL OR embedding_vector_dim >= 1),
+  probe_detail_json             TEXT NOT NULL CHECK (json_valid(probe_detail_json)),
+  probed_at                     TEXT NOT NULL,
+  CHECK ((embedding_supported = 1 AND embedding_vector_dim IS NOT NULL)
+      OR (embedding_supported = 0 AND embedding_vector_dim IS NULL)),
+  UNIQUE (connection_revision_id, credential_generation_id)
+) STRICT;
+
+-- Business System ↔ Kubernetes Connection 的管理面绑定；不进入业务系统 YAML，也不暴露给模型。
+-- 解绑只做 Active -> Retired，保留历史以解释旧 Attempt 的确定性路由。
+CREATE TABLE business_system_kubernetes_connections (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  business_system_id INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_id      INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  state              TEXT NOT NULL CHECK (state IN ('Active','Retired')),
+  row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  created_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at         TEXT NOT NULL,
+  retired_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  retired_at         TEXT,
+  CHECK ((state = 'Active' AND retired_by IS NULL AND retired_at IS NULL)
+      OR (state = 'Retired' AND retired_by IS NOT NULL AND retired_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX ux_business_system_kubernetes_connection_active
+  ON business_system_kubernetes_connections (business_system_id, connection_id) WHERE state = 'Active';
+CREATE INDEX idx_business_system_kubernetes_connections_system
+  ON business_system_kubernetes_connections (business_system_id, state, connection_id);
+
+-- 一个部署只能有一个 active model provider 与一个全局 active Thanos；Kubernetes 连接允许多个。
+CREATE UNIQUE INDEX ux_connections_one_enabled_model_provider ON connections ((1))
+  WHERE type = 'model_provider' AND enabled = 1;
+CREATE UNIQUE INDEX ux_connections_one_enabled_thanos ON connections ((1))
+  WHERE type = 'thanos' AND enabled = 1;
+
 CREATE TABLE browser_identities (
   id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   business_system_id            INTEGER NOT NULL UNIQUE REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每业务系统恰好一个
@@ -717,105 +793,254 @@ CREATE TABLE label_contract_activations (
 -- ============================================================================
 
 CREATE TABLE execution_attempts (
-  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  attempt_type             TEXT NOT NULL CHECK (attempt_type IN ('initial_analysis','investigation','inspection_analysis','inspection_collection','browser_exploration')),
-  scope_type               TEXT NOT NULL CHECK (scope_type IN ('analysis','investigation','run','run_check','config_test_run')),
-  scope_id                 INTEGER NOT NULL,
-  plan_key                 TEXT,   -- config_test_run 子 Attempt 必填；其它 scope 为空（该 Test Run 覆盖整个配置版本，必须以 plan+check 复合定位）
-  check_key                TEXT,   -- run_check/config_test_run 子 Attempt 非空；其它 scope 为空
-  state                    TEXT NOT NULL CHECK (state IN ('Queued','Assigned','Running','Cancelling','Succeeded','Failed','Cancelled','Interrupted')),
-  row_version              INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  runtime_slot             TEXT CHECK (runtime_slot IN ('plinth','lintel')), -- 派发绑定的 Runtime；一旦绑定不可改（DATA-ATTEMPT-001/007）
-  requested_by_tool_call_id INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 跨 Runtime 子执行：Plinth Tool Call 请求 Lintel（DATA-ATTEMPT-007）
-  connection_revision_id   INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  credential_generation_id INTEGER REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  connection_epoch         INTEGER,
-  boot_id                  TEXT,
-  lease_until              TEXT,
-  accepted_at              TEXT,
-  started_at               TEXT,
-  ended_at                 TEXT,
-  termination_reason       TEXT CHECK (termination_reason IS NULL OR termination_reason IN
-                             ('timeout','rate_limited','provider_unavailable','invalid_response','tool_error','artifact_commit_failed',
-                              'cancelled','connection_disabled','business_system_disabled','lease_expired','replaced','revoked')),
-  created_at               TEXT NOT NULL,
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_type              TEXT NOT NULL CHECK (attempt_type IN
+                              ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding',
+                               'inspection_collection','browser_exploration','model_provider_probe')),
+  scope_type                TEXT NOT NULL CHECK (scope_type IN
+                              ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','config_test_run')),
+  scope_id                  INTEGER NOT NULL,
+  plan_key                  TEXT,   -- config_test_run 子 Attempt 必填；其它 scope 为空
+  check_key                 TEXT,   -- run_check/config_test_run 子 Attempt 非空；其它 scope 为空
+  state                     TEXT NOT NULL CHECK (state IN ('Queued','Assigned','Running','Cancelling','Succeeded','Failed','Cancelled','Interrupted')),
+  row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  runtime_slot              TEXT CHECK (runtime_slot IN ('plinth','lintel')), -- 派发绑定；一旦绑定不可改
+  requested_by_tool_call_id INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- Plinth Browser Tool 请求的 Lintel 子 Attempt
+  connection_epoch          INTEGER,
+  boot_id                   TEXT,
+  lease_until               TEXT,
+  accepted_at               TEXT,
+  started_at                TEXT,
+  ended_at                  TEXT,
+  quoin_release_version     TEXT NOT NULL,
+  runtime_release_version   TEXT,
+  agent_version             TEXT,
+  termination_reason        TEXT CHECK (termination_reason IS NULL OR termination_reason IN
+                              ('timeout','rate_limited','provider_unavailable','invalid_response','context_too_large','tool_error',
+                               'artifact_commit_failed','artifact_body_expired','sandbox_unavailable','worker_protocol_error',
+                               'cancelled','connection_disabled','business_system_disabled','lease_expired','replaced','revoked')),
+  created_at                TEXT NOT NULL,
   CHECK (
-    (state = 'Queued' AND runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL)
-    OR (state = 'Assigned' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NULL)
-    OR (state IN ('Running','Cancelling') AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NOT NULL)
+    (state = 'Queued' AND runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL AND runtime_release_version IS NULL)
+    OR (state = 'Assigned' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NULL AND runtime_release_version IS NOT NULL)
+    OR (state IN ('Running','Cancelling') AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NOT NULL AND runtime_release_version IS NOT NULL)
     OR (state IN ('Succeeded','Failed','Cancelled','Interrupted') AND (
-      -- 终态只允许两种完整形态（DATA-ATTEMPT-001）：从未派发（绑定五字段全空），
-      -- 或曾派发（runtime_slot/boot_id/connection_epoch/lease_until 完整非空；accepted_at 可空=
-      -- Assigned 直接终结，非空=曾 Running/Cancelling）。绝不允许任意部分绑定。
-      (runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL)
-      OR (runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL)
+      (runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL AND runtime_release_version IS NULL)
+      OR (runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND runtime_release_version IS NOT NULL)
     ))
   ),
-  CHECK (connection_epoch IS NULL OR connection_epoch >= 1), -- 递增 connection epoch 必须为正（DATA-ATTEMPT-001）
-  CHECK (requested_by_tool_call_id IS NULL OR attempt_type = 'browser_exploration'), -- 只有浏览器探索可作为跨 Runtime 子执行
+  CHECK (connection_epoch IS NULL OR connection_epoch >= 1),
+  CHECK (requested_by_tool_call_id IS NULL OR attempt_type = 'browser_exploration'),
   CHECK (
     (scope_type = 'config_test_run' AND plan_key IS NOT NULL AND check_key IS NOT NULL)
     OR (scope_type = 'run_check' AND plan_key IS NULL AND check_key IS NOT NULL)
     OR (scope_type NOT IN ('run_check','config_test_run') AND plan_key IS NULL AND check_key IS NULL)
   ),
-  CHECK ( -- Attempt 类型与 Runtime slot 的固定映射（DATA-ATTEMPT-001）：浏览器类只派发 lintel，模型/Agent 类只派发 plinth；未派发（runtime_slot IS NULL）不受限
+  CHECK (
     runtime_slot IS NULL
     OR (attempt_type IN ('browser_exploration','inspection_collection') AND runtime_slot = 'lintel')
-    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis') AND runtime_slot = 'plinth')
+    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','model_provider_probe') AND runtime_slot = 'plinth')
   ),
-  CHECK ( -- scope_type 与 attempt_type 固定映射（DATA-ATTEMPT-002）：禁止 wrong-type 组合（如 initial_analysis + config_test_run）
+  CHECK (
     (attempt_type = 'initial_analysis' AND scope_type = 'analysis')
     OR (attempt_type = 'investigation' AND scope_type = 'investigation')
     OR (attempt_type = 'browser_exploration' AND scope_type = 'investigation')
     OR (attempt_type = 'inspection_analysis' AND scope_type = 'run')
+    OR (attempt_type = 'knowledge_extraction' AND scope_type = 'knowledge_import_batch')
+    OR (attempt_type = 'embedding' AND scope_type = 'embedding_generation')
+    OR (attempt_type = 'model_provider_probe' AND scope_type = 'connection')
     OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_test_run'))
   )
 ) STRICT;
 CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (scope_type, scope_id)
-  WHERE state IN ('Queued','Assigned','Running','Cancelling') AND check_key IS NULL;
+  WHERE state IN ('Queued','Assigned','Running','Cancelling') AND check_key IS NULL
+    AND attempt_type <> 'browser_exploration';
 CREATE UNIQUE INDEX ux_execution_attempt_active_run_check ON execution_attempts (scope_type, scope_id, check_key)
   WHERE scope_type = 'run_check' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_active_config_test_check ON execution_attempts (scope_type, scope_id, plan_key, check_key)
   WHERE scope_type = 'config_test_run' AND state IN ('Queued','Assigned','Running','Cancelling');
+CREATE UNIQUE INDEX ux_execution_attempt_browser_requestor ON execution_attempts (requested_by_tool_call_id)
+  WHERE requested_by_tool_call_id IS NOT NULL;
 CREATE INDEX idx_execution_attempts_scope ON execution_attempts (scope_type, scope_id);
 CREATE INDEX idx_execution_attempts_lease ON execution_attempts (state, lease_until);
 
-CREATE TABLE model_calls (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  call_seq                  INTEGER NOT NULL CHECK (call_seq >= 1),
-  model_id                  TEXT NOT NULL,
-  connection_revision_id    INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  credential_generation_id  INTEGER REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  prompt_digest             TEXT CHECK (prompt_digest IS NULL OR length(prompt_digest) = 64),
-  tool_schema_digest        TEXT CHECK (tool_schema_digest IS NULL OR length(tool_schema_digest) = 64),
-  input_snapshot_digest     TEXT CHECK (input_snapshot_digest IS NULL OR length(input_snapshot_digest) = 64),
-  usage_json                TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
-  latency_ms                INTEGER,
-  retry_seq                 INTEGER NOT NULL DEFAULT 0 CHECK (retry_seq >= 0),
-  status                    TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','cancelled')),
-  termination_reason        TEXT CHECK (termination_reason IS NULL OR termination_reason IN
-                              ('timeout','rate_limited','provider_unavailable','invalid_response','tool_error','artifact_commit_failed','cancelled')),
-  started_at                TEXT NOT NULL,
-  ended_at                  TEXT,
-  UNIQUE (attempt_id, call_seq)
+-- Attempt 创建时冻结的输入谱系；正文仍由各领域对象/Artifact 拥有。content_digest 覆盖由有序 items、
+-- renderer_version 与固定 schema_kind 重建的 canonical JSON，不能只保存 digest 而丢失可解析引用。
+CREATE TABLE attempt_input_snapshots (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_id       INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  schema_kind      TEXT NOT NULL,
+  renderer_version TEXT NOT NULL,
+  content_digest   TEXT NOT NULL CHECK (length(content_digest) = 64),
+  created_at       TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE tool_calls (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  attempt_id     INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  call_seq       INTEGER NOT NULL CHECK (call_seq >= 1),
-  tool_name      TEXT NOT NULL,
-  tool_version   TEXT,
-  arguments_json TEXT NOT NULL CHECK (json_valid(arguments_json)),
-  status         TEXT NOT NULL CHECK (status IN ('pending','succeeded','failed','cancelled')),
-  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  result_json    TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
-  error_detail   TEXT,
-  created_at     TEXT NOT NULL,
-  ended_at       TEXT,
-  UNIQUE (attempt_id, call_seq)
+CREATE TABLE attempt_input_items (
+  id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  snapshot_id                       INTEGER NOT NULL REFERENCES attempt_input_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  item_seq                          INTEGER NOT NULL CHECK (item_seq >= 1),
+  item_role      TEXT NOT NULL,
+  source_digest  TEXT NOT NULL CHECK (length(source_digest) = 64),
+  occurrence_id                     INTEGER REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  initial_analysis_id               INTEGER REFERENCES initial_analyses(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  investigation_message_id          INTEGER REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id                       INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id                       INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_version_id              INTEGER REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  inspection_run_id                 INTEGER REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  inspection_check_result_id        INTEGER REFERENCES inspection_check_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  source_material_id                INTEGER REFERENCES source_materials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  business_system_config_version_id INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_import_batch_id         INTEGER REFERENCES knowledge_import_batches(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  embedding_generation_id           INTEGER REFERENCES embedding_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_revision_id             INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (snapshot_id, item_seq),
+  CHECK (
+    (occurrence_id IS NOT NULL) + (initial_analysis_id IS NOT NULL) + (investigation_message_id IS NOT NULL) +
+    (evidence_id IS NOT NULL) + (artifact_id IS NOT NULL) + (knowledge_version_id IS NOT NULL) +
+    (inspection_run_id IS NOT NULL) + (inspection_check_result_id IS NOT NULL) + (source_material_id IS NOT NULL) +
+    (business_system_config_version_id IS NOT NULL) + (label_contract_version_id IS NOT NULL) +
+    (knowledge_import_batch_id IS NOT NULL) + (embedding_generation_id IS NOT NULL) +
+    (connection_revision_id IS NOT NULL) = 1
+  )
 ) STRICT;
+
+-- 行 id 是当前 Attempt/epoch 下 FetchCredentialGrant 使用的非秘密 locator；revision/generation 与用途
+-- 是持久权威。Kubernetes binding 可在 Tool Call 持久化事务中追加，连接轮换不改写旧 binding。
+CREATE TABLE attempt_connection_grants (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','kubernetes_read')),
+  business_system_id        INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  credential_generation_id  INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_by_tool_call_id    INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at                TEXT NOT NULL,
+  CHECK ((purpose = 'kubernetes_read' AND business_system_id IS NOT NULL AND created_by_tool_call_id IS NOT NULL)
+      OR (purpose = 'thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NOT NULL)
+      OR (purpose IN ('chat_model','embedding') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
+  (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id, COALESCE(business_system_id, 0));
+
+CREATE TABLE model_calls (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_id                 INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  call_seq                   INTEGER NOT NULL CHECK (call_seq >= 1), -- logical call sequence
+  retry_seq                  INTEGER NOT NULL DEFAULT 0 CHECK (retry_seq >= 0), -- physical request within logical call
+  operation                  TEXT NOT NULL CHECK (operation IN ('chat','embedding')),
+  model_id                   TEXT NOT NULL,
+  connection_grant_id        INTEGER NOT NULL REFERENCES attempt_connection_grants(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  provider_request_id        TEXT,
+  prompt_renderer_version    TEXT,
+  agent_version              TEXT,
+  prompt_digest              TEXT CHECK (prompt_digest IS NULL OR length(prompt_digest) = 64),
+  tool_schema_version        TEXT,
+  tool_schema_digest         TEXT CHECK (tool_schema_digest IS NULL OR length(tool_schema_digest) = 64),
+  input_snapshot_digest      TEXT NOT NULL CHECK (length(input_snapshot_digest) = 64),
+  rendered_request_digest    TEXT NOT NULL CHECK (length(rendered_request_digest) = 64),
+  context_budget_tokens      INTEGER CHECK (context_budget_tokens IS NULL OR context_budget_tokens >= 1),
+  max_output_tokens          INTEGER CHECK (max_output_tokens IS NULL OR (max_output_tokens >= 1 AND max_output_tokens < context_budget_tokens)),
+  estimated_input_tokens     INTEGER NOT NULL CHECK (estimated_input_tokens >= 0),
+  evicted_turn_count         INTEGER NOT NULL DEFAULT 0 CHECK (evicted_turn_count >= 0),
+  usage_json                 TEXT CHECK (usage_json IS NULL OR json_valid(usage_json)),
+  latency_ms                 INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
+  status                     TEXT NOT NULL CHECK (status IN ('running','succeeded','failed','cancelled')),
+  termination_reason         TEXT CHECK (termination_reason IS NULL OR termination_reason IN
+                               ('timeout','rate_limited','transport_error','provider_unavailable','context_overflow','invalid_response',
+                                 'artifact_commit_failed','cancelled')),
+  started_at                 TEXT NOT NULL,
+  ended_at                   TEXT,
+  UNIQUE (attempt_id, call_seq, retry_seq),
+  CHECK ((status = 'running' AND ended_at IS NULL AND termination_reason IS NULL)
+      OR (status = 'succeeded' AND ended_at IS NOT NULL AND termination_reason IS NULL AND usage_json IS NOT NULL)
+      OR (status IN ('failed','cancelled') AND ended_at IS NOT NULL AND termination_reason IS NOT NULL)),
+  CHECK ((operation = 'chat' AND prompt_renderer_version IS NOT NULL AND agent_version IS NOT NULL
+                         AND prompt_digest IS NOT NULL AND tool_schema_version IS NOT NULL AND tool_schema_digest IS NOT NULL
+                         AND context_budget_tokens IS NOT NULL AND max_output_tokens IS NOT NULL)
+      OR (operation = 'embedding' AND prompt_renderer_version IS NULL AND agent_version IS NULL
+                               AND prompt_digest IS NULL AND tool_schema_version IS NULL AND tool_schema_digest IS NULL
+                               AND context_budget_tokens IS NULL AND max_output_tokens IS NULL AND evicted_turn_count = 0))
+) STRICT;
+
+-- 每个物理模型请求的规范化响应审计；流式 delta 只用于实时投影，完成后在此封存组装结果。
+CREATE TABLE model_call_outputs (
+  model_call_id   INTEGER PRIMARY KEY REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  complete        INTEGER NOT NULL CHECK (complete IN (0,1)),
+  response_json   TEXT NOT NULL CHECK (json_valid(response_json)),
+  response_digest TEXT NOT NULL CHECK (length(response_digest) = 64),
+  finish_reason   TEXT,
+  created_at      TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE model_call_input_items (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  model_call_id            INTEGER NOT NULL REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  item_seq                 INTEGER NOT NULL CHECK (item_seq >= 1),
+  item_role                TEXT NOT NULL CHECK (item_role IN ('system','user','assistant','tool')),
+  source_digest            TEXT NOT NULL CHECK (length(source_digest) = 64),
+  attempt_input_snapshot_id INTEGER REFERENCES attempt_input_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  investigation_message_id INTEGER REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  prior_model_call_id      INTEGER REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  tool_call_id             INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id              INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id              INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_version_id     INTEGER REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  synthetic_kind           TEXT CHECK (synthetic_kind IS NULL OR synthetic_kind IN ('system_contract','tool_schema')),
+  UNIQUE (model_call_id, item_seq),
+  CHECK (
+    (attempt_input_snapshot_id IS NOT NULL) + (investigation_message_id IS NOT NULL) + (prior_model_call_id IS NOT NULL) +
+    (tool_call_id IS NOT NULL) + (evidence_id IS NOT NULL) + (artifact_id IS NOT NULL) +
+    (knowledge_version_id IS NOT NULL) + (synthetic_kind IS NOT NULL) = 1
+  )
+) STRICT;
+
+-- 每行代表一次不可改写的物理 Tool 执行；v1 不在 supervisor 内部自动重试 Tool。
+-- 模型再次提出调用时必须形成新的 Model Call 与新的 provider Tool Call ID。
+CREATE TABLE tool_calls (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_id            INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  model_call_id         INTEGER NOT NULL REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  call_seq              INTEGER NOT NULL CHECK (call_seq >= 1),
+  tool_index            INTEGER NOT NULL CHECK (tool_index >= 0),
+  provider_tool_call_id TEXT NOT NULL,
+  tool_name             TEXT NOT NULL,
+  tool_version          TEXT NOT NULL,
+  arguments_json        TEXT NOT NULL CHECK (json_valid(arguments_json) AND json_type(arguments_json) = 'object'),
+  arguments_digest      TEXT NOT NULL CHECK (length(arguments_digest) = 64),
+  execution_mode        TEXT NOT NULL CHECK (execution_mode IN ('worker_local','supervisor_typed','quoin_browser')),
+  failure_mode          TEXT NOT NULL CHECK (failure_mode IN ('return_to_model','fail_attempt')),
+  status                TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed','cancelled')),
+  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  result_json           TEXT CHECK (result_json IS NULL OR json_valid(result_json)), -- 有界模型可见预览/结构化结果
+  result_artifact_id    INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  error_detail          TEXT,
+  created_at            TEXT NOT NULL,
+  started_at            TEXT,
+  ended_at              TEXT,
+  UNIQUE (attempt_id, call_seq, tool_index),
+  UNIQUE (model_call_id, provider_tool_call_id),
+  UNIQUE (model_call_id, tool_index),
+  CHECK ((status = 'pending' AND started_at IS NULL AND ended_at IS NULL AND result_json IS NULL AND result_artifact_id IS NULL AND error_detail IS NULL)
+      OR (status = 'running' AND started_at IS NOT NULL AND ended_at IS NULL AND result_json IS NULL AND result_artifact_id IS NULL AND error_detail IS NULL)
+      OR (status = 'succeeded' AND started_at IS NOT NULL AND ended_at IS NOT NULL AND error_detail IS NULL
+                              AND (result_json IS NOT NULL OR result_artifact_id IS NOT NULL))
+      OR (status = 'failed' AND started_at IS NOT NULL AND ended_at IS NOT NULL AND error_detail IS NOT NULL
+                            AND ((failure_mode = 'return_to_model' AND result_json IS NOT NULL AND result_artifact_id IS NULL)
+                              OR (failure_mode = 'fail_attempt' AND result_json IS NULL AND result_artifact_id IS NULL)))
+      OR (status = 'cancelled' AND ended_at IS NOT NULL AND error_detail IS NOT NULL
+                               AND result_json IS NULL AND result_artifact_id IS NULL))
+) STRICT;
+
+CREATE TABLE tool_call_connection_grants (
+  tool_call_id       INTEGER NOT NULL REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_grant_id INTEGER NOT NULL REFERENCES attempt_connection_grants(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal            INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (tool_call_id, connection_grant_id),
+  UNIQUE (tool_call_id, ordinal)
+) WITHOUT ROWID, STRICT;
 
 CREATE TABLE evidence (
   id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -840,7 +1065,7 @@ CREATE TABLE inspection_reports (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   run_id         INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   version        INTEGER NOT NULL CHECK (version >= 1),
-  attempt_id     INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id     INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   evidence_digest TEXT NOT NULL CHECK (length(evidence_digest) = 64),
   model_id       TEXT NOT NULL,
   prompt_digest  TEXT CHECK (prompt_digest IS NULL OR length(prompt_digest) = 64),
@@ -848,6 +1073,71 @@ CREATE TABLE inspection_reports (
   created_at     TEXT NOT NULL,
   UNIQUE (run_id, version)
 ) STRICT;
+
+-- 模型输出正文由领域记录拥有；下列有序引用保存输出声明使用的精确 Evidence/Artifact/KnowledgeVersion。
+CREATE TABLE initial_analysis_output_evidence (
+  output_id   INTEGER NOT NULL REFERENCES initial_analysis_outputs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (output_id, evidence_id),
+  UNIQUE (output_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE initial_analysis_output_artifacts (
+  output_id   INTEGER NOT NULL REFERENCES initial_analysis_outputs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (output_id, artifact_id),
+  UNIQUE (output_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE initial_analysis_output_knowledge_versions (
+  output_id            INTEGER NOT NULL REFERENCES initial_analysis_outputs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_version_id INTEGER NOT NULL REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal              INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (output_id, knowledge_version_id),
+  UNIQUE (output_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE investigation_message_evidence (
+  message_id  INTEGER NOT NULL REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (message_id, evidence_id),
+  UNIQUE (message_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE investigation_message_artifacts (
+  message_id  INTEGER NOT NULL REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (message_id, artifact_id),
+  UNIQUE (message_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE investigation_message_knowledge_versions (
+  message_id           INTEGER NOT NULL REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_version_id INTEGER NOT NULL REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal              INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (message_id, knowledge_version_id),
+  UNIQUE (message_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE inspection_report_evidence (
+  report_id   INTEGER NOT NULL REFERENCES inspection_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (report_id, evidence_id),
+  UNIQUE (report_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE inspection_report_artifacts (
+  report_id   INTEGER NOT NULL REFERENCES inspection_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (report_id, artifact_id),
+  UNIQUE (report_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE TABLE inspection_report_knowledge_versions (
+  report_id            INTEGER NOT NULL REFERENCES inspection_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  knowledge_version_id INTEGER NOT NULL REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal              INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (report_id, knowledge_version_id),
+  UNIQUE (report_id, ordinal)
+) WITHOUT ROWID, STRICT;
 
 -- ============================================================================
 -- 9. Artifact 与来源材料引用
@@ -869,6 +1159,7 @@ CREATE TABLE artifacts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   blob_id        INTEGER NOT NULL REFERENCES artifact_blobs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
+  media_type     TEXT NOT NULL,
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)), -- raw trace 固定 sensitive=1
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
   owner_type     TEXT NOT NULL,
@@ -894,6 +1185,7 @@ CREATE TABLE runtime_artifact_uploads (
   owner_type     TEXT NOT NULL,
   owner_id       INTEGER NOT NULL,
   kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
+  media_type     TEXT NOT NULL,
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)),
   size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
@@ -910,6 +1202,18 @@ CREATE TABLE runtime_artifact_uploads (
   CHECK (kind <> 'trace' OR sensitive = 1)
 ) STRICT;
 CREATE INDEX idx_runtime_artifact_uploads_attempt ON runtime_artifact_uploads (attempt_id, created_at);
+
+-- 当前 Attempt 对 Artifact 正文读取的不可变授权；来源可为冻结输入或同 Attempt 已提交 Tool Result。
+-- 到期 GC 只把 artifacts.body_expired 置 1，不删除本授权或调用谱系。
+CREATE TABLE attempt_artifact_grants (
+  attempt_id   INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id  INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  source_kind  TEXT NOT NULL CHECK (source_kind IN ('input_snapshot','tool_result','evidence')),
+  source_id    INTEGER NOT NULL,
+  granted_at   TEXT NOT NULL,
+  PRIMARY KEY (attempt_id, artifact_id)
+) WITHOUT ROWID, STRICT;
+CREATE INDEX idx_attempt_artifact_grants_source ON attempt_artifact_grants (source_kind, source_id);
 
 -- ============================================================================
 -- 10. 知识沉淀
@@ -1009,7 +1313,7 @@ CREATE TABLE embedding_generations (
   validated_at  TEXT,
   created_at    TEXT NOT NULL,
   UNIQUE (generation),
-  CHECK (state <> 'current' OR vector_dim IS NOT NULL)
+  CHECK (state <> 'current' OR (vector_dim IS NOT NULL AND built_at IS NOT NULL AND validated_at IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_embedding_generation_current ON embedding_generations (state) WHERE state = 'current';
 
@@ -1113,6 +1417,21 @@ CREATE TRIGGER trg_evidence_no_update BEFORE UPDATE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
 CREATE TRIGGER trg_evidence_no_delete BEFORE DELETE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
+CREATE TRIGGER trg_evidence_attempt_tool_closure BEFORE INSERT ON evidence
+WHEN (NEW.tool_call_id IS NOT NULL AND NEW.attempt_id IS NULL)
+   OR (NEW.tool_call_id IS NOT NULL AND NOT EXISTS (
+     SELECT 1 FROM execution_attempts a
+     JOIN tool_calls t ON t.attempt_id = a.id
+     WHERE a.id = NEW.attempt_id AND t.id = NEW.tool_call_id
+       AND a.state = 'Running' AND t.status = 'running'
+   ))
+   OR (NEW.attempt_id IS NOT NULL AND NEW.tool_call_id IS NULL AND NOT EXISTS (
+     SELECT 1 FROM execution_attempts a
+     WHERE a.id = NEW.attempt_id AND a.state = 'Running' AND a.runtime_slot = 'lintel'
+       AND a.accepted_at IS NOT NULL
+       AND a.attempt_type IN ('inspection_collection','browser_exploration')
+   ))
+BEGIN SELECT RAISE(ABORT, 'Evidence must be Quoin-local, close to one same Running Attempt and running Tool Call, or close to one accepted Running Lintel collection/exploration Attempt'); END;
 CREATE TRIGGER trg_inspection_reports_no_update BEFORE UPDATE ON inspection_reports
 BEGIN SELECT RAISE(ABORT, 'inspection_reports is append-only'); END;
 CREATE TRIGGER trg_inspection_reports_no_delete BEFORE DELETE ON inspection_reports
@@ -1133,6 +1452,44 @@ CREATE TRIGGER trg_source_materials_no_update BEFORE UPDATE ON source_materials
 BEGIN SELECT RAISE(ABORT, 'source_materials is append-only'); END;
 CREATE TRIGGER trg_source_materials_no_delete BEFORE DELETE ON source_materials
 BEGIN SELECT RAISE(ABORT, 'source_materials is append-only'); END;
+CREATE TRIGGER trg_investigation_source_links_creation_only BEFORE INSERT ON investigation_source_links
+WHEN NOT EXISTS (
+  SELECT 1 FROM investigations i WHERE i.id = NEW.investigation_id AND i.created_at = NEW.linked_at
+    AND NOT EXISTS (SELECT 1 FROM investigation_messages m WHERE m.investigation_id = i.id)
+)
+BEGIN SELECT RAISE(ABORT, 'investigation source links may only be frozen before the first Chat message'); END;
+CREATE TRIGGER trg_investigation_source_links_no_update BEFORE UPDATE ON investigation_source_links
+BEGIN SELECT RAISE(ABORT, 'investigation_source_links is append-only'); END;
+CREATE TRIGGER trg_investigation_source_links_no_delete BEFORE DELETE ON investigation_source_links
+BEGIN SELECT RAISE(ABORT, 'investigation_source_links is append-only'); END;
+CREATE TRIGGER trg_attempt_input_snapshots_no_update BEFORE UPDATE ON attempt_input_snapshots
+BEGIN SELECT RAISE(ABORT, 'attempt_input_snapshots is append-only'); END;
+CREATE TRIGGER trg_attempt_input_snapshots_no_delete BEFORE DELETE ON attempt_input_snapshots
+BEGIN SELECT RAISE(ABORT, 'attempt_input_snapshots is append-only'); END;
+CREATE TRIGGER trg_attempt_input_items_no_update BEFORE UPDATE ON attempt_input_items
+BEGIN SELECT RAISE(ABORT, 'attempt_input_items is append-only'); END;
+CREATE TRIGGER trg_attempt_input_items_no_delete BEFORE DELETE ON attempt_input_items
+BEGIN SELECT RAISE(ABORT, 'attempt_input_items is append-only'); END;
+CREATE TRIGGER trg_attempt_connection_grants_no_update BEFORE UPDATE ON attempt_connection_grants
+BEGIN SELECT RAISE(ABORT, 'attempt_connection_grants is append-only'); END;
+CREATE TRIGGER trg_attempt_connection_grants_no_delete BEFORE DELETE ON attempt_connection_grants
+BEGIN SELECT RAISE(ABORT, 'attempt_connection_grants is append-only'); END;
+CREATE TRIGGER trg_model_call_outputs_no_update BEFORE UPDATE ON model_call_outputs
+BEGIN SELECT RAISE(ABORT, 'model_call_outputs is append-only'); END;
+CREATE TRIGGER trg_model_call_outputs_no_delete BEFORE DELETE ON model_call_outputs
+BEGIN SELECT RAISE(ABORT, 'model_call_outputs is append-only'); END;
+CREATE TRIGGER trg_model_call_input_items_no_update BEFORE UPDATE ON model_call_input_items
+BEGIN SELECT RAISE(ABORT, 'model_call_input_items is append-only'); END;
+CREATE TRIGGER trg_model_call_input_items_no_delete BEFORE DELETE ON model_call_input_items
+BEGIN SELECT RAISE(ABORT, 'model_call_input_items is append-only'); END;
+CREATE TRIGGER trg_tool_call_connection_grants_no_update BEFORE UPDATE ON tool_call_connection_grants
+BEGIN SELECT RAISE(ABORT, 'tool_call_connection_grants is append-only'); END;
+CREATE TRIGGER trg_tool_call_connection_grants_no_delete BEFORE DELETE ON tool_call_connection_grants
+BEGIN SELECT RAISE(ABORT, 'tool_call_connection_grants is append-only'); END;
+CREATE TRIGGER trg_model_provider_capabilities_no_update BEFORE UPDATE ON model_provider_capabilities
+BEGIN SELECT RAISE(ABORT, 'model_provider_capabilities is append-only per revision and credential generation'); END;
+CREATE TRIGGER trg_model_provider_capabilities_no_delete BEFORE DELETE ON model_provider_capabilities
+BEGIN SELECT RAISE(ABORT, 'model_provider_capabilities is append-only'); END;
 CREATE TRIGGER trg_connection_revisions_no_update BEFORE UPDATE ON connection_revisions
 BEGIN SELECT RAISE(ABORT, 'connection_revisions is append-only'); END;
 CREATE TRIGGER trg_connection_revisions_no_delete BEFORE DELETE ON connection_revisions
@@ -1161,6 +1518,42 @@ CREATE TRIGGER trg_initial_analysis_outputs_no_update BEFORE UPDATE ON initial_a
 BEGIN SELECT RAISE(ABORT, 'initial_analysis_outputs is append-only'); END;
 CREATE TRIGGER trg_initial_analysis_outputs_no_delete BEFORE DELETE ON initial_analysis_outputs
 BEGIN SELECT RAISE(ABORT, 'initial_analysis_outputs is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_evidence_no_update BEFORE UPDATE ON initial_analysis_output_evidence
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_evidence is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_evidence_no_delete BEFORE DELETE ON initial_analysis_output_evidence
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_evidence is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_artifacts_no_update BEFORE UPDATE ON initial_analysis_output_artifacts
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_artifacts is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_artifacts_no_delete BEFORE DELETE ON initial_analysis_output_artifacts
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_artifacts is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_knowledge_no_update BEFORE UPDATE ON initial_analysis_output_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_knowledge_versions is append-only'); END;
+CREATE TRIGGER trg_initial_analysis_output_knowledge_no_delete BEFORE DELETE ON initial_analysis_output_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'initial_analysis_output_knowledge_versions is append-only'); END;
+CREATE TRIGGER trg_investigation_message_evidence_no_update BEFORE UPDATE ON investigation_message_evidence
+BEGIN SELECT RAISE(ABORT, 'investigation_message_evidence is append-only'); END;
+CREATE TRIGGER trg_investigation_message_evidence_no_delete BEFORE DELETE ON investigation_message_evidence
+BEGIN SELECT RAISE(ABORT, 'investigation_message_evidence is append-only'); END;
+CREATE TRIGGER trg_investigation_message_artifacts_no_update BEFORE UPDATE ON investigation_message_artifacts
+BEGIN SELECT RAISE(ABORT, 'investigation_message_artifacts is append-only'); END;
+CREATE TRIGGER trg_investigation_message_artifacts_no_delete BEFORE DELETE ON investigation_message_artifacts
+BEGIN SELECT RAISE(ABORT, 'investigation_message_artifacts is append-only'); END;
+CREATE TRIGGER trg_investigation_message_knowledge_no_update BEFORE UPDATE ON investigation_message_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'investigation_message_knowledge_versions is append-only'); END;
+CREATE TRIGGER trg_investigation_message_knowledge_no_delete BEFORE DELETE ON investigation_message_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'investigation_message_knowledge_versions is append-only'); END;
+CREATE TRIGGER trg_inspection_report_evidence_no_update BEFORE UPDATE ON inspection_report_evidence
+BEGIN SELECT RAISE(ABORT, 'inspection_report_evidence is append-only'); END;
+CREATE TRIGGER trg_inspection_report_evidence_no_delete BEFORE DELETE ON inspection_report_evidence
+BEGIN SELECT RAISE(ABORT, 'inspection_report_evidence is append-only'); END;
+CREATE TRIGGER trg_inspection_report_artifacts_no_update BEFORE UPDATE ON inspection_report_artifacts
+BEGIN SELECT RAISE(ABORT, 'inspection_report_artifacts is append-only'); END;
+CREATE TRIGGER trg_inspection_report_artifacts_no_delete BEFORE DELETE ON inspection_report_artifacts
+BEGIN SELECT RAISE(ABORT, 'inspection_report_artifacts is append-only'); END;
+CREATE TRIGGER trg_inspection_report_knowledge_no_update BEFORE UPDATE ON inspection_report_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'inspection_report_knowledge_versions is append-only'); END;
+CREATE TRIGGER trg_inspection_report_knowledge_no_delete BEFORE DELETE ON inspection_report_knowledge_versions
+BEGIN SELECT RAISE(ABORT, 'inspection_report_knowledge_versions is append-only'); END;
 CREATE TRIGGER trg_observed_refresh_log_no_update BEFORE UPDATE ON observed_refresh_log
 BEGIN SELECT RAISE(ABORT, 'observed_refresh_log is append-only'); END;
 CREATE TRIGGER trg_observed_refresh_log_no_delete BEFORE DELETE ON observed_refresh_log
@@ -1187,7 +1580,7 @@ BEGIN SELECT RAISE(ABORT, 'alert_intake_issues history is not deletable'); END;
 
 -- 12.4 调查消息：正文/角色/顺序不可变，只允许 active -> withdrawn
 CREATE TRIGGER trg_investigation_messages_no_content_update BEFORE UPDATE OF
-  investigation_id, seq, role, content, client_command_id, parent_message_id, created_at ON investigation_messages
+  investigation_id, attempt_id, seq, role, content, client_command_id, parent_message_id, created_at ON investigation_messages
 BEGIN SELECT RAISE(ABORT, 'investigation_message content is immutable'); END;
 CREATE TRIGGER trg_investigation_messages_no_delete BEFORE DELETE ON investigation_messages
 BEGIN SELECT RAISE(ABORT, 'investigation_messages history is not deletable'); END;
@@ -1219,9 +1612,20 @@ CREATE TRIGGER trg_label_contracts_no_content_update BEFORE UPDATE OF
   version, yaml_body, contract_json, digest, parser_version, schema_version, created_at ON label_contracts
 BEGIN SELECT RAISE(ABORT, 'label_contract content is immutable'); END;
 
--- 12.9 连接：name/type 不可变
+-- 12.9 连接：name/type 不可变；Business System ↔ Kubernetes binding 只允许 Active -> Retired。
 CREATE TRIGGER trg_connections_no_identity_update BEFORE UPDATE OF name, type, created_at ON connections
 BEGIN SELECT RAISE(ABORT, 'connection identity is immutable'); END;
+CREATE TRIGGER trg_business_system_kubernetes_connection_origin_immutable BEFORE UPDATE OF
+  business_system_id, connection_id, created_by, created_at ON business_system_kubernetes_connections
+BEGIN SELECT RAISE(ABORT, 'business_system kubernetes connection origin is immutable'); END;
+CREATE TRIGGER trg_business_system_kubernetes_connection_retire_only BEFORE UPDATE ON business_system_kubernetes_connections
+WHEN NOT (OLD.state = 'Active' AND NEW.state = 'Retired'
+          AND NEW.row_version = OLD.row_version + 1
+          AND OLD.retired_by IS NULL AND NEW.retired_by IS NOT NULL
+          AND OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'business_system kubernetes connection update must be Active -> Retired'); END;
+CREATE TRIGGER trg_business_system_kubernetes_connections_no_delete BEFORE DELETE ON business_system_kubernetes_connections
+BEGIN SELECT RAISE(ABORT, 'business_system kubernetes connection history is not deletable'); END;
 
 -- 12.10 浏览器身份：业务系统绑定不可变
 CREATE TRIGGER trg_browser_identities_no_system_update BEFORE UPDATE OF business_system_id, created_at ON browser_identities
@@ -1232,25 +1636,45 @@ CREATE TRIGGER trg_observed_resources_no_identity_update BEFORE UPDATE OF
   business_system_id, discovery_key, identity_key, identity_digest, created_at ON observed_resources
 BEGIN SELECT RAISE(ABORT, 'observed_resource identity is immutable'); END;
 
--- 12.12 Artifact：物理 blob 身份不可改写；逻辑 Artifact 的来源字段不可改写，
--- 只允许保留字段（expires_at/body_expired）变化（DATA-ARTIFACT-003/005）
+-- 12.12 Artifact：物理 blob 身份不可改写；逻辑 Artifact 的来源与到期时刻不可改写，
+-- body_expired 只允许由 0 单向收口为 1（DATA-ARTIFACT-003/005）。
 CREATE TRIGGER trg_artifact_blobs_no_update BEFORE UPDATE ON artifact_blobs
 BEGIN SELECT RAISE(ABORT, 'artifact_blob content addressing is immutable'); END;
+CREATE TRIGGER trg_artifact_blobs_no_delete BEFORE DELETE ON artifact_blobs
+BEGIN SELECT RAISE(ABORT, 'artifact_blobs metadata is permanent; GC deletes only the physical body'); END;
 CREATE TRIGGER trg_artifacts_origin_immutable BEFORE UPDATE OF
-  blob_id, kind, sensitive, retention_kind, owner_type, owner_id, created_by, created_at ON artifacts
-BEGIN SELECT RAISE(ABORT, 'artifact logical origin is immutable'); END;
+  blob_id, kind, media_type, sensitive, retention_kind, owner_type, owner_id, expires_at, created_by, created_at ON artifacts
+BEGIN SELECT RAISE(ABORT, 'artifact logical origin and expiry are immutable'); END;
+CREATE TRIGGER trg_artifacts_body_expired_sticky BEFORE UPDATE OF body_expired ON artifacts
+WHEN OLD.body_expired = 1 AND NEW.body_expired <> 1
+BEGIN SELECT RAISE(ABORT, 'expired artifact body cannot be revived'); END;
+CREATE TRIGGER trg_artifacts_owner_closure BEFORE INSERT ON artifacts
+WHEN NOT (
+  (NEW.kind = 'report_file' AND NEW.owner_type = 'investigation_message' AND EXISTS (SELECT 1 FROM investigation_messages m WHERE m.id = NEW.owner_id))
+  OR (NEW.kind = 'report_file' AND NEW.owner_type = 'evidence' AND EXISTS (SELECT 1 FROM evidence e WHERE e.id = NEW.owner_id))
+  OR (NEW.kind = 'tool_result' AND NEW.owner_type = 'tool_call' AND EXISTS (SELECT 1 FROM tool_calls t WHERE t.id = NEW.owner_id))
+  OR (NEW.kind IN ('screenshot','trace') AND NEW.owner_type = 'browser_operation' AND EXISTS (SELECT 1 FROM browser_operations b WHERE b.id = NEW.owner_id))
+  OR (NEW.kind = 'report_file' AND NEW.owner_type = 'inspection_report' AND EXISTS (SELECT 1 FROM inspection_reports r WHERE r.id = NEW.owner_id))
+  OR (NEW.kind = 'report_file' AND NEW.owner_type = 'backup' AND EXISTS (SELECT 1 FROM backups b WHERE b.id = NEW.owner_id))
+  OR (NEW.kind = 'attachment' AND NEW.owner_type = 'source_material' AND EXISTS (SELECT 1 FROM source_materials s WHERE s.id = NEW.owner_id))
+)
+BEGIN SELECT RAISE(ABORT, 'artifact kind/owner_type/owner_id must reference an existing compatible authority row'); END;
 
 -- 12.13 浏览器操作：边界字段不可变，结果/结束时间可更新
 CREATE TRIGGER trg_browser_operations_no_origin_update BEFORE UPDATE OF
   identity_id, kind, actor_type, actor_id, started_at ON browser_operations
 BEGIN SELECT RAISE(ABORT, 'browser_operation origin is immutable'); END;
 
--- 12.14 模型/工具调用：归属与签名不可变，状态/结果可更新
+-- 12.14 模型/工具调用：每行是一条物理请求/执行事实；归属与签名不可变，只允许状态/result 收口。
 CREATE TRIGGER trg_model_calls_no_origin_update BEFORE UPDATE OF
-  attempt_id, call_seq, model_id, prompt_digest, tool_schema_digest, input_snapshot_digest, started_at ON model_calls
+  attempt_id, call_seq, retry_seq, operation, model_id, connection_grant_id,
+  prompt_renderer_version, agent_version, prompt_digest, tool_schema_version, tool_schema_digest,
+  input_snapshot_digest, rendered_request_digest, context_budget_tokens, max_output_tokens, estimated_input_tokens,
+  evicted_turn_count, started_at ON model_calls
 BEGIN SELECT RAISE(ABORT, 'model_call origin is immutable'); END;
 CREATE TRIGGER trg_tool_calls_no_origin_update BEFORE UPDATE OF
-  attempt_id, call_seq, tool_name, tool_version, arguments_json, created_at ON tool_calls
+  attempt_id, model_call_id, call_seq, tool_index, provider_tool_call_id, tool_name,
+  tool_version, arguments_json, arguments_digest, execution_mode, failure_mode, created_at ON tool_calls
 BEGIN SELECT RAISE(ABORT, 'tool_call origin is immutable'); END;
 
 -- 12.15 用户：auth_revision 必须严格递增（账号变更裁决依据）
@@ -1315,6 +1739,8 @@ BEGIN
   INSERT INTO knowledge_fts (knowledge_fts, rowid, title, body)
   VALUES ('delete', OLD.knowledge_version_id, OLD.title, OLD.body);
 END;
+CREATE TRIGGER trg_knowledge_search_docs_no_update BEFORE UPDATE ON knowledge_search_docs
+BEGIN SELECT RAISE(ABORT, 'knowledge_search_docs is an immutable eligibility projection; delete and insert a new version projection'); END;
 
 -- 12.22 稳定身份 key / 登录名：不可改写
 CREATE TRIGGER trg_users_username_immutable BEFORE UPDATE OF username ON users
@@ -1342,7 +1768,8 @@ CREATE TRIGGER trg_inspection_runs_origin_immutable BEFORE UPDATE OF
   trigger_kind, scheduled_for, rerun_of_id, journey_catalog_digest, journey_catalog_version, created_at ON inspection_runs
 BEGIN SELECT RAISE(ABORT, 'inspection_run binding is immutable'); END;
 CREATE TRIGGER trg_execution_attempts_origin_immutable BEFORE UPDATE OF
-  attempt_type, scope_type, scope_id, plan_key, check_key, created_at ON execution_attempts
+  attempt_type, scope_type, scope_id, plan_key, check_key, requested_by_tool_call_id,
+  quoin_release_version, created_at ON execution_attempts
 BEGIN SELECT RAISE(ABORT, 'execution_attempt origin is immutable'); END;
 CREATE TRIGGER trg_alert_occurrence_labels_no_update BEFORE UPDATE ON alert_occurrence_labels
 BEGIN SELECT RAISE(ABORT, 'alert_occurrence_labels are immutable'); END;
@@ -1373,6 +1800,9 @@ BEGIN SELECT RAISE(ABORT, 'business_systems row_version must increase exactly by
 CREATE TRIGGER trg_connections_row_version_increment BEFORE UPDATE ON connections
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'connections row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_business_system_kubernetes_connections_row_version_increment BEFORE UPDATE ON business_system_kubernetes_connections
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'business_system_kubernetes_connections row_version must increase exactly by 1'); END;
 CREATE TRIGGER trg_browser_identities_row_version_increment BEFORE UPDATE ON browser_identities
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'browser_identities row_version must increase exactly by 1'); END;
@@ -1643,13 +2073,7 @@ BEGIN SELECT RAISE(ABORT, 'withdrawn message cannot be reactivated'); END;
 CREATE TRIGGER trg_alert_source_credentials_origin_immutable BEFORE UPDATE OF
   source_id, digest, created_at ON alert_source_credentials
 BEGIN SELECT RAISE(ABORT, 'alert_source_credential origin is immutable'); END;
--- 连接绑定的 revision/generation 一旦非空即不可改写（派发时绑定；DATA-CONN-002）
-CREATE TRIGGER trg_execution_attempts_binding_immutable BEFORE UPDATE OF connection_revision_id ON execution_attempts
-WHEN OLD.connection_revision_id IS NOT NULL AND NEW.connection_revision_id <> OLD.connection_revision_id
-BEGIN SELECT RAISE(ABORT, 'attempt connection binding is immutable once set'); END;
-CREATE TRIGGER trg_execution_attempts_credential_immutable BEFORE UPDATE OF credential_generation_id ON execution_attempts
-WHEN OLD.credential_generation_id IS NOT NULL AND NEW.credential_generation_id <> OLD.credential_generation_id
-BEGIN SELECT RAISE(ABORT, 'attempt credential binding is immutable once set'); END;
+-- Attempt 可追加多条不可变 attempt_connection_grants；execution_attempts 不再携带单连接伪权威。
 -- 备份记录是审计等价历史：禁止 UPDATE（DATA-BACKUP-007）
 CREATE TRIGGER trg_backups_no_update BEFORE UPDATE ON backups
 BEGIN SELECT RAISE(ABORT, 'backups is append-only'); END;
@@ -1662,6 +2086,37 @@ BEGIN SELECT RAISE(ABORT, 'runtime_slot key is fixed'); END;
 CREATE TRIGGER trg_browser_operations_result_immutable BEFORE UPDATE OF result, ended_at ON browser_operations
 WHEN OLD.result IS NOT NULL AND (NEW.result IS NOT OLD.result OR NEW.ended_at IS NOT OLD.ended_at)
 BEGIN SELECT RAISE(ABORT, 'browser_operation result is final once set; result/ended_at cannot be cleared or rewritten'); END;
+CREATE TRIGGER trg_browser_operations_complete_running_attempt BEFORE UPDATE OF result ON browser_operations
+WHEN OLD.result IS NULL AND NEW.result IS NOT NULL AND NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts child
+  WHERE child.id = NEW.attempt_id AND child.state = 'Running'
+    AND (
+      child.attempt_type = 'inspection_collection'
+      OR (child.attempt_type = 'browser_exploration' AND EXISTS (
+        SELECT 1 FROM tool_calls t JOIN execution_attempts parent ON parent.id = t.attempt_id
+        WHERE t.id = child.requested_by_tool_call_id
+          AND ((t.status = 'running' AND parent.state = 'Running')
+            OR NEW.result IN ('cancelled','interrupted'))
+      ))
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'browser operation may complete only while its child Attempt is Running and its parent browser request is valid'); END;
+-- 子 Attempt 一旦离开 Running，必须先在同一语句触发链中机械关闭活动 Browser Operation；
+-- 否则 result=NULL 会永久占用 Browser Identity，并阻断 Lintel replacement fence。
+CREATE TRIGGER trg_execution_attempts_close_browser_operation_before_terminal
+BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.state = 'Running' AND NEW.state IN ('Cancelling','Failed','Cancelled','Interrupted')
+BEGIN
+  UPDATE browser_operations
+  SET result = CASE
+        WHEN NEW.state = 'Interrupted' THEN 'interrupted'
+        WHEN NEW.state IN ('Cancelling','Cancelled') THEN 'cancelled'
+        ELSE 'failed'
+      END,
+      ended_at = COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      row_version = row_version + 1
+  WHERE attempt_id = OLD.id AND result IS NULL;
+END;
 -- Embedding generation 来源字段不可变；vector_dim 一旦设置或该 generation 已有 embeddings 即不可变更
 CREATE TRIGGER trg_embedding_generations_origin_immutable BEFORE UPDATE OF
   model_name, model_version, generation, created_at ON embedding_generations
@@ -1670,11 +2125,29 @@ CREATE TRIGGER trg_embedding_generations_vector_dim_immutable BEFORE UPDATE OF v
 WHEN (OLD.vector_dim IS NOT NULL AND NEW.vector_dim <> OLD.vector_dim)
   OR (EXISTS (SELECT 1 FROM embeddings e WHERE e.embedding_generation_id = OLD.id) AND NEW.vector_dim IS NOT OLD.vector_dim)
 BEGIN SELECT RAISE(ABORT, 'embedding_generation vector_dim is immutable once set or embeddings exist'); END;
+CREATE TRIGGER trg_embedding_generations_insert_building BEFORE INSERT ON embedding_generations
+WHEN NEW.state <> 'building'
+BEGIN SELECT RAISE(ABORT, 'embedding_generation must be created building'); END;
+CREATE TRIGGER trg_embedding_generations_state_transition BEFORE UPDATE OF state ON embedding_generations
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'building' AND NEW.state IN ('current','retired'))
+  OR (OLD.state = 'current' AND NEW.state = 'retired')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid embedding_generation state transition'); END;
 
 -- 12.28 生命周期终态不可变：终态只可到达、不可离开（非终态间转换由应用按状态机推进）
+CREATE TRIGGER trg_initial_analyses_insert_queued BEFORE INSERT ON initial_analyses
+WHEN NEW.state <> 'Queued'
+BEGIN SELECT RAISE(ABORT, 'initial_analysis must be created Queued'); END;
 CREATE TRIGGER trg_initial_analyses_terminal_immutable BEFORE UPDATE OF state ON initial_analyses
 WHEN OLD.state IN ('Succeeded','Failed','Cancelled','Interrupted') AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'initial_analysis terminal state is immutable'); END;
+CREATE TRIGGER trg_initial_analyses_state_transition BEFORE UPDATE OF state ON initial_analyses
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'Running' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted'))
+)
+BEGIN SELECT RAISE(ABORT, 'invalid initial_analysis state transition'); END;
 CREATE TRIGGER trg_inspection_runs_insert_state BEFORE INSERT ON inspection_runs
 WHEN NEW.state NOT IN ('Queued','SkippedOverlap')
   OR (NEW.state = 'SkippedOverlap' AND (NEW.trigger_kind <> 'schedule' OR NEW.scheduled_for IS NULL))
@@ -1715,15 +2188,164 @@ BEGIN SELECT RAISE(ABORT, 'completed inspection_run must freeze one valid result
 CREATE TRIGGER trg_execution_attempts_terminal_immutable BEFORE UPDATE OF state ON execution_attempts
 WHEN OLD.state IN ('Succeeded','Failed','Cancelled','Interrupted') AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'execution_attempt terminal state is immutable'); END;
+CREATE TRIGGER trg_execution_attempts_state_transition BEFORE UPDATE OF state ON execution_attempts
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'Queued' AND NEW.state IN ('Assigned','Failed','Cancelled'))
+  OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'Running' AND NEW.state IN ('Succeeded','Failed','Cancelling','Interrupted'))
+  OR (OLD.state = 'Cancelling' AND NEW.state = 'Cancelled')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid execution_attempt state transition'); END;
+CREATE TRIGGER trg_model_call_output_closure BEFORE INSERT ON model_call_outputs
+WHEN NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.id = NEW.model_call_id AND m.status = 'running')
+BEGIN SELECT RAISE(ABORT, 'model call output must be sealed while its physical request is running'); END;
+CREATE TRIGGER trg_model_call_output_terminal_coupling BEFORE INSERT ON model_call_outputs
+WHEN NEW.complete = 1 AND NOT EXISTS (
+  SELECT 1 FROM model_calls m
+  WHERE m.id = NEW.model_call_id
+    AND m.status = 'running'
+    AND m.ended_at IS NULL
+    AND m.termination_reason IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'complete model output requires its Model Call to be nonterminal until the enclosing transaction succeeds it'); END;
+CREATE TRIGGER trg_model_calls_status_transition BEFORE UPDATE OF status ON model_calls
+WHEN NEW.status <> OLD.status AND NOT (OLD.status = 'running' AND NEW.status IN ('succeeded','failed','cancelled'))
+BEGIN SELECT RAISE(ABORT, 'model_call status transition must be running -> terminal'); END;
+CREATE TRIGGER trg_model_call_output_shape BEFORE INSERT ON model_call_outputs
+WHEN EXISTS (
+  SELECT 1 FROM model_calls m
+  WHERE m.id = NEW.model_call_id AND m.operation = 'chat'
+    AND (json_type(NEW.response_json) IS NOT 'object'
+      OR json_type(NEW.response_json, '$.tool_calls') IS NOT 'array')
+)
+BEGIN SELECT RAISE(ABORT, 'chat model response_json must be an object with a tool_calls array, including an empty array'); END;
+CREATE TRIGGER trg_model_call_success_output BEFORE UPDATE OF status ON model_calls
+WHEN NEW.status = 'succeeded' AND NOT EXISTS (
+  SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = NEW.id AND o.complete = 1)
+BEGIN SELECT RAISE(ABORT, 'succeeded model call requires one complete sealed response'); END;
+CREATE TRIGGER trg_model_call_success_input BEFORE UPDATE OF status ON model_calls
+WHEN NEW.status = 'succeeded' AND (
+  NOT EXISTS (SELECT 1 FROM model_call_input_items i WHERE i.model_call_id = NEW.id)
+  OR (NEW.operation = 'chat' AND (
+      NOT EXISTS (SELECT 1 FROM model_call_input_items i WHERE i.model_call_id = NEW.id AND i.synthetic_kind = 'system_contract')
+      OR NOT EXISTS (SELECT 1 FROM model_call_input_items i WHERE i.model_call_id = NEW.id AND i.synthetic_kind = 'tool_schema')))
+)
+BEGIN SELECT RAISE(ABORT, 'succeeded model call requires persisted input lineage and chat contract items'); END;
+CREATE TRIGGER trg_model_call_non_success_output BEFORE UPDATE OF status ON model_calls
+WHEN NEW.status IN ('failed','cancelled') AND EXISTS (
+  SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = NEW.id AND o.complete = 1)
+BEGIN SELECT RAISE(ABORT, 'failed or cancelled model call cannot expose a complete response'); END;
 CREATE TRIGGER trg_model_calls_terminal_immutable BEFORE UPDATE OF status ON model_calls
 WHEN OLD.status IN ('succeeded','failed','cancelled') AND NEW.status <> OLD.status
 BEGIN SELECT RAISE(ABORT, 'model_call terminal status is immutable'); END;
+CREATE TRIGGER trg_model_calls_terminal_result_immutable BEFORE UPDATE OF
+  provider_request_id, usage_json, latency_ms, termination_reason, ended_at ON model_calls
+WHEN OLD.status IN ('succeeded','failed','cancelled') AND (
+  NEW.provider_request_id IS NOT OLD.provider_request_id OR NEW.usage_json IS NOT OLD.usage_json
+  OR NEW.latency_ms IS NOT OLD.latency_ms OR NEW.termination_reason IS NOT OLD.termination_reason
+  OR NEW.ended_at IS NOT OLD.ended_at)
+BEGIN SELECT RAISE(ABORT, 'model_call terminal result is immutable'); END;
+CREATE TRIGGER trg_model_calls_provider_request_id_once BEFORE UPDATE OF provider_request_id ON model_calls
+WHEN OLD.provider_request_id IS NOT NULL OR NEW.provider_request_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'provider_request_id may only be recorded once'); END;
+CREATE TRIGGER trg_model_calls_insert_running BEFORE INSERT ON model_calls
+WHEN NEW.status <> 'running'
+BEGIN SELECT RAISE(ABORT, 'model_call must be created running before provider I/O'); END;
+CREATE TRIGGER trg_model_call_retry_closure BEFORE INSERT ON model_calls
+WHEN (NEW.retry_seq = 0 AND EXISTS (
+       SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.attempt_id AND m.call_seq = NEW.call_seq))
+   OR (NEW.retry_seq > 0 AND NOT EXISTS (
+       SELECT 1 FROM model_calls prior
+       WHERE prior.attempt_id = NEW.attempt_id AND prior.call_seq = NEW.call_seq
+         AND prior.retry_seq = NEW.retry_seq - 1 AND prior.status = 'failed'
+         AND NOT EXISTS (SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = prior.id)
+         AND prior.operation = NEW.operation AND prior.model_id = NEW.model_id
+         AND prior.connection_grant_id = NEW.connection_grant_id
+         AND ((prior.termination_reason = 'context_overflow'
+               AND NEW.input_snapshot_digest = prior.input_snapshot_digest
+               AND NEW.evicted_turn_count > prior.evicted_turn_count
+               AND NEW.rendered_request_digest <> prior.rendered_request_digest)
+OR (prior.termination_reason IN ('transport_error','timeout','rate_limited')
+                AND NEW.input_snapshot_digest = prior.input_snapshot_digest
+               AND NEW.evicted_turn_count = prior.evicted_turn_count
+               AND NEW.rendered_request_digest = prior.rendered_request_digest))))
+BEGIN SELECT RAISE(ABORT, 'model call retry must follow the immediately prior immutable failed physical request'); END;
+CREATE TRIGGER trg_model_call_sequence_closure BEFORE INSERT ON model_calls
+WHEN NEW.retry_seq = 0 AND EXISTS (
+  SELECT 1 FROM execution_attempts a
+  WHERE a.id = NEW.attempt_id AND a.attempt_type <> 'model_provider_probe'
+) AND (
+  NEW.call_seq < 1
+  OR (NEW.call_seq = 1 AND EXISTS (
+    SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.attempt_id
+  ))
+  OR (NEW.call_seq > 1 AND NOT EXISTS (
+    SELECT 1 FROM model_calls prior
+    JOIN model_call_outputs output ON output.model_call_id = prior.id AND output.complete = 1
+    WHERE prior.attempt_id = NEW.attempt_id
+      AND prior.call_seq = NEW.call_seq - 1
+      AND prior.status = 'succeeded'
+      AND (
+        NEW.operation = 'embedding'
+        OR (
+          json_type(output.response_json, '$.tool_calls') = 'array'
+          AND json_array_length(output.response_json, '$.tool_calls') =
+              (SELECT count(*) FROM tool_calls t WHERE t.model_call_id = prior.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM tool_calls t
+            WHERE t.model_call_id = prior.id
+              AND (t.status NOT IN ('succeeded','failed','cancelled')
+                OR (t.status = 'failed' AND t.failure_mode = 'fail_attempt'))
+          )
+        )
+      )
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'model call sequence must start at one and continue only after every proposed Tool Call is materialized, terminal, and continuable'); END;
+CREATE TRIGGER trg_tool_calls_insert_pending BEFORE INSERT ON tool_calls
+WHEN NEW.status <> 'pending'
+BEGIN SELECT RAISE(ABORT, 'tool_call must be created pending before any execution'); END;
+CREATE TRIGGER trg_tool_calls_status_transition BEFORE UPDATE OF status ON tool_calls
+WHEN NEW.status <> OLD.status AND NOT (
+  (OLD.status = 'pending' AND NEW.status IN ('running','cancelled'))
+  OR (OLD.status = 'running' AND NEW.status IN ('succeeded','failed','cancelled')))
+BEGIN SELECT RAISE(ABORT, 'tool_call status transition must follow pending -> running -> terminal'); END;
+CREATE TRIGGER trg_tool_call_begin_sequence BEFORE UPDATE OF status ON tool_calls
+WHEN OLD.status = 'pending' AND NEW.status = 'running' AND (
+  NOT EXISTS (SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Running')
+  OR EXISTS (SELECT 1 FROM tool_calls prior
+             WHERE prior.model_call_id = NEW.model_call_id AND prior.tool_index < NEW.tool_index
+               AND (prior.status NOT IN ('succeeded','failed','cancelled')
+                    OR (prior.status = 'failed' AND prior.failure_mode = 'fail_attempt')))
+)
+BEGIN SELECT RAISE(ABORT, 'Tool Call may start only while its Attempt is Running and every previous Tool Call is terminal and continuable'); END;
 CREATE TRIGGER trg_tool_calls_terminal_immutable BEFORE UPDATE OF status ON tool_calls
 WHEN OLD.status IN ('succeeded','failed','cancelled') AND NEW.status <> OLD.status
 BEGIN SELECT RAISE(ABORT, 'tool_call terminal status is immutable'); END;
+CREATE TRIGGER trg_tool_calls_terminal_result_immutable BEFORE UPDATE OF
+  result_json, result_artifact_id, error_detail, started_at, ended_at ON tool_calls
+WHEN OLD.status IN ('succeeded','failed','cancelled') AND (
+  NEW.result_json IS NOT OLD.result_json OR NEW.result_artifact_id IS NOT OLD.result_artifact_id
+  OR NEW.error_detail IS NOT OLD.error_detail OR NEW.started_at IS NOT OLD.started_at OR NEW.ended_at IS NOT OLD.ended_at)
+BEGIN SELECT RAISE(ABORT, 'tool_call terminal result is immutable'); END;
+CREATE TRIGGER trg_tool_call_result_artifact_closure BEFORE UPDATE OF status, result_artifact_id ON tool_calls
+WHEN NEW.result_artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM artifacts ar WHERE ar.id = NEW.result_artifact_id
+    AND ar.kind = 'tool_result' AND ar.retention_kind = 'generated'
+    AND ar.owner_type = 'tool_call' AND ar.owner_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'tool_call result Artifact must be its generated tool_result Artifact'); END;
+CREATE TRIGGER trg_knowledge_import_batches_insert_processing BEFORE INSERT ON knowledge_import_batches
+WHEN NEW.state <> 'Processing'
+BEGIN SELECT RAISE(ABORT, 'knowledge_import_batch must be created Processing'); END;
 CREATE TRIGGER trg_knowledge_import_batches_terminal_immutable BEFORE UPDATE OF state ON knowledge_import_batches
 WHEN OLD.state IN ('Failed','Completed','Cancelled') AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'knowledge_import_batch terminal state is immutable'); END;
+CREATE TRIGGER trg_knowledge_import_batches_state_transition BEFORE UPDATE OF state ON knowledge_import_batches
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'Processing' AND NEW.state IN ('AwaitingConfirmation','Failed','Cancelled'))
+  OR (OLD.state = 'AwaitingConfirmation' AND NEW.state IN ('Processing','Completed','Cancelled'))
+)
+BEGIN SELECT RAISE(ABORT, 'invalid knowledge_import_batch state transition'); END;
 CREATE TRIGGER trg_knowledge_candidates_terminal_immutable BEFORE UPDATE OF state ON knowledge_candidates
 WHEN OLD.state IN ('Confirmed','Excluded','Superseded','SourceInvalid') AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'knowledge_candidate terminal state is immutable'); END;
@@ -2011,7 +2633,7 @@ BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential can only be inserted for
 -- （旧 Attempt 已终态/未派发/替换后 ABA/epoch 不符一律拒绝 commit，只能 rejected）；
 -- artifact_id/committed_at 一旦提交不可改；历史不可删除（DATA-ARTIFACT-006）。
 CREATE TRIGGER trg_runtime_artifact_uploads_origin_immutable BEFORE UPDATE OF
-  upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, retention_kind, sensitive, size_bytes, sha256, created_at ON runtime_artifact_uploads
+  upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, media_type, retention_kind, sensitive, size_bytes, sha256, created_at ON runtime_artifact_uploads
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload origin is immutable'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_insert_state BEFORE INSERT ON runtime_artifact_uploads
 WHEN NEW.state <> 'uploading'
@@ -2030,6 +2652,7 @@ WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
     AND a.boot_id IS NOT NULL AND a.boot_id = NEW.boot_id
     AND a.connection_epoch IS NOT NULL AND a.connection_epoch = NEW.connection_epoch
     AND ar.kind = NEW.kind
+    AND ar.media_type = NEW.media_type
     AND ar.retention_kind = NEW.retention_kind
     AND ar.sensitive = NEW.sensitive
     AND ar.owner_type = NEW.owner_type
@@ -2037,12 +2660,40 @@ WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
     AND b.sha256 = NEW.sha256
     AND b.size_bytes = NEW.size_bytes
 )
-BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires the attempt Running with matching non-null boot_id/connection_epoch and an artifact exactly matching kind/retention_kind/sensitive/owner_type/owner_id/sha256/size_bytes'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires the attempt Running with matching non-null boot_id/connection_epoch and an artifact exactly matching kind/media_type/retention_kind/sensitive/owner_type/owner_id/sha256/size_bytes'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_tool_result_owner BEFORE INSERT ON runtime_artifact_uploads
+WHEN NEW.kind = 'tool_result' AND (
+  NEW.owner_type <> 'tool_call' OR NEW.retention_kind <> 'generated' OR NOT EXISTS (
+    SELECT 1 FROM tool_calls t WHERE t.id = NEW.owner_id AND t.attempt_id = NEW.attempt_id))
+BEGIN SELECT RAISE(ABORT, 'tool_result upload must be generated and owned by a Tool Call of the same Attempt'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_result_immutable BEFORE UPDATE OF artifact_id, committed_at ON runtime_artifact_uploads
 WHEN OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.committed_at IS NOT OLD.committed_at)
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload result is immutable once committed'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_no_delete BEFORE DELETE ON runtime_artifact_uploads
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_uploads ledger is not deletable'); END;
+
+CREATE TRIGGER trg_attempt_artifact_grants_closure BEFORE INSERT ON attempt_artifact_grants
+WHEN NOT EXISTS (SELECT 1 FROM execution_attempts a JOIN artifacts ar ON ar.id = NEW.artifact_id
+                 WHERE a.id = NEW.attempt_id AND ar.body_expired = 0
+                   AND ((NEW.source_kind = 'input_snapshot' AND a.state = 'Queued')
+                     OR (NEW.source_kind IN ('tool_result','evidence') AND a.state = 'Running')))
+  OR (NEW.source_kind = 'input_snapshot' AND NOT EXISTS (
+      SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id
+      WHERE s.id = NEW.source_id AND s.attempt_id = NEW.attempt_id AND i.artifact_id = NEW.artifact_id))
+  OR (NEW.source_kind = 'tool_result' AND NOT EXISTS (
+      SELECT 1 FROM tool_calls t JOIN artifacts ar ON ar.id = NEW.artifact_id
+      WHERE t.id = NEW.source_id AND t.attempt_id = NEW.attempt_id AND t.status = 'succeeded'
+        AND ar.owner_type = 'tool_call' AND ar.owner_id = t.id))
+  OR (NEW.source_kind = 'evidence' AND NOT EXISTS (
+      SELECT 1 FROM evidence e WHERE e.id = NEW.source_id AND e.artifact_id = NEW.artifact_id
+        AND (e.attempt_id = NEW.attempt_id OR EXISTS (
+          SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id
+          WHERE s.attempt_id = NEW.attempt_id AND i.evidence_id = e.id))))
+BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grant must bind a Running Attempt to an unexpired input, Tool Result, or Evidence Artifact'); END;
+CREATE TRIGGER trg_attempt_artifact_grants_no_update BEFORE UPDATE ON attempt_artifact_grants
+BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are append-only'); END;
+CREATE TRIGGER trg_attempt_artifact_grants_no_delete BEFORE DELETE ON attempt_artifact_grants
+BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are retained as immutable access lineage'); END;
 
 -- 替换 fence（Q237「有 active task 时必须先等待完成或明确取消才能替换」）：
 -- Execution Attempt 可由 Plinth 或 Lintel 承载（browser_exploration 与巡检 Journey 的子 Attempt
@@ -2094,7 +2745,10 @@ WHEN NEW.requested_by_tool_call_id IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM tool_calls tc
   JOIN execution_attempts parent ON parent.id = tc.attempt_id
   WHERE tc.id = NEW.requested_by_tool_call_id
-    AND parent.runtime_slot = 'plinth'
+    AND parent.runtime_slot = 'plinth' AND parent.state = 'Running'
+    AND parent.attempt_type = 'investigation' AND parent.scope_type = 'investigation'
+    AND NEW.scope_type = 'investigation' AND NEW.scope_id = parent.scope_id
+    AND tc.execution_mode = 'quoin_browser' AND tc.status = 'running'
 )
 BEGIN SELECT RAISE(ABORT, 'cross-runtime sub-execution requestor must be a tool call of a plinth-dispatched parent attempt'); END;
 CREATE TRIGGER trg_execution_attempts_requestor_immutable BEFORE UPDATE OF requested_by_tool_call_id ON execution_attempts
@@ -2112,11 +2766,11 @@ WHEN NOT (
   OR (NEW.kind = 'exploration' AND NEW.attempt_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM execution_attempts a
         WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
-          AND a.scope_type = 'investigation' AND a.check_key IS NULL))
+          AND a.scope_type = 'investigation' AND a.check_key IS NULL AND a.state = 'Running'))
   OR (NEW.kind = 'journey' AND NEW.attempt_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM execution_attempts a
         WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-          AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL)
+          AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL AND a.state = 'Running')
       AND EXISTS (
         SELECT 1 FROM browser_identities bi JOIN execution_attempts a ON a.id = NEW.attempt_id
         WHERE bi.id = NEW.identity_id AND (
@@ -2129,11 +2783,11 @@ WHEN OLD.attempt_id IS NULL AND NEW.attempt_id IS NOT NULL AND NOT (
   (NEW.kind = 'exploration' AND EXISTS (
      SELECT 1 FROM execution_attempts a
      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
-       AND a.scope_type = 'investigation' AND a.check_key IS NULL))
+       AND a.scope_type = 'investigation' AND a.check_key IS NULL AND a.state = 'Running'))
   OR (NEW.kind = 'journey' AND EXISTS (
      SELECT 1 FROM execution_attempts a
      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-       AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL)
+       AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL AND a.state = 'Running')
      AND EXISTS (
        SELECT 1 FROM browser_identities bi JOIN execution_attempts a ON a.id = NEW.attempt_id
        WHERE bi.id = NEW.identity_id AND (
@@ -2185,6 +2839,22 @@ CREATE TRIGGER trg_config_test_runs_running_requires_evidence_at BEFORE UPDATE O
 WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
 BEGIN SELECT RAISE(ABORT, 'config_test_run evidence_at must be set when entering Running'); END;
 -- Passed 证据：绑定配置版本的全部 check 都有 ok+Evidence 结果行（且无多余/非 ok 行）。
+CREATE TRIGGER trg_config_test_run_check_result_closure BEFORE INSERT ON config_test_run_check_results
+WHEN NOT EXISTS (
+  SELECT 1 FROM config_test_runs tr
+  JOIN config_plans p ON p.config_version_id = tr.config_version_id AND p.plan_key = NEW.plan_key
+  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+  WHERE tr.id = NEW.test_run_id AND tr.state = 'Running'
+    AND ((c.kind = 'promql' AND NEW.attempt_id IS NULL)
+      OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id
+          AND a.attempt_type = 'inspection_collection' AND a.scope_type = 'config_test_run'
+          AND a.scope_id = NEW.test_run_id AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
+          AND a.state IN ('Succeeded','Failed','Cancelled','Interrupted'))))
+    AND (NEW.evidence_id IS NULL OR EXISTS (
+      SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NEW.attempt_id))
+)
+BEGIN SELECT RAISE(ABORT, 'config test result must close over the same configured check, browser Attempt, and Evidence'); END;
 CREATE TRIGGER trg_config_test_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_test_runs
 WHEN NEW.state = 'Passed' AND OLD.state <> 'Passed' AND (
   EXISTS (SELECT 1 FROM config_checks c JOIN config_plans p ON p.id = c.plan_id
@@ -2395,13 +3065,29 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'inspection_run must bind the enabled business system current published config, configured plan, and current label contract'); END;
 
--- 12.40 execution_attempts 作用域闭合（DATA-ATTEMPT-002）：run_check/config_test_run 子 Attempt 的
--- scope 必须处于可接收子执行的 active 状态且复合检查身份必须引用该 scope 绑定配置版本中的 browser check；Config Test Run
--- 覆盖整个配置版本，必须同时携带 plan_key+check_key；普通 run_check 的 plan 由 Inspection Run 唯一确定。
--- PromQL 由 Quoin 直接采集，不得虚构 Lintel inspection_collection Attempt（拒绝 ghost scope / bogus/wrong-kind check）。
--- attempt_type/scope_type/plan_key/check_key 是 origin 字段不可改（trg_execution_attempts_origin_immutable），INSERT 检查足够。
+-- 12.40 execution_attempts 统一从 Queued 创建；输入快照/grant 依赖 Attempt ID，禁止绕过派发事务直接出生为 active/terminal。
+CREATE TRIGGER trg_execution_attempts_insert_queued BEFORE INSERT ON execution_attempts
+WHEN NEW.state <> 'Queued'
+BEGIN SELECT RAISE(ABORT, 'execution_attempt must be created Queued before input freeze and dispatch'); END;
+
+-- execution_attempts 作用域闭合（DATA-ATTEMPT-002）：每种固定工作模式只引用其权威 scope；
+-- run_check/config_test_run 还必须引用 scope 当前配置中的 browser check。PromQL 由 Quoin 直接采集，
+-- 不得虚构 Lintel inspection_collection Attempt。
 CREATE TRIGGER trg_execution_attempts_scope_exists BEFORE INSERT ON execution_attempts
-WHEN (NEW.scope_type = 'config_test_run' AND NOT EXISTS (
+WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
+        SELECT 1 FROM initial_analyses a WHERE a.id = NEW.scope_id AND a.state IN ('Queued','Running')))
+   OR (NEW.scope_type = 'investigation' AND NOT EXISTS (
+        SELECT 1 FROM investigations i WHERE i.id = NEW.scope_id))
+   OR (NEW.scope_type = 'run' AND NOT EXISTS (
+        SELECT 1 FROM inspection_runs r WHERE r.id = NEW.scope_id
+          AND r.state IN ('Running','Completed','CompletedWithGaps')))
+   OR (NEW.scope_type = 'knowledge_import_batch' AND NOT EXISTS (
+        SELECT 1 FROM knowledge_import_batches b WHERE b.id = NEW.scope_id AND b.state = 'Processing'))
+   OR (NEW.scope_type = 'embedding_generation' AND NOT EXISTS (
+        SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id))
+   OR (NEW.scope_type = 'connection' AND NOT EXISTS (
+        SELECT 1 FROM connections c WHERE c.id = NEW.scope_id AND c.type = 'model_provider'))
+   OR (NEW.scope_type = 'config_test_run' AND NOT EXISTS (
         SELECT 1 FROM config_test_runs t JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
         JOIN config_checks c ON c.plan_id = p.id
         WHERE t.id = NEW.scope_id AND t.state = 'Running'
@@ -2412,7 +3098,337 @@ WHEN (NEW.scope_type = 'config_test_run' AND NOT EXISTS (
         JOIN config_checks c ON c.plan_id = p.id
         WHERE r.id = NEW.scope_id AND r.state = 'Running'
           AND c.check_key = NEW.check_key AND c.kind = 'browser' AND NEW.check_key IS NOT NULL))
-BEGIN SELECT RAISE(ABORT, 'execution_attempt run_check/config_test_run scope must reference a Running run/test_run of the same config version containing the browser check'); END;
+BEGIN SELECT RAISE(ABORT, 'execution_attempt scope must reference the active object required by its fixed work mode'); END;
+
+CREATE TRIGGER trg_browser_exploration_parent_tool BEFORE INSERT ON execution_attempts
+WHEN NEW.attempt_type = 'browser_exploration' AND NOT EXISTS (
+  SELECT 1 FROM tool_calls t JOIN execution_attempts parent ON parent.id = t.attempt_id
+  WHERE t.id = NEW.requested_by_tool_call_id
+    AND t.execution_mode = 'quoin_browser'
+    AND parent.attempt_type = 'investigation'
+    AND parent.scope_type = 'investigation' AND parent.scope_id = NEW.scope_id
+)
+BEGIN SELECT RAISE(ABORT, 'browser exploration must be requested by a quoin_browser Tool Call in the same investigation'); END;
+
+-- 输入快照只在 Queued 阶段创建，schema_kind 按固定 AttemptType 映射到版本化 wire schema；items 之后同事务追加。
+CREATE TRIGGER trg_attempt_input_snapshot_closure BEFORE INSERT ON attempt_input_snapshots
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  WHERE a.id = NEW.attempt_id AND a.state = 'Queued'
+    AND NEW.schema_kind = CASE a.attempt_type
+      WHEN 'initial_analysis' THEN 'initial_analysis_v1'
+      WHEN 'investigation' THEN 'investigation_v1'
+      WHEN 'inspection_analysis' THEN 'inspection_analysis_v1'
+      WHEN 'knowledge_extraction' THEN 'knowledge_extraction_v1'
+      WHEN 'embedding' THEN 'embedding_v1'
+      WHEN 'inspection_collection' THEN 'inspection_collection_v1'
+      WHEN 'browser_exploration' THEN 'browser_exploration_v1'
+      WHEN 'model_provider_probe' THEN 'model_provider_probe_v1'
+    END)
+BEGIN SELECT RAISE(ABORT, 'attempt input snapshot schema_kind must match the versioned schema of the same Queued Attempt type'); END;
+CREATE TRIGGER trg_attempt_input_item_closure BEFORE INSERT ON attempt_input_items
+WHEN NOT EXISTS (
+  SELECT 1 FROM attempt_input_snapshots s JOIN execution_attempts a ON a.id = s.attempt_id
+  WHERE s.id = NEW.snapshot_id AND a.state = 'Queued'
+    AND (NEW.connection_revision_id IS NULL OR (a.attempt_type = 'model_provider_probe' AND EXISTS (
+      SELECT 1 FROM connection_revisions r WHERE r.id = NEW.connection_revision_id AND r.connection_id = a.scope_id))))
+BEGIN SELECT RAISE(ABORT, 'attempt input items may only be frozen for the same Queued Attempt and valid fixed-mode source'); END;
+-- 派发前必须已经存在可重建的输入谱系与固定工作模式版本；Plinth 模型工作还必须绑定真实探测通过的模型 grant。
+CREATE TRIGGER trg_execution_attempts_dispatch_ready BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
+  NOT EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id WHERE s.attempt_id = NEW.id)
+  OR EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id
+             WHERE s.attempt_id = NEW.id AND i.artifact_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM attempt_artifact_grants g
+                               WHERE g.attempt_id = NEW.id AND g.artifact_id = i.artifact_id AND g.source_kind = 'input_snapshot' AND g.source_id = s.id))
+  OR NEW.quoin_release_version = ''
+  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction')
+      AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NULL OR NOT EXISTS (
+        SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'chat_model')))
+  OR (NEW.attempt_type = 'embedding' AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'embedding')))
+  OR (NEW.attempt_type = 'model_provider_probe' AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL
+      OR NOT EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'chat_model')
+      OR NOT EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'embedding')))
+  OR (NEW.runtime_slot = 'lintel' AND NEW.agent_version IS NOT NULL)
+)
+BEGIN SELECT RAISE(ABORT, 'attempt cannot dispatch without frozen input, release binding, and required model grant'); END;
+
+-- Investigation 的 user/assistant 消息都绑定本轮唯一 Attempt；用户消息先创建，成功 proposal 才追加 assistant 消息。
+CREATE TRIGGER trg_investigation_messages_attempt_closure BEFORE INSERT ON investigation_messages
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  WHERE a.id = NEW.attempt_id AND a.attempt_type = 'investigation'
+    AND a.scope_type = 'investigation' AND a.scope_id = NEW.investigation_id
+)
+BEGIN SELECT RAISE(ABORT, 'investigation message must bind an investigation Attempt of the same investigation'); END;
+CREATE TRIGGER trg_investigation_user_message_attempt BEFORE INSERT ON investigation_messages
+WHEN NEW.role = 'user' AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Queued')
+BEGIN SELECT RAISE(ABORT, 'user message must be committed with its newly Queued Attempt'); END;
+CREATE TRIGGER trg_investigation_assistant_message_success BEFORE INSERT ON investigation_messages
+WHEN NEW.role = 'assistant' AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Running')
+BEGIN SELECT RAISE(ABORT, 'assistant message is committed only while its Attempt is Running in the same result transaction'); END;
+
+CREATE TRIGGER trg_initial_analysis_output_attempt BEFORE INSERT ON initial_analysis_outputs
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a JOIN initial_analyses ia ON ia.id = a.scope_id
+  WHERE a.id = NEW.attempt_id AND a.attempt_type = 'initial_analysis' AND a.scope_type = 'analysis'
+    AND ia.id = NEW.analysis_id AND a.state = 'Running'
+)
+BEGIN SELECT RAISE(ABORT, 'initial analysis output must bind its Running analysis Attempt'); END;
+CREATE TRIGGER trg_inspection_report_attempt BEFORE INSERT ON inspection_reports
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id
+    AND a.attempt_type = 'inspection_analysis' AND a.scope_type = 'run' AND a.scope_id = NEW.run_id
+    AND a.state = 'Running'
+)
+BEGIN SELECT RAISE(ABORT, 'inspection report must bind its Running inspection_analysis Attempt'); END;
+
+-- 模型能力、业务系统连接映射与 Attempt grant 必须闭合到同一 connection/revision/generation。
+CREATE TRIGGER trg_model_provider_capabilities_type BEFORE INSERT ON model_provider_capabilities
+WHEN NOT EXISTS (
+  SELECT 1 FROM connection_revisions r
+  JOIN connections c ON c.id = r.connection_id
+  JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = c.id
+  JOIN execution_attempts a ON a.id = NEW.probe_attempt_id
+  WHERE r.id = NEW.connection_revision_id AND c.type = 'model_provider'
+    AND json_extract(r.config_json, '$.chatModelId') = NEW.chat_model_id
+    AND json_extract(r.config_json, '$.embeddingModelId') = NEW.embedding_model_id
+    AND (json_type(r.config_json, '$.contextBudgetTokens') IS NULL
+         OR json_extract(r.config_json, '$.contextBudgetTokens') = NEW.context_budget_tokens)
+    AND (json_type(r.config_json, '$.maxOutputTokens') IS NULL
+         OR json_extract(r.config_json, '$.maxOutputTokens') = NEW.max_output_tokens)
+    AND a.attempt_type = 'model_provider_probe' AND a.scope_type = 'connection'
+    AND a.scope_id = c.id AND a.state = 'Running'
+    AND EXISTS (
+      SELECT 1 FROM attempt_connection_grants ag
+      WHERE ag.attempt_id = a.id AND ag.connection_id = c.id
+        AND ag.connection_revision_id = NEW.connection_revision_id
+        AND ag.credential_generation_id = NEW.credential_generation_id
+        AND ag.purpose = 'chat_model'
+    )
+    AND EXISTS (
+      SELECT 1 FROM attempt_connection_grants ag
+      WHERE ag.attempt_id = a.id AND ag.connection_id = c.id
+        AND ag.connection_revision_id = NEW.connection_revision_id
+        AND ag.credential_generation_id = NEW.credential_generation_id
+        AND ag.purpose = 'embedding'
+    )
+    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded')
+    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'embedding' AND m.status = 'succeeded')
+    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'chat'
+                AND m.status = 'cancelled' AND m.termination_reason = 'cancelled')
+    AND (NEW.request_id_observed = 0 OR EXISTS (
+          SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.provider_request_id IS NOT NULL))
+    AND (NEW.native_tool_calling_supported = 0 OR EXISTS (
+          SELECT 1 FROM model_calls m JOIN tool_calls t ON t.model_call_id = m.id
+          WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded' AND t.status = 'succeeded'))
+    AND (NEW.multi_tool_call_supported = 0 OR EXISTS (
+          SELECT 1 FROM model_calls m JOIN tool_calls t ON t.model_call_id = m.id
+          WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded' AND t.status = 'succeeded'
+          GROUP BY m.id HAVING COUNT(*) >= 2))
+)
+BEGIN SELECT RAISE(ABORT, 'model capability probe must close over its Running probe Attempt, provider revision, and real chat/embedding calls'); END;
+CREATE TRIGGER trg_connections_model_provider_insert_disabled BEFORE INSERT ON connections
+WHEN NEW.type = 'model_provider' AND NEW.enabled = 1
+BEGIN SELECT RAISE(ABORT, 'model_provider must be created disabled until its revision and credential pass the real capability probe'); END;
+CREATE TRIGGER trg_connections_enable_requires_probe BEFORE UPDATE OF enabled, current_revision_id, current_credential_generation_id ON connections
+WHEN NEW.type = 'model_provider' AND NEW.enabled = 1 AND (
+  NEW.current_revision_id IS NULL OR NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM model_provider_capabilities p WHERE p.connection_revision_id = NEW.current_revision_id
+      AND p.credential_generation_id = NEW.current_credential_generation_id
+      AND p.streaming_supported = 1 AND p.native_tool_calling_supported = 1
+      AND p.cancellation_observed = 1 AND p.usage_observed = 1 AND p.embedding_supported = 1))
+BEGIN SELECT RAISE(ABORT, 'enabled model_provider requires a probed current revision with streaming, native tools, cancellation, and usage'); END;
+CREATE TRIGGER trg_business_system_kubernetes_connection_type BEFORE INSERT ON business_system_kubernetes_connections
+WHEN NOT EXISTS (SELECT 1 FROM connections c WHERE c.id = NEW.connection_id AND c.type = 'kubernetes')
+BEGIN SELECT RAISE(ABORT, 'business system binding requires a kubernetes connection'); END;
+CREATE TRIGGER trg_attempt_connection_grant_closure BEFORE INSERT ON attempt_connection_grants
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  JOIN connections c ON c.id = NEW.connection_id
+  JOIN connection_revisions r ON r.id = NEW.connection_revision_id AND r.connection_id = c.id
+  JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = c.id
+  WHERE a.id = NEW.attempt_id AND a.state IN ('Queued','Assigned','Running')
+    AND ((a.attempt_type = 'model_provider_probe' AND NEW.purpose IN ('chat_model','embedding')
+          AND c.type = 'model_provider' AND c.current_revision_id = NEW.connection_revision_id
+          AND c.current_credential_generation_id = NEW.credential_generation_id)
+      OR (c.enabled = 1 AND c.revalidation_required = 0
+        AND c.current_revision_id = NEW.connection_revision_id
+        AND c.current_credential_generation_id = NEW.credential_generation_id
+        AND ((NEW.purpose IN ('chat_model','embedding') AND c.type = 'model_provider'
+          AND EXISTS (SELECT 1 FROM model_provider_capabilities p WHERE p.connection_revision_id = r.id
+            AND p.credential_generation_id = g.id
+            AND p.streaming_supported = 1 AND p.native_tool_calling_supported = 1
+            AND p.cancellation_observed = 1 AND p.usage_observed = 1
+            AND (NEW.purpose <> 'embedding' OR p.embedding_supported = 1)))
+        OR (NEW.purpose = 'thanos_query' AND c.type = 'thanos')
+        OR (NEW.purpose = 'kubernetes_read' AND c.type = 'kubernetes'
+            AND EXISTS (SELECT 1 FROM business_system_kubernetes_connections m
+                        WHERE m.business_system_id = NEW.business_system_id AND m.connection_id = c.id AND m.state = 'Active')))))
+    AND (NEW.created_by_tool_call_id IS NULL OR EXISTS (
+      SELECT 1 FROM tool_calls t WHERE t.id = NEW.created_by_tool_call_id AND t.attempt_id = NEW.attempt_id))
+)
+BEGIN SELECT RAISE(ABORT, 'attempt connection grant must close over the same active attempt, connection, revision, credential, purpose, and business-system mapping'); END;
+CREATE TRIGGER trg_model_call_grant_closure BEFORE INSERT ON model_calls
+WHEN NOT EXISTS (
+  SELECT 1 FROM attempt_connection_grants g
+  WHERE g.id = NEW.connection_grant_id AND g.attempt_id = NEW.attempt_id
+    AND ((NEW.operation = 'chat' AND g.purpose = 'chat_model') OR (NEW.operation = 'embedding' AND g.purpose = 'embedding'))
+)
+BEGIN SELECT RAISE(ABORT, 'model call must use the same Attempt model/embedding grant'); END;
+CREATE TRIGGER trg_model_call_operation_attempt BEFORE INSERT ON model_calls
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Running'
+    AND ((NEW.operation = 'embedding' AND a.attempt_type IN ('embedding','model_provider_probe'))
+      OR (NEW.operation = 'chat' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe')))
+)
+BEGIN SELECT RAISE(ABORT, 'model call operation must match a Running fixed Plinth work mode'); END;
+CREATE TRIGGER trg_model_call_input_item_closure BEFORE INSERT ON model_call_input_items
+WHEN EXISTS (SELECT 1 FROM model_calls m WHERE m.id = NEW.model_call_id) AND (
+  (NEW.prior_model_call_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN model_calls prior ON prior.id = NEW.prior_model_call_id
+    WHERE current.id = NEW.model_call_id AND prior.attempt_id = current.attempt_id AND prior.status = 'succeeded'
+      AND NEW.item_role = 'assistant'
+      AND (prior.call_seq < current.call_seq OR (prior.call_seq = current.call_seq AND prior.retry_seq < current.retry_seq))))
+  OR (NEW.tool_call_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN tool_calls t ON t.id = NEW.tool_call_id
+    WHERE current.id = NEW.model_call_id AND t.attempt_id = current.attempt_id AND NEW.item_role = 'tool'
+      AND (t.status = 'succeeded' OR (t.status = 'failed' AND t.failure_mode = 'return_to_model' AND t.result_json IS NOT NULL))))
+  OR (NEW.investigation_message_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN investigation_messages im ON im.id = NEW.investigation_message_id
+    JOIN execution_attempts a ON a.id = current.attempt_id
+    WHERE current.id = NEW.model_call_id AND a.scope_type = 'investigation' AND im.investigation_id = a.scope_id
+      AND im.status = 'active' AND NEW.item_role = im.role))
+  OR (NEW.attempt_input_snapshot_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN attempt_input_snapshots s ON s.id = NEW.attempt_input_snapshot_id
+    WHERE current.id = NEW.model_call_id AND s.attempt_id = current.attempt_id
+      AND NEW.item_role = CASE current.operation WHEN 'embedding' THEN 'user' ELSE 'system' END))
+  OR (NEW.evidence_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN evidence e ON e.id = NEW.evidence_id
+     WHERE current.id = NEW.model_call_id
+       AND NEW.item_role = CASE current.operation WHEN 'embedding' THEN 'user' ELSE 'system' END
+       AND (e.attempt_id = current.attempt_id OR EXISTS (
+      SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id
+      WHERE s.attempt_id = current.attempt_id AND i.evidence_id = e.id))))
+  OR (NEW.artifact_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN attempt_artifact_grants g ON g.attempt_id = current.attempt_id
+    WHERE current.id = NEW.model_call_id AND g.artifact_id = NEW.artifact_id
+      AND NEW.item_role = CASE current.operation WHEN 'embedding' THEN 'user' ELSE 'system' END))
+  OR (NEW.knowledge_version_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM model_calls current JOIN attempt_input_snapshots s ON s.attempt_id = current.attempt_id
+    JOIN attempt_input_items i ON i.snapshot_id = s.id
+    WHERE current.id = NEW.model_call_id AND i.knowledge_version_id = NEW.knowledge_version_id
+      AND NEW.item_role = CASE current.operation WHEN 'embedding' THEN 'user' ELSE 'system' END))
+  OR (NEW.synthetic_kind IS NOT NULL AND NEW.item_role <> 'system')
+)
+BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attempt and valid history state'); END;
+
+-- Tool Call 在执行前以 pending 行落库；model_call、Attempt、provider ID、ordinal 与 grant 均不可混淆。
+CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
+WHEN NEW.status <> 'pending' OR NOT EXISTS (
+  SELECT 1 FROM model_calls m JOIN execution_attempts a ON a.id = m.attempt_id
+  WHERE m.id = NEW.model_call_id AND m.attempt_id = NEW.attempt_id AND m.call_seq = NEW.call_seq AND m.status = 'succeeded'
+    AND EXISTS (SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = m.id AND o.complete = 1)
+    AND a.state = 'Running' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe')
+)
+BEGIN SELECT RAISE(ABORT, 'tool call must be inserted pending after a successful model call in the same Running Attempt'); END;
+CREATE TRIGGER trg_tool_call_proposal_closure BEFORE INSERT ON tool_calls
+WHEN EXISTS (
+  SELECT 1 FROM model_calls m
+  WHERE m.id = NEW.model_call_id AND m.attempt_id = NEW.attempt_id AND m.call_seq = NEW.call_seq AND m.status = 'succeeded'
+) AND NOT EXISTS (
+  SELECT 1 FROM model_call_outputs o
+  WHERE o.model_call_id = NEW.model_call_id AND o.complete = 1
+    AND json_type(o.response_json, '$.tool_calls') = 'array'
+    AND NEW.tool_index < json_array_length(o.response_json, '$.tool_calls')
+    AND json_extract(o.response_json, '$.tool_calls[' || NEW.tool_index || '].id') = NEW.provider_tool_call_id
+    AND json_extract(o.response_json, '$.tool_calls[' || NEW.tool_index || '].name') = NEW.tool_name
+)
+BEGIN SELECT RAISE(ABORT, 'tool call must match the provider proposal at the same ordinal'); END;
+CREATE TRIGGER trg_tool_call_connection_grant_closure BEFORE INSERT ON tool_call_connection_grants
+WHEN NOT EXISTS (
+  SELECT 1 FROM tool_calls t JOIN attempt_connection_grants g ON g.id = NEW.connection_grant_id
+  WHERE t.id = NEW.tool_call_id AND g.attempt_id = t.attempt_id
+    AND ((t.tool_name = 'thanos_query' AND g.purpose = 'thanos_query')
+      OR (t.tool_name IN ('kubernetes_get','kubernetes_list','kubernetes_logs','kubernetes_events') AND g.purpose = 'kubernetes_read'))
+)
+BEGIN SELECT RAISE(ABORT, 'tool call connection grant must match the same Attempt and typed external tool'); END;
+
+-- 成功终态不得掩盖尚未闭合的 Model/Tool/Browser 子执行；失败/取消/中断终态必须在同一
+-- Attempt UPDATE 中取消它们，否则父 Attempt 已终态而调用或子执行仍可产生迟到有效结果。
+CREATE TRIGGER trg_execution_attempts_success_requires_closed_calls BEFORE UPDATE OF state ON execution_attempts
+WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
+  EXISTS (SELECT 1 FROM model_calls mc WHERE mc.attempt_id = NEW.id AND mc.status = 'running')
+  OR EXISTS (SELECT 1 FROM tool_calls tc WHERE tc.attempt_id = NEW.id AND tc.status IN ('pending','running'))
+  OR EXISTS (
+    SELECT 1 FROM execution_attempts child
+    JOIN tool_calls tc ON tc.id = child.requested_by_tool_call_id
+    WHERE tc.attempt_id = NEW.id AND child.state IN ('Queued','Assigned','Running','Cancelling'))
+  OR (NEW.attempt_type = 'browser_exploration' AND NOT EXISTS (
+    SELECT 1 FROM browser_operations bo WHERE bo.attempt_id = NEW.id AND bo.result = 'success'))
+  OR (NEW.attempt_type = 'inspection_collection' AND EXISTS (
+    SELECT 1 FROM browser_operations bo WHERE bo.attempt_id = NEW.id AND bo.result IS NOT 'success'))
+)
+BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt requires all Model Calls, Tool Calls, and browser child Attempts terminal'); END;
+CREATE TRIGGER trg_execution_attempts_close_calls_after_terminal AFTER UPDATE OF state ON execution_attempts
+WHEN NEW.state IN ('Cancelling','Failed','Cancelled','Interrupted')
+  AND OLD.state NOT IN ('Succeeded','Failed','Cancelled','Interrupted')
+BEGIN
+  UPDATE model_calls
+  SET status = 'cancelled', termination_reason = 'cancelled', ended_at = COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  WHERE attempt_id = NEW.id AND status = 'running';
+  UPDATE tool_calls
+  SET status = 'cancelled', row_version = row_version + 1,
+      result_json = NULL, result_artifact_id = NULL,
+      error_detail = COALESCE(error_detail, 'attempt terminated'), ended_at = COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  WHERE attempt_id = NEW.id AND status IN ('pending','running');
+  UPDATE execution_attempts
+  SET state = CASE WHEN state IN ('Running','Cancelling') THEN 'Cancelling' ELSE 'Cancelled' END,
+      row_version = row_version + 1,
+      termination_reason = CASE WHEN state IN ('Queued','Assigned') THEN 'cancelled' ELSE termination_reason END,
+      ended_at = CASE WHEN state IN ('Queued','Assigned') THEN COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) ELSE ended_at END
+  WHERE requested_by_tool_call_id IN (SELECT id FROM tool_calls WHERE attempt_id = NEW.id)
+    AND state IN ('Queued','Assigned','Running');
+END;
+
+-- 成功 Attempt 的领域结果必须已在同一事务写入；模型 ResultProposal 不能直接改写任意领域表。
+CREATE TRIGGER trg_execution_attempts_success_result BEFORE UPDATE OF state ON execution_attempts
+WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
+  (NEW.attempt_type = 'initial_analysis' AND NOT EXISTS (SELECT 1 FROM initial_analysis_outputs o WHERE o.attempt_id = NEW.id))
+  OR (NEW.attempt_type = 'investigation' AND NOT EXISTS (
+      SELECT 1 FROM investigation_messages m WHERE m.attempt_id = NEW.id AND m.role = 'assistant' AND m.status = 'active'))
+  OR (NEW.attempt_type = 'inspection_analysis' AND NOT EXISTS (SELECT 1 FROM inspection_reports r WHERE r.attempt_id = NEW.id))
+  OR (NEW.attempt_type = 'knowledge_extraction' AND NOT EXISTS (
+      SELECT 1 FROM knowledge_import_batches b WHERE b.id = NEW.scope_id AND b.state = 'AwaitingConfirmation'
+        AND EXISTS (SELECT 1 FROM knowledge_candidates c WHERE c.import_batch_id = b.id AND c.generation = b.generation)))
+  OR (NEW.attempt_type = 'embedding' AND (
+      EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id = s.id
+              WHERE s.attempt_id = NEW.id AND i.knowledge_version_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.knowledge_version_id = i.knowledge_version_id
+                                AND e.embedding_generation_id = NEW.scope_id AND e.state = 'ready'))
+      OR NOT EXISTS (SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id AND g.vector_dim IS NOT NULL)))
+  OR (NEW.attempt_type = 'model_provider_probe' AND NOT EXISTS (
+      SELECT 1 FROM model_provider_capabilities c JOIN connection_revisions r ON r.id = c.connection_revision_id
+       WHERE c.probe_attempt_id = NEW.id AND r.connection_id = NEW.scope_id))
+  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe') AND (
+      NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.id AND m.status = 'succeeded')
+      OR EXISTS (
+        SELECT 1 FROM model_calls m
+        JOIN model_call_outputs o ON o.model_call_id = m.id AND o.complete = 1
+        WHERE m.attempt_id = NEW.id AND m.operation = 'chat' AND m.status = 'succeeded'
+          AND (json_type(o.response_json, '$.tool_calls') IS NOT 'array'
+            OR json_array_length(o.response_json, '$.tool_calls') <>
+               (SELECT count(*) FROM tool_calls t WHERE t.model_call_id = m.id))
+      )
+      OR EXISTS (SELECT 1 FROM tool_calls t WHERE t.attempt_id = NEW.id
+                 AND (t.status NOT IN ('succeeded','failed','cancelled')
+                   OR (t.status = 'failed' AND t.failure_mode = 'fail_attempt')))
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt must atomically commit the valid domain result for its fixed work mode'); END;
 -- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。
 -- PromQL ok 由 Quoin 直接采集（Evidence.attempt_id 为空）；browser ok 必须闭合到已被 Lintel 接受、
 -- Succeeded 的 run_check 子 Attempt 及其唯一成功 Journey Browser Operation。Evidence 不得跨 check 复用。

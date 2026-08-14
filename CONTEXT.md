@@ -48,14 +48,17 @@ Plinth、Lintel 和 Stele 分别使用类型固定、只能访问自身 RPC 的�
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 通过自身 service token 获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多短期同时保留新旧两个有效凭据。
 
 **模型调用边界**：
-模型供应商是 supervisor 持有的类型化外部连接。Plinth worker 通过本地 streaming ChatModel 协议提交 messages、tool schema 和非秘密生成参数；supervisor 只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Kubernetes Secret/kubeconfig、Browser profile/storage state、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。
+模型供应商是 supervisor 持有的类型化外部连接。Plinth worker 通过本地 framed protobuf ChatModel 协议提交 messages、固定 tool schema 与可复核的非秘密请求摘要；模型 ID、输出预算和 generation 参数由 Quoin 当前 capability/grant 与固定 Agent 契约决定，worker/模型不得选择或覆盖。supervisor 先经 Quoin 持久化物理 Model Call，再只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Kubernetes Secret/kubeconfig、Browser profile/storage state、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。模型 Provider revision 在启用前必须由 Plinth supervisor 真实执行 Chat streaming、native/multi Tool Call、取消、usage/request ID 与 Embedding/dimension 探测；Embedding 和 provider probe 不启动 Agent worker。Provider SDK 隐式重试关闭；同一逻辑调用的自动物理重试只允许无任何响应的 `timeout|rate_limited|transport_error`，以及增加旧回合淘汰后的无响应 `context_overflow`，不对 provider unavailable、取消/终态 fence、invalid response 或 Artifact 提交失败自动重试。
+
+**Plinth worker 隔离边界**：
+v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处理 Attempt 输入前必须 fail-closed 建立 `no_new_privs`、Landlock ABI >= 6 与进程内 seccomp，只能访问既定只读运行时路径、当前一次性工作区和 framed stdio，不能读取 supervisor 的敏感 `/proc` 文件、发域外信号、建立外部网络连接、写工作区外路径或继承非 stdio FD。Plinth readiness 与每个 worker Ack 前都实际执行这些对抗检查，任一失败即 `sandbox_unavailable`，不得静默降级。v1 接受同 PID namespace 下世界可读的非秘密进程元数据可见，不引入 user namespace、bubblewrap、额外 worker daemon 或第二套本地协议。
 
 **领域写命令契约**：
 所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定当时生效的业务系统配置和 Label Contract。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
 _Avoid_: 每个 handler 自定义重试语义、最后写入者静默覆盖、把内部 Runtime 围栏混为客户端命令键
 
 **审计与执行溯源**：
-领域对象及其不可变版本仍是业务历史权威；另保存窄的 append-only Audit Event，只记录 actor 类型/ID、action、target 类型/ID/版本、client command/request ID、提交时间、成功或失败结果及领域记录引用，覆盖取消、重试、Undo、配置发布、知识确认/停用、用户与 Session、秘密/凭据、Runtime 替换、备份和恢复，不复制消息、Evidence、附件、Prompt 正文或秘密。每个 Execution Attempt 和低层 Model/Tool Call 保存实际供应商连接 revision/credential generation、模型 ID、Prompt/renderer/agent/tool-schema 版本或 digest、有序输入对象及 revision/digest、Quoin/Plinth/Lintel/Journey Catalog 版本、开始结束时间、usage、延迟、重试序号和结构化终止原因；输出正文继续由消息、Report、Candidate 和 Evidence 等领域记录承担。不得保存或展示隐藏思维链。结构化审计长期保留并进入备份。
+领域对象及其不可变版本仍是业务历史权威；另保存窄的 append-only Audit Event，只记录 actor 类型/ID、action、target 类型/ID/版本、client command/request ID、提交时间、成功或失败结果及领域记录引用，覆盖取消、重试、Undo、配置发布、知识确认/停用、用户与 Session、秘密/凭据、Runtime 替换、备份和恢复，不复制消息、Evidence、附件、Prompt 正文或秘密。每个 Execution Attempt 和低层 Model/Tool Call 保存实际供应商连接 revision/credential generation、模型 ID、Prompt/renderer/agent/tool-schema 版本或 digest、有序输入对象及 revision/digest、Quoin/Plinth/Lintel/Journey Catalog 版本、开始结束时间、usage、延迟、重试序号、规范可见模型响应和结构化终止原因；最终领域输出正文继续由消息、Report、Candidate 和 Evidence 等记录承担。不得保存或展示隐藏思维链。结构化审计长期保留并进入备份。
 
 ## 告警与调查
 
@@ -88,8 +91,16 @@ _Avoid_: 第三种告警状态、自动恢复、事故
 _Avoid_: 调查、对话、可覆盖结果、已验证诊断
 
 **调查（Investigation）**：
-围绕一个运维问题展开的一条对话线程，可以引用一个或多个告警发生、初步分析及相关证据，并形成诊断。
-_Avoid_: 初步分析、事故、跨问题聊天
+围绕一个运维问题展开的一条对话线程，可以引用一个或多个告警发生、初步分析及相关证据，并形成诊断。Investigation 页面就是主流 Chat 页面：直接新建后立即输入自然语言，不要求先选业务系统、连接、告警、Evidence、模型或工具；从既有告警、Initial Analysis、Evidence 或 Inspection 入口进入时自动保留来源引用。模型只识别人类领域对象，Quoin 才把 Tool 参数中的业务系统确定性路由到全局 Thanos 或该系统绑定的 Kubernetes Connection；真实歧义由模型在对话中追问。
+_Avoid_: 初步分析、事故、跨问题聊天、进入 Chat 前的配置向导、让模型选择连接或凭据
+
+**模型上下文投影（Model Context Projection）**：
+一次具体 Model Call 从 Quoin 唯一完整历史派生的瞬时有序输入。它固定保留 System/Prompt、当前用户回合、当前 Attempt 已提交的协议组和必要输入，超出 active model budget 时按提交时间淘汰最旧完整 user turn；Tool Call 与全部 Tool Result 共同保留或淘汰。投影不写回历史，不生成摘要、replacement history、rolling memory 或跨 Attempt cache。固定内容仍超限时明确失败为 ContextTooLarge。
+_Avoid_: 对话历史、长期摘要、Agent memory、截断当前用户输入、孤立 Tool Result
+
+**长工具输出（Long Tool Output）**：
+达到 50 KiB 或 2000 行任一阈值的 Tool Result 正文。完整字节以现有 generated `tool_result` Artifact 持久化并按既有保留策略清理，模型只得到带 size/hash/media type 的有界 head/tail 预览和 Artifact locator，再经 Attempt-scoped `artifact_read`/`artifact_grep` 分段读取；不得新增 per-Attempt 持久目录、暴露 Quoin PV 路径或把预览冒充完整正文。
+_Avoid_: 消息正文、`.quoin/tool-results`、第二索引、无限内存缓冲、过期后从 Runtime 缓存恢复
 
 **撤回消息（Withdrawn Message）**：
 用户只能 Undo 当前有效对话的最新用户回合。每个 Investigation 只有一个当前有效 head，同时最多一个 active 模型 Attempt；发送消息携带 client command ID 与 expected head，Quoin 在一个事务中追加消息并创建 Attempt，重复命令返回原结果，head 已变化则冲突。Undo 后，该用户消息及基于它产生的助手回复、工具调用、Evidence 引用和知识草稿成为只读非活动分支，保留审计但不进入后续上下文；依赖该回合的 active Attempt 立即取消，迟到结果只留审计。新消息从撤回前的有效 head 继续。第一版不支持任意历史撤回、分支切换/合并、原地编辑或重新生成分支。

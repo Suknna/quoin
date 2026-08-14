@@ -58,6 +58,11 @@ service BrowserTunnel {
 // （RUNTIME-UPLOAD-001/002）。upload_id 在重试生命周期内稳定，同摘要重试幂等。
 service ArtifactService {
   rpc Upload(stream ArtifactUploadFrame) returns (ArtifactUploadResult);
+
+  // supervisor-only、Attempt-scoped 的文本分段读取与 RE2 搜索。只允许读取 Quoin 已授权给
+  // 当前 Attempt 且正文尚在的 Artifact；worker 不直接持有 Runtime Bearer（RUNTIME-ARTIFACT-001..004）。
+  rpc ReadText(ArtifactReadTextRequest) returns (ArtifactReadTextResponse);
+  rpc GrepText(ArtifactGrepTextRequest) returns (ArtifactGrepTextResponse);
 }
 
 // Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
@@ -93,6 +98,9 @@ enum AttemptType {
   ATTEMPT_TYPE_INSPECTION_ANALYSIS = 3;
   ATTEMPT_TYPE_INSPECTION_COLLECTION = 4;
   ATTEMPT_TYPE_BROWSER_EXPLORATION = 5;
+  ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION = 6;
+  ATTEMPT_TYPE_EMBEDDING = 7;
+  ATTEMPT_TYPE_MODEL_PROVIDER_PROBE = 8;
 }
 
 // execution_attempts.scope_type 的 wire 表达（DATA-ATTEMPT-002）。
@@ -103,6 +111,9 @@ enum ScopeType {
   SCOPE_TYPE_RUN = 3;
   SCOPE_TYPE_RUN_CHECK = 4;
   SCOPE_TYPE_CONFIG_TEST_RUN = 5; // 配置 Test Run 的机械采集子 Attempt（DATA-CONFIG-007）
+  SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH = 6;
+  SCOPE_TYPE_EMBEDDING_GENERATION = 7;
+  SCOPE_TYPE_CONNECTION = 8;
 }
 
 // execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。
@@ -120,6 +131,10 @@ enum TerminationReason {
   TERMINATION_REASON_LEASE_EXPIRED = 10;
   TERMINATION_REASON_REPLACED = 11;
   TERMINATION_REASON_REVOKED = 12;
+  TERMINATION_REASON_CONTEXT_TOO_LARGE = 13;
+  TERMINATION_REASON_ARTIFACT_BODY_EXPIRED = 14;
+  TERMINATION_REASON_SANDBOX_UNAVAILABLE = 15;
+  TERMINATION_REASON_WORKER_PROTOCOL_ERROR = 16;
 }
 
 // ResultProposal 的结果分类（RUNTIME-TASK-008）。
@@ -173,7 +188,7 @@ enum UploadRejectReason {
   UPLOAD_REJECT_REASON_BOOT_MISMATCH = 4;
   UPLOAD_REJECT_REASON_EPOCH_MISMATCH = 5;
   UPLOAD_REJECT_REASON_METADATA_MISMATCH = 6;   // kind/retention/sensitive/owner 与 artifacts 不符
-  UPLOAD_REJECT_REASON_TERMINAL_OR_CANCELLED = 7;
+  reserved 7;
   UPLOAD_REJECT_REASON_INTERNAL = 8;
 }
 
@@ -283,9 +298,21 @@ message ControlEnvelope {
     RequestBrowserSubExecution request_browser_sub_execution = 25; // Plinth -> Quoin
     BrowserSubExecutionAck browser_sub_execution_ack = 26;         // Quoin -> Plinth
     ToolResultDelivery tool_result_delivery = 27;                  // Quoin -> Plinth；子执行结果
+    ToolResultDeliveryAck tool_result_delivery_ack = 38;            // Plinth -> Quoin；幂等接收确认
 
     // --- 连接终结（RUNTIME-CTRL-007 / RUNTIME-REVOKE-001）---
     GoAway go_away = 28;                     // Quoin -> Runtime；尽力而为的通知，关闭是权威
+
+    // --- Plinth 模型/工具循环（RUNTIME-AGENT-001..010）---
+    BeginModelCall begin_model_call = 29;             // Plinth -> Quoin；provider 请求前先落物理调用
+    BeginModelCallAck begin_model_call_ack = 30;      // Quoin -> Plinth；返回 model_call_id 与模型 grant
+    ModelTokenDelta model_token_delta = 31;           // Plinth -> Quoin；瞬时 UI token delta，不入权威历史
+    CompleteModelCall complete_model_call = 32;       // Plinth -> Quoin；封存响应/usage，并提议 Tool Calls
+    CompleteModelCallAck complete_model_call_ack = 33; // Quoin -> Plinth；返回持久 tool_call_id/grant
+    BeginToolCall begin_tool_call = 34;               // Plinth -> Quoin；副作用执行前 pending -> running
+    BeginToolCallAck begin_tool_call_ack = 35;        // Quoin -> Plinth；fence 与授权裁决
+    CompleteToolCall complete_tool_call = 36;         // Plinth -> Quoin；提交 Tool 结果/Evidence/Artifact 引用
+    CompleteToolCallAck complete_tool_call_ack = 37;  // Quoin -> Plinth；提交裁决
   }
 }
 
@@ -306,7 +333,7 @@ message Hello {
 message HelloAck {
   bool accepted = 1;
   HelloRejectReason reject_reason = 2;
-  uint64 last_connection_epoch = 3; // accepted 时携带该 slot 最近一次连接 epoch（调和参考）
+  uint64 last_connection_epoch = 3; // accepted 时携带该 slot 当前 boot 最近一次连接 epoch（调和参考）
 }
 
 // 心跳：更新瞬时连接投影（connected/lastSeenAt）；不写 runtime_slots.row_version
@@ -349,23 +376,29 @@ message AttemptInputSnapshot {
   bytes canonical_json = 2;        // 非秘密规范结构化输入（冻结）
   bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
   repeated ArtifactRef artifact_refs = 4;     // 输入引用的只读 Artifact（可空）
-  repeated ConnectionGrant connection_grants = 5; // 非秘密 grant 引用（可空）
+  repeated ConnectionGrant connection_grants = 5; // 派发前已知 grant；动态 Tool grant 由 CompleteModelCallAck 返回
+  reserved 6;
+  string agent_version = 7;        // 与 execution_attempts.agent_version 严格一致；Plinth 必须已有该不可变内置版本
 }
 
 // 输入引用的 Artifact（只读；正文访问按 DATA-ARTIFACT-003 裁决）。
 message ArtifactRef {
   int64 artifact_id = 1;           // artifacts.id
-  string role = 2;                 // 输入中的角色（如 "attachment"、"source"）
+  string role = 2;                 // 输入中的角色（如 attachment、source、tool_result）
+  string media_type = 3;
+  uint64 size_bytes = 4;
+  bytes sha256 = 5;
+  bool body_expired = 6;
 }
 
-// 任务级连接凭据 grant 引用（非秘密；RUNTIME-GRANT-001）。grant_id 由 Quoin 生成，
-// 在 Attempt 内存生命周期内有效；绑定派发时的 connection_revision_id 与
-// credential_generation_id（DATA-CONN-002）。
+// 任务级连接凭据 grant 引用（非秘密；RUNTIME-GRANT-001）。grant 可在 Attempt 派发时
+// （模型供应商）或 Quoin 接受具体 Tool Call 时（Thanos/Kubernetes）创建；绑定当时实际的
+// connection revision/credential generation，并在 Attempt 终态后不可再获取（DATA-CONN-002）。
 message ConnectionGrant {
-  string grant_id = 1;             // Quoin 生成的单次 grant 标识（attempt 内唯一）
+  int64 grant_id = 1;              // attempt_connection_grants.id（不可变、Attempt-scoped）
   int64 connection_revision_id = 2; // connections.current_revision_id 绑定
   int64 credential_generation_id = 3; // credential_generations.id 绑定
-  string purpose = 4;              // 非秘密用途说明（如 "promql_query"、"chat_completion"）
+  string purpose = 4;              // chat_model|embedding|thanos_query|kubernetes_read
 }
 
 // 接受：Quoin 写 accepted_at 并转 Running（RUNTIME-TASK-004）。
@@ -409,7 +442,8 @@ message ResultProposal {
   uint64 connection_epoch = 3;
   AttemptOutcome outcome = 4;
   TerminationReason termination_reason = 5; // outcome=FAILED 时必填
-  repeated int64 artifact_ids = 6;          // 经 ArtifactService 提交并返回的引用（可空）
+  reserved 6;
+  reserved "artifact_ids";               // 最终引用只由 ResultPayload 显式承载
   ResultPayload payload = 7;                // 规范结构化输出；SUCCEEDED 必填（RUNTIME-TASK-012）
 }
 
@@ -420,6 +454,9 @@ message ResultPayload {
   string schema_kind = 1;          // 输出 schema 标识（如 "assistant_message_v1"、"inspection_report_v1"）；非空
   bytes canonical_json = 2;        // 非秘密规范结构化输出
   bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
+  repeated int64 evidence_ids = 4; // 本 Attempt 已提交或输入快照授权的精确引用
+  repeated int64 artifact_ids = 5;
+  repeated int64 knowledge_version_ids = 6;
 }
 
 // 结果裁决：accepted=true 表示 Quoin 已提交该结果；false 表示迟到（旧 epoch/已取消/
@@ -462,43 +499,240 @@ message GoAway {
 }
 
 // ============================================================================
+// Plinth 模型/工具执行循环
+// ============================================================================
+
+// 物理 Model Call 必须先落库再发 provider 请求。call_seq 是 Attempt 内逻辑模型步序；
+// provider 传输重试使用相同 call_seq、递增 retry_seq，且前一物理行必须已明确失败。
+enum ModelOperation {
+  MODEL_OPERATION_UNSPECIFIED = 0;
+  MODEL_OPERATION_CHAT = 1;
+  MODEL_OPERATION_EMBEDDING = 2;
+}
+
+message BeginModelCall {
+  int64 attempt_id = 1;
+  uint32 call_seq = 2;
+  uint32 retry_seq = 3;
+  string model_id = 4;
+  bytes prompt_digest = 5;       // 固定 agent/system prompt 的 SHA-256
+  bytes tool_schema_digest = 6;  // 本次暴露 Tool schema 集合的 SHA-256
+  bytes input_digest = 7;        // 按顺序串联 input_items 后的 SHA-256
+  repeated ModelInputItem input_items = 8;
+  uint32 evicted_turn_count = 9; // 因 context budget 从最旧端淘汰的完整回合数；不生成摘要
+  ModelOperation operation = 10;
+  uint64 context_budget_tokens = 11; // chat 必填；embedding 为 0
+  uint64 max_output_tokens = 12;     // chat 必填；embedding 为 0
+  bytes rendered_request_digest = 13; // 实际发送 provider 的规范请求 SHA-256；chat/embedding 均必填
+}
+
+enum ModelInputItemKind {
+  MODEL_INPUT_ITEM_KIND_UNSPECIFIED = 0;
+  MODEL_INPUT_ITEM_KIND_ATTEMPT_INPUT_SNAPSHOT = 1;
+  MODEL_INPUT_ITEM_KIND_INVESTIGATION_MESSAGE = 2;
+  MODEL_INPUT_ITEM_KIND_PRIOR_MODEL_CALL = 3;
+  MODEL_INPUT_ITEM_KIND_TOOL_CALL = 4;
+  MODEL_INPUT_ITEM_KIND_EVIDENCE = 5;
+  MODEL_INPUT_ITEM_KIND_ARTIFACT = 6;
+  MODEL_INPUT_ITEM_KIND_KNOWLEDGE_VERSION = 7;
+  MODEL_INPUT_ITEM_KIND_SYSTEM_CONTRACT = 8;
+  MODEL_INPUT_ITEM_KIND_TOOL_SCHEMA = 9;
+}
+
+enum ModelInputRole {
+  MODEL_INPUT_ROLE_UNSPECIFIED = 0;
+  MODEL_INPUT_ROLE_SYSTEM = 1;
+  MODEL_INPUT_ROLE_USER = 2;
+  MODEL_INPUT_ROLE_ASSISTANT = 3;
+  MODEL_INPUT_ROLE_TOOL = 4;
+}
+
+message ModelInputItem {
+  uint32 sequence = 1;
+  ModelInputItemKind item_kind = 2;
+  int64 item_id = 3;             // system_contract/tool_schema 时必须为 0；其余为对应权威行 ID
+  bytes content_digest = 4;      // Quoin 对对应权威记录复算并核对
+  ModelInputRole role = 5;       // 精确对应本次 provider Message role；Quoin 与来源类型共同复核
+}
+
+message BeginModelCallAck {
+  bool accepted = 1;
+  int64 attempt_id = 2;
+  int64 model_call_id = 3;
+  ConnectionGrant model_provider_grant = 4; // accepted 时必填；只供 supervisor FetchCredentialGrant
+  string detail = 5;
+}
+
+// 流式 token delta 仅用于 Chat UI 的瞬时显示；Quoin 不把 delta 当消息或模型响应权威。
+// complete_model_call 的规范响应才可封存，ResultProposal 成功事务才可创建 assistant message。
+message ModelTokenDelta {
+  int64 attempt_id = 1;
+  int64 model_call_id = 2;
+  uint64 delta_seq = 3;
+  string text = 4;
+}
+
+enum ModelCallOutcome {
+  MODEL_CALL_OUTCOME_UNSPECIFIED = 0;
+  MODEL_CALL_OUTCOME_SUCCEEDED = 1;
+  MODEL_CALL_OUTCOME_FAILED = 2;
+  MODEL_CALL_OUTCOME_CANCELLED = 3;
+}
+
+enum ModelCallFailureReason {
+  MODEL_CALL_FAILURE_REASON_UNSPECIFIED = 0;
+  MODEL_CALL_FAILURE_REASON_TIMEOUT = 1;
+  MODEL_CALL_FAILURE_REASON_RATE_LIMITED = 2;
+  MODEL_CALL_FAILURE_REASON_PROVIDER_UNAVAILABLE = 3;
+  MODEL_CALL_FAILURE_REASON_CONTEXT_OVERFLOW = 4;
+  MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE = 5;
+  MODEL_CALL_FAILURE_REASON_CANCELLED = 6;
+  MODEL_CALL_FAILURE_REASON_ARTIFACT_COMMIT_FAILED = 7;
+  MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR = 8; // 请求明确未到达 provider 或由 adapter 证明无不确定副作用；可物理重试
+  MODEL_CALL_FAILURE_REASON_ATTEMPT_TERMINAL = 9; // cancellation fence/终态已提交；绝不可重试
+}
+
+message CompleteModelCall {
+  int64 attempt_id = 1;
+  int64 model_call_id = 2;
+  ModelCallOutcome outcome = 3;
+  ModelCallFailureReason failure_reason = 4; // FAILED/CANCELLED 时必填
+  string provider_request_id = 5;
+  uint64 latency_ms = 6;
+  uint64 input_tokens = 7;
+  uint64 output_tokens = 8;
+  uint64 total_tokens = 9;
+  string finish_reason = 10;
+  string assistant_text = 11;                // success 时可空；隐藏思维链不得提交
+  repeated ProposedToolCall tool_calls = 12; // success 时按 provider 输出顺序；无工具则为空
+  bytes response_digest = 13;                // 规范化 assistant_text + tool_calls 的 SHA-256
+  bool response_complete = 14;               // success 必须 true；失败收到 partial 时 false
+  repeated EmbeddingVector embedding_vectors = 15; // embedding success 时必填；chat 时为空
+}
+
+message EmbeddingVector {
+  uint32 input_index = 1;
+  bytes source_digest = 2; // 对应输入正文 digest
+  repeated float values = 3;
+}
+
+message ProposedToolCall {
+  uint32 provider_index = 1;
+  string provider_tool_call_id = 2;
+  string tool_name = 3;
+  bytes arguments_json = 4;       // 规范 JSON；Quoin 按固定 Tool schema 验证
+  bytes arguments_digest = 5;     // SHA-256(arguments_json)
+}
+
+enum ToolExecutionMode {
+  TOOL_EXECUTION_MODE_UNSPECIFIED = 0;
+  TOOL_EXECUTION_MODE_WORKER_LOCAL = 1;
+  TOOL_EXECUTION_MODE_SUPERVISOR_TYPED = 2;
+  TOOL_EXECUTION_MODE_QUOIN_BROWSER = 3;
+}
+
+enum ToolFailureMode {
+  TOOL_FAILURE_MODE_UNSPECIFIED = 0;
+  TOOL_FAILURE_MODE_RETURN_TO_MODEL = 1;
+  TOOL_FAILURE_MODE_FAIL_ATTEMPT = 2;
+}
+
+message ToolCallAuthorization {
+  int64 tool_call_id = 1;
+  uint32 provider_index = 2;
+  string provider_tool_call_id = 3;
+  ToolFailureMode failure_mode = 4; // 由固定 Tool 定义决定，模型不得覆盖
+  repeated ConnectionGrant connection_grants = 5; // Kubernetes 可绑定多个；无外部连接的 Tool 为空
+}
+
+message CompleteModelCallAck {
+  bool accepted = 1;
+  int64 attempt_id = 2;
+  int64 model_call_id = 3;
+  repeated ToolCallAuthorization tool_calls = 4;
+  string detail = 5;
+}
+
+message BeginToolCall {
+  int64 attempt_id = 1;
+  int64 tool_call_id = 2;
+}
+
+message BeginToolCallAck {
+  bool accepted = 1;
+  int64 attempt_id = 2;
+  int64 tool_call_id = 3;
+  string detail = 4;
+}
+
+enum ToolCallOutcome {
+  TOOL_CALL_OUTCOME_UNSPECIFIED = 0;
+  TOOL_CALL_OUTCOME_SUCCEEDED = 1;
+  TOOL_CALL_OUTCOME_FAILED = 2;
+  TOOL_CALL_OUTCOME_CANCELLED = 3;
+}
+
+// Tool 结果由固定 Tool schema 解释。小结果可在 canonical_json inline；长结果必须先通过
+// ArtifactService.Upload 提交现有 tool_result Artifact，再在 artifact_ids 中引用。
+message CompleteToolCall {
+  int64 attempt_id = 1;
+  int64 tool_call_id = 2;
+  ToolCallOutcome outcome = 3;
+  ResultPayload payload = 4;       // succeeded 时必填；schema_kind 绑定 tool definition
+  int64 artifact_id = 5; // 0 表示无长正文；每个 Tool Result 最多一个完整正文 Artifact
+  string error_code = 6;           // failed/cancelled 时的稳定机器码
+  string error_detail = 7;         // 非秘密、面向 Agent 的可操作说明
+}
+
+message CompleteToolCallAck {
+  bool accepted = 1;
+  int64 attempt_id = 2;
+  int64 tool_call_id = 3;
+  repeated int64 evidence_ids = 4; // Quoin 由固定 Tool 结果确定性创建并提交的 Evidence
+  ResultPayload committed_payload = 5; // 后续模型输入使用的已提交规范结果
+  ArtifactRef artifact_ref = 6; // 无长正文时为空
+  string detail = 7;
+}
+
+// ============================================================================
 // 跨 Runtime 子执行（Plinth -> Quoin -> Lintel）
 // ============================================================================
 
-// Plinth -> Quoin：请求浏览器工具子执行（RUNTIME-CROSS-001/004）。Quoin 在同一事务
-// 持久化父 Attempt 的 tool_calls 行（status=pending）与 browser_exploration 子 Attempt
-// （requested_by_tool_call_id = 新 tool_call id），随后派发 lintel 并以
-// BrowserSubExecutionAck 应答。幂等：相同 (parent_attempt_id, request_id) 重放返回原
-// tool_call_id 与 child_attempt_id；旧 epoch/boot 的请求按 RUNTIME-CTRL-009 丢弃。
+// Plinth -> Quoin：请求浏览器工具子执行（RUNTIME-CROSS-001/004）。父 Tool Call 已由
+// CompleteModelCallAck 持久化；Quoin 在同一事务创建 browser_exploration 子 Attempt
+// （requested_by_tool_call_id = 既有 tool_call_id），随后派发 lintel 并以
+// BrowserSubExecutionAck 应答。幂等键就是已持久化且唯一的 tool_call_id；重放返回原
+// tool_call_id 与 child_attempt_id，不再生造 request_id。旧 epoch/boot 的请求按 RUNTIME-CTRL-009 丢弃。
 message RequestBrowserSubExecution {
-  string request_id = 1;           // 父 Attempt 内唯一（写入 params 快照并持久化，幂等键）
-  int64 parent_attempt_id = 2;     // 父 Plinth Attempt（execution_attempts.id）
-  BrowserSubExecutionInput input = 3; // 冻结的非秘密浏览器工具参数快照
+  int64 parent_attempt_id = 1;     // 父 Plinth Attempt（execution_attempts.id）
+  BrowserSubExecutionInput input = 2; // 冻结的非秘密浏览器工具参数快照
+  int64 tool_call_id = 3;          // CompleteModelCallAck 已返回的 quoin_browser tool_calls.id
 }
 
-// 浏览器工具参数快照（非秘密）；content_digest 必须等于 SHA-256(canonical_json)。
+// 浏览器工具参数快照（非秘密）；canonical_json 必须逐字等于既有 tool_calls.arguments_json 的
+// canonical bytes，content_digest 必须等于既有 tool_calls.arguments_digest 与 SHA-256(canonical_json)。
 message BrowserSubExecutionInput {
+  reserved 4;
+  reserved "identity_id";
   string schema_kind = 1;          // "browser_tool_v1"；非空
-  bytes canonical_json = 2;        // 冻结参数（含 request_id、identity 或 journey 引用等）
+  bytes canonical_json = 2;        // 冻结的模型 Tool arguments；只含人类领域 locator
   bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
-  int64 identity_id = 4;           // browser_identities.id
 }
 
-// Quoin -> Plinth：子执行请求裁决。accepted=true 时携带新建 tool_call_id 与
+// Quoin -> Plinth：子执行请求裁决。accepted=true 时回显既有 tool_call_id 并携带新建
 // child_attempt_id；reject_reason 为拒绝原因（旧流 fence、父 Attempt 非 plinth/非
 // Running、输入不支持、父已取消等）。
 message BrowserSubExecutionAck {
-  string request_id = 1;
-  int64 parent_attempt_id = 2;
-  bool accepted = 3;
-  int64 tool_call_id = 4;          // accepted 时：新建 tool_calls.id（status=pending）
-  int64 child_attempt_id = 5;      // accepted 时：browser_exploration 子 Attempt id
-  BrowserSubExecutionRejectReason reject_reason = 6; // accepted=false 时必填；封闭原因，UNSPECIFIED 拒绝
+  int64 parent_attempt_id = 1;
+  bool accepted = 2;
+  int64 tool_call_id = 3;          // accepted 时：回显既有 quoin_browser tool_calls.id（status=running）
+  int64 child_attempt_id = 4;      // accepted 时：browser_exploration 子 Attempt id
+  BrowserSubExecutionRejectReason reject_reason = 5; // accepted=false 时必填；封闭原因，UNSPECIFIED 拒绝
 }
 
 // Quoin -> Plinth：子执行完成后的工具结果交付（RUNTIME-CROSS-004）。Quoin 在子 Attempt
 // 结果提交事务内更新 tool_calls 状态并持久化浏览器操作结果后发送；父 Attempt 据此继续
-// 模型循环。correlation_id 关联原 RequestBrowserSubExecution。
+// 模型循环。correlation_id 关联原 RequestBrowserSubExecution；tool_call_id 是幂等交付键。
 message ToolResultDelivery {
   int64 tool_call_id = 1;          // 父 Attempt 的 tool_calls.id
   bool success = 2;
@@ -508,6 +742,13 @@ message ToolResultDelivery {
   ResultPayload payload = 6;       // 浏览器工具结构化结果（可空）
 }
 
+message ToolResultDeliveryAck {
+  int64 tool_call_id = 1;
+  int64 child_attempt_id = 2;
+  bool accepted = 3;
+  string detail = 4;
+}
+
 // ============================================================================
 // 连接凭据 grant（RuntimeControl.FetchCredentialGrant）
 // ============================================================================
@@ -515,7 +756,7 @@ message ToolResultDelivery {
 // grant 获取请求（supervisor-only，RUNTIME-GRANT-001..003）：必须携带派发时下发的
 // grant_id 与 Attempt/boot/epoch 上下文；Quoin 校验 Attempt Running 且绑定一致。
 message FetchCredentialGrantRequest {
-  string grant_id = 1;
+  int64 grant_id = 1;
   int64 attempt_id = 2;
   string boot_id = 3;
   uint64 connection_epoch = 4;
@@ -525,7 +766,7 @@ message FetchCredentialGrantRequest {
 // 载荷；supervisor 只在 Attempt 内存中使用，完成即清除，不落盘、不进入日志/审计
 // （RUNTIME-GRANT-002/003）。secret oneof 按 connection_type 选择。
 message FetchCredentialGrantResponse {
-  string grant_id = 1;
+  int64 grant_id = 1;
   int64 attempt_id = 2;
   int64 connection_revision_id = 3;     // connections.current_revision_id 绑定
   int64 credential_generation_id = 4;   // credential_generations.id 绑定
@@ -627,13 +868,14 @@ message ArtifactUploadHeader {
   int64 attempt_id = 2;            // execution_attempts.id
   string boot_id = 3;
   uint64 connection_epoch = 4;     // >= 1
-  string owner_type = 5;           // artifacts.owner_type（如 investigation_message、browser_operation）
+  string owner_type = 5;           // artifacts.owner_type 封闭值（OpenAPI ArtifactSummary.ownerType / DATA-ARTIFACT-003）
   int64 owner_id = 6;              // artifacts.owner_id
   ArtifactKind kind = 7;
   RetentionKind retention_kind = 8;
   bool sensitive = 9;              // trace 必须 true（DATA-ARTIFACT-003）
   uint64 size_bytes = 10;
   bytes sha256 = 11;               // 完整内容 SHA-256（32 字节）
+  string media_type = 12;          // IANA media type；与 artifacts.media_type 严格一致
 }
 
 // 数据块：offset 必须连续（从 0 开始按序到达）；payload 长度部署受限（RUNTIME-UPLOAD-006）。
@@ -653,6 +895,55 @@ message ArtifactUploadResult {
   bool committed = 2;
   int64 artifact_id = 3;           // committed 时返回 artifacts.id
   UploadRejectReason reject_reason = 4;
+}
+
+// Artifact 文本读取/搜索请求都必须绑定当前 Running Attempt、boot 与 epoch；Quoin 只允许
+// attempt_artifact_grants 中已授权且 body_expired=0 的正文。offset/limit 和输出字节数受部署
+// 固定上限，响应永不暴露 PV/storage_key 物理路径。
+message ArtifactReadTextRequest {
+  int64 attempt_id = 1;
+  int64 artifact_id = 2;
+  string boot_id = 3;
+  uint64 connection_epoch = 4;
+  uint64 start_line = 5;           // 1-based；0 拒绝
+  uint32 max_lines = 6;            // 非零且不超过服务端固定上限
+}
+
+message ArtifactReadTextResponse {
+  int64 artifact_id = 1;
+  bytes content = 2;               // 原始 UTF-8 字节片段；不改写换行
+  uint64 start_line = 3;
+  uint64 next_line = 4;            // eof=false 时下一次读取位置
+  bool eof = 5;
+  uint64 total_size_bytes = 6;
+  uint64 total_lines = 7;
+  bytes sha256 = 8;
+  string media_type = 9;
+}
+
+message ArtifactGrepTextRequest {
+  int64 attempt_id = 1;
+  int64 artifact_id = 2;
+  string boot_id = 3;
+  uint64 connection_epoch = 4;
+  string re2_pattern = 5;
+  uint32 max_matches = 6;          // 非零且不超过服务端固定上限
+  uint32 context_lines = 7;        // 不超过服务端固定上限
+}
+
+message ArtifactTextMatch {
+  uint64 line = 1;
+  bytes content = 2;
+}
+
+message ArtifactGrepTextResponse {
+  int64 artifact_id = 1;
+  repeated ArtifactTextMatch matches = 2;
+  bool truncated = 3;
+  uint64 total_size_bytes = 4;
+  uint64 total_lines = 5;
+  bytes sha256 = 6;
+  string media_type = 7;
 }
 
 // ============================================================================

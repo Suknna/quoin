@@ -1,0 +1,224 @@
+// Quoin v1 Plinth supervisor <-> agent worker 本地 stdio 协议机器契约。
+//
+// 本协议不是网络服务、不是 gRPC service，也不是持久历史。每个 Agent Execution Attempt 启动
+// 一个全新 worker 进程；supervisor 与该进程通过 stdin/stdout 交换 length-delimited
+// WorkerEnvelope。framing、顺序、取消、持久化先后、sandbox 与故障语义由
+// docs/specs/quoin-v1/architecture.md（ARCH-WORKER-* / ARCH-AGENT-*）唯一拥有；本文件只拥有
+// message 与 wire-level enum 形状。
+//
+// protobuf payload 外层帧为 4-byte unsigned big-endian 长度 + payload；长度不含 4-byte 前缀。
+// stdout 只允许该协议，诊断写 stderr。字段编号一经发布永不复用；删除字段必须 reserved。
+
+syntax = "proto3";
+
+package quoin.plinth.worker.v1;
+
+import "runtime.proto";
+
+option go_package = "github.com/Suknna/quoin/gen/plinth/worker/v1;workerv1";
+
+// supervisor 已持久化的固定 Agent 工作模式。Embedding 与 Model Provider probe 是 supervisor
+// 的机械 Model Call 工作，不创建 Agent worker，因此不在本枚举中。
+enum WorkMode {
+  WORK_MODE_UNSPECIFIED = 0;
+  WORK_MODE_INITIAL_ANALYSIS = 1;
+  WORK_MODE_INVESTIGATION = 2;
+  WORK_MODE_INSPECTION_ANALYSIS = 3;
+  WORK_MODE_KNOWLEDGE_EXTRACTION = 4;
+}
+
+// 一个 Attempt 的双向 stdio 信封。message_id 在本进程连接内按方向从 1 单调递增且唯一；
+// correlation_id 回带所响应请求的 message_id，0 表示非响应事件。attempt_id 恒等于 StartAttempt。
+message WorkerEnvelope {
+  uint64 message_id = 1;
+  uint64 correlation_id = 2;
+  int64 attempt_id = 3;
+
+  oneof msg {
+    StartAttempt start_attempt = 10;                   // supervisor -> worker；首帧
+    StartAttemptAck start_attempt_ack = 11;            // worker -> supervisor；首个响应
+    ChatModelRequest chat_model_request = 12;          // worker -> supervisor
+    ChatModelStarted chat_model_started = 13;          // supervisor -> worker；Quoin 已持久化物理调用
+    ChatModelChunk chat_model_chunk = 14;              // supervisor -> worker；瞬时可见 token
+    ChatModelCompleted chat_model_completed = 15;      // supervisor -> worker；Quoin 已封存规范响应/Tool Calls
+    ChatModelFailed chat_model_failed = 16;            // supervisor -> worker；结构化失败
+    ExecuteToolCall execute_tool_call = 17;            // worker -> supervisor；请求开始下一个已准备 Tool
+    LocalToolCompleted local_tool_completed = 18;      // worker -> supervisor；worker-local Tool 原始结果
+    ToolResult tool_result = 19;                        // supervisor -> worker；Quoin 已提交结果
+    CancelWorker cancel_worker = 20;                    // supervisor -> worker；Quoin fence 已提交
+    WorkerResultProposal worker_result_proposal = 21;  // worker -> supervisor；最终领域输出
+    WorkerResultAck worker_result_ack = 22;             // supervisor -> worker；Quoin 裁决
+    WorkerLog worker_log = 23;                          // worker -> supervisor；有界非秘密诊断
+    WorkerCancelled worker_cancelled = 24;              // worker -> supervisor；仅确认本地已停止
+    ToolCallStarted tool_call_started = 25;              // supervisor -> worker；Quoin 已提交 pending -> running
+  }
+}
+
+// 输入 canonical_json 是 Quoin 已持久化的不可变 AttemptInputSnapshot。Artifact 只给 locator 与
+// 元数据，不物化 Quoin PV 路径；worker 按需调用固定 artifact_read/artifact_grep Tool。
+message StartAttempt {
+  WorkMode mode = 1;
+  string schema_kind = 2;
+  bytes canonical_json = 3;
+  bytes content_digest = 4; // SHA-256(canonical_json)，32 字节
+  repeated WorkerArtifactRef artifact_refs = 5;
+  string agent_version = 6;
+  string prompt_renderer_version = 7;
+  bytes tool_schema_digest = 8;
+}
+
+message WorkerArtifactRef {
+  int64 artifact_id = 1;
+  string role = 2;
+  string media_type = 3;
+  uint64 size_bytes = 4;
+  bytes sha256 = 5;
+  bool body_expired = 6;
+}
+
+message StartAttemptAck {
+  bool accepted = 1;
+  string detail = 2; // 非秘密诊断；accepted=false 后 worker 必须退出
+}
+
+// worker 使用 Eino Message/Tool 语义组装请求。本地 wire 使用规范 JSON，避免把 Go 内部类型当协议。
+// messages_json 只含 visible content/tool calls/tool results，不含隐藏思维链；input_items 让 supervisor
+// 在 provider 请求前向 Quoin 提交可复核的精确历史投影。
+message ChatModelRequest {
+  reserved 2, 5;
+  reserved "model_id", "generation_json";
+
+  uint32 call_seq = 1;
+  bytes messages_json = 3;
+  bytes tools_json = 4;
+  bytes messages_digest = 6;
+  bytes tools_digest = 7;
+  repeated WorkerModelInputItem input_items = 8;
+  uint32 evicted_turn_count = 9;
+}
+
+message WorkerModelInputItem {
+  uint32 sequence = 1;
+  quoin.runtime.v1.ModelInputItemKind item_kind = 2;
+  int64 item_id = 3;    // system_contract/tool_schema 时为 0；其余为权威行 ID
+  bytes content_digest = 4;
+  quoin.runtime.v1.ModelInputRole role = 5;
+}
+
+// 每个物理 provider 尝试都在 Quoin 创建 model_calls 行后发送；retry_seq 从 0 递增。
+message ChatModelStarted {
+  int64 model_call_id = 1;
+  uint32 call_seq = 2;
+  uint32 retry_seq = 3;
+}
+
+// chunk_seq 在物理 model_call 内从 1 递增；不持久化为消息或输出。
+message ChatModelChunk {
+  int64 model_call_id = 1;
+  uint64 chunk_seq = 2;
+  string text = 3;
+}
+
+// supervisor 只有在 Quoin 已封存完整 ModelCall output 并为同一响应中的全部 Tool Call 创建
+// pending 行后才发送。worker 必须按 tool_calls 顺序执行，不得自行改变 execution/failure mode。
+message ChatModelCompleted {
+  int64 model_call_id = 1;
+  string assistant_text = 2;
+  bytes response_digest = 3;
+  ModelUsage usage = 4;
+  string provider_request_id = 5;
+  repeated PreparedToolCall tool_calls = 6;
+}
+
+message PreparedToolCall {
+  int64 tool_call_id = 1;
+  uint32 provider_index = 2;
+  string provider_tool_call_id = 3;
+  string tool_name = 4;
+  bytes arguments_json = 5;
+  bytes arguments_digest = 6;
+  quoin.runtime.v1.ToolExecutionMode execution_mode = 7;
+  quoin.runtime.v1.ToolFailureMode failure_mode = 8;
+}
+
+message ChatModelFailed {
+  int64 model_call_id = 1; // provider 前持久化失败时可为 0；请求已开始时必须非 0
+  string reason = 2;
+  string detail = 3;
+  bool retryable = 4;      // 仅尚无可见 chunk 且固定策略允许时 true
+  string provider_request_id = 5;
+}
+
+message ModelUsage {
+  uint64 input_tokens = 1;
+  uint64 output_tokens = 2;
+  uint64 total_tokens = 3;
+}
+
+// worker 按 PreparedToolCall 顺序为三种 execution mode 都发送此请求；收到对应 ToolCallStarted 前
+// 不得执行 WORKER_LOCAL，也不得继续下一个 Tool。supervisor 只有在 Quoin 的 BeginToolCallAck 成功后
+// 才能回 ToolCallStarted；随后本地执行由 worker 完成，typed/browser 执行由 supervisor 发起。
+message ExecuteToolCall {
+  int64 tool_call_id = 1;
+}
+
+message ToolCallStarted {
+  int64 tool_call_id = 1;
+  quoin.runtime.v1.ToolExecutionMode execution_mode = 2;
+}
+
+// WORKER_LOCAL 使用。success=true 时，小结果 inline 或大结果写入当前一次性工作区文件，body
+// 两者恰好一个；success=false 时 body 必须不设，只提交稳定 error_code 与有界 error_detail。
+// workspace_output_path 不是持久 locator；supervisor 校验路径、流式上传现有 tool_result Artifact 后删除。
+message LocalToolCompleted {
+  int64 tool_call_id = 1;
+  bool success = 2;
+  oneof body {
+    bytes inline_output = 3;
+    string workspace_output_path = 4;
+  }
+  string media_type = 5;
+  string error_code = 6;
+  string error_detail = 7;
+}
+
+// 只有在 Quoin 已提交 ToolCall 终态、Evidence 与 Artifact 引用后才发送。result_json 是模型可见
+// 的有界预览/结构化结果；完整正文只由 artifact_ref 指向并通过后续 Artifact Tool 按需读取。
+message ToolResult {
+  int64 tool_call_id = 1;
+  bool success = 2;
+  bytes result_json = 3;
+  WorkerArtifactRef artifact_ref = 4; // 无长正文时为空
+  repeated int64 evidence_ids = 5;
+  string error_code = 6;
+  string error_detail = 7;
+}
+
+// Quoin cancellation fence 已提交后 supervisor 才能发送。worker 必须取消当前 context、停止提出
+// 新模型/工具请求并尽快退出；supervisor 仍以 Quoin 的 SQLite 提交顺序裁决为权威。
+message CancelWorker {
+  string reason = 1;
+}
+
+message WorkerCancelled {
+  string detail = 1;
+}
+
+message WorkerResultProposal {
+  string schema_kind = 1;
+  bytes canonical_json = 2;
+  bytes content_digest = 3;
+  repeated int64 artifact_ids = 4;
+  repeated int64 evidence_ids = 5;
+  repeated int64 knowledge_version_ids = 6;
+}
+
+message WorkerResultAck {
+  bool accepted = 1;
+  string detail = 2;
+}
+
+message WorkerLog {
+  string level = 1;   // debug | info | warn | error；未知值按 info
+  string message = 2; // 非秘密、有界；不承载消息/Prompt/Tool 原文
+}

@@ -544,6 +544,40 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/alerts/{occurrenceId}/matched-resources:
+    get:
+      tags: [alerts]
+      operationId: listAlertMatchedResources
+      summary: 当前 Label Contract 下匹配的 Observed Resource 候选（游标分页；可为零个或多个）
+      description: 这是从当前完整 labels 与已发布配置机械计算的可重建投影，不是历史身份事实；不得任意选一个候选冒充唯一匹配。游标绑定当前 Label Contract 与相关已发布配置版本，版本变化后继续翻页返回 410 resource_expired（CONTEXT「告警与 Observed Resource 关联」）。
+      parameters:
+        - $ref: '#/components/parameters/OccurrenceId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 匹配候选分页列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ObservedResourceSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
   /api/v1/alerts/{occurrenceId}/observations:
     get:
       tags: [alerts]
@@ -959,7 +993,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CommandRequest'
+              $ref: '#/components/schemas/CreateInvestigationRequest'
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
@@ -983,7 +1017,7 @@ paths:
     get:
       tags: [investigations]
       operationId: getInvestigation
-      summary: 调查详情（消息、head、active Attempt、工具时间线）
+      summary: 调查详情（head、active Attempt 与历史计数；消息/Attempt/Tool Call 时间线经分页子资源读取）
       parameters:
         - $ref: '#/components/parameters/InvestigationId'
       responses:
@@ -1151,6 +1185,38 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/AttemptSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/investigations/{investigationId}/attempts/{attemptId}/tool-calls:
+    get:
+      tags: [investigations]
+      operationId: listAttemptToolCalls
+      summary: 调查执行尝试的 Tool Call 时间线（游标分页）
+      description: 按 callSeq、toolIndex 升序返回已持久化的 Tool Call；大结果只返回有界 result 预览与 Artifact 引用，不返回 Artifact 正文（HTTP-PAGE-005、ARCH-OUTPUT-002）。
+      parameters:
+        - $ref: '#/components/parameters/InvestigationId'
+        - $ref: '#/components/parameters/AttemptId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Tool Call 分页时间线。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ToolCallSummary'
                   nextCursor:
                     $ref: '#/components/schemas/Cursor'
         '401':
@@ -2844,6 +2910,7 @@ paths:
       operationId: rotateConnectionCredential
       x-external-dependency: true
       summary: 轮换连接凭据（Admin；创建新 revision/generation 并原子切换 current）
+      description: 对已启用的 model_provider，v1 固定先 disable 再切换；切换后的 current pair 在真实 probe 成功前不可启用或承载普通模型工作，probe 只测试该 current pair（HTTP-COMMAND-013）。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
       requestBody:
@@ -2875,13 +2942,49 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
+  /api/v1/connections/{connectionName}/probe:
+    post:
+      tags: [adminops]
+      operationId: probeModelProvider
+      x-external-dependency: true
+      summary: 对当前 Model Provider revision 执行真实能力探测（Admin）
+      description: 仅适用于 model_provider；创建 model_provider_probe Attempt，绑定当前 revision/generation（允许连接 disabled 或 RevalidationRequired）。成功能力行是启用该 current pair 的前提（HTTP-COMMAND-013）。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '202':
+          description: 能力探测 Attempt 已创建。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/connections/{connectionName}/enable:
     post:
       tags: [adminops]
       operationId: enableConnection
       x-external-dependency: true
       summary: 启用连接并清除 RevalidationRequired（Admin）
-      description: 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）。
+      description: 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）；model_provider 还必须有 current revision/generation 的成功真实 capability probe（HTTP-COMMAND-013）。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
       requestBody:
@@ -4613,14 +4716,16 @@ components:
       allOf:
         - $ref: '#/components/schemas/AlertOccurrenceSummary'
         - type: object
-          required: [observationCount, initialAnalysisCount, investigationCount]
+          required: [observationCount, matchedResourceCount, initialAnalysisCount, investigationCount]
           properties:
             observationCount:
               type: integer
               minimum: 0
               description: 不可变观测总数；完整时间线经 listAlertObservations 游标读取。
-            matchedResource:
-              $ref: '#/components/schemas/ObservedResourceSummary'
+            matchedResourceCount:
+              type: integer
+              minimum: 0
+              description: 当前机械匹配候选总数；完整集合经 listAlertMatchedResources 游标读取，可为零个或多个。
             initialAnalysisCount:
               type: integer
               minimum: 0
@@ -4695,7 +4800,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         type:
           type: string
-          enum: [initial_analysis, investigation, inspection_analysis, inspection_collection, browser_exploration]
+          enum: [initial_analysis, investigation, inspection_analysis, inspection_collection, browser_exploration, knowledge_extraction, embedding, model_provider_probe]
         state:
           type: string
           enum: [Queued, Assigned, Running, Cancelling, Succeeded, Failed, Cancelled, Interrupted]
@@ -4708,7 +4813,61 @@ components:
           $ref: '#/components/schemas/Timestamp'
         terminationReason:
           type: string
-          enum: [timeout, rate_limited, provider_unavailable, invalid_response, tool_error, artifact_commit_failed, cancelled, connection_disabled, business_system_disabled, lease_expired, replaced, revoked]
+          enum: [context_too_large, timeout, rate_limited, provider_unavailable, invalid_response, tool_error, artifact_commit_failed, artifact_body_expired, sandbox_unavailable, worker_protocol_error, cancelled, connection_disabled, business_system_disabled, lease_expired, replaced, revoked]
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    ToolCallSummary:
+      type: object
+      additionalProperties: false
+      required: [id, attemptId, modelCallId, callSeq, toolIndex, providerToolCallId, toolName, toolVersion, arguments, executionMode, failureMode, status, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        attemptId:
+          $ref: '#/components/schemas/LocatorId'
+        modelCallId:
+          $ref: '#/components/schemas/LocatorId'
+        callSeq:
+          type: integer
+          minimum: 1
+        toolIndex:
+          type: integer
+          minimum: 0
+        providerToolCallId:
+          type: string
+          minLength: 1
+        toolName:
+          type: string
+          minLength: 1
+        toolVersion:
+          type: string
+          minLength: 1
+        arguments:
+          type: object
+          additionalProperties: true
+          description: 已持久化 canonical Tool arguments 的 JSON 投影；只含非秘密领域 locator/参数。
+        executionMode:
+          type: string
+          enum: [worker_local, supervisor_typed, quoin_browser]
+        failureMode:
+          type: string
+          enum: [return_to_model, fail_attempt]
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, cancelled]
+        rowVersion:
+          type: integer
+          minimum: 1
+        result:
+          description: 有界模型可见结果预览；JSON 结构由该 Tool definition 的 result schema 约束，通用时间线不建立第二份联合；完整正文只由 resultArtifactId 指向。
+        resultArtifactId:
+          $ref: '#/components/schemas/LocatorId'
+        errorDetail:
+          type: string
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+        endedAt:
+          $ref: '#/components/schemas/Timestamp'
         createdAt:
           $ref: '#/components/schemas/Timestamp'
     IntakeIssueSummary:
@@ -4732,6 +4891,44 @@ components:
           type: integer
           minimum: 1
           description: 确认命令并发前提（DATA-ALERT-011）。
+    InvestigationSourceInput:
+      type: object
+      additionalProperties: false
+      required: [type, sourceId]
+      properties:
+        type:
+          type: string
+          enum: [occurrence, initial_analysis, evidence, inspection_report]
+        sourceId:
+          $ref: '#/components/schemas/LocatorId'
+    InvestigationSourceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, type, sourceId, linkedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        type:
+          type: string
+          enum: [occurrence, initial_analysis, evidence, inspection_report]
+        sourceId:
+          $ref: '#/components/schemas/LocatorId'
+        linkedBy:
+          $ref: '#/components/schemas/LocatorId'
+        linkedAt:
+          $ref: '#/components/schemas/Timestamp'
+    CreateInvestigationRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          properties:
+            sources:
+              type: array
+              maxItems: 100
+              uniqueItems: true
+              items:
+                $ref: '#/components/schemas/InvestigationSourceInput'
+              description: 从既有对象进入 Chat 时由前端自动携带；直接新建时省略或为空，不得要求用户预选。
     InvestigationSummary:
       type: object
       required: [id, createdAt, createdBy]
@@ -4750,8 +4947,14 @@ components:
       allOf:
         - $ref: '#/components/schemas/InvestigationSummary'
         - type: object
-          required: [messageCount, attemptCount]
+          required: [messageCount, attemptCount, sources]
           properties:
+            sources:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/InvestigationSourceSummary'
+              description: 创建时从既有对象入口自动带入的不可变来源；直接新建时为空。
             messageCount:
               type: integer
               minimum: 0
@@ -4911,6 +5114,9 @@ components:
             required: [state]
           then:
             not:
+              type: object
+              properties:
+                evidenceAt: {}
               required: [evidenceAt]
         - if:
             properties:
@@ -4918,6 +5124,8 @@ components:
                 enum: [Running, Completed, CompletedWithGaps]
             required: [state]
           then:
+            properties:
+              evidenceAt: {}
             required: [evidenceAt]
     InspectionRunDetail:
       allOf:
@@ -5450,9 +5658,14 @@ components:
                 enum: [published, superseded]
             required: [state]
           then:
+            properties:
+              publishedAt: {}
             required: [publishedAt]
           else:
             not:
+              type: object
+              properties:
+                publishedAt: {}
               required: [publishedAt]
     ConfigVersionDetail:
       allOf:
@@ -5590,9 +5803,14 @@ components:
                 enum: [active, retired]
             required: [state]
           then:
+            properties:
+              activatedAt: {}
             required: [activatedAt]
           else:
             not:
+              type: object
+              properties:
+                activatedAt: {}
               required: [activatedAt]
     LabelContractDetail:
       allOf:
@@ -5750,6 +5968,9 @@ components:
             required: [state]
           then:
             not:
+              type: object
+              properties:
+                evidenceAt: {}
               required: [evidenceAt]
         - if:
             properties:
@@ -5757,6 +5978,8 @@ components:
                 enum: [Running, Passed]
             required: [state]
           then:
+            properties:
+              evidenceAt: {}
             required: [evidenceAt]
     ConfigTestRunDetail:
       allOf:
@@ -5777,9 +6000,14 @@ components:
                 enum: [Failed, Cancelled, Interrupted]
             required: [state]
           then:
+            properties:
+              resultDetail: {}
             required: [resultDetail]
           else:
             not:
+              type: object
+              properties:
+                resultDetail: {}
               required: [resultDetail]
     ConfigTestRunCheckResult:
       oneOf:
@@ -5896,6 +6124,57 @@ components:
           $ref: '#/components/schemas/LocatorId'
         config:
           $ref: '#/components/schemas/ModelProviderConnectionNonSecret'
+        capability:
+          $ref: '#/components/schemas/ModelProviderCapabilitySummary'
+          description: 仅当 current revision/generation 已完成真实 probe 时存在；缺失表示未验证且不可启用。
+    ModelProviderCapabilitySummary:
+      type: object
+      additionalProperties: false
+      required: [probeAttemptId, chatModelId, embeddingModelId, supportsStreaming, supportsNativeTools, supportsParallelToolCalls, supportsCancel, supportsUsage, supportsRequestId, supportsEmbeddings, contextBudgetTokens, maxOutputTokens, testedAt]
+      properties:
+        probeAttemptId:
+          $ref: '#/components/schemas/LocatorId'
+        chatModelId:
+          type: string
+        embeddingModelId:
+          type: string
+        supportsStreaming:
+          type: boolean
+        supportsNativeTools:
+          type: boolean
+        supportsParallelToolCalls:
+          type: boolean
+        supportsCancel:
+          type: boolean
+        supportsUsage:
+          type: boolean
+        supportsRequestId:
+          type: boolean
+        contextBudgetTokens:
+          type: integer
+          minimum: 1
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+        supportsEmbeddings:
+          type: boolean
+        embeddingDimensions:
+          type: integer
+          minimum: 1
+        testedAt:
+          $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              supportsEmbeddings:
+                const: true
+          then:
+            properties:
+              embeddingDimensions: {}
+            required: [embeddingDimensions]
+          else:
+            properties:
+              embeddingDimensions: false
     ConnectionDetail:
       allOf:
         - $ref: '#/components/schemas/ConnectionSummary'
@@ -5983,7 +6262,7 @@ components:
           description: 只读调查的默认命名空间（非秘密）。
     ModelProviderConnectionNonSecret:
       type: object
-      required: [type, baseUrl, chatModelId, contextBudgetTokens, maxOutputTokens]
+      required: [type, baseUrl, chatModelId, embeddingModelId]
       additionalProperties: false
       properties:
         type:
@@ -5998,18 +6277,15 @@ components:
           description: 对话模型 ID（必须存在于 GET /v1/models；能力经 ConnectionRevision 实测）。
         embeddingModelId:
           type: string
-          description: 嵌入模型 ID（可选；能力经实测）。
+          description: 嵌入模型 ID；能力与向量维度经真实 probe 实测。
         contextBudgetTokens:
           type: integer
           minimum: 1
-          description: 人工配置的上下文预算（非秘密；模型能力实测见 research/model-provider-eino）。
+          description: 优先由 provider metadata 自动发现；metadata 不足时由 Admin 补充，并由 probe 验证可工作。
         maxOutputTokens:
           type: integer
           minimum: 1
-          description: 人工配置的最大输出预算。
-        toolsEnabled:
-          type: boolean
-          description: 是否允许工具调用（连接验证时实测；不依赖模型名称推断）。
+          description: 优先由 provider metadata 自动发现；metadata 不足时由 Admin 补充。
     ThanosConnectionInput:
       type: object
       required: [type, baseUrl]
@@ -6049,7 +6325,7 @@ components:
           description: kubeconfig 正文（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
     ModelProviderConnectionInput:
       type: object
-      required: [type, baseUrl, chatModelId, contextBudgetTokens, maxOutputTokens]
+      required: [type, baseUrl, chatModelId, embeddingModelId]
       additionalProperties: false
       properties:
         type:
@@ -6068,8 +6344,6 @@ components:
         maxOutputTokens:
           type: integer
           minimum: 1
-        toolsEnabled:
-          type: boolean
         apiKey:
           type: string
           description: API key（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
@@ -6282,7 +6556,8 @@ components:
           enum: [long_term, generated]
         ownerType:
           type: string
-          description: 逻辑所有者类型（investigation_message、evidence、browser_operation 等）。
+          enum: [investigation_message, evidence, tool_call, browser_operation, inspection_report, backup, source_material]
+          description: 逻辑所有者类型；与 ownerId 的权威表由 DATA-ARTIFACT-003 机械闭合。
         ownerId:
           $ref: '#/components/schemas/LocatorId'
         sizeBytes:
