@@ -2070,6 +2070,64 @@ paths:
                     $ref: '#/components/schemas/Cursor'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [config]
+      operationId: uploadBusinessSystemConfig
+      x-external-dependency: true
+      summary: 上传业务系统 YAML（multipart 流式；只解析一次并保存草稿）
+      description: YAML 根 system_key 是唯一系统身份；首次上传原子创建同 key 的 Disabled 系统与第一份不可变草稿，后续上传为同系统追加草稿，路径不重复传递系统身份。解析一次保存原文/parser/schema 版本/digest/类型结构（根 system_key/display_name/enabled/timezone/resource_refresh_interval_seconds 与 discovery/plan/check 类型化投影，DATA-CONFIG-003）。strict 单文档 YAML：未知字段、重复 key、anchor/alias/merge、自定义 tag、非字符串字段名、第二文档、尾随内容必须拒绝（CFG-YAML-002）。PromQL 表达式与 discovery selector 必须通过 Prometheus 官方 AST 校验（每个 VectorSelector 必须以目标 Label Contract 的业务系统 label 精确 = YAML system_key；discovery 必须是单个 instant vector selector，禁止 offset/@/聚合/label_replace，CFG-PROMQL-001/002）；browser check 的 journey_id 与 journey_params 必须通过嵌入 Journey Catalog 的封闭 params_schema 静态校验（CFG-JOURNEY-003）。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, clientCommandId, targetLabelContractVersion]
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 单个 UTF-8 YAML 文档。
+                clientCommandId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）；内容 hash 相同仍按命令键去重。
+                targetLabelContractVersion:
+                  type: integer
+                  minimum: 1
+                  description: 显式目标 Label Contract 版本（label_contracts.version）；候选版本校验不静默使用当前契约（DATA-CONFIG-003）。
+                journeyCatalogDigest:
+                  type: string
+                  pattern: '^[0-9a-f]{64}$'
+                  description: 可选；提供时必须等于 Quoin 嵌入的 Journey Catalog digest，否则 422；未提供时记录嵌入 digest（DATA-CONFIG-008）。
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '201':
+          description: 草稿已创建；首次上传时同时返回新建 Disabled 系统下的第一版草稿。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigVersionDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
   /api/v1/business-systems/{systemKey}:
     get:
       tags: [config]
@@ -2091,59 +2149,6 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
   /api/v1/business-systems/{systemKey}/config:
-    post:
-      tags: [config]
-      operationId: uploadBusinessSystemConfig
-      x-external-dependency: true
-      summary: 上传业务系统 YAML（multipart 流式；只解析一次并保存草稿）
-      description: 首次上传创建 Disabled 系统与第一份不可变草稿；解析一次保存原文/parser/schema 版本/digest/类型结构（DATA-CONFIG-003）。未知字段、重复 key、anchor/alias/merge、第二文档必须拒绝。
-      parameters:
-        - $ref: '#/components/parameters/SystemKey'
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [file, clientCommandId]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: 单个 UTF-8 YAML 文档。
-                clientCommandId:
-                  type: string
-                  minLength: 8
-                  maxLength: 128
-                  pattern: '^[A-Za-z0-9_-]+$'
-                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）；内容 hash 相同仍按命令键去重。
-      responses:
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '201':
-          description: 草稿已创建。
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigVersionDetail'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '413':
-          $ref: '#/components/responses/PayloadTooLarge'
-        '415':
-          $ref: '#/components/responses/UnsupportedMedia'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
     get:
       tags: [config]
       operationId: listBusinessSystemConfigs
@@ -2199,6 +2204,7 @@ paths:
       tags: [config]
       operationId: publishBusinessSystemConfig
       summary: 发布配置版本（expected current published version ID；事务重验并切换）
+      description: 普通发布只允许目标为当前 Label Contract 的草稿；目标为候选契约的配置版本必须通过该契约的联合激活原子切换（DATA-CONFIG-001/002）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -2231,7 +2237,9 @@ paths:
     post:
       tags: [config]
       operationId: runConfigTestRun
-      summary: 对指定草稿版本执行 Test Run（精确绑定草稿）
+      x-external-dependency: true
+      summary: 对指定草稿版本执行配置 Test Run（精确绑定草稿、目标 Label Contract 与 Journey Catalog）
+      description: 独立持久化的配置校验执行（DATA-CONFIG-007），不参与巡检 one-active-plan 约束；状态 Queued/WaitingForCapacity/Running/Passed/Failed/Cancelled/Interrupted；Passed 表示绑定配置版本全部 check 都有 ok+Evidence 结果行并作为 Label Contract 联合激活证据（DATA-CONFIG-002）。Disabled 系统可执行；执行所需依赖不可用时返回 503（PromQL check 依赖 Thanos；仅包含 browser check 时才依赖 Lintel）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -2244,14 +2252,85 @@ paths:
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '400':
           $ref: '#/components/responses/BadRequest'
         '202':
-          description: Test Run 已受理。
+          description: Test Run 已受理（独立配置校验执行）。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/InspectionRunDetail'
+                $ref: '#/components/schemas/ConfigTestRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run/{testRunId}:
+    get:
+      tags: [config]
+      operationId: getConfigTestRun
+      summary: 配置 Test Run 详情（含逐 check 结果与 resultDetail）
+      description: 独立持久化执行的权威详情重读（DATA-CONFIG-007）；状态/结果变化经 streamTaskEvents 推送（objectType=config_test_run，HTTP-SSE-006）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+        - name: testRunId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: Test Run 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigTestRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run/{testRunId}/cancel:
+    post:
+      tags: [config]
+      operationId: cancelConfigTestRun
+      x-external-dependency: true
+      summary: 取消配置 Test Run（clientCommandId + expectedRowVersion）
+      description: 按 SQLite 提交顺序持久化取消 fence：Queued/WaitingForCapacity/Running 的 Config Test Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Test Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+        - name: testRunId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '200':
+          description: 已受理取消；返回当前权威详情（含终态 rowVersion）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigTestRunDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2478,16 +2557,33 @@ paths:
     post:
       tags: [config]
       operationId: createLabelContractDraft
-      summary: 创建 Label Contract 草稿（Admin）
+      x-external-dependency: true
+      summary: 上传 Label Contract YAML（strict YAML-only；解析一次并保存草稿）
+      description: Q12.1 B：Label Contract 只接受严格单文档 YAML，与业务系统配置复用同一解析机制；未知字段、重复 key、anchor/alias/merge、自定义 tag、第二文档必须拒绝。解析一次保存原文/parser/schema 版本/类型化 contractJson/digest（DATA-CONFIG-003）。
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
-              $ref: '#/components/schemas/LabelContractDraft'
+              type: object
+              required: [file, clientCommandId]
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 单个 UTF-8 YAML 文档（形状见 contracts/schemas/label-contract.schema.json）。
+                clientCommandId:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: 客户端生成的幂等命令 ID（HTTP-COMMAND-001）。
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '409':
           $ref: '#/components/responses/Conflict'
         '201':
@@ -2502,6 +2598,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMedia'
         '422':
           $ref: '#/components/responses/Unprocessable'
   /api/v1/label-contracts/{contractVersion}:
@@ -2557,6 +2657,44 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/label-contracts/{contractVersion}/readiness:
+    get:
+      tags: [config]
+      operationId: getLabelContractActivationReadiness
+      summary: 联合激活就绪视图（逐启用系统：可激活候选与阻塞原因）
+      description: 从权威状态派生：对每个启用业务系统列出全部可由激活命令显式选择的未发布配置版本 + Passed config_test_run 证据对；更新草稿或后续失败的 Test Run 不得否定仍合法的旧候选。仅在不存在任何可激活候选时返回阻塞原因（DATA-CONFIG-002/007）。
+      parameters:
+        - $ref: '#/components/parameters/ContractVersion'
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 激活就绪视图。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LabelContractReadiness'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/journey-catalog:
+    get:
+      tags: [config]
+      operationId: getJourneyCatalog
+      summary: 只读 Journey Catalog 元数据（构建期嵌入；无上传/编辑端点）
+      description: 返回 Quoin 嵌入的生成产物 catalog 文档（形状由 contracts/schemas/journey-catalog.schema.json 唯一拥有）与其 digest/版本（DATA-CONFIG-008）；catalog 不可通过 HTTP 编辑。
+      responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 嵌入 Journey Catalog。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JourneyCatalogView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/v1/connections:
     get:
       tags: [adminops]
@@ -3523,27 +3661,8 @@ paths:
     get:
       tags: [config]
       operationId: downloadLabelContractTemplate
-      summary: 下载 Label Contract 起始模板
-      responses:
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '200':
-          description: YAML 模板。
-          headers:
-            Content-Disposition:
-              schema:
-                type: string
-          content:
-            application/yaml:
-              schema:
-                type: string
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-  /api/v1/templates/journey-catalog:
-    get:
-      tags: [config]
-      operationId: downloadJourneyCatalogTemplate
-      summary: 下载 Journey Catalog 起始模板
+      summary: 下载 Label Contract 起始模板（strict YAML-only）
+      description: 与业务系统配置同一严格 YAML 解析机制（Q12.1 B / DATA-CONFIG-003）。
       responses:
         '403':
           $ref: '#/components/responses/Forbidden'
@@ -4784,6 +4903,22 @@ components:
           $ref: '#/components/schemas/Timestamp'
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              state:
+                enum: [Queued, WaitingForCapacity, SkippedOverlap]
+            required: [state]
+          then:
+            not:
+              required: [evidenceAt]
+        - if:
+            properties:
+              state:
+                enum: [Running, Completed, CompletedWithGaps]
+            required: [state]
+          then:
+            required: [evidenceAt]
     InspectionRunDetail:
       allOf:
         - $ref: '#/components/schemas/InspectionRunSummary'
@@ -4799,18 +4934,29 @@ components:
               minimum: 0
               description: 报告版本总数；完整版本历史经 listInspectionReports 游标读取。
     CheckResultSummary:
-      type: object
-      required: [checkKey, status]
-      properties:
-        checkKey:
-          $ref: '#/components/schemas/StableKey'
-        status:
-          type: string
-          enum: [ok, error, gap]
-        evidenceId:
-          $ref: '#/components/schemas/LocatorId'
-        gapReason:
-          type: string
+      oneOf:
+        - type: object
+          required: [checkKey, status, evidenceId]
+          additionalProperties: false
+          properties:
+            checkKey:
+              $ref: '#/components/schemas/StableKey'
+            status:
+              const: ok
+            evidenceId:
+              $ref: '#/components/schemas/LocatorId'
+        - type: object
+          required: [checkKey, status, gapReason]
+          additionalProperties: false
+          properties:
+            checkKey:
+              $ref: '#/components/schemas/StableKey'
+            status:
+              type: string
+              enum: [error, gap]
+            gapReason:
+              type: string
+      description: ok 必须且只能携带 Evidence locator；error/gap 必须且只能携带缺口原因。
     ReportSummary:
       type: object
       required: [version, createdAt, modelId]
@@ -5099,7 +5245,7 @@ components:
       properties:
         objectType:
           type: string
-          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation]
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_test_run]
         objectId:
           $ref: '#/components/schemas/LocatorId'
         rowVersion:
@@ -5122,6 +5268,13 @@ components:
           description: 系统行并发前提（HTTP-COMMAND-002）。
         currentConfigVersionId:
           $ref: '#/components/schemas/LocatorId'
+        timezone:
+          type: ["string", "null"]
+          description: 已发布配置版本的根投影；首次发布后存在（DATA-CONFIG-001）。
+        resourceRefreshIntervalSeconds:
+          type: ["integer", "null"]
+          minimum: 1
+          description: 已发布配置版本的根投影；首次发布后存在（DATA-CONFIG-001）。
         browserIdentityState:
           type: string
           enum: [Ready, AuthenticationRequired, none]
@@ -5129,14 +5282,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/BusinessSystemSummary'
         - type: object
-          required: [timezone, refreshIntervalSeconds]
           properties:
-            timezone:
-              type: string
-              description: IANA 时区。
-            refreshIntervalSeconds:
-              type: integer
-              minimum: 1
             configVersionCount:
               type: integer
               minimum: 0
@@ -5153,22 +5299,22 @@ components:
               $ref: '#/components/schemas/BrowserIdentitySummary'
     DiscoverySummary:
       type: object
-      required: [discoveryKey, displayName, identityLabels, refreshIntervalSeconds]
+      required: [discoveryKey, displayName, selector, identityLabels]
       properties:
         discoveryKey:
           $ref: '#/components/schemas/StableKey'
         displayName:
           type: string
+        selector:
+          type: string
+          description: 单个 instant vector selector（上传时经 Prometheus 官方 AST 校验，CFG-PROMQL-002）。
         identityLabels:
           type: array
           items:
             type: string
-        refreshIntervalSeconds:
-          type: integer
-          minimum: 1
     PlanSummary:
       type: object
-      required: [planKey, displayName, timezone]
+      required: [planKey, displayName]
       properties:
         planKey:
           $ref: '#/components/schemas/StableKey'
@@ -5176,16 +5322,25 @@ components:
           type: string
         cron:
           type: string
-          description: 标准五字段 cron；缺省表示仅人工运行。
-        timezone:
-          type: string
+          description: 标准五字段 cron；缺省表示仅人工运行。时区由配置根节点统一提供（DATA-CONFIG-004）。
         checks:
           type: array
           items:
             $ref: '#/components/schemas/CheckSummary'
     CheckSummary:
+      oneOf:
+        - $ref: '#/components/schemas/PromqlCheckSummary'
+        - $ref: '#/components/schemas/BrowserCheckSummary'
+      description: 巡检项按 kind 封闭判别；promql 与 browser 字段互相排斥（DATA-CONFIG-003）。
+    PromqlCheckSummary:
+      oneOf:
+        - $ref: '#/components/schemas/PromqlInstantCheck'
+        - $ref: '#/components/schemas/PromqlRangeCheck'
+      description: PromQL 巡检项按查询模式封闭判别（DATA-CONFIG-003）。
+    PromqlInstantCheck:
       type: object
-      required: [checkKey, displayName, analysisQuestion, kind]
+      required: [checkKey, displayName, analysisQuestion, kind, queryMode, expression]
+      additionalProperties: false
       properties:
         checkKey:
           $ref: '#/components/schemas/StableKey'
@@ -5195,14 +5350,64 @@ components:
           type: string
         kind:
           type: string
-          enum: [promql, browser]
+          const: promql
+        queryMode:
+          type: string
+          const: instant
         expression:
           type: string
+          description: PromQL 字面量表达式（官方 AST 校验；每个 VectorSelector 必须等于目标 Label Contract 业务系统 label 精确 = 当前 system key，CFG-PROMQL-002）。
+    PromqlRangeCheck:
+      type: object
+      required: [checkKey, displayName, analysisQuestion, kind, queryMode, expression, rangeSeconds, stepSeconds]
+      additionalProperties: false
+      properties:
+        checkKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        analysisQuestion:
+          type: string
+        kind:
+          type: string
+          const: promql
+        queryMode:
+          type: string
+          const: range
+        expression:
+          type: string
+          description: PromQL 字面量表达式（官方 AST 校验；每个 VectorSelector 必须等于目标 Label Contract 业务系统 label 精确 = 当前 system key，CFG-PROMQL-002）。
+        rangeSeconds:
+          type: integer
+          minimum: 1
+          description: range 查询窗口；以真实 evidence_at 为终点（DATA-CONFIG-003）。
+        stepSeconds:
+          type: integer
+          minimum: 1
+          description: range 查询步长。
+    BrowserCheckSummary:
+      type: object
+      required: [checkKey, displayName, analysisQuestion, kind, journeyId, journeyParams]
+      additionalProperties: false
+      properties:
+        checkKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        analysisQuestion:
+          type: string
+        kind:
+          type: string
+          const: browser
         journeyId:
           type: string
+          description: Journey Catalog 中的稳定 ID（DATA-CONFIG-008）。
+        journeyParams:
+          type: object
+          description: 与 journey_id 对应的封闭参数；YAML 缺省时规范化为 {}，上传时按嵌入 catalog 的 params_schema 校验（schema 由 catalog 生成持有，不在此复制字段，CFG-JOURNEY-003）。
     ConfigVersionSummary:
       type: object
-      required: [id, versionSeq, state, createdAt, digest]
+      required: [id, versionSeq, state, createdAt, digest, parserVersion, schemaVersion, systemKey, displayName, enabled, labelContractVersionId, journeyCatalogDigest, journeyCatalogVersion]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5214,6 +5419,8 @@ components:
           enum: [draft, published, superseded]
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+        publishedAt:
+          $ref: '#/components/schemas/Timestamp'
         digest:
           type: string
           pattern: '^[0-9a-f]{64}$'
@@ -5221,17 +5428,55 @@ components:
           type: string
         schemaVersion:
           type: string
+        systemKey:
+          $ref: '#/components/schemas/StableKey'
+          description: 解析一次的类型化根投影；必须等于业务系统稳定 key（DATA-CONFIG-003）。
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        labelContractVersionId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 上传时显式目标 Label Contract 版本（DATA-CONFIG-003）。
+        journeyCatalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        journeyCatalogVersion:
+          type: string
+      allOf:
+        - if:
+            properties:
+              state:
+                enum: [published, superseded]
+            required: [state]
+          then:
+            required: [publishedAt]
+          else:
+            not:
+              required: [publishedAt]
     ConfigVersionDetail:
       allOf:
         - $ref: '#/components/schemas/ConfigVersionSummary'
         - type: object
-          required: [yamlBody]
+          required: [yamlBody, timezone, resourceRefreshIntervalSeconds, discoveries, plans]
           properties:
             yamlBody:
               type: string
               description: 上传的原始 YAML 正文（可导出；运行只使用类型结构）。
-            baseVersionId:
-              $ref: '#/components/schemas/LocatorId'
+            timezone:
+              type: string
+              description: IANA 时区（根节点统一提供，DATA-CONFIG-004）。
+            resourceRefreshIntervalSeconds:
+              type: integer
+              minimum: 1
+            discoveries:
+              type: array
+              items:
+                $ref: '#/components/schemas/DiscoverySummary'
+            plans:
+              type: array
+              items:
+                $ref: '#/components/schemas/PlanSummary'
     PublishConfigRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5315,8 +5560,11 @@ components:
       unevaluatedProperties: false
     LabelContractSummary:
       type: object
-      required: [version, state, createdAt, rowVersion]
+      required: [id, version, state, createdAt, rowVersion, parserVersion, schemaVersion]
       properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+          description: Label Contract 版本记录的技术 locator；并发激活前提使用该 ID。
         version:
           type: integer
           minimum: 1
@@ -5327,32 +5575,41 @@ components:
           type: integer
           minimum: 1
           description: 契约行并发前提（激活命令使用，HTTP-COMMAND-002）。
+        parserVersion:
+          type: string
+        schemaVersion:
+          type: string
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         activatedAt:
           $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              state:
+                enum: [active, retired]
+            required: [state]
+          then:
+            required: [activatedAt]
+          else:
+            not:
+              required: [activatedAt]
     LabelContractDetail:
       allOf:
         - $ref: '#/components/schemas/LabelContractSummary'
         - type: object
-          required: [contractJson, digest]
+          required: [yamlBody, contractJson, digest]
           properties:
+            yamlBody:
+              type: string
+              description: 上传的 strict YAML 原文（可导出；运行只使用类型化 contractJson）。
             contractJson:
               type: object
               additionalProperties: true
+              description: 解析一次的类型化投影（形状由 contracts/schemas/label-contract.schema.json 唯一拥有）。
             digest:
               type: string
               pattern: '^[0-9a-f]{64}$'
-    LabelContractDraft:
-      allOf:
-        - $ref: '#/components/schemas/CommandBase'
-        - type: object
-          required: [contractJson]
-          properties:
-            contractJson:
-              type: object
-              additionalProperties: true
-              description: Label Contract 的机器可验证结构（与 contracts/schemas 保持一致）。
     ActivateLabelContractRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5375,12 +5632,16 @@ components:
               description: 启用业务系统的兼容目标配置版本与逐系统并发前提；零启用系统时必须为空数组；全部就绪才原子激活（DATA-CONFIG-002）。
               items:
                 type: object
-                required: [businessSystemKey, configVersionId, expectedCurrentConfigVersionId, expectedBusinessSystemRowVersion]
+                required: [businessSystemKey, configVersionId, testRunId, expectedCurrentConfigVersionId, expectedBusinessSystemRowVersion]
+                additionalProperties: false
                 properties:
                   businessSystemKey:
                     $ref: '#/components/schemas/StableKey'
                   configVersionId:
                     $ref: '#/components/schemas/LocatorId'
+                  testRunId:
+                    $ref: '#/components/schemas/LocatorId'
+                    description: 引用该 (businessSystemKey, configVersionId, target contract) 的 Passed 配置 Test Run；联合激活必须逐系统重验其状态、完整检查结果与归属，否则 409（DATA-CONFIG-002/007）。
                   expectedCurrentConfigVersionId:
                     $ref: '#/components/schemas/NullableLocatorId'
                     description: 该业务系统当前已发布配置版本并发前提；null 表示当前无已发布版本；不匹配返回 409（DATA-CONFIG-002）。
@@ -5389,6 +5650,179 @@ components:
                     minimum: 1
                     description: 该业务系统行（business_systems.row_version）的并发前提；陈旧值 409。
       description: 多聚合并发前提（DATA-CONFIG-005/006）：state 单行聚合 + 目标草稿契约行 + 每个受影响系统的 current 配置与行版本，同一事务重验后原子切换（DATA-TX-007）；任一前提陈旧全部回滚。
+    LabelContractReadiness:
+      type: object
+      required: [targetContractVersion, stateRowVersion, targetRowVersion, currentContractVersionId, systems]
+      additionalProperties: false
+      properties:
+        targetContractVersion:
+          type: integer
+          minimum: 1
+        stateRowVersion:
+          type: integer
+          minimum: 1
+          description: label_contract_state.row_version；激活请求复制为 expectedStateRowVersion。
+        targetRowVersion:
+          type: integer
+          minimum: 1
+          description: 目标契约草稿 row_version；激活请求复制为 expectedTargetRowVersion。
+        currentContractVersionId:
+          $ref: '#/components/schemas/NullableLocatorId'
+        systems:
+          type: array
+          items:
+            $ref: '#/components/schemas/LabelContractReadinessSystem'
+    LabelContractReadinessSystem:
+      type: object
+      required: [businessSystemKey, currentConfigVersionId, businessSystemRowVersion, activationCandidates, blockers]
+      additionalProperties: false
+      properties:
+        businessSystemKey:
+          $ref: '#/components/schemas/StableKey'
+        currentConfigVersionId:
+          $ref: '#/components/schemas/NullableLocatorId'
+          description: 当前已发布配置版本；激活请求复制为 expectedCurrentConfigVersionId。
+        businessSystemRowVersion:
+          type: integer
+          minimum: 1
+          description: business_systems.row_version；激活请求复制为 expectedBusinessSystemRowVersion。
+        activationCandidates:
+          type: array
+          uniqueItems: true
+          items:
+            type: object
+            required: [configVersionId, passedTestRunId]
+            additionalProperties: false
+            properties:
+              configVersionId:
+                $ref: '#/components/schemas/LocatorId'
+              passedTestRunId:
+                $ref: '#/components/schemas/LocatorId'
+                description: 精确绑定该未发布配置版本与目标契约、状态为 Passed 的 Config Test Run；激活请求复制为 testRunId。
+        blockers:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [no_compatible_version, test_run_missing, test_run_pending, test_run_failed, test_run_cancelled, test_run_interrupted]
+      oneOf:
+        - properties:
+            activationCandidates:
+              minItems: 1
+            blockers:
+              maxItems: 0
+        - properties:
+            activationCandidates:
+              maxItems: 0
+            blockers:
+              minItems: 1
+      description: activationCandidates 包含所有数据库实际可接受的显式候选对；blockers 仅在候选集合为空时存在。不得用“最新草稿”或“最新 Test Run”覆盖仍合法的旧候选。
+    ConfigTestRunSummary:
+      type: object
+      required: [id, configVersionId, labelContractVersionId, journeyCatalogDigest, journeyCatalogVersion, state, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        configVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        labelContractVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        journeyCatalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        journeyCatalogVersion:
+          type: string
+        state:
+          type: string
+          enum: [Queued, WaitingForCapacity, Running, Passed, Failed, Cancelled, Interrupted]
+        rowVersion:
+          type: integer
+          minimum: 1
+        evidenceAt:
+          $ref: '#/components/schemas/Timestamp'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              state:
+                enum: [Queued, WaitingForCapacity]
+            required: [state]
+          then:
+            not:
+              required: [evidenceAt]
+        - if:
+            properties:
+              state:
+                enum: [Running, Passed]
+            required: [state]
+          then:
+            required: [evidenceAt]
+    ConfigTestRunDetail:
+      allOf:
+        - $ref: '#/components/schemas/ConfigTestRunSummary'
+        - type: object
+          required: [checkResults]
+          properties:
+            checkResults:
+              type: array
+              items:
+                $ref: '#/components/schemas/ConfigTestRunCheckResult'
+            resultDetail:
+              type: string
+              description: Failed/Cancelled/Interrupted 的人类可读失败或中止原因（非秘密）。
+        - if:
+            properties:
+              state:
+                enum: [Failed, Cancelled, Interrupted]
+            required: [state]
+          then:
+            required: [resultDetail]
+          else:
+            not:
+              required: [resultDetail]
+    ConfigTestRunCheckResult:
+      oneOf:
+        - type: object
+          required: [planKey, checkKey, status, evidenceId]
+          additionalProperties: false
+          properties:
+            planKey:
+              type: string
+            checkKey:
+              type: string
+            status:
+              const: ok
+            evidenceId:
+              $ref: '#/components/schemas/LocatorId'
+        - type: object
+          required: [planKey, checkKey, status, gapReason]
+          additionalProperties: false
+          properties:
+            planKey:
+              type: string
+            checkKey:
+              type: string
+            status:
+              type: string
+              enum: [error, gap]
+            gapReason:
+              type: string
+      description: planKey+checkKey 精确定位绑定配置版本中的检查；ok 携带 Evidence locator，error/gap 携带缺口原因，两种联合不得混合（DATA-CONFIG-007）。
+    JourneyCatalogView:
+      type: object
+      required: [version, digest, catalogJson]
+      additionalProperties: false
+      properties:
+        version:
+          type: string
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        catalogJson:
+          type: object
+          additionalProperties: true
+          description: 嵌入的生成产物 catalog 文档；形状由 contracts/schemas/journey-catalog.schema.json 唯一拥有（DATA-CONFIG-008）。
     ConnectionSummary:
       oneOf:
         - $ref: '#/components/schemas/ThanosConnectionSummary'
@@ -5949,7 +6383,7 @@ components:
           description: "task_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。"
         objectType:
           type: string
-          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation]
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_test_run]
         objectId:
           $ref: '#/components/schemas/LocatorId'
         changeType:

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/label-contract.schema.json",
+  "title": "Label Contract Document（解析后的文档形状）",
+  "description": "Label Contract 的 parsed document shape。人类输入是 strict YAML-only（Q12.1 B），与业务系统配置复用同一严格单文档 YAML 解析机制；本 Schema 描述解析后的文档结构。strict YAML 词法/解析限制见 docs/specs/quoin-v1/inspection-config.md（CFG-YAML-002）。第一版只统一配置业务系统归属 label 名（CONTEXT「标签契约」）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["label_contract"],
+  "properties": {
+    "label_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["business_system_label"],
+      "properties": {
+        "business_system_label": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$",
+          "description": "Prometheus label 名，承载业务系统归属；PromQL AST 校验以它为每个 VectorSelector 的精确 '=' 约束（CFG-PROMQL-001）。"
+        }
+      }
+    }
+  }
+}

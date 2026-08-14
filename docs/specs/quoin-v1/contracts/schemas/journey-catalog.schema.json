@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/journey-catalog.schema.json",
+  "title": "Journey Catalog Document（构建期生成，Quoin 与 Lintel 同版本嵌入）",
+  "description": "Journey Catalog 构建产物的 JSON 文档形状。catalog 由 Lintel 中版本化 Playwright Journey 及其参数 Schema 的同一机器可验证来源生成（DATA-CONFIG-008）；生成器输出的文件字节是 digest 的唯一输入，Quoin 与 Lintel 构建期嵌入同一文件并各自计算 SHA-256（hex，64 字符），禁止两侧重新序列化（CFG-JOURNEY-002）；Lintel 握手以 Hello.journey_catalog_digest 严格相等校验（RUNTIME-CTRL-010）。catalog 内容不落库、不可通过 HTTP 上传或编辑；业务系统配置的 journey_id/journey_params 由 Quoin 按本 catalog 静态校验（CFG-JOURNEY-003）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["catalog_version", "journeys"],
+  "properties": {
+    "catalog_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "catalog 自身版本（与 release_version 解耦；同 Release 内必须一致）。"
+    },
+    "journeys": {
+      "type": "object",
+      "description": "以非空 journey_id 为键的映射（键天然唯一，生成器按 key 稳定排序）；值不再重复 journey_id。",
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/journeyEntry"
+      }
+    }
+  },
+  "$defs": {
+    "journeyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "params_schema"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params_schema": {
+          "$ref": "#/$defs/paramsSchema"
+        }
+      }
+    },
+    "paramsSchema": {
+      "allOf": [
+        {
+          "$ref": "https://json-schema.org/draft/2020-12/schema"
+        }
+      ],
+      "type": "object",
+      "description": "该 journey 的封闭参数 JSON Schema（draft 2020-12 对象子集），由 Lintel 生成管线输出；外层 Schema 通过官方 metaschema 验证其关键字形状，生成管线还会逐个真实编译并递归拒绝 $ref/$dynamicRef/$id/$anchor/$dynamicAnchor，使参数契约完全自包含。要求 type=object、声明 properties、additionalProperties=false；required 只引用 properties 中已声明的参数名。",
+      "required": ["type", "properties", "additionalProperties"],
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "type": {
+          "const": "object"
+        },
+        "properties": {
+          "type": "object",
+          "description": "参数名 -> 参数约束（生成器按 journey 实现声明生成；不在本文件枚举）。"
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "必填参数名；必须全部存在于 properties（生成管线保证，运行时 Quoin 校验）。"
+        },
+        "additionalProperties": {
+          "const": false,
+          "description": "参数必须封闭：未知参数名在配置校验时拒绝（CFG-JOURNEY-003）。"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

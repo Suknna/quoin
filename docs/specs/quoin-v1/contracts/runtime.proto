@@ -102,6 +102,7 @@ enum ScopeType {
   SCOPE_TYPE_INVESTIGATION = 2;
   SCOPE_TYPE_RUN = 3;
   SCOPE_TYPE_RUN_CHECK = 4;
+  SCOPE_TYPE_CONFIG_TEST_RUN = 5; // 配置 Test Run 的机械采集子 Attempt（DATA-CONFIG-007）
 }
 
 // execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。
@@ -128,13 +129,14 @@ enum AttemptOutcome {
   ATTEMPT_OUTCOME_FAILED = 2;
 }
 
-// Hello 拒绝原因（RUNTIME-CTRL-002/003）；detail 在 runtime-protocol.md 定义。
+// Hello 拒绝原因（RUNTIME-CTRL-002/003/010）；detail 在 runtime-protocol.md 定义。
 enum HelloRejectReason {
   HELLO_REJECT_REASON_UNSPECIFIED = 0;
   HELLO_REJECT_REASON_TOKEN_INVALID = 1;
   HELLO_REJECT_REASON_SLOT_REVOKED = 2;
   HELLO_REJECT_REASON_VERSION_MISMATCH = 3;
   HELLO_REJECT_REASON_EPOCH_STALE = 4;
+  HELLO_REJECT_REASON_CATALOG_MISMATCH = 5; // Lintel journey_catalog_digest 与 Quoin 嵌入 Catalog 不一致（RUNTIME-CTRL-010）
 }
 
 // Runtime 拒绝接受派发的原因（RUNTIME-TASK-004）。
@@ -287,13 +289,16 @@ message ControlEnvelope {
   }
 }
 
-// 握手首帧：Bearer 已由 metadata 认证；本帧声明 slot/连接身份与版本。
+// 握手首帧：Bearer 已由 metadata 认证；本帧声明 slot/连接身份、版本与 Journey Catalog digest。
 message Hello {
   RuntimeSlot slot = 1;
   string boot_id = 2;              // 每次进程启动重新生成
   uint64 connection_epoch = 3;     // 每次连接递增，>= 1（RUNTIME-CTRL-004）
   string release_version = 4;      // 与 Quoin 严格相等
   repeated int64 active_attempts = 5; // 上次连接仍在执行的 attempt（调和输入，可空）
+  string journey_catalog_digest = 6; // 仅 Lintel：构建期嵌入的 Journey Catalog 生成文件原始字节 SHA-256（hex，64 字符），
+                                     // 必须与 Quoin 嵌入 digest 严格相等，否则 CATALOG_MISMATCH（RUNTIME-CTRL-010）；
+                                     // Plinth 该字段必须为空
 }
 
 // 握手裁决：accepted=true 后连接成为该 slot 当前活动控制流；
@@ -327,10 +332,11 @@ message DispatchAttempt {
   AttemptType attempt_type = 2;
   ScopeType scope_type = 3;
   int64 scope_id = 4;
-  string check_key = 5;            // 子 Attempt（run_check）时非空；否则空
+  string check_key = 5;            // run_check/config_test_run 子 Attempt 时非空；否则空
   google.protobuf.Timestamp lease_deadline = 6; // 有限 lease 截止；时长数值为部署配置
   AttemptInputSnapshot input = 7;  // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
   int64 requested_by_tool_call_id = 8; // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
+  string plan_key = 9;             // config_test_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
 }
 
 // 任务执行输入快照：Quoin 在派发事务中冻结的规范结构化输入（非秘密），对端按
@@ -533,10 +539,11 @@ message FetchCredentialGrantResponse {
 }
 
 // thanos 连接秘密（与 OpenAPI ThanosConnectionInput 秘密字段一致；仅 supervisor 内存）。
+// CONTEXT:147 只承诺 HTTP Basic Auth；不使用 Bearer。
 message ThanosCredentialSecret {
   string username = 1;
   string password = 2;
-  string bearer_token = 3;             // 仅 Bearer 模式使用（二选一）
+  reserved 3; // bearer_token removed: CONTEXT only commits Basic Auth
 }
 
 // kubernetes 连接秘密：kubeconfig 正文（仅 supervisor 内存）。
