@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/browser-execution.schema.json",
+  "title": "Quoin Browser Execution Contracts",
+  "description": "Browser Operation、Lintel Journey 输入与 Journey 结果的版本化非秘密机器契约；有状态 Exploration Session 由 browser-tool.schema.json 的首个 open 子 Attempt 建立。Plinth 单动作 Browser Tool 协议见 browser-tool.schema.json。",
+  "oneOf": [
+    { "$ref": "#/$defs/manualLoginInput" },
+    { "$ref": "#/$defs/authenticationProbeInput" },
+    { "$ref": "#/$defs/inspectionCollectionInput" },
+    { "$ref": "#/$defs/browserJourneyResult" }
+  ],
+  "$defs": {
+    "locatorId": { "type": "integer", "minimum": 1 },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "url": { "type": "string", "minLength": 8, "maxLength": 4096, "pattern": "^https?://[^/?#\\s\\u0000-\\u001F\\u007F]+(?:[/?#]|$)" },
+    "catalogBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "version"],
+      "properties": {
+        "digest": { "$ref": "#/$defs/digest" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "journeyBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "params", "catalog"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$" },
+        "version": { "type": "integer", "minimum": 1 },
+        "params": { "type": "object" },
+        "catalog": { "$ref": "#/$defs/catalogBinding" }
+      }
+    },
+    "identityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityId", "identityRevisionId", "startUrl"],
+      "properties": {
+        "identityId": { "$ref": "#/$defs/locatorId" },
+        "identityRevisionId": { "$ref": "#/$defs/locatorId" },
+        "profileGenerationId": {
+          "oneOf": [
+            { "$ref": "#/$defs/locatorId" },
+            { "type": "null" }
+          ]
+        },
+        "startUrl": { "$ref": "#/$defs/url" }
+      }
+    },
+    "manualLoginInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "identity", "actorUserId", "authenticationProbe"],
+      "properties": {
+        "schemaKind": { "const": "manual_login_v1" },
+        "operationId": { "$ref": "#/$defs/locatorId" },
+        "identity": { "$ref": "#/$defs/identityBinding" },
+        "actorUserId": { "$ref": "#/$defs/locatorId" },
+        "authenticationProbe": { "$ref": "#/$defs/journeyBinding" }
+      }
+    },
+    "authenticationProbeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "phase", "identity", "probe"],
+      "properties": {
+        "schemaKind": { "const": "authentication_probe_v1" },
+        "operationId": { "$ref": "#/$defs/locatorId" },
+        "phase": { "const": "revision_change" },
+        "identity": {
+          "allOf": [
+            { "$ref": "#/$defs/identityBinding" },
+            {
+              "type": "object",
+              "properties": { "profileGenerationId": { "$ref": "#/$defs/locatorId" } },
+              "required": ["profileGenerationId"]
+            }
+          ]
+        },
+        "probe": { "$ref": "#/$defs/journeyBinding" }
+      }
+    },
+    "inspectionCollectionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "attemptId", "operationId", "identity", "journey", "planKey", "checkKey"],
+      "properties": {
+        "schemaKind": { "const": "inspection_collection_v1" },
+        "attemptId": { "$ref": "#/$defs/locatorId" },
+        "operationId": {
+          "oneOf": [
+            { "$ref": "#/$defs/locatorId" },
+            { "type": "null" }
+          ]
+        },
+        "identity": {
+          "allOf": [
+            { "$ref": "#/$defs/identityBinding" },
+            {
+              "type": "object",
+              "properties": { "profileGenerationId": { "$ref": "#/$defs/locatorId" } },
+              "required": ["profileGenerationId"]
+            }
+          ]
+        },
+        "journey": { "$ref": "#/$defs/journeyBinding" },
+        "planKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "checkKey": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "probeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "result", "journeyId", "journeyVersion", "catalog", "reasonCode", "observedAt"],
+      "properties": {
+        "phase": { "enum": ["admission", "completion", "mid_operation"] },
+        "result": { "enum": ["Authenticated", "Unauthenticated", "Indeterminate"] },
+        "journeyId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$" },
+        "journeyVersion": { "type": "integer", "minimum": 1 },
+        "catalog": { "$ref": "#/$defs/catalogBinding" },
+        "reasonCode": { "type": ["string", "null"] },
+        "observedAt": { "type": "string", "format": "date-time", "minLength": 1, "maxLength": 100 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "result": { "const": "Indeterminate" } },
+            "required": ["result"]
+          },
+          "then": { "properties": { "reasonCode": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "reasonCode": { "type": "null" } } }
+        }
+      ]
+    },
+    "journeyEvidenceProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "primary", "observedAt", "content", "artifactId"],
+      "properties": {
+        "kind": { "enum": ["text", "structured", "screenshot"] },
+        "primary": { "type": "boolean" },
+        "observedAt": { "type": "string", "format": "date-time", "minLength": 1, "maxLength": 100 },
+        "content": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 1000000 },
+            { "type": "object" },
+            { "type": "null" }
+          ]
+        },
+        "artifactId": {
+          "oneOf": [
+            { "$ref": "#/$defs/locatorId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "text" } }, "required": ["kind"] },
+          "then": { "properties": { "primary": { "const": false }, "content": { "type": "string", "minLength": 1 }, "artifactId": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "structured" } }, "required": ["kind"] },
+          "then": { "properties": { "content": { "type": "object" }, "artifactId": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "screenshot" } }, "required": ["kind"] },
+          "then": { "properties": { "primary": { "const": false }, "content": { "type": "null" }, "artifactId": { "$ref": "#/$defs/locatorId" } } }
+        }
+      ]
+    },
+    "browserJourneyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "attemptId", "operationId", "outcome", "probeResults", "evidence", "traceArtifactId", "traceIntegrity", "gapCode", "originalGapCode", "terminalReason", "errorDetail"],
+      "properties": {
+        "schemaKind": { "const": "browser_journey_result_v1" },
+        "attemptId": { "$ref": "#/$defs/locatorId" },
+        "operationId": {
+          "oneOf": [
+            { "$ref": "#/$defs/locatorId" },
+            { "type": "null" }
+          ]
+        },
+        "outcome": { "enum": ["success", "gap"] },
+        "probeResults": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/probeObservation" }
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/journeyEvidenceProposal" }
+        },
+        "traceArtifactId": {
+          "oneOf": [
+            { "$ref": "#/$defs/locatorId" },
+            { "type": "null" }
+          ]
+        },
+        "traceIntegrity": {
+          "oneOf": [
+            { "enum": ["complete", "incomplete"] },
+            { "type": "null" }
+          ]
+        },
+        "gapCode": {
+          "oneOf": [
+            {
+              "enum": ["runtime_unavailable", "authentication_required", "authentication_probe_unavailable", "identity_busy", "artifact_commit_failed", "journey_failed", "cancelled", "interrupted"]
+            },
+            { "type": "null" }
+          ]
+        },
+        "originalGapCode": {
+          "oneOf": [
+            { "const": "journey_failed" },
+            { "type": "null" }
+          ],
+          "description": "trace 提交失败时保留被 ArtifactCommitFailed 覆盖的原 Journey 失败分类；其他结果为 null。"
+        },
+        "terminalReason": {
+          "oneOf": [
+            { "enum": ["new_boot", "shutdown", "slot_revoked", "slot_replaced", "authentication_required", "authentication_probe_unavailable", "artifact_commit_failed", "journey_failed", "cancelled", "parent_terminal", "lease_expired", "runtime_unavailable", "browser_crashed", "protocol_error"] },
+            { "type": "null" }
+          ]
+        },
+        "errorDetail": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 2000 },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "success" } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "operationId": { "$ref": "#/$defs/locatorId" },
+              "probeResults": {
+                "type": "array",
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/probeObservation" },
+                    { "type": "object", "properties": { "result": { "const": "Authenticated" } } }
+                  ]
+                },
+                "contains": {
+                  "type": "object",
+                  "properties": { "phase": { "const": "admission" }, "result": { "const": "Authenticated" } },
+                  "required": ["phase", "result"]
+                },
+                "minContains": 1
+              },
+              "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "contains": {
+                  "type": "object",
+                  "properties": { "kind": { "const": "structured" }, "primary": { "const": true } },
+                  "required": ["kind", "primary"]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              "traceArtifactId": { "type": "null" },
+              "traceIntegrity": { "type": "null" },
+              "gapCode": { "type": "null" },
+              "originalGapCode": { "type": "null" },
+              "terminalReason": { "type": "null" },
+              "errorDetail": { "type": "null" }
+            },
+            "allOf": [
+              {
+                "properties": {
+                  "probeResults": {
+                    "type": "array",
+                    "contains": {
+                      "type": "object",
+                      "properties": { "phase": { "const": "completion" }, "result": { "const": "Authenticated" } },
+                      "required": ["phase", "result"]
+                    },
+                    "minContains": 1
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "evidence": { "type": "array", "maxItems": 0 },
+              "gapCode": {
+                "enum": ["runtime_unavailable", "authentication_required", "authentication_probe_unavailable", "identity_busy", "artifact_commit_failed", "journey_failed", "cancelled", "interrupted"]
+              },
+              "errorDetail": { "type": "string", "minLength": 1, "maxLength": 2000 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "traceArtifactId": { "type": "null" } }, "required": ["traceArtifactId"] },
+          "then": { "properties": { "traceIntegrity": { "type": "null" } } },
+          "else": { "properties": { "traceIntegrity": { "enum": ["complete", "incomplete"] } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "terminalReason": { "enum": ["artifact_commit_failed", "new_boot", "runtime_unavailable"] }
+            },
+            "required": ["terminalReason"]
+          },
+          "then": {
+            "properties": {
+              "traceArtifactId": { "type": "null" },
+              "traceIntegrity": { "type": "null" }
+            }
+          },
+          "else": {
+            "if": {
+              "allOf": [
+                { "properties": { "outcome": { "const": "gap" } }, "required": ["outcome"] },
+                { "not": { "properties": { "operationId": { "type": "null" } }, "required": ["operationId"] } }
+              ]
+            },
+            "then": {
+              "properties": {
+                "traceArtifactId": { "$ref": "#/$defs/locatorId" },
+                "traceIntegrity": { "enum": ["complete", "incomplete"] }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "artifact_commit_failed" } }, "required": ["gapCode"] },
+          "then": {
+            "properties": {
+              "terminalReason": { "const": "artifact_commit_failed" },
+              "originalGapCode": { "const": "journey_failed" }
+            }
+          },
+          "else": { "properties": { "originalGapCode": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "journey_failed" } }, "required": ["gapCode"] },
+          "then": { "properties": { "terminalReason": { "const": "journey_failed" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "authentication_required" } }, "required": ["gapCode"] },
+          "then": { "properties": { "terminalReason": { "const": "authentication_required" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "authentication_probe_unavailable" } }, "required": ["gapCode"] },
+          "then": { "properties": { "terminalReason": { "const": "authentication_probe_unavailable" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "runtime_unavailable" } }, "required": ["gapCode"] },
+          "then": { "properties": { "terminalReason": { "const": "runtime_unavailable" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "cancelled" } }, "required": ["gapCode"] },
+          "then": { "properties": { "terminalReason": { "const": "cancelled" } } }
+        },
+        {
+          "if": { "properties": { "gapCode": { "const": "interrupted" } }, "required": ["gapCode"] },
+          "then": {
+            "properties": {
+              "terminalReason": {
+                "enum": ["new_boot", "shutdown", "slot_revoked", "slot_replaced", "parent_terminal", "lease_expired", "browser_crashed", "protocol_error"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operationId": { "type": "null" } },
+            "required": ["operationId"]
+          },
+          "then": {
+            "properties": {
+              "outcome": { "const": "gap" },
+              "gapCode": { "const": "identity_busy" },
+              "probeResults": { "type": "array", "maxItems": 0 },
+              "traceArtifactId": { "type": "null" },
+              "traceIntegrity": { "type": "null" },
+              "terminalReason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "gapCode": { "const": "identity_busy" } },
+            "required": ["gapCode"]
+          },
+          "then": { "properties": { "operationId": { "type": "null" } } }
+        }
+      ]
+    }
+  }
+}

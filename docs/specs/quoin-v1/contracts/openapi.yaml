@@ -293,8 +293,12 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '409':
           $ref: '#/components/responses/Conflict'
-        '204':
-          description: 密码已重置；password_change_required=1；该用户全部 Session 已撤销。
+        '200':
+          description: 密码已重置；password_change_required=1；响应只在 auth_revision 递增且该用户此前全部有效 Session 已撤销后返回。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResetPasswordPayload'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -325,8 +329,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '409':
           $ref: '#/components/responses/Conflict'
-        '204':
+        '200':
           description: 该用户全部 Session 已撤销；对应 SSE/WebSocket 立即关闭。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionRevocationPayload'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -419,7 +427,7 @@ paths:
       description: |
         幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-010）：同一事务先确认
         fence（DATA-RUNTIME-001b：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），
-        且 lintel 另无任何 active Browser Operation（result IS NULL）），否则返回 409 active_conflict 且不得先行吊销；通过后
+        且 lintel 另无任何 active Browser Operation（非终态，或虽终态但 `stopConfirmedAt` 仍为空）），否则返回 409 active_conflict 且不得先行吊销；通过后
         单条 UPDATE 把 slot 置为 revoked 并清空 current/pending 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
         自动 retire 该 slot 全部未退休凭据；被引用行在指针清空前禁止手动 retire，DATA-RUNTIME-001/002），同时生成内存短生命周期、
         单次使用的一次性注册令牌 reveal handle（HTTP-COMMAND-012）。响应只含非秘密元数据；首次实时响应可能
@@ -1457,7 +1465,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [Queued, WaitingForCapacity, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
+            enum: [Queued, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -2304,8 +2312,8 @@ paths:
       tags: [config]
       operationId: runConfigTestRun
       x-external-dependency: true
-      summary: 对指定草稿版本执行配置 Test Run（精确绑定草稿、目标 Label Contract 与 Journey Catalog）
-      description: 独立持久化的配置校验执行（DATA-CONFIG-007），不参与巡检 one-active-plan 约束；状态 Queued/WaitingForCapacity/Running/Passed/Failed/Cancelled/Interrupted；Passed 表示绑定配置版本全部 check 都有 ok+Evidence 结果行并作为 Label Contract 联合激活证据（DATA-CONFIG-002）。Disabled 系统可执行；执行所需依赖不可用时返回 503（PromQL check 依赖 Thanos；仅包含 browser check 时才依赖 Lintel）。
+      summary: 对指定草稿版本执行配置 Test Run（精确绑定草稿与目标 Label Contract；实际 Journey 使用准入时当前兼容 Catalog）
+      description: 独立持久化的配置校验执行（DATA-CONFIG-007），不参与巡检 one-active-plan 约束；Journey 等待浏览器 slot 时 Test Run 保持 Running；Passed 表示绑定配置版本全部 check 都有 ok+Evidence 结果行并作为 Label Contract 联合激活证据（DATA-CONFIG-002）。Disabled 系统可执行；执行所需依赖不可用时返回 503（PromQL check 依赖 Thanos；仅包含 browser check 时才依赖 Lintel）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -2369,7 +2377,7 @@ paths:
       operationId: cancelConfigTestRun
       x-external-dependency: true
       summary: 取消配置 Test Run（clientCommandId + expectedRowVersion）
-      description: 按 SQLite 提交顺序持久化取消 fence：Queued/WaitingForCapacity/Running 的 Config Test Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Test Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
+      description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Test Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Test Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -2443,7 +2451,7 @@ paths:
     get:
       tags: [config]
       operationId: getBrowserIdentity
-      summary: 浏览器身份详情（generation/状态/起始 URL）
+      summary: 浏览器身份当前 revision/profile/operation 与认证状态
       parameters:
         - $ref: '#/components/parameters/SystemKey'
       responses:
@@ -2462,7 +2470,7 @@ paths:
     post:
       tags: [config]
       operationId: configureBrowserIdentity
-      summary: 创建/配置浏览器身份（Admin）
+      summary: 创建不可变 Browser Identity Revision 并切换当前指针（Admin）
       parameters:
         - $ref: '#/components/parameters/SystemKey'
       requestBody:
@@ -2478,12 +2486,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '409':
           $ref: '#/components/responses/Conflict'
-        '201':
-          description: 身份已创建/更新。
+        '202':
+          description: revision 与 current 指针已提交；若已有 profile，revision_change probe 已创建并进入唯一全局 FIFO。身份已有未停止 operation 时必须在创建 revision 前返回 409 identity_busy。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BrowserIdentitySummary'
+                $ref: '#/components/schemas/BrowserIdentityConfigResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2492,78 +2500,13 @@ paths:
           $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/Unprocessable'
-  /api/v1/browser-login/{systemKey}:
-    get:
-      tags: [config]
-      operationId: enterBrowserLogin
-      x-external-dependency: true
-      summary: 进入实时 noVNC 登录页面（返回页面所需的会话状态）
-      parameters:
-        - $ref: '#/components/parameters/SystemKey'
-      responses:
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '200':
-          description: 登录会话状态（不含 profile 内容；profile 在 lintel-state 卷）。
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [identityId, state]
-                properties:
-                  identityId:
-                    $ref: '#/components/schemas/LocatorId'
-                  state:
-                    type: string
-                    enum: [Ready, AuthenticationRequired]
-                  currentGeneration:
-                    type: integer
-                    minimum: 0
-                  reconnectDeadline:
-                    $ref: '#/components/schemas/Timestamp'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-  /api/v1/browser-login/{systemKey}/ws:
-    get:
-      tags: [config]
-      operationId: browserLoginWebSocket
-      x-external-dependency: true
-      summary: noVNC WebSocket 升级（101；二进制字节中继，不做协议解析）
-      description: |
-        同 Origin 且带有效 Session Cookie；握手额外校验 Origin 等于配置的公共 Origin
-        （HTTP-NOVNC-002）。101 后为 noVNC→x0vncserver 字节流，由 Quoin 经 Runtime
-        通道中继给 Lintel（HTTP-NOVNC-003）；gRPC 内部机制属于 runtime-protocol.md，
-        不在本契约建模。Session 吊销立即关闭该 WebSocket（HTTP-NOVNC-004）。
-      parameters:
-        - $ref: '#/components/parameters/SystemKey'
-      responses:
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '101':
-          description: Switching Protocols；后续为二进制 WebSocket 帧流。
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-  /api/v1/browser-login/{systemKey}/publish-generation:
+  /api/v1/browser-login/{systemKey}/operations:
     post:
       tags: [config]
-      operationId: publishBrowserProfileGeneration
+      operationId: startBrowserManualLogin
       x-external-dependency: true
-      summary: 显式发布浏览器 profile generation（人工登录后）
-      description: 只有显式发布才形成新 generation；自动变化不制造版本（CONTEXT「浏览器身份」）。
+      summary: 启动一个人工登录 Browser Operation
+      description: 创建 operation 时身份立即转 AuthenticationRequired；请求已受理返回 202。一个身份同时至多一个 active operation，冲突返回 identity_busy（HTTP-NOVNC-003/007）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
       requestBody:
@@ -2571,28 +2514,153 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/VersionedCommandRequest'
+              $ref: '#/components/schemas/StartBrowserManualLoginRequest'
       responses:
+        '202':
+          description: 已创建并排队或启动的人工登录 operation。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserOperationSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
         '429':
           $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-        '400':
-          $ref: '#/components/responses/BadRequest'
+  /api/v1/browser-login/{systemKey}/operations/{browserOperationId}:
+    get:
+      tags: [config]
+      operationId: getBrowserLoginOperation
+      summary: 读取人工登录 operation 状态
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/BrowserOperationId'
+      responses:
+        '200':
+          description: Operation 状态、重附着期限和可执行下一步。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserOperationSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/ws:
+    get:
+      tags: [config]
+      operationId: browserLoginWebSocket
+      x-external-dependency: true
+      summary: 附着当前操作者唯一的 noVNC WebSocket
+      description: |
+        同 Origin且带有效 Session Cookie；必须是 operation 发起用户。任一时刻只允许一个
+        active WebSocket；同一用户仅可在同 boot 宽限期内重附着。101 后为 noVNC→
+        x0vncserver 原始二进制帧，经 Quoin 转发给 Lintel；Quoin 不解析 RFB 内容。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/BrowserOperationId'
+      responses:
+        '101':
+          description: Switching Protocols；后续为二进制 WebSocket 帧流。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/publish:
+    post:
+      tags: [config]
+      operationId: publishBrowserProfileGeneration
+      x-external-dependency: true
+      summary: Probe 成功后原子发布新 profile generation
+      description: 只允许 operation 发起用户发布；probe、generation 创建、身份 current 指针切换和 operation Succeeded 在一个事务内提交，随后立即关闭 noVNC 与 Chromium（HTTP-NOVNC-005）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/BrowserOperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishBrowserProfileRequest'
+      responses:
         '200':
           description: generation 已发布。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BrowserIdentitySummary'
+                $ref: '#/components/schemas/BrowserProfilePublishResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/cancel:
+    post:
+      tags: [config]
+      operationId: cancelBrowserLoginOperation
+      summary: 取消当前操作者的人工登录 operation
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/BrowserOperationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelBrowserOperationRequest'
+      responses:
+        '200':
+          description: 返回已提交的权威终态；重复命令幂等。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BrowserOperationSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/label-contracts:
     get:
       tags: [config]
@@ -4038,6 +4106,12 @@ components:
       required: true
       schema:
         $ref: '#/components/schemas/StableKey'
+    BrowserOperationId:
+      name: browserOperationId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
     ContractVersion:
       name: contractVersion
       in: path
@@ -4172,6 +4246,12 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ErrorModel'
+    InternalError:
+      description: 已受理操作的强制 Artifact/profile 提交失败（500；code=artifact_commit_failed）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ErrorModel'
     ServiceUnavailable:
       description: 服务不可用/维护中（503）。
       content:
@@ -4245,7 +4325,8 @@ components:
           maxLength: 200
         password:
           type: string
-          maxLength: 1024
+          minLength: 15
+          maxLength: 128
           description: 15–128 Unicode 字符（NFC 规范化后校验）；弱密码检查与有界冷却由部署层执行。
     UserSummary:
       type: object
@@ -4279,8 +4360,12 @@ components:
       properties:
         currentPassword:
           type: string
+          minLength: 15
+          maxLength: 128
         newPassword:
           type: string
+          minLength: 15
+          maxLength: 128
           description: 15–128 Unicode 字符；成功改密在同一事务清除强制改密标志并撤销其他 Session。
     SessionInfo:
       type: object
@@ -4316,6 +4401,8 @@ components:
               enum: [admin, operator]
             password:
               type: string
+              minLength: 15
+              maxLength: 128
               description: 15–128 Unicode 字符。
     UpdateUserRequest:
       allOf:
@@ -4342,7 +4429,27 @@ components:
       properties:
         newPassword:
           type: string
+          minLength: 15
+          maxLength: 128
           description: 临时密码；重置后 password_change_required=1 并要求首次登录修改（CONTEXT「管理员离线恢复」）。
+    ResetPasswordPayload:
+      type: object
+      required: [user, revokedSessionCount]
+      properties:
+        user:
+          $ref: '#/components/schemas/UserSummary'
+        revokedSessionCount:
+          type: integer
+          minimum: 0
+          description: 本事务从有效变为撤销的 Session 数；所有旧 Session 即使并发请求已读到 bearer，也会因 authRevision 不匹配而认证失败。
+    SessionRevocationPayload:
+      type: object
+      required: [revokedSessionCount]
+      properties:
+        revokedSessionCount:
+          type: integer
+          minimum: 0
+          description: 本事务从有效变为撤销的 Session 数。
     ErrorModel:
       type: object
       required: [code, message, retryable]
@@ -4376,6 +4483,8 @@ components:
                 - $ref: '#/components/schemas/HeadConflict'
                 - $ref: '#/components/schemas/CurrentPointerConflict'
                 - $ref: '#/components/schemas/RuntimeSlotConflict'
+                - $ref: '#/components/schemas/IdentityBusyConflict'
+                - $ref: '#/components/schemas/AuthenticationRequiredConflict'
       description: 409 冲突响应的专用包络：conflict 块按 code 判别联合（HTTP-ERROR-004/007）。
     FieldError:
       type: object
@@ -4454,6 +4563,41 @@ components:
         detail:
           type: string
           description: 人类可读冲突说明（HTTP-ERROR-004）。
+    IdentityBusyConflict:
+      type: object
+      required: [code, identityId, browserOperationId, operationKind, occupiedSince]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          const: identity_busy
+        identityId:
+          $ref: '#/components/schemas/LocatorId'
+        browserOperationId:
+          $ref: '#/components/schemas/LocatorId'
+        operationKind:
+          type: string
+          enum: [manual_login, authentication_probe, journey, exploration]
+        occupiedSince:
+          $ref: '#/components/schemas/Timestamp'
+        detail:
+          type: string
+    AuthenticationRequiredConflict:
+      type: object
+      required: [code, identityId, currentRevisionId, currentProfileGenerationId]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          const: authentication_required
+        identityId:
+          $ref: '#/components/schemas/LocatorId'
+        currentRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentProfileGenerationId:
+          $ref: '#/components/schemas/NullableLocatorId'
+        detail:
+          type: string
     HeadConflict:
       type: object
       required: [code, objectType, objectId, headMessageId]
@@ -5093,7 +5237,7 @@ components:
           $ref: '#/components/schemas/StableKey'
         state:
           type: string
-          enum: [Queued, WaitingForCapacity, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
+          enum: [Queued, Running, Completed, CompletedWithGaps, Failed, Cancelled, Interrupted, SkippedOverlap]
         rowVersion:
           type: integer
           minimum: 1
@@ -5110,7 +5254,7 @@ components:
         - if:
             properties:
               state:
-                enum: [Queued, WaitingForCapacity, SkippedOverlap]
+                enum: [Queued, SkippedOverlap]
             required: [state]
           then:
             not:
@@ -5164,6 +5308,7 @@ components:
               enum: [error, gap]
             gapReason:
               type: string
+              enum: [runtime_unavailable, authentication_required, authentication_probe_unavailable, identity_busy, artifact_commit_failed, journey_failed, query_failed, partial_response, no_data, cancelled, interrupted]
       description: ok 必须且只能携带 Evidence locator；error/gap 必须且只能携带缺口原因。
     ReportSummary:
       type: object
@@ -5722,55 +5867,446 @@ components:
           type: boolean
         lastSuccessfulRefreshAt:
           $ref: '#/components/schemas/Timestamp'
-    BrowserIdentitySummary:
+    AuthenticationProbeConfig:
       type: object
-      required: [id, name, startUrl, state]
+      additionalProperties: false
+      required: [journeyId, journeyVersion, params]
+      properties:
+        journeyId:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Journey Catalog 中 purpose=authentication_probe 的稳定版本化 ID。
+        journeyVersion:
+          type: integer
+          minimum: 1
+        params:
+          type: object
+          description: 按该 Journey 的封闭 params_schema 校验；未知字段拒绝。
+    BrowserIdentityRevisionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, revision, name, startUrl, authenticationProbe, catalogDigest, catalogVersion, createdAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
+        revision:
+          type: integer
+          minimum: 1
         name:
           type: string
         startUrl:
           type: string
           format: uri
+          pattern: '^https?://[^/?#]+'
+        authenticationProbe:
+          $ref: '#/components/schemas/AuthenticationProbeConfig'
+        catalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        catalogVersion:
+          type: string
+          minLength: 1
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    BrowserProfileGenerationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, generation, identityRevisionId, chromiumRevision, profileManifestDigest, probeJourneyId, probeJourneyVersion, probeCatalogDigest, probeCatalogVersion, publishedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        generation:
+          type: integer
+          minimum: 1
+        identityRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        chromiumRevision:
+          type: string
+          minLength: 1
+        profileManifestDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        probeJourneyId:
+          type: string
+          minLength: 1
+        probeJourneyVersion:
+          type: integer
+          minimum: 1
+        probeCatalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        probeCatalogVersion:
+          type: string
+          minLength: 1
+        publishedAt:
+          $ref: '#/components/schemas/Timestamp'
+    AuthenticationProbeResultSummary:
+      type: object
+      additionalProperties: false
+      required: [phase, result, journeyId, journeyVersion, catalogDigest, catalogVersion, observedAt]
+      properties:
+        phase:
+          type: string
+          enum: [revision_change, admission, completion, publish, mid_operation]
+        result:
+          type: string
+          enum: [Authenticated, Unauthenticated, Indeterminate]
+        journeyId:
+          type: string
+        journeyVersion:
+          type: integer
+          minimum: 1
+        catalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        catalogVersion:
+          type: string
+          minLength: 1
+        reasonCode:
+          type: string
+          minLength: 1
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              result:
+                const: Indeterminate
+            required: [result]
+          then:
+            properties:
+              reasonCode:
+                type: string
+                minLength: 1
+            required: [reasonCode]
+          else:
+            properties:
+              reasonCode: false
+    BrowserOperationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, identityId, identityRevisionId, kind, state, rowVersion, requestedAt, canAttach, canPublish, canCancel]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        identityId:
+          $ref: '#/components/schemas/LocatorId'
+        identityRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        profileGenerationId:
+          $ref: '#/components/schemas/NullableLocatorId'
+        kind:
+          type: string
+          enum: [manual_login, authentication_probe, journey, exploration]
+        state:
+          type: string
+          enum: [Queued, WaitingForCapacity, Starting, Running, AwaitingReconnect, Succeeded, Failed, Cancelled, Interrupted]
+        terminalReason:
+          type: string
+          enum: [client_closed_without_publish, grace_expired, session_revoked, new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, artifact_commit_failed, journey_failed, cancelled, parent_terminal, lease_expired, runtime_unavailable, browser_crashed, protocol_error]
+        rowVersion:
+          type: integer
+          minimum: 1
+        requestedAt:
+          $ref: '#/components/schemas/Timestamp'
+        startDispatchedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: StartBrowserOperation 已派发；本字段存在但 startedAt 缺失时，Starting 表示 Ack 未知，WaitingForCapacity 表示明确 NO_CAPACITY 后按原 FIFO 等待重发；两者都保留身份 fence。
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+        reconnectDeadline:
+          $ref: '#/components/schemas/Timestamp'
+        endedAt:
+          $ref: '#/components/schemas/Timestamp'
+        stopConfirmedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: Lintel 已确认该 operation 的 Chromium/隧道不存在；领域终态存在但本字段缺失时身份仍被占用。
+        stopConfirmationBasis:
+          type: string
+          enum: [not_dispatched, start_rejected, stop_ack, inventory_absent, new_boot]
+          description: 物理停止确认的唯一审计依据；必须与 stopConfirmedAt 成对出现。
+        startedByUsername:
+          type: string
+        probeResults:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthenticationProbeResultSummary'
+        canAttach:
+          type: boolean
+        canPublish:
+          type: boolean
+        canCancel:
+          type: boolean
+      allOf:
+        - if:
+            required: [stopConfirmedAt]
+          then:
+            required: [stopConfirmationBasis]
+          else:
+            properties:
+              stopConfirmationBasis: false
+        - if:
+            properties:
+              state:
+                const: Starting
+            required: [state]
+          then:
+            properties:
+              startedAt: false
+            required: [startDispatchedAt]
+        - if:
+            properties:
+              state:
+                enum: [Running, AwaitingReconnect, Succeeded]
+            required: [state]
+          then:
+            required: [startDispatchedAt, startedAt]
+        - if:
+            properties:
+              state:
+                enum: [Failed, Cancelled, Interrupted]
+            required: [state]
+          then:
+            properties:
+              endedAt:
+                $ref: '#/components/schemas/Timestamp'
+              terminalReason:
+                type: string
+                enum: [client_closed_without_publish, grace_expired, session_revoked, new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, artifact_commit_failed, journey_failed, cancelled, parent_terminal, lease_expired, runtime_unavailable, browser_crashed, protocol_error]
+            required: [endedAt, terminalReason]
+          else:
+            properties:
+              terminalReason: false
+        - if:
+            properties:
+              state:
+                const: Succeeded
+            required: [state]
+          then:
+            properties:
+              endedAt:
+                $ref: '#/components/schemas/Timestamp'
+            required: [endedAt]
+        - if:
+            properties:
+              state:
+                const: AwaitingReconnect
+            required: [state]
+          then:
+            properties:
+              startedAt:
+                $ref: '#/components/schemas/Timestamp'
+              reconnectDeadline:
+                $ref: '#/components/schemas/Timestamp'
+            required: [startedAt, reconnectDeadline]
+          else:
+            properties:
+              reconnectDeadline: false
+        - if:
+            properties:
+              terminalReason:
+                enum: [artifact_commit_failed, journey_failed]
+            required: [terminalReason]
+          then:
+            properties:
+              state:
+                const: Failed
+        - if:
+            properties:
+              state:
+                enum: [Queued, WaitingForCapacity, Starting, Running, AwaitingReconnect]
+            required: [state]
+          then:
+            properties:
+              stopConfirmedAt: false
+        - if:
+            allOf:
+              - properties:
+                  state:
+                    enum: [Succeeded, Failed, Cancelled, Interrupted]
+                required: [state]
+              - not:
+                  required: [startDispatchedAt]
+          then:
+            required: [stopConfirmedAt, stopConfirmationBasis]
+            properties:
+              stopConfirmationBasis:
+                const: not_dispatched
+        - if:
+            required: [startDispatchedAt]
+          then:
+            properties:
+              stopConfirmationBasis:
+                enum: [start_rejected, stop_ack, inventory_absent, new_boot]
+        - if:
+            properties:
+              kind:
+                const: manual_login
+            required: [kind]
+          then:
+            properties:
+              startedByUsername:
+                type: string
+            required: [startedByUsername]
+          else:
+            properties:
+              startedByUsername: false
+        - if:
+            properties: {kind: {const: manual_login}}
+            required: [kind]
+          then:
+            properties:
+              terminalReason:
+                enum: [client_closed_without_publish, grace_expired, session_revoked, new_boot, shutdown, slot_revoked, slot_replaced, cancelled, runtime_unavailable, browser_crashed, protocol_error]
+        - if:
+            properties: {kind: {const: authentication_probe}}
+            required: [kind]
+          then:
+            properties:
+              terminalReason:
+                enum: [new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, cancelled, runtime_unavailable, browser_crashed, protocol_error]
+        - if:
+            properties: {kind: {const: journey}}
+            required: [kind]
+          then:
+            properties:
+              terminalReason:
+                enum: [new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, artifact_commit_failed, journey_failed, cancelled, parent_terminal, lease_expired, runtime_unavailable, browser_crashed, protocol_error]
+        - if:
+            properties: {kind: {const: exploration}}
+            required: [kind]
+          then:
+            properties:
+              terminalReason:
+                enum: [new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, artifact_commit_failed, cancelled, parent_terminal, lease_expired, runtime_unavailable, browser_crashed, protocol_error]
+    BrowserIdentitySummary:
+      type: object
+      additionalProperties: false
+      required: [id, state, rowVersion, currentRevision, currentProfile, lastProbe, currentOperation]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
         state:
           type: string
           enum: [Ready, AuthenticationRequired]
-        currentGeneration:
+        rowVersion:
           type: integer
-          minimum: 0
+          minimum: 1
+        currentRevision:
+          $ref: '#/components/schemas/BrowserIdentityRevisionSummary'
+        currentProfile:
+          oneOf:
+            - $ref: '#/components/schemas/BrowserProfileGenerationSummary'
+            - type: 'null'
+        lastProbe:
+          description: 当前身份最近一次持久化 authentication probe 三态事实；从未执行时为 null。
+          oneOf:
+            - $ref: '#/components/schemas/AuthenticationProbeResultSummary'
+            - type: 'null'
+        currentOperation:
+          description: 当前身份锁持有者；领域已终态但 stopConfirmedAt 缺失的 operation 仍在此返回，只有物理停止确认后才为 null。
+          oneOf:
+            - $ref: '#/components/schemas/BrowserOperationSummary'
+            - type: 'null'
+      allOf:
+        - if:
+            properties:
+              state:
+                const: Ready
+            required: [state]
+          then:
+            properties:
+              currentProfile:
+                $ref: '#/components/schemas/BrowserProfileGenerationSummary'
     BrowserIdentityConfig:
       oneOf:
         - $ref: '#/components/schemas/BrowserIdentityCreate'
         - $ref: '#/components/schemas/BrowserIdentityUpdate'
-      description: 创建（身份不存在）与更新（身份已存在）两种形态按 expectedRowVersion 存在性判别；更新形态必须携带 expectedRowVersion（HTTP-COMMAND-002/DATA-BROWSER-004）。
+      description: 创建形态无 expectedRowVersion；更新形态必须携带当前 BrowserIdentitySummary.rowVersion。
     BrowserIdentityCreate:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
         - type: object
-          required: [name, startUrl]
+          required: [name, startUrl, authenticationProbe]
           properties:
             name:
               type: string
+              minLength: 1
+              maxLength: 200
             startUrl:
               type: string
               format: uri
-              description: Admin 管理的起始 URL（不含用户密码或任意绝对导航范围之外的内容）。
+              pattern: '^https?://[^/?#]+'
+            authenticationProbe:
+              $ref: '#/components/schemas/AuthenticationProbeConfig'
       unevaluatedProperties: false
     BrowserIdentityUpdate:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
         - $ref: '#/components/schemas/ExpectedRowVersion'
         - type: object
-          required: [name, startUrl]
+          required: [name, startUrl, authenticationProbe]
           properties:
             name:
               type: string
+              minLength: 1
+              maxLength: 200
             startUrl:
               type: string
               format: uri
-              description: Admin 管理的起始 URL（不含用户密码或任意绝对导航范围之外的内容）。
+              pattern: '^https?://[^/?#]+'
+            authenticationProbe:
+              $ref: '#/components/schemas/AuthenticationProbeConfig'
       unevaluatedProperties: false
+    BrowserIdentityConfigResponse:
+      type: object
+      additionalProperties: false
+      required: [identity, probeOperation]
+      properties:
+        identity:
+          $ref: '#/components/schemas/BrowserIdentitySummary'
+        probeOperation:
+          oneOf:
+            - $ref: '#/components/schemas/BrowserOperationSummary'
+            - type: 'null'
+          description: 已有 current profile 时为立即创建的 revision_change probe；尚无 profile 时为 null。
+    StartBrowserManualLoginRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+      unevaluatedProperties: false
+    PublishBrowserProfileRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedOperationRowVersion]
+          properties:
+            expectedOperationRowVersion:
+              type: integer
+              minimum: 1
+      unevaluatedProperties: false
+    CancelBrowserOperationRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - type: object
+          required: [expectedOperationRowVersion]
+          properties:
+            expectedOperationRowVersion:
+              type: integer
+              minimum: 1
+      unevaluatedProperties: false
+    BrowserProfilePublishResponse:
+      type: object
+      additionalProperties: false
+      required: [identity, operation, generation]
+      properties:
+        identity:
+          $ref: '#/components/schemas/BrowserIdentitySummary'
+        operation:
+          $ref: '#/components/schemas/BrowserOperationSummary'
+        generation:
+          $ref: '#/components/schemas/BrowserProfileGenerationSummary'
     LabelContractSummary:
       type: object
       required: [id, version, state, createdAt, rowVersion, parserVersion, schemaVersion]
@@ -5937,7 +6473,7 @@ components:
       description: activationCandidates 包含所有数据库实际可接受的显式候选对；blockers 仅在候选集合为空时存在。不得用“最新草稿”或“最新 Test Run”覆盖仍合法的旧候选。
     ConfigTestRunSummary:
       type: object
-      required: [id, configVersionId, labelContractVersionId, journeyCatalogDigest, journeyCatalogVersion, state, rowVersion, createdAt]
+      required: [id, configVersionId, labelContractVersionId, state, rowVersion, createdAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5945,14 +6481,9 @@ components:
           $ref: '#/components/schemas/LocatorId'
         labelContractVersionId:
           $ref: '#/components/schemas/LocatorId'
-        journeyCatalogDigest:
-          type: string
-          pattern: '^[0-9a-f]{64}$'
-        journeyCatalogVersion:
-          type: string
         state:
           type: string
-          enum: [Queued, WaitingForCapacity, Running, Passed, Failed, Cancelled, Interrupted]
+          enum: [Queued, Running, Passed, Failed, Cancelled, Interrupted]
         rowVersion:
           type: integer
           minimum: 1
@@ -5964,7 +6495,7 @@ components:
         - if:
             properties:
               state:
-                enum: [Queued, WaitingForCapacity]
+                enum: [Queued]
             required: [state]
           then:
             not:
@@ -6036,6 +6567,7 @@ components:
               enum: [error, gap]
             gapReason:
               type: string
+              enum: [runtime_unavailable, authentication_required, authentication_probe_unavailable, identity_busy, artifact_commit_failed, journey_failed, query_failed, partial_response, no_data, cancelled, interrupted]
       description: planKey+checkKey 精确定位绑定配置版本中的检查；ok 携带 Evidence locator，error/gap 携带缺口原因，两种联合不得混合（DATA-CONFIG-007）。
     JourneyCatalogView:
       type: object

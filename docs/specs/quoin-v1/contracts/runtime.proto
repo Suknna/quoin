@@ -211,7 +211,9 @@ enum BrowserCloseReason {
   BROWSER_CLOSE_REASON_SLOT_REVOKED = 4;    // Lintel slot 凭据吊销
   BROWSER_CLOSE_REASON_SLOT_REPLACED = 5;   // Lintel slot 被替换
   BROWSER_CLOSE_REASON_SHUTDOWN = 6;        // 有序停机
-  BROWSER_CLOSE_REASON_NEW_BOOT = 7;        // Lintel 新 boot 被接受：旧 boot 会话立即关闭、身份锁释放
+  BROWSER_CLOSE_REASON_NEW_BOOT = 7;        // Lintel 新 boot 被接受：旧 operation Interrupted，身份锁释放
+  BROWSER_CLOSE_REASON_PROFILE_PUBLISHED = 8; // profile generation 已原子发布，立即关闭 tunnel/Chromium
+  BROWSER_CLOSE_REASON_OPERATION_TERMINAL = 9; // Browser Operation 已进入其它终态
 }
 
 // 跨 Runtime 浏览器子执行请求的封闭拒绝原因（RUNTIME-CROSS-002）。
@@ -313,6 +315,18 @@ message ControlEnvelope {
     BeginToolCallAck begin_tool_call_ack = 35;        // Quoin -> Plinth；fence 与授权裁决
     CompleteToolCall complete_tool_call = 36;         // Plinth -> Quoin；提交 Tool 结果/Evidence/Artifact 引用
     CompleteToolCallAck complete_tool_call_ack = 37;  // Quoin -> Plinth；提交裁决
+
+    // --- Lintel Browser Operation / profile 调和（RUNTIME-BROWSER-009..016）---
+    StartBrowserOperation start_browser_operation = 39;               // Quoin -> Lintel
+    StartBrowserOperationAck start_browser_operation_ack = 40;        // Lintel -> Quoin
+    CompleteBrowserOperation complete_browser_operation = 41;         // Lintel -> Quoin
+    PublishBrowserProfile publish_browser_profile = 42;               // Quoin -> Lintel
+    PublishBrowserProfileResult publish_browser_profile_result = 43;  // Lintel -> Quoin
+    ProfileInventoryRequest profile_inventory_request = 44;           // Quoin -> Lintel；每个新 boot
+    ProfileInventoryReport profile_inventory_report = 45;             // Lintel -> Quoin；readiness fence
+    StopBrowserOperation stop_browser_operation = 46;                  // Quoin -> Lintel；已提交终态后的幂等进程停止 fence
+    StopBrowserOperationAck stop_browser_operation_ack = 47;           // Lintel -> Quoin；物理进程/隧道已停止
+    CompleteBrowserOperationAck complete_browser_operation_ack = 48;   // Quoin -> Lintel；终态提交/重放裁决
   }
 }
 
@@ -323,9 +337,11 @@ message Hello {
   uint64 connection_epoch = 3;     // 每次连接递增，>= 1（RUNTIME-CTRL-004）
   string release_version = 4;      // 与 Quoin 严格相等
   repeated int64 active_attempts = 5; // 上次连接仍在执行的 attempt（调和输入，可空）
-  string journey_catalog_digest = 6; // 仅 Lintel：构建期嵌入的 Journey Catalog 生成文件原始字节 SHA-256（hex，64 字符），
-                                     // 必须与 Quoin 嵌入 digest 严格相等，否则 CATALOG_MISMATCH（RUNTIME-CTRL-010）；
-                                     // Plinth 该字段必须为空
+  string journey_catalog_digest = 6; // 仅 Lintel：嵌入 Journey Catalog 原始 JCS 字节 SHA-256（hex，64 字符）
+  uint32 browser_capacity_slots = 7; // 仅 Lintel：该 boot 固定浏览器 slot 总数，必须 >=1；Quoin 是唯一 FIFO 队列
+  string chromium_revision = 8;      // 仅 Lintel：精确 Chromium revision；profile 只允许 revision 完全相等
+  string journey_catalog_version = 9; // 仅 Lintel：与 digest 对应；Plinth 的 6..10 必须为空/0
+  repeated int64 active_browser_operations = 10; // 仅 Lintel：本 boot 当前仍有物理进程/trace staging 的 operation IDs
 }
 
 // 握手裁决：accepted=true 后连接成为该 slot 当前活动控制流；
@@ -334,6 +350,7 @@ message HelloAck {
   bool accepted = 1;
   HelloRejectReason reject_reason = 2;
   uint64 last_connection_epoch = 3; // accepted 时携带该 slot 当前 boot 最近一次连接 epoch（调和参考）
+  bool profile_reconcile_required = 4; // Lintel 每个新 boot 必须 true；报告完整前不得接受 Browser Operation
 }
 
 // 心跳：更新瞬时连接投影（connected/lastSeenAt）；不写 runtime_slots.row_version
@@ -342,6 +359,7 @@ message Heartbeat {
   uint64 seq = 1;                  // 当前连接内单调递增
   repeated int64 active_attempts = 2; // Runtime 当前正在执行的 attempt（调和输入）
   Capacity capacity = 3;           // 剩余容量上报（部署内部）
+  repeated int64 active_browser_operations = 4; // 仅 Lintel：实际物理 operation 集合；必须与本 boot 调和
 }
 
 // 容量投影（部署内部）：只用于派发决策提示，不是权威事实（RUNTIME-CTRL-005）。
@@ -417,7 +435,7 @@ message AttemptReject {
 // （RUNTIME-TASK-010）。
 message AttemptProgress {
   int64 attempt_id = 1;
-  string stage = 2;                // 显示性阶段名（由 #13/#14 承接具体值）
+  string stage = 2;                // 显示性阶段名；不得成为 Browser Operation/Action 状态权威
   int64 tool_call_id = 3;          // 相关 tool_call（可 0）
 }
 
@@ -454,7 +472,7 @@ message ResultPayload {
   string schema_kind = 1;          // 输出 schema 标识（如 "assistant_message_v1"、"inspection_report_v1"）；非空
   bytes canonical_json = 2;        // 非秘密规范结构化输出
   bytes content_digest = 3;        // SHA-256(canonical_json)（32 字节）
-  repeated int64 evidence_ids = 4; // 本 Attempt 已提交或输入快照授权的精确引用
+  repeated int64 evidence_ids = 4; // 已存在且本 Attempt 获授权的引用；browser_journey_result_v1 必须为空，Evidence 由 canonical_json proposals 经 Quoin 事务创建
   repeated int64 artifact_ids = 5;
   repeated int64 knowledge_version_ids = 6;
 }
@@ -750,6 +768,211 @@ message ToolResultDeliveryAck {
 }
 
 // ============================================================================
+// Lintel Browser Operation、Authentication Probe 与 profile inventory
+// ============================================================================
+
+enum BrowserOperationKind {
+  BROWSER_OPERATION_KIND_UNSPECIFIED = 0;
+  BROWSER_OPERATION_KIND_MANUAL_LOGIN = 1;
+  BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE = 2;
+  BROWSER_OPERATION_KIND_JOURNEY = 3;
+  BROWSER_OPERATION_KIND_EXPLORATION = 4;
+}
+
+enum BrowserOperationStartRejectReason {
+  BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED = 0;
+  BROWSER_OPERATION_START_REJECT_REASON_IDENTITY_BUSY = 1;
+  BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY = 2;
+  BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE = 3;
+  BROWSER_OPERATION_START_REJECT_REASON_AUTHENTICATION_REQUIRED = 4;
+  BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED = 5;
+  BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED = 6;
+  BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM = 7;
+  BROWSER_OPERATION_START_REJECT_REASON_INTERNAL = 8;
+}
+
+enum BrowserOperationOutcome {
+  BROWSER_OPERATION_OUTCOME_UNSPECIFIED = 0;
+  BROWSER_OPERATION_OUTCOME_SUCCEEDED = 1;
+  BROWSER_OPERATION_OUTCOME_FAILED = 2;
+  BROWSER_OPERATION_OUTCOME_CANCELLED = 3;
+  BROWSER_OPERATION_OUTCOME_INTERRUPTED = 4;
+}
+
+enum BrowserOperationTerminalReason {
+  BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED = 0;
+  BROWSER_OPERATION_TERMINAL_REASON_CLIENT_CLOSED_WITHOUT_PUBLISH = 1;
+  BROWSER_OPERATION_TERMINAL_REASON_GRACE_EXPIRED = 2;
+  BROWSER_OPERATION_TERMINAL_REASON_SESSION_REVOKED = 3;
+  BROWSER_OPERATION_TERMINAL_REASON_NEW_BOOT = 4;
+  BROWSER_OPERATION_TERMINAL_REASON_SHUTDOWN = 5;
+  BROWSER_OPERATION_TERMINAL_REASON_SLOT_REVOKED = 6;
+  BROWSER_OPERATION_TERMINAL_REASON_SLOT_REPLACED = 7;
+  BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MISSING = 8;
+  BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MANIFEST_INVALID = 9;
+  BROWSER_OPERATION_TERMINAL_REASON_CHROMIUM_REVISION_MISMATCH = 10;
+  BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED = 11;
+  BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE = 12;
+  BROWSER_OPERATION_TERMINAL_REASON_ARTIFACT_COMMIT_FAILED = 13;
+  BROWSER_OPERATION_TERMINAL_REASON_JOURNEY_FAILED = 14;
+  BROWSER_OPERATION_TERMINAL_REASON_CANCELLED = 15;
+  BROWSER_OPERATION_TERMINAL_REASON_PARENT_TERMINAL = 16;
+  BROWSER_OPERATION_TERMINAL_REASON_LEASE_EXPIRED = 17;
+  BROWSER_OPERATION_TERMINAL_REASON_RUNTIME_UNAVAILABLE = 18;
+  BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED = 19;
+  BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR = 20;
+}
+
+enum AuthenticationProbeResult {
+  AUTHENTICATION_PROBE_RESULT_UNSPECIFIED = 0;
+  AUTHENTICATION_PROBE_RESULT_AUTHENTICATED = 1;
+  AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED = 2;
+  AUTHENTICATION_PROBE_RESULT_INDETERMINATE = 3;
+}
+
+enum AuthenticationProbePhase {
+  AUTHENTICATION_PROBE_PHASE_UNSPECIFIED = 0;
+  AUTHENTICATION_PROBE_PHASE_REVISION_CHANGE = 1;
+  AUTHENTICATION_PROBE_PHASE_ADMISSION = 2;
+  AUTHENTICATION_PROBE_PHASE_COMPLETION = 3;
+  AUTHENTICATION_PROBE_PHASE_PUBLISH = 4;
+  AUTHENTICATION_PROBE_PHASE_MID_OPERATION = 5;
+}
+
+enum BrowserTraceIntegrity {
+  BROWSER_TRACE_INTEGRITY_UNSPECIFIED = 0;
+  BROWSER_TRACE_INTEGRITY_COMPLETE = 1;
+  BROWSER_TRACE_INTEGRITY_INCOMPLETE = 2;
+}
+
+enum ProfileInventoryStatus {
+  PROFILE_INVENTORY_STATUS_UNSPECIFIED = 0;
+  PROFILE_INVENTORY_STATUS_COMPATIBLE = 1;
+  PROFILE_INVENTORY_STATUS_MISSING = 2;
+  PROFILE_INVENTORY_STATUS_MANIFEST_INVALID = 3;
+  PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH = 4;
+}
+
+message BrowserOperationInput {
+  string schema_kind = 1;       // manual_login_v1|authentication_probe_v1；Attempt 输入另走 InputSnapshot
+  bytes canonical_json = 2;     // browser-execution.schema.json 对应 $defs 的 JCS bytes
+  bytes content_digest = 3;     // SHA-256(canonical_json)，32 字节
+}
+
+message StartBrowserOperation {
+  int64 operation_id = 1;       // 已持久化 browser_operations.id；重复发送按本 ID 幂等
+  BrowserOperationKind kind = 2;
+  int64 identity_id = 3;
+  int64 identity_revision_id = 4;
+  int64 profile_generation_id = 5; // fresh manual login 可为 0；其它 kind 必填
+  BrowserOperationInput input = 6;
+  google.protobuf.Timestamp requested_at = 7;
+  string journey_catalog_digest = 8;  // 必须等于 Hello 与冻结 Browser Operation；64 位 hex
+  string journey_catalog_version = 9;
+}
+
+message StartBrowserOperationAck {
+  int64 operation_id = 1;
+  bool accepted = 2;
+  BrowserOperationStartRejectReason reject_reason = 3;
+  google.protobuf.Timestamp started_at = 4; // accepted 时必填
+  string detail = 5;                       // 非秘密诊断
+}
+
+message AuthenticationProbeObservation {
+  AuthenticationProbePhase phase = 1;
+  AuthenticationProbeResult result = 2;
+  string journey_id = 3;
+  uint64 journey_version = 4;
+  string journey_catalog_digest = 5;
+  string journey_catalog_version = 6;
+  string reason_code = 7; // 仅 INDETERMINATE 非空；技术错误不得映射成 UNAUTHENTICATED
+  google.protobuf.Timestamp observed_at = 8;
+}
+
+message CompleteBrowserOperation {
+  int64 operation_id = 1;
+  BrowserOperationOutcome outcome = 2;
+  BrowserOperationTerminalReason terminal_reason = 3; // 非 SUCCEEDED 必填
+  repeated AuthenticationProbeObservation probe_results = 4;
+  int64 trace_artifact_id = 5;             // 无 trace 为 0；已由 ArtifactService 提交
+  BrowserTraceIntegrity trace_integrity = 6;
+  google.protobuf.Timestamp ended_at = 7;
+  bytes result_digest = 8;                 // 规范 completion payload SHA-256，32 字节；重连重发必须稳定
+}
+
+message CompleteBrowserOperationAck {
+  int64 operation_id = 1;
+  bytes result_digest = 2;                 // 回显已裁决 digest
+  bool accepted = 3;                       // 首次提交或同 digest 重放为 true；冲突/迟到为 false
+  string detail = 4;                       // 非秘密诊断
+}
+
+message PublishBrowserProfile {
+  int64 operation_id = 1;                  // 必须是同一 actor 的 active manual-login operation
+  int64 identity_id = 2;
+  int64 identity_revision_id = 3;
+  int64 expected_current_generation_id = 4; // 尚无 generation 为 0
+  uint64 new_generation = 5;               // Quoin 分配的下一单调 generation
+  string command_id = 6;                   // HTTP clientCommandId；同 operation/generation 重试必须稳定
+}
+
+message PublishBrowserProfileResult {
+  int64 operation_id = 1;
+  bool accepted = 2;
+  uint64 generation = 3;
+  string chromium_revision = 4;            // 必须等于当前 Hello.chromium_revision
+  bytes profile_manifest_digest = 5;       // 原子 manifest SHA-256，32 字节
+  AuthenticationProbeObservation probe_result = 6; // accepted 必须是 PUBLISH+AUTHENTICATED
+  BrowserOperationTerminalReason reject_reason = 7;
+  string detail = 8;
+  string command_id = 9;                   // 回显请求 command_id
+}
+
+// Quoin 已提交 operation 终态后发送的幂等进程停止 fence。Lintel 不得据此改写领域终态；
+// 只停止 operation_id 对应的进程/隧道，不得按 identity 杀死后续 operation。重复消息安全，
+// 目标已关闭时同样回 stopped=true；Quoin 收到 Ack 或接受新 Lintel boot 前保留身份/容量 fence。
+message StopBrowserOperation {
+  int64 operation_id = 1;
+  BrowserCloseReason reason = 2;
+  google.protobuf.Timestamp committed_at = 3;
+}
+
+message StopBrowserOperationAck {
+  int64 operation_id = 1;
+  bool stopped = 2;                    // 进程/隧道已不存在；目标原本不存在同样为 true
+  google.protobuf.Timestamp stopped_at = 3;
+  string detail = 4;
+}
+
+message ExpectedBrowserProfile {
+  int64 identity_id = 1;
+  int64 profile_generation_id = 2; // current generation locator，必须 > 0
+  uint64 generation = 3;
+  string chromium_revision = 4;
+  bytes profile_manifest_digest = 5; // current generation 的 32-byte SHA-256
+}
+
+message ProfileInventoryRequest {
+  string inventory_id = 1;                     // 同 boot 内唯一；重发必须稳定，报告必须回显
+  repeated ExpectedBrowserProfile profiles = 2; // 当前全部 profile generation；identity_id 严格递增且恰好一次
+}
+
+message ObservedBrowserProfile {
+  int64 identity_id = 1;
+  int64 profile_generation_id = 2;
+  ProfileInventoryStatus status = 3;
+  string observed_chromium_revision = 4; // missing 为空；manifest_invalid 只回可靠解析值
+  bytes observed_manifest_digest = 5;    // missing 为空；manifest_invalid 可为空；revision mismatch 必须等于 expected
+}
+
+message ProfileInventoryReport {
+  string inventory_id = 1;                      // 必须匹配当前尚未完成的 request；旧 ID 只审计不解除 fence
+  repeated ObservedBrowserProfile profiles = 2; // 单份完整报告；必须与 request identity 集合完全相等且无重复
+  bool complete = 3; // 必须为 true；false/缺失不得写任何 reconciliation 或解除 readiness fence
+}
+
+// ============================================================================
 // 连接凭据 grant（RuntimeControl.FetchCredentialGrant）
 // ============================================================================
 
@@ -822,6 +1045,7 @@ message BrowserSessionOpen {
   string boot_id = 4;
   uint64 connection_epoch = 5;
   string reconnect_session_id = 6; // 同 boot 宽限期内重附着时携带；新建时为空
+  int64 actor_user_id = 7;         // 必须等于 manual-login operation 的 actor_user_id
 }
 
 // 会话打开确认：返回瞬时 session_id 与重附着宽限期截止（数值为部署配置）。
@@ -865,7 +1089,7 @@ message ArtifactUploadFrame {
 // （DATA-ARTIFACT-006）。
 message ArtifactUploadHeader {
   string upload_id = 1;            // Runtime 生成；重试生命周期内稳定
-  int64 attempt_id = 2;            // execution_attempts.id
+  int64 attempt_id = 2;            // execution_attempts.id；Journey/Exploration 连续 trace 以 operation 自身授权时为 0
   string boot_id = 3;
   uint64 connection_epoch = 4;     // >= 1
   string owner_type = 5;           // artifacts.owner_type 封闭值（OpenAPI ArtifactSummary.ownerType / DATA-ARTIFACT-003）

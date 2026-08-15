@@ -61,6 +61,14 @@ CREATE TABLE sessions (
 ) STRICT;
 CREATE INDEX idx_sessions_user ON sessions (user_id);
 CREATE INDEX idx_sessions_expiry ON sessions (absolute_expires_at);
+CREATE TRIGGER trg_sessions_insert_current_auth_revision BEFORE INSERT ON sessions
+WHEN NOT EXISTS (
+  SELECT 1 FROM users u
+  WHERE u.id = NEW.user_id AND u.enabled = 1 AND u.auth_revision = NEW.auth_revision_at_issue
+)
+BEGIN SELECT RAISE(ABORT, 'session must bind the enabled user current auth_revision'); END;
+CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, created_at ON sessions
+BEGIN SELECT RAISE(ABORT, 'session issue identity is immutable'); END;
 
 CREATE TABLE user_viewed (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -458,7 +466,7 @@ CREATE TABLE business_system_config_versions (
   parser_version                    TEXT NOT NULL,
   schema_version                    TEXT NOT NULL,
   label_contract_version_id         INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 上传时显式目标契约版本；不静默使用当前契约（DATA-CONFIG-003/CFG-CONTRACT-003）
-  journey_catalog_digest            TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64),  -- 上传时 Quoin 嵌入 Journey Catalog 生成文件原始字节 digest（DATA-CONFIG-008）
+  journey_catalog_digest            TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),  -- 上传时 Quoin 嵌入 Journey Catalog 生成文件原始字节 digest（DATA-CONFIG-008）
   journey_catalog_version           TEXT NOT NULL,
   digest                            TEXT NOT NULL CHECK (length(digest) = 64),
   created_by                        INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -642,48 +650,230 @@ CREATE UNIQUE INDEX ux_connections_one_enabled_model_provider ON connections ((1
 CREATE UNIQUE INDEX ux_connections_one_enabled_thanos ON connections ((1))
   WHERE type = 'thanos' AND enabled = 1;
 
+-- Browser Identity 配置是不可变 revision；stable identity 只持有当前指针（DATA-BROWSER-001/010）。
+CREATE TABLE browser_identity_revisions (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  business_system_id       INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  revision                 INTEGER NOT NULL CHECK (revision >= 1),
+  name                     TEXT NOT NULL,
+  start_url                TEXT NOT NULL CHECK (
+                             ((start_url GLOB 'http://?*' AND substr(start_url, 8, 1) NOT IN ('/','?','#'))
+                               OR (start_url GLOB 'https://?*' AND substr(start_url, 9, 1) NOT IN ('/','?','#')))
+                             AND instr(start_url, ' ') = 0 AND instr(start_url, char(9)) = 0
+                             AND instr(start_url, char(10)) = 0 AND instr(start_url, char(13)) = 0),
+  probe_journey_id         TEXT NOT NULL,
+  probe_journey_version    INTEGER NOT NULL CHECK (probe_journey_version >= 1),
+  probe_params_json        TEXT NOT NULL CHECK (json_valid(probe_params_json) AND json_type(probe_params_json) = 'object'),
+  journey_catalog_digest   TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),
+  journey_catalog_version  TEXT NOT NULL,
+  created_by               INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at               TEXT NOT NULL,
+  UNIQUE (business_system_id, revision)
+) STRICT;
+
 CREATE TABLE browser_identities (
   id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  business_system_id            INTEGER NOT NULL UNIQUE REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每业务系统恰好一个
-  name                          TEXT NOT NULL,
-  start_url                     TEXT NOT NULL,
-  state                         TEXT NOT NULL CHECK (state IN ('Ready','AuthenticationRequired')),
-  row_version                   INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 配置/发布 generation 命令并发前提（DATA-BROWSER-004）
+  business_system_id            INTEGER NOT NULL UNIQUE REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  current_revision_id           INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   current_profile_generation_id INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                    TEXT NOT NULL
+  state                         TEXT NOT NULL CHECK (state IN ('Ready','AuthenticationRequired')),
+  row_version                   INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  created_at                    TEXT NOT NULL,
+  CHECK (state <> 'Ready' OR current_profile_generation_id IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE browser_profile_generations (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  identity_id   INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  generation    INTEGER NOT NULL CHECK (generation >= 0),
-  probe_version TEXT,
-  published_at  TEXT NOT NULL,
-  published_by  INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  identity_id               INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  identity_revision_id      INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  generation                INTEGER NOT NULL CHECK (generation >= 1),
+  chromium_revision         TEXT NOT NULL,
+  profile_manifest_digest   TEXT NOT NULL CHECK (length(profile_manifest_digest) = 64 AND profile_manifest_digest NOT GLOB '*[^0-9a-f]*'),
+  probe_journey_id          TEXT NOT NULL,
+  probe_journey_version     INTEGER NOT NULL CHECK (probe_journey_version >= 1),
+  probe_catalog_digest      TEXT NOT NULL CHECK (length(probe_catalog_digest) = 64 AND probe_catalog_digest NOT GLOB '*[^0-9a-f]*'),
+  probe_catalog_version     TEXT NOT NULL,
+  published_operation_id    INTEGER NOT NULL UNIQUE REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  published_by              INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  published_at              TEXT NOT NULL,
   UNIQUE (identity_id, generation)
 ) STRICT;
 
+-- 会话级 Browser Operation；active identity lock 与全局容量 FIFO 的持久权威（DATA-BROWSER-003）。
 CREATE TABLE browser_operations (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  identity_id       INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  attempt_id        INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- exploration/journey 对应执行尝试；manual_login 无（DATA-BROWSER-003）
-  kind              TEXT NOT NULL CHECK (kind IN ('manual_login','exploration','journey')),
-  actor_type        TEXT NOT NULL CHECK (actor_type IN ('user','service','system')),
-  actor_id          INTEGER NOT NULL,
-  started_at        TEXT NOT NULL,
-  ended_at          TEXT,
-  result            TEXT CHECK (result IS NULL OR result IN ('success','failed','cancelled','interrupted')),
-  row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  new_generation_id INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  trace_artifact_id INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  log_json          TEXT CHECK (log_json IS NULL OR json_valid(log_json)),
-  CHECK (kind = 'manual_login' OR attempt_id IS NOT NULL), -- 非人工登录的浏览器操作必须绑定执行尝试
-  CHECK (result IS NULL OR ended_at IS NOT NULL) -- 结果一旦产生即结束，必须带结束时间
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  identity_id                INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  identity_revision_id       INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  profile_generation_id      INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  owner_attempt_id           INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  kind                       TEXT NOT NULL CHECK (kind IN ('manual_login','authentication_probe','journey','exploration')),
+  actor_user_id              INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  state                      TEXT NOT NULL CHECK (state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect','Succeeded','Failed','Cancelled','Interrupted')),
+  journey_catalog_digest     TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),
+  journey_catalog_version    TEXT NOT NULL,
+  journey_id                 TEXT,
+  journey_version            INTEGER CHECK (journey_version IS NULL OR journey_version >= 1),
+  probe_phase                TEXT CHECK (probe_phase IS NULL OR probe_phase IN ('revision_change','admission','completion','publish','mid_operation')),
+  requested_at               TEXT NOT NULL,
+  start_dispatched_at        TEXT,                   -- StartBrowserOperation 已写入控制流的持久 fence；Ack 丢失时仍证明物理启动结果未知
+  lintel_boot_id             TEXT,                   -- Start 派发时冻结的 Lintel boot；是 operation 分配事实，不是在线状态投影
+  lintel_connection_epoch    INTEGER CHECK (lintel_connection_epoch IS NULL OR lintel_connection_epoch >= 1),
+  started_at                 TEXT,
+  reconnect_deadline         TEXT,
+  ended_at                   TEXT,
+  stop_confirmed_at          TEXT,                   -- 物理 Chromium/隧道停止确认；终态可先提交，但本列非空前仍持有身份/容量 fence
+  stop_confirmation_basis    TEXT CHECK (stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','stop_ack','inventory_absent','new_boot')),
+  start_rejected_at          TEXT,                   -- accepted=false 且非 NO_CAPACITY 的持久事实；与拒绝原因同事务写入
+  start_reject_reason        TEXT CHECK (start_reject_reason IS NULL OR start_reject_reason IN ('identity_busy','profile_unavailable','authentication_required','input_unsupported','reconcile_required','stale_stream','internal')),
+  terminal_reason            TEXT CHECK (terminal_reason IS NULL OR terminal_reason IN (
+                               'client_closed_without_publish','grace_expired','session_revoked','new_boot','shutdown',
+                               'slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+                               'authentication_required','authentication_probe_unavailable','artifact_commit_failed','journey_failed',
+                               'cancelled','parent_terminal','lease_expired','runtime_unavailable','browser_crashed','protocol_error')),
+  trace_artifact_id          INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  trace_integrity            TEXT CHECK (trace_integrity IS NULL OR trace_integrity IN ('complete','incomplete')),
+  completion_digest          BLOB CHECK (completion_digest IS NULL OR length(completion_digest) = 32), -- CompleteBrowserOperation 重放裁决；Journey ResultProposal 使用独立 ledger
+  row_version                INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  CHECK (
+    (state IN ('Queued','WaitingForCapacity') AND started_at IS NULL AND reconnect_deadline IS NULL AND ended_at IS NULL AND terminal_reason IS NULL
+      AND ((start_dispatched_at IS NULL AND lintel_boot_id IS NULL AND lintel_connection_epoch IS NULL)
+        OR (state = 'WaitingForCapacity' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL)))
+    OR (state = 'Starting' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL AND started_at IS NULL AND reconnect_deadline IS NULL AND ended_at IS NULL AND terminal_reason IS NULL)
+    OR (state = 'Running' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL AND started_at IS NOT NULL AND reconnect_deadline IS NULL AND ended_at IS NULL AND terminal_reason IS NULL)
+    OR (state = 'AwaitingReconnect' AND kind = 'manual_login' AND started_at IS NOT NULL AND reconnect_deadline IS NOT NULL AND ended_at IS NULL AND terminal_reason IS NULL)
+    OR (state = 'Succeeded' AND started_at IS NOT NULL AND reconnect_deadline IS NULL AND ended_at IS NOT NULL AND terminal_reason IS NULL)
+    OR (state IN ('Failed','Cancelled','Interrupted') AND ended_at IS NOT NULL AND terminal_reason IS NOT NULL)
+  ),
+  CHECK (
+    (kind = 'manual_login' AND actor_user_id IS NOT NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL)
+    OR (kind = 'authentication_probe' AND actor_user_id IS NULL AND owner_attempt_id IS NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase = 'revision_change' AND profile_generation_id IS NOT NULL)
+    OR (kind = 'journey' AND actor_user_id IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
+    OR (kind = 'exploration' AND actor_user_id IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
+  ),
+  CHECK (terminal_reason IS NULL OR
+    (kind = 'manual_login' AND terminal_reason IN (
+      'client_closed_without_publish','grace_expired','session_revoked','new_boot','shutdown','slot_revoked','slot_replaced',
+      'cancelled','runtime_unavailable','browser_crashed','protocol_error'))
+    OR (kind = 'authentication_probe' AND terminal_reason IN (
+      'new_boot','shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+      'authentication_required','authentication_probe_unavailable','cancelled','runtime_unavailable','browser_crashed','protocol_error'))
+    OR (kind = 'journey' AND terminal_reason IN (
+      'new_boot','shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+      'authentication_required','authentication_probe_unavailable','artifact_commit_failed','journey_failed','cancelled','parent_terminal',
+      'lease_expired','runtime_unavailable','browser_crashed','protocol_error'))
+    OR (kind = 'exploration' AND terminal_reason IN (
+      'new_boot','shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+      'authentication_required','authentication_probe_unavailable','artifact_commit_failed','cancelled','parent_terminal',
+      'lease_expired','runtime_unavailable','browser_crashed','protocol_error'))),
+  CHECK ((stop_confirmed_at IS NULL) = (stop_confirmation_basis IS NULL)),
+  CHECK (stop_confirmed_at IS NULL OR state IN ('Succeeded','Failed','Cancelled','Interrupted')),
+  CHECK ((start_rejected_at IS NULL) = (start_reject_reason IS NULL)),
+  CHECK (start_rejected_at IS NULL OR (start_dispatched_at IS NOT NULL AND started_at IS NULL AND state = 'Failed')),
+  CHECK (stop_confirmation_basis IS NULL
+    OR (stop_confirmation_basis = 'not_dispatched' AND start_dispatched_at IS NULL)
+    OR (stop_confirmation_basis = 'start_rejected' AND start_rejected_at IS NOT NULL)
+    OR (stop_confirmation_basis IN ('stop_ack','inventory_absent','new_boot') AND start_dispatched_at IS NOT NULL)),
+  CHECK (terminal_reason <> 'artifact_commit_failed' OR state = 'Failed'),
+  CHECK (terminal_reason <> 'journey_failed' OR state = 'Failed'),
+  CHECK (state NOT IN ('Succeeded','Failed','Cancelled','Interrupted')
+    OR ((start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL)
+      OR (start_dispatched_at IS NULL AND lintel_boot_id IS NULL AND lintel_connection_epoch IS NULL
+        AND stop_confirmed_at IS NOT NULL AND stop_confirmation_basis = 'not_dispatched'))),
+  CHECK (completion_digest IS NULL OR state IN ('Succeeded','Failed','Cancelled','Interrupted')),
+  CHECK ((trace_artifact_id IS NULL) = (trace_integrity IS NULL)),
+  CHECK (trace_artifact_id IS NULL OR started_at IS NOT NULL), -- trace 是启动后事实；INSERT 必须以 Queued 创建，故不得预置或借用其它 operation 的 trace
+  CHECK (kind = 'exploration' OR trace_integrity IS NULL OR state <> 'Succeeded'),
+  CHECK (kind <> 'journey' OR state <> 'Failed' OR terminal_reason <> 'journey_failed' OR trace_artifact_id IS NOT NULL),
+  CHECK (state <> 'Succeeded' OR kind <> 'exploration' OR trace_integrity = 'complete')
 ) STRICT;
-CREATE INDEX idx_browser_operations_identity ON browser_operations (identity_id, started_at);
-CREATE UNIQUE INDEX ux_browser_operation_active_identity ON browser_operations (identity_id) WHERE result IS NULL;
-CREATE UNIQUE INDEX ux_browser_operation_attempt ON browser_operations (attempt_id) WHERE attempt_id IS NOT NULL;
+CREATE INDEX idx_browser_operations_identity ON browser_operations (identity_id, requested_at);
+CREATE INDEX idx_browser_operations_fifo ON browser_operations (id) WHERE state IN ('Queued','WaitingForCapacity');
+CREATE UNIQUE INDEX ux_browser_operation_active_identity ON browser_operations (identity_id)
+  WHERE state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR stop_confirmed_at IS NULL;
+CREATE UNIQUE INDEX ux_browser_operation_journey_attempt ON browser_operations (owner_attempt_id)
+  WHERE kind = 'journey';
+CREATE UNIQUE INDEX ux_browser_operation_active_exploration_parent ON browser_operations (owner_attempt_id)
+  WHERE kind = 'exploration' AND state IN ('Queued','WaitingForCapacity','Starting','Running');
 
+CREATE TABLE browser_probe_results (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  operation_id             INTEGER NOT NULL REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  probe_seq                INTEGER NOT NULL CHECK (probe_seq >= 1),
+  phase                    TEXT NOT NULL CHECK (phase IN ('revision_change','admission','completion','publish','mid_operation')),
+  identity_revision_id     INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  journey_id               TEXT NOT NULL,
+  journey_version          INTEGER NOT NULL CHECK (journey_version >= 1),
+  journey_catalog_digest   TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),
+  journey_catalog_version  TEXT NOT NULL,
+  result                   TEXT NOT NULL CHECK (result IN ('Authenticated','Unauthenticated','Indeterminate')),
+  reason_code              TEXT,
+  observed_at              TEXT NOT NULL,
+  UNIQUE (operation_id, probe_seq),
+  CHECK ((result = 'Indeterminate' AND reason_code IS NOT NULL) OR (result <> 'Indeterminate' AND reason_code IS NULL))
+) STRICT;
+
+CREATE TABLE browser_profile_reconciliations (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  boot_id                    TEXT NOT NULL,
+  connection_epoch           INTEGER NOT NULL CHECK (connection_epoch >= 1),
+  identity_id                INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  profile_generation_id      INTEGER NOT NULL REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  result                     TEXT NOT NULL CHECK (result IN ('compatible','missing','manifest_invalid','chromium_revision_mismatch')),
+  observed_chromium_revision TEXT,
+  observed_manifest_digest   TEXT CHECK (observed_manifest_digest IS NULL OR (length(observed_manifest_digest) = 64 AND observed_manifest_digest NOT GLOB '*[^0-9a-f]*')),
+  reconciled_at              TEXT NOT NULL,
+  UNIQUE (boot_id, connection_epoch, identity_id),
+  CHECK ((result = 'missing' AND observed_chromium_revision IS NULL AND observed_manifest_digest IS NULL)
+    OR result = 'manifest_invalid'
+    OR (result IN ('compatible','chromium_revision_mismatch')
+      AND observed_chromium_revision IS NOT NULL AND observed_manifest_digest IS NOT NULL))
+) STRICT;
+
+CREATE TABLE browser_exploration_actions (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  operation_id             INTEGER NOT NULL REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  action_seq               INTEGER NOT NULL CHECK (action_seq >= 1),
+  child_attempt_id         INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  tool_call_id             INTEGER NOT NULL UNIQUE REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  action_kind              TEXT NOT NULL CHECK (action_kind IN (
+                             'open','close_session','switch_page','close_page','goto','back','forward','reload','click','fill','select',
+                             'check','uncheck','press','scroll','read','screenshot','wait_for','accept_dialog','dismiss_dialog')),
+  page_id                  TEXT,
+  origin                   TEXT,
+  target_description       TEXT,
+  started_at               TEXT NOT NULL,
+  ended_at                 TEXT,
+  outcome                  TEXT CHECK (outcome IS NULL OR outcome IN ('success','recoverable_error','session_closed')),
+  error_code               TEXT CHECK (error_code IS NULL OR error_code IN (
+                             'ElementNotFound','ElementNotUnique','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked',
+                             'ElementReferenceStale','AuthenticationRequired','AuthenticationProbeUnavailable',
+                             'BrowserCrashed','ProfileUnavailable','RuntimeUnavailable','ProtocolError','ArtifactCommitFailed',
+                             'Cancelled','LeaseExpired','ParentTerminated')),
+  observation_version      INTEGER CHECK (observation_version IS NULL OR observation_version >= 1),
+  observation_digest       TEXT CHECK (observation_digest IS NULL OR (length(observation_digest) = 64 AND observation_digest NOT GLOB '*[^0-9a-f]*')),
+  observation_size_bytes   INTEGER CHECK (observation_size_bytes IS NULL OR observation_size_bytes >= 0),
+  screenshot_artifact_id   INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (operation_id, action_seq),
+  CHECK ((action_seq = 1 AND action_kind = 'open') OR (action_seq > 1 AND action_kind <> 'open')),
+  CHECK (
+    (outcome IS NULL AND ended_at IS NULL AND error_code IS NULL)
+    OR (outcome = 'success' AND ended_at IS NOT NULL AND error_code IS NULL)
+    OR (outcome IN ('recoverable_error','session_closed') AND ended_at IS NOT NULL AND error_code IS NOT NULL)
+  ),
+  CHECK (
+    (outcome IS NULL AND observation_version IS NULL AND observation_digest IS NULL AND observation_size_bytes IS NULL AND screenshot_artifact_id IS NULL)
+    OR (outcome IN ('success','recoverable_error') AND observation_version IS NOT NULL AND observation_digest IS NOT NULL AND observation_size_bytes IS NOT NULL)
+    OR (outcome = 'session_closed' AND (
+      (observation_version IS NULL AND observation_digest IS NULL AND observation_size_bytes IS NULL AND screenshot_artifact_id IS NULL)
+      OR (observation_version IS NOT NULL AND observation_digest IS NOT NULL AND observation_size_bytes IS NOT NULL)))
+  ),
+  CHECK (outcome <> 'recoverable_error' OR error_code IN (
+    'ElementNotFound','ElementNotUnique','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked','ElementReferenceStale')),
+  CHECK (outcome <> 'session_closed' OR error_code IN (
+    'AuthenticationRequired','AuthenticationProbeUnavailable','BrowserCrashed','ProfileUnavailable','RuntimeUnavailable',
+    'ProtocolError','ArtifactCommitFailed','Cancelled','LeaseExpired','ParentTerminated')),
+  CHECK (screenshot_artifact_id IS NULL OR (action_kind = 'screenshot' AND outcome = 'success'))
+) STRICT;
 -- ============================================================================
 -- 7. 巡检运行与检查结果
 -- ============================================================================
@@ -696,15 +886,13 @@ CREATE TABLE inspection_runs (
   label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   trigger_kind              TEXT NOT NULL CHECK (trigger_kind IN ('schedule','manual')),
   scheduled_for             TEXT,                    -- UTC；NULL = 人工触发
-  state                     TEXT NOT NULL CHECK (state IN ('Queued','WaitingForCapacity','Running','Completed','CompletedWithGaps','Failed','Cancelled','Interrupted','SkippedOverlap')),
+  state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Completed','CompletedWithGaps','Failed','Cancelled','Interrupted','SkippedOverlap')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   evidence_at               TEXT,                    -- 真正采证开始时生成
   rerun_of_id               INTEGER REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  journey_catalog_digest    TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64),
-  journey_catalog_version   TEXT NOT NULL,
   created_at                TEXT NOT NULL,
   CHECK (
-    (state IN ('Queued','WaitingForCapacity','SkippedOverlap') AND evidence_at IS NULL)
+    (state IN ('Queued','SkippedOverlap') AND evidence_at IS NULL)
     OR (state IN ('Running','Completed','CompletedWithGaps') AND evidence_at IS NOT NULL)
     OR state IN ('Failed','Cancelled','Interrupted')
   ),
@@ -715,48 +903,53 @@ CREATE TABLE inspection_runs (
 ) STRICT;
 CREATE UNIQUE INDEX ux_inspection_run_scheduled ON inspection_runs (business_system_id, plan_key, scheduled_for) WHERE scheduled_for IS NOT NULL;
 CREATE UNIQUE INDEX ux_inspection_run_active ON inspection_runs (business_system_id, plan_key)
-  WHERE state IN ('Queued','WaitingForCapacity','Running');
+  WHERE state IN ('Queued','Running');
 CREATE INDEX idx_inspection_runs_plan ON inspection_runs (business_system_id, plan_key, created_at DESC);
 
 CREATE TABLE inspection_check_results (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  run_id      INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  check_key   TEXT NOT NULL,
-  status      TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
-  evidence_id INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  gap_reason  TEXT,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  run_id        INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  check_key     TEXT NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
+  evidence_id   INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id    INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- browser result 绑定精确 inspection_collection Attempt；PromQL 为 NULL
+  result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- operation-less Journey Result 重放摘要；有 operation 时与 browser_journey_results 同值
+  gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
+                'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
+                'artifact_commit_failed','journey_failed','query_failed','partial_response','no_data','cancelled','interrupted')),
   created_at  TEXT NOT NULL,
   UNIQUE (run_id, check_key),
   CHECK (
     (status = 'ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL)
-    OR (status IN ('error','gap') AND evidence_id IS NULL AND gap_reason IS NOT NULL)
-  )
+    OR (status IN ('error','gap') AND gap_reason IS NOT NULL)
+  ),
+  CHECK (attempt_id IS NOT NULL OR result_digest IS NULL),
+  CHECK (result_digest IS NULL OR status = 'gap' OR evidence_id IS NOT NULL)
 ) STRICT;
 CREATE UNIQUE INDEX ux_inspection_check_result_evidence ON inspection_check_results (evidence_id) WHERE evidence_id IS NOT NULL;
 
 -- 配置 Test Run：独立于巡检计划的持久化配置校验执行（DATA-CONFIG-007）。
--- 精确绑定一个不可变配置版本、显式目标 Label Contract 版本与嵌入 Journey Catalog digest；
+-- 精确绑定一个不可变配置版本与显式目标 Label Contract 版本；配置版本保存上传时 Catalog provenance，
+-- 每个实际 Browser Operation 另存准入时当前兼容 Catalog binding，避免排队跨升级后出现双重执行权威。
 -- 不参与 inspection_runs 的 one-active-plan 约束；Passed 结果作为 Label Contract 联合激活证据。
 CREATE TABLE config_test_runs (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  journey_catalog_digest    TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64),
-  journey_catalog_version   TEXT NOT NULL,
-  state                     TEXT NOT NULL CHECK (state IN ('Queued','WaitingForCapacity','Running','Passed','Failed','Cancelled','Interrupted')),
+  state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Passed','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   evidence_at               TEXT,                    -- 真正开始采证时生成
   result_detail             TEXT,                    -- Failed/Cancelled/Interrupted 的人工可读说明（非秘密）
   created_by                INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
   CHECK (
-    (state IN ('Queued','WaitingForCapacity','Running','Passed') AND result_detail IS NULL)
+    (state IN ('Queued','Running','Passed') AND result_detail IS NULL)
     OR (state IN ('Failed','Cancelled','Interrupted') AND result_detail IS NOT NULL)
   )
 ) STRICT;
 CREATE UNIQUE INDEX ux_config_test_run_active ON config_test_runs (business_system_id, config_version_id)
-  WHERE state IN ('Queued','WaitingForCapacity','Running');
+  WHERE state IN ('Queued','Running');
 CREATE INDEX idx_config_test_runs_version ON config_test_runs (config_version_id, created_at DESC);
 
 CREATE TABLE config_test_run_check_results (
@@ -767,13 +960,18 @@ CREATE TABLE config_test_run_check_results (
   status      TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
   evidence_id INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   attempt_id  INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- browser result: 绑定同 testRun/check 的 inspection_collection Attempt；promql result: NULL
-  gap_reason  TEXT,
+  result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- operation-less Journey Result 重放摘要；有 operation 时与 browser_journey_results 同值
+  gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
+                'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
+                'artifact_commit_failed','journey_failed','query_failed','partial_response','no_data','cancelled','interrupted')),
   created_at  TEXT NOT NULL,
   UNIQUE (test_run_id, plan_key, check_key),
   CHECK (
     (status = 'ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL)
-    OR (status IN ('error','gap') AND evidence_id IS NULL AND gap_reason IS NOT NULL)
-  )
+    OR (status IN ('error','gap') AND gap_reason IS NOT NULL)
+  ),
+  CHECK (attempt_id IS NOT NULL OR result_digest IS NULL),
+  CHECK (result_digest IS NULL OR status = 'gap' OR evidence_id IS NOT NULL)
 ) STRICT;
 -- Label Contract 激活事件（DATA-CONFIG-002/006）：不可变单行承载 canonical items_json。
 -- 单 INSERT 触发 AFTER INSERT 原子校验并切换全部系统指针、更新 label_contract_state、激活/退休契约。
@@ -1061,6 +1259,45 @@ CREATE TABLE evidence (
 CREATE INDEX idx_evidence_attempt ON evidence (attempt_id);
 CREATE INDEX idx_evidence_target ON evidence (target_type, target_id);
 
+-- Lintel Journey ResultProposal 的不可变重放账本与单一提交入口。单 INSERT 先绑定 primary structured Evidence，
+-- 再由 AFTER trigger 派生 check result 并原子收口 Browser Operation/Attempt；相同 operation 只能有一个 digest，
+-- 因而 Ack 丢失可按 digest 重建，不同 payload 无法覆盖。operation-less identity_busy 结果直接由 check result
+-- 行承载 digest，并由对应 AFTER trigger 原子收口未派发 Attempt。
+CREATE TABLE browser_journey_results (
+  operation_id       INTEGER PRIMARY KEY REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id         INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  result_digest      BLOB NOT NULL CHECK (length(result_digest) = 32),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('success','gap')),
+  primary_evidence_id INTEGER UNIQUE REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  gap_code           TEXT CHECK (gap_code IS NULL OR gap_code IN (
+                       'runtime_unavailable','authentication_required','authentication_probe_unavailable',
+                       'artifact_commit_failed','journey_failed','cancelled','interrupted')),
+  original_gap_code  TEXT CHECK (original_gap_code IS NULL OR original_gap_code = 'journey_failed'),
+  terminal_reason    TEXT CHECK (terminal_reason IS NULL OR terminal_reason IN (
+                       'new_boot','shutdown','slot_revoked','slot_replaced','authentication_required',
+                       'authentication_probe_unavailable','artifact_commit_failed','journey_failed','cancelled',
+                       'parent_terminal','lease_expired','runtime_unavailable','browser_crashed','protocol_error')),
+  error_detail       TEXT,
+  created_at         TEXT NOT NULL,
+  CHECK (
+    (outcome = 'success' AND primary_evidence_id IS NOT NULL AND gap_code IS NULL AND original_gap_code IS NULL AND terminal_reason IS NULL AND error_detail IS NULL)
+    OR (outcome = 'gap' AND primary_evidence_id IS NULL AND gap_code IS NOT NULL AND terminal_reason IS NOT NULL AND error_detail IS NOT NULL
+      AND ((gap_code = 'artifact_commit_failed' AND original_gap_code IS NOT NULL AND original_gap_code = 'journey_failed')
+        OR (gap_code <> 'artifact_commit_failed' AND original_gap_code IS NULL)))
+  ),
+  CHECK (
+    gap_code IS NULL
+    OR (gap_code = 'authentication_required' AND terminal_reason = 'authentication_required')
+    OR (gap_code = 'authentication_probe_unavailable' AND terminal_reason = 'authentication_probe_unavailable')
+    OR (gap_code = 'artifact_commit_failed' AND terminal_reason = 'artifact_commit_failed')
+    OR (gap_code = 'journey_failed' AND terminal_reason = 'journey_failed')
+    OR (gap_code = 'runtime_unavailable' AND terminal_reason = 'runtime_unavailable')
+    OR (gap_code = 'cancelled' AND terminal_reason = 'cancelled')
+    OR (gap_code = 'interrupted' AND terminal_reason IN (
+      'new_boot','shutdown','slot_revoked','slot_replaced','parent_terminal','lease_expired','browser_crashed','protocol_error'))
+  )
+) STRICT;
+
 CREATE TABLE inspection_reports (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   run_id         INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1179,7 +1416,7 @@ CREATE INDEX idx_artifacts_blob ON artifacts (blob_id);
 CREATE TABLE runtime_artifact_uploads (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   upload_id      TEXT NOT NULL UNIQUE,
-  attempt_id     INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id     INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   boot_id        TEXT NOT NULL,  -- 与 Attempt 派发绑定的 boot_id；不可改（DATA-ARTIFACT-006）
   connection_epoch INTEGER NOT NULL CHECK (connection_epoch >= 1), -- 旧 epoch 上传只审计、拒绝提交
   owner_type     TEXT NOT NULL,
@@ -1199,7 +1436,8 @@ CREATE TABLE runtime_artifact_uploads (
   -- uploading/rejected 必须两者皆无（不允许引用已提交 Artifact 或伪造提交时间）。
   CHECK (state <> 'committed' OR (artifact_id IS NOT NULL AND committed_at IS NOT NULL)),
   CHECK (state = 'committed' OR (artifact_id IS NULL AND committed_at IS NULL)),
-  CHECK (kind <> 'trace' OR sensitive = 1)
+  CHECK (kind <> 'trace' OR sensitive = 1),
+  CHECK (attempt_id IS NOT NULL OR (kind = 'trace' AND owner_type = 'browser_operation'))
 ) STRICT;
 CREATE INDEX idx_runtime_artifact_uploads_attempt ON runtime_artifact_uploads (attempt_id, created_at);
 
@@ -1498,10 +1736,24 @@ CREATE TRIGGER trg_credential_generations_no_update BEFORE UPDATE ON credential_
 BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
 CREATE TRIGGER trg_credential_generations_no_delete BEFORE DELETE ON credential_generations
 BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
+CREATE TRIGGER trg_browser_identity_revisions_no_update BEFORE UPDATE ON browser_identity_revisions
+BEGIN SELECT RAISE(ABORT, 'browser_identity_revisions is append-only'); END;
+CREATE TRIGGER trg_browser_identity_revisions_no_delete BEFORE DELETE ON browser_identity_revisions
+BEGIN SELECT RAISE(ABORT, 'browser_identity_revisions is retained history'); END;
 CREATE TRIGGER trg_browser_profile_generations_no_update BEFORE UPDATE ON browser_profile_generations
 BEGIN SELECT RAISE(ABORT, 'browser_profile_generations is append-only'); END;
 CREATE TRIGGER trg_browser_profile_generations_no_delete BEFORE DELETE ON browser_profile_generations
 BEGIN SELECT RAISE(ABORT, 'browser_profile_generations is append-only'); END;
+CREATE TRIGGER trg_browser_probe_results_no_update BEFORE UPDATE ON browser_probe_results
+BEGIN SELECT RAISE(ABORT, 'browser_probe_results is append-only'); END;
+CREATE TRIGGER trg_browser_probe_results_no_delete BEFORE DELETE ON browser_probe_results
+BEGIN SELECT RAISE(ABORT, 'browser_probe_results is retained history'); END;
+CREATE TRIGGER trg_browser_profile_reconciliations_no_update BEFORE UPDATE ON browser_profile_reconciliations
+BEGIN SELECT RAISE(ABORT, 'browser_profile_reconciliations is append-only'); END;
+CREATE TRIGGER trg_browser_profile_reconciliations_no_delete BEFORE DELETE ON browser_profile_reconciliations
+BEGIN SELECT RAISE(ABORT, 'browser_profile_reconciliations is retained history'); END;
+CREATE TRIGGER trg_browser_exploration_actions_no_delete BEFORE DELETE ON browser_exploration_actions
+BEGIN SELECT RAISE(ABORT, 'browser_exploration_actions is retained history'); END;
 CREATE TRIGGER trg_config_discoveries_no_update BEFORE UPDATE ON config_discoveries
 BEGIN SELECT RAISE(ABORT, 'config_discoveries is append-only'); END;
 CREATE TRIGGER trg_config_discoveries_no_delete BEFORE DELETE ON config_discoveries
@@ -1660,10 +1912,290 @@ WHEN NOT (
 )
 BEGIN SELECT RAISE(ABORT, 'artifact kind/owner_type/owner_id must reference an existing compatible authority row'); END;
 
--- 12.13 浏览器操作：边界字段不可变，结果/结束时间可更新
+-- 12.13 Browser Identity/Operation/Exploration：revision、generation、probe/reconcile 事实不可变；
+-- Operation 只沿封闭状态机推进，profile 发布由 generation INSERT 原子切换 identity/operation。
 CREATE TRIGGER trg_browser_operations_no_origin_update BEFORE UPDATE OF
-  identity_id, kind, actor_type, actor_id, started_at ON browser_operations
+  identity_id, identity_revision_id, profile_generation_id, owner_attempt_id, kind, actor_user_id,
+  journey_catalog_digest, journey_catalog_version, journey_id, journey_version, probe_phase, requested_at ON browser_operations
 BEGIN SELECT RAISE(ABORT, 'browser_operation origin is immutable'); END;
+CREATE TRIGGER trg_browser_operations_completion_digest_once BEFORE UPDATE OF completion_digest ON browser_operations
+WHEN OLD.completion_digest IS NOT NULL AND NEW.completion_digest IS NOT OLD.completion_digest
+BEGIN SELECT RAISE(ABORT, 'browser operation completion digest is immutable once committed'); END;
+CREATE TRIGGER trg_browser_operations_insert_closure BEFORE INSERT ON browser_operations
+WHEN NEW.state <> 'Queued' OR NOT EXISTS (
+  SELECT 1 FROM browser_identities i JOIN browser_identity_revisions r ON r.id = NEW.identity_revision_id
+  WHERE i.id = NEW.identity_id AND r.business_system_id = i.business_system_id
+    AND ((NEW.kind = 'authentication_probe' AND NEW.probe_phase = 'revision_change') OR i.current_revision_id = NEW.identity_revision_id)
+) OR (NEW.profile_generation_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM browser_profile_generations g
+  WHERE g.id = NEW.profile_generation_id AND g.identity_id = NEW.identity_id
+)) OR (NEW.kind = 'authentication_probe' AND NOT EXISTS (
+  SELECT 1 FROM browser_identity_revisions r WHERE r.id = NEW.identity_revision_id
+    AND r.probe_journey_id = NEW.journey_id AND NEW.journey_version >= r.probe_journey_version
+  )) OR (NEW.kind = 'journey' AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts a JOIN browser_identities i ON i.id = NEW.identity_id
+  WHERE a.id = NEW.owner_attempt_id AND a.attempt_type = 'inspection_collection'
+    AND ((a.state = 'Queued' AND a.runtime_slot IS NULL)
+      OR (a.state IN ('Assigned','Running') AND a.runtime_slot = 'lintel'))
+    AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL
+    AND ((a.scope_type = 'run_check' AND i.business_system_id = (SELECT business_system_id FROM inspection_runs WHERE id = a.scope_id))
+      OR (a.scope_type = 'config_test_run' AND i.business_system_id = (SELECT business_system_id FROM config_test_runs WHERE id = a.scope_id)))
+  )) OR (NEW.kind = 'exploration' AND NOT EXISTS (
+  SELECT 1 FROM execution_attempts a WHERE a.id = NEW.owner_attempt_id
+    AND a.attempt_type = 'investigation' AND a.runtime_slot = 'plinth'
+    AND a.scope_type = 'investigation' AND a.check_key IS NULL AND a.state = 'Running'
+  ))
+BEGIN SELECT RAISE(ABORT, 'browser_operation must start Queued with an owned revision/profile and a compatible owner Attempt/Journey binding'); END;
+CREATE TRIGGER trg_browser_operations_global_fifo BEFORE UPDATE OF state ON browser_operations
+WHEN NEW.state = 'Starting' AND OLD.state IN ('Queued','WaitingForCapacity') AND EXISTS (
+  SELECT 1 FROM browser_operations q
+  WHERE q.id < NEW.id AND q.state IN ('Queued','WaitingForCapacity')
+)
+BEGIN SELECT RAISE(ABORT, 'browser operation may dispatch Start only at the global FIFO head'); END;
+CREATE TRIGGER trg_execution_attempts_browser_dispatch_after_operation_running BEFORE UPDATE OF state ON execution_attempts
+WHEN NEW.state = 'Assigned' AND OLD.state = 'Queued' AND (
+  (NEW.attempt_type = 'inspection_collection'
+    AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = NEW.id AND o.kind = 'journey' AND o.state = 'Running'))
+  OR (NEW.attempt_type = 'browser_exploration'
+    AND NOT EXISTS (
+      SELECT 1 FROM tool_calls t JOIN browser_operations o ON o.owner_attempt_id = t.attempt_id
+      WHERE t.id = NEW.requested_by_tool_call_id AND o.kind = 'exploration' AND o.state = 'Running'))
+)
+BEGIN SELECT RAISE(ABORT, 'browser Attempt may dispatch only after its Browser Operation owns a physical slot'); END;
+CREATE TRIGGER trg_browser_journey_results_closure BEFORE INSERT ON browser_journey_results
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM browser_operations o
+  JOIN execution_attempts a ON a.id = NEW.attempt_id AND a.id = o.owner_attempt_id
+  WHERE o.id = NEW.operation_id AND o.kind = 'journey' AND o.state = 'Running'
+    AND a.attempt_type = 'inspection_collection' AND a.state = 'Running'
+    AND a.runtime_slot = 'lintel' AND a.accepted_at IS NOT NULL
+    AND (
+      (NEW.outcome = 'success' AND EXISTS (
+        SELECT 1 FROM evidence e
+        WHERE e.id = NEW.primary_evidence_id AND e.attempt_id = a.id
+          AND e.integrity = 'complete' AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
+          AND ((a.scope_type = 'run_check' AND e.target_type = 'inspection_run' AND e.target_id = a.scope_id
+                AND json_type(e.params_json, '$.check_key') = 'text' AND (e.params_json ->> '$.check_key') = a.check_key)
+            OR (a.scope_type = 'config_test_run' AND e.target_type = 'config_test_run' AND e.target_id = a.scope_id
+                AND json_type(e.params_json, '$.plan_key') = 'text' AND (e.params_json ->> '$.plan_key') = a.plan_key
+                AND json_type(e.params_json, '$.check_key') = 'text' AND (e.params_json ->> '$.check_key') = a.check_key))))
+      OR (NEW.outcome = 'gap' AND NEW.primary_evidence_id IS NULL)
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'Journey ResultProposal must bind one Running journey operation/Attempt; success additionally requires its committed primary structured Evidence'); END;
+CREATE TRIGGER trg_browser_journey_results_commit AFTER INSERT ON browser_journey_results
+BEGIN
+  INSERT INTO inspection_check_results
+    (run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
+  SELECT a.scope_id,a.check_key,
+         CASE WHEN NEW.outcome = 'success' THEN 'ok' ELSE 'gap' END,
+         NEW.primary_evidence_id,a.id,NEW.result_digest,NEW.gap_code,NEW.created_at
+  FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.scope_type = 'run_check';
+  INSERT INTO config_test_run_check_results
+    (test_run_id,plan_key,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
+  SELECT a.scope_id,a.plan_key,a.check_key,
+         CASE WHEN NEW.outcome = 'success' THEN 'ok' ELSE 'gap' END,
+         NEW.primary_evidence_id,a.id,NEW.result_digest,NEW.gap_code,NEW.created_at
+  FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.scope_type = 'config_test_run';
+  UPDATE browser_operations
+  SET state = CASE WHEN NEW.outcome = 'success' THEN 'Succeeded' ELSE 'Failed' END,
+      terminal_reason = NEW.terminal_reason,
+      ended_at = NEW.created_at,
+      row_version = row_version + 1
+  WHERE id = NEW.operation_id AND state = 'Running';
+  UPDATE execution_attempts
+  SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
+  WHERE id = NEW.attempt_id AND state = 'Running';
+END;
+CREATE TRIGGER trg_browser_journey_results_no_update BEFORE UPDATE ON browser_journey_results
+BEGIN SELECT RAISE(ABORT, 'browser Journey results are immutable'); END;
+CREATE TRIGGER trg_browser_journey_results_no_delete BEFORE DELETE ON browser_journey_results
+BEGIN SELECT RAISE(ABORT, 'browser Journey results are retained as replay lineage'); END;
+
+CREATE TRIGGER trg_browser_operations_success_probe_fence BEFORE UPDATE OF state ON browser_operations
+WHEN NEW.state = 'Succeeded' AND (
+  (NEW.kind = 'authentication_probe' AND NOT EXISTS (
+    SELECT 1 FROM browser_probe_results p WHERE p.operation_id = NEW.id
+      AND p.phase = NEW.probe_phase AND p.result IN ('Authenticated','Unauthenticated')))
+  OR (NEW.kind IN ('journey','exploration') AND (
+    NOT EXISTS (SELECT 1 FROM browser_probe_results p WHERE p.operation_id = NEW.id
+      AND p.phase = 'admission' AND p.result = 'Authenticated')
+    OR NOT EXISTS (SELECT 1 FROM browser_probe_results p WHERE p.operation_id = NEW.id
+      AND p.phase = 'completion' AND p.result = 'Authenticated')
+    OR NOT EXISTS (SELECT 1 FROM browser_identities i WHERE i.id = NEW.identity_id AND i.state = 'Ready')
+    OR (NEW.kind = 'journey' AND NOT EXISTS (
+      SELECT 1 FROM execution_attempts a JOIN evidence e ON e.attempt_id = a.id
+      WHERE a.id = NEW.owner_attempt_id AND (
+        (a.scope_type = 'run_check' AND EXISTS (
+          SELECT 1 FROM inspection_check_results r
+          WHERE r.run_id = a.scope_id AND r.check_key = a.check_key AND r.status = 'ok' AND r.evidence_id = e.id))
+        OR (a.scope_type = 'config_test_run' AND EXISTS (
+          SELECT 1 FROM config_test_run_check_results r
+          WHERE r.test_run_id = a.scope_id AND r.plan_key = a.plan_key AND r.check_key = a.check_key
+            AND r.status = 'ok' AND r.evidence_id = e.id AND r.attempt_id = a.id))
+      )))
+    OR (NEW.kind = 'exploration' AND NOT (NEW.trace_artifact_id IS NOT NULL AND NEW.trace_integrity = 'complete'))
+  ))
+  OR (NEW.kind = 'manual_login' AND NOT EXISTS (
+    SELECT 1 FROM browser_profile_generations g WHERE g.published_operation_id = NEW.id))
+)
+BEGIN SELECT RAISE(ABORT, 'successful browser operation requires its authoritative probe/profile result'); END;
+CREATE TRIGGER trg_browser_operations_failed_journey_trace BEFORE UPDATE OF state ON browser_operations
+WHEN NEW.state = 'Failed' AND NEW.kind = 'journey' AND NEW.started_at IS NOT NULL
+  AND NEW.terminal_reason NOT IN ('artifact_commit_failed','new_boot','runtime_unavailable')
+  AND NOT (NEW.trace_artifact_id IS NOT NULL AND NEW.trace_integrity IN ('complete','incomplete'))
+BEGIN SELECT RAISE(ABORT, 'failed journey requires its diagnostic trace unless trace commit itself failed'); END;
+CREATE TRIGGER trg_browser_operations_exploration_terminal_trace BEFORE UPDATE OF state ON browser_operations
+WHEN NEW.kind = 'exploration' AND NEW.started_at IS NOT NULL
+  AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+  AND (NEW.terminal_reason IS NULL OR NEW.terminal_reason NOT IN ('artifact_commit_failed','new_boot','runtime_unavailable'))
+  AND NOT (NEW.trace_artifact_id IS NOT NULL AND NEW.trace_integrity IN ('complete','incomplete'))
+BEGIN SELECT RAISE(ABORT, 'started exploration requires its continuous trace unless commit failed or process loss made the trace unavailable'); END;
+CREATE TRIGGER trg_browser_operations_trace_owner BEFORE UPDATE OF trace_artifact_id ON browser_operations
+WHEN NEW.trace_artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM artifacts a WHERE a.id = NEW.trace_artifact_id AND a.kind = 'trace'
+    AND a.owner_type = 'browser_operation' AND a.owner_id = NEW.id AND a.sensitive = 1 AND a.body_expired = 0)
+BEGIN SELECT RAISE(ABORT, 'browser operation trace must be an available sensitive trace artifact owned by the operation'); END;
+CREATE TRIGGER trg_browser_operation_manual_login_marks_auth_required AFTER INSERT ON browser_operations
+WHEN NEW.kind = 'manual_login'
+BEGIN
+  UPDATE browser_identities SET state = 'AuthenticationRequired', row_version = row_version + 1
+  WHERE id = NEW.identity_id AND state <> 'AuthenticationRequired';
+END;
+CREATE TRIGGER trg_browser_probe_results_closure BEFORE INSERT ON browser_probe_results
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_operations o JOIN browser_identity_revisions r ON r.id = o.identity_revision_id
+  WHERE o.id = NEW.operation_id
+    AND o.identity_revision_id = NEW.identity_revision_id
+    AND r.probe_journey_id = NEW.journey_id AND NEW.journey_version >= r.probe_journey_version
+    AND o.journey_catalog_digest = NEW.journey_catalog_digest
+    AND o.journey_catalog_version = NEW.journey_catalog_version
+    AND (o.state = 'Running' OR (o.kind = 'manual_login' AND o.state = 'AwaitingReconnect'))
+    AND (o.kind <> 'authentication_probe' OR (o.journey_id = NEW.journey_id AND o.journey_version = NEW.journey_version AND o.probe_phase = NEW.phase))
+    AND (NEW.phase <> 'publish' OR o.kind = 'manual_login')
+    AND (NEW.phase <> 'revision_change' OR o.kind = 'authentication_probe')
+)
+BEGIN SELECT RAISE(ABORT, 'probe result must match its operation revision, catalog, Journey and phase'); END;
+CREATE TRIGGER trg_browser_probe_unauthenticated_marks_auth_required AFTER INSERT ON browser_probe_results
+WHEN NEW.result = 'Unauthenticated'
+BEGIN
+  UPDATE browser_identities SET state = 'AuthenticationRequired', row_version = row_version + 1
+  WHERE id = (SELECT identity_id FROM browser_operations WHERE id = NEW.operation_id)
+    AND state <> 'AuthenticationRequired';
+END;
+-- Browser Identity 配置切换与 profile 指针切换都不能绕过仍持有物理进程 fence 的 operation。
+CREATE TRIGGER trg_browser_identities_revision_switch_busy BEFORE UPDATE OF current_revision_id ON browser_identities
+WHEN NEW.current_revision_id IS NOT OLD.current_revision_id AND EXISTS (
+  SELECT 1 FROM browser_operations o
+  WHERE o.identity_id = OLD.id AND o.stop_confirmed_at IS NULL
+    AND NOT (o.kind = 'authentication_probe' AND o.probe_phase = 'revision_change'
+      AND o.identity_revision_id = NEW.current_revision_id AND o.state IN ('Queued','WaitingForCapacity','Starting','Running')))
+BEGIN SELECT RAISE(ABORT, 'identity revision cannot switch while an unrelated active operation holds the identity'); END;
+CREATE TRIGGER trg_browser_identities_profile_pointer_requires_no_active_operation BEFORE UPDATE OF current_profile_generation_id ON browser_identities
+WHEN NEW.current_profile_generation_id IS NOT OLD.current_profile_generation_id AND EXISTS (
+  SELECT 1 FROM browser_operations o
+  WHERE o.identity_id = OLD.id AND o.stop_confirmed_at IS NULL AND o.kind <> 'manual_login')
+BEGIN SELECT RAISE(ABORT, 'profile pointer cannot switch while a non-publication operation holds the identity'); END;
+CREATE TRIGGER trg_browser_profile_reconciliations_closure BEFORE INSERT ON browser_profile_reconciliations
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_identities i JOIN browser_profile_generations g ON g.id = NEW.profile_generation_id
+  WHERE i.id = NEW.identity_id AND g.identity_id = i.id AND i.current_profile_generation_id = g.id
+    AND (
+      (NEW.result = 'compatible' AND NEW.observed_chromium_revision = g.chromium_revision
+        AND NEW.observed_manifest_digest = g.profile_manifest_digest)
+      OR (NEW.result = 'missing')
+      OR (NEW.result = 'manifest_invalid'
+        AND (NEW.observed_manifest_digest IS NULL OR NEW.observed_manifest_digest <> g.profile_manifest_digest))
+      OR (NEW.result = 'chromium_revision_mismatch'
+        AND NEW.observed_chromium_revision <> g.chromium_revision
+        AND NEW.observed_manifest_digest = g.profile_manifest_digest)
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'profile reconciliation must classify the identity current generation by exact Chromium revision and manifest digest'); END;
+CREATE TRIGGER trg_browser_reconcile_incompatible_marks_auth_required AFTER INSERT ON browser_profile_reconciliations
+WHEN NEW.result IN ('missing','manifest_invalid','chromium_revision_mismatch')
+BEGIN
+  UPDATE browser_identities SET state = 'AuthenticationRequired', row_version = row_version + 1
+  WHERE id = NEW.identity_id AND state <> 'AuthenticationRequired';
+END;
+CREATE TRIGGER trg_browser_profile_generation_sequence BEFORE INSERT ON browser_profile_generations
+WHEN NEW.generation <> COALESCE((SELECT MAX(generation) + 1 FROM browser_profile_generations WHERE identity_id = NEW.identity_id), 1)
+BEGIN SELECT RAISE(ABORT, 'profile generation must be the next monotonic generation for its identity'); END;
+CREATE TRIGGER trg_browser_profile_generation_publish_guard BEFORE INSERT ON browser_profile_generations
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_operations o JOIN browser_identities i ON i.id = o.identity_id
+  WHERE o.id = NEW.published_operation_id AND o.kind = 'manual_login'
+    AND o.state IN ('Running','AwaitingReconnect') AND o.identity_id = NEW.identity_id
+    AND o.identity_revision_id = NEW.identity_revision_id AND i.current_revision_id = NEW.identity_revision_id
+    AND o.actor_user_id = NEW.published_by
+) OR NOT EXISTS (
+  SELECT 1 FROM browser_probe_results p WHERE p.operation_id = NEW.published_operation_id
+    AND p.phase = 'publish' AND p.result = 'Authenticated'
+    AND p.identity_revision_id = NEW.identity_revision_id
+    AND p.journey_id = NEW.probe_journey_id AND p.journey_version = NEW.probe_journey_version
+    AND p.journey_catalog_digest = NEW.probe_catalog_digest
+    AND p.journey_catalog_version = NEW.probe_catalog_version
+)
+BEGIN SELECT RAISE(ABORT, 'profile generation requires the active actor-owned manual login and a matching authenticated publish probe'); END;
+CREATE TRIGGER trg_browser_profile_generation_publish_atomic AFTER INSERT ON browser_profile_generations
+BEGIN
+  UPDATE browser_identities
+  SET current_profile_generation_id = NEW.id, state = 'Ready', row_version = row_version + 1
+  WHERE id = NEW.identity_id AND current_revision_id = NEW.identity_revision_id;
+  UPDATE browser_operations
+  SET state = 'Succeeded', reconnect_deadline = NULL, ended_at = NEW.published_at, row_version = row_version + 1
+  WHERE id = NEW.published_operation_id AND state IN ('Running','AwaitingReconnect');
+END;
+CREATE TRIGGER trg_browser_exploration_actions_no_origin_update BEFORE UPDATE OF
+  operation_id, action_seq, child_attempt_id, tool_call_id, action_kind, page_id, origin, target_description, started_at ON browser_exploration_actions
+BEGIN SELECT RAISE(ABORT, 'browser exploration action origin is immutable'); END;
+CREATE TRIGGER trg_browser_exploration_actions_closure BEFORE INSERT ON browser_exploration_actions
+WHEN NEW.action_seq <> COALESCE((SELECT MAX(action_seq) + 1 FROM browser_exploration_actions WHERE operation_id = NEW.operation_id), 1)
+  OR (NEW.action_seq = 1 AND NEW.action_kind <> 'open')
+  OR (NEW.action_seq > 1 AND NEW.action_kind = 'open')
+  OR (NEW.action_seq > 1 AND NOT EXISTS (
+    SELECT 1 FROM browser_probe_results p
+    WHERE p.operation_id = NEW.operation_id AND p.phase = 'admission' AND p.result = 'Authenticated'))
+  OR NOT EXISTS (
+  SELECT 1 FROM browser_operations o
+  JOIN execution_attempts parent ON parent.id = o.owner_attempt_id
+  JOIN tool_calls t ON t.id = NEW.tool_call_id AND t.attempt_id = parent.id
+  JOIN execution_attempts child ON child.id = NEW.child_attempt_id
+    AND child.attempt_type = 'browser_exploration' AND child.state = 'Running'
+    AND child.scope_type = 'investigation' AND child.scope_id = parent.scope_id
+    AND child.requested_by_tool_call_id = t.id
+  WHERE o.id = NEW.operation_id AND o.kind = 'exploration' AND o.state = 'Running'
+    AND parent.attempt_type = 'investigation' AND parent.state = 'Running'
+    AND t.execution_mode = 'quoin_browser' AND t.status = 'running'
+    AND json_extract(t.arguments_json, '$.action') = NEW.action_kind
+)
+BEGIN SELECT RAISE(ABORT, 'browser exploration action must bind one parent Tool Call to its matching child Attempt in the same exploration operation'); END;
+CREATE TRIGGER trg_browser_exploration_first_action_success_probe BEFORE UPDATE OF outcome ON browser_exploration_actions
+WHEN NEW.action_seq = 1 AND NEW.action_kind = 'open' AND NEW.outcome = 'success'
+  AND NOT EXISTS (
+    SELECT 1 FROM browser_probe_results p
+    WHERE p.operation_id = NEW.operation_id AND p.phase = 'admission' AND p.result = 'Authenticated')
+BEGIN SELECT RAISE(ABORT, 'successful exploration open requires an authenticated admission probe'); END;
+CREATE TRIGGER trg_browser_exploration_actions_screenshot_owner_insert BEFORE INSERT ON browser_exploration_actions
+WHEN NEW.screenshot_artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM artifacts a WHERE a.id = NEW.screenshot_artifact_id AND a.kind = 'screenshot'
+    AND a.owner_type = 'browser_operation' AND a.owner_id = NEW.operation_id AND a.body_expired = 0)
+BEGIN SELECT RAISE(ABORT, 'browser action screenshot must be an available screenshot artifact owned by its operation'); END;
+CREATE TRIGGER trg_browser_exploration_actions_screenshot_owner BEFORE UPDATE OF screenshot_artifact_id ON browser_exploration_actions
+WHEN NEW.screenshot_artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM artifacts a JOIN browser_operations o ON o.id = NEW.operation_id
+  WHERE a.id = NEW.screenshot_artifact_id AND a.kind = 'screenshot'
+    AND a.owner_type = 'browser_operation' AND a.owner_id = o.id AND a.body_expired = 0)
+BEGIN SELECT RAISE(ABORT, 'browser action screenshot must be an available screenshot artifact owned by its operation'); END;
+CREATE TRIGGER trg_browser_exploration_actions_result_immutable BEFORE UPDATE OF
+  ended_at, outcome, error_code, observation_version, observation_digest, observation_size_bytes, screenshot_artifact_id
+  ON browser_exploration_actions
+WHEN OLD.outcome IS NOT NULL AND (
+  NEW.ended_at IS NOT OLD.ended_at OR NEW.outcome IS NOT OLD.outcome OR NEW.error_code IS NOT OLD.error_code
+  OR NEW.observation_version IS NOT OLD.observation_version OR NEW.observation_digest IS NOT OLD.observation_digest
+  OR NEW.observation_size_bytes IS NOT OLD.observation_size_bytes OR NEW.screenshot_artifact_id IS NOT OLD.screenshot_artifact_id)
+BEGIN SELECT RAISE(ABORT, 'browser exploration action result is final once set'); END;
 
 -- 12.14 模型/工具调用：每行是一条物理请求/执行事实；归属与签名不可变，只允许状态/result 收口。
 CREATE TRIGGER trg_model_calls_no_origin_update BEFORE UPDATE OF
@@ -1681,6 +2213,21 @@ BEGIN SELECT RAISE(ABORT, 'tool_call origin is immutable'); END;
 CREATE TRIGGER trg_users_auth_revision_monotonic BEFORE UPDATE OF auth_revision ON users
 WHEN NEW.auth_revision <= OLD.auth_revision
 BEGIN SELECT RAISE(ABORT, 'auth_revision must increase'); END;
+CREATE TRIGGER trg_users_security_change_revision BEFORE UPDATE ON users
+WHEN (NEW.enabled IS NOT OLD.enabled
+   OR NEW.role IS NOT OLD.role
+   OR NEW.password_phc IS NOT OLD.password_phc
+   OR NEW.password_change_required IS NOT OLD.password_change_required
+   OR NEW.password_change_required_at IS NOT OLD.password_change_required_at)
+ AND NEW.auth_revision <> OLD.auth_revision + 1
+BEGIN SELECT RAISE(ABORT, 'user security changes must increment auth_revision exactly once'); END;
+CREATE TRIGGER trg_users_auth_revision_requires_security_change BEFORE UPDATE OF auth_revision ON users
+WHEN NEW.enabled IS OLD.enabled
+ AND NEW.role IS OLD.role
+ AND NEW.password_phc IS OLD.password_phc
+ AND NEW.password_change_required IS OLD.password_change_required
+ AND NEW.password_change_required_at IS OLD.password_change_required_at
+BEGIN SELECT RAISE(ABORT, 'auth_revision can only advance with a user security change'); END;
 
 -- 12.16 告警源凭据：最多两个 Active；Retired 不可复活；退休时记录时间
 CREATE TRIGGER trg_alert_source_credentials_max2_insert BEFORE INSERT ON alert_source_credentials
@@ -1765,7 +2312,7 @@ CREATE TRIGGER trg_initial_analyses_origin_immutable BEFORE UPDATE OF
 BEGIN SELECT RAISE(ABORT, 'initial_analysis origin/input snapshot is immutable'); END;
 CREATE TRIGGER trg_inspection_runs_origin_immutable BEFORE UPDATE OF
   business_system_id, plan_key, config_version_id, label_contract_version_id,
-  trigger_kind, scheduled_for, rerun_of_id, journey_catalog_digest, journey_catalog_version, created_at ON inspection_runs
+  trigger_kind, scheduled_for, rerun_of_id, created_at ON inspection_runs
 BEGIN SELECT RAISE(ABORT, 'inspection_run binding is immutable'); END;
 CREATE TRIGGER trg_execution_attempts_origin_immutable BEFORE UPDATE OF
   attempt_type, scope_type, scope_id, plan_key, check_key, requested_by_tool_call_id,
@@ -2029,6 +2576,40 @@ BEGIN
   UPDATE business_system_config_versions SET state = 'superseded'
   WHERE id = OLD.current_config_version_id AND OLD.current_config_version_id IS NOT NULL AND state = 'published';
 END;
+CREATE TRIGGER trg_browser_identities_revision_owner_insert AFTER INSERT ON browser_identities
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_identity_revisions r
+  WHERE r.id = NEW.current_revision_id AND r.business_system_id = NEW.business_system_id)
+BEGIN SELECT RAISE(ABORT, 'current_revision_id must belong to the identity business system'); END;
+CREATE TRIGGER trg_browser_identities_revision_owner_update BEFORE UPDATE OF current_revision_id ON browser_identities
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_identity_revisions r
+  WHERE r.id = NEW.current_revision_id AND r.business_system_id = NEW.business_system_id)
+  OR (NEW.current_profile_generation_id IS NULL AND NEW.state <> 'AuthenticationRequired')
+  OR (NEW.current_profile_generation_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM browser_operations o WHERE o.identity_id = NEW.id
+      AND o.kind = 'authentication_probe' AND o.probe_phase = 'revision_change'
+      AND o.identity_revision_id = NEW.current_revision_id
+      AND o.profile_generation_id = NEW.current_profile_generation_id
+      AND o.state IN ('Queued','WaitingForCapacity','Starting','Running')
+  ))
+BEGIN SELECT RAISE(ABORT, 'revision switch requires an owned target and, when a profile exists, its active revision-change probe'); END;
+CREATE TRIGGER trg_browser_identities_profile_pointer_publish_only BEFORE UPDATE OF current_profile_generation_id ON browser_identities
+WHEN NEW.current_profile_generation_id IS NOT OLD.current_profile_generation_id AND NOT EXISTS (
+  SELECT 1 FROM browser_profile_generations g JOIN browser_operations o ON o.id = g.published_operation_id
+  WHERE g.id = NEW.current_profile_generation_id AND g.identity_id = NEW.id
+    AND g.identity_revision_id = NEW.current_revision_id
+    AND o.kind = 'manual_login' AND o.state IN ('Running','AwaitingReconnect')
+)
+BEGIN SELECT RAISE(ABORT, 'current profile pointer can only move through an active manual-login publication'); END;
+CREATE TRIGGER trg_browser_identities_ready_publish_only BEFORE UPDATE OF state ON browser_identities
+WHEN OLD.state = 'AuthenticationRequired' AND NEW.state = 'Ready' AND NOT EXISTS (
+  SELECT 1 FROM browser_profile_generations g JOIN browser_operations o ON o.id = g.published_operation_id
+  WHERE g.id = NEW.current_profile_generation_id AND g.identity_id = NEW.id
+    AND g.identity_revision_id = NEW.current_revision_id
+    AND o.kind = 'manual_login' AND o.state IN ('Running','AwaitingReconnect')
+)
+BEGIN SELECT RAISE(ABORT, 'AuthenticationRequired can return Ready only through a successful manual profile publication'); END;
 CREATE TRIGGER trg_browser_identities_profile_owner_insert AFTER INSERT ON browser_identities
 WHEN NEW.current_profile_generation_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM browser_profile_generations p WHERE p.id = NEW.current_profile_generation_id AND p.identity_id = NEW.id)
@@ -2080,43 +2661,74 @@ BEGIN SELECT RAISE(ABORT, 'backups is append-only'); END;
 -- Runtime slot 是固定键（CONTEXT「服务身份」）
 CREATE TRIGGER trg_runtime_slots_slot_immutable BEFORE UPDATE OF slot ON runtime_slots
 BEGIN SELECT RAISE(ABORT, 'runtime_slot key is fixed'); END;
--- 浏览器操作：result 一旦产生即终态不可变，且必须带 ended_at（DATA-BROWSER-003）。
--- result 非空后，result 与 ended_at 都完全冻结：清空（result=NULL/ended_at=NULL）或改写均拒绝——
--- 用 IS NOT 做 NULL-safe 比较，避免 NULL 比较短路放行“复活”回 active（重新阻塞 lintel 替换 fence）。
-CREATE TRIGGER trg_browser_operations_result_immutable BEFORE UPDATE OF result, ended_at ON browser_operations
-WHEN OLD.result IS NOT NULL AND (NEW.result IS NOT OLD.result OR NEW.ended_at IS NOT OLD.ended_at)
-BEGIN SELECT RAISE(ABORT, 'browser_operation result is final once set; result/ended_at cannot be cleared or rewritten'); END;
-CREATE TRIGGER trg_browser_operations_complete_running_attempt BEFORE UPDATE OF result ON browser_operations
-WHEN OLD.result IS NULL AND NEW.result IS NOT NULL AND NEW.attempt_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM execution_attempts child
-  WHERE child.id = NEW.attempt_id AND child.state = 'Running'
-    AND (
-      child.attempt_type = 'inspection_collection'
-      OR (child.attempt_type = 'browser_exploration' AND EXISTS (
-        SELECT 1 FROM tool_calls t JOIN execution_attempts parent ON parent.id = t.attempt_id
-        WHERE t.id = child.requested_by_tool_call_id
-          AND ((t.status = 'running' AND parent.state = 'Running')
-            OR NEW.result IN ('cancelled','interrupted'))
-      ))
-    )
+-- Browser Operation 显式前向状态机；终态不可复活，row_version 每次 UPDATE 精确 +1。
+CREATE TRIGGER trg_browser_operations_start_dispatch_once BEFORE UPDATE OF start_dispatched_at ON browser_operations
+WHEN NOT (OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NULL
+  AND OLD.lintel_boot_id IS NULL AND NEW.lintel_boot_id IS NOT NULL
+  AND OLD.lintel_connection_epoch IS NULL AND NEW.lintel_connection_epoch IS NOT NULL
+  AND OLD.state IN ('Queued','WaitingForCapacity') AND NEW.state = 'Starting')
+BEGIN SELECT RAISE(ABORT, 'browser operation Start dispatch fence is write-once and must accompany entry to Starting'); END;
+CREATE TRIGGER trg_browser_operations_start_binding_once BEFORE UPDATE OF lintel_boot_id, lintel_connection_epoch ON browser_operations
+WHEN NOT (OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NULL
+  AND OLD.lintel_boot_id IS NULL AND NEW.lintel_boot_id IS NOT NULL
+  AND OLD.lintel_connection_epoch IS NULL AND NEW.lintel_connection_epoch IS NOT NULL
+  AND OLD.state IN ('Queued','WaitingForCapacity') AND NEW.state = 'Starting')
+BEGIN SELECT RAISE(ABORT, 'browser operation Lintel boot/epoch binding is immutable and must accompany Start dispatch'); END;
+CREATE TRIGGER trg_browser_operations_start_ack_once BEFORE UPDATE OF started_at ON browser_operations
+WHEN NOT (OLD.started_at IS NULL AND NEW.started_at IS NOT NULL AND OLD.state = 'Starting' AND NEW.state = 'Running')
+BEGIN SELECT RAISE(ABORT, 'browser operation started_at is write-once and must accompany an accepted Start Ack'); END;
+CREATE TRIGGER trg_browser_operations_start_rejection_once BEFORE UPDATE OF start_rejected_at, start_reject_reason ON browser_operations
+WHEN NOT (OLD.start_rejected_at IS NULL AND OLD.start_reject_reason IS NULL
+  AND NEW.start_rejected_at IS NOT NULL AND NEW.start_reject_reason IS NOT NULL
+  AND OLD.state = 'Starting' AND NEW.state = 'Failed'
+  AND NEW.stop_confirmed_at IS NOT NULL AND NEW.stop_confirmation_basis = 'start_rejected'
+  AND (
+    (NEW.start_reject_reason IN ('identity_busy','input_unsupported','reconcile_required','stale_stream','internal') AND NEW.terminal_reason = 'protocol_error')
+    OR (NEW.start_reject_reason = 'authentication_required' AND NEW.kind <> 'manual_login' AND NEW.terminal_reason = 'authentication_required')
+    OR (NEW.start_reject_reason = 'profile_unavailable' AND NEW.kind <> 'manual_login'
+      AND NEW.terminal_reason IN ('profile_missing','profile_manifest_invalid','chromium_revision_mismatch'))
+  ))
+BEGIN SELECT RAISE(ABORT, 'browser operation Start rejection is write-once and must atomically fail and confirm no process'); END;
+CREATE TRIGGER trg_browser_operations_state_transition BEFORE UPDATE OF state ON browser_operations
+WHEN OLD.state <> NEW.state AND NOT (
+  (OLD.state = 'Queued' AND NEW.state IN ('WaitingForCapacity','Starting','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'WaitingForCapacity' AND NEW.state IN ('Starting','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'Starting' AND NEW.state IN ('WaitingForCapacity','Running','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'Running' AND NEW.state IN ('AwaitingReconnect','Succeeded','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'AwaitingReconnect' AND NEW.state IN ('Running','Succeeded','Failed','Cancelled','Interrupted'))
 )
-BEGIN SELECT RAISE(ABORT, 'browser operation may complete only while its child Attempt is Running and its parent browser request is valid'); END;
--- 子 Attempt 一旦离开 Running，必须先在同一语句触发链中机械关闭活动 Browser Operation；
--- 否则 result=NULL 会永久占用 Browser Identity，并阻断 Lintel replacement fence。
-CREATE TRIGGER trg_execution_attempts_close_browser_operation_before_terminal
-BEFORE UPDATE OF state ON execution_attempts
-WHEN OLD.state = 'Running' AND NEW.state IN ('Cancelling','Failed','Cancelled','Interrupted')
-BEGIN
-  UPDATE browser_operations
-  SET result = CASE
-        WHEN NEW.state = 'Interrupted' THEN 'interrupted'
-        WHEN NEW.state IN ('Cancelling','Cancelled') THEN 'cancelled'
-        ELSE 'failed'
-      END,
-      ended_at = COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-      row_version = row_version + 1
-  WHERE attempt_id = OLD.id AND result IS NULL;
-END;
+BEGIN SELECT RAISE(ABORT, 'invalid browser_operation state transition'); END;
+CREATE TRIGGER trg_browser_operations_terminal_immutable BEFORE UPDATE OF
+  identity_id, identity_revision_id, profile_generation_id, owner_attempt_id, kind, actor_user_id, state,
+  journey_catalog_digest, journey_catalog_version, journey_id, journey_version, probe_phase,
+  requested_at, start_dispatched_at, lintel_boot_id, lintel_connection_epoch, started_at, start_rejected_at, start_reject_reason, reconnect_deadline, ended_at, terminal_reason, trace_artifact_id, trace_integrity
+  ON browser_operations
+WHEN OLD.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+BEGIN SELECT RAISE(ABORT, 'terminal browser_operation domain result is immutable'); END;
+CREATE TRIGGER trg_browser_operations_stop_confirmation_once BEFORE UPDATE OF stop_confirmed_at, stop_confirmation_basis ON browser_operations
+WHEN NOT (
+  (OLD.stop_confirmed_at IS NULL AND OLD.stop_confirmation_basis IS NULL
+    AND NEW.stop_confirmed_at IS NOT NULL AND NEW.stop_confirmation_basis IS NOT NULL
+    AND ((OLD.state NOT IN ('Succeeded','Failed','Cancelled','Interrupted')
+          AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted'))
+      OR (OLD.state IN ('Succeeded','Failed','Cancelled','Interrupted') AND NEW.state = OLD.state)))
+  OR (NEW.stop_confirmed_at IS OLD.stop_confirmed_at AND NEW.stop_confirmation_basis IS OLD.stop_confirmation_basis)
+)
+BEGIN SELECT RAISE(ABORT, 'browser_operation stop confirmation and its basis are terminal and write-once'); END;
+-- 显式取消的父 Attempt 先进入 Cancelling；自然成功/失败/中断时保持 Running 直至收口。
+-- 任何终态都必须等待会话级 operation、completion probe 与强制 trace 先提交；数据库不得用父状态 UPDATE 伪造浏览器终局。
+CREATE TRIGGER trg_execution_attempts_exploration_requires_closed_operation BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.attempt_type = 'investigation' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+  AND EXISTS (
+    SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = OLD.id AND o.kind = 'exploration'
+      AND o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect'))
+BEGIN SELECT RAISE(ABORT, 'investigation attempt may terminate only after its exploration operation and mandatory trace are closed'); END;
+CREATE TRIGGER trg_execution_attempts_journey_requires_closed_operation BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.attempt_type = 'inspection_collection' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+  AND EXISTS (
+    SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = OLD.id AND o.kind = 'journey'
+      AND o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect'))
+BEGIN SELECT RAISE(ABORT, 'inspection collection attempt may terminate only after its journey operation and mandatory trace are closed'); END;
 -- Embedding generation 来源字段不可变；vector_dim 一旦设置或该 generation 已有 embeddings 即不可变更
 CREATE TRIGGER trg_embedding_generations_origin_immutable BEFORE UPDATE OF
   model_name, model_version, generation, created_at ON embedding_generations
@@ -2157,13 +2769,12 @@ WHEN OLD.state IN ('Completed','CompletedWithGaps','Failed','Cancelled','Interru
 BEGIN SELECT RAISE(ABORT, 'inspection_run terminal state is immutable'); END;
 CREATE TRIGGER trg_inspection_runs_state_transition BEFORE UPDATE OF state ON inspection_runs
 WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'Queued' AND NEW.state IN ('WaitingForCapacity','Running','Failed','Cancelled','Interrupted'))
-  OR (OLD.state = 'WaitingForCapacity' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
+  (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Completed','CompletedWithGaps','Failed','Cancelled','Interrupted'))
 )
 BEGIN SELECT RAISE(ABORT, 'invalid inspection_run state transition'); END;
 CREATE TRIGGER trg_inspection_runs_evidence_at_once BEFORE UPDATE OF evidence_at ON inspection_runs
-WHEN NOT (OLD.evidence_at IS NULL AND NEW.evidence_at IS NOT NULL AND OLD.state IN ('Queued','WaitingForCapacity') AND NEW.state = 'Running')
+WHEN NOT (OLD.evidence_at IS NULL AND NEW.evidence_at IS NOT NULL AND OLD.state = 'Queued' AND NEW.state = 'Running')
 BEGIN SELECT RAISE(ABORT, 'inspection_run evidence_at is generated exactly once when collection starts'); END;
 -- 终态转换必须与子 Attempt fence 同一事务提交；Cancelled 允许已 fence 到 Cancelling 的运行子 Attempt。
 CREATE TRIGGER trg_inspection_runs_terminal_children_fenced BEFORE UPDATE OF state ON inspection_runs
@@ -2191,6 +2802,13 @@ BEGIN SELECT RAISE(ABORT, 'execution_attempt terminal state is immutable'); END;
 CREATE TRIGGER trg_execution_attempts_state_transition BEFORE UPDATE OF state ON execution_attempts
 WHEN NEW.state <> OLD.state AND NOT (
   (OLD.state = 'Queued' AND NEW.state IN ('Assigned','Failed','Cancelled'))
+  OR (OLD.state = 'Queued' AND NEW.state = 'Succeeded' AND OLD.runtime_slot IS NULL AND (
+    (OLD.attempt_type = 'browser_exploration' AND OLD.requested_by_tool_call_id IS NOT NULL)
+    OR (OLD.attempt_type = 'inspection_collection' AND (
+      EXISTS (SELECT 1 FROM inspection_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM config_test_run_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
+    ))
+  ))
   OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Succeeded','Failed','Cancelling','Interrupted'))
   OR (OLD.state = 'Cancelling' AND NEW.state = 'Cancelled')
@@ -2479,8 +3097,8 @@ BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
   VALUES ('browser_operation', NEW.id, 'created', NEW.row_version);
 END;
-CREATE TRIGGER trg_task_change_log_browser_result AFTER UPDATE OF result ON browser_operations
-WHEN NEW.result IS NOT NULL AND (OLD.result IS NULL OR NEW.result <> OLD.result)
+CREATE TRIGGER trg_task_change_log_browser_state AFTER UPDATE OF state ON browser_operations
+WHEN NEW.state <> OLD.state
 BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
   VALUES ('browser_operation', NEW.id, 'state_changed', NEW.row_version);
@@ -2629,8 +3247,9 @@ BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential can only be inserted for
 
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
--- 必须 state='Running' 且 runtime_slot/boot_id/connection_epoch 全部非空且与 upload 一致
--- （旧 Attempt 已终态/未派发/替换后 ABA/epoch 不符一律拒绝 commit，只能 rejected）；
+-- 普通上传必须绑定 state='Running' Attempt 且 runtime_slot/boot_id/connection_epoch 精确一致；
+-- Session/Journey 连续 trace 可改由 active browser_operation 的冻结 Lintel boot/epoch 授权而不伪造一个 Tool Call Attempt。
+-- 旧 Attempt、错误 operation 绑定或 ABA/epoch 不符一律拒绝 commit，只能 rejected；
 -- artifact_id/committed_at 一旦提交不可改；历史不可删除（DATA-ARTIFACT-006）。
 CREATE TRIGGER trg_runtime_artifact_uploads_origin_immutable BEFORE UPDATE OF
   upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, media_type, retention_kind, sensitive, size_bytes, sha256, created_at ON runtime_artifact_uploads
@@ -2643,14 +3262,8 @@ WHEN OLD.state <> NEW.state AND NOT (OLD.state = 'uploading' AND NEW.state IN ('
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload state transition only uploading->committed/rejected'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_commit_attempt BEFORE UPDATE OF state ON runtime_artifact_uploads
 WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM execution_attempts a
-  JOIN artifacts ar ON ar.id = NEW.artifact_id
-  JOIN artifact_blobs b ON b.id = ar.blob_id
-  WHERE a.id = NEW.attempt_id
-    AND a.state = 'Running'
-    AND a.runtime_slot IS NOT NULL
-    AND a.boot_id IS NOT NULL AND a.boot_id = NEW.boot_id
-    AND a.connection_epoch IS NOT NULL AND a.connection_epoch = NEW.connection_epoch
+  SELECT 1 FROM artifacts ar JOIN artifact_blobs b ON b.id = ar.blob_id
+  WHERE ar.id = NEW.artifact_id
     AND ar.kind = NEW.kind
     AND ar.media_type = NEW.media_type
     AND ar.retention_kind = NEW.retention_kind
@@ -2659,13 +3272,36 @@ WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
     AND ar.owner_id = NEW.owner_id
     AND b.sha256 = NEW.sha256
     AND b.size_bytes = NEW.size_bytes
+    AND (
+      EXISTS (
+        SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id
+          AND a.state = 'Running' AND a.runtime_slot IS NOT NULL
+          AND a.boot_id = NEW.boot_id AND a.connection_epoch = NEW.connection_epoch)
+      OR (NEW.attempt_id IS NULL AND NEW.kind = 'trace' AND NEW.owner_type = 'browser_operation'
+        AND EXISTS (
+          SELECT 1 FROM browser_operations o WHERE o.id = NEW.owner_id
+            AND o.kind IN ('journey','exploration') AND o.state = 'Running'
+            AND o.lintel_boot_id = NEW.boot_id AND o.lintel_connection_epoch = NEW.connection_epoch))
+    )
 )
-BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires the attempt Running with matching non-null boot_id/connection_epoch and an artifact exactly matching kind/media_type/retention_kind/sensitive/owner_type/owner_id/sha256/size_bytes'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires a matching Running Attempt or active browser operation Lintel binding and an exactly matching artifact'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_tool_result_owner BEFORE INSERT ON runtime_artifact_uploads
 WHEN NEW.kind = 'tool_result' AND (
   NEW.owner_type <> 'tool_call' OR NEW.retention_kind <> 'generated' OR NOT EXISTS (
     SELECT 1 FROM tool_calls t WHERE t.id = NEW.owner_id AND t.attempt_id = NEW.attempt_id))
 BEGIN SELECT RAISE(ABORT, 'tool_result upload must be generated and owned by a Tool Call of the same Attempt'); END;
+CREATE TRIGGER trg_runtime_artifact_uploads_browser_owner BEFORE INSERT ON runtime_artifact_uploads
+WHEN NEW.kind IN ('trace','screenshot') AND (
+  NEW.owner_type <> 'browser_operation' OR NOT EXISTS (
+    SELECT 1 FROM browser_operations o WHERE o.id = NEW.owner_id AND (
+      (NEW.attempt_id IS NULL AND NEW.kind = 'trace' AND o.kind IN ('journey','exploration'))
+      OR o.owner_attempt_id = NEW.attempt_id OR EXISTS (
+        SELECT 1 FROM browser_exploration_actions x
+        WHERE x.operation_id = o.id AND x.child_attempt_id = NEW.attempt_id)
+    )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'browser upload must be owned by the operation itself for continuous trace or linked to its Journey/exploration child Attempt'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_result_immutable BEFORE UPDATE OF artifact_id, committed_at ON runtime_artifact_uploads
 WHEN OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.committed_at IS NOT OLD.committed_at)
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload result is immutable once committed'); END;
@@ -2699,13 +3335,15 @@ BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are retained as immutable acc
 -- Execution Attempt 可由 Plinth 或 Lintel 承载（browser_exploration 与巡检 Journey 的子 Attempt
 -- 绑定 Lintel，CONTEXT「执行尝试」）；Browser Operation 全部由 Lintel 承载。任意 slot 置 revoked 前
 -- 必须没有绑定该 slot 的 active Attempt（Assigned/Running/Cancelling）；此外 lintel 还必须没有
--- active Browser Operation（browser_operations.result IS NULL，直接检查，不通过 Attempt 推断——
--- manual_login、Queued/未派发 Attempt 或已终态 Attempt 上仍活跃的浏览器操作同样拦截）。
+-- active Browser Operation（领域状态非终态，或虽已终态但尚无 stop_confirmed_at 物理停止事实；直接检查，
+-- 不通过 Attempt 推断——manual_login、Queued/未派发 Attempt 或已终态 Attempt 上仍存活的浏览器进程同样拦截）。
 -- 应用事务先检查并拒绝（409 active_conflict），本触发器是机械兑底；正常替换流程中不存在 active。
 CREATE TRIGGER trg_runtime_slots_no_replace_with_active BEFORE UPDATE OF state ON runtime_slots
 WHEN NEW.state = 'revoked' AND (
   EXISTS (SELECT 1 FROM execution_attempts a WHERE a.runtime_slot = NEW.slot AND a.state IN ('Assigned','Running','Cancelling'))
-  OR (NEW.slot = 'lintel' AND EXISTS (SELECT 1 FROM browser_operations bo WHERE bo.result IS NULL))
+  OR (NEW.slot = 'lintel' AND EXISTS (
+    SELECT 1 FROM browser_operations bo
+    WHERE bo.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR bo.stop_confirmed_at IS NULL))
 )
 BEGIN SELECT RAISE(ABORT, 'runtime slot cannot be replaced while active attempts on the slot or active browser operations (lintel) exist'); END;
 
@@ -2755,57 +3393,13 @@ CREATE TRIGGER trg_execution_attempts_requestor_immutable BEFORE UPDATE OF reque
 WHEN NOT (OLD.requested_by_tool_call_id IS NEW.requested_by_tool_call_id)
 BEGIN SELECT RAISE(ABORT, 'execution_attempt requestor tool call is immutable once set'); END;
 
--- browser_operations 与执行尝试的严格绑定（DATA-BROWSER-003）：manual_login 无 attempt；
--- exploration -> browser_exploration（scope investigation，非 run_check 子 Attempt）；
--- journey -> inspection_collection（scope run_check 或 config_test_run 子 Attempt，check_key 非空），
--- 且浏览器身份的业务系统必须等于 scope 的业务系统（同 system 约束）。
--- attempt_id 一旦设置不可改；kind 已由 trg_browser_operations_no_origin_update 冻结。
-CREATE TRIGGER trg_browser_operations_attempt_binding_insert BEFORE INSERT ON browser_operations
-WHEN NOT (
-  (NEW.kind = 'manual_login' AND NEW.attempt_id IS NULL)
-  OR (NEW.kind = 'exploration' AND NEW.attempt_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM execution_attempts a
-        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
-          AND a.scope_type = 'investigation' AND a.check_key IS NULL AND a.state = 'Running'))
-  OR (NEW.kind = 'journey' AND NEW.attempt_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM execution_attempts a
-        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-          AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL AND a.state = 'Running')
-      AND EXISTS (
-        SELECT 1 FROM browser_identities bi JOIN execution_attempts a ON a.id = NEW.attempt_id
-        WHERE bi.id = NEW.identity_id AND (
-          (a.scope_type = 'run_check' AND bi.business_system_id = (SELECT business_system_id FROM inspection_runs WHERE id = a.scope_id))
-          OR (a.scope_type = 'config_test_run' AND bi.business_system_id = (SELECT business_system_id FROM config_test_runs WHERE id = a.scope_id)))))
-)
-BEGIN SELECT RAISE(ABORT, 'browser_operation kind requires a matching execution_attempt binding and, for journeys, a browser identity of the same business system'); END;
-CREATE TRIGGER trg_browser_operations_attempt_binding_update BEFORE UPDATE OF attempt_id ON browser_operations
-WHEN OLD.attempt_id IS NULL AND NEW.attempt_id IS NOT NULL AND NOT (
-  (NEW.kind = 'exploration' AND EXISTS (
-     SELECT 1 FROM execution_attempts a
-     WHERE a.id = NEW.attempt_id AND a.attempt_type = 'browser_exploration'
-       AND a.scope_type = 'investigation' AND a.check_key IS NULL AND a.state = 'Running'))
-  OR (NEW.kind = 'journey' AND EXISTS (
-     SELECT 1 FROM execution_attempts a
-     WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-       AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL AND a.state = 'Running')
-     AND EXISTS (
-       SELECT 1 FROM browser_identities bi JOIN execution_attempts a ON a.id = NEW.attempt_id
-       WHERE bi.id = NEW.identity_id AND (
-         (a.scope_type = 'run_check' AND bi.business_system_id = (SELECT business_system_id FROM inspection_runs WHERE id = a.scope_id))
-         OR (a.scope_type = 'config_test_run' AND bi.business_system_id = (SELECT business_system_id FROM config_test_runs WHERE id = a.scope_id)))))
-)
-BEGIN SELECT RAISE(ABORT, 'browser_operation attempt binding must match kind and, for journeys, the same business system'); END;
-CREATE TRIGGER trg_browser_operations_attempt_immutable BEFORE UPDATE OF attempt_id ON browser_operations
-WHEN OLD.attempt_id IS NOT NULL AND NEW.attempt_id IS NOT OLD.attempt_id
-BEGIN SELECT RAISE(ABORT, 'browser_operation attempt binding is immutable once set'); END;
-
 -- 12.36
 -- 终态写 fence：只允许状态变化 UPDATE；evidence_at 必须随进入 Running 首次写入；
 -- 终态后禁止任何 UPDATE、子 Attempt、check result。check result 只能在 Running 插入。
 -- Passed 必须覆盖绑定配置版本全部 check 且每项 ok+Evidence。
 CREATE TRIGGER trg_config_test_runs_no_origin_update BEFORE UPDATE OF
   business_system_id, config_version_id, label_contract_version_id,
-  journey_catalog_digest, journey_catalog_version, created_by, created_at ON config_test_runs
+  created_by, created_at ON config_test_runs
 BEGIN SELECT RAISE(ABORT, 'config_test_run origin is immutable'); END;
 CREATE TRIGGER trg_config_test_runs_no_delete BEFORE DELETE ON config_test_runs
 BEGIN SELECT RAISE(ABORT, 'config_test_run history is not deletable'); END;
@@ -2829,8 +3423,7 @@ WHEN NEW.state <> 'Queued' OR NEW.evidence_at IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'config_test_run must be created as Queued without evidence_at'); END;
 CREATE TRIGGER trg_config_test_runs_state_transition BEFORE UPDATE OF state ON config_test_runs
 WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'Queued' AND NEW.state IN ('WaitingForCapacity','Running','Failed','Cancelled','Interrupted'))
-  OR (OLD.state = 'WaitingForCapacity' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
+  (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Passed','Failed','Cancelled','Interrupted'))
 )
 BEGIN SELECT RAISE(ABORT, 'illegal config_test_run state transition'); END;
@@ -2839,22 +3432,6 @@ CREATE TRIGGER trg_config_test_runs_running_requires_evidence_at BEFORE UPDATE O
 WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
 BEGIN SELECT RAISE(ABORT, 'config_test_run evidence_at must be set when entering Running'); END;
 -- Passed 证据：绑定配置版本的全部 check 都有 ok+Evidence 结果行（且无多余/非 ok 行）。
-CREATE TRIGGER trg_config_test_run_check_result_closure BEFORE INSERT ON config_test_run_check_results
-WHEN NOT EXISTS (
-  SELECT 1 FROM config_test_runs tr
-  JOIN config_plans p ON p.config_version_id = tr.config_version_id AND p.plan_key = NEW.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE tr.id = NEW.test_run_id AND tr.state = 'Running'
-    AND ((c.kind = 'promql' AND NEW.attempt_id IS NULL)
-      OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id
-          AND a.attempt_type = 'inspection_collection' AND a.scope_type = 'config_test_run'
-          AND a.scope_id = NEW.test_run_id AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
-          AND a.state IN ('Succeeded','Failed','Cancelled','Interrupted'))))
-    AND (NEW.evidence_id IS NULL OR EXISTS (
-      SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NEW.attempt_id))
-)
-BEGIN SELECT RAISE(ABORT, 'config test result must close over the same configured check, browser Attempt, and Evidence'); END;
 CREATE TRIGGER trg_config_test_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_test_runs
 WHEN NEW.state = 'Passed' AND OLD.state <> 'Passed' AND (
   EXISTS (SELECT 1 FROM config_checks c JOIN config_plans p ON p.id = c.plan_id
@@ -2892,66 +3469,66 @@ BEGIN SELECT RAISE(ABORT, 'config_test_run_check_results is append-only'); END;
 CREATE TRIGGER trg_config_test_run_check_results_running_only BEFORE INSERT ON config_test_run_check_results
 WHEN NOT EXISTS (SELECT 1 FROM config_test_runs t WHERE t.id = NEW.test_run_id AND t.state = 'Running')
 BEGIN SELECT RAISE(ABORT, 'config_test_run check results can only be inserted while the test run is Running'); END;
--- check result closure：plan_key+check_key 必须存在于绑定配置版本；
--- browser result 必须绑定同 testRun/plan/check 的 Succeeded inspection_collection Attempt 及成功 journey Browser Operation；promql result 必须 attempt_id NULL。
--- Evidence 必须 target_type=config_test_run、target_id=本 Test Run、attempt_id 与结果一致、integrity=complete，
--- 且 params_json.plan_key/check_key 精确等于结果复合检查身份；同一 Evidence 不得被两个 Test Run result 复用。
+-- check result closure：plan_key+check_key 必须存在于绑定配置版本。PromQL ok 与 Journey success
+-- 引用唯一完整 Evidence；Journey 业务 gap 和技术 gap 不制造空 Evidence。Journey ledger/check result
+-- 以 result_digest 闭合；operation 创建前的 identity_busy 只允许未派发 Queued Attempt。
 CREATE TRIGGER trg_config_test_run_check_results_closure BEFORE INSERT ON config_test_run_check_results
 WHEN NOT EXISTS (
   SELECT 1 FROM config_test_runs t
   JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
-  JOIN config_checks c ON c.plan_id = p.id
-  WHERE t.id = NEW.test_run_id AND c.check_key = NEW.check_key
-)
-OR (NEW.attempt_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM execution_attempts a
-  WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-    AND a.scope_type = 'config_test_run' AND a.scope_id = NEW.test_run_id
-    AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
-))
-OR EXISTS (
-  SELECT 1 FROM config_checks c
-  JOIN config_plans p ON p.id = c.plan_id AND p.plan_key = NEW.plan_key
-  JOIN config_test_runs t ON t.config_version_id = p.config_version_id
-  WHERE t.id = NEW.test_run_id AND c.check_key = NEW.check_key AND (
-    (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL)
-    OR (c.kind = 'browser' AND (
-      NEW.attempt_id IS NULL
-      OR (NEW.status = 'ok' AND NOT EXISTS (
-        SELECT 1 FROM execution_attempts a
-        JOIN browser_operations bo ON bo.attempt_id = a.id
-        WHERE a.id = NEW.attempt_id
-          AND a.attempt_type = 'inspection_collection'
-          AND a.scope_type = 'config_test_run' AND a.scope_id = NEW.test_run_id
-          AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
-          AND a.state = 'Succeeded' AND a.runtime_slot = 'lintel' AND a.accepted_at IS NOT NULL
-          AND bo.kind = 'journey' AND bo.result = 'success'
-      ))
-      OR (NEW.status IN ('error','gap') AND NOT EXISTS (
-        SELECT 1 FROM execution_attempts a
-        WHERE a.id = NEW.attempt_id
-          AND a.attempt_type = 'inspection_collection'
-          AND a.scope_type = 'config_test_run' AND a.scope_id = NEW.test_run_id
-          AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
-          AND a.state IN ('Failed','Cancelled','Interrupted')
-      ))
+  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+  WHERE t.id = NEW.test_run_id AND t.state = 'Running' AND (
+    (c.kind = 'promql' AND NEW.attempt_id IS NULL AND NEW.result_digest IS NULL AND (
+      (NEW.status = 'ok' AND EXISTS (
+        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NULL
+          AND e.target_type = 'config_test_run' AND e.target_id = NEW.test_run_id AND e.integrity = 'complete'
+          AND json_extract(e.params_json, '$.plan_key') = NEW.plan_key
+          AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
+      OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL)))
+    OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
+      SELECT 1 FROM execution_attempts a
+      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+        AND a.scope_type = 'config_test_run' AND a.scope_id = NEW.test_run_id
+        AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
+        AND (
+          (NEW.result_digest IS NOT NULL AND (
+            EXISTS (SELECT 1 FROM browser_journey_results j
+              WHERE j.attempt_id = a.id AND j.result_digest = NEW.result_digest
+                AND ((j.outcome = 'success' AND NEW.status = 'ok' AND NEW.gap_reason IS NULL
+                      AND NEW.evidence_id = j.primary_evidence_id AND EXISTS (
+                        SELECT 1 FROM evidence e WHERE e.id = j.primary_evidence_id AND e.attempt_id = a.id
+                          AND e.target_type = 'config_test_run' AND e.target_id = NEW.test_run_id AND e.integrity = 'complete'
+                          AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
+                          AND json_extract(e.params_json, '$.plan_key') = NEW.plan_key
+                          AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
+                  OR (j.outcome = 'gap' AND NEW.status = 'gap' AND NEW.gap_reason = j.gap_code
+                      AND NEW.evidence_id IS NULL AND j.primary_evidence_id IS NULL)))
+            OR (a.state = 'Queued' AND a.runtime_slot IS NULL AND NEW.status = 'gap'
+              AND NEW.gap_reason = 'identity_busy' AND NEW.evidence_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = a.id)
+              AND EXISTS (
+                SELECT 1 FROM config_test_runs tr
+                JOIN browser_identities bi ON bi.business_system_id = tr.business_system_id
+                JOIN browser_operations busy ON busy.identity_id = bi.id AND busy.stop_confirmed_at IS NULL
+                WHERE tr.id = a.scope_id))
+          ))
+          OR (NEW.result_digest IS NULL AND NEW.evidence_id IS NULL AND NEW.status IN ('error','gap')
+            AND a.state IN ('Failed','Cancelled','Interrupted'))
+        )
     ))
   )
 )
-OR (NEW.evidence_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id
-    AND e.target_type = 'config_test_run' AND e.target_id = NEW.test_run_id
-    AND (e.attempt_id IS NEW.attempt_id)
-    AND e.integrity = 'complete'
-    AND json_type(e.params_json, '$.plan_key') = 'text'
-    AND (e.params_json ->> '$.plan_key') = NEW.plan_key
-    AND json_type(e.params_json, '$.check_key') = 'text'
-    AND (e.params_json ->> '$.check_key') = NEW.check_key
-))
 OR (NEW.evidence_id IS NOT NULL AND EXISTS (
-  SELECT 1 FROM config_test_run_check_results r WHERE r.evidence_id = NEW.evidence_id AND r.id <> NEW.id
-))
-BEGIN SELECT RAISE(ABORT, 'config_test_run check result must reference an exact plan/check identity; promql uses a NULL attempt, browser ok requires a Succeeded matching inspection_collection attempt with a successful journey operation, and browser error/gap requires a terminal non-success attempt; complete evidence must target this run and plan/check with matching attempt_id and not be reused'); END;
+  SELECT 1 FROM config_test_run_check_results r WHERE r.evidence_id = NEW.evidence_id))
+BEGIN SELECT RAISE(ABORT, 'config_test_run result must be one exact PromQL result, an atomically committed Journey ResultProposal, or a terminal technical gap'); END;
+CREATE TRIGGER trg_config_test_run_local_journey_result AFTER INSERT ON config_test_run_check_results
+WHEN NEW.result_digest IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM browser_journey_results j WHERE j.attempt_id = NEW.attempt_id)
+BEGIN
+  UPDATE execution_attempts
+  SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
+  WHERE id = NEW.attempt_id AND state = 'Queued' AND runtime_slot IS NULL;
+END;
 -- 12.38 Label Contract 原子激活（DATA-CONFIG-002/006）：单个顶层 INSERT 触发 AFTER INSERT，
 -- 在同一 statement 中重验全部前提并原子切换全部系统指针、更新 label_contract_state。
 -- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用。
@@ -3359,6 +3936,47 @@ BEGIN SELECT RAISE(ABORT, 'tool call connection grant must match the same Attemp
 
 -- 成功终态不得掩盖尚未闭合的 Model/Tool/Browser 子执行；失败/取消/中断终态必须在同一
 -- Attempt UPDATE 中取消它们，否则父 Attempt 已终态而调用或子执行仍可产生迟到有效结果。
+CREATE TRIGGER trg_execution_attempts_close_browser_action_before_cancel
+BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.attempt_type = 'browser_exploration' AND NEW.state IN ('Cancelled','Interrupted')
+BEGIN
+  UPDATE browser_exploration_actions
+  SET outcome = 'session_closed',
+      error_code = CASE WHEN NEW.state = 'Cancelled' THEN 'Cancelled' ELSE 'ParentTerminated' END,
+      ended_at = COALESCE(NEW.ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  WHERE child_attempt_id = OLD.id AND outcome IS NULL;
+END;
+CREATE TRIGGER trg_execution_attempts_failed_browser_action_closed BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.attempt_type = 'browser_exploration' AND NEW.state = 'Failed' AND NOT EXISTS (
+  SELECT 1 FROM browser_exploration_actions a JOIN browser_operations o ON o.id = a.operation_id
+  WHERE a.child_attempt_id = OLD.id AND a.outcome = 'session_closed'
+    AND o.state IN ('Failed','Cancelled','Interrupted'))
+BEGIN SELECT RAISE(ABORT, 'failed browser action attempt requires a fatal action result and terminal exploration session'); END;
+-- quoin_browser Tool Call 是浏览器子 Attempt 的提交入口：父 Tool Result 先写入，AFTER trigger 在同一 statement
+-- 原子推进子 Attempt，避免“子 Attempt 已终态但父 Tool Call 仍 Running”的可提交分裂状态。
+CREATE TRIGGER trg_tool_calls_close_browser_child AFTER UPDATE OF status ON tool_calls
+WHEN OLD.status <> NEW.status AND NEW.execution_mode = 'quoin_browser'
+  AND NEW.status IN ('succeeded','failed','cancelled')
+BEGIN
+  UPDATE execution_attempts
+  SET state = CASE
+        WHEN NEW.status = 'succeeded' THEN 'Succeeded'
+        WHEN NEW.status = 'failed' THEN 'Failed'
+        ELSE CASE WHEN state IN ('Running','Cancelling') THEN 'Cancelling' ELSE 'Cancelled' END
+      END,
+      termination_reason = CASE
+        WHEN NEW.status = 'failed' THEN 'tool_error'
+        WHEN NEW.status = 'cancelled' AND state IN ('Queued','Assigned') THEN 'cancelled'
+        ELSE termination_reason
+      END,
+      ended_at = CASE
+        WHEN NEW.status IN ('succeeded','failed') OR state IN ('Queued','Assigned') THEN NEW.ended_at
+        ELSE ended_at
+      END,
+      row_version = row_version + 1
+  WHERE requested_by_tool_call_id = NEW.id
+    AND state IN ('Queued','Assigned','Running','Cancelling');
+END;
 CREATE TRIGGER trg_execution_attempts_success_requires_closed_calls BEFORE UPDATE OF state ON execution_attempts
 WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   EXISTS (SELECT 1 FROM model_calls mc WHERE mc.attempt_id = NEW.id AND mc.status = 'running')
@@ -3367,10 +3985,29 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     SELECT 1 FROM execution_attempts child
     JOIN tool_calls tc ON tc.id = child.requested_by_tool_call_id
     WHERE tc.attempt_id = NEW.id AND child.state IN ('Queued','Assigned','Running','Cancelling'))
+  OR (NEW.attempt_type = 'investigation' AND EXISTS (
+    SELECT 1 FROM browser_operations bo WHERE bo.owner_attempt_id = NEW.id
+      AND bo.kind = 'exploration' AND bo.state IN ('Queued','WaitingForCapacity','Starting','Running')))
   OR (NEW.attempt_type = 'browser_exploration' AND NOT EXISTS (
-    SELECT 1 FROM browser_operations bo WHERE bo.attempt_id = NEW.id AND bo.result = 'success'))
-  OR (NEW.attempt_type = 'inspection_collection' AND EXISTS (
-    SELECT 1 FROM browser_operations bo WHERE bo.attempt_id = NEW.id AND bo.result IS NOT 'success'))
+      SELECT 1 FROM tool_calls tc
+      WHERE tc.id = NEW.requested_by_tool_call_id AND tc.execution_mode = 'quoin_browser' AND tc.status = 'succeeded'))
+  OR (NEW.attempt_type = 'browser_exploration'
+    AND NOT (OLD.state = 'Queued' AND OLD.requested_by_tool_call_id IS NOT NULL AND OLD.runtime_slot IS NULL)
+    AND NOT EXISTS (
+      SELECT 1 FROM browser_exploration_actions ba WHERE ba.child_attempt_id = NEW.id AND ba.outcome IS NOT NULL))
+  OR (NEW.attempt_type = 'browser_exploration' AND EXISTS (
+    SELECT 1 FROM browser_exploration_actions ba JOIN browser_operations bo ON bo.id = ba.operation_id
+    WHERE ba.child_attempt_id = NEW.id AND ba.action_kind = 'close_session'
+      AND NOT (ba.outcome = 'success' AND bo.state = 'Succeeded')))
+  OR (NEW.attempt_type = 'inspection_collection' AND NOT EXISTS (
+    SELECT 1 FROM inspection_check_results r
+    WHERE NEW.scope_type = 'run_check' AND r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM config_test_run_check_results r
+    WHERE NEW.scope_type = 'config_test_run' AND r.test_run_id = NEW.scope_id
+      AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL))
 )
 BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt requires all Model Calls, Tool Calls, and browser child Attempts terminal'); END;
 CREATE TRIGGER trg_execution_attempts_close_calls_after_terminal AFTER UPDATE OF state ON execution_attempts
@@ -3430,43 +4067,62 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
 )
 BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt must atomically commit the valid domain result for its fixed work mode'); END;
 -- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。
--- PromQL ok 由 Quoin 直接采集（Evidence.attempt_id 为空）；browser ok 必须闭合到已被 Lintel 接受、
--- Succeeded 的 run_check 子 Attempt 及其唯一成功 Journey Browser Operation。Evidence 不得跨 check 复用。
+-- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。PromQL ok 与 Journey
+-- success 引用唯一完整 Evidence；Journey 业务 gap 和技术 gap 不制造空 Evidence。
 CREATE TRIGGER trg_inspection_check_results_closure BEFORE INSERT ON inspection_check_results
 WHEN NOT EXISTS (
   SELECT 1 FROM inspection_runs r
   JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
   JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE r.id = NEW.run_id AND r.state = 'Running'
-    AND (
-      NEW.status IN ('error','gap')
-      OR EXISTS (
-        SELECT 1 FROM evidence e
-        WHERE e.id = NEW.evidence_id
-          AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id
-          AND e.integrity = 'complete'
-          AND json_extract(e.params_json, '$.check_key') = NEW.check_key
-          AND (
-            (c.kind = 'promql' AND e.attempt_id IS NULL)
-            OR (c.kind = 'browser' AND EXISTS (
-              SELECT 1 FROM execution_attempts a
-              JOIN browser_operations bo ON bo.attempt_id = a.id
-              WHERE a.id = e.attempt_id
-                AND a.attempt_type = 'inspection_collection'
-                AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id
-                AND a.check_key = NEW.check_key
-                AND a.state = 'Succeeded' AND a.runtime_slot = 'lintel' AND a.accepted_at IS NOT NULL
-                AND bo.kind = 'journey' AND bo.result = 'success'
-            ))
-          )
-      )
-    )
+  WHERE r.id = NEW.run_id AND r.state = 'Running' AND (
+    (c.kind = 'promql' AND NEW.attempt_id IS NULL AND NEW.result_digest IS NULL AND (
+      (NEW.status = 'ok' AND EXISTS (
+        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NULL
+          AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id AND e.integrity = 'complete'
+          AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
+      OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL)))
+    OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
+      SELECT 1 FROM execution_attempts a
+      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+        AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id AND a.check_key = NEW.check_key
+        AND (
+          (NEW.result_digest IS NOT NULL AND (
+            EXISTS (SELECT 1 FROM browser_journey_results j
+              WHERE j.attempt_id = a.id AND j.result_digest = NEW.result_digest
+                AND ((j.outcome = 'success' AND NEW.status = 'ok' AND NEW.gap_reason IS NULL
+                      AND NEW.evidence_id = j.primary_evidence_id AND EXISTS (
+                        SELECT 1 FROM evidence e WHERE e.id = j.primary_evidence_id AND e.attempt_id = a.id
+                          AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id AND e.integrity = 'complete'
+                          AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
+                          AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
+                  OR (j.outcome = 'gap' AND NEW.status = 'gap' AND NEW.gap_reason = j.gap_code
+                      AND NEW.evidence_id IS NULL AND j.primary_evidence_id IS NULL)))
+            OR (a.state = 'Queued' AND a.runtime_slot IS NULL AND NEW.status = 'gap'
+              AND NEW.gap_reason = 'identity_busy' AND NEW.evidence_id IS NULL
+              AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = a.id)
+              AND EXISTS (
+                SELECT 1 FROM inspection_runs ir
+                JOIN browser_identities bi ON bi.business_system_id = ir.business_system_id
+                JOIN browser_operations busy ON busy.identity_id = bi.id AND busy.stop_confirmed_at IS NULL
+                WHERE ir.id = a.scope_id))
+          ))
+          OR (NEW.result_digest IS NULL AND NEW.evidence_id IS NULL AND NEW.status IN ('error','gap')
+            AND a.state IN ('Failed','Cancelled','Interrupted'))
+        )
+    ))
+  )
 )
-BEGIN SELECT RAISE(ABORT, 'inspection check result must close to the Running run exact configured check and trusted Evidence source'); END;
--- 12.41 config children freeze：config_discoveries/config_plans/config_checks 只允许在父配置仍 draft
--- 且尚无任何 Config Test Run、未发布、未被历史 inspection_run 引用时 INSERT。
--- key 按真实作用域唯一（每版本 discovery_key/plan_key 唯一、每 plan 的 check_key 唯一；已有 UNIQUE 约束）。
--- identity_labels 不得重复（DATA-OBSERVED-001 身份 tuple 规范编码）。
+OR (NEW.evidence_id IS NOT NULL AND EXISTS (
+  SELECT 1 FROM inspection_check_results r WHERE r.evidence_id = NEW.evidence_id))
+BEGIN SELECT RAISE(ABORT, 'inspection result must be one exact PromQL result, an atomically committed Journey ResultProposal, or a terminal technical gap'); END;
+CREATE TRIGGER trg_inspection_local_journey_result AFTER INSERT ON inspection_check_results
+WHEN NEW.result_digest IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM browser_journey_results j WHERE j.attempt_id = NEW.attempt_id)
+BEGIN
+  UPDATE execution_attempts
+  SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
+  WHERE id = NEW.attempt_id AND state = 'Queued' AND runtime_slot IS NULL;
+END;
 CREATE TRIGGER trg_config_discoveries_parent_frozen BEFORE INSERT ON config_discoveries
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v

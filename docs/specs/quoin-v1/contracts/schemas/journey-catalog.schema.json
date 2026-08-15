@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Suknna/quoin/schemas/journey-catalog.schema.json",
-  "title": "Journey Catalog Document（构建期生成，Quoin 与 Lintel 同版本嵌入）",
-  "description": "Journey Catalog 构建产物的 JSON 文档形状。catalog 由 Lintel 中版本化 Playwright Journey 及其参数 Schema 的同一机器可验证来源生成（DATA-CONFIG-008）；生成器输出的文件字节是 digest 的唯一输入，Quoin 与 Lintel 构建期嵌入同一文件并各自计算 SHA-256（hex，64 字符），禁止两侧重新序列化（CFG-JOURNEY-002）；Lintel 握手以 Hello.journey_catalog_digest 严格相等校验（RUNTIME-CTRL-010）。catalog 内容不落库、不可通过 HTTP 上传或编辑；业务系统配置的 journey_id/journey_params 由 Quoin 按本 catalog 静态校验（CFG-JOURNEY-003）。",
+  "title": "Journey Catalog Document",
+  "description": "由 Lintel 版本化 Playwright Journey 的单一机器来源生成并由 Quoin/Lintel 同字节嵌入的 catalog。每个稳定 Journey ID 同时声明参数、输出、Evidence 与实现版本契约；该文档原始 JCS 字节的 SHA-256 是握手和历史绑定使用的 catalog digest（CFG-JOURNEY-001..005）。",
   "type": "object",
   "additionalProperties": false,
   "required": ["catalog_version", "journeys"],
@@ -10,14 +10,13 @@
     "catalog_version": {
       "type": "string",
       "minLength": 1,
-      "description": "catalog 自身版本（与 release_version 解耦；同 Release 内必须一致）。"
+      "maxLength": 100
     },
     "journeys": {
       "type": "object",
-      "description": "以非空 journey_id 为键的映射（键天然唯一，生成器按 key 稳定排序）；值不再重复 journey_id。",
+      "description": "以版本化稳定 journey_id 为键的映射；生成器按 key 稳定排序。",
       "propertyNames": {
-        "minLength": 1,
-        "maxLength": 200
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$"
       },
       "additionalProperties": {
         "$ref": "#/$defs/journeyEntry"
@@ -28,47 +27,127 @@
     "journeyEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["summary", "params_schema"],
+      "required": [
+        "summary",
+        "purpose",
+        "version",
+        "steps_digest",
+        "params_schema",
+        "output_schema",
+        "evidence_kinds"
+      ],
       "properties": {
         "summary": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "purpose": {
+          "type": "string",
+          "enum": ["journey", "authentication_probe"]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "同一稳定 ID 下实现步骤变化时单调递增；相同 version 的 steps_digest 不得改写。"
+        },
+        "steps_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "生成器从不可变 Playwright step definition 计算的 SHA-256；catalog 不暴露用户可编程脚本。"
         },
         "params_schema": {
-          "$ref": "#/$defs/paramsSchema"
+          "$ref": "#/$defs/selfContainedObjectSchema"
+        },
+        "output_schema": {
+          "$ref": "#/$defs/selfContainedObjectSchema"
+        },
+        "evidence_kinds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["text", "structured", "screenshot"]
+          },
+          "description": "普通 Journey 必须允许 structured；成功结果中唯一 primary structured Evidence 的 content 是 output_schema 的唯一权威实例。authentication probe 固定为空，其三态结果只进入 browser_probe_results。"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "purpose": { "const": "authentication_probe" } },
+            "required": ["purpose"]
+          },
+          "then": {
+            "properties": {
+              "evidence_kinds": { "const": [] },
+              "output_schema": {
+                "const": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["result", "reasonCode"],
+                  "properties": {
+                    "result": { "enum": ["Authenticated", "Unauthenticated", "Indeterminate"] },
+                    "reasonCode": { "type": ["string", "null"] }
+                  },
+                  "allOf": [
+                    {
+                      "if": { "properties": { "result": { "const": "Indeterminate" } }, "required": ["result"] },
+                      "then": { "properties": { "reasonCode": { "type": "string", "minLength": 1 } } },
+                      "else": { "properties": { "reasonCode": { "type": "null" } } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "evidence_kinds": {
+                "type": "array",
+                "minItems": 1,
+                "contains": { "const": "structured" }
+              }
+            }
+          }
+        }
+      ]
     },
-    "paramsSchema": {
+    "selfContainedObjectSchema": {
       "allOf": [
         {
           "$ref": "https://json-schema.org/draft/2020-12/schema"
         }
       ],
       "type": "object",
-      "description": "该 journey 的封闭参数 JSON Schema（draft 2020-12 对象子集），由 Lintel 生成管线输出；外层 Schema 通过官方 metaschema 验证其关键字形状，生成管线还会逐个真实编译并递归拒绝 $ref/$dynamicRef/$id/$anchor/$dynamicAnchor，使参数契约完全自包含。要求 type=object、声明 properties、additionalProperties=false；required 只引用 properties 中已声明的参数名。",
+      "description": "生成器逐项真实编译的 draft 2020-12 封闭对象 Schema。生成管线递归拒绝 $ref/$dynamicRef/$id/$anchor/$dynamicAnchor/patternProperties/unevaluatedProperties，要求每层 object 的 additionalProperties=false 且 required 只引用同层 properties 中已声明字段。",
       "required": ["type", "properties", "additionalProperties"],
       "properties": {
         "$schema": {
-          "type": "string"
+          "const": "https://json-schema.org/draft/2020-12/schema"
         },
+        "$ref": false,
+        "$dynamicRef": false,
+        "$id": false,
+        "$anchor": false,
+        "$dynamicAnchor": false,
+        "patternProperties": false,
+        "unevaluatedProperties": false,
         "type": {
           "const": "object"
         },
         "properties": {
-          "type": "object",
-          "description": "参数名 -> 参数约束（生成器按 journey 实现声明生成；不在本文件枚举）。"
+          "type": "object"
         },
         "required": {
           "type": "array",
+          "uniqueItems": true,
           "items": {
             "type": "string"
-          },
-          "description": "必填参数名；必须全部存在于 properties（生成管线保证，运行时 Quoin 校验）。"
+          }
         },
         "additionalProperties": {
-          "const": false,
-          "description": "参数必须封闭：未知参数名在配置校验时拒绝（CFG-JOURNEY-003）。"
+          "const": false
         }
       },
       "additionalProperties": true

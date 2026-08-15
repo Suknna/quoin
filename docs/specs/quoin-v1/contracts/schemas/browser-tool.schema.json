@@ -1,0 +1,700 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/browser-tool.schema.json",
+  "title": "Quoin Browser Tool Protocol",
+  "description": "Plinth Browser Tool 与 browser_exploration Attempt 输入/结果的封闭机器契约。调用方按对应 $defs 校验；禁止任意 JavaScript、Playwright、CDP、raw HTTP、上传与下载（RUNTIME-BROWSER-007/008）。",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/browserExplorationInput" },
+    { "$ref": "#/$defs/browserExplorationResult" }
+  ],
+  "$defs": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "pageId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "catalogBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "version"],
+      "properties": {
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "locator": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref", "observationVersion"],
+          "properties": {
+            "kind": { "const": "elementRef" },
+            "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "observationVersion": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "role"],
+          "properties": {
+            "kind": { "const": "role" },
+            "role": { "type": "string", "minLength": 1, "maxLength": 100 },
+            "name": { "type": "string", "maxLength": 500 },
+            "exact": { "type": "boolean", "default": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "label"],
+          "properties": {
+            "kind": { "const": "label" },
+            "label": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "exact": { "type": "boolean", "default": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "const": "text" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+            "exact": { "type": "boolean", "default": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "testId"],
+          "properties": {
+            "kind": { "const": "testId" },
+            "testId": { "type": "string", "minLength": 1, "maxLength": 300 }
+          }
+        }
+      ]
+    },
+    "openRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "businessSystemKey"],
+      "properties": {
+        "action": { "const": "open" },
+        "businessSystemKey": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "sessionOnlyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId"],
+      "properties": {
+        "action": { "enum": ["close_session", "back", "forward", "reload", "read"] },
+        "sessionId": { "$ref": "#/$defs/sessionId" }
+      }
+    },
+    "pageRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "pageId"],
+      "properties": {
+        "action": { "enum": ["switch_page", "close_page"] },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "pageId": { "$ref": "#/$defs/pageId" }
+      }
+    },
+    "gotoRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "url"],
+      "properties": {
+        "action": { "const": "goto" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 4096,
+          "pattern": "^https?://[^/?#\\s\\u0000-\\u001F\\u007F]+(?:[/?#]|$)"
+        }
+      }
+    },
+    "locatorRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator"],
+      "properties": {
+        "action": { "enum": ["click", "check", "uncheck"] },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" }
+      }
+    },
+    "fillRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator", "value"],
+      "properties": {
+        "action": { "const": "fill" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" },
+        "value": { "type": "string", "maxLength": 16384 }
+      }
+    },
+    "selectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator", "values"],
+      "properties": {
+        "action": { "const": "select" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 1000 }
+        }
+      }
+    },
+    "pressRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator", "key"],
+      "properties": {
+        "action": { "const": "press" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "scrollRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "deltaX", "deltaY"],
+      "properties": {
+        "action": { "const": "scroll" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "deltaX": { "type": "integer", "minimum": -100000, "maximum": 100000 },
+        "deltaY": { "type": "integer", "minimum": -100000, "maximum": 100000 }
+      }
+    },
+    "readTargetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator"],
+      "properties": {
+        "action": { "const": "read" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" }
+      }
+    },
+    "screenshotRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId"],
+      "properties": {
+        "action": { "const": "screenshot" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "fullPage": { "type": "boolean", "default": false }
+      }
+    },
+    "waitRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId", "locator", "state"],
+      "properties": {
+        "action": { "const": "wait_for" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "locator": { "$ref": "#/$defs/locator" },
+        "state": { "enum": ["visible", "hidden", "enabled", "disabled"] }
+      }
+    },
+    "dialogRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "sessionId"],
+      "properties": {
+        "action": { "enum": ["accept_dialog", "dismiss_dialog"] },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "promptText": { "type": "string", "maxLength": 16384 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "const": "dismiss_dialog" } } },
+          "then": { "properties": { "promptText": false } }
+        }
+      ]
+    },
+    "request": {
+      "oneOf": [
+        { "$ref": "#/$defs/openRequest" },
+        { "$ref": "#/$defs/sessionOnlyRequest" },
+        { "$ref": "#/$defs/pageRequest" },
+        { "$ref": "#/$defs/gotoRequest" },
+        { "$ref": "#/$defs/locatorRequest" },
+        { "$ref": "#/$defs/fillRequest" },
+        { "$ref": "#/$defs/selectRequest" },
+        { "$ref": "#/$defs/pressRequest" },
+        { "$ref": "#/$defs/scrollRequest" },
+        { "$ref": "#/$defs/readTargetRequest" },
+        { "$ref": "#/$defs/screenshotRequest" },
+        { "$ref": "#/$defs/waitRequest" },
+        { "$ref": "#/$defs/dialogRequest" }
+      ]
+    },
+    "pageSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pageId", "url", "origin", "title", "current"],
+      "properties": {
+        "pageId": { "$ref": "#/$defs/pageId" },
+        "url": { "type": "string", "maxLength": 4096 },
+        "origin": { "type": "string", "maxLength": 2048 },
+        "title": { "type": "string", "maxLength": 1000 },
+        "current": { "type": "boolean" }
+      }
+    },
+    "elementSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "role", "name", "visible", "enabled"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "role": { "type": "string", "maxLength": 100 },
+        "name": { "type": "string", "maxLength": 500 },
+        "value": { "type": "string", "maxLength": 2000 },
+        "visible": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "checked": { "type": "boolean" },
+        "selected": { "type": "boolean" }
+      }
+    },
+    "browserEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "pageId"],
+      "properties": {
+        "kind": { "enum": ["navigation", "redirect", "popup", "dialog", "page_closed"] },
+        "pageId": { "$ref": "#/$defs/pageId" },
+        "url": { "type": "string", "maxLength": 4096 },
+        "origin": { "type": "string", "maxLength": 2048 },
+        "detail": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "url",
+        "origin",
+        "title",
+        "pages",
+        "visibleText",
+        "accessibilityText",
+        "elements",
+        "events",
+        "originalSizeBytes",
+        "truncated"
+      ],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1 },
+        "url": { "type": "string", "maxLength": 4096 },
+        "origin": { "type": "string", "maxLength": 2048 },
+        "title": { "type": "string", "maxLength": 1000 },
+        "pages": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/pageSummary" }
+        },
+        "visibleText": { "type": "string", "maxLength": 200000 },
+        "accessibilityText": { "type": "string", "maxLength": 200000 },
+        "elements": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": { "$ref": "#/$defs/elementSummary" }
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/browserEvent" }
+        },
+        "originalSizeBytes": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryableInSession"],
+      "properties": {
+        "code": {
+          "enum": [
+            "ElementNotFound",
+            "ElementNotUnique",
+            "ActionTimeout",
+            "NavigationFailed",
+            "DialogBlocked",
+            "DownloadBlocked",
+            "ElementReferenceStale",
+            "IdentityBusy",
+            "AuthenticationRequired",
+            "AuthenticationProbeUnavailable",
+            "BrowserCrashed",
+            "ProfileUnavailable",
+            "RuntimeUnavailable",
+            "ProtocolError",
+            "ArtifactCommitFailed",
+            "Cancelled",
+            "LeaseExpired",
+            "ParentTerminated"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "retryableInSession": { "type": "boolean" },
+        "identityBusy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["currentOperationId", "operationKind", "occupiedSince"],
+          "properties": {
+            "currentOperationId": { "type": "integer", "minimum": 1 },
+            "operationKind": { "enum": ["manual_login", "authentication_probe", "journey", "exploration"] },
+            "occupiedSince": { "type": "string", "format": "date-time", "minLength": 1, "maxLength": 100 }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "ElementNotFound",
+                  "ElementNotUnique",
+                  "ActionTimeout",
+                  "NavigationFailed",
+                  "DialogBlocked",
+                  "DownloadBlocked",
+                  "ElementReferenceStale"
+                ]
+              }
+            },
+            "required": ["code"]
+          },
+          "then": { "properties": { "retryableInSession": { "const": true } } },
+          "else": { "properties": { "retryableInSession": { "const": false } } }
+        },
+        {
+          "if": {
+            "properties": { "code": { "const": "IdentityBusy" } },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": { "identityBusy": {} },
+            "required": ["identityBusy"]
+          },
+          "else": { "properties": { "identityBusy": false } }
+        }
+      ]
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "action"],
+      "properties": {
+        "outcome": { "enum": ["success", "recoverable_error", "session_closed"] },
+        "action": {
+          "enum": [
+            "open",
+            "close_session",
+            "switch_page",
+            "close_page",
+            "goto",
+            "back",
+            "forward",
+            "reload",
+            "click",
+            "fill",
+            "select",
+            "check",
+            "uncheck",
+            "press",
+            "scroll",
+            "read",
+            "screenshot",
+            "wait_for",
+            "accept_dialog",
+            "dismiss_dialog"
+          ]
+        },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "observation": { "$ref": "#/$defs/observation" },
+        "error": { "$ref": "#/$defs/error" },
+        "screenshotArtifactId": { "type": "integer", "minimum": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "const": "open" } },
+            "required": ["action"]
+          },
+          "then": true,
+          "else": {
+            "properties": { "sessionId": { "$ref": "#/$defs/sessionId" } },
+            "required": ["sessionId"]
+          }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "success" } } },
+          "then": { "properties": { "error": false } },
+          "else": { "required": ["error"] }
+        },
+        {
+          "if": {
+            "allOf": [
+              { "required": ["sessionId"] },
+              {
+                "properties": { "outcome": { "enum": ["success", "recoverable_error"] } },
+                "required": ["outcome"]
+              }
+            ]
+          },
+          "then": {
+            "properties": { "observation": { "$ref": "#/$defs/observation" } },
+            "required": ["observation"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "ElementNotFound",
+                      "ElementNotUnique",
+                      "ActionTimeout",
+                      "NavigationFailed",
+                      "DialogBlocked",
+                      "DownloadBlocked",
+                      "ElementReferenceStale",
+                      "IdentityBusy"
+                    ]
+                  }
+                },
+                "required": ["code"]
+              }
+            },
+            "required": ["error"]
+          },
+          "then": { "properties": { "outcome": { "const": "recoverable_error" } } },
+          "else": {
+            "if": { "required": ["error"] },
+            "then": { "properties": { "outcome": { "const": "session_closed" } } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "open" }, "outcome": { "const": "success" } },
+            "required": ["action", "outcome"]
+          },
+          "then": { "required": ["sessionId"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": { "const": "open" },
+              "outcome": { "const": "recoverable_error" },
+              "error": {
+                "type": "object",
+                "properties": { "code": { "const": "IdentityBusy" } },
+                "required": ["code"]
+              }
+            },
+            "required": ["action", "outcome", "error"]
+          },
+          "then": { "properties": { "sessionId": false, "observation": false } }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": { "const": "open" },
+              "outcome": { "const": "recoverable_error" },
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": { "enum": ["ElementNotFound", "ElementNotUnique", "ActionTimeout", "NavigationFailed", "DialogBlocked", "DownloadBlocked", "ElementReferenceStale"] }
+                },
+                "required": ["code"]
+              }
+            },
+            "required": ["action", "outcome", "error"]
+          },
+          "then": { "required": ["sessionId", "observation"] }
+        },
+        {
+          "if": {
+            "properties": { "screenshotArtifactId": { "type": "integer", "minimum": 1 } },
+            "required": ["screenshotArtifactId"]
+          },
+          "then": {
+            "properties": {
+              "action": { "const": "screenshot" },
+              "outcome": { "const": "success" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "screenshot" }, "outcome": { "const": "success" } },
+            "required": ["action", "outcome"]
+          },
+          "then": { "required": ["screenshotArtifactId"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": { "code": { "const": "IdentityBusy" } },
+                "required": ["code"]
+              }
+            },
+            "required": ["error"]
+          },
+          "then": {
+            "properties": {
+              "action": { "const": "open" },
+              "outcome": { "const": "recoverable_error" }
+            }
+          }
+        }
+      ]
+    },
+    "browserExplorationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "identityId", "identityRevisionId", "profileGenerationId", "parentAttemptId", "toolCallId", "catalog", "request"],
+      "properties": {
+        "schemaKind": { "const": "browser_exploration_v1" },
+        "operationId": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "null" }
+          ]
+        },
+        "identityId": { "type": "integer", "minimum": 1 },
+        "identityRevisionId": { "type": "integer", "minimum": 1 },
+        "profileGenerationId": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "null" }
+          ]
+        },
+        "parentAttemptId": { "type": "integer", "minimum": 1 },
+        "toolCallId": { "type": "integer", "minimum": 1 },
+        "catalog": { "$ref": "#/$defs/catalogBinding" },
+        "request": { "$ref": "#/$defs/request" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "request": { "$ref": "#/$defs/openRequest" } },
+            "required": ["request"]
+          },
+          "then": true,
+          "else": {
+            "properties": {
+              "operationId": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operationId": { "type": "integer", "minimum": 1 } },
+            "required": ["operationId"]
+          },
+          "then": {
+            "properties": { "profileGenerationId": { "type": "integer", "minimum": 1 } }
+          }
+        }
+      ]
+    },
+    "browserExplorationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "childAttemptId", "actionSeq", "result"],
+      "properties": {
+        "schemaKind": { "const": "browser_exploration_result_v1" },
+        "operationId": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "null" }
+          ]
+        },
+        "childAttemptId": { "type": "integer", "minimum": 1 },
+        "actionSeq": { "type": "integer", "minimum": 0 },
+        "result": { "$ref": "#/$defs/result" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operationId": { "type": "null" } },
+            "required": ["operationId"]
+          },
+          "then": {
+            "properties": {
+              "actionSeq": { "const": 0 },
+              "result": {
+                "allOf": [
+                  { "$ref": "#/$defs/result" },
+                  {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {
+                      "action": { "const": "open" },
+                      "error": {
+                        "allOf": [
+                          { "$ref": "#/$defs/error" },
+                          { "type": "object", "properties": { "code": { "enum": ["IdentityBusy", "ProfileUnavailable", "AuthenticationRequired"] } } }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "actionSeq": { "type": "integer", "minimum": 1 },
+              "result": {
+                "allOf": [
+                  { "$ref": "#/$defs/result" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "error": {
+                        "type": "object",
+                        "properties": { "code": { "not": { "const": "IdentityBusy" } } }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
