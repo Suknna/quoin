@@ -1,6 +1,6 @@
 # Quoin v1 — Agent 执行架构（architecture.md）
 
-**状态：Draft**（Issue #13、#14）
+**状态：Draft**（Issue #13、#14、#15）
 **CATEGORY 前缀：`ARCH`**（SPEC-TRACE-002）
 领域语言权威：[CONTEXT.md](../../../CONTEXT.md)
 跨组件机器契约：[contracts/runtime.proto](contracts/runtime.proto)
@@ -8,6 +8,7 @@ Plinth 本地机器契约：[contracts/quoin/plinth/worker/v1/agent_worker.proto
 持久化机器契约：[contracts/sql/schema.sql](contracts/sql/schema.sql)
 浏览器 Tool 机器契约：[contracts/schemas/browser-tool.schema.json](contracts/schemas/browser-tool.schema.json)
 Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](contracts/schemas/journey-catalog.schema.json)
+前端人类交互契约：[frontend.md](frontend.md)
 
 ## 1. 权威边界
 
@@ -16,6 +17,7 @@ Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](c
 - **ARCH-AUTH-003 —** 用户可见最终正文只由 `investigation_messages`、Initial Analysis 输出、Inspection Report、Knowledge Candidate 与 Evidence 等领域记录拥有。Model/Tool Call 保存版本、输入引用、连接绑定、usage、时间、结构化终止、规范可见响应与输出引用，**MUST NOT** 保存或展示隐藏思维链。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-AUTH-004 —** Prompt、Agent loop、工具 schema 与 deterministic renderer 随发布代码版本化；Admin **MUST NOT** 在线编辑 Prompt、工具清单、判断下限或 Agent 执行图。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-AUTH-005 —** 临时 token delta、进度、工作区路径、Eino 内部对象和上下文投影都不是领域事实，断线或进程退出后可以丢失；最终恢复只读取 Quoin 权威记录和尚未过期的 Artifact 正文。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
+- **ARCH-AUTH-006 —** React 前端是同源 HTTP/SSE/noVNC 的可丢弃投影：可在当前 history entry 保存滚动、折叠和布局，在当前页面内存保存未提交非秘密输入，但 **MUST NOT** 持久化领域状态、秘密、通知、任务进度或恢复 checkpoint；刷新后的全部可恢复业务事实必须来自 Quoin。（来源：[Issue #15](https://github.com/Suknna/quoin/issues/15)、[frontend.md](frontend.md)）
 
 ## 2. 组件与数据流
 

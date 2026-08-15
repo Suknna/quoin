@@ -70,17 +70,6 @@ BEGIN SELECT RAISE(ABORT, 'session must bind the enabled user current auth_revis
 CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, created_at ON sessions
 BEGIN SELECT RAISE(ABORT, 'session issue identity is immutable'); END;
 
-CREATE TABLE user_viewed (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  user_id     INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  object_type TEXT NOT NULL CHECK (object_type IN
-    ('initial_analysis','investigation','execution_attempt','inspection_run','inspection_report','tool_call',
-     'knowledge_import_batch','knowledge_candidate','browser_operation','config_test_run')),
-  object_id   INTEGER NOT NULL,
-  viewed_at   TEXT NOT NULL,
-  UNIQUE (user_id, object_type, object_id)
-) STRICT;
-CREATE INDEX idx_user_viewed_user ON user_viewed (user_id);
 
 -- Runtime 注册与长期服务 token 凭据（CONTEXT「服务身份」）：注册状态与 Admin 并发前提
 -- （row_version）是持久权威；在线连接、boot/epoch、心跳 last_seen 是瞬时投影（内存），不落库
@@ -280,20 +269,80 @@ CREATE INDEX idx_alert_delivery_items_delivery ON alert_delivery_items (delivery
 CREATE TABLE alert_intake_issues (
   id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   source_id         INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  delivery_id       INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  delivery_item_id  INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  delivery_id       INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
+  delivery_item_id  INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
+  last_event_id     INTEGER REFERENCES alert_intake_issue_events(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 最近一次 repeat 事件；首次发生为 NULL
   kind              TEXT NOT NULL CHECK (kind IN ('identity_conflict','fingerprint_mismatch','delivery_truncated')),
-  detail_json       TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
+  issue_key         TEXT NOT NULL CHECK (length(issue_key) = 64 AND issue_key NOT GLOB '*[^0-9a-f]*'), -- DATA-ALERT-011 kind-specific versioned canonical JSON SHA-256 digest
+  detail_json       TEXT NOT NULL CHECK (json_valid(detail_json)), -- 首次事件诊断详情
+  first_seen_at     TEXT NOT NULL,
+  last_seen_at      TEXT NOT NULL,
+  occurrence_count  INTEGER NOT NULL DEFAULT 1 CHECK (occurrence_count >= 1),
   acknowledged_at   TEXT,
   acknowledged_by   INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   row_version       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   created_at        TEXT NOT NULL,
+  CHECK (first_seen_at = created_at),
   CHECK (kind <> 'delivery_truncated' OR delivery_id IS NOT NULL),
   CHECK (kind = 'delivery_truncated' OR delivery_item_id IS NOT NULL),
   CHECK ((acknowledged_at IS NULL AND acknowledged_by IS NULL) OR (acknowledged_at IS NOT NULL AND acknowledged_by IS NOT NULL))
 ) STRICT;
+CREATE UNIQUE INDEX ux_alert_intake_issue_open_signature
+  ON alert_intake_issues (source_id, kind, issue_key)
+  WHERE acknowledged_at IS NULL;
 CREATE UNIQUE INDEX ux_alert_intake_issue_truncated ON alert_intake_issues (delivery_id) WHERE kind = 'delivery_truncated';
-CREATE INDEX idx_alert_intake_issues_source ON alert_intake_issues (source_id, created_at);
+CREATE INDEX idx_alert_intake_issues_source ON alert_intake_issues (source_id, last_seen_at);
+
+CREATE TABLE alert_intake_issue_events (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  issue_id         INTEGER NOT NULL REFERENCES alert_intake_issues(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  delivery_id      INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  delivery_item_id INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  detail_json      TEXT NOT NULL CHECK (json_valid(detail_json)),
+  observed_at      TEXT NOT NULL,
+  CHECK (delivery_id IS NOT NULL OR delivery_item_id IS NOT NULL)
+) STRICT;
+CREATE INDEX idx_alert_intake_issue_events_issue ON alert_intake_issue_events (issue_id, observed_at, id);
+CREATE UNIQUE INDEX ux_alert_intake_issue_events_item ON alert_intake_issue_events (delivery_item_id) WHERE delivery_item_id IS NOT NULL;
+CREATE UNIQUE INDEX ux_alert_intake_issue_events_delivery ON alert_intake_issue_events (delivery_id) WHERE delivery_item_id IS NULL;
+
+-- 接入问题必须闭合到同一告警源的真实异常 Delivery/Item；kind、首事件定位与后续事件不可漂移。
+CREATE TRIGGER trg_alert_intake_issues_source_closure BEFORE INSERT ON alert_intake_issues
+WHEN NOT (
+  (NEW.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
+    SELECT 1 FROM alert_deliveries d
+    WHERE d.id = NEW.delivery_id AND d.source_id = NEW.source_id
+      AND d.integrity = 'truncated' AND d.status = 'processed'
+  ))
+  OR (NEW.kind IN ('identity_conflict','fingerprint_mismatch') AND EXISTS (
+    SELECT 1 FROM alert_delivery_items i JOIN alert_deliveries d ON d.id = i.delivery_id
+    WHERE i.id = NEW.delivery_item_id AND d.id = NEW.delivery_id AND d.source_id = NEW.source_id
+      AND i.status = NEW.kind
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'alert intake issue must close to the same source and matching anomalous delivery item'); END;
+CREATE TRIGGER trg_alert_intake_issue_events_source_closure BEFORE INSERT ON alert_intake_issue_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM alert_intake_issues issue
+  WHERE issue.id = NEW.issue_id AND issue.acknowledged_at IS NULL AND (
+    (issue.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
+      SELECT 1 FROM alert_deliveries d
+      WHERE d.id = NEW.delivery_id AND d.source_id = issue.source_id
+        AND d.integrity = 'truncated' AND d.status = 'processed'
+    ))
+    OR (issue.kind IN ('identity_conflict','fingerprint_mismatch') AND EXISTS (
+      SELECT 1 FROM alert_delivery_items i JOIN alert_deliveries d ON d.id = i.delivery_id
+      WHERE i.id = NEW.delivery_item_id AND d.source_id = issue.source_id
+        AND i.status = issue.kind AND (NEW.delivery_id IS NULL OR NEW.delivery_id = d.id)
+    ))
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'alert intake issue event must match its issue source and anomaly kind'); END;
+CREATE TRIGGER trg_alert_intake_issues_insert_open BEFORE INSERT ON alert_intake_issues
+WHEN NEW.acknowledged_at IS NOT NULL OR NEW.acknowledged_by IS NOT NULL
+  OR NEW.occurrence_count <> 1 OR NEW.last_seen_at <> NEW.first_seen_at
+  OR NEW.last_event_id IS NOT NULL OR NEW.row_version <> 1
+BEGIN SELECT RAISE(ABORT, 'alert intake issue must be created as one unacknowledged first occurrence'); END;
 
 -- 有界派生变更日志：id 即单调递增 change_seq（AUTOINCREMENT，同事务分配、永不复用）；
 -- 可清理（保留窗口由部署配置），不是告警历史权威源。最新行（MAX(id)）是回放 high-water，
@@ -391,17 +440,27 @@ CREATE UNIQUE INDEX ux_investigation_source_analysis ON investigation_source_lin
 CREATE UNIQUE INDEX ux_investigation_source_evidence ON investigation_source_links (investigation_id, evidence_id) WHERE evidence_id IS NOT NULL;
 CREATE UNIQUE INDEX ux_investigation_source_report ON investigation_source_links (investigation_id, inspection_report_id) WHERE inspection_report_id IS NOT NULL;
 
+-- 上传先建立独立 TextAttachment；消息发送事务再按 ordinal 建立引用。附件对象与消息引用分离，
+-- 因而新调查可在首条消息落库前 staging 多个附件，Undo 后也可复用原附件而不重复上传。
 CREATE TABLE text_attachments (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  message_id        INTEGER NOT NULL UNIQUE REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每条消息最多一个
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   source_material_id INTEGER NOT NULL UNIQUE REFERENCES source_materials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  artifact_id       INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 正文存 Artifact
-  original_filename TEXT NOT NULL,
-  size_bytes        INTEGER NOT NULL CHECK (size_bytes >= 0),
-  digest            TEXT NOT NULL CHECK (length(digest) = 64),
-  uploaded_by       INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  uploaded_at       TEXT NOT NULL
+  artifact_id        INTEGER NOT NULL UNIQUE REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 正文存 Artifact
+  original_filename  TEXT NOT NULL,
+  size_bytes         INTEGER NOT NULL CHECK (size_bytes >= 0),
+  digest             TEXT NOT NULL CHECK (length(digest) = 64),
+  uploaded_by        INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  uploaded_at        TEXT NOT NULL
 ) STRICT;
+
+CREATE TABLE investigation_message_attachments (
+  message_id    INTEGER NOT NULL REFERENCES investigation_messages(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attachment_id INTEGER NOT NULL REFERENCES text_attachments(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  ordinal       INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (message_id, attachment_id),
+  UNIQUE (message_id, ordinal)
+) WITHOUT ROWID, STRICT;
+CREATE INDEX idx_investigation_message_attachments_attachment ON investigation_message_attachments (attachment_id);
 
 -- ============================================================================
 -- 5. 来源材料、配置与观测资源
@@ -1470,8 +1529,9 @@ CREATE TABLE knowledge_import_batches (
 CREATE TABLE knowledge_candidates (
   id                      INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   import_batch_id         INTEGER REFERENCES knowledge_import_batches(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  source_type             TEXT NOT NULL CHECK (source_type IN ('initial_analysis_output','inspection_report','investigation_message','source_material')),
+  source_type             TEXT NOT NULL CHECK (source_type IN ('initial_analysis_output','inspection_report','investigation_message','source_material','knowledge_version')),
   source_id               INTEGER NOT NULL,
+  target_knowledge_id     INTEGER REFERENCES reusable_knowledge(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   generation              INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
   state                   TEXT NOT NULL CHECK (state IN ('AwaitingConfirmation','Confirmed','Excluded','Superseded','SourceInvalid')),
   row_version             INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
@@ -1483,13 +1543,18 @@ CREATE TABLE knowledge_candidates (
   created_by              INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at              TEXT NOT NULL,
   CHECK (
-    (source_type = 'source_material' AND import_batch_id IS NOT NULL)
-    OR (source_type IN ('initial_analysis_output','inspection_report','investigation_message') AND import_batch_id IS NULL)
-  )
+    (source_type = 'source_material' AND import_batch_id IS NOT NULL AND target_knowledge_id IS NULL)
+    OR (source_type IN ('initial_analysis_output','inspection_report','investigation_message') AND import_batch_id IS NULL AND target_knowledge_id IS NULL)
+    OR (source_type = 'knowledge_version' AND import_batch_id IS NULL AND target_knowledge_id IS NOT NULL)
+  ),
+  CHECK (confirmed_knowledge_id IS NULL OR target_knowledge_id IS NULL OR confirmed_knowledge_id = target_knowledge_id)
 ) STRICT;
-CREATE UNIQUE INDEX ux_knowledge_candidate_confirmed ON knowledge_candidates (confirmed_knowledge_id) WHERE confirmed_knowledge_id IS NOT NULL;
 CREATE INDEX idx_knowledge_candidates_batch ON knowledge_candidates (import_batch_id);
 CREATE INDEX idx_knowledge_candidates_source ON knowledge_candidates (source_type, source_id);
+CREATE UNIQUE INDEX ux_knowledge_candidate_single_source
+  ON knowledge_candidates (source_type, source_id)
+  WHERE source_type <> 'source_material'
+    AND (source_type <> 'knowledge_version' OR state IN ('AwaitingConfirmation','Confirmed'));
 
 CREATE TABLE reusable_knowledge (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -1508,7 +1573,7 @@ CREATE TABLE knowledge_versions (
   scope_json          TEXT CHECK (scope_json IS NULL OR json_valid(scope_json)),
   conditions_json     TEXT CHECK (conditions_json IS NULL OR json_valid(conditions_json)),
   limitations_json    TEXT CHECK (limitations_json IS NULL OR json_valid(limitations_json)), -- 限制/条件（DATA-KNOWLEDGE-001）
-  source_candidate_id INTEGER REFERENCES knowledge_candidates(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  source_candidate_id INTEGER NOT NULL UNIQUE REFERENCES knowledge_candidates(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_by          INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at          TEXT NOT NULL,
   UNIQUE (knowledge_id, version_seq)
@@ -1574,6 +1639,7 @@ CREATE TABLE diagnosis_feedback (
   target_type TEXT NOT NULL CHECK (target_type IN ('initial_analysis_output','inspection_report','investigation_message')),
   target_id   INTEGER NOT NULL,
   value       TEXT NOT NULL CHECK (value IN ('adopted','executed','verified_effective','rejected')),
+  note        TEXT CHECK (note IS NULL OR length(note) <= 4096),
   created_by  INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at  TEXT NOT NULL
 ) STRICT;
@@ -1682,10 +1748,33 @@ CREATE TRIGGER trg_diagnosis_feedback_no_update BEFORE UPDATE ON diagnosis_feedb
 BEGIN SELECT RAISE(ABORT, 'diagnosis_feedback is append-only'); END;
 CREATE TRIGGER trg_diagnosis_feedback_no_delete BEFORE DELETE ON diagnosis_feedback
 BEGIN SELECT RAISE(ABORT, 'diagnosis_feedback is append-only'); END;
+CREATE TRIGGER trg_diagnosis_feedback_target_insert AFTER INSERT ON diagnosis_feedback
+WHEN NOT (
+  (NEW.target_type = 'initial_analysis_output' AND EXISTS (
+    SELECT 1 FROM initial_analysis_outputs o WHERE o.id = NEW.target_id
+  ))
+  OR (NEW.target_type = 'inspection_report' AND EXISTS (
+    SELECT 1 FROM inspection_reports r WHERE r.id = NEW.target_id
+  ))
+  OR (NEW.target_type = 'investigation_message' AND EXISTS (
+    SELECT 1 FROM investigation_messages m WHERE m.id = NEW.target_id AND m.role = 'assistant'
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'diagnosis feedback target must be an immutable diagnosis output or assistant message'); END;
 CREATE TRIGGER trg_text_attachments_no_update BEFORE UPDATE ON text_attachments
 BEGIN SELECT RAISE(ABORT, 'text_attachments is append-only'); END;
 CREATE TRIGGER trg_text_attachments_no_delete BEFORE DELETE ON text_attachments
 BEGIN SELECT RAISE(ABORT, 'text_attachments is append-only'); END;
+CREATE TRIGGER trg_investigation_message_attachments_user_message AFTER INSERT ON investigation_message_attachments
+WHEN NOT EXISTS (
+  SELECT 1 FROM investigation_messages m
+  WHERE m.id = NEW.message_id AND m.role = 'user' AND m.status = 'active'
+)
+BEGIN SELECT RAISE(ABORT, 'text attachments may reference only user messages'); END;
+CREATE TRIGGER trg_investigation_message_attachments_no_update BEFORE UPDATE ON investigation_message_attachments
+BEGIN SELECT RAISE(ABORT, 'investigation_message_attachments is append-only'); END;
+CREATE TRIGGER trg_investigation_message_attachments_no_delete BEFORE DELETE ON investigation_message_attachments
+BEGIN SELECT RAISE(ABORT, 'investigation_message_attachments history is not deletable'); END;
 CREATE TRIGGER trg_source_materials_no_update BEFORE UPDATE ON source_materials
 BEGIN SELECT RAISE(ABORT, 'source_materials is append-only'); END;
 CREATE TRIGGER trg_source_materials_no_delete BEFORE DELETE ON source_materials
@@ -1825,10 +1914,14 @@ BEGIN SELECT RAISE(ABORT, 'alert_change_log is append-only (deletion allowed for
 
 -- 12.3 接入问题：只允许确认字段变化，历史不可删除
 CREATE TRIGGER trg_alert_intake_issues_no_content_update BEFORE UPDATE OF
-  source_id, delivery_id, delivery_item_id, kind, detail_json, created_at ON alert_intake_issues
-BEGIN SELECT RAISE(ABORT, 'alert_intake_issues content is immutable'); END;
+  source_id, delivery_id, delivery_item_id, kind, issue_key, detail_json, first_seen_at, created_at ON alert_intake_issues
+BEGIN SELECT RAISE(ABORT, 'alert_intake_issues identity and first event are immutable'); END;
 CREATE TRIGGER trg_alert_intake_issues_no_delete BEFORE DELETE ON alert_intake_issues
 BEGIN SELECT RAISE(ABORT, 'alert_intake_issues history is not deletable'); END;
+CREATE TRIGGER trg_alert_intake_issue_events_no_update BEFORE UPDATE ON alert_intake_issue_events
+BEGIN SELECT RAISE(ABORT, 'alert_intake_issue_events is append-only'); END;
+CREATE TRIGGER trg_alert_intake_issue_events_no_delete BEFORE DELETE ON alert_intake_issue_events
+BEGIN SELECT RAISE(ABORT, 'alert_intake_issue_events history is not deletable'); END;
 
 -- 12.4 调查消息：正文/角色/顺序不可变，只允许 active -> withdrawn
 CREATE TRIGGER trg_investigation_messages_no_content_update BEFORE UPDATE OF
@@ -1839,7 +1932,7 @@ BEGIN SELECT RAISE(ABORT, 'investigation_messages history is not deletable'); EN
 
 -- 12.5 知识候选：原始建议与归属不可变；状态/草稿可更新；历史不可删除
 CREATE TRIGGER trg_knowledge_candidates_no_origin_update BEFORE UPDATE OF
-  import_batch_id, source_type, source_id, generation, original_suggestion_json, created_by, created_at ON knowledge_candidates
+  import_batch_id, source_type, source_id, target_knowledge_id, generation, original_suggestion_json, created_by, created_at ON knowledge_candidates
 BEGIN SELECT RAISE(ABORT, 'knowledge_candidate origin is immutable'); END;
 CREATE TRIGGER trg_knowledge_candidates_no_delete BEFORE DELETE ON knowledge_candidates
 BEGIN SELECT RAISE(ABORT, 'knowledge_candidates history is not deletable'); END;
@@ -2271,10 +2364,10 @@ END;
 -- 并发前提 expected_row_version 的比较与递增在同一 UPDATE 的 WHERE 与 SET 中完成）。
 
 -- 12.20 知识检索退出是粘性的：永不自动复活（恢复复用必须创建并确认新版本）
-CREATE TRIGGER trg_knowledge_retrieval_exit_sticky BEFORE UPDATE OF exited ON knowledge_version_retrieval_state
-WHEN OLD.exited = 1 AND NEW.exited = 0
-BEGIN SELECT RAISE(ABORT, 'retrieval exit is sticky; recovery requires a new confirmed version'); END;
--- exited_at / updated_at 由应用在同一 UPDATE 中写入。
+CREATE TRIGGER trg_knowledge_retrieval_exit_sticky BEFORE UPDATE ON knowledge_version_retrieval_state
+WHEN OLD.exited = 1
+BEGIN SELECT RAISE(ABORT, 'retrieval exit is terminal and immutable; recovery requires a new confirmed version'); END;
+-- exited_at / updated_at 由应用在退出 UPDATE 中一次写入，退出后整行不可改写。
 
 -- 12.21 FTS5 external-content 同步：knowledge_search_docs 与 knowledge_fts 同一事务保持一致
 CREATE TRIGGER trg_knowledge_fts_insert AFTER INSERT ON knowledge_search_docs
@@ -2406,6 +2499,22 @@ CREATE TRIGGER trg_alert_intake_issues_ack_sticky BEFORE UPDATE OF acknowledged_
 WHEN OLD.acknowledged_at IS NOT NULL AND
      (NEW.acknowledged_at IS NULL OR NEW.acknowledged_at <> OLD.acknowledged_at OR NEW.acknowledged_by <> OLD.acknowledged_by)
 BEGIN SELECT RAISE(ABORT, 'intake issue acknowledgement is sticky'); END;
+CREATE TRIGGER trg_alert_intake_issues_repeat_update BEFORE UPDATE OF last_seen_at, occurrence_count, last_event_id ON alert_intake_issues
+WHEN OLD.acknowledged_at IS NOT NULL
+  OR NEW.acknowledged_at IS NOT OLD.acknowledged_at
+  OR NEW.acknowledged_by IS NOT OLD.acknowledged_by
+  OR NEW.occurrence_count <> OLD.occurrence_count + 1
+  OR NEW.last_event_id IS NULL OR NEW.last_event_id = OLD.last_event_id
+  OR NOT EXISTS (
+    SELECT 1 FROM alert_intake_issue_events e
+    WHERE e.id = NEW.last_event_id AND e.issue_id = OLD.id AND e.observed_at = NEW.last_seen_at
+      AND e.id > COALESCE(OLD.last_event_id, 0)
+  )
+  OR NEW.occurrence_count <> (SELECT COUNT(*) FROM alert_intake_issue_events e WHERE e.issue_id = OLD.id)
+BEGIN SELECT RAISE(ABORT, 'intake issue repeat must append one new event and advance the open aggregate once'); END;
+CREATE TRIGGER trg_alert_intake_issues_ack_does_not_change_repeat BEFORE UPDATE OF acknowledged_at, acknowledged_by ON alert_intake_issues
+WHEN NEW.last_seen_at <> OLD.last_seen_at OR NEW.occurrence_count <> OLD.occurrence_count OR NEW.last_event_id IS NOT OLD.last_event_id
+BEGIN SELECT RAISE(ABORT, 'intake issue acknowledgement cannot rewrite repeat history'); END;
 
 -- 指针变更只能由激活触发器内部修改（trg_label_contract_state_activate_atomic）。
 -- 放行条件不是时间戳：目标 activation 必须是本次尚未标记 applied 的不可变 INSERT，且 contract 精确匹配。
@@ -2626,6 +2735,62 @@ CREATE TRIGGER trg_reusable_knowledge_current_owner_update AFTER UPDATE OF curre
 WHEN NEW.current_version_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM knowledge_versions v WHERE v.id = NEW.current_version_id AND v.knowledge_id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'current_version_id must belong to the same knowledge'); END;
+CREATE TRIGGER trg_knowledge_versions_next_sequence BEFORE INSERT ON knowledge_versions
+WHEN NEW.version_seq <> COALESCE((SELECT MAX(v.version_seq) FROM knowledge_versions v WHERE v.knowledge_id = NEW.knowledge_id), 0) + 1
+BEGIN SELECT RAISE(ABORT, 'knowledge version sequence must append exactly once'); END;
+CREATE TRIGGER trg_reusable_knowledge_current_forward_only BEFORE UPDATE OF current_version_id ON reusable_knowledge
+WHEN NEW.current_version_id IS NULL
+  OR NOT EXISTS (
+    SELECT 1 FROM knowledge_versions next
+    LEFT JOIN knowledge_versions previous ON previous.id = OLD.current_version_id
+    WHERE next.id = NEW.current_version_id AND next.knowledge_id = OLD.id
+      AND next.version_seq = COALESCE(previous.version_seq, 0) + 1
+  )
+BEGIN SELECT RAISE(ABORT, 'knowledge current version must advance to the next immutable version'); END;
+CREATE TRIGGER trg_knowledge_candidates_source_insert AFTER INSERT ON knowledge_candidates
+WHEN NOT (
+  (NEW.source_type = 'initial_analysis_output' AND EXISTS (
+    SELECT 1 FROM initial_analysis_outputs o WHERE o.id = NEW.source_id
+  ))
+  OR (NEW.source_type = 'inspection_report' AND EXISTS (
+    SELECT 1 FROM inspection_reports r WHERE r.id = NEW.source_id
+  ))
+  OR (NEW.source_type = 'investigation_message' AND EXISTS (
+    SELECT 1 FROM investigation_messages m WHERE m.id = NEW.source_id AND m.role = 'assistant' AND m.status = 'active'
+  ))
+  OR (NEW.source_type = 'source_material' AND EXISTS (
+    SELECT 1 FROM knowledge_import_batches b
+    JOIN source_materials s ON s.id = b.source_material_id
+    WHERE b.id = NEW.import_batch_id AND s.id = NEW.source_id
+  ))
+  OR (NEW.source_type = 'knowledge_version' AND EXISTS (
+    SELECT 1 FROM knowledge_versions v
+    WHERE v.id = NEW.source_id AND v.knowledge_id = NEW.target_knowledge_id
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'knowledge candidate must reference a valid immutable source'); END;
+CREATE TRIGGER trg_knowledge_candidates_source_not_rejected AFTER INSERT ON knowledge_candidates
+WHEN NEW.source_type IN ('initial_analysis_output','inspection_report','investigation_message')
+  AND EXISTS (
+    SELECT 1 FROM diagnosis_feedback f
+    WHERE f.target_type = NEW.source_type AND f.target_id = NEW.source_id AND f.value = 'rejected'
+  )
+BEGIN SELECT RAISE(ABORT, 'rejected diagnosis source cannot create a knowledge candidate'); END;
+CREATE TRIGGER trg_attempt_input_items_no_withdrawn_message AFTER INSERT ON attempt_input_items
+WHEN NEW.investigation_message_id IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM investigation_messages m
+    WHERE m.id = NEW.investigation_message_id AND m.status = 'withdrawn'
+  )
+BEGIN SELECT RAISE(ABORT, 'withdrawn investigation message cannot enter a new attempt input snapshot'); END;
+CREATE TRIGGER trg_knowledge_versions_candidate_closure_insert AFTER INSERT ON knowledge_versions
+WHEN NOT EXISTS (
+  SELECT 1 FROM knowledge_candidates c
+  WHERE c.id = NEW.source_candidate_id
+    AND c.state = 'Confirmed'
+    AND c.confirmed_knowledge_id = NEW.knowledge_id
+)
+BEGIN SELECT RAISE(ABORT, 'knowledge version must be produced by its confirmed candidate'); END;
 CREATE TRIGGER trg_investigations_head_owner_insert AFTER INSERT ON investigations
 WHEN NEW.current_head_message_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM investigation_messages m WHERE m.id = NEW.current_head_message_id AND m.investigation_id = NEW.id)

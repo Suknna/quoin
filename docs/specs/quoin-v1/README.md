@@ -47,7 +47,7 @@ contracts/
 | `contracts/openapi.yaml` | HTTP 路由、方法、输入输出结构、状态码和可机械表达的 HTTP 契约 |
 | `contracts/runtime.proto` | 四组件 gRPC service、RPC、message、stream 与 wire-level 枚举 |
 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | Plinth supervisor ↔ worker 本地 stdio framed protobuf message 与 wire-level 枚举 |
-| `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog、Browser Tool 与 Browser Execution 等独立 JSON 文档格式 |
+| `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog、Browser Tool、Browser Execution 与 Frontend State 等独立 JSON 文档格式 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
 - **SPEC-STRUCTURE-003 —** 九份主题 Markdown **MUST** 保持在 `docs/specs/quoin-v1/` 根目录；机器契约 **MUST** 使用上表所列的 `contracts/` 路径，并按 `SPEC-STRUCTURE-001` 延迟创建。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）

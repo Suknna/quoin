@@ -842,8 +842,8 @@ paths:
     post:
       tags: [alerts]
       operationId: createAnalysisKnowledgeCandidate
-      summary: 从 Initial Analysis 输出生成知识候选（最终分析区的“整理为知识”操作）
-      description: Initial Analysis 与 Inspection Report 在最终分析区提供次要“整理为知识”操作（CONTEXT「知识候选」）。
+      summary: 从 Initial Analysis 输出创建或返回知识候选（最终分析区的“整理为知识”操作）
+      description: 同一不可变输出最多一个 Candidate；先查重，已有记录时不同 clientCommandId 也返回原 Candidate。仅在不存在 Candidate 时检查来源是否曾追加 rejected 反馈；已拒绝来源返回 409，不得重新创建（DATA-KNOWLEDGE-004/006）。
       parameters:
         - $ref: '#/components/parameters/OccurrenceId'
         - $ref: '#/components/parameters/AnalysisId'
@@ -860,6 +860,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 该来源已有 Candidate，返回原记录。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
         '201':
           description: 候选已创建（AwaitingConfirmation）。
           content:
@@ -909,12 +915,18 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/alerts/intake-issues:
+  /api/v1/alert-intake-issues:
     get:
       tags: [alerts]
       operationId: listAlertIntakeIssues
       summary: 告警接入问题列表（IdentityConflict/FingerprintMismatch/DeliveryTruncated）
+      description: 默认只返回未确认问题；acknowledged=true 用于查看已处理历史，省略或 false 返回待处理列表。
       parameters:
+        - name: acknowledged
+          in: query
+          schema:
+            type: boolean
+            default: false
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -936,7 +948,57 @@ paths:
                     $ref: '#/components/schemas/Cursor'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /api/v1/alerts/intake-issues/{issueId}/acknowledge:
+  /api/v1/alert-intake-issues/{issueId}:
+    get:
+      tags: [alerts]
+      operationId: getAlertIntakeIssue
+      summary: 告警接入问题详情
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: 接入问题、来源、Delivery/项目定位与结构化诊断详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeIssueDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alert-intake-issues/{issueId}/events:
+    get:
+      tags: [alerts]
+      operationId: listAlertIntakeIssueEvents
+      summary: 告警接入问题不可变发生历史
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 发生事件按 observedAt 倒序分页返回。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntakeIssueEvent'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/alert-intake-issues/{issueId}/acknowledge:
     post:
       tags: [alerts]
       operationId: acknowledgeIntakeIssue
@@ -995,7 +1057,9 @@ paths:
     post:
       tags: [investigations]
       operationId: createInvestigation
-      summary: 创建调查
+      x-external-dependency: true
+      summary: 以第一条用户消息原子创建调查、消息与 Execution Attempt
+      description: 调查列表的“新建”只打开本地空白输入；直到首条消息发送成功，本操作才在一个事务创建 Investigation、冻结输入、追加首条 user message、创建 Attempt 并建立 head。不得持久化空 Investigation（DATA-INVEST-001）。
       requestBody:
         required: true
         content:
@@ -1005,12 +1069,16 @@ paths:
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '400':
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '201':
           description: 调查已创建。
           content:
@@ -1312,6 +1380,7 @@ paths:
       operationId: retryInvestigationAttempt
       x-external-dependency: true
       summary: 重试失败的调查 Attempt（创建新 Attempt）
+      description: 仅当原 Attempt 为 Failed、所绑定 user message 仍为 active 且位于当前有效分支时创建新 Attempt；消息已被 Undo 撤回或已离开当前分支时返回 409，撤回分支不得重新进入模型上下文（DATA-INVEST-002）。
       parameters:
         - $ref: '#/components/parameters/InvestigationId'
         - $ref: '#/components/parameters/AttemptId'
@@ -1342,15 +1411,13 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/investigations/{investigationId}/attachments:
+  /api/v1/investigation-attachments:
     post:
       tags: [investigations]
       operationId: uploadInvestigationAttachment
       x-external-dependency: true
-      summary: 流式上传文本附件到 staging（multipart；正文作为 Artifact）
-      description: 每条消息最多一个附件；正文须有效 UTF-8、无 NUL、默认 ≤10 MiB；文件名只是审计元数据（DATA-ATTACH-001）。上传结果由后续 send-message 原子消费（HTTP-FILE-001/002）。
-      parameters:
-        - $ref: '#/components/parameters/InvestigationId'
+      summary: 流式上传一个文本附件到 staging（multipart；正文作为 Artifact）
+      description: 单个正文须有效 UTF-8、无 NUL；单文件与一条消息附件正文合计都受默认 10 MiB、部署可调的消息级边界；文件名只是审计元数据（DATA-ATTACH-001）。上传结果由后续 create-investigation 或 send-message 原子消费；同一附件可在 Undo 后重新发送而不重复上传（HTTP-FILE-001/002）。
       requestBody:
         required: true
         content:
@@ -1379,11 +1446,11 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
         '201':
-          description: staging Artifact 已登记。
+          description: staging Text Attachment 已登记，返回后续消息命令引用的 attachment ID。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ArtifactSummary'
+                $ref: '#/components/schemas/TextAttachmentSummary'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1396,13 +1463,12 @@ paths:
           $ref: '#/components/responses/UnsupportedMedia'
         '422':
           $ref: '#/components/responses/Unprocessable'
-  /api/v1/investigations/{investigationId}/attachments/{attachmentId}:
+  /api/v1/investigation-attachments/{attachmentId}:
     get:
       tags: [investigations]
       operationId: getInvestigationAttachment
-      summary: 附件元数据
+      summary: 当前用户上传的附件元数据
       parameters:
-        - $ref: '#/components/parameters/InvestigationId'
         - $ref: '#/components/parameters/AttachmentId'
       responses:
         '403':
@@ -1412,7 +1478,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ArtifactSummary'
+                $ref: '#/components/schemas/TextAttachmentSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1421,7 +1487,8 @@ paths:
     post:
       tags: [investigations]
       operationId: createInvestigationKnowledgeCandidate
-      summary: 从用户明确选择的调查回合生成知识候选
+      summary: 从用户明确选择的 assistant 消息创建或返回知识候选
+      description: sourceId 必须是本 Investigation 的 active assistant message；先查重，已有记录时返回原 Candidate。仅在不存在 Candidate 时检查来源是否曾追加 rejected 反馈；已拒绝来源返回 409，不得重新创建；不按标题或正文相似度合并（DATA-KNOWLEDGE-004/006）。
       parameters:
         - $ref: '#/components/parameters/InvestigationId'
       requestBody:
@@ -1437,6 +1504,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 该消息已有 Candidate，返回原记录。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
         '201':
           description: 候选已创建（AwaitingConfirmation）。
           content:
@@ -1702,7 +1775,8 @@ paths:
     post:
       tags: [inspections]
       operationId: createReportKnowledgeCandidate
-      summary: 从巡检报告版本生成知识候选
+      summary: 从巡检报告版本创建或返回知识候选
+      description: 同一不可变 Report 版本最多一个 Candidate；先查重，已有记录时返回原 Candidate。仅在不存在 Candidate 时检查来源是否曾追加 rejected 反馈；已拒绝来源返回 409，不得重新创建（DATA-KNOWLEDGE-004/006）。
       parameters:
         - $ref: '#/components/parameters/RunId'
         - $ref: '#/components/parameters/ReportVersion'
@@ -1719,6 +1793,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '200':
+          description: 该 Report 版本已有 Candidate，返回原记录。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
         '201':
           description: 候选已创建。
           content:
@@ -1735,12 +1815,11 @@ paths:
     get:
       tags: [knowledge]
       operationId: searchKnowledge
-      summary: 知识检索（FTS5 trigram 与 embedding cosine 由模型综合；程序不设阈值）
-      description: 只返回当前、未停用、来源有效、未 exit 的版本（DATA-KNOWLEDGE-002/003）。
+      summary: 浏览或检索可复用知识
+      description: q 省略时按当前版本最近创建时间列出合格知识；提供 q 时返回 FTS5 trigram 与 embedding cosine 原始双通道结果供前端分组呈现，程序不合成总分、不设内容阈值。Agent 检索由内部类型化工具提供相同双通道事实并由模型综合，不把模型判断塞入本 HTTP 投影。只返回当前、未停用、来源有效、未 exit 的版本（DATA-KNOWLEDGE-002/003）。
       parameters:
         - name: q
           in: query
-          required: true
           schema:
             type: string
             minLength: 1
@@ -1754,7 +1833,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/KnowledgeSearchResult'
+                oneOf:
+                  - $ref: '#/components/schemas/KnowledgeBrowseResult'
+                  - $ref: '#/components/schemas/KnowledgeQueryResult'
         '401':
           $ref: '#/components/responses/Unauthorized'
   /api/v1/knowledge/items/{knowledgeId}:
@@ -1808,6 +1889,44 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+    post:
+      tags: [knowledge]
+      operationId: createKnowledgeRevisionCandidate
+      summary: 从当前知识版本创建或返回修订候选
+      description: expectedCurrentVersionId 与 expectedRowVersion 共同保护 current 指针；同一源版本同时最多一个 AwaitingConfirmation 或 Confirmed 修订 Candidate。已有可操作/已确认 Candidate 时返回原记录；此前 Candidate 已 Excluded、Superseded 或 SourceInvalid 时可创建新的修订流程。确认该 Candidate 时追加不可变 KnowledgeVersion 并原子切换 current 指针，不建立第二个 Reusable Knowledge（DATA-KNOWLEDGE-001/004/006/007）。
+      parameters:
+        - $ref: '#/components/parameters/KnowledgeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateKnowledgeRevisionRequest'
+      responses:
+        '200':
+          description: 当前版本已有 AwaitingConfirmation 或 Confirmed 修订 Candidate，返回原记录；已 Excluded/Superseded/SourceInvalid 的旧流程不阻止重新修订。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '201':
+          description: 修订 Candidate 已创建并以当前版本正文预填。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/knowledge/items/{knowledgeId}/versions/{versionId}:
     get:
       tags: [knowledge]
@@ -1860,6 +1979,37 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
   /api/v1/knowledge/import-batches:
+    get:
+      tags: [knowledge]
+      operationId: listKnowledgeImportBatches
+      summary: 知识导入批次列表
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [Processing, AwaitingConfirmation, Failed, Completed, Cancelled]
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 批次分页列表（createdAt 倒序）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ImportBatchSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       tags: [knowledge]
       operationId: importKnowledgeBatch
@@ -1984,7 +2134,63 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/knowledge/candidates:
+    get:
+      tags: [knowledge]
+      operationId: listKnowledgeCandidates
+      summary: 知识候选列表
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [AwaitingConfirmation, Confirmed, Excluded, Superseded, SourceInvalid]
+        - name: sourceType
+          in: query
+          schema:
+            type: string
+            enum: [initial_analysis_output, inspection_report, investigation_message, source_material, knowledge_version]
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 候选分页列表；默认先返回 AwaitingConfirmation，再按 createdAt 倒序。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CandidateSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/v1/knowledge/candidates/{candidateId}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeCandidate
+      summary: 知识候选详情
+      parameters:
+        - $ref: '#/components/parameters/CandidateId'
+      responses:
+        '200':
+          description: 当前不可变来源、原始建议与最新草稿投影。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     patch:
       tags: [knowledge]
       operationId: editKnowledgeCandidateDraft
@@ -2022,7 +2228,7 @@ paths:
       tags: [knowledge]
       operationId: confirmKnowledgeCandidate
       summary: 确认单个候选（携带 client_command_id 与 expected revision）
-      description: 每个 Candidate 最多创建一个 Reusable Knowledge；相同命令重试返回原 Knowledge ID（DATA-KNOWLEDGE-004）。
+      description: 普通来源 Candidate 创建一个 Reusable Knowledge 的首版本；knowledge_version 修订 Candidate 则向原 Knowledge 追加版本并原子切换 current 指针。每个 Candidate 最多确认一次；相同命令重试返回原结果（DATA-KNOWLEDGE-001/004）。
       parameters:
         - $ref: '#/components/parameters/CandidateId'
       requestBody:
@@ -2085,11 +2291,42 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
   /api/v1/knowledge/feedback:
+    get:
+      tags: [knowledge]
+      operationId: listDiagnosisFeedback
+      summary: 读取一个不可变诊断目标的追加反馈时间线
+      parameters:
+        - name: targetType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [initial_analysis_output, inspection_report, investigation_message]
+        - name: targetId
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 反馈事件按 createdAt 倒序返回；服务端另返回 latestValue 便于稳定投影。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackTimeline'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       tags: [knowledge]
       operationId: appendDiagnosisFeedback
       summary: 追加诊断反馈（append-only；目标为不可变诊断输出）
-      description: 目标精确指向 Initial Analysis 成功输出、Inspection Report 版本或 Investigation 消息/Attempt 输出（CONTEXT「诊断反馈」）。
+      description: 目标精确指向 Initial Analysis 成功输出、Inspection Report 版本或 Investigation 的 assistant Message；不得指向整个 Investigation 或 user Message（DATA-KNOWLEDGE-008）。
       requestBody:
         required: true
         content:
@@ -2123,6 +2360,18 @@ paths:
       operationId: listBusinessSystems
       summary: 业务系统列表
       parameters:
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+          description: 按当前启用状态筛选。
+        - name: q
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: 按显示名称做服务端大小写不敏感的包含搜索；筛选值绑定分页游标。
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -2307,7 +2556,38 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs:
+    get:
+      tags: [config]
+      operationId: listConfigTestRuns
+      summary: 指定不可变配置版本的 Config Test Run 历史
+      description: 按 `(created_at DESC, id DESC)` 游标分页；用于配置版本详情在刷新或深链后重建完整测试历史（HTTP-PAGE-005、UI-SYSTEM-005）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - $ref: '#/components/parameters/VersionId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Config Test Run 历史分页。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConfigTestRunSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       tags: [config]
       operationId: runConfigTestRun
@@ -2344,7 +2624,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run/{testRunId}:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs/{testRunId}:
     get:
       tags: [config]
       operationId: getConfigTestRun
@@ -2371,7 +2651,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-run/{testRunId}/cancel:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs/{testRunId}/cancel:
     post:
       tags: [config]
       operationId: cancelConfigTestRun
@@ -2445,6 +2725,32 @@ paths:
                     $ref: '#/components/schemas/Cursor'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/resources/{resourceId}:
+    get:
+      tags: [config]
+      operationId: getObservedResource
+      summary: 单个 Observed Resource 的完整当前/历史详情
+      description: 返回完整 labels、发现项和新鲜度；资源 identity 与历史行不可改写。v1 不存在资源历史引用集合（UI-SYSTEM-007、DATA-OBSERVED-001）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - name: resourceId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+      responses:
+        '200':
+          description: Observed Resource 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObservedResourceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
   /api/v1/business-systems/{systemKey}/browser-identity:
@@ -3016,7 +3322,7 @@ paths:
       operationId: probeModelProvider
       x-external-dependency: true
       summary: 对当前 Model Provider revision 执行真实能力探测（Admin）
-      description: 仅适用于 model_provider；创建 model_provider_probe Attempt，绑定当前 revision/generation（允许连接 disabled 或 RevalidationRequired）。成功能力行是启用该 current pair 的前提（HTTP-COMMAND-013）。
+      description: 仅适用于 model_provider；当前 revision 必须已由 Admin 选择或手工填写 chatModelId/embeddingModelId，否则 409。创建 model_provider_probe Attempt，绑定 current revision/generation（允许连接 disabled 或 RevalidationRequired）。成功能力行是启用该 current pair 的前提（HTTP-COMMAND-013）。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
       requestBody:
@@ -3117,6 +3423,36 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/model-providers/discover:
+    post:
+      tags: [adminops]
+      operationId: discoverProviderModels
+      x-external-dependency: true
+      summary: 创建前以表单中的 Base URL 与 API key 探测上游 /v1/models
+      description: 凭据只在请求内存中用于本次发现，不落库、不写日志；上游成功响应但无列表、返回零项或 metadata 不完整时以 available=false 返回；网络/超时或不可解析响应返回 503。两类失败都必须保留手工填写模型 ID 的路径。发现结果只辅助选择，不构成能力证明。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscoverProviderModelsRequest'
+      responses:
+        '200':
+          description: 可用模型 ID 与上游可选 metadata，或明确 unavailable 结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderModelDiscoveryResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/model-providers:
     get:
       tags: [adminops]
@@ -3149,7 +3485,8 @@ paths:
       tags: [adminops]
       operationId: listProviderModels
       x-external-dependency: true
-      summary: 供应商模型 ID 列表（只列举 ID；能力按 ConnectionRevision 实测）
+      summary: 从当前 disabled Model Provider revision 的上游 /v1/models 发现模型 ID
+      description: 用于创建向导的自动发现；零项、503 或上游缺少能力 metadata 均不得禁止 Admin 手工填写模型 ID。返回列表只辅助选择，不构成能力证明；能力仍按 ConnectionRevision 真实 probe。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
         - $ref: '#/components/parameters/Cursor'
@@ -3604,6 +3941,31 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/Unprocessable'
+  /api/v1/evidence/{evidenceId}:
+    get:
+      tags: [artifacts]
+      operationId: getEvidence
+      summary: 不可变 Evidence 详情与正文定位
+      description: 返回来源、采集参数、观测时间、完整性、warnings/errors 与 inline JSON 或 Artifact 二选一正文；Artifact 正文仍经 downloadArtifactContent 授权下载（HTTP-FILE-009、DATA-EVIDENCE-001）。
+      parameters:
+        - name: evidenceId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+      responses:
+        '200':
+          description: Evidence 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/artifacts:
     post:
       tags: [files]
@@ -3753,61 +4115,6 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-  /api/v1/me/unviewed:
-    get:
-      tags: [auth]
-      operationId: listUnviewedNotifications
-      summary: 当前用户未查看标记（后台任务终态徽标）
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '200':
-          description: 未查看对象分页列表。
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/UnviewedNotification'
-                  nextCursor:
-                    $ref: '#/components/schemas/Cursor'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-  /api/v1/me/viewed:
-    put:
-      tags: [auth]
-      operationId: markNotificationViewed
-      summary: 标记对象已查看（不删除历史）
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              allOf:
-                - $ref: '#/components/schemas/CommandBase'
-                - $ref: '#/components/schemas/MarkViewedRequest'
-      responses:
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '204':
-          description: 已标记。
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
   /api/v1/templates/business-system:
     get:
       tags: [config]
@@ -3853,11 +4160,11 @@ paths:
     get:
       tags: [realtime]
       operationId: getTaskSnapshot
-      summary: 后台任务快照（有界：active 任务 + 当前用户终态未查看任务；游标绑定快照 seq）
+      summary: 后台 active 任务快照（有界；游标绑定快照 seq）
       description: |
         进入任务页面先读本快照再建立 streamTaskEvents（after=snapshotSeq），消除 T1/T2/T3 漏更新（DATA-SSE-006/HTTP-SSE-008）。
-        有界集合（HTTP-PAGE-007）：只包含 active 任务对象与当前用户已终态但尚未查看（user_viewed 投影）的任务对象；
-        用户打开/标记查看后终态任务离开快照。items 按游标分页遍历；snapshotSeq 取当前最大 task_change_log.id（最新行由触发器保留，DATA-SSE-009），
+        有界集合（HTTP-PAGE-007）：只包含 active 任务对象；终态结果由所属领域对象、模块列表与详情长期提供，
+        不建立通知、已读/未读或 per-user 未查看投影。items 按游标分页遍历；snapshotSeq 取当前最大 task_change_log.id（最新行由触发器保留，DATA-SSE-009），
         全部页回传同一值；游标过期返回 410（resource_expired），客户端重新从首页读取。
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -4926,7 +5233,7 @@ components:
               $ref: '#/components/schemas/AnalysisOutput'
     AnalysisOutput:
       type: object
-      required: [id, modelId, content, createdAt]
+      required: [id, modelId, content, evidenceIds, createdAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -4934,6 +5241,12 @@ components:
           type: string
         content:
           type: string
+        evidenceIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/LocatorId'
+          description: 通过 initial_analysis_output_evidence 不可变关系按 Evidence locator 投影；每项可由 getEvidence 读取。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
     AttemptSummary:
@@ -5014,17 +5327,33 @@ components:
           $ref: '#/components/schemas/Timestamp'
         createdAt:
           $ref: '#/components/schemas/Timestamp'
-    IntakeIssueSummary:
+    IntakeIssueFields:
       type: object
-      required: [id, kind, createdAt]
+      dependentRequired:
+        acknowledgedAt: [acknowledgedBy]
+        acknowledgedBy: [acknowledgedAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
+        sourceId:
+          $ref: '#/components/schemas/LocatorId'
+        sourceKey:
+          $ref: '#/components/schemas/StableKey'
+          description: 告警源的人类稳定 key；列表不得以 sourceId 作为主要识别信息。
         kind:
           type: string
           enum: [identity_conflict, fingerprint_mismatch, delivery_truncated]
         deliveryId:
           $ref: '#/components/schemas/LocatorId'
+        deliveryItemId:
+          $ref: '#/components/schemas/LocatorId'
+        firstSeenAt:
+          $ref: '#/components/schemas/Timestamp'
+        lastSeenAt:
+          $ref: '#/components/schemas/Timestamp'
+        occurrenceCount:
+          type: integer
+          minimum: 1
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         acknowledgedAt:
@@ -5035,6 +5364,46 @@ components:
           type: integer
           minimum: 1
           description: 确认命令并发前提（DATA-ALERT-011）。
+    IntakeIssueSummary:
+      allOf:
+        - $ref: '#/components/schemas/IntakeIssueFields'
+      required: [id, sourceId, sourceKey, kind, firstSeenAt, lastSeenAt, occurrenceCount, rowVersion, createdAt]
+      unevaluatedProperties: false
+    IntakeIssueDetail:
+      allOf:
+        - $ref: '#/components/schemas/IntakeIssueFields'
+      required: [id, sourceId, sourceKey, kind, firstSeenAt, lastSeenAt, occurrenceCount, rowVersion, createdAt, detail, eventCount]
+      properties:
+        detail:
+          type: object
+          additionalProperties: true
+          description: 服务端从首个事件 detail_json 解析的人类诊断所需结构化事实；不得包含凭据或请求秘密。
+        eventCount:
+          type: integer
+          minimum: 1
+          description: 完整历史经 listAlertIntakeIssueEvents 游标分页读取。
+      unevaluatedProperties: false
+    IntakeIssueEvent:
+      type: object
+      additionalProperties: false
+      required: [id, issueId, observedAt, detail]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        issueId:
+          $ref: '#/components/schemas/LocatorId'
+        deliveryId:
+          $ref: '#/components/schemas/LocatorId'
+        deliveryItemId:
+          $ref: '#/components/schemas/LocatorId'
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+        detail:
+          type: object
+          additionalProperties: true
+      anyOf:
+        - required: [deliveryId]
+        - required: [deliveryItemId]
     InvestigationSourceInput:
       type: object
       additionalProperties: false
@@ -5064,6 +5433,7 @@ components:
     CreateInvestigationRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/MessageContentInput'
         - type: object
           properties:
             sources:
@@ -5075,10 +5445,18 @@ components:
               description: 从既有对象进入 Chat 时由前端自动携带；直接新建时省略或为空，不得要求用户预选。
     InvestigationSummary:
       type: object
-      required: [id, createdAt, createdBy]
+      additionalProperties: false
+      required: [id, displayTitle, lastActivityAt, createdAt, createdBy]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
+        displayTitle:
+          type: string
+          minLength: 1
+          description: 服务端派生的人类标题；优先使用当前有效分支第一条用户消息的有界单行摘要，消息空白时才回退为不可变来源对象显示名或“新调查 + 创建时间”。前端不得自行建立第二套标题规则。
+        lastActivityAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: 当前有效分支最后消息提交时间与 Investigation-scope Attempt 最近持久化状态时间的机械最大值；空分支回退 Investigation 创建时间。用于 `(last_activity_at DESC, id DESC)` 键集排序（DATA-INVEST-005）。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         createdBy:
@@ -5109,7 +5487,7 @@ components:
               description: 当前调查的执行尝试总数；历史经 listInvestigationAttempts 游标分页读取（HTTP-PAGE-005）。
     MessageSummary:
       type: object
-      required: [id, seq, role, status, content, createdAt]
+      required: [id, seq, role, status, content, attachments, evidenceIds, createdAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5126,28 +5504,53 @@ components:
           type: string
         parentMessageId:
           $ref: '#/components/schemas/LocatorId'
-        attachmentId:
-          $ref: '#/components/schemas/LocatorId'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/TextAttachmentSummary'
+          description: 按用户发送顺序列出消息引用的文本附件及稳定显示文件名；不设个数限制，单文件与合计大小由默认 10 MiB、部署可调的消息级边界限制。
         attemptId:
           $ref: '#/components/schemas/LocatorId'
+        evidenceIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/LocatorId'
+          description: 通过 investigation_message_evidence 不可变关系投影；user 消息为空数组，assistant 消息中的引用可由 getEvidence 读取。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+    MessageContentInput:
+      type: object
+      properties:
+        content:
+          type: string
+          maxLength: 262144
+        attachmentIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/LocatorId'
+          description: 先前上传的文本附件；创建首条消息前也可上传，同一不可变附件可被 Undo 后的新消息复用；单文件与合计大小由默认 10 MiB、部署可调的消息级边界限制。
+      anyOf:
+        - required: [content]
+          properties:
+            content:
+              minLength: 1
+        - required: [attachmentIds]
+          properties:
+            attachmentIds:
+              minItems: 1
+      description: 消息必须包含非空正文或至少一个附件；允许附件消息正文为空。
     SendMessageRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/MessageContentInput'
         - type: object
-          required: [expectedHeadMessageId, content]
+          required: [expectedHeadMessageId]
           properties:
             expectedHeadMessageId:
               $ref: '#/components/schemas/NullableLocatorId'
-              description: 并发前提；null 表示当前无 head（新调查或已撤回全部消息后的第一条消息），其余情况必须为当前 head locator（DATA-INVEST-001）。head 已变化返回 409。
-            content:
-              type: string
-              minLength: 1
-              maxLength: 262144
-            attachmentId:
-              $ref: '#/components/schemas/LocatorId'
-              description: 先前上传的 staging Artifact（每条消息最多一个）。
+              description: 当前 head locator（DATA-INVEST-001）；Undo 撤回全部消息后可为 null，其余情况必须与当前 head 一致；head 已变化返回 409。
     StreamRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5323,7 +5726,7 @@ components:
           $ref: '#/components/schemas/Timestamp'
     ReportDetail:
       type: object
-      required: [runId, version, evidenceDigest, modelId, content, createdAt]
+      required: [runId, version, evidenceDigest, evidenceIds, modelId, content, createdAt]
       properties:
         runId:
           $ref: '#/components/schemas/LocatorId'
@@ -5333,6 +5736,12 @@ components:
         evidenceDigest:
           type: string
           pattern: '^[0-9a-f]{64}$'
+        evidenceIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/LocatorId'
+          description: 本报告精确绑定的不可变 Evidence 集；每项可由 getEvidence 读取。
         modelId:
           type: string
         content:
@@ -5349,19 +5758,58 @@ components:
               $ref: '#/components/schemas/StableKey'
             planKey:
               $ref: '#/components/schemas/StableKey'
-    KnowledgeSearchResult:
+    KnowledgeBrowseResult:
       type: object
-      required: [items]
+      additionalProperties: false
+      required: [mode, items]
       properties:
+        mode:
+          type: string
+          const: browse
         items:
           type: array
           items:
             $ref: '#/components/schemas/KnowledgeSummary'
         nextCursor:
           $ref: '#/components/schemas/Cursor'
+    KnowledgeQueryResult:
+      type: object
+      additionalProperties: false
+      required: [mode, exactTextMatches, semanticMatches]
+      properties:
+        mode:
+          type: string
+          const: query
+        exactTextMatches:
+          type: array
+          description: FTS5 原始排序；不得与 semanticScore 合成总分。
+          items:
+            $ref: '#/components/schemas/KnowledgeSearchHit'
+        semanticMatches:
+          type: array
+          description: cosine 原始排序；同一 Knowledge 可同时出现在两组，前端只显示一次并标出双重依据。
+          items:
+            $ref: '#/components/schemas/KnowledgeSearchHit'
+        nextCursor:
+          $ref: '#/components/schemas/Cursor'
+          description: query 模式复合游标，同时绑定 q/筛选/索引 generation 与 exactTextMatches、semanticMatches 两个通道各自的排序方向、最后 score 和 Knowledge locator；任一通道未耗尽即返回。客户端按 Knowledge locator 跨页幂等合并，同一对象可累积文本与语义两种依据；两个通道都耗尽时省略。
+    KnowledgeSearchHit:
+      type: object
+      additionalProperties: false
+      required: [knowledge, score]
+      properties:
+        knowledge:
+          $ref: '#/components/schemas/KnowledgeSummary'
+        score:
+          type: number
+          description: 所在通道的原始分数；两个通道的值不可比较或加权。
+        indexState:
+          type: string
+          enum: [ready, stale, rebuilding]
+          description: 仅语义通道可返回；它是相对当前 EmbeddingGeneration 的派生状态。
     KnowledgeSummary:
       type: object
-      required: [id, title, currentVersionId, currentVersionSeq, eligible]
+      required: [id, title, currentVersionId, currentVersionSeq, eligible, rowVersion]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5375,21 +5823,23 @@ components:
         eligible:
           type: boolean
           description: current ∧ 未停用 ∧ 来源有效 ∧ 未 exit（DATA-KNOWLEDGE-002）。
-    KnowledgeDetail:
-      type: object
-      required: [id, currentVersionId, versionCount]
-      properties:
-        id:
-          $ref: '#/components/schemas/LocatorId'
-        currentVersionId:
-          $ref: '#/components/schemas/LocatorId'
-        versionCount:
+        rowVersion:
           type: integer
-          minimum: 0
-          description: 版本总数；历史经 listKnowledgeVersions 游标分页读取（HTTP-PAGE-005）。
+          minimum: 1
+          description: 创建修订 Candidate 时与 expectedCurrentVersionId 一起保护 current 指针。
+    KnowledgeDetail:
+      allOf:
+        - $ref: '#/components/schemas/KnowledgeSummary'
+        - type: object
+          required: [versionCount]
+          properties:
+            versionCount:
+              type: integer
+              minimum: 1
+              description: 版本总数；历史经 listKnowledgeVersions 游标分页读取（HTTP-PAGE-005）。
     KnowledgeVersionSummary:
       type: object
-      required: [id, versionSeq, title, createdAt, eligible, rowVersion]
+      required: [id, versionSeq, title, sourceCandidateId, embeddingState, createdAt, eligible, retrievalStateRowVersion]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5398,17 +5848,22 @@ components:
           minimum: 1
         title:
           type: string
+        sourceCandidateId:
+          $ref: '#/components/schemas/LocatorId'
+        embeddingState:
+          type: string
+          enum: [not_configured, pending, ready, failed, stale, rebuilding]
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         eligible:
           type: boolean
-        rowVersion:
+        retrievalStateRowVersion:
           type: integer
           minimum: 1
-          description: 版本行并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）。
+          description: knowledge_version_retrieval_state 投影的并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）；不可误称为不可变 KnowledgeVersion 行版本。
     KnowledgeVersionDetail:
       type: object
-      required: [id, versionSeq, title, body, createdAt, eligible, rowVersion]
+      required: [id, versionSeq, title, body, sourceCandidateId, createdAt, eligible, retrievalStateRowVersion, embeddingState]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5428,14 +5883,26 @@ components:
         limitations:
           type: object
           additionalProperties: true
+        sourceCandidateId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 产生本版本的已确认 Candidate；由此可追溯到不可变诊断来源或前一 KnowledgeVersion。
+        exitedAt:
+          $ref: '#/components/schemas/Timestamp'
+        exitReason:
+          type: string
+          enum: [source_rejected, stopped]
+        embeddingState:
+          type: string
+          enum: [not_configured, pending, ready, failed, stale, rebuilding]
+          description: 相对当前 EmbeddingGeneration 的派生索引状态；不成为知识资格第二权威。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         eligible:
           type: boolean
-        rowVersion:
+        retrievalStateRowVersion:
           type: integer
           minimum: 1
-          description: 版本行并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）。
+          description: knowledge_version_retrieval_state 投影的并发前提（stop-reuse 命令使用，HTTP-COMMAND-002）；不可误称为不可变 KnowledgeVersion 行版本。
     ImportBatchRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5481,7 +5948,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         sourceType:
           type: string
-          enum: [initial_analysis_output, inspection_report, investigation_message, source_material]
+          enum: [initial_analysis_output, inspection_report, investigation_message, source_material, knowledge_version]
         sourceId:
           $ref: '#/components/schemas/LocatorId'
         state:
@@ -5500,8 +5967,31 @@ components:
           type: string
         draftBody:
           type: string
+        targetKnowledgeId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 仅 knowledge_version 修订 Candidate 在确认前后携带，指向将追加版本的 Reusable Knowledge。
         confirmedKnowledgeId:
           $ref: '#/components/schemas/LocatorId'
+    CandidateDetail:
+      allOf:
+        - $ref: '#/components/schemas/CandidateSummary'
+        - type: object
+          required: [originalSuggestion]
+          properties:
+            originalSuggestion:
+              type: object
+              additionalProperties: true
+              description: 模型原始建议的不可变结构化投影；用户只编辑 draft 字段。
+    CreateKnowledgeRevisionRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          required: [expectedCurrentVersionId]
+          properties:
+            expectedCurrentVersionId:
+              $ref: '#/components/schemas/LocatorId'
+              description: 必须等于 Reusable Knowledge 当前指针；与 expectedRowVersion 同时比较。
     CandidateDraftEditRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5559,6 +6049,10 @@ components:
         value:
           type: string
           enum: [adopted, executed, verified_effective, rejected]
+        note:
+          type: string
+          maxLength: 4096
+          description: 可选的人类说明；任何反馈值都不强制填写。
     FeedbackSummary:
       type: object
       required: [id, targetType, targetId, value, createdAt]
@@ -5573,10 +6067,26 @@ components:
         value:
           type: string
           enum: [adopted, executed, verified_effective, rejected]
+        note:
+          type: string
+          maxLength: 4096
         createdBy:
           $ref: '#/components/schemas/LocatorId'
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+    FeedbackTimeline:
+      type: object
+      required: [items]
+      properties:
+        latestValue:
+          type: string
+          enum: [adopted, executed, verified_effective, rejected]
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedbackSummary'
+        nextCursor:
+          $ref: '#/components/schemas/Cursor'
     TaskSnapshot:
       type: object
       required: [snapshotSeq, items]
@@ -5586,7 +6096,7 @@ components:
           description: 快照绑定的 task_change_seq（首页取当前最大 task_change_log.id；全部页回传同一值，DATA-SSE-009）；建立 streamTaskEvents 时作为 after。
         items:
           type: array
-          description: 有界集合（HTTP-PAGE-007）：active 任务 + 当前用户终态未查看任务；按 nextCursor 分页遍历。
+          description: 有界集合（HTTP-PAGE-007）：只包含 active 任务；终态由所属领域对象长期提供；按 nextCursor 分页遍历。
           items:
             $ref: '#/components/schemas/TaskObjectRef'
         nextCursor:
@@ -5867,6 +6377,19 @@ components:
           type: boolean
         lastSuccessfulRefreshAt:
           $ref: '#/components/schemas/Timestamp'
+    ObservedResourceDetail:
+      allOf:
+        - $ref: '#/components/schemas/ObservedResourceSummary'
+        - type: object
+          required: [labels, createdAt]
+          properties:
+            labels:
+              type: object
+              additionalProperties:
+                type: string
+              description: 最近一次观测保存的完整 labels；identityLabels 只是相等性子集（DATA-OBSERVED-001）。
+            createdAt:
+              $ref: '#/components/schemas/Timestamp'
     AuthenticationProbeConfig:
       type: object
       additionalProperties: false
@@ -6040,8 +6563,12 @@ components:
           type: boolean
       allOf:
         - if:
+            properties:
+              stopConfirmedAt: {}
             required: [stopConfirmedAt]
           then:
+            properties:
+              stopConfirmationBasis: {}
             required: [stopConfirmationBasis]
           else:
             properties:
@@ -6053,6 +6580,7 @@ components:
             required: [state]
           then:
             properties:
+              startDispatchedAt: {}
               startedAt: false
             required: [startDispatchedAt]
         - if:
@@ -6061,6 +6589,9 @@ components:
                 enum: [Running, AwaitingReconnect, Succeeded]
             required: [state]
           then:
+            properties:
+              startDispatchedAt: {}
+              startedAt: {}
             required: [startDispatchedAt, startedAt]
         - if:
             properties:
@@ -6127,13 +6658,18 @@ components:
                     enum: [Succeeded, Failed, Cancelled, Interrupted]
                 required: [state]
               - not:
+                  properties:
+                    startDispatchedAt: {}
                   required: [startDispatchedAt]
           then:
             required: [stopConfirmedAt, stopConfirmationBasis]
             properties:
+              stopConfirmedAt: {}
               stopConfirmationBasis:
                 const: not_dispatched
         - if:
+            properties:
+              startDispatchedAt: {}
             required: [startDispatchedAt]
           then:
             properties:
@@ -6806,10 +7342,12 @@ components:
           description: OpenAI-compatible endpoint 基 URL。
         chatModelId:
           type: string
-          description: 对话模型 ID（必须存在于 GET /v1/models；能力经 ConnectionRevision 实测）。
+          minLength: 1
+          description: Admin 从 /v1/models 选择或在列表/metadata 不可用时手工填写的对话模型 ID；仅真实 probe 可证明能力。
         embeddingModelId:
           type: string
-          description: 嵌入模型 ID；能力与向量维度经真实 probe 实测。
+          minLength: 1
+          description: Admin 从 /v1/models 选择或手工填写的嵌入模型 ID；能力与向量维度只由真实 probe 证明。
         contextBudgetTokens:
           type: integer
           minimum: 1
@@ -6868,8 +7406,10 @@ components:
           format: uri
         chatModelId:
           type: string
+          minLength: 1
         embeddingModelId:
           type: string
+          minLength: 1
         contextBudgetTokens:
           type: integer
           minimum: 1
@@ -6879,6 +7419,42 @@ components:
         apiKey:
           type: string
           description: API key（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
+    DiscoverProviderModelsRequest:
+      type: object
+      additionalProperties: false
+      required: [baseUrl]
+      properties:
+        baseUrl:
+          type: string
+          format: uri
+        apiKey:
+          type: string
+          description: 仅用于本次上游 /v1/models 请求；不持久化。
+    ProviderModelDiscoveryResult:
+      type: object
+      additionalProperties: false
+      required: [available, items]
+      properties:
+        available:
+          type: boolean
+        items:
+          type: array
+          uniqueItems: true
+          items:
+            type: object
+            additionalProperties: false
+            required: [id]
+            properties:
+              id:
+                type: string
+                minLength: 1
+              metadata:
+                type: object
+                additionalProperties: true
+                description: 上游原样返回的非秘密辅助 metadata；不得被当作已验证 capability。
+        detail:
+          type: string
+          description: available=false 时供 Admin 理解发现失败；不得包含秘密或原始响应正文。
     ConnectionInput:
       oneOf:
         - $ref: '#/components/schemas/ThanosConnectionInput'
@@ -7072,6 +7648,129 @@ components:
             - required: [timezone]
             - required: [retentionCount]
       description: 至少提供一个设置字段（anyOf 强制），防止无变化更新；expectedRowVersion 取当前 BackupSettings.rowVersion。
+    TextAttachmentSummary:
+      type: object
+      additionalProperties: false
+      required: [id, artifactId, originalFilename, mediaType, sizeBytes, digest, bodyExpired, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        artifactId:
+          $ref: '#/components/schemas/LocatorId'
+        originalFilename:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: multipart 原始 basename 的转义显示值；不得解释为路径。
+        mediaType:
+          type: string
+          const: text/plain
+        sizeBytes:
+          type: integer
+          minimum: 0
+          description: 实际正文大小；允许范围由部署的消息级附件边界决定，Schema 不硬编码默认值。
+        digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        bodyExpired:
+          type: boolean
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    EvidenceDetail:
+      type: object
+      additionalProperties: false
+      required: [id, targetType, targetId, params, observedAt, integrity, producer, connections, body, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        targetType:
+          type: string
+          minLength: 1
+          maxLength: 128
+        targetId:
+          $ref: '#/components/schemas/LocatorId'
+        params:
+          description: 采集时冻结的类型化参数 JSON；不得包含连接凭据。
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+        integrity:
+          type: string
+          enum: [complete, incomplete]
+        warnings:
+          description: 采集器返回的有界结构化 warnings JSON。
+        errors:
+          description: 采集器返回的有界结构化 errors JSON。
+        producer:
+          $ref: '#/components/schemas/EvidenceProducer'
+        connections:
+          type: array
+          uniqueItems: true
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, type]
+            properties:
+              key:
+                $ref: '#/components/schemas/StableKey'
+              type:
+                type: string
+                enum: [thanos, kubernetes, model_provider]
+          description: 从 Tool Call grant 机械派生的非秘密连接逻辑名；无连接时为空数组。
+        body:
+          $ref: '#/components/schemas/EvidenceBody'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    EvidenceProducer:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind]
+          properties:
+            kind:
+              const: quoin_local
+        - type: object
+          additionalProperties: false
+          required: [kind, attemptId, toolCallId, toolName, toolVersion]
+          properties:
+            kind:
+              const: plinth_tool
+            attemptId:
+              $ref: '#/components/schemas/LocatorId'
+            toolCallId:
+              $ref: '#/components/schemas/LocatorId'
+            toolName:
+              type: string
+              minLength: 1
+              maxLength: 200
+            toolVersion:
+              type: string
+              minLength: 1
+              maxLength: 200
+        - type: object
+          additionalProperties: false
+          required: [kind, attemptId]
+          properties:
+            kind:
+              const: lintel_browser
+            attemptId:
+              $ref: '#/components/schemas/LocatorId'
+    EvidenceBody:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, value]
+          properties:
+            kind:
+              const: inline_json
+            value: {}
+        - type: object
+          additionalProperties: false
+          required: [kind, artifact]
+          properties:
+            kind:
+              const: artifact
+            artifact:
+              $ref: '#/components/schemas/ArtifactSummary'
     ArtifactSummary:
       type: object
       required: [id, kind, sensitive, retentionKind, ownerType, ownerId, sizeBytes, sha256, bodyExpired, createdAt]
@@ -7121,27 +7820,6 @@ components:
           minimum: 0
         createdAt:
           $ref: '#/components/schemas/Timestamp'
-    UnviewedNotification:
-      type: object
-      required: [objectType, objectId]
-      properties:
-        objectType:
-          type: string
-          enum: [initial_analysis, investigation, inspection_run, knowledge_import_batch]
-        objectId:
-          $ref: '#/components/schemas/LocatorId'
-        state:
-          type: string
-          description: 权威对象当前终态（显示用）。
-    MarkViewedRequest:
-      type: object
-      required: [objectType, objectId]
-      properties:
-        objectType:
-          type: string
-          enum: [initial_analysis, investigation, inspection_run, knowledge_import_batch]
-        objectId:
-          $ref: '#/components/schemas/LocatorId'
     AuditEventSummary:
       type: object
       required: [id, actorType, actorId, action, outcome, createdAt]

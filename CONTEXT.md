@@ -48,7 +48,7 @@ Plinth、Lintel 和 Stele 分别使用类型固定、只能访问自身 RPC 的�
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 通过自身 service token 获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多短期同时保留新旧两个有效凭据。
 
 **模型调用边界**：
-模型供应商是 supervisor 持有的类型化外部连接。Plinth worker 通过本地 framed protobuf ChatModel 协议提交 messages、固定 tool schema 与可复核的非秘密请求摘要；模型 ID、输出预算和 generation 参数由 Quoin 当前 capability/grant 与固定 Agent 契约决定，worker/模型不得选择或覆盖。supervisor 先经 Quoin 持久化物理 Model Call，再只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Kubernetes Secret/kubeconfig、Browser profile/storage state、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。模型 Provider revision 在启用前必须由 Plinth supervisor 真实执行 Chat streaming、native/multi Tool Call、取消、usage/request ID 与 Embedding/dimension 探测；Embedding 和 provider probe 不启动 Agent worker。Provider SDK 隐式重试关闭；同一逻辑调用的自动物理重试只允许无任何响应的 `timeout|rate_limited|transport_error`，以及增加旧回合淘汰后的无响应 `context_overflow`，不对 provider unavailable、取消/终态 fence、invalid response 或 Artifact 提交失败自动重试。
+模型供应商是 supervisor 持有的类型化外部连接。配置时先真实请求 OpenAI-compatible `/v1/models`；返回多个 ID 时由 Admin 明确选择 Chat 与 Embedding model，不自动取第一项，接口缺失、空列表或目标未列出时允许手工填写 model ID。上下文容量等未声明且无法可靠实测的元数据允许手工补充，缺少能力声明不阻止保存为“尚未验证”；流式输出、native/multi Tool Call、取消与 Embedding dimension 等可实测能力仍由最小真实请求验证，成功后才能启用普通 Agent 任务，失败保留配置和原始错误。Plinth worker 通过本地 framed protobuf ChatModel 协议提交 messages、固定 tool schema 与可复核的非秘密请求摘要；模型 ID、输出预算和 generation 参数由 Quoin 当前 capability/grant 与固定 Agent 契约决定，worker/模型不得选择或覆盖。supervisor 先经 Quoin 持久化物理 Model Call，再只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Kubernetes Secret/kubeconfig、Browser profile/storage state、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。模型 Provider revision 在启用前必须由 Plinth supervisor 真实执行 Chat streaming、native/multi Tool Call、取消、usage/request ID 与 Embedding/dimension 探测；Embedding 和 provider probe 不启动 Agent worker。Provider SDK 隐式重试关闭；同一逻辑调用的自动物理重试只允许无任何响应的 `timeout|rate_limited|transport_error`，以及增加旧回合淘汰后的无响应 `context_overflow`，不对 provider unavailable、取消/终态 fence、invalid response 或 Artifact 提交失败自动重试。
 
 **Plinth worker 隔离边界**：
 v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处理 Attempt 输入前必须 fail-closed 建立 `no_new_privs`、Landlock ABI >= 6 与进程内 seccomp，只能访问既定只读运行时路径、当前一次性工作区和 framed stdio，不能读取 supervisor 的敏感 `/proc` 文件、发域外信号、建立外部网络连接、写工作区外路径或继承非 stdio FD。Plinth readiness 与每个 worker Ack 前都实际执行这些对抗检查，任一失败即 `sandbox_unavailable`，不得静默降级。v1 接受同 PID namespace 下世界可读的非秘密进程元数据可见，不引入 user namespace、bubblewrap、额外 worker daemon 或第二套本地协议。
@@ -103,11 +103,11 @@ _Avoid_: 对话历史、长期摘要、Agent memory、截断当前用户输入�
 _Avoid_: 消息正文、`.quoin/tool-results`、第二索引、无限内存缓冲、过期后从 Runtime 缓存恢复
 
 **撤回消息（Withdrawn Message）**：
-用户只能 Undo 当前有效对话的最新用户回合。每个 Investigation 只有一个当前有效 head，同时最多一个 active 模型 Attempt；发送消息携带 client command ID 与 expected head，Quoin 在一个事务中追加消息并创建 Attempt，重复命令返回原结果，head 已变化则冲突。Undo 后，该用户消息及基于它产生的助手回复、工具调用、Evidence 引用和知识草稿成为只读非活动分支，保留审计但不进入后续上下文；依赖该回合的 active Attempt 立即取消，迟到结果只留审计。新消息从撤回前的有效 head 继续。第一版不支持任意历史撤回、分支切换/合并、原地编辑或重新生成分支。
+用户只能 Undo 当前有效对话的最新用户回合。每个 Investigation 只有一个当前有效 head，同时最多一个 active 模型 Attempt；发送消息携带 client command ID 与 expected head，Quoin 在一个事务中追加消息并创建 Attempt，重复命令返回原结果，head 已变化则冲突。Undo 入口显示在最新用户消息下方；提交后，该用户消息及基于它产生的助手回复、工具调用、Evidence 引用和知识草稿成为只读非活动分支，保留审计但不进入后续上下文，依赖该回合的 active Attempt 立即取消，迟到结果只留审计；撤回消息正文与全部附件项一起返回发送框供用户修正后重新发送，新消息从撤回前的有效 head 继续。附件重发只新建消息—附件引用并复用同一份不可变 Artifact 字节，不复制 BLOB；撤回分支仍保留原引用。第一版不支持任意历史撤回、分支切换/合并、原地编辑或重新生成分支。
 _Avoid_: 删除消息、只隐藏输入而保留其结论、并发主线、通用分支管理器
 
 **文本附件（Text Attachment）**：
-用户附加到一条调查消息中的纯文本 Source Material，保留原始文件名、内容、大小、上传者和时间，并与该消息一同进入调查历史。每条消息最多一个，正文必须是有效 UTF-8、不得含 NUL、默认上限 10 MiB；不依赖扩展名判断内容。原始文件名只作为审计元数据，UI 显示转义后的 basename；Attempt 工作区固定写入 `attachments/<attachment-id>.txt` 并用 manifest 映射，不把用户文件名拼入路径。其精确字节和来源可追溯，但正文中的主张不自动成为已验证 Evidence。
+用户附加到一条调查消息中的纯文本 Source Material，保留原始文件名、内容、大小、上传者和时间，并与该消息一同进入调查历史；一条消息可以携带任意份文本附件，不另设个数限制，但全部附件合计受一个默认 10 MiB、可由部署调整的消息级边界约束，单个文件也不得超过该边界。每份正文必须是有效 UTF-8、不得含 NUL；不依赖扩展名判断内容。输入区将待发送附件显示为悬浮文件图标，发送后在用户消息正文下排列文件项，超过三份时默认折叠并明确显示剩余数量；发送条件为非空正文或至少一份附件，不要求用户为附件补写“见附件”。一次粘贴达到 16 KiB 或 200 行任一边界时，客户端确定性转换为可预览、可移除的临时 `.txt` 附件项；逐字输入不在过程中自动转换。原始文件名只作为审计元数据，UI 显示转义后的 basename；Attempt 工作区固定写入 `attachments/<attachment-id>.txt` 并用 manifest 映射，不把用户文件名拼入路径。其精确字节和来源可追溯，但正文中的主张不自动成为已验证 Evidence。
 _Avoid_: 任意文件、图片、压缩包、用户控制的工作区路径、确定性工具证据
 
 **诊断（Diagnosis）**：
@@ -117,20 +117,70 @@ _Avoid_: 事实、告警、整个调查、可覆盖的当前结论
 ## 工作台投影
 
 **三栏工作台**：
-第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；第二栏是当前模块的对象列表、筛选和主要操作；第三栏是选中对象的详情或工作区。登录后直接进入 `/alerts`，不建设独立仪表盘；全局模块为告警、调查、巡检、业务系统、知识和管理，Runtime 离线、登录失效和备份故障通过导航徽标及告警页状态区暴露。窄屏时第一栏变抽屉，列表与工作区分别全屏显示，返回时恢复筛选、滚动和选中状态；复杂 noVNC 登录提示优先使用桌面。
+第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；第二栏是当前模块的对象列表、筛选和主要操作；第三栏是选中对象的详情或工作区。登录后直接进入 `/alerts`，不建设独立仪表盘；Admin 的全局模块为告警、调查、巡检、业务系统、知识和管理，Operator 不显示管理入口，Runtime 离线、登录失效和备份故障通过可见模块的导航徽标及告警页状态区暴露。工作台直接启用所选 shadcn `sidebar-09`/Sidebar 与 Resizable primitives 已有的展开、折叠、隐藏、拖动调整、键盘调整和浏览器本地布局恢复能力，不另造平行布局系统；第一栏保持图标导航语义，第二栏可折叠或调整宽度，第三栏使用剩余空间。URL 未选择对象时不自动选择列表第一项，第三栏使用 shadcn `Empty` 的图标、标题、自然语言描述和至多一个主操作说明当前可做什么；不得留白或伪装成 Dashboard。窄屏时第一栏变抽屉，列表与工作区分别全屏显示；复杂 noVNC 登录明确提示优先使用桌面，但不禁用入口，也不增加复制秘密的替代流程。
+
+**工作台展示约定**：
+界面使用紧凑但不拥挤的运维信息密度，列表优先展示状态、对象名、关键时间和业务系统，完整内容进入详情，不提供密度设置。颜色跟随系统明暗偏好，不提供应用内主题设置。v1 界面使用简体中文，代码、labels、annotations、协议状态、日志和上游错误保留原文，不建立无实际消费者的 i18n 机制。业务筛选与实际存在的可切换排序进入 URL query，形成可刷新和可分享的确定性视图；v1 当前列表排序由领域契约固定，不暴露没有服务端契约的统一排序控件。分页游标、滚动位置、临时展开和选中状态属于当前浏览器历史项，返回时恢复并用服务端快照/SSE 调和。cursor 列表首次只读取一页，底部由明确的“加载更多”触发下一页，不伪造页码、不自动无限滚动；加载后仍是同一连续列表。实时新项目到达且用户不在顶部时，保持当前可视内容与焦点不动并显示“有 N 条新内容”，用户触发后合并并回到顶部；已在顶部时可直接合并，但不得抢焦点或自动打开详情。跨模块关联跳转使用浏览器原生历史，返回到来源详情，不维护第二套面包屑栈，也不默认新开标签页。
+_Avoid_: 大卡片列表、密度/主题配置页、把滚动像素写进可分享 URL、自定义导航历史、自动无限滚动、实时插入导致阅读位置跳动
 
 **首次设置投影**：
-空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、Thanos/Kubernetes Connection、Plinth/Lintel、Label Contract、Business System 配置、Browser Identity 登录、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可直接处理，Operator 只看到需要 Admin 完成的项目；完成后清单折叠但仍可从管理页查看。
+空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、Thanos/Kubernetes Connection、Plinth/Lintel、Label Contract、Business System 配置、Browser Identity 登录、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可在管理模块直接处理；Operator 不显示管理入口，只在告警等相关模块看到“需要管理员完成”的结果与影响，不暴露不可进入的配置清单。设置清单始终由权威状态派生且保留：全部就绪时折叠为一行“核心能力已就绪”，有故障或未完成依赖时自动展开受影响项并直达对应连接、Runtime、业务系统、Browser Identity、告警源或备份详情；不保存用户勾选的完成状态。
 _Avoid_: 空页面、强制线性向导、把内部对象依赖留给用户推导、所有能力全配齐才允许使用
 
+**管理工作区**：
+管理模块只对 Admin 出现在全局导航中；第二栏按设置清单、用户、Label Contract/Journey Catalog、连接、模型供应商、告警源、Runtime、备份、安全和审计分组，第三栏显示所选列表、详情或设置，不增加第四栏或卡片墙管理首页。每个业务系统自己的配置版本、计划、Observed Resource 与 Browser Identity 只在全局“业务系统”模块管理，管理模块不得建立第二入口。权限始终由服务端裁决，前端隐藏不是权限边界。
+_Avoid_: Operator 管理入口、独立只读系统状态模块、第四栏、管理 Dashboard 卡片墙
+
+**操作、表单与反馈**：
+只有会立即撤销 Session/凭据、停用当前能力、替换 Runtime、切换已发布版本或丢弃未保存输入的高影响操作才确认；确认直接说明影响对象与恢复方式，不要求输入对象名。普通读取、下载、测试、启动、重试不确认并立即反馈。普通设置显式提交、不逐字段自动保存；客户端只做机械即时校验，服务端结果是权威。失败保留全部输入、聚焦首个错误并提供页首摘要；成功在当前对象状态中持续可见，toast 只能补充。业务系统仍走 YAML 上传、静态校验、Test Run 与发布，不建立第二套表单或通用 JSON/YAML 编辑器。后台任务终态在所属列表/详情持续显示；用户位于其他模块时用导航徽标和非阻塞 toast 补充完成/失败并可返回对象，但不建设通知数据库、铃铛收件箱、已读状态或强制浏览器系统通知；六个导航图标只投影 active/failed Attempt、巡检 gap、待确认知识、未确认接入问题、Runtime/备份故障等可操作权威状态，重新打开应用时从对象状态重建，不只用 toast，也不自动跳转。时间主显示为带时区的浏览器本地绝对时间，相对时间只作辅助；hover/focus 或详情提供原始 offset 时间、UTC 与复制，持续时间单独显示。对象按 row version 原位刷新；若已不存在或不再可操作，保留已渲染内容并显示状态条、禁用非法操作和提供返回列表，Session/权限撤销仍立即结束访问。
+_Avoid_: 每次写操作确认、仅 toast 表达结果、自动保存半完成配置、错误后清空输入、伪造页码或时间、静默保留可提交的陈旧页面
+
+**跨模块交互状态**：
+Evidence、Initial Analysis、Inspection Report、Knowledge、配置版本和 Observed Resource 等已持久化长内容使用确定性嵌套路由铺满工作台；浏览器后退关闭阅读层，刷新和分享恢复同一对象。一次性秘密、未提交上传和未保存表单不进入可分享 URL。Stop/Cancel 提交后按钮立即变为不可重复触发的“正在停止”，保留当前阶段和已完成内容；只有服务端确认 cancellation fence/终态后才显示 `Cancelled`，失败则恢复合法操作并说明原因，用户可离开等待。部分完成不发明统一领域状态，而是并列显示父对象真实状态、每个子步骤终态和机械计数，已完成 Evidence/Artifact 继续可读，失败项原位提供合法恢复动作，程序不按比例生成健康结论。
+
+无权执行的写动作不显示；直接访问受限 URL 时显示工作区级 403，使用普通语言说明所需角色和返回入口，不伪装为对象不存在，也不建设申请权限流程。Session 失效时以不可绕过的重新登录层遮蔽应用，受保护内容不再可见；仅在当前页面内存暂存非秘密正文、附件引用和表单输入，不写浏览器持久存储，同一 principal 重新登录后恢复原 URL 与输入，principal 变化或刷新则丢弃，一次性秘密永不恢复。临时密码登录始终停留在登录页的第二阶段：先验证临时凭据，再在同一认证页面要求设置新密码，成功建立正常 Session 后才加载工作台数据。
+
+对网络中断、429、可恢复 5xx 和结果不确定的命令默认自动恢复：读取与复用同一 `client_command_id` 的命令总计尝试三次，重试间隔 1 秒、2 秒；验证失败、权限不足等确定性错误不重试。三次失败后显示“内部错误”、普通语言原因、“如持续发生请联系管理员”和可复制诊断；停留 10 秒后自动重读当前对象一次，仍失败则回到所属列表上一层。倒计时只存在当前页面内存，用户主动刷新、后退、离开或成功重试后立即取消，绝不在新页面继续旧回退。错误默认先用自然语言说明发生了什么、影响和下一步，并在表单页首或对象状态中持续显示；可展开技术详情只包含稳定错误码、request/Attempt ID、阶段、必要上游原文与复制诊断，禁止堆栈、Authorization、Cookie、秘密或整份无关请求正文。
+
+普通对象列表使用语义化链接/按钮与自然 Tab 顺序，`Tab` 可到达控件、`Enter/Space` 可操作；Sidebar、Dialog、Tabs、Resizable 等沿用 shadcn/Radix/APG 键盘行为，不把整个页面做成 application/grid，也不发明隐藏快捷键。抽屉/确认框打开时焦点不进入背后页面，关闭后回到触发控件；全工作台内容打开时焦点进入标题，关闭/后退后回到原消息或列表行及原滚动位置；未保存输入继续遵循丢弃确认。窄屏详情顶部始终提供明确“返回列表”，不依赖浏览器手势。普通模式的全工作台层使用简短、可中断的从右向左渐入/渐出；`prefers-reduced-motion` 时关闭位移、淡入淡出、列表重排和循环装饰动效，直接显示相同终态，同时保留静态阶段图标、文字和真实进度。
+_Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、按失败比例判健康、403 伪装 404、Session 草稿持久化、临时密码进入工作台、确定性错误重试、换 command ID 重试、跨页面遗留回退定时器、原始堆栈主错误、全局隐藏快捷键、reduced-motion 丢失等待反馈
+
 **告警列表与详情**：
-告警模块第二栏默认显示 Firing Occurrence，并按真正状态转换的 Quoin commit 时间倒序；Resolved 进入历史筛选。第三栏确定性展示状态、来源时间与接收时间、业务系统、完整 labels/annotations、Delivery 时间线、按业务系统与 identity labels 精确匹配的 ObservedResource、机械候选关联及原因、Initial Analysis 历史和引用该 Occurrence 的 Investigation；未匹配资源时明确显示“未匹配到观测资源”。severity 只是原样展示和筛选的普通 label，Quoin 不定义顺序，模型不推断。普通列表不显示 IdentityConflict 等接入问题。详情 URL 为 `/alerts/:occurrence`；Occurrence resolved 后当前 URL 仍可查看并明确显示已恢复。
+告警模块第二栏默认显示 Firing Occurrence，并按真正状态转换的 Quoin commit 时间倒序；Resolved 进入历史筛选。列表项使用紧凑两行而不是横向表格或大卡片：主行显示状态图标与文字、alertname 和关键时间，次行显示业务系统、可用的 severity 原值和必要状态徽标，选中/hover/focus/变化不只靠颜色表达。列表顶部固定“当前/历史”分段控件与业务系统可搜索 combobox，有筛选时可直接清除；不展示服务端不支持的任意 label 构造器、全文查询或 severity 顺序。第三栏确定性展示状态、来源时间与接收时间、业务系统、完整 labels/annotations、Delivery 时间线、按业务系统与 identity labels 精确匹配的 ObservedResource、机械候选关联及原因、Initial Analysis 历史和引用该 Occurrence 的 Investigation；未匹配资源时明确显示“未匹配到观测资源”。详情标题区只有一个“初步分析”主操作，运行后原位显示真实阶段与取消；正文优先展示最新成功结果的状态、摘要及 Evidence/Attempt 状态，旧成功、失败和取消记录进入按时间排列的版本历史；点击“查看完整分析”后使用与 Evidence 相同的从右向左渐入并铺满整个工作台的阅读层，关闭后恢复原详情位置。severity 只是原样展示和筛选的普通 label，Quoin 不定义顺序，模型不推断。普通列表不显示 IdentityConflict 等接入问题。告警第二栏顶部使用“当前 / 历史 / 接入问题”三个分段；接入问题有独立列表与 URL query，不混入 Occurrence，也不新增全局模块。未确认问题优先显示类型、逻辑告警源、首次/最近发生时间和重复次数；详情先用普通语言解释影响，再展示关联 Delivery、项目索引、冲突 labels/fingerprint、截断数量与不可变历史。Operator 只读，Admin 可原位“标记已处理”且不弹第二个确认框；确认不删除历史，已处理项仍可筛选，后续再次发生形成新的待处理事实。存在未确认接入问题时告警导航图标显示可解释警示徽标。详情 URL 为 `/alerts/:occurrence`；Occurrence resolved 后当前 URL 仍可查看并明确显示已恢复。
 
 **实时投影**：
-影响告警列表的事务在同一 SQLite 事务中产生单调递增 `alert_change_seq`；HTTP 快照返回 `snapshot_seq`，每个 Occurrence 返回 `row_version`。客户端首次建立 SSE 时携带 `after=snapshot_seq`，重连使用 `Last-Event-ID`；Quoin 回放其后的有界派生变更。SSE 可重复投递，客户端按 sequence 与 row version 幂等应用；游标过期时返回 `resync_required` 并重新读取完整快照。事件只携带 Occurrence ID、变化类型和版本，选中详情发现版本变化后重新读取。Resolved 从 Firing 列表移除，但已打开 URL 继续显示并标记已恢复。新告警非阻塞提示不打断当前详情；该变更流可丢弃、可重建，不是告警历史权威源。
+影响告警列表的事务在同一 SQLite 事务中产生单调递增 `alert_change_seq`；HTTP 快照返回 `snapshot_seq`，每个 Occurrence 返回 `row_version`。客户端首次建立 SSE 时携带 `after=snapshot_seq`，重连使用 `Last-Event-ID`；Quoin 回放其后的有界派生变更。断线、重连、回放和游标过期后的完整快照刷新均在前端静默完成，不向普通用户暴露 SSE、sequence、cursor、resync 等无可操作价值的技术名词，不清空当前阅读位置或抢焦点；多次恢复失败后统一进入普通内部错误恢复流程。SSE 可重复投递，客户端按 sequence 与 row version 幂等应用；游标过期时重新读取完整快照。事件只携带 Occurrence ID、变化类型和版本，选中详情发现版本变化后重新读取。Resolved 从 Firing 列表移除，但已打开 URL 继续显示并标记已恢复。新告警非阻塞提示不打断当前详情；该变更流可丢弃、可重建，不是告警历史权威源。
 
 **调查与巡检工作区**：
-调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，URL 为 `/investigations/:investigation`；巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。noVNC 瞬断进入短暂 `AwaitingReconnect`，同一 Session 可重附着，宽限期后关闭 BrowserSession 释放身份锁，且不自动发布 profile generation。
+调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，既有调查 URL 为 `/investigations/:investigation`。列表标题由程序从当前分支第一条有效用户消息机械生成，空白时回退为关联来源或“新调查 + 创建时间”，不持久化独立标题、不调用模型；列表按当前分支最后消息/Attempt 活动时间倒序。点击新建先进入 `/investigations/new` 空白对话，第一条消息被服务端接受时才原子创建 Investigation、消息和 Attempt；未发送即离开不产生空记录，也不先要求标题、业务系统、告警、模型或工具。从告警进入时在发送框上方显示当前 Occurrence 与用户选中 Initial Analysis 的不可变来源项并直接聚焦输入，第一条消息提交时与来源原子写入。用户位于底部时跟随新 token/message；用户向上阅读后停止自动滚动并显示“查看新回复”，不得抢焦点或改变阅读位置。失败 Attempt 对应的用户消息左侧显示环形重试按钮，点击后按既有消息创建新 Attempt；active Attempt 期间发送按钮变为方形停止按钮，点击提交 cancellation fence，终态后恢复发送按钮。Tool Call 在对话中显示为可折叠状态卡片，默认展示工具名、真实阶段、耗时或终态与人类可读摘要，原始参数、输出和诊断详情原位展开；窄屏不为工具调用增加第二页面或上下分屏。点击 Evidence 引用后，内容从右向左渐入并铺满整个工作台，关闭后恢复原消息与滚动位置；Initial Analysis 完整正文与 Inspection Report 也使用同一全工作台阅读层，详情只保留状态、摘要和版本入口；减少动态效果模式直接切换到同一终态。巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。noVNC 瞬断进入短暂 `AwaitingReconnect`，同一 Session 可重附着，宽限期后关闭 BrowserSession 释放身份锁，且不自动发布 profile generation。
+
+**巡检工作台投影**：
+巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示业务系统、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的业务系统和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择业务系统及其已发布计划，从业务系统详情进入时预填；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，按状态与时间、检查结果、Evidence 缺口、分析状态、报告版本排列，并提供简短页内 section navigation，不拆成隐藏上下文的多 tab。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。`AuthenticationRequired` 直达该业务系统 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
+_Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试、登录后改写或自动补跑旧 Run
+
+**知识工作台投影**：
+知识模块第二栏分为“知识 / 待确认 / 导入批次”，第三栏显示所选详情；只有导入批次提供“导入文本”，不提供空白知识表单或知识 Dashboard。人类检索只有一个自然语言输入，结果分列“精确文本匹配”和“语义相似”，分别保留命中依据、分数与索引状态；同一 Knowledge 双重命中时只显示一次并标出两种依据，程序不合成统一相关性总分，也不要求用户先选择 FTS5/向量实现。Knowledge Candidate 从来源诊断、待确认列表进入一个从右向左铺满工作台的编辑层，只编辑标题、正文和适用范围，来源诊断/Evidence 只读；草稿按 revision 保存，冲突时保留本地输入并展示最新版本，不静默覆盖。成功 Initial Analysis 与 Inspection Report 标题区提供次要“整理为知识”，Investigation 只在用户明确选中的 assistant message 菜单提供；点击创建或返回同源 AwaitingConfirmation Candidate 并直接打开编辑层，已有 Candidate 不重复创建，已被标记“不采纳”的诊断不能再创建。导入批次接收一份粘贴原文后立即进入可离开的真实 Processing 状态；成功后在同一批次逐条展开修改或排除 Candidate，并以一次事务确认当前全部，任一 revision 冲突则全不提交并定位冲突项。
+
+每个不可变 Diagnosis 正文底部提供“记录实际结果”：已采纳、已执行、验证有效、不采纳。反馈精确绑定 Initial Analysis 输出、Inspection Report 版本或具体 Investigation assistant message，追加不可变事件并原位显示最新投影与历史；程序不强制四种反馈必须按顺序经过，也不维护 Investigation 级总反馈。每次反馈可选填简短说明；正向反馈直接追加，“不采纳”须确认相关 Candidate 将变为 SourceInvalid、已确认 KnowledgeVersion 将永久退出检索。知识详情展示当前版本、范围、来源诊断、反馈、检索/index 状态和不可变历史；“修订”以当前版本预填待确认草稿，确认后创建下一不可变版本，不原地覆盖；一次修订 Candidate 被排除后保留历史，但同一 current version 仍可重新发起新修订，不能形成永久死路；“停止复用”经影响确认使该版本粘性退出，恢复只能修订并重新确认新版本。
+_Avoid_: 混排正式知识与候选、索引实现选择器、程序融合排名、窄弹窗编辑长正文、模型自动写入、逐条跨页面确认
+
+**业务系统工作台投影**：
+业务系统模块第二栏使用紧凑两行列表：主行显示系统名称与 `Enabled|Disabled`，次行显示当前配置版本、资源数据新鲜度、Browser Identity 状态和待处理徽标；顶部只有状态筛选和名称搜索。第三栏为连续详情页，依次展示当前状态、配置版本、巡检计划、Observed Resource 与 Browser Identity，并用简短页内 section navigation；关联 Run、资源和不可变版本使用确定性子路由或全工作台阅读层，返回后恢复原位置。Admin 从列表标题或配置 section 进入全工作台上传层，可下载起始模板、拖放或选择一份 YAML，并查看目标 Label Contract 与 Journey Catalog provenance；失败保留文件并逐项显示 YAML path、原因和修复方法，不提供 YAML 编辑器或平行表单。版本历史逐项显示真实状态，不发明“当前草稿”；版本详情机械展示相对当前发布版本的 YAML diff、静态校验、Config Test Run 历史和契约兼容性。“运行测试”创建独立 Test Run；“发布”经一次影响确认原子切换，冲突后重新读取权威指针且不覆盖其他版本。业务系统启停只由新 YAML 版本的根 `enabled` 字段发布完成，不增加开关；Disabled 系统和历史对 Operator 仍可见，但不能创建新的普通巡检。
+
+Observed Resource 列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，显示 discovery、身份 labels、最后成功刷新与最后见到时间；点击后铺满工作台查看完整 labels、discovery、观测时间与当前/陈旧状态，不把未观测到解释为删除；v1 没有资源历史引用数据模型，不制造该列表。Browser Identity section 显示当前状态、revision、profile generation、最近 probe 与占用情况；Admin 配置层只编辑显示名、起始 URL、authentication probe 与类型化参数并创建新 revision，Operator 只能对既有身份执行重新登录。`/business-systems/:system/browser-login` 中 noVNC 铺满工作台，顶部固定窄工具条显示业务系统、真实 operation 状态、重连提示、发布与取消；发布成功关闭远程桌面并回到来源详情，关闭页面不隐式取消，窄屏保留入口并提示桌面体验更可靠。
+
+**Label Contract 激活投影**：
+管理页使用全工作台 readiness 视图，展示目标契约、每个已启用业务系统的全部合法“配置版本 + Passed Config Test Run”候选和阻塞原因；多个合法候选必须由 Admin 明确选择，不以“最新”代替。全部系统选择完整后经一次影响确认原子激活；阻塞项直接跳转对应业务系统版本或 Test Run，禁止先切契约再逐系统修复。
+_Avoid_: 双配置入口、Business System 卡片墙、latest draft、上传即发布、可编辑 CMDB、Cookie/profile 文件编辑、部分激活
+
+**账号、Session 与审计投影**：
+全局导航底部头像菜单只包含当前身份/角色、修改密码、我的 Session、审计记录和退出；低频账号操作不占主导航。我的 Session 使用全工作台层列出设备/浏览器、创建时间、最后活动并标记当前 Session，其他 Session 可逐个撤销，确认明确说明对应 SSE/WebSocket 会立即断开。Admin 用户管理列表显示用户名、显示名、角色、启用状态和最后登录；详情原位修改显示名/角色/状态，并提供重置密码和撤销全部 Session。禁用、降级、重置密码与撤销 Session 均说明现有登录影响；最后一个有效 Admin 的服务端冲突原样解释，不通过隐藏按钮冒充不可能。所有登录用户可从头像菜单进入 `/audit` 全工作台审计列表，按 actor type、action 与时间筛选并查看结构化事件；它不是第七个常驻模块，返回恢复原业务页面。
+
+**连接、凭据与 Runtime 管理投影**：
+管理页按 Thanos、Kubernetes、模型供应商等真实 Connection kind 使用类型化表单，只收集该类型真实的非秘密字段和凭据，不提供任意 URL+JSON 编辑器。详情分开显示当前 ConnectionRevision、CredentialGeneration、启用/重验状态、最近真实测试与不可变历史；Operator 只在相关业务页面看到非秘密连接状态与影响。模型供应商创建/轮换后显示“尚未验证”：先列出 `/v1/models` 返回 ID 供 Admin 选择，列表缺失时提供手工 model ID 与未声明元数据输入；真实 capability probe 可后台运行，成功后显示实测能力并允许启用，失败保留 revision/generation、手工输入和原始错误，已启用供应商轮换时先停用且不在 probe 前自动恢复。Alert Source 详情显示凭据的非秘密 ID、状态、创建与最后使用时间；轮换后可短期显示新旧两个 Active generation，并提示“更新 Alertmanager → 确认新凭据已使用 → 显式吊销旧凭据”，程序不自动猜测切换完成或自动吊销。创建/轮换返回 reveal handle 时，前端立即调用一次 reveal 并打开铺满工作台的一次性秘密层：原文可见且可复制，明确关闭后不能再次查看；秘密只在当前页面内存存在，不进入 URL、toast、日志、下载或浏览器持久存储，关闭后只能通过新轮换取得。
+
+Plinth/Lintel 两个固定 Runtime slot 各自分离展示持久注册状态与当前在线状态，并显示 generation、最后见到时间和 active 工作阻塞。替换先确认吊销与能力中断影响；服务端 fence 通过后使用同一一次性秘密层显示注册令牌，随后持续显示“等待新 Runtime 注册/连接”，不建设可新增 slot 的 Runtime 管理器。备份页为连续页面：顶部显示目标挂载状态、计划时间、IANA 时区、保留份数与最近成功，并显式保存设置；下方展示不可变备份记录、真实阶段/错误、大小、checksum 和下载，“立即备份”受理后可离开。失败在告警页/管理徽标持续提示并可重试；Web UI 不提供在线恢复，只提供停机恢复说明与所选备份 manifest 信息。
+_Avoid_: 个人设置全局模块、通用连接 JSON、秘密持久化、自动吊销旧凭据、健康/异常单灯、动态 Runtime slot、在线覆盖恢复
 
 ## 资源与巡检
 
@@ -248,7 +298,7 @@ Artifact 的临时文件与最终文件必须位于同一文件系统：完成�
 **健康语义**：
 Quoin 取得数据目录锁并完成 migration 前不 Ready；Plinth/Lintel 只有在 token、版本握手和控制流被 Quoin 接受后 Ready；Stele 只有版本握手及告警源 digest 快照加载成功后 Ready。Quoin 暂时离线不得使 Runtime liveness 失败并触发循环重启；Compose `depends_on` 只改善启动顺序，不能替代组件自身重连和 Ready 判断。
 
-## 通知投影
+## 任务终态提示
 
 **后台任务提示**：
-不建设邮件、浏览器 Push 或独立通知中心。Initial Analysis、Investigation Attempt、Inspection Run、Knowledge Import Batch 等权威对象的终态派生 UI 提示：用户在线时以非阻塞 toast 提示自己发起任务的成功、失败、取消或中断；离开后使用服务端 per-user 未查看标记在相关模块显示徽标，打开对象即标记已查看而不删除历史。正常成功的定时巡检不逐次打扰；`CompletedWithGaps`、`Failed`、`RuntimeUnavailable`、`AuthenticationRequired` 等异常定时结果向 Operator/Admin 显示，只有 Admin 能处理的用户、凭据、Runtime、备份问题只向 Admin 显示。通知不复制报告正文，也不能反向修改任务状态。
+不建设邮件、浏览器 Push、通知数据库、铃铛收件箱、已读/未读或 per-user 未查看状态。Initial Analysis、Investigation Attempt、Inspection Run、Knowledge Import Batch 等权威对象的终态持续保留在原对象、模块列表和详情中；模块徽标只能由当前可操作权威状态即时派生，打开对象不得产生“已查看”写入。用户在线时可用非阻塞 toast 提示自己发起任务的成功、失败、取消或中断；离开后返回时直接从权威对象查询结果。正常成功的定时巡检不逐次打扰；`CompletedWithGaps`、`Failed`、`RuntimeUnavailable`、`AuthenticationRequired` 等异常结果在其所属模块持续可见，只有 Admin 能处理的用户、凭据、Runtime、备份问题只向 Admin 显示。提示不复制报告正文，也不能反向修改任务状态。

@@ -1,0 +1,522 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quoin.local/schemas/frontend-state.schema.json",
+  "title": "Quoin frontend workbench state",
+  "description": "Issue #15 的前端可观察状态权威：只描述 URL/HTTP/SSE/本地面板偏好如何投影为人类工作台，不成为领域数据或任务生命周期的第二权威。",
+  "oneOf": [
+    { "$ref": "#/$defs/workbenchState" },
+    { "$ref": "#/$defs/workspaceState" },
+    { "$ref": "#/$defs/emptyState" },
+    { "$ref": "#/$defs/listState" },
+    { "$ref": "#/$defs/taskState" },
+    { "$ref": "#/$defs/chatState" },
+    { "$ref": "#/$defs/intakeIssueState" },
+    { "$ref": "#/$defs/diagnosisFeedbackState" },
+    { "$ref": "#/$defs/knowledgeState" },
+    { "$ref": "#/$defs/fullScreenReadingState" },
+    { "$ref": "#/$defs/sessionAuthenticationState" }
+  ],
+  "$defs": {
+    "locatorId": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9(?:[0-1][0-9]{17}|2(?:[0-1][0-9]{16}|2(?:[0-2][0-9]{15}|3(?:[0-2][0-9]{14}|3(?:[0-6][0-9]{13}|7(?:[0-1][0-9]{12}|20(?:[0-2][0-9]{10}|3(?:[0-5][0-9]{9}|6(?:[0-7][0-9]{8}|8(?:[0-4][0-9]{7}|5(?:[0-3][0-9]{6}|4(?:[0-6][0-9]{5}|7(?:[0-6][0-9]{4}|7(?:[0-4][0-9]{3}|5(?:[0-7][0-9]{2}|80(?:[0-6]|7)))))))))))))))))$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "module": {
+      "type": "string",
+      "enum": ["alerts", "investigations", "inspections", "businessSystems", "knowledge", "admin", "account"]
+    },
+    "selectionKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "模块对象的原始选择 key；写入 URL path 前必须按单个 path segment 编码，不在此重复收紧 StableKey 词法。"
+    },
+    "queryState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "q": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "status": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "uniqueItems": true
+        },
+        "businessSystem": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "tab": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "moduleMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query"],
+      "properties": {
+        "query": { "$ref": "#/$defs/queryState" },
+        "selectedKey": { "$ref": "#/$defs/selectionKey" },
+        "listCursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "scrollOffset": { "type": "number", "minimum": 0 }
+      }
+    },
+    "workspaceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "viewport", "module", "path", "query", "firstColumnHidden", "middleColumnHidden", "rightColumnHidden"],
+      "properties": {
+        "kind": { "const": "workspace" },
+        "viewport": { "type": "string", "enum": ["desktop", "narrow"] },
+        "module": { "$ref": "#/$defs/module" },
+        "path": { "type": "string", "pattern": "^/(alerts|investigations|inspections|business-systems|knowledge|admin)(/[^/?#\\s]+)*$|^/(audit|sessions|change-password)(/[^/?#\\s]+)*$" },
+        "query": { "$ref": "#/$defs/queryState" },
+        "firstColumnHidden": { "type": "boolean" },
+        "middleColumnHidden": { "type": "boolean" },
+        "rightColumnHidden": { "type": "boolean" },
+        "panelSizes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["navigationPercent", "listPercent"],
+          "properties": {
+            "navigationPercent": { "type": "number", "minimum": 8, "maximum": 20 },
+            "listPercent": { "type": "number", "minimum": 18, "maximum": 45 }
+          },
+          "description": "第三栏占剩余百分比；两个上限保证剩余空间至少 35%，避免另存一个可能与总和漂移的第三值。"
+        },
+        "mobileLayer": { "type": "string", "enum": ["navigation", "list", "detail"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "module": { "const": "alerts" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/alerts(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "investigations" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/investigations(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "inspections" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/inspections(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "businessSystems" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/business-systems(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "knowledge" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/knowledge(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "admin" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/admin(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "module": { "const": "account" } }, "required": ["module"] },
+          "then": { "properties": { "path": { "pattern": "^/(audit|sessions|change-password)(?:/|$)" } } }
+        },
+        {
+          "if": { "properties": { "viewport": { "const": "desktop" } }, "required": ["viewport"] },
+          "then": {
+            "properties": { "firstColumnHidden": { "const": false } },
+            "not": { "required": ["mobileLayer"] }
+          },
+          "else": { "required": ["mobileLayer"] }
+        },
+        {
+          "if": { "properties": { "viewport": { "const": "narrow" }, "mobileLayer": { "const": "navigation" } }, "required": ["viewport", "mobileLayer"] },
+          "then": { "properties": { "firstColumnHidden": { "const": false }, "middleColumnHidden": { "const": true }, "rightColumnHidden": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "viewport": { "const": "narrow" }, "mobileLayer": { "const": "list" } }, "required": ["viewport", "mobileLayer"] },
+          "then": { "properties": { "firstColumnHidden": { "const": true }, "middleColumnHidden": { "const": false }, "rightColumnHidden": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "viewport": { "const": "narrow" }, "mobileLayer": { "const": "detail" } }, "required": ["viewport", "mobileLayer"] },
+          "then": { "properties": { "firstColumnHidden": { "const": true }, "middleColumnHidden": { "const": true }, "rightColumnHidden": { "const": false } } }
+        }
+      ]
+    },
+    "workbenchState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "active", "moduleState"],
+      "properties": {
+        "kind": { "const": "workbench" },
+        "active": { "$ref": "#/$defs/workspaceState" },
+        "moduleState": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "alerts": { "$ref": "#/$defs/moduleMemory" },
+            "investigations": { "$ref": "#/$defs/moduleMemory" },
+            "inspections": { "$ref": "#/$defs/moduleMemory" },
+            "businessSystems": { "$ref": "#/$defs/moduleMemory" },
+            "knowledge": { "$ref": "#/$defs/moduleMemory" },
+            "admin": { "$ref": "#/$defs/moduleMemory" }
+          }
+        }
+      }
+    },
+    "emptyState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason", "icon", "title", "description"],
+      "properties": {
+        "kind": { "const": "empty_state" },
+        "reason": { "type": "string", "enum": ["no_selection", "no_results", "no_data", "not_available"] },
+        "icon": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "primaryAction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "command"],
+          "properties": {
+            "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "command": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        }
+      }
+    },
+    "listState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "module", "items", "hasMore", "newItemsPending"],
+      "properties": {
+        "kind": { "const": "list" },
+        "module": { "$ref": "#/$defs/module" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "primary", "secondary"],
+            "properties": {
+              "key": { "$ref": "#/$defs/selectionKey" },
+              "primary": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "secondary": { "type": "string", "maxLength": 512 },
+              "status": { "type": "string", "maxLength": 64 }
+            }
+          }
+        },
+        "hasMore": { "type": "boolean" },
+        "nextCursor": { "type": "string", "minLength": 1 },
+        "newItemsPending": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hasMore": { "const": true } }, "required": ["hasMore"] },
+          "then": { "required": ["nextCursor"] },
+          "else": { "not": { "required": ["nextCursor"] } }
+        }
+      ]
+    },
+    "humanError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "impact", "recovery"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "impact": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "recovery": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "technicalReason": { "type": "string", "maxLength": 4096 },
+        "diagnosticId": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "taskState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "objectType", "objectId", "state", "stageLabel", "updatedAt"],
+      "properties": {
+        "kind": { "const": "task_state" },
+        "objectType": {
+          "type": "string",
+          "enum": ["initial_analysis", "execution_attempt", "inspection_run", "inspection_report", "tool_call", "knowledge_import_batch", "knowledge_candidate", "browser_operation", "config_test_run"]
+        },
+        "objectId": { "$ref": "#/$defs/locatorId" },
+        "state": { "type": "string", "minLength": 1 },
+        "stageLabel": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "progress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["completed", "remaining", "unit"],
+          "properties": {
+            "completed": { "type": "integer", "minimum": 0 },
+            "remaining": { "type": "integer", "minimum": 0, "description": "服务端可测的剩余单位数；总量由 completed + remaining 派生，避免表达 completed > total。" },
+            "unit": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        },
+        "error": { "$ref": "#/$defs/humanError" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "objectType": { "const": "initial_analysis" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Queued", "Running", "Succeeded", "Failed", "Cancelled", "Interrupted"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "execution_attempt" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Queued", "Assigned", "Running", "Cancelling", "Succeeded", "Failed", "Cancelled", "Interrupted"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "inspection_run" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Queued", "Running", "Completed", "CompletedWithGaps", "Failed", "Cancelled", "Interrupted", "SkippedOverlap"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "inspection_report" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "const": "Completed" } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "tool_call" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["pending", "running", "succeeded", "failed", "cancelled"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "knowledge_import_batch" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Processing", "AwaitingConfirmation", "Failed", "Completed", "Cancelled"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "knowledge_candidate" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["AwaitingConfirmation", "Confirmed", "Excluded", "Superseded", "SourceInvalid"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "browser_operation" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Queued", "WaitingForCapacity", "Starting", "Running", "AwaitingReconnect", "Succeeded", "Failed", "Cancelled", "Interrupted"] } } }
+        },
+        {
+          "if": { "properties": { "objectType": { "const": "config_test_run" } }, "required": ["objectType"] },
+          "then": { "properties": { "state": { "enum": ["Queued", "Running", "Passed", "Failed", "Cancelled", "Interrupted"] } } }
+        }
+      ]
+    },
+    "textAttachmentSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifactId", "originalFilename", "mediaType", "sizeBytes", "digest", "bodyExpired", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "artifactId": { "$ref": "#/$defs/locatorId" },
+        "originalFilename": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "mediaType": { "const": "text/plain" },
+        "sizeBytes": { "type": "integer", "minimum": 0, "description": "实际正文大小；允许范围由部署的消息级附件边界决定，Schema 不硬编码默认值。" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bodyExpired": { "type": "boolean" },
+        "createdAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "seq", "role", "status", "content", "attachments", "evidenceIds", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "enum": ["user", "assistant"] },
+        "status": { "type": "string", "enum": ["active", "withdrawn"] },
+        "content": { "type": "string" },
+        "attachments": { "type": "array", "items": { "$ref": "#/$defs/textAttachmentSummary" }, "uniqueItems": true },
+        "evidenceIds": { "type": "array", "items": { "$ref": "#/$defs/locatorId" }, "uniqueItems": true, "description": "对话引用的不可变 Evidence locator；详情经 OpenAPI getEvidence 读取。" },
+        "attemptId": { "$ref": "#/$defs/locatorId" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "delivery": { "type": "string", "enum": ["sending", "sent", "failed"] },
+        "canRetry": { "type": "boolean" },
+        "canUndo": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "assistant" } }, "required": ["role"] },
+          "then": { "properties": { "canUndo": { "const": false }, "canRetry": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "withdrawn" } }, "required": ["status"] },
+          "then": { "properties": { "canUndo": { "const": false }, "canRetry": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "canRetry": { "const": true } }, "required": ["canRetry"] },
+          "then": { "properties": { "role": { "const": "user" }, "status": { "const": "active" }, "delivery": { "const": "failed" } }, "required": ["delivery"] }
+        },
+        {
+          "if": { "properties": { "canUndo": { "const": true } }, "required": ["canUndo"] },
+          "then": { "properties": { "role": { "const": "user" }, "status": { "const": "active" }, "delivery": { "const": "sent" } }, "required": ["delivery"] }
+        }
+      ]
+    },
+    "composer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "attachmentIds", "sendControl", "requestPending"],
+      "properties": {
+        "text": { "type": "string" },
+        "attachmentIds": { "type": "array", "items": { "$ref": "#/$defs/locatorId" }, "uniqueItems": true },
+        "sendControl": { "type": "string", "enum": ["send", "stop"] },
+        "requestPending": { "type": "boolean", "description": "发送命令尚未被服务端受理；send 按钮保持原位但禁用，不能伪装成可取消 Attempt。" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "sendControl": { "const": "stop" } }, "required": ["sendControl"] },
+          "then": { "properties": { "requestPending": { "const": false } } }
+        }
+      ]
+    },
+    "chatState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messages", "composer"],
+      "properties": {
+        "kind": { "const": "chat" },
+        "investigationId": { "$ref": "#/$defs/locatorId" },
+        "headMessageId": { "$ref": "#/$defs/locatorId" },
+        "activeAttemptId": { "$ref": "#/$defs/locatorId" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+        "composer": { "$ref": "#/$defs/composer" }
+      }
+    },
+    "intakeIssueSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceId", "sourceKey", "kind", "firstSeenAt", "lastSeenAt", "occurrenceCount", "rowVersion", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "sourceId": { "$ref": "#/$defs/locatorId" },
+        "sourceKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "type": "string", "enum": ["identity_conflict", "fingerprint_mismatch", "delivery_truncated"] },
+        "firstSeenAt": { "$ref": "#/$defs/timestamp" },
+        "lastSeenAt": { "$ref": "#/$defs/timestamp" },
+        "occurrenceCount": { "type": "integer", "minimum": 1 },
+        "acknowledgedAt": { "$ref": "#/$defs/timestamp" },
+        "acknowledgedBy": { "$ref": "#/$defs/locatorId" },
+        "rowVersion": { "type": "integer", "minimum": 1 },
+        "createdAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "dependentRequired": { "acknowledgedAt": ["acknowledgedBy"], "acknowledgedBy": ["acknowledgedAt"] }
+    },
+    "intakeIssueEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "issueId", "detail", "observedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "issueId": { "$ref": "#/$defs/locatorId" },
+        "deliveryId": { "$ref": "#/$defs/locatorId" },
+        "deliveryItemId": { "$ref": "#/$defs/locatorId" },
+        "detail": { "type": "object", "additionalProperties": true },
+        "observedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "anyOf": [{ "required": ["deliveryId"] }, { "required": ["deliveryItemId"] }]
+    },
+    "intakeIssueState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "issue", "events", "canAcknowledge"],
+      "properties": {
+        "kind": { "const": "intake_issue" },
+        "issue": { "$ref": "#/$defs/intakeIssueSummary" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/intakeIssueEvent" } },
+        "canAcknowledge": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "issue": { "required": ["acknowledgedAt"] } }, "required": ["issue"] },
+          "then": { "properties": { "canAcknowledge": { "const": false } } }
+        }
+      ]
+    },
+    "feedbackItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "targetType", "targetId", "value", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "targetType": { "type": "string", "enum": ["initial_analysis_output", "inspection_report", "investigation_message"] },
+        "targetId": { "$ref": "#/$defs/locatorId" },
+        "value": { "type": "string", "enum": ["adopted", "executed", "verified_effective", "rejected"] },
+        "note": { "type": "string", "maxLength": 4096 },
+        "createdAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "diagnosisFeedbackState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "targetType", "targetId", "timeline"],
+      "properties": {
+        "kind": { "const": "diagnosis_feedback" },
+        "targetType": { "type": "string", "enum": ["initial_analysis_output", "inspection_report", "investigation_message"] },
+        "targetId": { "$ref": "#/$defs/locatorId" },
+        "selected": { "type": "string", "enum": ["adopted", "executed", "verified_effective", "rejected"] },
+        "timeline": { "type": "array", "items": { "$ref": "#/$defs/feedbackItem" } }
+      }
+    },
+    "knowledgeSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "currentVersionId", "currentVersionSeq", "eligible", "rowVersion"],
+      "properties": {
+        "id": { "$ref": "#/$defs/locatorId" },
+        "title": { "type": "string", "minLength": 1 },
+        "currentVersionId": { "$ref": "#/$defs/locatorId" },
+        "currentVersionSeq": { "type": "integer", "minimum": 1 },
+        "eligible": { "type": "boolean" },
+        "rowVersion": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "knowledgeHit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["knowledge", "score"],
+      "properties": {
+        "knowledge": { "$ref": "#/$defs/knowledgeSummary" },
+        "score": { "type": "number" },
+        "indexState": { "type": "string", "enum": ["ready", "stale", "rebuilding"] }
+      }
+    },
+    "knowledgeState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mode", "items"],
+          "properties": {
+            "kind": { "const": "knowledge" },
+            "mode": { "const": "browse" },
+            "items": { "type": "array", "items": { "$ref": "#/$defs/knowledgeSummary" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mode", "exactTextMatches", "semanticMatches"],
+          "properties": {
+            "kind": { "const": "knowledge" },
+            "mode": { "const": "query" },
+            "exactTextMatches": { "type": "array", "items": { "$ref": "#/$defs/knowledgeHit" } },
+            "semanticMatches": { "type": "array", "items": { "$ref": "#/$defs/knowledgeHit" } }
+          }
+        }
+      ]
+    },
+    "fullScreenReadingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "contentType", "contentId", "openerFocusId", "returnScrollAnchor", "transition"],
+      "properties": {
+        "kind": { "const": "full_screen_reading" },
+        "contentType": { "type": "string", "enum": ["initial_analysis", "inspection_report", "evidence", "artifact", "knowledge_version", "config_version", "observed_resource", "audit_event", "session"] },
+        "contentId": { "$ref": "#/$defs/locatorId" },
+        "openerFocusId": { "type": "string", "minLength": 1 },
+        "returnScrollAnchor": { "type": "string", "minLength": 1 },
+        "transition": { "type": "string", "enum": ["entering", "open", "leaving"] }
+      }
+    },
+    "sessionAuthenticationState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason", "message", "canRetry"],
+      "properties": {
+        "kind": { "const": "session_authentication" },
+        "reason": { "type": "string", "enum": ["not_authenticated", "session_expired", "session_revoked", "password_change_required"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "canRetry": { "type": "boolean" }
+      }
+    }
+  }
+}
