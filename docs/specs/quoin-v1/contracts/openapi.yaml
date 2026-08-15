@@ -12,6 +12,42 @@ servers:
   - url: /
 security:
   - sessionCookie: []
+x-quoin-security:
+  publicOriginSource: deployment-config
+  forwardedHeadersTrustedOnlyFromConfiguredProxyCidrs: true
+  sessionCookie:
+    name: __Host-quoin-session
+    rawBytes: 32
+    persistedForm: sha256-digest-only
+    secure: true
+    httpOnly: true
+    sameSite: Lax
+    path: /
+    domainAttribute: forbidden
+    acceptedTransport: cookie-only
+  csrf:
+    unsafeCookieRequestMissingOriginAndFetchMetadata: reject
+    loginMissingOriginAndFetchMetadata: reject
+    loginAllowedWithoutOriginFetchSite: same-origin
+    websocketOrigin: exact-public-origin
+  protectedResponseHeaders:
+    xContentTypeOptions: nosniff
+    referrerPolicy: no-referrer
+    contentSecurityPolicyOwner: quoin-central-policy
+    hstsOwner: tls-termination-layer
+  reveal:
+    rawSecretBytes: 32
+    handleTtlSeconds: 60
+    consumption: same-session-once
+    persistence: forbidden
+  rootKey:
+    source: read-only-file
+    bytes: 32
+    aead: AES-256-GCM
+    nonceBytes: 12
+  maintenanceDefault: deny
+  sensitiveDownloadBearerUrl: forbidden
+  description: 安全跨协议语义由 security.md 拥有；这些值用于机器校验默认拒绝边界（SEC-CSRF-*、SEC-MAINT-*、SEC-DOWNLOAD-*）。
 tags:
   - name: auth
     description: 登录、登出、当前用户、密码与 Session 管理
@@ -19,6 +55,8 @@ tags:
     description: Admin 用户与审计管理
   - name: setup
     description: 首次设置与就绪状态
+  - name: maintenance
+    description: 恢复、升级与根密钥 rebind 的隔离状态和安全退出
   - name: alerts
     description: 告警列表、详情、初步分析与接入问题
   - name: investigations
@@ -40,6 +78,9 @@ paths:
     post:
       tags: [auth]
       operationId: login
+      x-quoin-maintenance-access: allowed
+      x-quoin-csrf-mode: pre-auth-same-origin
+      x-quoin-cache-control: no-store
       x-external-dependency: true
       summary: 登录并签发 Session Cookie
       security: []
@@ -54,9 +95,13 @@ paths:
           description: 登录成功；Set-Cookie 写入 __Host-quoin-session（Secure HttpOnly SameSite=Lax Path=/）。
           headers:
             Set-Cookie:
-              description: 32-byte opaque session bearer 的 Cookie；raw bearer 不进入任何持久存储或日志（DATA-AUTH-003）。
+              description: 32-byte opaque session bearer；必须包含 Secure、HttpOnly、SameSite=Lax、Path=/，不得包含 Domain。
               schema:
                 type: string
+            Cache-Control:
+              $ref: '#/components/headers/NoStoreCacheControl'
+            Pragma:
+              $ref: '#/components/headers/NoCachePragma'
           content:
             application/json:
               schema:
@@ -75,6 +120,8 @@ paths:
     post:
       tags: [auth]
       operationId: logout
+      x-quoin-maintenance-access: allowed
+      x-quoin-cache-control: no-store
       summary: 登出并撤销当前 Session
       responses:
         '429':
@@ -83,15 +130,26 @@ paths:
           description: 当前 Session 已撤销；Set-Cookie 清除 __Host-quoin-session。
           headers:
             Set-Cookie:
-              description: 清除 __Host-quoin-session（Max-Age=0）。
+              description: 清除 __Host-quoin-session（Max-Age=0；保持 Secure、HttpOnly、SameSite=Lax、Path=/ 且无 Domain）。
               schema:
                 type: string
+            Clear-Site-Data:
+              description: 清除当前 Origin 的 cache、cookies 与 storage；不得包含 executionContexts。
+              schema:
+                type: string
+                const: '"cache", "cookies", "storage"'
+            Cache-Control:
+              $ref: '#/components/headers/NoStoreCacheControl'
+            Pragma:
+              $ref: '#/components/headers/NoCachePragma'
         '401':
           $ref: '#/components/responses/Unauthorized'
   /api/v1/auth/me:
     get:
       tags: [auth]
       operationId: getCurrentUser
+      x-quoin-maintenance-access: allowed
+      x-quoin-cache-control: no-store
       summary: 当前用户与强制改密状态
       description: 受限 Session（password_change_required=1）唯一允许的读操作之一（HTTP-AUTH-006）。
       responses:
@@ -107,6 +165,8 @@ paths:
     put:
       tags: [auth]
       operationId: changeOwnPassword
+      x-quoin-maintenance-access: allowed
+      x-quoin-cache-control: no-store
       summary: 修改当前用户密码
       description: 成功改密在同一事务清除 password_change_required（DATA-AUTH-001）；撤销除当前外的其他 Session 并更新当前 Session revision（CONTEXT「本地账号认证」）。
       requestBody:
@@ -130,6 +190,7 @@ paths:
     get:
       tags: [auth]
       operationId: listOwnSessions
+      x-quoin-cache-control: no-store
       summary: 列出当前用户的全部 Session
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -157,6 +218,7 @@ paths:
     post:
       tags: [auth]
       operationId: revokeOwnSession
+      x-quoin-cache-control: no-store
       summary: 撤销当前用户的其他 Session（不得撤销当前 Session）
       parameters:
         - $ref: '#/components/parameters/SessionId'
@@ -185,6 +247,7 @@ paths:
     get:
       tags: [admin]
       operationId: listUsers
+      x-quoin-maintenance-access: trust-rebuild
       summary: 列出用户（Admin）
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -211,6 +274,7 @@ paths:
     post:
       tags: [admin]
       operationId: createUser
+      x-quoin-maintenance-access: trust-rebuild
       summary: 创建用户（Admin）
       requestBody:
         required: true
@@ -241,6 +305,7 @@ paths:
     patch:
       tags: [admin]
       operationId: updateUser
+      x-quoin-maintenance-access: trust-rebuild
       summary: 更新用户显示名/启用状态/角色（Admin）
       description: 禁用或降级最后一个有效 Admin 必须冲突（DATA-TX-014）；账号变更事务递增 auth_revision 并撤销该用户全部 Session（CONTEXT「本地账号认证」）。
       parameters:
@@ -276,6 +341,7 @@ paths:
     post:
       tags: [admin]
       operationId: resetUserPassword
+      x-quoin-maintenance-access: trust-rebuild
       summary: Admin 重置用户密码（置位强制改密并撤销全部 Session）
       requestBody:
         required: true
@@ -313,6 +379,8 @@ paths:
     post:
       tags: [admin]
       operationId: revokeUserSessions
+      x-quoin-maintenance-access: trust-rebuild
+      x-quoin-cache-control: no-store
       summary: 撤销某用户全部 Session（Admin）
       parameters:
         - $ref: '#/components/parameters/UserId'
@@ -345,6 +413,7 @@ paths:
     get:
       tags: [admin]
       operationId: listAuditEvents
+      x-quoin-maintenance-access: allowed
       summary: 审计事件列表（全部登录用户可读）
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -389,6 +458,7 @@ paths:
     get:
       tags: [setup]
       operationId: getSetupStatus
+      x-quoin-maintenance-access: allowed
       summary: 依赖驱动的首次设置清单与能力就绪状态
       description: 从权威状态派生；Admin 看到全部项目，Operator 只看到需要 Operator 处理的项目（CONTEXT「首次设置投影」）。
       responses:
@@ -402,10 +472,59 @@ paths:
                 $ref: '#/components/schemas/SetupResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/maintenance:
+    get:
+      tags: [maintenance]
+      operationId: getMaintenanceState
+      x-quoin-maintenance-access: allowed
+      summary: 当前维护隔离状态与安全清单
+      description: 非维护时返回 active=false；维护期间只有本路由和显式标记的 trust-rebuild 操作可用（SEC-MAINT-002）。
+      responses:
+        '200':
+          description: 当前维护聚合及本 revision 清单。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/maintenance/exit:
+    post:
+      tags: [maintenance]
+      operationId: exitMaintenance
+      x-quoin-maintenance-access: allowed
+      summary: 验证全部安全条件并退出维护（Admin）
+      description: 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip（SEC-MAINT-003..005）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExitMaintenanceRequest'
+      responses:
+        '200':
+          description: 已退出维护。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/runtime:
     get:
       tags: [setup]
       operationId: getRuntimeStatus
+      x-quoin-maintenance-access: allowed
       summary: Plinth/Lintel Runtime slot 状态
       responses:
         '403':
@@ -422,18 +541,19 @@ paths:
     post:
       tags: [adminops]
       operationId: replaceRuntimeSlot
+      x-quoin-maintenance-access: trust-rebuild
       x-external-dependency: true
       summary: 替换 Runtime slot（Admin；状态卷丢失时重建，不创建第二个 Runtime）
       description: |
         幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-010）：同一事务先确认
         fence（DATA-RUNTIME-001b：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），
         且 lintel 另无任何 active Browser Operation（非终态，或虽终态但 `stopConfirmedAt` 仍为空）），否则返回 409 active_conflict 且不得先行吊销；通过后
-        单条 UPDATE 把 slot 置为 revoked 并清空 current/pending 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
+         单条 UPDATE 把 slot 置为 revoked 并清空 current/pending/retiring 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
         自动 retire 该 slot 全部未退休凭据；被引用行在指针清空前禁止手动 retire，DATA-RUNTIME-001/002），同时生成内存短生命周期、
-        单次使用的一次性注册令牌 reveal handle（HTTP-COMMAND-012）。响应只含非秘密元数据；首次实时响应可能
-         携带 registrationTokenHandle（registrationTokenAvailable=true），由 `revealRuntimeRegistrationToken`
-         一次性换取 raw 注册令牌（绑定 slot 与该 slot 下一个 credential generation）；命令重放返回
-         registrationTokenAvailable=false 且无 handle，绝不重新生成。
+         固定 60 秒、同 Session、单次成功消费的一次性注册令牌 reveal handle（SEC-REVEAL-*）。响应只含非秘密元数据；
+         registrationTokenAvailable=true 时携带 registrationTokenHandle，由 `revealRuntimeRegistrationToken`
+         一次性换取 raw 注册令牌（绑定 slot 与该 slot 下一个 credential generation）；同 Session 以相同
+         clientCommandId 重放时，仍有效且未消费则返回同一 handle，否则 registrationTokenAvailable=false，绝不重新生成。
         长期服务 token 只经已认证 gRPC 控制面下发/轮换（runtime-protocol.md），不进入 HTTP 响应。
       parameters:
         - $ref: '#/components/parameters/RuntimeSlot'
@@ -466,12 +586,14 @@ paths:
     post:
       tags: [adminops]
       operationId: revealRuntimeRegistrationToken
+      x-quoin-maintenance-access: trust-rebuild
       summary: 一次性显示 Runtime 注册令牌（Admin；消费单次 reveal handle）
       description: |
         非领域写命令（HTTP-COMMAND-012）：不携带 clientCommandId；路由无 slot 路径参数，只接受
-        replaceRuntimeSlot 首次实时响应返回的内存短生命周期、单次使用的 registrationTokenHandle，
-        不接受 slot 本身。handle 与 raw 注册令牌均不落盘（SQLite、client_commands、日志、审计、
-        Artifact、响应快照均禁止）；handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403。
+         replaceRuntimeSlot 返回的内存 60 秒、同 Session、单次成功消费的 registrationTokenHandle，
+         不接受 slot 本身。消费前重验当前 Session 与 Admin；授权成功先写不含 handle/raw 的 Audit Event。
+         handle 与 raw 注册令牌均不落盘（SQLite、client_commands、日志、审计、Artifact、响应快照均禁止）；
+         handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403（SEC-REVEAL-*）。
       requestBody:
         required: true
         content:
@@ -495,6 +617,40 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '410':
           $ref: '#/components/responses/Gone'
+  /api/v1/runtime-slots/{slot}/retiring-credential/retire:
+    post:
+      tags: [adminops]
+      operationId: retireRuntimeCredential
+      x-quoin-maintenance-access: trust-rebuild
+      summary: 显式退休 Runtime 旧 token（Admin）
+      description: 仅当新 current generation 已首次成功认证、slot 持有 retiring generation 时允许；同一事务清空 retiring 指针并永久退休旧 generation。不存在 force、TTL 或自动退休（SEC-SERVICE-003、DATA-RUNTIME-002）。
+      parameters:
+        - $ref: '#/components/parameters/RuntimeSlot'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '200':
+          description: 旧 generation 已退休。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeSlot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/alerts:
     get:
       tags: [alerts]
@@ -3139,6 +3295,7 @@ paths:
     get:
       tags: [adminops]
       operationId: listConnections
+      x-quoin-maintenance-access: trust-rebuild
       summary: 连接列表（全部登录用户可读）
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -3165,6 +3322,7 @@ paths:
     post:
       tags: [adminops]
       operationId: createConnection
+      x-quoin-secret-input-idempotency: replay-original-without-secret-value-comparison
       x-external-dependency: true
       summary: 创建连接（Admin）
       description: 非秘密配置形成 ConnectionRevision；秘密由服务端加密为 CredentialGeneration（DATA-CONN-001/004）。
@@ -3199,6 +3357,7 @@ paths:
     get:
       tags: [adminops]
       operationId: getConnection
+      x-quoin-maintenance-access: trust-rebuild
       summary: 连接详情（revision/generation 历史，非秘密）
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
@@ -3219,6 +3378,7 @@ paths:
     get:
       tags: [adminops]
       operationId: listConnectionRevisions
+      x-quoin-maintenance-access: trust-rebuild
       summary: 连接 revision 历史（游标分页，非秘密）
       description: 详情只返回 revisionCount；历史经本接口有界读取（HTTP-PAGE-005）。
       parameters:
@@ -3250,6 +3410,7 @@ paths:
     get:
       tags: [adminops]
       operationId: listCredentialGenerations
+      x-quoin-maintenance-access: trust-rebuild
       summary: 凭据 generation 历史（游标分页，仅非秘密标识）
       description: 详情只返回 generationCount；历史经本接口有界读取；密文与内部元数据永不下发（HTTP-PAGE-005）。
       parameters:
@@ -3282,6 +3443,8 @@ paths:
     post:
       tags: [adminops]
       operationId: rotateConnectionCredential
+      x-quoin-secret-input-idempotency: replay-original-without-secret-value-comparison
+      x-quoin-maintenance-access: trust-rebuild
       x-external-dependency: true
       summary: 轮换连接凭据（Admin；创建新 revision/generation 并原子切换 current）
       description: 对已启用的 model_provider，v1 固定先 disable 再切换；切换后的 current pair 在真实 probe 成功前不可启用或承载普通模型工作，probe 只测试该 current pair（HTTP-COMMAND-013）。
@@ -3392,6 +3555,7 @@ paths:
     post:
       tags: [adminops]
       operationId: disableConnection
+      x-quoin-maintenance-access: trust-rebuild
       x-external-dependency: true
       summary: 停用连接（Admin；阻止新派发，已接受 Attempt 完成）
       parameters:
@@ -3518,6 +3682,7 @@ paths:
     get:
       tags: [adminops]
       operationId: listAlertSources
+      x-quoin-maintenance-access: trust-rebuild
       summary: 逻辑告警源列表
       parameters:
         - $ref: '#/components/parameters/Cursor'
@@ -3545,7 +3710,7 @@ paths:
       tags: [adminops]
       operationId: createAlertSource
       summary: 创建逻辑告警源（Admin；两段式：先建凭据元数据，再经一次性 reveal 显示 Bearer）
-      description: Quoin 生成 32-byte 高熵 Bearer 并只保存 digest。命令响应只含非秘密元数据；首次实时响应携带内存短生命周期、单次使用的 revealHandle，由 `revealAlertSourceCredential` 一次性换取 raw Bearer（HTTP-COMMAND-008）。命令重放返回 revealAvailable=false 且无 handle，绝不重新创建凭据。
+      description: Quoin 生成 32-byte 高熵 Bearer 并只保存 digest。命令响应只含非秘密元数据；revealAvailable=true 时携带固定 60 秒、同 Session、单次成功消费的 revealHandle，由 `revealAlertSourceCredential` 换取 raw Bearer。同 Session 以相同 clientCommandId 重放时，仍有效且未消费则返回同一 handle，否则 revealAvailable=false；绝不重新创建凭据（SEC-REVEAL-*）。
       requestBody:
         required: true
         content:
@@ -3573,6 +3738,7 @@ paths:
     get:
       tags: [adminops]
       operationId: getAlertSource
+      x-quoin-maintenance-access: trust-rebuild
       summary: 告警源详情（凭据状态，不含 digest）
       parameters:
         - $ref: '#/components/parameters/SourceKey'
@@ -3593,6 +3759,7 @@ paths:
     get:
       tags: [adminops]
       operationId: listAlertSourceCredentials
+      x-quoin-maintenance-access: trust-rebuild
       summary: 告警源凭据历史（游标分页，仅状态与版本）
       description: 详情只返回 credentialCount；历史经本接口有界读取；digest 永不下发（HTTP-PAGE-005）。
       parameters:
@@ -3624,8 +3791,9 @@ paths:
     post:
       tags: [adminops]
       operationId: rotateAlertSourceCredential
+      x-quoin-maintenance-access: trust-rebuild
       summary: 轮换告警源 Bearer（Admin；两段式：先建新凭据元数据，再经一次性 reveal 显示 Bearer）
-      description: 轮换期最多短期并存新旧两个有效凭据；吊销旧凭据必须在新凭据确认使用后（CONTEXT「告警源凭据投影」）。响应只含非秘密元数据；首次实时响应携带内存短生命周期、单次使用的 revealHandle，由 `revealAlertSourceCredential` 一次性换取 raw Bearer（HTTP-COMMAND-008）。命令重放返回 revealAvailable=false 且无 handle，绝不重新创建凭据。
+      description: 最多并存两个可认证 generation；新凭据首个成功 Delivery 会把旧凭据机械标记 PendingRetirement，只有 Admin 显式退休，系统不设 TTL。响应的 60 秒同 Session reveal handle 与命令重放遵循 SEC-REVEAL-*，绝不重新创建凭据。
       parameters:
         - $ref: '#/components/parameters/SourceKey'
       requestBody:
@@ -3657,11 +3825,12 @@ paths:
     post:
       tags: [adminops]
       operationId: retireAlertSourceCredential
-      summary: 吊销告警源凭据（Admin；Active -> Retired）
+      x-quoin-maintenance-access: trust-rebuild
+      summary: 显式退休告警源凭据（Admin；Active/PendingRetirement -> Retired）
       description: |
         领域写命令（HTTP-COMMAND-009）：携带 clientCommandId 与 expectedRowVersion（DATA-ALERT-009）。
-        仅允许 Active -> Retired：同一事务写入 retiredAt 并递增凭据 rowVersion；凭据必须属于路径中的
-        sourceKey（跨来源 404）。相同命令 ID 重放返回原结果（HTTP-COMMAND-003）；新命令针对已 Retired
+         仅允许 Active/PendingRetirement -> Retired：同一事务写入 retiredAt 并递增凭据 rowVersion；凭据必须属于路径中的
+         sourceKey（跨来源 404）。相同命令 ID 重放返回原结果（HTTP-COMMAND-003）；新命令针对已 Retired
         凭据返回 409（row_version_conflict）。吊销与 Delivery 按 DATA-TX-003 提交顺序裁决。
       parameters:
         - $ref: '#/components/parameters/SourceKey'
@@ -3695,12 +3864,13 @@ paths:
     post:
       tags: [adminops]
       operationId: revealAlertSourceCredential
+      x-quoin-maintenance-access: trust-rebuild
       summary: 一次性显示新建凭据的 Bearer（Admin；消费单次 reveal handle）
       description: |
-        非领域写命令（HTTP-COMMAND-008）：不携带 clientCommandId；只接受创建/轮换命令
-        首次实时响应中返回的内存短生命周期、单次使用的 revealHandle，不接受 source/credential ID。
-        handle 与 raw Bearer 均不落盘（SQLite、client_commands、日志、审计、Artifact、响应快照均禁止）；
-        handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403。
+         非领域写命令（HTTP-COMMAND-008）：不携带 clientCommandId；只接受创建/轮换命令返回的
+         内存 60 秒、同 Session、单次成功消费 revealHandle，不接受 source/credential ID。消费前重验
+         当前 Session 与 Admin，并先写不含 handle/raw 的 Audit Event。handle 与 raw Bearer 均不落盘；
+         handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403（SEC-REVEAL-*）。
       requestBody:
         required: true
         content:
@@ -3761,6 +3931,7 @@ paths:
     post:
       tags: [adminops]
       operationId: disableAlertSource
+      x-quoin-maintenance-access: trust-rebuild
       summary: 停用告警源（Admin）
       parameters:
         - $ref: '#/components/parameters/SourceKey'
@@ -3870,6 +4041,7 @@ paths:
     get:
       tags: [adminops]
       operationId: downloadBackup
+      x-quoin-sensitive-download: required
       x-external-dependency: true
       summary: 下载备份归档（Admin；下载审计）
       parameters:
@@ -3881,8 +4053,17 @@ paths:
           description: 备份 manifest 与数据库快照归档的流式下载（经审计）。
           headers:
             Content-Disposition:
-              schema:
-                type: string
+              $ref: '#/components/headers/AttachmentDisposition'
+            Cache-Control:
+              $ref: '#/components/headers/NoStoreCacheControl'
+            Pragma:
+              $ref: '#/components/headers/NoCachePragma'
+            Referrer-Policy:
+              $ref: '#/components/headers/NoReferrerPolicy'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/NoSniff'
+            Content-Security-Policy:
+              $ref: '#/components/headers/DownloadSandboxPolicy'
           content:
             application/octet-stream:
               schema:
@@ -4043,6 +4224,7 @@ paths:
     get:
       tags: [files]
       operationId: downloadArtifactContent
+      x-quoin-sensitive-download: conditional-on-artifact-sensitive
       x-external-dependency: true
       summary: 流式下载 Artifact 正文（授权按逻辑所有者；sensitive trace 仅 Admin 经审计下载）
       description: Raw Playwright trace 固定 sensitive=1，仅 Admin 经审计下载（DATA-ARTIFACT-003）。正文已过期返回 410；下载不经由 hash/path 授权入口。
@@ -4055,12 +4237,21 @@ paths:
           description: 正文流式下载。
           headers:
             Content-Disposition:
-              schema:
-                type: string
+              $ref: '#/components/headers/AttachmentDisposition'
+            Cache-Control:
+              $ref: '#/components/headers/NoStoreCacheControl'
+            Pragma:
+              $ref: '#/components/headers/NoCachePragma'
+            Referrer-Policy:
+              $ref: '#/components/headers/NoReferrerPolicy'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/NoSniff'
+            Content-Security-Policy:
+              $ref: '#/components/headers/DownloadSandboxPolicy'
             ETag:
               schema:
                 type: string
-                description: 内容 SHA-256（弱校验，仅缓存用途）。
+                description: 内容 SHA-256 的响应校验标识；不得作为 bearer 或绕过每次 Range 请求重新授权。
           content:
             application/octet-stream:
               schema:
@@ -4318,6 +4509,38 @@ components:
       in: cookie
       name: __Host-quoin-session
       description: 32-byte opaque Session bearer 的 HttpOnly Secure SameSite=Lax Cookie；raw bearer 只存在于浏览器与认证瞬间内存（DATA-AUTH-003）。
+  headers:
+    AttachmentDisposition:
+      required: true
+      schema:
+        type: string
+        pattern: '^attachment; filename="[^"\\r\\n]+"$'
+      description: 固定 attachment；文件名必须服务端生成且无 CR/LF。
+    NoStoreCacheControl:
+      required: true
+      schema:
+        type: string
+        const: no-store
+    NoCachePragma:
+      required: true
+      schema:
+        type: string
+        const: no-cache
+    NoReferrerPolicy:
+      required: true
+      schema:
+        type: string
+        const: no-referrer
+    NoSniff:
+      required: true
+      schema:
+        type: string
+        const: nosniff
+    DownloadSandboxPolicy:
+      required: true
+      schema:
+        type: string
+        const: "sandbox; default-src 'none'"
   parameters:
     Cursor:
       name: cursor
@@ -4634,7 +4857,7 @@ components:
           type: string
           minLength: 15
           maxLength: 128
-          description: 15–128 Unicode 字符（NFC 规范化后校验）；弱密码检查与有界冷却由部署层执行。
+          description: 15–128 Unicode 字符（NFC 规范化后校验）；登录不重跑 blocklist，失败由 Quoin 有界进程内冷却状态裁决。
     UserSummary:
       type: object
       required: [id, username, displayName, role, enabled, authRevision, rowVersion, passwordChangeRequired]
@@ -4673,7 +4896,7 @@ components:
           type: string
           minLength: 15
           maxLength: 128
-          description: 15–128 Unicode 字符；成功改密在同一事务清除强制改密标志并撤销其他 Session。
+          description: 15–128 Unicode 字符；NFC 后执行嵌入 blocklist 与上下文比较；成功改密在同一事务清除强制改密标志并撤销其他 Session。
     SessionInfo:
       type: object
       required: [id, createdAt, lastActiveAt, idleExpiresAt, absoluteExpiresAt, current]
@@ -4710,7 +4933,7 @@ components:
               type: string
               minLength: 15
               maxLength: 128
-              description: 15–128 Unicode 字符。
+              description: 15–128 Unicode 字符；NFC 后执行嵌入 blocklist 与上下文比较。
     UpdateUserRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -4738,7 +4961,7 @@ components:
           type: string
           minLength: 15
           maxLength: 128
-          description: 临时密码；重置后 password_change_required=1 并要求首次登录修改（CONTEXT「管理员离线恢复」）。
+          description: 受保护请求中的临时密码秘密；NFC 后执行同一 blocklist/上下文策略，服务端不得回显或保存明文；重置后 password_change_required=1。
     ResetPasswordPayload:
       type: object
       required: [user, revokedSessionCount]
@@ -4972,6 +5195,88 @@ components:
         action:
           type: string
           description: 直接修复入口（路由或操作引用）。
+    MaintenanceState:
+      type: object
+      required: [active, reason, rowVersion, enteredAt, items]
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        reason:
+          type: [string, 'null']
+          enum: [Restore, Upgrade, RootKeyRebind, null]
+        rowVersion:
+          type: integer
+          minimum: 1
+          description: maintenance_state.row_version；同时是当前清单 revision。active=true 时冻结，只有退出事务可推进。
+        enteredAt:
+          anyOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceItem'
+          description: 仅 active=true 时返回当前 revision 的非空清单；退出只接受全部 Safe。
+      allOf:
+        - if:
+            properties:
+              active:
+                const: true
+            required: [active]
+          then:
+            properties:
+              reason:
+                type: string
+                enum: [Restore, Upgrade, RootKeyRebind]
+              enteredAt:
+                $ref: '#/components/schemas/Timestamp'
+          else:
+            properties:
+              reason:
+                type: 'null'
+              enteredAt:
+                type: 'null'
+              items:
+                maxItems: 0
+    MaintenanceItem:
+      type: object
+      required: [kind, objectKey, safeState, detailCode]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [AdminPassword, User, Connection, RuntimeSlot, AlertSource, BrowserIdentity, SchemaMigration, ReleaseVersion, Integrity, SearchProjection]
+        objectKey:
+          type: string
+          minLength: 1
+          maxLength: 256
+        safeState:
+          type: string
+          enum: [Safe, Blocking]
+        detailCode:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 与 maintenance_items.detail_code 一致的稳定非秘密机器码。
+        detail:
+          type: string
+          maxLength: 2000
+        action:
+          type: string
+          maxLength: 512
+          description: Blocking 项可直接前往的显式 trust-rebuild 操作；不得指向普通业务路由。
+    ExitMaintenanceRequest:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: '#/components/schemas/VersionedCommandRequest'
+        - type: object
+          required: [expectedReason]
+          properties:
+            expectedReason:
+              type: string
+              enum: [Restore, Upgrade, RootKeyRebind]
+      description: expectedRowVersion/expectedReason 必须与当前 active maintenance_state 一致；不存在 force/skip。
     RuntimeSlot:
       type: object
       required: [slot, state, currentGeneration, rowVersion, connected]
@@ -4991,7 +5296,17 @@ components:
         pendingGeneration:
           type: integer
           minimum: 1
-          description: 从 runtime_slots.pending_credential_id 指向的 runtime_credentials.generation 投影；两阶段轮换中待确认的 generation（仅 registered 且轮换期间存在；DATA-RUNTIME-002）。
+          description: 从 runtime_slots.pending_credential_id 指向的 runtime_credentials.generation 投影；两阶段轮换中待确认持久化的 generation（DATA-RUNTIME-002）。
+        retiringGeneration:
+          type: integer
+          minimum: 1
+          description: 从 runtime_slots.retiring_credential_id 投影；新 current 首次认证前为 AwaitingFirstUse，之后为 PendingRetirement，直到 Admin 显式退休。
+        retirementState:
+          type: string
+          enum: [AwaitingFirstUse, PendingRetirement]
+        currentFirstAuthenticatedAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: current generation 首次成功认证时间；一经设置不可修改。
         rowVersion:
           type: integer
           minimum: 1
@@ -5029,6 +5344,9 @@ components:
               currentGeneration:
                 const: 0
               pendingGeneration: false
+              retiringGeneration: false
+              retirementState: false
+              currentFirstAuthenticatedAt: false
         - if:
             properties:
               connected:
@@ -5050,6 +5368,24 @@ components:
               bootId: false
               connectionEpoch: false
               lastSeenAt: false
+        - if:
+            properties:
+              retirementState:
+                const: PendingRetirement
+            required: [retirementState]
+          then:
+            required: [currentFirstAuthenticatedAt]
+        - if:
+            properties:
+              retirementState:
+                const: AwaitingFirstUse
+            required: [retirementState]
+          then:
+            properties:
+              currentFirstAuthenticatedAt: false
+      dependentRequired:
+        retiringGeneration: [retirementState]
+        retirementState: [retiringGeneration]
     RuntimeSlotReplacement:
       type: object
       required: [slot, state, currentGeneration, rowVersion, registrationTokenAvailable]
@@ -5065,16 +5401,18 @@ components:
         currentGeneration:
           type: integer
           const: 0
-          description: 替换后 current/pending 指针皆空，恒为 0。
+          description: 替换后 current/pending/retiring 指针皆空，恒为 0。
         rowVersion:
           type: integer
           minimum: 1
         registrationTokenAvailable:
           type: boolean
-          description: 仅首次实时响应为 true（同次请求后立即生成内存 revealHandle）；命令重放恒为 false（HTTP-COMMAND-012）。
+          description: 当前命令结果是否仍有可读取 handle；同 Session 同 clientCommandId 重放时，原 handle 在 60 秒内且未消费仍为 true，否则为 false（SEC-REVEAL-003）。
         registrationTokenHandle:
           type: string
-          description: 不透明、内存中短生命周期、单次使用的 reveal 句柄；仅 registrationTokenAvailable=true 时存在；不落盘（SQLite/日志/审计/Artifact/命令结果均禁止）（HTTP-COMMAND-012）。
+          minLength: 32
+          maxLength: 256
+          description: 不透明、内存 60 秒、绑定发起 Session、单次成功消费的 reveal 句柄；仅 registrationTokenAvailable=true 时存在；不落盘（SEC-REVEAL-*）。
       allOf:
         - if:
             properties:
@@ -5095,7 +5433,9 @@ components:
       properties:
         registrationTokenHandle:
           type: string
-          description: replaceRuntimeSlot 首次实时响应返回的一次性句柄；不接受 slot 本身（HTTP-COMMAND-012）。
+          minLength: 32
+          maxLength: 256
+          description: replaceRuntimeSlot 返回的 60 秒同 Session 一次性句柄；不接受 slot 本身（SEC-REVEAL-*）。
     RuntimeRegistrationTokenRevealResult:
       type: object
       required: [slot, generation, registrationToken]
@@ -5111,7 +5451,8 @@ components:
           description: 注册令牌绑定的 credential generation；Register 请求必须回显同一值（HTTP-COMMAND-012、RUNTIME-REG-002）。
         registrationToken:
           type: string
-          description: 一次性注册令牌（32 随机字节 base64url 无填充文本）；仅此一次返回，绑定 slot 与 generation，内存短生命周期；不进入日志、审计或命令结果（HTTP-COMMAND-012、RUNTIME-AUTH-006）。
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: 一次性注册令牌（32 随机字节 base64url 无填充文本）；仅此一次返回，绑定 slot 与 generation；不进入日志、审计或命令结果（SEC-REVEAL-*、RUNTIME-AUTH-006）。
     RuntimeStatus:
       type: object
       required: [plinth, lintel]
@@ -7513,20 +7854,54 @@ components:
     CredentialSummary:
       type: object
       required: [id, state, rowVersion, createdAt]
+      additionalProperties: false
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
         state:
           type: string
-          enum: [Active, Retired]
+          enum: [Active, PendingRetirement, Retired]
         rowVersion:
           type: integer
           minimum: 1
           description: 吊销命令并发前提与响应版本（DATA-ALERT-009）。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+        supersedesCredentialId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 本 generation 轮换取代的旧凭据；首个成功 Delivery 后旧凭据进入 PendingRetirement。
+        firstUsedAt:
+          $ref: '#/components/schemas/Timestamp'
+        pendingRetirementAt:
+          $ref: '#/components/schemas/Timestamp'
         retiredAt:
           $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              state:
+                const: PendingRetirement
+            required: [state]
+          then:
+            required: [pendingRetirementAt]
+            properties:
+              retiredAt: false
+        - if:
+            properties:
+              state:
+                const: Active
+            required: [state]
+          then:
+            properties:
+              pendingRetirementAt: false
+              retiredAt: false
+        - if:
+            properties:
+              state:
+                const: Retired
+            required: [state]
+          then:
+            required: [retiredAt]
     CreateAlertSourceRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -7541,6 +7916,7 @@ components:
     AlertSourceCredentialMetadata:
       type: object
       required: [sourceKey, credentialId, revealAvailable]
+      additionalProperties: false
       properties:
         sourceKey:
           $ref: '#/components/schemas/StableKey'
@@ -7548,10 +7924,12 @@ components:
           $ref: '#/components/schemas/LocatorId'
         revealAvailable:
           type: boolean
-          description: 仅首次实时响应为 true（同次请求创建/轮换后立即生成内存 revealHandle）；命令重放恒为 false（HTTP-COMMAND-008）。
+          description: 当前命令结果是否仍有可读取 handle；同 Session 同 clientCommandId 重放时，原 handle 在 60 秒内且未消费仍为 true，否则为 false（SEC-REVEAL-003）。
         revealHandle:
           type: string
-          description: 不透明、内存中短生命周期、单次使用的 reveal 句柄；仅 revealAvailable=true 时存在；不落盘（SQLite/日志/审计/Artifact/命令结果均禁止）（HTTP-COMMAND-008）。
+          minLength: 32
+          maxLength: 256
+          description: 不透明、内存 60 秒、绑定发起 Session、单次成功消费的 reveal 句柄；仅 revealAvailable=true 时存在；不落盘（SEC-REVEAL-*）。
       allOf:
         - if:
             properties:
@@ -7572,16 +7950,20 @@ components:
       properties:
         revealHandle:
           type: string
-          description: 创建/轮换命令首次实时响应返回的一次性句柄；不接受 source/credential ID（HTTP-COMMAND-008）。
+          minLength: 32
+          maxLength: 256
+          description: 创建/轮换命令返回的 60 秒同 Session 一次性句柄；不接受 source/credential ID（SEC-REVEAL-*）。
     RevealCredentialResult:
       type: object
       required: [credentialId, bearerToken]
+      additionalProperties: false
       properties:
         credentialId:
           $ref: '#/components/schemas/LocatorId'
         bearerToken:
           type: string
-          description: 32-byte 高熵 Bearer；仅此一次返回；数据库只存 digest（CONTEXT「告警源凭据投影」）；不进入日志、审计或命令结果（HTTP-COMMAND-008）。
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: 32-byte 高熵 Bearer 的 base64url 无填充文本；仅此一次返回；数据库只存 digest，禁止进入日志、审计或命令结果（SEC-REVEAL-*）。
     RetireCredentialRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'

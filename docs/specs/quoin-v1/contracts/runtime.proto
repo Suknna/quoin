@@ -67,7 +67,7 @@ service ArtifactService {
 
 // Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
 // 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带 release_version，
-// 与 Quoin 严格相等（RUNTIME-STELE-005、RUNTIME-VERSION-001）。
+// 与 Quoin 严格相等（RUNTIME-STELE-006、RUNTIME-VERSION-001）。
 service SteleRelay {
   // 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
   // （RUNTIME-STELE-002）。
@@ -1174,13 +1174,13 @@ message ArtifactGrepTextResponse {
 // Stele 告警接入（SteleRelay）
 // ============================================================================
 
-// 快照请求：release_version 必填且与 Quoin 严格相等（RUNTIME-STELE-005）。
+// 快照请求：release_version 必填且与 Quoin 严格相等（RUNTIME-STELE-006）。
 message GetCredentialSnapshotRequest {
   string release_version = 1;
 }
 
 // 版本化只读快照：Stele 仅内存缓存；Deliver 必须回传 snapshot_version
-// （DATA-ALERT-008）。quoin_release_version 供 Stele 快速核对（RUNTIME-STELE-005）。
+// （DATA-ALERT-008）。quoin_release_version 供 Stele 快速核对（RUNTIME-STELE-006）。
 message GetCredentialSnapshotResponse {
   uint64 snapshot_version = 1;     // 单调递增；Deliver 回传
   repeated AlertSourceSnapshot sources = 2;
@@ -1212,7 +1212,7 @@ message DeliveryRelayRequest {
   string protocol = 5;             // v1: alertmanager
   bytes body = 6;                  // 精确原始请求体（可能非 UTF-8）
   google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
-  string release_version = 8;      // 与 Quoin 严格相等（RUNTIME-STELE-005）
+  string release_version = 8;      // 与 Quoin 严格相等（RUNTIME-STELE-006）
 }
 
 // Delivery 结果：ACCEPTED=204；REJECTED=4xx 不重试；UNAVAILABLE=5xx 重试

@@ -116,12 +116,12 @@
 
 ## 11. 注册与轮换
 
-- **RUNTIME-REG-001 —** 一次性注册令牌 **MUST** 只存在于内存（短生命周期、单次消费、绑定 slot **与 credential generation**，RUNTIME-AUTH-006 文本编码），**MUST NOT** 落库（SQLite/日志/审计/Artifact/命令结果均禁止）；HTTP 面经 `replaceRuntimeSlot` + `revealRuntimeRegistrationToken` 两段式 reveal，reveal 结果携带 slot、generation 与 registrationToken（HTTP-COMMAND-012）。
-- **RUNTIME-REG-002 —** `RuntimeControl.Register` **MUST** 只接受处于注册窗口（slot `unregistered` 或 `revoked`）的请求：Quoin 验证一次性令牌与内存令牌记录匹配（slot **和 generation 都须一致**）、`release_version` 严格相等，随后在同一事务创建已确认 credential（`confirmed_at` 非空，`trg_runtime_credentials_insert_confirmed_registration_only` 允许窗口、generation 与请求一致）、设置 current 指针、slot 转 `registered`，并返回长期 token 与同一 generation；supervisor **MUST** 将返回的 token 原子持久化到权限 `0600` 专用状态卷。响应丢失 **MUST NOT** 重放同一一次性令牌：slot 已 `registered` 时 `Register` 拒绝（`FAILED_PRECONDITION`），恢复路径为 Admin 重新执行 `replaceRuntimeSlot`（HTTP-COMMAND-012）。
-- **RUNTIME-REG-003 —** `Register` 在 slot 已 `registered` 时 **MUST** 拒绝（`FAILED_PRECONDITION`，detail=`ALREADY_REGISTERED`）；同一 slot 的并发注册由一次性令牌单次消费裁决；generation 不匹配 **MUST** 拒绝（`FAILED_PRECONDITION`）。
-- **RUNTIME-REG-004 —** 长期 token 两阶段轮换 **MUST** 只走已认证控制流：① Quoin 建 credential（`confirmed_at` 空）并设 `pending_credential_id`，发送 `IssueToken`（新 token，RUNTIME-AUTH-006 文本编码）；② Runtime **MUST** 原子持久化新 token 到 0600 状态卷后回 `TokenPersisted`；③ Quoin 写 `confirmed_at`（须仍被 pending 引用）并单条 UPDATE 原子提升（current=pending、pending 清空，AFTER 触发器自动 retire 旧 current，DATA-RUNTIME-002）；④ Quoin 以 `GoAway{ROTATED}` 关闭旧 token 认证的连接，Runtime 以新 token 重连。轮换窗口数值为部署配置（RUNTIME-SCOPE-004）。
-- **RUNTIME-REG-005 —** 轮换期间认证 **MUST** 只接受 `registered` + current 指针指向的行（DATA-RUNTIME-002）；pending 行 **MUST NOT** 被认证接受。
-- **RUNTIME-REG-006 —** 轮换中止（Admin 中止）**MUST** 先清 `pending_credential_id`（AFTER 触发器自动 retire 原 pending），随后以 `GoAway` 或继续当前连接结束；已退休凭据 **MUST NOT** 再被确认或重新设回 pending（DATA-RUNTIME-002）。
+- **RUNTIME-REG-001 —** 一次性注册令牌只存在于进程内存，固定 60 秒、单次成功消费、绑定发起 Admin Session、slot 与 generation；HTTP `replaceRuntimeSlot` + `revealRuntimeRegistrationToken` 遵循 SEC-REVEAL-*。令牌/handle 不得进入 SQLite、日志、审计、Artifact 或命令持久结果。（来源：Issue #16、HTTP-COMMAND-012、RUNTIME-AUTH-006）
+- **RUNTIME-REG-002 —** `RuntimeControl.Register` **MUST** 只接受注册窗口中的请求：验证内存令牌的 slot/generation、单次消费和 release version；同一事务创建已确认 credential、设置 current、slot 转 registered，返回长期 token/generation。supervisor 原子持久化到 0600 状态卷。响应丢失后令牌不得重放，恢复必须由 Admin 再次 replace。（来源：DATA-RUNTIME-001/002、SEC-REVEAL-*）
+- **RUNTIME-REG-003 —** slot 已 registered、generation/slot 不匹配、token 过期/消费等拒绝映射保持封闭 canonical gRPC status；detail 只含非秘密说明。（来源：RUNTIME-ERROR-001、SEC-ERROR-001）
+- **RUNTIME-REG-004 —** 长期 token 两阶段轮换只走已认证控制流：① Quoin 创建未确认 credential 并设 pending，发送 `IssueToken`；② Runtime 原子持久化新 token 后回 `TokenPersisted`；③ Quoin写 `confirmed_at`，单条 UPDATE 把 pending 提升为 current、原 current 移入 retiring；④ Quoin 以 `GoAway{ROTATED}` 关闭旧 epoch，Runtime 用新 token 重连；⑤ 新 current 首次成功认证时写 `first_authenticated_at`，旧 generation 进入用户可见 Pending Retirement；⑥ 只有 Admin 的 `retireRuntimeCredential` 才清 retiring 并永久退休旧 generation。步骤⑤ **MUST NOT** 自动执行步骤⑥，也不设 TTL。（来源：CONTEXT「服务身份」「安全、身份与恢复」、Issue #16、DATA-RUNTIME-002）
+- **RUNTIME-REG-005 —** 轮换期间认证只接受 registered slot 的 current 或 retiring 指针；pending 永不接受。若 retiring token 重连成功，它获得新的唯一 connection epoch 并使旧 epoch 失效，但不得把该 generation 自动恢复为 current。Admin 退休后对应全部流立即关闭且禁止重连。（来源：Issue #16、SEC-SERVICE-003、RUNTIME-CTRL-003）
+- **RUNTIME-REG-006 —** 轮换中止必须先清 pending（SQL 自动退休未提升 generation），随后继续 current 连接；已退休凭据不得确认、复活或重新设为任一角色指针。（来源：DATA-RUNTIME-002）
 - **RUNTIME-REG-007 —** `Register` 失败 **MUST** 使用 canonical gRPC status（RUNTIME-ERROR-001）：`INVALID_ARGUMENT`（请求缺字段/generation=0/token 文本非 base64url 或解码非 32 字节）、`UNAUTHENTICATED`（令牌未知/过期/已消费）、`FAILED_PRECONDITION`（slot 不在注册窗口——含 `ALREADY_REGISTERED`——或 generation 与令牌记录不一致）、`PERMISSION_DENIED`（令牌绑定 slot 与请求 slot 不一致）、`NOT_FOUND`（未知 slot，不应发生）、`INTERNAL`（瞬态内部错误）。detail 只含非秘密说明。
 
 ## 12. 吊销与关闭
@@ -133,16 +133,17 @@
 ## 13. 连接凭据 grant（`RuntimeControl.FetchCredentialGrant`）
 
 - **RUNTIME-GRANT-001 —** 连接凭据必须由 Quoin 以不可变 `attempt_connection_grants` 授权：模型/Embedding grant 可在派发前随 `AttemptInputSnapshot` 下发；Thanos/Kubernetes grant 只能在 Quoin 接受具体 Tool Call 并根据全局 Thanos 或当前 Business System mappings 确定性路由时创建，再由 `CompleteModelCallAck` 返回非秘密 `ConnectionGrant`。grant 引用携带 `grant_id`/revision/generation/purpose；秘密正文 **MUST NOT** 进入 worker、Dispatch、模型上下文、日志或审计。（来源：DATA-CONN-002/006/008、Issue #13）
-- **RUNTIME-GRANT-002 —** supervisor **MUST** 经 `FetchCredentialGrant`（unary，Bearer 认证）获取秘密：Quoin 校验 grant 存在且属于请求的 Attempt、Attempt 处于 `Running`、`boot_id`/`connection_epoch` 与派发绑定一致、请求 slot 为 `plinth`（Lintel 无连接凭据，请求一律 `PERMISSION_DENIED`）；成功响应携带非秘密 `revision_config_json`（DATA-CONN-005 类型化投影）与解密后的类型化 secret（`connection_type` 对应 thanos/kubernetes/model_provider）。worker 进程 **MUST NOT** 调用本 RPC（RUNTIME-AUTH-005）。
+- **RUNTIME-GRANT-002 —** supervisor **MUST** 经 `FetchCredentialGrant` 获取秘密：Quoin 校验 grant/Attempt/boot/epoch/slot，并重验 Connection current generation 的 root binding revision；随后在受控内存中以 SEC-KEY-003 的 AAD 解密。成功只返回类型化非秘密 config 与 secret 给 supervisor，worker 不得调用。binding 不匹配或 AEAD 认证失败必须拒绝 grant、隔离 Connection 并写无秘密审计，绝不尝试旧 key/旧 generation/空凭据。（来源：DATA-CONN-002/009、Issue #16、SEC-KEY-005）
 - **RUNTIME-GRANT-003 —** grant 生命周期 **MUST** 只存在于 Attempt 运行期间：派发或具体 Tool 授权时创建、Attempt 达到终态（Succeeded/Failed/Cancelled/Interrupted）时 Quoin **MUST** 撤销获取资格并释放内存秘密，持久 grant 行继续作为不可变审计历史；Attempt 未 `Running` 或 grant 已撤销时 `FetchCredentialGrant` **MUST** 返回 `FAILED_PRECONDITION`（或 `NOT_FOUND`，detail 说明）；supervisor 侧 **MUST** 在 Attempt 终态后丢弃内存秘密，**MUST NOT** 落盘、进入日志/审计或响应快照。成功响应经 TLS 每次可重取（Attempt Running 期间幂等），但 supervisor **MUST NOT** 持久化。（来源：Issue #13、DATA-CONN-008）
 
 ## 14. Stele 告警接入（`SteleRelay`）
 
 - **RUNTIME-STELE-001 —** Stele **MUST NOT** 注册为 Runtime（无 slot、不持有 Runtime 凭据）；其 service token 由部署 Secret 文件提供（CONTEXT「服务身份」），经 metadata 认证 `SteleRelay` 两个 unary RPC。
-- **RUNTIME-STELE-002 —** Stele **MUST** 经 `GetCredentialSnapshot` 获取版本化只读凭据 digest 快照并仅内存缓存；未成功加载快照 **MUST** 拒绝接收 Delivery；快照版本单调递增，Stele 提交时回传（DATA-ALERT-008）。
+- **RUNTIME-STELE-002 —** Stele **MUST** 经 `GetCredentialSnapshot` 获取版本化只读凭据 digest 快照并仅内存缓存；快照只包含 SQL 中 `Active|PendingRetirement` 的可认证 generation，Retired 必须消失。未成功加载快照拒绝接收 Delivery；快照版本单调递增，Stele 提交时回传（DATA-ALERT-008）。
 - **RUNTIME-STELE-003 —** `Deliver` **MUST** 携带 `relay_id`（每次外部请求生成，内部重试复用）、`source_id`、`credential_id`、`credential_snapshot_version`（>= 1）、`protocol`、精确原始 `body` 与 `received_at`；Quoin **MUST** 在 Delivery 事务内重验来源启用、凭据有效性与归属，relay_id 幂等（DATA-ALERT-001/008）。
-- **RUNTIME-STELE-004 —** `DeliveryRelayResponse` 状态 **MUST** 映射 HTTP 语义：`ACCEPTED`=204（单事务保存 Delivery、处理结果并更新全部正常 Occurrence 后才返回）；`REJECTED`=4xx（永久拒绝，Alertmanager 不重试）；`UNAVAILABLE`=5xx（可重试）。提交失败或结果不确定 **MUST NOT** 返回 ACCEPTED（CONTEXT「Stele」）。
-- **RUNTIME-STELE-005 —** 每个 unary 请求 **MUST** 携带 `release_version`（机器契约字段），与 Quoin 严格相等（RUNTIME-VERSION-001）；不匹配 **MUST** 返回 `FAILED_PRECONDITION` 且 **MUST NOT** 处理请求（Stele 不 Ready、拒绝接收 Delivery）；`GetCredentialSnapshotResponse.quoin_release_version` 供 Stele 快速核对，不一致时 Stele **MUST** 视为版本不匹配。
+- **RUNTIME-STELE-004 —** Delivery 使用新 generation 首次成功提交时，同一 SQLite 事务写该 generation `first_used_at` 并把其 supersedes 指向的旧 generation转为 PendingRetirement；Stele 后续快照继续包含新旧两个 generation，直到 Admin 显式退休旧值。系统不得以墙钟或首次成功自动移除旧 digest。（来源：Issue #16、SEC-SERVICE-002、DATA-ALERT-009）
+- **RUNTIME-STELE-005 —** `DeliveryRelayResponse` 状态 **MUST** 映射 HTTP 语义：`ACCEPTED`=204（单事务保存 Delivery、处理结果并更新全部正常 Occurrence 后才返回）；`REJECTED`=4xx（永久拒绝，Alertmanager 不重试）；`UNAVAILABLE`=5xx（可重试）。提交失败或结果不确定 **MUST NOT** 返回 ACCEPTED（CONTEXT「Stele」）。
+- **RUNTIME-STELE-006 —** 每个 unary 请求 **MUST** 携带 `release_version`（机器契约字段），与 Quoin 严格相等（RUNTIME-VERSION-001）；不匹配 **MUST** 返回 `FAILED_PRECONDITION` 且 **MUST NOT** 处理请求（Stele 不 Ready、拒绝接收 Delivery）；`GetCredentialSnapshotResponse.quoin_release_version` 供 Stele 快速核对，不一致时 Stele **MUST** 视为版本不匹配。
 
 ## 15. 版本与兼容
 

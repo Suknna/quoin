@@ -24,6 +24,7 @@
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;
+PRAGMA recursive_triggers = ON;
 
 -- ============================================================================
 -- 1. 账号、会话与服务身份
@@ -61,6 +62,17 @@ CREATE TABLE sessions (
 ) STRICT;
 CREATE INDEX idx_sessions_user ON sessions (user_id);
 CREATE INDEX idx_sessions_expiry ON sessions (absolute_expires_at);
+
+-- 当前部署根密钥绑定。verifier 是固定非秘密明文的 AES-256-GCM 密文；根密钥本身永不落库。
+-- rebind 只允许 binding_revision 严格递增并替换 verifier（SEC-KEY-001..007）。
+CREATE TABLE root_key_state (
+  id                  INTEGER PRIMARY KEY CHECK (id = 1),
+  binding_revision    INTEGER NOT NULL CHECK (binding_revision >= 1),
+  verifier_nonce      BLOB NOT NULL CHECK (length(verifier_nonce) = 12),
+  verifier_ciphertext BLOB NOT NULL CHECK (length(verifier_ciphertext) >= 16),
+  bound_at            TEXT NOT NULL
+) STRICT;
+
 CREATE TRIGGER trg_sessions_insert_current_auth_revision BEFORE INSERT ON sessions
 WHEN NOT EXISTS (
   SELECT 1 FROM users u
@@ -69,33 +81,61 @@ WHEN NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'session must bind the enabled user current auth_revision'); END;
 CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, created_at ON sessions
 BEGIN SELECT RAISE(ABORT, 'session issue identity is immutable'); END;
+CREATE TRIGGER trg_sessions_revocation_sticky BEFORE UPDATE OF revoked_at ON sessions
+WHEN NEW.revoked_at IS NOT OLD.revoked_at AND (OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'session revocation is terminal'); END;
+CREATE TRIGGER trg_sessions_absolute_expiry_immutable BEFORE UPDATE OF absolute_expires_at ON sessions
+WHEN NEW.absolute_expires_at IS NOT OLD.absolute_expires_at
+BEGIN SELECT RAISE(ABORT, 'session absolute expiry is immutable'); END;
+CREATE TRIGGER trg_sessions_activity_window_forward BEFORE UPDATE OF last_active_at, idle_expires_at ON sessions
+WHEN OLD.revoked_at IS NOT NULL OR NEW.last_active_at <= OLD.last_active_at
+  OR NEW.idle_expires_at <= OLD.idle_expires_at OR NEW.idle_expires_at > NEW.absolute_expires_at
+BEGIN SELECT RAISE(ABORT, 'session activity and idle expiry must advance together within the absolute expiry'); END;
+CREATE TRIGGER trg_root_key_state_insert_inactive_history BEFORE INSERT ON root_key_state
+WHEN NEW.binding_revision <> 1
+BEGIN SELECT RAISE(ABORT, 'initial root key binding revision must be one'); END;
+CREATE TRIGGER trg_root_key_state_revision_forward BEFORE UPDATE ON root_key_state
+WHEN NEW.id <> OLD.id OR NEW.binding_revision <> OLD.binding_revision + 1
+  OR NEW.verifier_nonce IS OLD.verifier_nonce OR NEW.verifier_ciphertext IS OLD.verifier_ciphertext
+  OR NEW.bound_at <= OLD.bound_at
+BEGIN SELECT RAISE(ABORT, 'root key rebind must replace verifier and advance binding revision exactly once'); END;
+CREATE TRIGGER trg_root_key_state_rebind_requires_isolation BEFORE UPDATE ON root_key_state
+WHEN EXISTS (SELECT 1 FROM connections c WHERE c.current_credential_generation_id IS NOT NULL AND c.revalidation_required = 0)
+  OR NOT EXISTS (SELECT 1 FROM maintenance_state m WHERE m.id = 1 AND m.active = 1 AND m.reason = 'RootKeyRebind')
+BEGIN SELECT RAISE(ABORT, 'root key rebind requires RootKeyRebind maintenance and every connection isolated'); END;
+CREATE TRIGGER trg_root_key_state_no_delete BEFORE DELETE ON root_key_state
+BEGIN SELECT RAISE(ABORT, 'root key state is not deletable'); END;
 
 
 -- Runtime 注册与长期服务 token 凭据（CONTEXT「服务身份」）：注册状态与 Admin 并发前提
 -- （row_version）是持久权威；在线连接、boot/epoch、心跳 last_seen 是瞬时投影（内存），不落库
 -- ——避免心跳改写 Admin row_version（DATA-RUNTIME-001）。当前 active 长期 token 的唯一权威是
 -- runtime_slots.current_credential_id（单一 owner-side current authority，DATA-RUNTIME-001）；
--- 两阶段轮换的待确认 token 由 pending_credential_id 单行表达。runtime_credentials 行只记录
--- 不可变 generation 生命周期历史（confirmed_at/retired_at 事实），不存在与指针并列的第二权威。
+-- 两阶段轮换的待确认 token 由 pending_credential_id 单行表达；已提升但等待 Admin 显式退休的旧
+-- token 由 retiring_credential_id 表达。runtime_credentials 行只记录不可变 generation 生命周期历史
+-- （confirmed_at/first_authenticated_at/retired_at 事实），不存在可独立写入的第二状态权威。
 CREATE TABLE runtime_slots (
   slot                  TEXT PRIMARY KEY CHECK (slot IN ('plinth','lintel')),
   state                 TEXT NOT NULL DEFAULT 'unregistered' CHECK (state IN ('unregistered','registered','revoked')),
   current_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   pending_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  retiring_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 注册/替换/轮换命令并发前提（DATA-ROWVER-001）
   created_at            TEXT NOT NULL,
   CHECK (
-    (state IN ('unregistered','revoked') AND current_credential_id IS NULL AND pending_credential_id IS NULL)
+    (state IN ('unregistered','revoked') AND current_credential_id IS NULL AND pending_credential_id IS NULL AND retiring_credential_id IS NULL)
     OR (state = 'registered' AND current_credential_id IS NOT NULL)
   ),
-  CHECK (current_credential_id IS NULL OR pending_credential_id IS NULL OR current_credential_id <> pending_credential_id) -- current/pending 不得指向同一行
+  CHECK (current_credential_id IS NULL OR pending_credential_id IS NULL OR current_credential_id <> pending_credential_id),
+  CHECK (current_credential_id IS NULL OR retiring_credential_id IS NULL OR current_credential_id <> retiring_credential_id),
+  CHECK (pending_credential_id IS NULL OR retiring_credential_id IS NULL OR pending_credential_id <> retiring_credential_id) -- 三个角色指针不得指向同一行
 ) STRICT;
 
 -- Runtime 长期服务 token 的不可变 credential generation 历史（两阶段轮换：下发新 token -> Runtime
--- 持久化确认 -> 原子切换指针并吊销旧 token，CONTEXT「服务身份」）。本表只保存不可变来源字段
--- （slot/generation/token_digest/created_at）与两个一次性生命周期事实：confirmed_at（NULL ->
--- 时间戳，一次，Runtime 持久化确认）与 retired_at（NULL -> 时间戳，一次，吊销）；两个时间
--- 均不可回退、不可改写。current/pending 选择完全由 runtime_slots 指针承载，本表不宣称任何
+-- 持久化确认 -> 原子切换 current/retiring -> 新 current 首次认证 -> Admin 显式退休旧 token，
+-- CONTEXT「服务身份」）。本表只保存不可变来源字段（slot/generation/token_digest/created_at）与
+-- 三个一次性生命周期事实：confirmed_at、first_authenticated_at、retired_at；时间均不可回退、
+-- 不可改写。current/pending/retiring 选择完全由 runtime_slots 指针承载，本表不宣称任何
 -- 状态（DATA-RUNTIME-002）。一次性注册令牌不落库（内存短生命周期、单次使用，HTTP-COMMAND-012）；
 -- 本表只保存长期 token digest。
 CREATE TABLE runtime_credentials (
@@ -104,8 +144,9 @@ CREATE TABLE runtime_credentials (
   generation   INTEGER NOT NULL CHECK (generation >= 1),
   token_digest BLOB NOT NULL CHECK (length(token_digest) = 32), -- 长期 token 只存 digest
   created_at   TEXT NOT NULL,
-  confirmed_at TEXT,   -- Runtime 持久化确认时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
-  retired_at   TEXT,   -- 吊销时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
+  confirmed_at          TEXT,   -- Runtime 持久化确认时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
+  first_authenticated_at TEXT,   -- 长期 token 第一次成功认证（NULL -> 时间戳一次；Pending Retirement 可见性）
+  retired_at            TEXT,   -- Admin/替换吊销时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
   row_version  INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- DATA-ROWVER-001
   UNIQUE (slot, generation)
 ) STRICT;
@@ -122,15 +163,28 @@ CREATE TABLE client_commands (
   principal_id       INTEGER NOT NULL,           -- users.id 或 service principal id（service 无 users 行，不设 FK）
   client_command_id  TEXT NOT NULL,
   command_type       TEXT NOT NULL,
-  request_digest     TEXT NOT NULL CHECK (length(request_digest) = 64), -- 全部语义字段（含 expected_* 并发前提）规范化后 SHA-256
+  request_digest     TEXT NOT NULL CHECK (length(request_digest) = 64), -- 非秘密语义字段（含 expected_*；秘密只记存在性）规范化后 SHA-256（DATA-COMMAND-002）
   outcome            TEXT NOT NULL CHECK (outcome IN ('committed','rejected_known')),
   result_object_type TEXT,
   result_object_id   INTEGER,
-  result_payload_json TEXT CHECK (result_payload_json IS NULL OR json_valid(result_payload_json)),
+  result_payload_json TEXT CHECK (result_payload_json IS NULL OR (
+    json_valid(result_payload_json) AND json_type(result_payload_json) = 'object'
+    AND json_type(result_payload_json, '$.revealHandle') IS NULL
+    AND json_type(result_payload_json, '$.registrationTokenHandle') IS NULL
+    AND json_type(result_payload_json, '$.bearerToken') IS NULL
+    AND json_type(result_payload_json, '$.registrationToken') IS NULL
+  )), -- 只持久化非秘密命令结果；reveal capability/raw secret 由内存响应拼装（SEC-REVEAL-005）
   created_at         TEXT NOT NULL,
   UNIQUE (principal_type, principal_id, client_command_id)
 ) STRICT;
 CREATE INDEX idx_client_commands_principal ON client_commands (principal_type, principal_id, created_at);
+CREATE TRIGGER trg_client_commands_no_secret_result_recursive BEFORE INSERT ON client_commands
+WHEN NEW.result_payload_json IS NOT NULL AND json_valid(NEW.result_payload_json)
+  AND EXISTS (
+    SELECT 1 FROM json_tree(NEW.result_payload_json)
+    WHERE key IN ('revealHandle','registrationTokenHandle','bearerToken','registrationToken',
+                  'password','currentPassword','newPassword','kubeconfig','apiKey','rootKey'))
+BEGIN SELECT RAISE(ABORT, 'command result cannot persist reveal capabilities or known raw secret fields at any nesting depth'); END;
 
 CREATE TABLE audit_events (
   id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -171,14 +225,20 @@ CREATE TABLE alert_sources (
 ) STRICT;
 
 CREATE TABLE alert_source_credentials (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  source_id  INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  digest     BLOB NOT NULL CHECK (length(digest) = 32), -- 32-byte Bearer 只存 digest
-  state      TEXT NOT NULL CHECK (state IN ('Active','Retired')),
-  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 吊销命令并发前提（DATA-ALERT-009）
-  created_at TEXT NOT NULL,
-  retired_at TEXT,
-  CHECK ((state = 'Retired' AND retired_at IS NOT NULL) OR (state = 'Active' AND retired_at IS NULL))
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  source_id             INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  digest                BLOB NOT NULL CHECK (length(digest) = 32), -- 32-byte Bearer 只存 digest
+  state                 TEXT NOT NULL CHECK (state IN ('Active','PendingRetirement','Retired')),
+  supersedes_credential_id INTEGER REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  first_used_at         TEXT,
+  pending_retirement_at TEXT,
+  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 生命周期命令并发前提（DATA-ALERT-009）
+  created_at            TEXT NOT NULL,
+  retired_at            TEXT,
+  CHECK (supersedes_credential_id IS NULL OR supersedes_credential_id <> id),
+  CHECK ((state = 'Active' AND pending_retirement_at IS NULL AND retired_at IS NULL)
+      OR (state = 'PendingRetirement' AND pending_retirement_at IS NOT NULL AND retired_at IS NULL)
+      OR (state = 'Retired' AND retired_at IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_alert_source_credentials_source ON alert_source_credentials (source_id);
 
@@ -648,13 +708,17 @@ CREATE TABLE connection_revisions (
 ) STRICT;
 
 CREATE TABLE credential_generations (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  connection_id  INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  generation_seq INTEGER NOT NULL CHECK (generation_seq >= 1),
-  ciphertext     BLOB NOT NULL,                     -- AEAD 密文（envelope 见 security.md）
-  created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at     TEXT NOT NULL,
-  UNIQUE (connection_id, generation_seq)
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  connection_id        INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  generation_seq       INTEGER NOT NULL CHECK (generation_seq >= 1),
+  envelope_version     INTEGER NOT NULL CHECK (envelope_version = 1),
+  key_binding_revision INTEGER NOT NULL CHECK (key_binding_revision >= 1),
+  nonce                BLOB NOT NULL CHECK (length(nonce) = 12),
+  ciphertext           BLOB NOT NULL CHECK (length(ciphertext) >= 16), -- AES-256-GCM ciphertext+tag；AAD 见 security.md
+  created_by           INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at           TEXT NOT NULL,
+  UNIQUE (connection_id, generation_seq),
+  UNIQUE (key_binding_revision, nonce)
 ) STRICT;
 
 -- model_provider 的能力只由真实黑盒探测写入，不接受客户端自报 toolsEnabled/streamingEnabled。
@@ -1688,6 +1752,34 @@ CREATE TABLE migration_ledger (
   applied_at   TEXT NOT NULL
 ) STRICT;
 
+-- 恢复、协调升级与根密钥 rebind 共用的维护聚合；具体可执行操作由 OpenAPI
+-- x-quoin-maintenance-access 与 security.md 拥有（SEC-MAINT-*）。
+CREATE TABLE maintenance_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  active          INTEGER NOT NULL CHECK (active IN (0,1)),
+  reason          TEXT CHECK (reason IS NULL OR reason IN ('Restore','Upgrade','RootKeyRebind')),
+  row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  entered_at      TEXT,
+  entered_by_type TEXT CHECK (entered_by_type IS NULL OR entered_by_type IN ('user','system')),
+  entered_by_id   INTEGER,
+  exited_at       TEXT,
+  exited_by       INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CHECK ((active = 1 AND reason IS NOT NULL AND entered_at IS NOT NULL AND entered_by_type IS NOT NULL AND exited_at IS NULL AND exited_by IS NULL)
+      OR (active = 0 AND reason IS NULL AND entered_at IS NULL AND entered_by_type IS NULL AND entered_by_id IS NULL))
+) STRICT;
+
+CREATE TABLE maintenance_items (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  maintenance_revision INTEGER NOT NULL CHECK (maintenance_revision >= 1),
+  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','SchemaMigration','ReleaseVersion','Integrity','SearchProjection')),
+  object_key           TEXT NOT NULL CHECK (length(object_key) BETWEEN 1 AND 256),
+  safe_state           TEXT NOT NULL CHECK (safe_state IN ('Safe','Blocking')),
+  detail_code          TEXT NOT NULL CHECK (length(detail_code) BETWEEN 1 AND 128),
+  updated_at           TEXT NOT NULL,
+  UNIQUE (maintenance_revision, kind, object_key)
+) STRICT;
+CREATE INDEX idx_maintenance_items_state ON maintenance_items (maintenance_revision, safe_state, kind);
+
 -- ============================================================================
 -- 12. 触发器（机器可表达的不变量）
 -- ============================================================================
@@ -1825,6 +1917,9 @@ CREATE TRIGGER trg_credential_generations_no_update BEFORE UPDATE ON credential_
 BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
 CREATE TRIGGER trg_credential_generations_no_delete BEFORE DELETE ON credential_generations
 BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
+CREATE TRIGGER trg_credential_generations_current_key_binding BEFORE INSERT ON credential_generations
+WHEN NOT EXISTS (SELECT 1 FROM root_key_state k WHERE k.id = 1 AND k.binding_revision = NEW.key_binding_revision)
+BEGIN SELECT RAISE(ABORT, 'credential generation must use the current root key binding revision'); END;
 CREATE TRIGGER trg_browser_identity_revisions_no_update BEFORE UPDATE ON browser_identity_revisions
 BEGIN SELECT RAISE(ABORT, 'browser_identity_revisions is append-only'); END;
 CREATE TRIGGER trg_browser_identity_revisions_no_delete BEFORE DELETE ON browser_identity_revisions
@@ -2322,25 +2417,66 @@ WHEN NEW.enabled IS OLD.enabled
  AND NEW.password_change_required_at IS OLD.password_change_required_at
 BEGIN SELECT RAISE(ABORT, 'auth_revision can only advance with a user security change'); END;
 
--- 12.16 告警源凭据：最多两个 Active；Retired 不可复活；退休时记录时间
+-- 12.16 告警源凭据：最多两个可认证 generation；轮换新凭据首次成功使用后，旧凭据机械进入
+-- PendingRetirement，只有 Admin 显式命令才退休；任一已退休凭据不可复活（SEC-SERVICE-004）。
 CREATE TRIGGER trg_alert_source_credentials_max2_insert BEFORE INSERT ON alert_source_credentials
-WHEN NEW.state = 'Active' AND (SELECT COUNT(*) FROM alert_source_credentials
-     WHERE source_id = NEW.source_id AND state = 'Active') >= 2
-BEGIN SELECT RAISE(ABORT, 'at most two active credentials per source'); END;
-CREATE TRIGGER trg_alert_source_credentials_max2_update BEFORE UPDATE OF state ON alert_source_credentials
-WHEN NEW.state = 'Active' AND (SELECT COUNT(*) FROM alert_source_credentials
-     WHERE source_id = NEW.source_id AND state = 'Active') >= 2
-BEGIN SELECT RAISE(ABORT, 'at most two active credentials per source'); END;
--- 唯一合法 UPDATE 是 Active -> Retired；这直接表达完整前向状态机，而非依赖多个否定守卫。
-CREATE TRIGGER trg_alert_source_credentials_update_is_retirement BEFORE UPDATE ON alert_source_credentials
-WHEN NOT (OLD.state = 'Active' AND NEW.state = 'Retired')
-BEGIN SELECT RAISE(ABORT, 'credential update must be Active -> Retired'); END;
--- 合法退休必须恰好递增 row_version（吊销命令在同一 UPDATE 中递增；DATA-ALERT-009）。
+WHEN NEW.state IN ('Active','PendingRetirement') AND (SELECT COUNT(*) FROM alert_source_credentials
+     WHERE source_id = NEW.source_id AND state IN ('Active','PendingRetirement')) >= 2
+BEGIN SELECT RAISE(ABORT, 'at most two accepted credentials per source'); END;
+CREATE UNIQUE INDEX ux_alert_source_one_pending_retirement
+  ON alert_source_credentials (source_id) WHERE state = 'PendingRetirement';
+CREATE UNIQUE INDEX ux_alert_source_one_replacement
+  ON alert_source_credentials (supersedes_credential_id) WHERE supersedes_credential_id IS NOT NULL;
+CREATE TRIGGER trg_alert_source_credentials_rotation_shape BEFORE INSERT ON alert_source_credentials
+WHEN (NEW.first_used_at IS NOT NULL OR NEW.pending_retirement_at IS NOT NULL OR NEW.retired_at IS NOT NULL)
+  OR (NEW.supersedes_credential_id IS NULL AND EXISTS (
+      SELECT 1 FROM alert_source_credentials c WHERE c.source_id = NEW.source_id AND c.state IN ('Active','PendingRetirement')))
+  OR (NEW.supersedes_credential_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM alert_source_credentials c WHERE c.id = NEW.supersedes_credential_id
+        AND c.source_id = NEW.source_id AND c.state = 'Active'))
+BEGIN SELECT RAISE(ABORT, 'alert credential must start Active and either be the first accepted generation or supersede the current Active generation'); END;
+CREATE TRIGGER trg_alert_source_credentials_state_transition BEFORE UPDATE OF state ON alert_source_credentials
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'Active' AND NEW.state IN ('PendingRetirement','Retired'))
+  OR (OLD.state = 'PendingRetirement' AND NEW.state = 'Retired'))
+BEGIN SELECT RAISE(ABORT, 'invalid alert credential state transition'); END;
+CREATE TRIGGER trg_alert_source_credentials_no_retire_superseded_before_first_use BEFORE UPDATE OF state ON alert_source_credentials
+WHEN OLD.state = 'Active' AND NEW.state = 'Retired' AND EXISTS (
+  SELECT 1 FROM alert_source_credentials replacement
+  WHERE replacement.supersedes_credential_id = OLD.id
+    AND replacement.state = 'Active'
+    AND replacement.first_used_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'superseded alert credential cannot retire before replacement first use'); END;
+CREATE TRIGGER trg_alert_source_credentials_first_used_once BEFORE UPDATE OF first_used_at ON alert_source_credentials
+WHEN OLD.first_used_at IS NOT NULL OR NEW.first_used_at IS NULL OR OLD.state <> 'Active'
+BEGIN SELECT RAISE(ABORT, 'alert credential first_used_at may only advance once while Active'); END;
+CREATE TRIGGER trg_alert_source_credentials_mark_old_pending AFTER UPDATE OF first_used_at ON alert_source_credentials
+WHEN OLD.first_used_at IS NULL AND NEW.first_used_at IS NOT NULL AND NEW.supersedes_credential_id IS NOT NULL
+BEGIN
+  UPDATE alert_source_credentials
+  SET state = 'PendingRetirement', pending_retirement_at = NEW.first_used_at, row_version = row_version + 1
+  WHERE id = NEW.supersedes_credential_id AND state = 'Active';
+END;
+CREATE TRIGGER trg_alert_source_credentials_lifecycle_shape BEFORE UPDATE ON alert_source_credentials
+WHEN (NEW.state = 'Active' AND (NEW.pending_retirement_at IS NOT NULL OR NEW.retired_at IS NOT NULL))
+  OR (NEW.state = 'PendingRetirement' AND (NEW.pending_retirement_at IS NULL OR NEW.retired_at IS NOT NULL))
+  OR (NEW.state = 'Retired' AND NEW.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'alert credential lifecycle timestamps must match state'); END;
 CREATE TRIGGER trg_alert_source_credentials_row_version_increment BEFORE UPDATE ON alert_source_credentials
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'credential row_version must increase exactly by 1'); END;
--- retired_at 由应用在同一 UPDATE 中写入（SQLite 触发器不支持 SET NEW）。
-
+CREATE TRIGGER trg_alert_deliveries_credential_current BEFORE INSERT ON alert_deliveries
+WHEN NOT EXISTS (
+  SELECT 1 FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id
+  WHERE s.id = NEW.source_id AND s.enabled = 1 AND c.id = NEW.credential_id
+    AND c.state IN ('Active','PendingRetirement'))
+BEGIN SELECT RAISE(ABORT, 'delivery credential must be accepted, enabled, and owned by the source at commit'); END;
+CREATE TRIGGER trg_alert_deliveries_record_first_use AFTER INSERT ON alert_deliveries
+WHEN EXISTS (SELECT 1 FROM alert_source_credentials c WHERE c.id = NEW.credential_id AND c.first_used_at IS NULL)
+BEGIN
+  UPDATE alert_source_credentials SET first_used_at = NEW.received_at, row_version = row_version + 1
+  WHERE id = NEW.credential_id AND first_used_at IS NULL;
+END;
 -- 12.17 告警发生：禁止已恢复再打开；row_version/last_state_change_at/resolved_at 由应用在
 -- 同一条 UPDATE 中维护（SQLite 触发器不支持 SET NEW；DATA-ALERT-* 定义其语义）。
 CREATE TRIGGER trg_alert_occurrence_no_reopen BEFORE UPDATE OF state ON alert_occurrences
@@ -2440,6 +2576,9 @@ BEGIN SELECT RAISE(ABORT, 'business_systems row_version must increase exactly by
 CREATE TRIGGER trg_connections_row_version_increment BEFORE UPDATE ON connections
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'connections row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_maintenance_state_row_version_increment BEFORE UPDATE ON maintenance_state
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'maintenance_state row_version must increase exactly by 1'); END;
 CREATE TRIGGER trg_business_system_kubernetes_connections_row_version_increment BEFORE UPDATE ON business_system_kubernetes_connections
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'business_system_kubernetes_connections row_version must increase exactly by 1'); END;
@@ -2817,12 +2956,47 @@ WHEN OLD.status = 'withdrawn' AND NEW.status <> 'withdrawn'
 BEGIN SELECT RAISE(ABORT, 'withdrawn message cannot be reactivated'); END;
 -- 告警源凭据：digest/source_id 等来源字段不可改写（轮换只创建新凭据）（DATA-ALERT-009）
 CREATE TRIGGER trg_alert_source_credentials_origin_immutable BEFORE UPDATE OF
-  source_id, digest, created_at ON alert_source_credentials
+  source_id, digest, supersedes_credential_id, created_at ON alert_source_credentials
 BEGIN SELECT RAISE(ABORT, 'alert_source_credential origin is immutable'); END;
 -- Attempt 可追加多条不可变 attempt_connection_grants；execution_attempts 不再携带单连接伪权威。
 -- 备份记录是审计等价历史：禁止 UPDATE（DATA-BACKUP-007）
 CREATE TRIGGER trg_backups_no_update BEFORE UPDATE ON backups
 BEGIN SELECT RAISE(ABORT, 'backups is append-only'); END;
+CREATE TRIGGER trg_maintenance_state_insert_inactive BEFORE INSERT ON maintenance_state
+WHEN NEW.active <> 0 OR NEW.reason IS NOT NULL OR NEW.entered_at IS NOT NULL OR NEW.entered_by_type IS NOT NULL OR NEW.entered_by_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'maintenance_state must be seeded inactive before entering maintenance'); END;
+CREATE TRIGGER trg_maintenance_state_transition BEFORE UPDATE OF active ON maintenance_state
+WHEN NEW.active <> OLD.active AND NOT (
+  (OLD.active = 0 AND NEW.active = 1 AND NEW.reason IS NOT NULL AND NEW.entered_at IS NOT NULL
+    AND NEW.entered_by_type IS NOT NULL AND NEW.exited_at IS NULL AND NEW.exited_by IS NULL)
+  OR (OLD.active = 1 AND NEW.active = 0 AND NEW.reason IS NULL AND NEW.entered_at IS NULL
+    AND NEW.entered_by_type IS NULL AND NEW.entered_by_id IS NULL AND NEW.exited_at IS NOT NULL AND NEW.exited_by IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'maintenance state transition must explicitly enter or exit'); END;
+CREATE TRIGGER trg_maintenance_state_active_identity_immutable BEFORE UPDATE OF reason, entered_at, entered_by_type, entered_by_id ON maintenance_state
+WHEN OLD.active = 1 AND NEW.active = 1 AND (
+  NEW.reason IS NOT OLD.reason OR NEW.entered_at IS NOT OLD.entered_at
+  OR NEW.entered_by_type IS NOT OLD.entered_by_type OR NEW.entered_by_id IS NOT OLD.entered_by_id)
+BEGIN SELECT RAISE(ABORT, 'active maintenance identity is immutable'); END;
+CREATE TRIGGER trg_maintenance_state_active_revision_frozen BEFORE UPDATE OF row_version ON maintenance_state
+WHEN OLD.active = 1 AND NEW.active = 1
+BEGIN SELECT RAISE(ABORT, 'active maintenance revision is frozen until exit'); END;
+CREATE TRIGGER trg_maintenance_state_exit_requires_safe_items BEFORE UPDATE OF active ON maintenance_state
+WHEN OLD.active = 1 AND NEW.active = 0 AND (
+  NOT EXISTS (SELECT 1 FROM maintenance_items i WHERE i.maintenance_revision = OLD.row_version)
+  OR EXISTS (SELECT 1 FROM maintenance_items i WHERE i.maintenance_revision = OLD.row_version AND i.safe_state = 'Blocking'))
+BEGIN SELECT RAISE(ABORT, 'maintenance exit requires a non-empty checklist with every item safe'); END;
+CREATE TRIGGER trg_maintenance_state_no_delete BEFORE DELETE ON maintenance_state
+BEGIN SELECT RAISE(ABORT, 'maintenance_state is not deletable'); END;
+CREATE TRIGGER trg_maintenance_items_insert_current BEFORE INSERT ON maintenance_items
+WHEN NOT EXISTS (SELECT 1 FROM maintenance_state m WHERE m.id = 1 AND m.active = 1 AND m.row_version = NEW.maintenance_revision)
+BEGIN SELECT RAISE(ABORT, 'maintenance item must belong to the active maintenance revision'); END;
+CREATE TRIGGER trg_maintenance_items_identity_immutable BEFORE UPDATE OF maintenance_revision, kind, object_key ON maintenance_items
+BEGIN SELECT RAISE(ABORT, 'maintenance item identity is immutable'); END;
+CREATE TRIGGER trg_maintenance_items_update_current BEFORE UPDATE ON maintenance_items
+WHEN NOT EXISTS (SELECT 1 FROM maintenance_state m WHERE m.id = 1 AND m.active = 1 AND m.row_version = OLD.maintenance_revision)
+BEGIN SELECT RAISE(ABORT, 'only items of the active maintenance revision may change'); END;
+CREATE TRIGGER trg_maintenance_items_no_delete BEFORE DELETE ON maintenance_items
+BEGIN SELECT RAISE(ABORT, 'maintenance checklist history is not deletable'); END;
 -- Runtime slot 是固定键（CONTEXT「服务身份」）
 CREATE TRIGGER trg_runtime_slots_slot_immutable BEFORE UPDATE OF slot ON runtime_slots
 BEGIN SELECT RAISE(ABORT, 'runtime_slot key is fixed'); END;
@@ -3271,8 +3445,8 @@ END;
 
 -- 12.30 Runtime 注册/凭据状态机与 Artifact 上传 ledger（DATA-RUNTIME-001/002、DATA-ARTIFACT-006）
 -- runtime_slots 持久状态转换：unregistered -> registered（注册成功）、registered -> revoked（替换）、
--- revoked -> registered（替换后注册）。在线连接/心跳是瞬时投影，不落库；current/pending 凭据指针
--- 由 runtime_slots 单行拥有（单一 current authority，DATA-RUNTIME-001）。
+-- revoked -> registered（替换后注册）。current 是首选 token，pending 是尚未提升的新 token，retiring 是
+-- 已被新 current 替代但等待 Admin 显式退休的旧 token；认证只接受 current 或 retiring。
 CREATE TRIGGER trg_runtime_slots_state_transition BEFORE UPDATE OF state ON runtime_slots
 WHEN OLD.state <> NEW.state AND NOT (
   (OLD.state = 'unregistered' AND NEW.state IN ('registered','revoked'))
@@ -3281,80 +3455,89 @@ WHEN OLD.state <> NEW.state AND NOT (
 )
 BEGIN SELECT RAISE(ABORT, 'runtime_slot state transition only unregistered->registered/revoked, registered->revoked, revoked->registered'); END;
 
--- current 指针必须属于同一 slot 且 confirmed_at 非空、retired_at 为空（当前可用长期 token）；
--- pending 指针必须属于同一 slot、retired_at 为空（可已确认或未确认）。registered ⇔ current 非空
--- （表 CHECK），unregistered/revoked ⇔ current/pending 皆空（表 CHECK）——每个语句/提交点
--- registered iff current 非空 iff 指向本 slot 已确认未退休凭据（DATA-RUNTIME-001/002）。
 CREATE TRIGGER trg_runtime_slots_current_owner_insert AFTER INSERT ON runtime_slots
 WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
      AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime_slots.current_credential_id must reference a confirmed, unretired credential of the same slot'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime current must reference a confirmed unretired credential of the same slot'); END;
 CREATE TRIGGER trg_runtime_slots_current_owner_update AFTER UPDATE OF current_credential_id ON runtime_slots
 WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
      AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime_slots.current_credential_id must reference a confirmed, unretired credential of the same slot'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime current must reference a confirmed unretired credential of the same slot'); END;
 CREATE TRIGGER trg_runtime_slots_pending_owner_insert AFTER INSERT ON runtime_slots
 WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime_slots.pending_credential_id must reference an unretired credential of the same slot'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime pending must reference an unretired credential of the same slot'); END;
 CREATE TRIGGER trg_runtime_slots_pending_owner_update AFTER UPDATE OF pending_credential_id ON runtime_slots
 WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime_slots.pending_credential_id must reference an unretired credential of the same slot'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime pending must reference an unretired credential of the same slot'); END;
+CREATE TRIGGER trg_runtime_slots_retiring_owner_insert AFTER INSERT ON runtime_slots
+WHEN NEW.retiring_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.retiring_credential_id AND c.slot = NEW.slot
+     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime retiring must reference a confirmed unretired credential of the same slot'); END;
+CREATE TRIGGER trg_runtime_slots_retiring_owner_update AFTER UPDATE OF retiring_credential_id ON runtime_slots
+WHEN NEW.retiring_credential_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.retiring_credential_id AND c.slot = NEW.slot
+     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime retiring must reference a confirmed unretired credential of the same slot'); END;
 
--- registered slot 的 pending 指针禁止非 NULL -> 另一个非 NULL 直接换绑：必须先 pending->NULL
--- （AFTER 触发器 trg_runtime_slots_abort_retire_pending 自动 retire 原 pending），再 NULL->new
--- （DATA-RUNTIME-002）。合法提升（current = 原 pending 且 pending 清空）不受影响（NEW.pending IS NULL）。
+-- 已有待确认或待退休 token 时不得开始另一轮；pending 中止先清空，AFTER 触发器退休孤儿。
 CREATE TRIGGER trg_runtime_slots_pending_no_direct_swap BEFORE UPDATE OF pending_credential_id ON runtime_slots
-WHEN OLD.pending_credential_id IS NOT NULL
-  AND NEW.pending_credential_id IS NOT NULL
+WHEN OLD.pending_credential_id IS NOT NULL AND NEW.pending_credential_id IS NOT NULL
   AND NEW.pending_credential_id IS NOT OLD.pending_credential_id
-BEGIN SELECT RAISE(ABORT, 'runtime slot pending can only be cleared before pointing to another credential (no direct swap)'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime pending must be cleared before another rotation'); END;
+CREATE TRIGGER trg_runtime_slots_no_new_pending_while_retiring BEFORE UPDATE OF pending_credential_id ON runtime_slots
+WHEN OLD.pending_credential_id IS NULL AND NEW.pending_credential_id IS NOT NULL AND OLD.retiring_credential_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'retiring runtime credential must be explicitly retired before another rotation'); END;
+CREATE TRIGGER trg_runtime_slots_retiring_no_direct_swap BEFORE UPDATE OF retiring_credential_id ON runtime_slots
+WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NOT NULL
+  AND NEW.retiring_credential_id IS NOT OLD.retiring_credential_id
+BEGIN SELECT RAISE(ABORT, 'runtime retiring credential must be cleared before another value'); END;
+CREATE TRIGGER trg_runtime_slots_retiring_only_from_promotion BEFORE UPDATE OF retiring_credential_id ON runtime_slots
+WHEN OLD.retiring_credential_id IS NULL AND NEW.retiring_credential_id IS NOT NULL AND NOT (
+  OLD.state = 'registered' AND NEW.state = 'registered'
+  AND OLD.pending_credential_id IS NOT NULL
+  AND NEW.retiring_credential_id IS OLD.current_credential_id
+  AND NEW.current_credential_id IS OLD.pending_credential_id
+  AND NEW.pending_credential_id IS NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime retiring credential can only be created by atomic pending promotion'); END;
 
--- B: registered slot 更换 current 只能是“提升 pending”（DATA-RUNTIME-002）：OLD.pending 非空、
--- NEW.current = OLD.pending、NEW.pending 清空，单条 UPDATE 原子完成。禁止绕 pending 直切、
--- 禁止先清 pending 后另行切换 current。初次注册（unregistered->registered）与替换后重新注册
--- （revoked->registered）不受此限——注册窗口由 trg_runtime_credentials_insert_confirmed_registration_only 限定。
--- current_owner 与 promote 触发器覆盖不同的非法类别且不依赖同类触发器的执行次序：
--- 目标非法（未确认/跨 slot/已退休）最终由 current_owner 拒绝；目标合法但绕 pending 的直切
--- 最终由本触发器拒绝。任一 RAISE(ABORT) 都回滚整条 UPDATE 及此前触发器产生的退休副作用；
--- 只有全部验证通过的合法提升才会保留 promotion_retire_old 的更新。
+-- registered slot 更换 current 只能在一条 UPDATE 中提升旧 pending，并把旧 current 移入 retiring；
+-- 旧 token 不自动退休。已有 retiring 时禁止提升，从而最多一个显式退休窗口。
 CREATE TRIGGER trg_runtime_slots_promote_requires_pending AFTER UPDATE OF current_credential_id ON runtime_slots
 WHEN OLD.state = 'registered' AND NEW.state = 'registered'
   AND NEW.current_credential_id IS NOT OLD.current_credential_id
-  AND EXISTS (
-    SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
-      AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
-  )
   AND (
     OLD.pending_credential_id IS NULL
+    OR OLD.retiring_credential_id IS NOT NULL
     OR NEW.current_credential_id IS NOT OLD.pending_credential_id
     OR NEW.pending_credential_id IS NOT NULL
+    OR NEW.retiring_credential_id IS NOT OLD.current_credential_id
   )
-BEGIN SELECT RAISE(ABORT, 'runtime slot current can only change by atomically promoting the pending credential (current=pending, pending=NULL)'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime promotion must atomically set current=old pending, pending=NULL, retiring=old current'); END;
 
--- C: retirement 是指针转移的机械副作用（AFTER 触发器），应用不得事后手动 retire 被引用行
--- （trg_runtime_credentials_no_retire_while_referenced 兜底）。提升：旧 current 自动退休；
--- 中止：被清空的 pending 自动退休；替换：该 slot 全部未退休凭据自动退休。时间使用与全库一致
--- 的 UTC 表达（strftime，同 committed_at DEFAULT）。自动 retire 恰好递增 row_version
--- （trg_runtime_credentials_row_version_increment），且不会命中 no_retire_while_referenced——
--- 触发器执行时该行已不再被 current/pending 引用。
-CREATE TRIGGER trg_runtime_slots_promotion_retire_old AFTER UPDATE OF current_credential_id ON runtime_slots
-WHEN OLD.state = 'registered' AND NEW.state = 'registered'
-  AND OLD.current_credential_id IS NOT NULL
-  AND NEW.current_credential_id IS NOT OLD.current_credential_id
-BEGIN
-  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
-  WHERE id = OLD.current_credential_id AND retired_at IS NULL;
-END;
+-- pending 中止退休该孤儿；替换退休全部；retiring 只有 Admin 显式清指针后退休。
 CREATE TRIGGER trg_runtime_slots_abort_retire_pending AFTER UPDATE OF pending_credential_id ON runtime_slots
 WHEN OLD.pending_credential_id IS NOT NULL AND NEW.pending_credential_id IS NULL
   AND NEW.current_credential_id IS OLD.current_credential_id
+  AND NEW.retiring_credential_id IS OLD.retiring_credential_id
 BEGIN
   UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
   WHERE id = OLD.pending_credential_id AND retired_at IS NULL;
+END;
+CREATE TRIGGER trg_runtime_slots_retiring_requires_new_auth BEFORE UPDATE OF retiring_credential_id ON runtime_slots
+WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NULL
+  AND OLD.state = 'registered' AND NEW.state = 'registered'
+  AND NOT EXISTS (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.first_authenticated_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'runtime old credential cannot retire before the new current token authenticates successfully'); END;
+CREATE TRIGGER trg_runtime_slots_retire_old_explicit AFTER UPDATE OF retiring_credential_id ON runtime_slots
+WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NULL
+BEGIN
+  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
+  WHERE id = OLD.retiring_credential_id AND retired_at IS NULL;
 END;
 CREATE TRIGGER trg_runtime_slots_replace_retire_all AFTER UPDATE OF state ON runtime_slots
 WHEN NEW.state = 'revoked' AND OLD.state <> 'revoked'
@@ -3363,53 +3546,46 @@ BEGIN
   WHERE slot = NEW.slot AND retired_at IS NULL;
 END;
 
--- runtime_credentials：来源字段（slot/generation/token_digest/created_at）不可改写；历史不可删除；
--- confirmed_at 与 retired_at 均为一次性生命周期事实（NULL -> 时间戳），不可回退、不可改写
--- （DATA-RUNTIME-002）。被 current 或 pending 指针引用的 credential 禁止设置 retired_at——
--- 吊销只能经指针转移的机械副作用发生（promotion/abort/replace 的 AFTER 触发器）；
--- 每个语句/提交点指针有效。
+-- Runtime credential 来源与历史不可改写；confirmed/first_authenticated/retired 是各自一次性事实。
 CREATE TRIGGER trg_runtime_credentials_origin_immutable BEFORE UPDATE OF
   slot, generation, token_digest, created_at ON runtime_credentials
-BEGIN SELECT RAISE(ABORT, 'runtime_credential origin is immutable'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime credential origin is immutable'); END;
 CREATE TRIGGER trg_runtime_credentials_no_delete BEFORE DELETE ON runtime_credentials
-BEGIN SELECT RAISE(ABORT, 'runtime_credentials history is not deletable'); END;
+BEGIN SELECT RAISE(ABORT, 'runtime credentials history is not deletable'); END;
 CREATE TRIGGER trg_runtime_credentials_confirmed_once BEFORE UPDATE OF confirmed_at ON runtime_credentials
-WHEN OLD.confirmed_at IS NOT NULL AND NEW.confirmed_at IS NOT OLD.confirmed_at
-BEGIN SELECT RAISE(ABORT, 'runtime_credential confirmed_at is a one-time fact and cannot be rewritten'); END;
+WHEN OLD.confirmed_at IS NOT NULL OR NEW.confirmed_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'runtime confirmed_at may only advance once from NULL'); END;
+CREATE TRIGGER trg_runtime_credentials_first_auth_once BEFORE UPDATE OF first_authenticated_at ON runtime_credentials
+WHEN OLD.first_authenticated_at IS NOT NULL OR NEW.first_authenticated_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'runtime first_authenticated_at may only advance once from NULL'); END;
+CREATE TRIGGER trg_runtime_credentials_first_auth_current BEFORE UPDATE OF first_authenticated_at ON runtime_credentials
+WHEN OLD.first_authenticated_at IS NULL AND NEW.first_authenticated_at IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.current_credential_id = NEW.id AND s.state = 'registered')
+BEGIN SELECT RAISE(ABORT, 'only the registered current runtime credential may record first authentication'); END;
 CREATE TRIGGER trg_runtime_credentials_retired_once BEFORE UPDATE OF retired_at ON runtime_credentials
-WHEN OLD.retired_at IS NOT NULL AND NEW.retired_at IS NOT OLD.retired_at
-BEGIN SELECT RAISE(ABORT, 'runtime_credential retired_at is a one-time fact and cannot be rewritten'); END;
+WHEN OLD.retired_at IS NOT NULL OR NEW.retired_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'runtime retired_at may only advance once from NULL'); END;
 CREATE TRIGGER trg_runtime_credentials_no_retire_while_referenced BEFORE UPDATE OF retired_at ON runtime_credentials
-WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL AND EXISTS
-  (SELECT 1 FROM runtime_slots s WHERE s.slot = OLD.slot AND (s.current_credential_id = OLD.id OR s.pending_credential_id = OLD.id))
-BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be retired while referenced by current or pending pointer'); END;
--- 已退休凭据不可再确认（retire 是终态：中止的 pending 或已吊销的历史行不得复活为可用凭据）；
--- 同一条 UPDATE 同时写 confirmed_at 与 retired_at 同样拒绝。确认与吊销互斥且各一次。
+WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL AND EXISTS (
+  SELECT 1 FROM runtime_slots s WHERE s.slot = OLD.slot
+    AND (s.current_credential_id = OLD.id OR s.pending_credential_id = OLD.id OR s.retiring_credential_id = OLD.id))
+BEGIN SELECT RAISE(ABORT, 'runtime credential cannot retire while referenced by current, pending, or retiring'); END;
 CREATE TRIGGER trg_runtime_credentials_no_confirm_after_retire BEFORE UPDATE OF confirmed_at ON runtime_credentials
 WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND (OLD.retired_at IS NOT NULL OR NEW.retired_at IS NOT NULL)
 BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be confirmed after retirement'); END;
--- 凭据不得“出生即退休”：INSERT 时 retired_at 必须为 NULL（生命周期只允许从 NULL -> 时间戳的
--- UPDATE 推进，DATA-RUNTIME-002）。confirmed_at 可非 NULL（初次注册）也可 NULL（轮换 pending）。
-CREATE TRIGGER trg_runtime_credentials_insert_not_retired BEFORE INSERT ON runtime_credentials
-WHEN NEW.retired_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be created already retired'); END;
--- A: 确认（confirmed_at NULL -> 时间戳）的唯一合法路径是“该 credential 正被同 slot 的
--- pending_credential_id 引用”（轮换确认）。初次注册/替换后注册允许 INSERT 时 confirmed_at 非空，
--- 但仅当 slot 当前为 unregistered/revoked 且 current/pending 皆空（注册窗口）；
--- registered slot 不得 INSERT 已确认孤儿（轮换必须从 pending 确认，不能绕 pending）。
+CREATE TRIGGER trg_runtime_credentials_insert_clean BEFORE INSERT ON runtime_credentials
+WHEN NEW.retired_at IS NOT NULL OR NEW.first_authenticated_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'runtime credential must be created unretired and not yet authenticated'); END;
 CREATE TRIGGER trg_runtime_credentials_confirm_requires_pending BEFORE UPDATE OF confirmed_at ON runtime_credentials
 WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.pending_credential_id = NEW.id
-)
-BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be confirmed unless referenced by the slot pending pointer'); END;
+  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.pending_credential_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'runtime credential confirmation requires the slot pending pointer'); END;
 CREATE TRIGGER trg_runtime_credentials_insert_confirmed_registration_only BEFORE INSERT ON runtime_credentials
 WHEN NEW.confirmed_at IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot
     AND s.state IN ('unregistered','revoked')
-    AND s.current_credential_id IS NULL AND s.pending_credential_id IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential can only be inserted for first or replacement registration (slot unregistered/revoked with no pointers)'); END;
-
+    AND s.current_credential_id IS NULL AND s.pending_credential_id IS NULL AND s.retiring_credential_id IS NULL)
+BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential may only be inserted in an empty registration window'); END;
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
 -- 普通上传必须绑定 state='Running' Attempt 且 runtime_slot/boot_id/connection_epoch 精确一致；
@@ -3976,6 +4152,13 @@ BEGIN SELECT RAISE(ABORT, 'model capability probe must close over its Running pr
 CREATE TRIGGER trg_connections_model_provider_insert_disabled BEFORE INSERT ON connections
 WHEN NEW.type = 'model_provider' AND NEW.enabled = 1
 BEGIN SELECT RAISE(ABORT, 'model_provider must be created disabled until its revision and credential pass the real capability probe'); END;
+CREATE TRIGGER trg_connections_current_key_binding BEFORE UPDATE OF enabled, revalidation_required, current_credential_generation_id ON connections
+WHEN NEW.enabled = 1 AND NEW.revalidation_required = 0 AND (
+  NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM credential_generations g JOIN root_key_state k ON k.id = 1
+    WHERE g.id = NEW.current_credential_generation_id AND g.connection_id = NEW.id
+      AND g.key_binding_revision = k.binding_revision))
+BEGIN SELECT RAISE(ABORT, 'enabled validated connection requires a current credential under the current root key binding'); END;
 CREATE TRIGGER trg_connections_enable_requires_probe BEFORE UPDATE OF enabled, current_revision_id, current_credential_generation_id ON connections
 WHEN NEW.type = 'model_provider' AND NEW.enabled = 1 AND (
   NEW.current_revision_id IS NULL OR NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
@@ -3993,6 +4176,7 @@ WHEN NOT EXISTS (
   JOIN connections c ON c.id = NEW.connection_id
   JOIN connection_revisions r ON r.id = NEW.connection_revision_id AND r.connection_id = c.id
   JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = c.id
+  JOIN root_key_state k ON k.id = 1 AND g.key_binding_revision = k.binding_revision
   WHERE a.id = NEW.attempt_id AND a.state IN ('Queued','Assigned','Running')
     AND ((a.attempt_type = 'model_provider_probe' AND NEW.purpose IN ('chat_model','embedding')
           AND c.type = 'model_provider' AND c.current_revision_id = NEW.connection_revision_id
