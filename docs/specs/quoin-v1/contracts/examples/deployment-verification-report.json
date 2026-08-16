@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "documentType": "helper_report",
+  "invocationId": "42",
+  "manifestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "itemSetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "releaseSubjectDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "catalogDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "resultProfileDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "deploymentConfigDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "publicOriginDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "backend": "compose",
+  "architecture": "linux/amd64",
+  "helperRequestDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "startedAt": "2026-08-11T00:01:00Z",
+  "finishedAt": "2026-08-11T00:02:00Z",
+  "items": [
+    {
+      "itemId": "101",
+      "scenarioId": "deployment.verify-only",
+      "cellId": "compose-linux-amd64",
+      "inputDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "resultDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "outcome": "passed",
+      "category": "passed",
+      "startedAt": "2026-08-11T00:01:00Z",
+      "finishedAt": "2026-08-11T00:02:00Z",
+      "argvSanitized": ["quoin-deploy", "verify", "--request", "request.json"],
+      "exitCode": 0,
+      "assertions": [
+        {
+          "id": "release-digest-match",
+          "expected": true,
+          "actual": true,
+          "result": "passed"
+        }
+      ],
+      "attachments": [
+        {
+          "kind": "log",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sizeBytes": 512,
+          "mediaType": "text/plain"
+        }
+      ],
+      "cleanupOutcome": "clean"
+    }
+  ]
+}

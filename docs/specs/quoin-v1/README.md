@@ -34,6 +34,9 @@ contracts/
 ├── metrics.yaml
 ├── plinth-worker-tools.yaml
 ├── release-inputs.yaml
+├── verification-catalog.yaml
+├── verification-result-profile.yaml
+├── connection-probes.yaml
 ├── examples/
 ├── quoin/
 │   └── plinth/
@@ -54,10 +57,19 @@ contracts/
 | `contracts/metrics.yaml` | 四组件 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
 | `contracts/plinth-worker-tools.yaml` | Plinth worker 的 Bash 调用、固定工具包/版本、可执行路径与 Landlock 只读运行时路径 |
 | `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 |
-| `contracts/examples/` | 由相应 JSON Schema 校验的最少 Helm/Compose 安装输入示例，不是独立权威源 |
+| `contracts/verification-catalog.yaml` | Scenario ID、验证层、cell/capability、依赖、低层证明引用、实现绑定、故障原语、证据与 cleanup 要求 |
+| `contracts/verification-result-profile.yaml` | PASSED/WARNED/FAILED 分类、冲突与聚合规则的唯一机器权威 |
+| `contracts/connection-probes.yaml` | Model Provider、Thanos 与 Kubernetes Connection Probe 的 action-set/version 和封闭机械动作 |
+| `contracts/examples/` | 由相应 JSON Schema 校验的最少 Helm/Compose 安装输入与 Deployment Acceptance helper request/report 示例，不是独立权威源 |
 | `contracts/schemas/deployment-config.schema.json` | 四组件启动配置字段、类型、默认值边界与跨平台投影结构 |
 | `contracts/schemas/release-manifest.schema.json` | Release 四镜像/双架构 digest、浏览器、Chart/Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
 | `contracts/schemas/readiness-response.schema.json` | 四组件 `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
+| `contracts/schemas/verification-catalog.schema.json` | Scenario catalog、cell、capability、fault primitive 与 execution profile 的文档形状 |
+| `contracts/schemas/verification-result.schema.json` | in-toto Statement v1 + Test Result v0.1 的严格 Quoin profile |
+| `contracts/schemas/verification-result-profile.schema.json` | 验证结果分类与聚合 profile 的严格文档形状 |
+| `contracts/schemas/verification-evidence.schema.json` | Scenario/cell 结果、断言、附件、cleanup 与 typed observation 的结构化证据索引 |
+| `contracts/schemas/deployment-verification.schema.json` | Deployment Acceptance helper request/report 与服务端生成 typed locator 的唯一交换格式；OpenAPI 直接引用其中 `helperRequest` / `helperReport` 定义 |
+| `contracts/schemas/connection-probes.schema.json` | Connection Probe action catalog 的严格文档形状 |
 | `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog、Browser Tool、Browser Execution 与 Frontend State 等独立 JSON 文档格式 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
@@ -75,6 +87,9 @@ contracts/
 | Plinth worker 本地 Bash/Debian package/工具路径与只读运行时路径 | `contracts/plinth-worker-tools.yaml` | `contracts/schemas/plinth-worker-tools.schema.json` 校验目录；`architecture.md` 与 `operations.md` 解释执行和镜像边界 |
 | Helm/Compose 最少安装输入与四组件生成配置 | `contracts/schemas/deployment-config.schema.json` | `contracts/examples/*-install.yaml` 给出可校验最小输入；`operations.md` 解释启动、拒绝与投影 |
 | 基础镜像、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 | `contracts/release-inputs.yaml` | `contracts/schemas/release-inputs.schema.json` 校验锁；`operations.md` 解释镜像与供应链边界 |
+| Scenario、验证层、环境 cell/capability、依赖/证明引用、实现绑定、故障与 cleanup 要求 | `contracts/verification-catalog.yaml` | `contracts/schemas/verification-catalog.schema.json` 校验目录；`verification.md` 解释执行与聚合语义 |
+| Connection Probe 的三类 action-set/version 与机械动作 | `contracts/connection-probes.yaml` | `contracts/schemas/connection-probes.schema.json` 校验目录；架构、持久化、HTTP 与 Runtime 规格引用 digest，不复制动作正文 |
+| Release/Deployment 验证证据与 helper 交换文档形状 | `contracts/schemas/verification-result.schema.json`、`verification-evidence.schema.json`、`deployment-verification.schema.json` | `verification.md` 解释签名、幂等、时间闭包和证据保留；helper request/report 不另建平行 Schema |
 | Release digest、在线/离线资产名、工件、Sigstore bundle 映射、契约版本与验收摘要 | `contracts/schemas/release-manifest.schema.json` | `operations.md` 解释发布、离线包、升级与回滚 |
 | 四组件 `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
 | 其他 YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | 对应主题 Markdown 解释发布、兼容、运行和错误语义 |
@@ -101,7 +116,7 @@ contracts/
 <CATEGORY>-<SUBJECT>-<NNN>
 ```
 
-**Example：** `DATA-ARTIFACT-001`、`HTTP-COMMAND-003`、`RPC-FENCE-002`、`UI-WAIT-004`。
+**Example：** `DATA-ARTIFACT-001`、`HTTP-COMMAND-003`、`RUNTIME-TASK-004`、`UI-TEST-004`。
 
 - **SPEC-TRACE-001 —** 每条独立的 `MUST`、`MUST NOT`、`SHOULD`、`SHOULD NOT` 或 `MAY` 规范条款 **MUST** 拥有稳定 ID；标题、Rationale、Example、Non-normative 和研究摘要 **MUST NOT** 分配规范条款 ID。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）
 - **SPEC-TRACE-002 —** 每个主题文件 **MUST** 在首次定义条款时声明自己的 `CATEGORY` 前缀；同一 ID **MUST NOT** 被重新分配给不同语义，删除或被替代的 ID **MUST NOT** 复用。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）

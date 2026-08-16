@@ -100,7 +100,7 @@ enum AttemptType {
   ATTEMPT_TYPE_BROWSER_EXPLORATION = 5;
   ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION = 6;
   ATTEMPT_TYPE_EMBEDDING = 7;
-  ATTEMPT_TYPE_MODEL_PROVIDER_PROBE = 8;
+  ATTEMPT_TYPE_CONNECTION_PROBE = 8;
 }
 
 // execution_attempts.scope_type 的 wire 表达（DATA-ATTEMPT-002）。
@@ -110,7 +110,7 @@ enum ScopeType {
   SCOPE_TYPE_INVESTIGATION = 2;
   SCOPE_TYPE_RUN = 3;
   SCOPE_TYPE_RUN_CHECK = 4;
-  SCOPE_TYPE_CONFIG_TEST_RUN = 5; // 配置 Test Run 的机械采集子 Attempt（DATA-CONFIG-007）
+  SCOPE_TYPE_CONFIG_VERIFICATION_RUN = 5; // Config Verification Run 的机械采集子 Attempt（DATA-CONFIG-007）
   SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH = 6;
   SCOPE_TYPE_EMBEDDING_GENERATION = 7;
   SCOPE_TYPE_CONNECTION = 8;
@@ -377,11 +377,11 @@ message DispatchAttempt {
   AttemptType attempt_type = 2;
   ScopeType scope_type = 3;
   int64 scope_id = 4;
-  string check_key = 5;            // run_check/config_test_run 子 Attempt 时非空；否则空
+  string check_key = 5;            // run_check/config_verification_run 子 Attempt 时非空；否则空
   google.protobuf.Timestamp lease_deadline = 6; // 有限 lease 截止；时长数值为部署配置
   AttemptInputSnapshot input = 7;  // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
   int64 requested_by_tool_call_id = 8; // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
-  string plan_key = 9;             // config_test_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
+  string plan_key = 9;             // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
 }
 
 // 任务执行输入快照：Quoin 在派发事务中冻结的规范结构化输入（非秘密），对端按
@@ -416,7 +416,8 @@ message ConnectionGrant {
   int64 grant_id = 1;              // attempt_connection_grants.id（不可变、Attempt-scoped）
   int64 connection_revision_id = 2; // connections.current_revision_id 绑定
   int64 credential_generation_id = 3; // credential_generations.id 绑定
-  string purpose = 4;              // chat_model|embedding|thanos_query|kubernetes_read
+  string purpose = 4;              // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|thanos_probe|kubernetes_probe
+  int64 connection_probe_result_id = 5; // model_provider 必须绑定通过的不可变 qualification；其它类型为 0
 }
 
 // 接受：Quoin 写 accepted_at 并转 Running（RUNTIME-TASK-004）。
@@ -777,6 +778,7 @@ enum BrowserOperationKind {
   BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE = 2;
   BROWSER_OPERATION_KIND_JOURNEY = 3;
   BROWSER_OPERATION_KIND_EXPLORATION = 4;
+  BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION = 5;
 }
 
 enum BrowserOperationStartRejectReason {
@@ -854,7 +856,7 @@ enum ProfileInventoryStatus {
 }
 
 message BrowserOperationInput {
-  string schema_kind = 1;       // manual_login_v1|authentication_probe_v1；Attempt 输入另走 InputSnapshot
+  string schema_kind = 1;       // manual_login_v1|authentication_probe_v1|deployment_verification_v1；Attempt 输入另走 InputSnapshot
   bytes canonical_json = 2;     // browser-execution.schema.json 对应 $defs 的 JCS bytes
   bytes content_digest = 3;     // SHA-256(canonical_json)，32 字节
 }
@@ -869,6 +871,8 @@ message StartBrowserOperation {
   google.protobuf.Timestamp requested_at = 7;
   string journey_catalog_digest = 8;  // 必须等于 Hello 与冻结 Browser Operation；64 位 hex
   string journey_catalog_version = 9;
+  int64 verification_invocation_item_id = 10; // deployment_verification 必填；其它 kind 为 0
+  string clone_identity = 11;                  // deployment_verification 必填且等于 SQL 冻结值；其它 kind 为空
 }
 
 message StartBrowserOperationAck {
@@ -930,19 +934,65 @@ message PublishBrowserProfileResult {
 }
 
 // Quoin 已提交 operation 终态后发送的幂等进程停止 fence。Lintel 不得据此改写领域终态；
-// 只停止 operation_id 对应的进程/隧道，不得按 identity 杀死后续 operation。重复消息安全，
-// 目标已关闭时同样回 stopped=true；Quoin 收到 Ack 或接受新 Lintel boot 前保留身份/容量 fence。
+// 只停止 operation_id 对应的进程/隧道并清理 trace staging/临时 profile，不得按 identity 杀死后续 operation。
+// 重复消息必须回同一规范 cleanup observation；同 boot 无成功 typed Ack 不得声称已清理。Quoin 收到
+// SUCCEEDED Ack 前保留身份/容量 fence；新 boot 只能令旧 cleanup 进入 indeterminate，必须走 LintelRecovery。
 message StopBrowserOperation {
   int64 operation_id = 1;
   BrowserCloseReason reason = 2;
   google.protobuf.Timestamp committed_at = 3;
+  string original_start_boot_id = 4; // deployment_verification 必填；允许新 boot 在完整 sweep 后确认旧 operation
+  string clone_identity = 5;         // deployment_verification 必填；必须等于 Start 与 SQL 冻结值
+}
+
+enum BrowserCleanupOutcome {
+  BROWSER_CLEANUP_OUTCOME_UNSPECIFIED = 0;
+  BROWSER_CLEANUP_OUTCOME_SUCCEEDED = 1;
+  BROWSER_CLEANUP_OUTCOME_FAILED = 2;
+}
+
+enum BrowserCleanupFailureCode {
+  BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED = 0;
+  BROWSER_CLEANUP_FAILURE_CODE_PROCESS_STILL_RUNNING = 1;
+  BROWSER_CLEANUP_FAILURE_CODE_TUNNEL_STILL_OPEN = 2;
+  BROWSER_CLEANUP_FAILURE_CODE_TRACE_STAGING_REMAINS = 3;
+  BROWSER_CLEANUP_FAILURE_CODE_TEMPORARY_PROFILE_REMAINS = 4;
+  BROWSER_CLEANUP_FAILURE_CODE_STATE_INSPECTION_FAILED = 5;
+  BROWSER_CLEANUP_FAILURE_CODE_INTERNAL = 6;
+  BROWSER_CLEANUP_FAILURE_CODE_CGROUP_NOT_EMPTY = 7;
+  BROWSER_CLEANUP_FAILURE_CODE_CHROMIUM_STILL_RUNNING = 8;
+  BROWSER_CLEANUP_FAILURE_CODE_X0VNC_STILL_RUNNING = 9;
+  BROWSER_CLEANUP_FAILURE_CODE_CLONE_NAMESPACE_REMAINS = 10;
+  BROWSER_CLEANUP_FAILURE_CODE_RUNTIME_HANDLE_REMAINS = 11;
+  BROWSER_CLEANUP_FAILURE_CODE_SLOT_LEASE_REMAINS = 12;
 }
 
 message StopBrowserOperationAck {
   int64 operation_id = 1;
-  bool stopped = 2;                    // 进程/隧道已不存在；目标原本不存在同样为 true
+  reserved 2;
   google.protobuf.Timestamp stopped_at = 3;
-  string detail = 4;
+  string detail = 4;                    // 非秘密诊断；不得代替 typed cleanup 字段
+  BrowserCleanupOutcome cleanup_outcome = 5;
+  bool process_stopped = 6;
+  bool tunnel_closed = 7;
+  bool trace_staging_deleted = 8;
+  bool temporary_profile_deleted = 9;
+  bytes cleanup_state_hash = 10;        // 规范 cleanup observation SHA-256，32 字节
+  BrowserCleanupFailureCode failure_code = 11; // FAILED 必填；SUCCEEDED 必须 UNSPECIFIED
+  string original_start_boot_id = 12;   // deployment_verification 必填并回显 Stop 的冻结值
+  string cleanup_boot_id = 13;          // deployment_verification 必填；same/new boot 清理依据
+  uint64 cleanup_connection_epoch = 14; // deployment_verification 必须 > 0
+  bytes stop_fence_digest = 15;         // SHA-256(规范 StopBrowserOperation)，32 字节
+  string clone_identity = 16;           // deployment_verification 必填并回显冻结值
+  uint64 operation_process_count = 17;  // clean 必须为 0
+  uint64 cgroup_process_count = 18;     // clean 必须为 0
+  uint64 chromium_process_count = 19;   // clean 必须为 0
+  uint64 x0vnc_process_count = 20;      // clean 必须为 0
+  uint64 novnc_tunnel_count = 21;       // clean 必须为 0
+  uint64 clone_namespace_count = 22;    // clean 必须为 0
+  uint64 temporary_file_count = 23;     // clean 必须为 0
+  uint64 runtime_handle_count = 24;     // clean 必须为 0
+  uint64 slot_lease_count = 25;         // clean 必须为 0
 }
 
 message ExpectedBrowserProfile {
@@ -1036,8 +1086,8 @@ message BrowserEnvelope {
   }
 }
 
-// 会话打开：声明对应的持久 Browser Operation（browser_operations.id）、身份、slot
-// 与连接身份（RUNTIME-BROWSER-002）。slot 必须为 LINTEL（DATA-RUNTIME-001b）。
+// 会话打开：声明对应的持久 Browser Operation（browser_operations.id）、kind、身份、冻结参与者 Session、slot
+// 与连接身份（RUNTIME-BROWSER-010/011）。slot 必须为 LINTEL（DATA-RUNTIME-001b）。
 message BrowserSessionOpen {
   int64 operation_id = 1;          // browser_operations.id（持久审计权威）
   int64 identity_id = 2;           // browser_identities.id
@@ -1045,7 +1095,10 @@ message BrowserSessionOpen {
   string boot_id = 4;
   uint64 connection_epoch = 5;
   string reconnect_session_id = 6; // 同 boot 宽限期内重附着时携带；新建时为空
-  int64 actor_user_id = 7;         // 必须等于 manual-login operation 的 actor_user_id
+  int64 actor_user_id = 7;         // 必须等于 operation.actor_user_id
+  BrowserOperationKind operation_kind = 8; // 只允许 MANUAL_LOGIN 或 DEPLOYMENT_VERIFICATION
+  int64 actor_session_id = 9;      // 必须等于 operation.actor_session_id；manual login 与部署观察都不可换 Session
+  uint64 attachment_seq = 10;      // operation 内从 1 严格递增；重附着不得重放旧序号
 }
 
 // 会话打开确认：返回瞬时 session_id 与重附着宽限期截止（数值为部署配置）。
@@ -1053,6 +1106,7 @@ message BrowserSessionOpen {
 message BrowserSessionOpenAck {
   string session_id = 1;           // 瞬时 BrowserSession ID（内存投影）
   google.protobuf.Timestamp reconnect_deadline = 2; // 宽限期截止；到期释放身份锁
+  uint64 attachment_seq = 3;       // 精确回显已接受的递增序号
 }
 
 // noVNC/RFB 原始字节：Quoin 透明中继，不解析、不校验内容（RUNTIME-BROWSER-003）。

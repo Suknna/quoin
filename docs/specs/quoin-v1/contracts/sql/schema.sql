@@ -426,7 +426,7 @@ CREATE TABLE task_change_log (
   object_type  TEXT NOT NULL CHECK (object_type IN
     ('initial_analysis','execution_attempt','inspection_run','inspection_report',
      'tool_call','knowledge_import_batch','knowledge_candidate','browser_operation',
-     'config_test_run')),
+     'config_verification_run')),
   object_id    INTEGER NOT NULL,
   change_type  TEXT NOT NULL CHECK (change_type IN ('created','state_changed')),
   row_version  INTEGER NOT NULL CHECK (row_version >= 1),
@@ -723,30 +723,79 @@ CREATE TABLE credential_generations (
   UNIQUE (key_binding_revision, nonce)
 ) STRICT;
 
--- model_provider 的能力只由真实黑盒探测写入，不接受客户端自报 toolsEnabled/streamingEnabled。
-CREATE TABLE model_provider_capabilities (
+-- Connection Probe 是 supervisor 直接执行的 immutable typed result；动作正文及 action-set/version
+-- 由 contracts/connection-probes.yaml 独占。header 与 execution_attempts 1:1，typed child 按连接类型封闭。
+CREATE TABLE connection_probe_results (
   id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  attempt_id                    INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_id                 INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_type               TEXT NOT NULL CHECK (connection_type IN ('model_provider','thanos','kubernetes')),
   connection_revision_id        INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id      INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  probe_attempt_id              INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  probe_version                 TEXT NOT NULL,
-  chat_model_id                 TEXT NOT NULL,
-  embedding_model_id            TEXT NOT NULL,
-  context_budget_tokens         INTEGER NOT NULL CHECK (context_budget_tokens >= 1),
-  max_output_tokens             INTEGER NOT NULL CHECK (max_output_tokens >= 1),
-  streaming_supported           INTEGER NOT NULL CHECK (streaming_supported IN (0,1)),
-  native_tool_calling_supported INTEGER NOT NULL CHECK (native_tool_calling_supported IN (0,1)),
-  multi_tool_call_supported     INTEGER NOT NULL CHECK (multi_tool_call_supported IN (0,1)),
-  cancellation_observed         INTEGER NOT NULL CHECK (cancellation_observed IN (0,1)),
-  usage_observed                INTEGER NOT NULL CHECK (usage_observed IN (0,1)),
-  request_id_observed           INTEGER NOT NULL CHECK (request_id_observed IN (0,1)),
-  embedding_supported           INTEGER NOT NULL CHECK (embedding_supported IN (0,1)),
-  embedding_vector_dim          INTEGER CHECK (embedding_vector_dim IS NULL OR embedding_vector_dim >= 1),
-  probe_detail_json             TEXT NOT NULL CHECK (json_valid(probe_detail_json)),
-  probed_at                     TEXT NOT NULL,
-  CHECK ((embedding_supported = 1 AND embedding_vector_dim IS NOT NULL)
-      OR (embedding_supported = 0 AND embedding_vector_dim IS NULL)),
-  UNIQUE (connection_revision_id, credential_generation_id)
+  root_binding_revision         INTEGER NOT NULL CHECK (root_binding_revision >= 1),
+  action_set_id                 TEXT NOT NULL CHECK (length(action_set_id) > 0),
+  action_set_version            INTEGER NOT NULL CHECK (action_set_version >= 1),
+  probe_contract_digest         TEXT NOT NULL CHECK (length(probe_contract_digest) = 64 AND probe_contract_digest NOT GLOB '*[^0-9a-f]*'),
+  outcome                       TEXT NOT NULL CHECK (outcome IN ('passed','failed','cancelled','interrupted')),
+  result_digest                 TEXT NOT NULL CHECK (length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'),
+  started_at                    TEXT NOT NULL,
+  finished_at                   TEXT NOT NULL,
+  created_at                    TEXT NOT NULL,
+  UNIQUE (connection_revision_id, credential_generation_id, probe_contract_digest, result_digest)
+) STRICT;
+
+CREATE TABLE model_provider_connection_probe_results (
+  probe_result_id                   INTEGER PRIMARY KEY REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  chat_model_id                     TEXT NOT NULL,
+  embedding_model_id                TEXT,
+  context_budget_tokens             INTEGER NOT NULL CHECK (context_budget_tokens >= 1),
+  max_output_tokens                 INTEGER NOT NULL CHECK (max_output_tokens >= 1),
+  streaming_supported               INTEGER NOT NULL CHECK (streaming_supported IN (0,1)),
+  native_tool_calling_supported     INTEGER NOT NULL CHECK (native_tool_calling_supported IN (0,1)),
+  multi_tool_call_supported         INTEGER NOT NULL CHECK (multi_tool_call_supported IN (0,1)),
+  cancellation_observed             INTEGER NOT NULL CHECK (cancellation_observed IN (0,1)),
+  usage_observed                    INTEGER NOT NULL CHECK (usage_observed IN (0,1)),
+  request_id_observed               INTEGER NOT NULL CHECK (request_id_observed IN (0,1)),
+  embedding_supported               INTEGER NOT NULL CHECK (embedding_supported IN (0,1)),
+  embedding_vector_dim              INTEGER CHECK (embedding_vector_dim IS NULL OR embedding_vector_dim >= 1),
+  detail_json                       TEXT NOT NULL CHECK (json_valid(detail_json)),
+  CHECK ((embedding_supported = 1 AND embedding_model_id IS NOT NULL AND embedding_vector_dim IS NOT NULL)
+      OR (embedding_supported = 0 AND embedding_model_id IS NULL AND embedding_vector_dim IS NULL))
+) STRICT;
+
+CREATE TABLE thanos_connection_probe_results (
+  probe_result_id INTEGER PRIMARY KEY REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  query           TEXT NOT NULL CHECK (query = 'vector(1)'),
+  response_type   TEXT NOT NULL CHECK (response_type = 'vector'),
+  sample_count    INTEGER NOT NULL CHECK (sample_count = 1),
+  sample_value    TEXT NOT NULL,
+  detail_json     TEXT NOT NULL CHECK (json_valid(detail_json))
+) STRICT;
+
+CREATE TABLE kubernetes_connection_probe_results (
+  probe_result_id       INTEGER PRIMARY KEY REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  effective_namespace   TEXT NOT NULL CHECK (length(effective_namespace) > 0),
+  version_ok             INTEGER NOT NULL CHECK (version_ok IN (0,1)),
+  core_discovery_ok      INTEGER NOT NULL CHECK (core_discovery_ok IN (0,1)),
+  grouped_discovery_ok   INTEGER NOT NULL CHECK (grouped_discovery_ok IN (0,1)),
+  pods_get_allowed       INTEGER NOT NULL CHECK (pods_get_allowed IN (0,1)),
+  pods_list_allowed      INTEGER NOT NULL CHECK (pods_list_allowed IN (0,1)),
+  events_list_allowed    INTEGER NOT NULL CHECK (events_list_allowed IN (0,1)),
+  pods_log_get_allowed   INTEGER NOT NULL CHECK (pods_log_get_allowed IN (0,1)),
+  detail_json            TEXT NOT NULL CHECK (json_valid(detail_json))
+) STRICT;
+
+-- Model Provider 每次 disabled->enabled 都追加一个显式 qualification 事件；connections 不保存
+-- "current/latest qualification" 指针。后续 grant 只可复制与当前 enabled row_version 对应的 immutable probe_result_id。
+CREATE TABLE connection_enable_qualifications (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  connection_id       INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  enabled_row_version INTEGER NOT NULL CHECK (enabled_row_version >= 2),
+  probe_result_id     INTEGER NOT NULL REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_by          INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at          TEXT NOT NULL,
+  UNIQUE (connection_id, enabled_row_version),
+  UNIQUE (connection_id, enabled_row_version, probe_result_id)
 ) STRICT;
 
 -- Business System ↔ Kubernetes Connection 的管理面绑定；不进入业务系统 YAML，也不暴露给模型。
@@ -831,8 +880,11 @@ CREATE TABLE browser_operations (
   identity_revision_id       INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   profile_generation_id      INTEGER REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   owner_attempt_id           INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  kind                       TEXT NOT NULL CHECK (kind IN ('manual_login','authentication_probe','journey','exploration')),
+  kind                       TEXT NOT NULL CHECK (kind IN ('manual_login','authentication_probe','journey','exploration','deployment_verification')),
   actor_user_id              INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  actor_session_id           INTEGER REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  verification_manifest_item_id INTEGER REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  clone_identity             TEXT,
   state                      TEXT NOT NULL CHECK (state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect','Succeeded','Failed','Cancelled','Interrupted')),
   journey_catalog_digest     TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),
   journey_catalog_version    TEXT NOT NULL,
@@ -847,7 +899,8 @@ CREATE TABLE browser_operations (
   reconnect_deadline         TEXT,
   ended_at                   TEXT,
   stop_confirmed_at          TEXT,                   -- 物理 Chromium/隧道停止确认；终态可先提交，但本列非空前仍持有身份/容量 fence
-  stop_confirmation_basis    TEXT CHECK (stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','stop_ack','inventory_absent','new_boot')),
+  stop_confirmation_basis    TEXT CHECK (stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired')),
+  cleanup_state_hash         BLOB CHECK (cleanup_state_hash IS NULL OR length(cleanup_state_hash) = 32),
   start_rejected_at          TEXT,                   -- accepted=false 且非 NO_CAPACITY 的持久事实；与拒绝原因同事务写入
   start_reject_reason        TEXT CHECK (start_reject_reason IS NULL OR start_reject_reason IN ('identity_busy','profile_unavailable','authentication_required','input_unsupported','reconcile_required','stale_stream','internal')),
   terminal_reason            TEXT CHECK (terminal_reason IS NULL OR terminal_reason IN (
@@ -865,15 +918,16 @@ CREATE TABLE browser_operations (
         OR (state = 'WaitingForCapacity' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL)))
     OR (state = 'Starting' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL AND started_at IS NULL AND reconnect_deadline IS NULL AND ended_at IS NULL AND terminal_reason IS NULL)
     OR (state = 'Running' AND start_dispatched_at IS NOT NULL AND lintel_boot_id IS NOT NULL AND lintel_connection_epoch IS NOT NULL AND started_at IS NOT NULL AND reconnect_deadline IS NULL AND ended_at IS NULL AND terminal_reason IS NULL)
-    OR (state = 'AwaitingReconnect' AND kind = 'manual_login' AND started_at IS NOT NULL AND reconnect_deadline IS NOT NULL AND ended_at IS NULL AND terminal_reason IS NULL)
+    OR (state = 'AwaitingReconnect' AND kind IN ('manual_login','deployment_verification') AND started_at IS NOT NULL AND reconnect_deadline IS NOT NULL AND ended_at IS NULL AND terminal_reason IS NULL)
     OR (state = 'Succeeded' AND started_at IS NOT NULL AND reconnect_deadline IS NULL AND ended_at IS NOT NULL AND terminal_reason IS NULL)
     OR (state IN ('Failed','Cancelled','Interrupted') AND ended_at IS NOT NULL AND terminal_reason IS NOT NULL)
   ),
   CHECK (
-    (kind = 'manual_login' AND actor_user_id IS NOT NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL)
-    OR (kind = 'authentication_probe' AND actor_user_id IS NULL AND owner_attempt_id IS NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase = 'revision_change' AND profile_generation_id IS NOT NULL)
-    OR (kind = 'journey' AND actor_user_id IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
-    OR (kind = 'exploration' AND actor_user_id IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
+    (kind = 'manual_login' AND actor_user_id IS NOT NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL)
+    OR (kind = 'authentication_probe' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase = 'revision_change' AND profile_generation_id IS NOT NULL)
+    OR (kind = 'journey' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
+    OR (kind = 'exploration' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
+    OR (kind = 'deployment_verification' AND actor_user_id IS NULL AND actor_session_id IS NOT NULL AND verification_manifest_item_id IS NOT NULL AND clone_identity IS NOT NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
   ),
   CHECK (terminal_reason IS NULL OR
     (kind = 'manual_login' AND terminal_reason IN (
@@ -889,7 +943,10 @@ CREATE TABLE browser_operations (
     OR (kind = 'exploration' AND terminal_reason IN (
       'new_boot','shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
       'authentication_required','authentication_probe_unavailable','artifact_commit_failed','cancelled','parent_terminal',
-      'lease_expired','runtime_unavailable','browser_crashed','protocol_error'))),
+      'lease_expired','runtime_unavailable','browser_crashed','protocol_error'))
+    OR (kind = 'deployment_verification' AND terminal_reason IN (
+      'shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+      'authentication_required','grace_expired','session_revoked','cancelled','runtime_unavailable','browser_crashed','protocol_error'))),
   CHECK ((stop_confirmed_at IS NULL) = (stop_confirmation_basis IS NULL)),
   CHECK (stop_confirmed_at IS NULL OR state IN ('Succeeded','Failed','Cancelled','Interrupted')),
   CHECK ((start_rejected_at IS NULL) = (start_reject_reason IS NULL)),
@@ -897,7 +954,9 @@ CREATE TABLE browser_operations (
   CHECK (stop_confirmation_basis IS NULL
     OR (stop_confirmation_basis = 'not_dispatched' AND start_dispatched_at IS NULL)
     OR (stop_confirmation_basis = 'start_rejected' AND start_rejected_at IS NOT NULL)
-    OR (stop_confirmation_basis IN ('stop_ack','inventory_absent','new_boot') AND start_dispatched_at IS NOT NULL)),
+    OR (stop_confirmation_basis IN ('stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired') AND start_dispatched_at IS NOT NULL)),
+  CHECK ((stop_confirmation_basis IN ('same_boot_cleanup_ack','new_boot_cleanup_confirmed')) = (cleanup_state_hash IS NOT NULL)),
+  CHECK (kind <> 'deployment_verification' OR stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','same_boot_cleanup_ack','new_boot_cleanup_confirmed','externally_fenced_storage_retired')),
   CHECK (terminal_reason <> 'artifact_commit_failed' OR state = 'Failed'),
   CHECK (terminal_reason <> 'journey_failed' OR state = 'Failed'),
   CHECK (state NOT IN ('Succeeded','Failed','Cancelled','Interrupted')
@@ -919,6 +978,49 @@ CREATE UNIQUE INDEX ux_browser_operation_journey_attempt ON browser_operations (
   WHERE kind = 'journey';
 CREATE UNIQUE INDEX ux_browser_operation_active_exploration_parent ON browser_operations (owner_attempt_id)
   WHERE kind = 'exploration' AND state IN ('Queued','WaitingForCapacity','Starting','Running');
+
+-- Deployment Verification 的功能结论与 cleanup 结论分别冻结；晚到 stop confirmation 只调和
+-- browser_operations.stop_confirmed_at，不得改写本结果。
+CREATE TABLE browser_deployment_verification_results (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  operation_id               INTEGER NOT NULL UNIQUE REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  verification_result_id     INTEGER NOT NULL UNIQUE REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  functional_outcome         TEXT NOT NULL CHECK (functional_outcome IN ('passed','warned','failed')),
+  functional_evidence_digest TEXT NOT NULL CHECK (length(functional_evidence_digest) = 64 AND functional_evidence_digest NOT GLOB '*[^0-9a-f]*'),
+  cleanup_outcome            TEXT NOT NULL CHECK (cleanup_outcome IN ('clean','residue','indeterminate')),
+  original_boot_id           TEXT NOT NULL,
+  cleanup_boot_id            TEXT,
+  cleanup_epoch              INTEGER CHECK (cleanup_epoch IS NULL OR cleanup_epoch >= 1),
+  cleanup_state_hash         TEXT CHECK (cleanup_state_hash IS NULL OR (length(cleanup_state_hash) = 64 AND cleanup_state_hash NOT GLOB '*[^0-9a-f]*')),
+  stop_fence_digest          TEXT CHECK (stop_fence_digest IS NULL OR (length(stop_fence_digest) = 64 AND stop_fence_digest NOT GLOB '*[^0-9a-f]*')),
+  clone_identity             TEXT NOT NULL,
+  operation_process_count    INTEGER CHECK (operation_process_count IS NULL OR operation_process_count >= 0),
+  cgroup_process_count       INTEGER CHECK (cgroup_process_count IS NULL OR cgroup_process_count >= 0),
+  chromium_process_count     INTEGER CHECK (chromium_process_count IS NULL OR chromium_process_count >= 0),
+  x0vnc_process_count        INTEGER CHECK (x0vnc_process_count IS NULL OR x0vnc_process_count >= 0),
+  novnc_tunnel_count         INTEGER CHECK (novnc_tunnel_count IS NULL OR novnc_tunnel_count >= 0),
+  clone_namespace_count      INTEGER CHECK (clone_namespace_count IS NULL OR clone_namespace_count >= 0),
+  temporary_file_count       INTEGER CHECK (temporary_file_count IS NULL OR temporary_file_count >= 0),
+  runtime_handle_count       INTEGER CHECK (runtime_handle_count IS NULL OR runtime_handle_count >= 0),
+  slot_lease_count           INTEGER CHECK (slot_lease_count IS NULL OR slot_lease_count >= 0),
+  result_digest              TEXT NOT NULL CHECK (length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at                 TEXT NOT NULL,
+  CHECK ((cleanup_outcome IN ('clean','residue')
+      AND cleanup_boot_id IS NOT NULL AND cleanup_epoch IS NOT NULL AND cleanup_state_hash IS NOT NULL AND stop_fence_digest IS NOT NULL
+       AND operation_process_count IS NOT NULL AND cgroup_process_count IS NOT NULL AND chromium_process_count IS NOT NULL
+       AND x0vnc_process_count IS NOT NULL AND novnc_tunnel_count IS NOT NULL AND clone_namespace_count IS NOT NULL
+       AND temporary_file_count IS NOT NULL AND runtime_handle_count IS NOT NULL AND slot_lease_count IS NOT NULL)
+     OR (cleanup_outcome = 'indeterminate' AND cleanup_state_hash IS NULL AND stop_fence_digest IS NULL
+       AND operation_process_count IS NULL AND cgroup_process_count IS NULL AND chromium_process_count IS NULL
+       AND x0vnc_process_count IS NULL AND novnc_tunnel_count IS NULL AND clone_namespace_count IS NULL
+       AND temporary_file_count IS NULL AND runtime_handle_count IS NULL AND slot_lease_count IS NULL)),
+   CHECK (cleanup_outcome <> 'clean' OR
+     (operation_process_count + cgroup_process_count + chromium_process_count + x0vnc_process_count + novnc_tunnel_count
+       + clone_namespace_count + temporary_file_count + runtime_handle_count + slot_lease_count) = 0),
+   CHECK (cleanup_outcome <> 'residue' OR
+     (operation_process_count + cgroup_process_count + chromium_process_count + x0vnc_process_count + novnc_tunnel_count
+       + clone_namespace_count + temporary_file_count + runtime_handle_count + slot_lease_count) > 0)
+) STRICT;
 
 CREATE TABLE browser_probe_results (
   id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -1053,15 +1155,16 @@ CREATE TABLE inspection_check_results (
 ) STRICT;
 CREATE UNIQUE INDEX ux_inspection_check_result_evidence ON inspection_check_results (evidence_id) WHERE evidence_id IS NOT NULL;
 
--- 配置 Test Run：独立于巡检计划的持久化配置校验执行（DATA-CONFIG-007）。
--- 精确绑定一个不可变配置版本与显式目标 Label Contract 版本；配置版本保存上传时 Catalog provenance，
--- 每个实际 Browser Operation 另存准入时当前兼容 Catalog binding，避免排队跨升级后出现双重执行权威。
--- 不参与 inspection_runs 的 one-active-plan 约束；Passed 结果作为 Label Contract 联合激活证据。
-CREATE TABLE config_test_runs (
+-- Config Verification Run：prepublish 与 deployment_acceptance 共用唯一机械执行模型。
+-- prepublish 只绑定未发布草稿并可被 Label Contract 联合激活采用；deployment_acceptance 只绑定
+-- manifest 创建时的 current published config/Label Contract，绝不移动发布指针或成为激活证据。
+CREATE TABLE config_verification_runs (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  purpose                   TEXT NOT NULL CHECK (purpose IN ('prepublish','deployment_acceptance')),
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  verification_manifest_item_id INTEGER REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Passed','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   evidence_at               TEXT,                    -- 真正开始采证时生成
@@ -1071,26 +1174,28 @@ CREATE TABLE config_test_runs (
   CHECK (
     (state IN ('Queued','Running','Passed') AND result_detail IS NULL)
     OR (state IN ('Failed','Cancelled','Interrupted') AND result_detail IS NOT NULL)
-  )
+  ),
+  CHECK ((purpose = 'prepublish' AND verification_manifest_item_id IS NULL)
+      OR (purpose = 'deployment_acceptance' AND verification_manifest_item_id IS NOT NULL))
 ) STRICT;
-CREATE UNIQUE INDEX ux_config_test_run_active ON config_test_runs (business_system_id, config_version_id)
+CREATE UNIQUE INDEX ux_config_verification_run_active ON config_verification_runs (purpose, business_system_id, config_version_id)
   WHERE state IN ('Queued','Running');
-CREATE INDEX idx_config_test_runs_version ON config_test_runs (config_version_id, created_at DESC);
+CREATE INDEX idx_config_verification_runs_version ON config_verification_runs (config_version_id, created_at DESC);
 
-CREATE TABLE config_test_run_check_results (
+CREATE TABLE config_verification_run_check_results (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  test_run_id INTEGER NOT NULL REFERENCES config_test_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  verification_run_id INTEGER NOT NULL REFERENCES config_verification_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   plan_key    TEXT NOT NULL,
   check_key   TEXT NOT NULL,
   status      TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
   evidence_id INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  attempt_id  INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- browser result: 绑定同 testRun/check 的 inspection_collection Attempt；promql result: NULL
+  attempt_id  INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- browser result: 绑定同 Config Verification Run/check 的 inspection_collection Attempt；promql result: NULL
   result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- operation-less Journey Result 重放摘要；有 operation 时与 browser_journey_results 同值
   gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
                 'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
                 'artifact_commit_failed','journey_failed','query_failed','partial_response','no_data','cancelled','interrupted')),
   created_at  TEXT NOT NULL,
-  UNIQUE (test_run_id, plan_key, check_key),
+  UNIQUE (verification_run_id, plan_key, check_key),
   CHECK (
     (status = 'ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL)
     OR (status IN ('error','gap') AND gap_reason IS NOT NULL)
@@ -1111,6 +1216,174 @@ CREATE TABLE label_contract_activations (
   applied_at                TEXT,
   created_at                TEXT NOT NULL
 ) STRICT;
+
+-- Deployment Acceptance：manifest/items/results/conflicts/receipt 是唯一持久证据闭包；
+-- 不建立可变 invocation status 或 current acceptance pointer。
+CREATE TABLE verification_invocation_manifests (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  admin_session_id           INTEGER NOT NULL REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  principal_user_id          INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  release_subject_digest     TEXT NOT NULL CHECK (length(release_subject_digest) = 64 AND release_subject_digest NOT GLOB '*[^0-9a-f]*'),
+  catalog_digest             TEXT NOT NULL CHECK (length(catalog_digest) = 64 AND catalog_digest NOT GLOB '*[^0-9a-f]*'),
+  result_profile_digest      TEXT NOT NULL CHECK (length(result_profile_digest) = 64 AND result_profile_digest NOT GLOB '*[^0-9a-f]*'),
+  deployment_config_digest   TEXT NOT NULL CHECK (length(deployment_config_digest) = 64 AND deployment_config_digest NOT GLOB '*[^0-9a-f]*'),
+  public_origin_digest       TEXT NOT NULL CHECK (length(public_origin_digest) = 64 AND public_origin_digest NOT GLOB '*[^0-9a-f]*'),
+  applicable_set_digest      TEXT NOT NULL CHECK (length(applicable_set_digest) = 64 AND applicable_set_digest NOT GLOB '*[^0-9a-f]*'),
+  item_count                 INTEGER NOT NULL CHECK (item_count >= 1),
+  item_set_digest            TEXT NOT NULL CHECK (length(item_set_digest) = 64 AND item_set_digest NOT GLOB '*[^0-9a-f]*'),
+  manifest_digest            TEXT NOT NULL UNIQUE CHECK (length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'),
+  canonical_input_digest     TEXT NOT NULL CHECK (length(canonical_input_digest) = 64 AND canonical_input_digest NOT GLOB '*[^0-9a-f]*'),
+  started_at                 TEXT NOT NULL,
+  deadline_at                TEXT NOT NULL,
+  created_at                 TEXT NOT NULL,
+  CHECK (julianday(deadline_at) = julianday(started_at, '+8 hours'))
+) STRICT;
+
+CREATE TABLE verification_invocation_items (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  item_seq                   INTEGER NOT NULL CHECK (item_seq >= 1),
+  scenario_id                TEXT NOT NULL CHECK (length(scenario_id) > 0),
+  cell_id                    TEXT NOT NULL CHECK (length(cell_id) > 0),
+  object_kind                TEXT NOT NULL CHECK (object_kind IN ('deployment','connection','config','browser_identity','ui_observation')),
+  input_digest               TEXT NOT NULL CHECK (length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at                 TEXT NOT NULL,
+  UNIQUE (invocation_id, item_seq),
+  UNIQUE (invocation_id, scenario_id, cell_id, object_kind, input_digest)
+) STRICT;
+
+CREATE TABLE verification_deployment_item_locators (
+  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  release_subject_digest     TEXT NOT NULL CHECK (length(release_subject_digest) = 64 AND release_subject_digest NOT GLOB '*[^0-9a-f]*'),
+  deployment_config_digest   TEXT NOT NULL CHECK (length(deployment_config_digest) = 64 AND deployment_config_digest NOT GLOB '*[^0-9a-f]*'),
+  public_origin_digest       TEXT NOT NULL CHECK (length(public_origin_digest) = 64 AND public_origin_digest NOT GLOB '*[^0-9a-f]*'),
+  backend                    TEXT NOT NULL CHECK (backend IN ('compose','kubernetes')),
+  architecture               TEXT NOT NULL CHECK (architecture IN ('linux/amd64','linux/arm64'))
+) STRICT;
+CREATE TABLE verification_connection_item_locators (
+  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_id              INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  connection_revision_id     INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  credential_generation_id   INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  root_binding_revision      INTEGER NOT NULL CHECK (root_binding_revision >= 1),
+  probe_contract_digest      TEXT NOT NULL CHECK (length(probe_contract_digest) = 64 AND probe_contract_digest NOT GLOB '*[^0-9a-f]*')
+) STRICT;
+CREATE TABLE verification_config_item_locators (
+  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  business_system_id         INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  config_version_id          INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_contract_version_id  INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE verification_browser_identity_item_locators (
+  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  browser_identity_id        INTEGER NOT NULL REFERENCES browser_identities(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  identity_revision_id       INTEGER NOT NULL REFERENCES browser_identity_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  profile_generation_id      INTEGER NOT NULL REFERENCES browser_profile_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  current_inventory_digest   TEXT NOT NULL CHECK (length(current_inventory_digest) = 64 AND current_inventory_digest NOT GLOB '*[^0-9a-f]*')
+) STRICT;
+CREATE TABLE verification_ui_observation_item_locators (
+  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  browser_artifact           TEXT NOT NULL CHECK (browser_artifact IN ('playwright_chromium','branded_chrome')),
+  browser_version            TEXT NOT NULL,
+  architecture               TEXT NOT NULL CHECK (architecture IN ('linux/amd64','linux/arm64')),
+  viewport_css_px            INTEGER NOT NULL CHECK (viewport_css_px IN (320,768,1024,1440)),
+  motion                     TEXT NOT NULL CHECK (motion IN ('normal','reduced')),
+  CHECK (browser_artifact <> 'branded_chrome' OR architecture = 'linux/amd64')
+) STRICT;
+
+CREATE TABLE verification_item_results (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  input_digest               TEXT NOT NULL CHECK (length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'),
+  result_digest              TEXT NOT NULL CHECK (length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'),
+  producer_type              TEXT NOT NULL CHECK (producer_type IN ('quoin','runtime','deployment_helper','admin_observation')),
+  outcome                    TEXT NOT NULL CHECK (outcome IN ('passed','warned','failed')),
+  category                   TEXT NOT NULL CHECK (category IN ('passed','functional_assertion_failed','cleanup_residue','verifier_conflict','subject_drift','environment_unavailable','operator_cancelled','infrastructure_interrupted','cleanup_indeterminate','not_run','verifier_invariant_violation')),
+  observed_at                TEXT NOT NULL,
+  committed_at               TEXT NOT NULL,
+  evidence_index_digest      TEXT NOT NULL CHECK (length(evidence_index_digest) = 64 AND evidence_index_digest NOT GLOB '*[^0-9a-f]*'),
+  artifact_id                INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (item_id, input_digest, result_digest),
+  CHECK (julianday(committed_at) >= julianday(observed_at)),
+  CHECK ((outcome = 'passed' AND category = 'passed')
+      OR (outcome = 'failed' AND category IN ('functional_assertion_failed','cleanup_residue','verifier_conflict','verifier_invariant_violation'))
+      OR (outcome = 'warned' AND category IN ('subject_drift','environment_unavailable','operator_cancelled','infrastructure_interrupted','cleanup_indeterminate','not_run')))
+) STRICT;
+
+CREATE TABLE verification_result_conflicts (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  first_result_id            INTEGER NOT NULL REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  conflicting_result_id      INTEGER NOT NULL REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at                 TEXT NOT NULL,
+  UNIQUE (item_id, first_result_id, conflicting_result_id),
+  CHECK (first_result_id <> conflicting_result_id)
+) STRICT;
+
+CREATE TABLE verification_helper_imports (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  request_digest             TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
+  report_digest              TEXT NOT NULL CHECK (length(report_digest) = 64 AND report_digest NOT GLOB '*[^0-9a-f]*'),
+  helper_reported_started_at TEXT NOT NULL,
+  helper_reported_finished_at TEXT NOT NULL,
+  received_at                TEXT NOT NULL,
+  artifact_id                INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (invocation_id, request_digest, report_digest),
+  CHECK (julianday(helper_reported_finished_at) >= julianday(helper_reported_started_at))
+) STRICT;
+
+CREATE TABLE verification_typed_observations (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  result_id                  INTEGER NOT NULL UNIQUE REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  admin_session_id           INTEGER NOT NULL REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  visual_result              TEXT NOT NULL CHECK (visual_result IN ('passed','failed')),
+  motion_result              TEXT NOT NULL CHECK (motion_result IN ('passed','failed')),
+  focus_occlusion_result     TEXT NOT NULL CHECK (focus_occlusion_result IN ('passed','failed')),
+  note                       TEXT,
+  submitted_at               TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE verification_subject_drifts (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  object_kind                TEXT NOT NULL CHECK (object_kind IN ('deployment','connection','config','browser_identity','ui_observation')),
+  drift_field                TEXT NOT NULL CHECK (drift_field IN ('release_subject_digest','deployment_config_digest','public_origin_digest','connection_revision','credential_generation','root_binding_revision','probe_contract_digest','config_version','label_contract_version','browser_identity_revision','browser_profile_generation','browser_inventory_observation','browser_artifact_digest','browser_artifact_version')),
+  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  frozen_digest              TEXT NOT NULL CHECK (length(frozen_digest) = 64 AND frozen_digest NOT GLOB '*[^0-9a-f]*'),
+  current_digest             TEXT NOT NULL CHECK (length(current_digest) = 64 AND current_digest NOT GLOB '*[^0-9a-f]*'),
+  observed_at                TEXT NOT NULL,
+  UNIQUE (invocation_id, object_kind, item_id, current_digest),
+  CHECK (frozen_digest <> current_digest),
+  CHECK ((object_kind = 'deployment' AND drift_field IN ('release_subject_digest','deployment_config_digest','public_origin_digest'))
+      OR (object_kind = 'connection' AND drift_field IN ('connection_revision','credential_generation','root_binding_revision','probe_contract_digest'))
+      OR (object_kind = 'config' AND drift_field IN ('config_version','label_contract_version'))
+      OR (object_kind = 'browser_identity' AND drift_field IN ('browser_identity_revision','browser_profile_generation','browser_inventory_observation'))
+      OR (object_kind = 'ui_observation' AND drift_field IN ('release_subject_digest','public_origin_digest','browser_artifact_digest','browser_artifact_version')))
+) STRICT;
+
+CREATE TABLE verification_finalization_receipts (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  invocation_id              INTEGER NOT NULL UNIQUE REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  manifest_digest            TEXT NOT NULL CHECK (length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'),
+  applicable_set_digest      TEXT NOT NULL CHECK (length(applicable_set_digest) = 64 AND applicable_set_digest NOT GLOB '*[^0-9a-f]*'),
+  item_set_digest            TEXT NOT NULL CHECK (length(item_set_digest) = 64 AND item_set_digest NOT GLOB '*[^0-9a-f]*'),
+  result_set_digest          TEXT NOT NULL CHECK (length(result_set_digest) = 64 AND result_set_digest NOT GLOB '*[^0-9a-f]*'),
+  helper_import_set_digest   TEXT NOT NULL CHECK (length(helper_import_set_digest) = 64 AND helper_import_set_digest NOT GLOB '*[^0-9a-f]*'),
+  typed_observation_set_digest TEXT NOT NULL CHECK (length(typed_observation_set_digest) = 64 AND typed_observation_set_digest NOT GLOB '*[^0-9a-f]*'),
+  conflict_set_digest        TEXT NOT NULL CHECK (length(conflict_set_digest) = 64 AND conflict_set_digest NOT GLOB '*[^0-9a-f]*'),
+  subject_drift_digest       TEXT NOT NULL CHECK (length(subject_drift_digest) = 64 AND subject_drift_digest NOT GLOB '*[^0-9a-f]*'),
+  overall_outcome            TEXT NOT NULL CHECK (overall_outcome IN ('passed','warned','failed')),
+  final_result_digest        TEXT NOT NULL CHECK (length(final_result_digest) = 64 AND final_result_digest NOT GLOB '*[^0-9a-f]*'),
+  canonical_artifact_id      INTEGER NOT NULL UNIQUE REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  snapshot_at                TEXT NOT NULL,
+  finalized_at               TEXT NOT NULL CHECK (julianday(finalized_at) >= julianday(snapshot_at)),
+  finalized_by_type          TEXT NOT NULL CHECK (finalized_by_type IN ('initiating_admin_session','system_deadline')),
+  finalized_by_session_id    INTEGER REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CHECK ((finalized_by_type = 'initiating_admin_session' AND finalized_by_session_id IS NOT NULL)
+      OR (finalized_by_type = 'system_deadline' AND finalized_by_session_id IS NULL))
+) STRICT;
+
 -- ============================================================================
 -- 8. 执行尝试、模型/工具调用、证据与报告
 -- ============================================================================
@@ -1119,12 +1392,12 @@ CREATE TABLE execution_attempts (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_type              TEXT NOT NULL CHECK (attempt_type IN
                               ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding',
-                               'inspection_collection','browser_exploration','model_provider_probe')),
+                               'inspection_collection','browser_exploration','connection_probe')),
   scope_type                TEXT NOT NULL CHECK (scope_type IN
-                              ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','config_test_run')),
+                              ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','config_verification_run')),
   scope_id                  INTEGER NOT NULL,
-  plan_key                  TEXT,   -- config_test_run 子 Attempt 必填；其它 scope 为空
-  check_key                 TEXT,   -- run_check/config_test_run 子 Attempt 非空；其它 scope 为空
+  plan_key                  TEXT,   -- config_verification_run 子 Attempt 必填；其它 scope 为空
+  check_key                 TEXT,   -- run_check/config_verification_run 子 Attempt 非空；其它 scope 为空
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Assigned','Running','Cancelling','Succeeded','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   runtime_slot              TEXT CHECK (runtime_slot IN ('plinth','lintel')), -- 派发绑定；一旦绑定不可改
@@ -1155,14 +1428,14 @@ CREATE TABLE execution_attempts (
   CHECK (connection_epoch IS NULL OR connection_epoch >= 1),
   CHECK (requested_by_tool_call_id IS NULL OR attempt_type = 'browser_exploration'),
   CHECK (
-    (scope_type = 'config_test_run' AND plan_key IS NOT NULL AND check_key IS NOT NULL)
+    (scope_type = 'config_verification_run' AND plan_key IS NOT NULL AND check_key IS NOT NULL)
     OR (scope_type = 'run_check' AND plan_key IS NULL AND check_key IS NOT NULL)
-    OR (scope_type NOT IN ('run_check','config_test_run') AND plan_key IS NULL AND check_key IS NULL)
+    OR (scope_type NOT IN ('run_check','config_verification_run') AND plan_key IS NULL AND check_key IS NULL)
   ),
   CHECK (
     runtime_slot IS NULL
     OR (attempt_type IN ('browser_exploration','inspection_collection') AND runtime_slot = 'lintel')
-    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','model_provider_probe') AND runtime_slot = 'plinth')
+    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','connection_probe') AND runtime_slot = 'plinth')
   ),
   CHECK (
     (attempt_type = 'initial_analysis' AND scope_type = 'analysis')
@@ -1171,8 +1444,8 @@ CREATE TABLE execution_attempts (
     OR (attempt_type = 'inspection_analysis' AND scope_type = 'run')
     OR (attempt_type = 'knowledge_extraction' AND scope_type = 'knowledge_import_batch')
     OR (attempt_type = 'embedding' AND scope_type = 'embedding_generation')
-    OR (attempt_type = 'model_provider_probe' AND scope_type = 'connection')
-    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_test_run'))
+    OR (attempt_type = 'connection_probe' AND scope_type = 'connection')
+    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_verification_run'))
   )
 ) STRICT;
 CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (scope_type, scope_id)
@@ -1180,8 +1453,8 @@ CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (sco
     AND attempt_type <> 'browser_exploration';
 CREATE UNIQUE INDEX ux_execution_attempt_active_run_check ON execution_attempts (scope_type, scope_id, check_key)
   WHERE scope_type = 'run_check' AND state IN ('Queued','Assigned','Running','Cancelling');
-CREATE UNIQUE INDEX ux_execution_attempt_active_config_test_check ON execution_attempts (scope_type, scope_id, plan_key, check_key)
-  WHERE scope_type = 'config_test_run' AND state IN ('Queued','Assigned','Running','Cancelling');
+CREATE UNIQUE INDEX ux_execution_attempt_active_config_verification_check ON execution_attempts (scope_type, scope_id, plan_key, check_key)
+  WHERE scope_type = 'config_verification_run' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_browser_requestor ON execution_attempts (requested_by_tool_call_id)
   WHERE requested_by_tool_call_id IS NOT NULL;
 CREATE INDEX idx_execution_attempts_scope ON execution_attempts (scope_type, scope_id);
@@ -1234,16 +1507,18 @@ CREATE TABLE attempt_input_items (
 CREATE TABLE attempt_connection_grants (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','kubernetes_read')),
+  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','kubernetes_read','model_probe_chat','model_probe_embedding','thanos_probe','kubernetes_probe')),
   business_system_id        INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id  INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  qualified_probe_result_id INTEGER REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_by_tool_call_id    INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
-  CHECK ((purpose = 'kubernetes_read' AND business_system_id IS NOT NULL AND created_by_tool_call_id IS NOT NULL)
-      OR (purpose = 'thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NOT NULL)
-      OR (purpose IN ('chat_model','embedding') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL))
+  CHECK ((purpose = 'kubernetes_read' AND business_system_id IS NOT NULL AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
+      OR (purpose = 'thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
+      OR (purpose IN ('chat_model','embedding') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
+      OR (purpose IN ('model_probe_chat','model_probe_embedding','thanos_probe','kubernetes_probe') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
   (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id, COALESCE(business_system_id, 0));
@@ -1520,7 +1795,7 @@ CREATE TABLE artifact_blobs (
 CREATE TABLE artifacts (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   blob_id        INTEGER NOT NULL REFERENCES artifact_blobs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
+  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file','verification_bundle','verification_attachment')),
   media_type     TEXT NOT NULL,
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)), -- raw trace 固定 sensitive=1
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
@@ -1546,7 +1821,7 @@ CREATE TABLE runtime_artifact_uploads (
   connection_epoch INTEGER NOT NULL CHECK (connection_epoch >= 1), -- 旧 epoch 上传只审计、拒绝提交
   owner_type     TEXT NOT NULL,
   owner_id       INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
+  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file','verification_bundle','verification_attachment')),
   media_type     TEXT NOT NULL,
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)),
@@ -1798,26 +2073,27 @@ CREATE TABLE migration_ledger (
   applied_at   TEXT NOT NULL
 ) STRICT;
 
--- 恢复、协调升级与根密钥 rebind 共用的维护聚合；具体可执行操作由 OpenAPI
--- x-quoin-maintenance-access 与 security.md 拥有（SEC-MAINT-*）。
+-- 恢复、协调升级、根密钥 rebind 与 Lintel offline recovery 共用的维护聚合；
+-- LintelRecovery 只能由 deployment helper 进入并以 helper-only finalize 退出。
 CREATE TABLE maintenance_state (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
   active          INTEGER NOT NULL CHECK (active IN (0,1)),
-  reason          TEXT CHECK (reason IS NULL OR reason IN ('Restore','Upgrade','RootKeyRebind')),
+  reason          TEXT CHECK (reason IS NULL OR reason IN ('Restore','Upgrade','RootKeyRebind','LintelRecovery')),
   row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   entered_at      TEXT,
-  entered_by_type TEXT CHECK (entered_by_type IS NULL OR entered_by_type IN ('user','system')),
+  entered_by_type TEXT CHECK (entered_by_type IS NULL OR entered_by_type IN ('user','system','deployment_helper')),
   entered_by_id   INTEGER,
   exited_at       TEXT,
-  exited_by       INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  CHECK ((active = 1 AND reason IS NOT NULL AND entered_at IS NOT NULL AND entered_by_type IS NOT NULL AND exited_at IS NULL AND exited_by IS NULL)
+  exited_by_type  TEXT CHECK (exited_by_type IS NULL OR exited_by_type IN ('user','system','deployment_helper')),
+  exited_by_id    INTEGER,
+  CHECK ((active = 1 AND reason IS NOT NULL AND entered_at IS NOT NULL AND entered_by_type IS NOT NULL AND exited_at IS NULL AND exited_by_type IS NULL AND exited_by_id IS NULL)
       OR (active = 0 AND reason IS NULL AND entered_at IS NULL AND entered_by_type IS NULL AND entered_by_id IS NULL))
 ) STRICT;
 
 CREATE TABLE maintenance_items (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   maintenance_revision INTEGER NOT NULL CHECK (maintenance_revision >= 1),
-  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','ActiveAttempt','ActiveBrowserOperation','BackupPreflight','SchemaMigration','ReleaseVersion','Integrity','SearchProjection')),
+  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','ActiveAttempt','ActiveBrowserOperation','BackupPreflight','SchemaMigration','ReleaseVersion','Integrity','SearchProjection','LintelRecoveryFence')),
   object_key           TEXT NOT NULL CHECK (length(object_key) BETWEEN 1 AND 256),
   safe_state           TEXT NOT NULL CHECK (safe_state IN ('Safe','Blocking')),
   detail_code          TEXT NOT NULL CHECK (length(detail_code) BETWEEN 1 AND 128),
@@ -1825,6 +2101,25 @@ CREATE TABLE maintenance_items (
   UNIQUE (maintenance_revision, kind, object_key)
 ) STRICT;
 CREATE INDEX idx_maintenance_items_state ON maintenance_items (maintenance_revision, safe_state, kind);
+
+CREATE TABLE lintel_recovery_receipts (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  maintenance_revision       INTEGER NOT NULL UNIQUE CHECK (maintenance_revision >= 1),
+  old_slot_id                TEXT NOT NULL CHECK (old_slot_id = 'lintel'),
+  old_runtime_credential_id  INTEGER NOT NULL REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  old_token_generation       INTEGER NOT NULL CHECK (old_token_generation >= 1),
+  replacement_runtime_credential_id INTEGER NOT NULL REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  replacement_token_generation INTEGER NOT NULL CHECK (replacement_token_generation >= 1),
+  storage_disposition        TEXT NOT NULL CHECK (storage_disposition IN ('exclusively_reattached','retired')),
+  disposition_digest         TEXT NOT NULL CHECK (length(disposition_digest) = 64 AND disposition_digest NOT GLOB '*[^0-9a-f]*'),
+  fence_report_digest        TEXT NOT NULL CHECK (length(fence_report_digest) = 64 AND fence_report_digest NOT GLOB '*[^0-9a-f]*'),
+  recovery_report_digest     TEXT NOT NULL CHECK (length(recovery_report_digest) = 64 AND recovery_report_digest NOT GLOB '*[^0-9a-f]*'),
+  post_verify_digest         TEXT NOT NULL CHECK (length(post_verify_digest) = 64 AND post_verify_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at                 TEXT NOT NULL,
+  CHECK (old_runtime_credential_id <> replacement_runtime_credential_id),
+  CHECK (old_token_generation < replacement_token_generation),
+  UNIQUE (old_slot_id, old_token_generation, disposition_digest)
+) STRICT;
 
 -- ============================================================================
 -- 12. 触发器（机器可表达的不变量）
@@ -1951,10 +2246,26 @@ CREATE TRIGGER trg_tool_call_connection_grants_no_update BEFORE UPDATE ON tool_c
 BEGIN SELECT RAISE(ABORT, 'tool_call_connection_grants is append-only'); END;
 CREATE TRIGGER trg_tool_call_connection_grants_no_delete BEFORE DELETE ON tool_call_connection_grants
 BEGIN SELECT RAISE(ABORT, 'tool_call_connection_grants is append-only'); END;
-CREATE TRIGGER trg_model_provider_capabilities_no_update BEFORE UPDATE ON model_provider_capabilities
-BEGIN SELECT RAISE(ABORT, 'model_provider_capabilities is append-only per revision and credential generation'); END;
-CREATE TRIGGER trg_model_provider_capabilities_no_delete BEFORE DELETE ON model_provider_capabilities
-BEGIN SELECT RAISE(ABORT, 'model_provider_capabilities is append-only'); END;
+CREATE TRIGGER trg_connection_probe_results_no_update BEFORE UPDATE ON connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'connection_probe_results is append-only'); END;
+CREATE TRIGGER trg_connection_probe_results_no_delete BEFORE DELETE ON connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'connection_probe_results is append-only'); END;
+CREATE TRIGGER trg_model_provider_connection_probe_results_no_update BEFORE UPDATE ON model_provider_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_model_provider_connection_probe_results_no_delete BEFORE DELETE ON model_provider_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_thanos_connection_probe_results_no_update BEFORE UPDATE ON thanos_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_thanos_connection_probe_results_no_delete BEFORE DELETE ON thanos_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_kubernetes_connection_probe_results_no_update BEFORE UPDATE ON kubernetes_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_kubernetes_connection_probe_results_no_delete BEFORE DELETE ON kubernetes_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'typed connection probe results are append-only'); END;
+CREATE TRIGGER trg_connection_enable_qualifications_no_update BEFORE UPDATE ON connection_enable_qualifications
+BEGIN SELECT RAISE(ABORT, 'connection enable qualifications are append-only'); END;
+CREATE TRIGGER trg_connection_enable_qualifications_no_delete BEFORE DELETE ON connection_enable_qualifications
+BEGIN SELECT RAISE(ABORT, 'connection enable qualifications are append-only'); END;
 CREATE TRIGGER trg_connection_revisions_no_update BEFORE UPDATE ON connection_revisions
 BEGIN SELECT RAISE(ABORT, 'connection_revisions is append-only'); END;
 CREATE TRIGGER trg_connection_revisions_no_delete BEFORE DELETE ON connection_revisions
@@ -2143,6 +2454,10 @@ WHEN NOT (
   OR (NEW.kind = 'report_file' AND NEW.owner_type = 'inspection_report' AND EXISTS (SELECT 1 FROM inspection_reports r WHERE r.id = NEW.owner_id))
   OR (NEW.kind = 'report_file' AND NEW.owner_type = 'backup' AND EXISTS (SELECT 1 FROM backups b WHERE b.id = NEW.owner_id))
   OR (NEW.kind = 'attachment' AND NEW.owner_type = 'source_material' AND EXISTS (SELECT 1 FROM source_materials s WHERE s.id = NEW.owner_id))
+  OR (NEW.kind = 'verification_bundle' AND NEW.owner_type = 'verification_invocation' AND NEW.retention_kind = 'long_term'
+    AND EXISTS (SELECT 1 FROM verification_invocation_manifests v WHERE v.id = NEW.owner_id))
+  OR (NEW.kind = 'verification_attachment' AND NEW.owner_type = 'verification_invocation'
+    AND EXISTS (SELECT 1 FROM verification_invocation_manifests v WHERE v.id = NEW.owner_id))
 )
 BEGIN SELECT RAISE(ABORT, 'artifact kind/owner_type/owner_id must reference an existing compatible authority row'); END;
 
@@ -2171,9 +2486,9 @@ WHEN NEW.state <> 'Queued' OR NOT EXISTS (
   WHERE a.id = NEW.owner_attempt_id AND a.attempt_type = 'inspection_collection'
     AND ((a.state = 'Queued' AND a.runtime_slot IS NULL)
       OR (a.state IN ('Assigned','Running') AND a.runtime_slot = 'lintel'))
-    AND a.scope_type IN ('run_check','config_test_run') AND a.check_key IS NOT NULL
+    AND a.scope_type IN ('run_check','config_verification_run') AND a.check_key IS NOT NULL
     AND ((a.scope_type = 'run_check' AND i.business_system_id = (SELECT business_system_id FROM inspection_runs WHERE id = a.scope_id))
-      OR (a.scope_type = 'config_test_run' AND i.business_system_id = (SELECT business_system_id FROM config_test_runs WHERE id = a.scope_id)))
+      OR (a.scope_type = 'config_verification_run' AND i.business_system_id = (SELECT business_system_id FROM config_verification_runs WHERE id = a.scope_id)))
   )) OR (NEW.kind = 'exploration' AND NOT EXISTS (
   SELECT 1 FROM execution_attempts a WHERE a.id = NEW.owner_attempt_id
     AND a.attempt_type = 'investigation' AND a.runtime_slot = 'plinth'
@@ -2211,7 +2526,7 @@ WHEN NOT EXISTS (
           AND e.integrity = 'complete' AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
           AND ((a.scope_type = 'run_check' AND e.target_type = 'inspection_run' AND e.target_id = a.scope_id
                 AND json_type(e.params_json, '$.check_key') = 'text' AND (e.params_json ->> '$.check_key') = a.check_key)
-            OR (a.scope_type = 'config_test_run' AND e.target_type = 'config_test_run' AND e.target_id = a.scope_id
+            OR (a.scope_type = 'config_verification_run' AND e.target_type = 'config_verification_run' AND e.target_id = a.scope_id
                 AND json_type(e.params_json, '$.plan_key') = 'text' AND (e.params_json ->> '$.plan_key') = a.plan_key
                 AND json_type(e.params_json, '$.check_key') = 'text' AND (e.params_json ->> '$.check_key') = a.check_key))))
       OR (NEW.outcome = 'gap' AND NEW.primary_evidence_id IS NULL)
@@ -2226,12 +2541,12 @@ BEGIN
          CASE WHEN NEW.outcome = 'success' THEN 'ok' ELSE 'gap' END,
          NEW.primary_evidence_id,a.id,NEW.result_digest,NEW.gap_code,NEW.created_at
   FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.scope_type = 'run_check';
-  INSERT INTO config_test_run_check_results
-    (test_run_id,plan_key,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
+  INSERT INTO config_verification_run_check_results
+    (verification_run_id,plan_key,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
   SELECT a.scope_id,a.plan_key,a.check_key,
          CASE WHEN NEW.outcome = 'success' THEN 'ok' ELSE 'gap' END,
          NEW.primary_evidence_id,a.id,NEW.result_digest,NEW.gap_code,NEW.created_at
-  FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.scope_type = 'config_test_run';
+  FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.scope_type = 'config_verification_run';
   UPDATE browser_operations
   SET state = CASE WHEN NEW.outcome = 'success' THEN 'Succeeded' ELSE 'Failed' END,
       terminal_reason = NEW.terminal_reason,
@@ -2264,9 +2579,9 @@ WHEN NEW.state = 'Succeeded' AND (
         (a.scope_type = 'run_check' AND EXISTS (
           SELECT 1 FROM inspection_check_results r
           WHERE r.run_id = a.scope_id AND r.check_key = a.check_key AND r.status = 'ok' AND r.evidence_id = e.id))
-        OR (a.scope_type = 'config_test_run' AND EXISTS (
-          SELECT 1 FROM config_test_run_check_results r
-          WHERE r.test_run_id = a.scope_id AND r.plan_key = a.plan_key AND r.check_key = a.check_key
+        OR (a.scope_type = 'config_verification_run' AND EXISTS (
+          SELECT 1 FROM config_verification_run_check_results r
+          WHERE r.verification_run_id = a.scope_id AND r.plan_key = a.plan_key AND r.check_key = a.check_key
             AND r.status = 'ok' AND r.evidence_id = e.id AND r.attempt_id = a.id))
       )))
     OR (NEW.kind = 'exploration' AND NOT (NEW.trace_artifact_id IS NOT NULL AND NEW.trace_integrity = 'complete'))
@@ -3065,14 +3380,27 @@ WHEN NEW.updated_at = OLD.updated_at
 BEGIN SELECT RAISE(ABORT, 'backup run update must change updated_at'); END;
 CREATE TRIGGER trg_maintenance_state_insert_inactive BEFORE INSERT ON maintenance_state
 WHEN NEW.active <> 0 OR NEW.reason IS NOT NULL OR NEW.entered_at IS NOT NULL OR NEW.entered_by_type IS NOT NULL OR NEW.entered_by_id IS NOT NULL
+  OR NEW.exited_at IS NOT NULL OR NEW.exited_by_type IS NOT NULL OR NEW.exited_by_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'maintenance_state must be seeded inactive before entering maintenance'); END;
 CREATE TRIGGER trg_maintenance_state_transition BEFORE UPDATE OF active ON maintenance_state
 WHEN NEW.active <> OLD.active AND NOT (
   (OLD.active = 0 AND NEW.active = 1 AND NEW.reason IS NOT NULL AND NEW.entered_at IS NOT NULL
-    AND NEW.entered_by_type IS NOT NULL AND NEW.exited_at IS NULL AND NEW.exited_by IS NULL)
+    AND NEW.entered_by_type IS NOT NULL AND NEW.exited_at IS NULL AND NEW.exited_by_type IS NULL AND NEW.exited_by_id IS NULL)
   OR (OLD.active = 1 AND NEW.active = 0 AND NEW.reason IS NULL AND NEW.entered_at IS NULL
-    AND NEW.entered_by_type IS NULL AND NEW.entered_by_id IS NULL AND NEW.exited_at IS NOT NULL AND NEW.exited_by IS NOT NULL))
+    AND NEW.entered_by_type IS NULL AND NEW.entered_by_id IS NULL AND NEW.exited_at IS NOT NULL AND NEW.exited_by_type IS NOT NULL))
 BEGIN SELECT RAISE(ABORT, 'maintenance state transition must explicitly enter or exit'); END;
+CREATE TRIGGER trg_maintenance_state_lintel_recovery_actor BEFORE UPDATE OF active ON maintenance_state
+WHEN (OLD.active = 0 AND NEW.active = 1 AND (
+       (NEW.reason = 'LintelRecovery' AND NEW.entered_by_type <> 'deployment_helper')
+       OR (NEW.reason <> 'LintelRecovery' AND NEW.entered_by_type = 'deployment_helper')))
+   OR (OLD.active = 1 AND NEW.active = 0 AND (
+       (OLD.reason = 'LintelRecovery' AND NEW.exited_by_type <> 'deployment_helper')
+       OR (OLD.reason <> 'LintelRecovery' AND NEW.exited_by_type = 'deployment_helper')))
+BEGIN SELECT RAISE(ABORT, 'LintelRecovery is entered and exited only by the deployment helper'); END;
+CREATE TRIGGER trg_maintenance_state_lintel_recovery_receipt BEFORE UPDATE OF active ON maintenance_state
+WHEN OLD.active = 1 AND OLD.reason = 'LintelRecovery' AND NEW.active = 0
+  AND NOT EXISTS (SELECT 1 FROM lintel_recovery_receipts r WHERE r.maintenance_revision = OLD.row_version)
+BEGIN SELECT RAISE(ABORT, 'LintelRecovery exit requires its immutable recovery receipt'); END;
 CREATE TRIGGER trg_maintenance_state_active_identity_immutable BEFORE UPDATE OF reason, entered_at, entered_by_type, entered_by_id ON maintenance_state
 WHEN OLD.active = 1 AND NEW.active = 1 AND (
   NEW.reason IS NOT OLD.reason OR NEW.entered_at IS NOT OLD.entered_at
@@ -3246,7 +3574,7 @@ WHEN NEW.state <> OLD.state AND NOT (
     (OLD.attempt_type = 'browser_exploration' AND OLD.requested_by_tool_call_id IS NOT NULL)
     OR (OLD.attempt_type = 'inspection_collection' AND (
       EXISTS (SELECT 1 FROM inspection_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
-      OR EXISTS (SELECT 1 FROM config_test_run_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
     ))
   ))
   OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
@@ -3331,7 +3659,7 @@ BEGIN SELECT RAISE(ABORT, 'model call retry must follow the immediately prior im
 CREATE TRIGGER trg_model_call_sequence_closure BEFORE INSERT ON model_calls
 WHEN NEW.retry_seq = 0 AND EXISTS (
   SELECT 1 FROM execution_attempts a
-  WHERE a.id = NEW.attempt_id AND a.attempt_type <> 'model_provider_probe'
+  WHERE a.id = NEW.attempt_id AND a.attempt_type <> 'connection_probe'
 ) AND (
   NEW.call_seq < 1
   OR (NEW.call_seq = 1 AND EXISTS (
@@ -3839,98 +4167,111 @@ BEGIN SELECT RAISE(ABORT, 'execution_attempt requestor tool call is immutable on
 -- 终态写 fence：只允许状态变化 UPDATE；evidence_at 必须随进入 Running 首次写入；
 -- 终态后禁止任何 UPDATE、子 Attempt、check result。check result 只能在 Running 插入。
 -- Passed 必须覆盖绑定配置版本全部 check 且每项 ok+Evidence。
-CREATE TRIGGER trg_config_test_runs_no_origin_update BEFORE UPDATE OF
-  business_system_id, config_version_id, label_contract_version_id,
-  created_by, created_at ON config_test_runs
-BEGIN SELECT RAISE(ABORT, 'config_test_run origin is immutable'); END;
-CREATE TRIGGER trg_config_test_runs_no_delete BEFORE DELETE ON config_test_runs
-BEGIN SELECT RAISE(ABORT, 'config_test_run history is not deletable'); END;
-CREATE TRIGGER trg_config_test_runs_row_version_increment BEFORE UPDATE ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_no_origin_update BEFORE UPDATE OF
+  purpose, business_system_id, config_version_id, label_contract_version_id, verification_manifest_item_id,
+  created_by, created_at ON config_verification_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run origin is immutable'); END;
+CREATE TRIGGER trg_config_verification_runs_no_delete BEFORE DELETE ON config_verification_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run history is not deletable'); END;
+CREATE TRIGGER trg_config_verification_runs_row_version_increment BEFORE UPDATE ON config_verification_runs
 WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'config_test_run row_version must increment by exactly 1'); END;
--- 闭合：run 的 business_system/config/contract 必须一致，且只对未发布草稿执行。
--- journey_catalog_digest/version 是执行时实际嵌入 catalog，不跨表强制等于上传时 config 快照（DATA-CONFIG-008）。
-CREATE TRIGGER trg_config_test_runs_closure BEFORE INSERT ON config_test_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run row_version must increment by exactly 1'); END;
+-- 闭合：prepublish 只测未发布草稿；deployment_acceptance 只测 manifest 冻结时 current published 指针。
+CREATE TRIGGER trg_config_verification_runs_closure BEFORE INSERT ON config_verification_runs
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id
     AND v.business_system_id = NEW.business_system_id
     AND v.label_contract_version_id = NEW.label_contract_version_id
-    AND v.state = 'draft' AND v.published_at IS NULL
+    AND (
+      (NEW.purpose = 'prepublish' AND v.state = 'draft' AND v.published_at IS NULL)
+      OR (NEW.purpose = 'deployment_acceptance' AND v.state = 'published' AND v.published_at IS NOT NULL
+        AND EXISTS (SELECT 1 FROM business_systems b WHERE b.id = NEW.business_system_id AND b.current_config_version_id = v.id)
+        AND EXISTS (SELECT 1 FROM label_contract_state s WHERE s.id = 1 AND s.current_contract_id = NEW.label_contract_version_id)
+        AND EXISTS (
+          SELECT 1 FROM verification_invocation_items i
+          JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+          JOIN verification_config_item_locators l ON l.item_id = i.id
+          WHERE i.id = NEW.verification_manifest_item_id AND i.object_kind = 'config'
+            AND l.business_system_id = NEW.business_system_id
+            AND l.config_version_id = NEW.config_version_id
+            AND l.label_contract_version_id = NEW.label_contract_version_id
+            AND julianday(NEW.created_at) <= julianday(m.deadline_at)
+            AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts fr WHERE fr.invocation_id = m.id))))
 )
-BEGIN SELECT RAISE(ABORT, 'config_test_run must bind an unpublished draft config version of the same business system and its explicit target label contract'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run purpose must bind the corresponding draft or manifest-frozen current published config'); END;
 -- 只能以 Queued 创建；显式前向状态机。
-CREATE TRIGGER trg_config_test_runs_insert_state BEFORE INSERT ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_insert_state BEFORE INSERT ON config_verification_runs
 WHEN NEW.state <> 'Queued' OR NEW.evidence_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'config_test_run must be created as Queued without evidence_at'); END;
-CREATE TRIGGER trg_config_test_runs_state_transition BEFORE UPDATE OF state ON config_test_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run must be created as Queued without evidence_at'); END;
+CREATE TRIGGER trg_config_verification_runs_state_transition BEFORE UPDATE OF state ON config_verification_runs
 WHEN NEW.state <> OLD.state AND NOT (
   (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Passed','Failed','Cancelled','Interrupted'))
 )
-BEGIN SELECT RAISE(ABORT, 'illegal config_test_run state transition'); END;
+BEGIN SELECT RAISE(ABORT, 'illegal config_verification_run state transition'); END;
 -- 进入 Running 时必须同时写入 evidence_at（同一条 UPDATE）。
-CREATE TRIGGER trg_config_test_runs_running_requires_evidence_at BEFORE UPDATE OF state ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_running_requires_evidence_at BEFORE UPDATE OF state ON config_verification_runs
 WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'config_test_run evidence_at must be set when entering Running'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run evidence_at must be set when entering Running'); END;
 -- Passed 证据：绑定配置版本的全部 check 都有 ok+Evidence 结果行（且无多余/非 ok 行）。
-CREATE TRIGGER trg_config_test_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_verification_runs
 WHEN NEW.state = 'Passed' AND OLD.state <> 'Passed' AND (
   EXISTS (SELECT 1 FROM config_checks c JOIN config_plans p ON p.id = c.plan_id
           WHERE p.config_version_id = OLD.config_version_id
-            AND NOT EXISTS (SELECT 1 FROM config_test_run_check_results r WHERE r.test_run_id = OLD.id AND r.plan_key = p.plan_key AND r.check_key = c.check_key))
-  OR EXISTS (SELECT 1 FROM config_test_run_check_results r WHERE r.test_run_id = OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
+            AND NOT EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND r.plan_key = p.plan_key AND r.check_key = c.check_key))
+  OR EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
 )
-BEGIN SELECT RAISE(ABORT, 'config_test_run can only Pass when every check of the bound config version has an ok result with evidence'); END;
--- 父 Test Run 进入终态前必须在同一事务 fence 子 Attempt；Cancelled 允许已进入 Cancelling 的运行子 Attempt。
-CREATE TRIGGER trg_config_test_runs_terminal_children_fenced BEFORE UPDATE OF state ON config_test_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run can only Pass when every check of the bound config version has an ok result with evidence'); END;
+-- 父 Config Verification Run 进入终态前必须在同一事务 fence 子 Attempt；Cancelled 允许已进入 Cancelling 的运行子 Attempt。
+CREATE TRIGGER trg_config_verification_runs_terminal_children_fenced BEFORE UPDATE OF state ON config_verification_runs
 WHEN NEW.state <> OLD.state AND NEW.state IN ('Passed','Failed','Cancelled','Interrupted') AND EXISTS (
   SELECT 1 FROM execution_attempts a
-  WHERE a.scope_type = 'config_test_run' AND a.scope_id = NEW.id
+  WHERE a.scope_type = 'config_verification_run' AND a.scope_id = NEW.id
     AND (a.state IN ('Queued','Assigned','Running') OR (NEW.state <> 'Cancelled' AND a.state = 'Cancelling'))
 )
-BEGIN SELECT RAISE(ABORT, 'config_test_run cannot become terminal before child attempts are fenced'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run cannot become terminal before child attempts are fenced'); END;
 -- evidence_at/result_detail 是一次性事实。
-CREATE TRIGGER trg_config_test_runs_evidence_at_once BEFORE UPDATE OF evidence_at ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_evidence_at_once BEFORE UPDATE OF evidence_at ON config_verification_runs
 WHEN (OLD.evidence_at IS NOT NULL AND NEW.evidence_at IS NOT OLD.evidence_at)
   OR (OLD.evidence_at IS NULL AND NEW.evidence_at IS NOT NULL AND NEW.state <> 'Running')
-BEGIN SELECT RAISE(ABORT, 'config_test_run evidence_at is a derived one-time fact written only while entering Running'); END;
-CREATE TRIGGER trg_config_test_runs_result_detail_once BEFORE UPDATE OF result_detail ON config_test_runs
+BEGIN SELECT RAISE(ABORT, 'config_verification_run evidence_at is a derived one-time fact written only while entering Running'); END;
+CREATE TRIGGER trg_config_verification_runs_result_detail_once BEFORE UPDATE OF result_detail ON config_verification_runs
 WHEN OLD.result_detail IS NOT NULL AND NEW.result_detail IS NOT OLD.result_detail
-BEGIN SELECT RAISE(ABORT, 'config_test_run result_detail is a one-time fact'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run result_detail is a one-time fact'); END;
 -- 终态写 fence：终态后禁止任何 UPDATE。
-CREATE TRIGGER trg_config_test_runs_terminal_no_update BEFORE UPDATE ON config_test_runs
+CREATE TRIGGER trg_config_verification_runs_terminal_no_update BEFORE UPDATE ON config_verification_runs
 WHEN OLD.state IN ('Passed','Failed','Cancelled','Interrupted')
-BEGIN SELECT RAISE(ABORT, 'config_test_run is terminal; no updates allowed'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run is terminal; no updates allowed'); END;
 -- 结果行 append-only：不可 UPDATE/不可 DELETE。
-CREATE TRIGGER trg_config_test_run_check_results_no_update BEFORE UPDATE ON config_test_run_check_results
-BEGIN SELECT RAISE(ABORT, 'config_test_run_check_results is append-only'); END;
-CREATE TRIGGER trg_config_test_run_check_results_no_delete BEFORE DELETE ON config_test_run_check_results
-BEGIN SELECT RAISE(ABORT, 'config_test_run_check_results is append-only'); END;
--- check result 只能在 TestRun 处于 Running 时插入。
-CREATE TRIGGER trg_config_test_run_check_results_running_only BEFORE INSERT ON config_test_run_check_results
-WHEN NOT EXISTS (SELECT 1 FROM config_test_runs t WHERE t.id = NEW.test_run_id AND t.state = 'Running')
-BEGIN SELECT RAISE(ABORT, 'config_test_run check results can only be inserted while the test run is Running'); END;
+CREATE TRIGGER trg_config_verification_run_check_results_no_update BEFORE UPDATE ON config_verification_run_check_results
+BEGIN SELECT RAISE(ABORT, 'config_verification_run_check_results is append-only'); END;
+CREATE TRIGGER trg_config_verification_run_check_results_no_delete BEFORE DELETE ON config_verification_run_check_results
+BEGIN SELECT RAISE(ABORT, 'config_verification_run_check_results is append-only'); END;
+-- check result 只能在 Config Verification Run 处于 Running 时插入。
+CREATE TRIGGER trg_config_verification_run_check_results_running_only BEFORE INSERT ON config_verification_run_check_results
+WHEN NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.id = NEW.verification_run_id AND t.state = 'Running')
+BEGIN SELECT RAISE(ABORT, 'config_verification_run check results can only be inserted while the config verification run is Running'); END;
 -- check result closure：plan_key+check_key 必须存在于绑定配置版本。PromQL ok 与 Journey success
 -- 引用唯一完整 Evidence；Journey 业务 gap 和技术 gap 不制造空 Evidence。Journey ledger/check result
 -- 以 result_digest 闭合；operation 创建前的 identity_busy 只允许未派发 Queued Attempt。
-CREATE TRIGGER trg_config_test_run_check_results_closure BEFORE INSERT ON config_test_run_check_results
+CREATE TRIGGER trg_config_verification_run_check_results_closure BEFORE INSERT ON config_verification_run_check_results
 WHEN NOT EXISTS (
-  SELECT 1 FROM config_test_runs t
+  SELECT 1 FROM config_verification_runs t
   JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
   JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE t.id = NEW.test_run_id AND t.state = 'Running' AND (
+  WHERE t.id = NEW.verification_run_id AND t.state = 'Running' AND (
     (c.kind = 'promql' AND NEW.attempt_id IS NULL AND NEW.result_digest IS NULL AND (
       (NEW.status = 'ok' AND EXISTS (
         SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NULL
-          AND e.target_type = 'config_test_run' AND e.target_id = NEW.test_run_id AND e.integrity = 'complete'
+          AND e.target_type = 'config_verification_run' AND e.target_id = NEW.verification_run_id AND e.integrity = 'complete'
           AND json_extract(e.params_json, '$.plan_key') = NEW.plan_key
           AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
       OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL)))
     OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM execution_attempts a
       WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-        AND a.scope_type = 'config_test_run' AND a.scope_id = NEW.test_run_id
+        AND a.scope_type = 'config_verification_run' AND a.scope_id = NEW.verification_run_id
         AND a.plan_key = NEW.plan_key AND a.check_key = NEW.check_key
         AND (
           (NEW.result_digest IS NOT NULL AND (
@@ -3939,7 +4280,7 @@ WHEN NOT EXISTS (
                 AND ((j.outcome = 'success' AND NEW.status = 'ok' AND NEW.gap_reason IS NULL
                       AND NEW.evidence_id = j.primary_evidence_id AND EXISTS (
                         SELECT 1 FROM evidence e WHERE e.id = j.primary_evidence_id AND e.attempt_id = a.id
-                          AND e.target_type = 'config_test_run' AND e.target_id = NEW.test_run_id AND e.integrity = 'complete'
+                          AND e.target_type = 'config_verification_run' AND e.target_id = NEW.verification_run_id AND e.integrity = 'complete'
                           AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
                           AND json_extract(e.params_json, '$.plan_key') = NEW.plan_key
                           AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
@@ -3949,7 +4290,7 @@ WHEN NOT EXISTS (
               AND NEW.gap_reason = 'identity_busy' AND NEW.evidence_id IS NULL
               AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = a.id)
               AND EXISTS (
-                SELECT 1 FROM config_test_runs tr
+                SELECT 1 FROM config_verification_runs tr
                 JOIN browser_identities bi ON bi.business_system_id = tr.business_system_id
                 JOIN browser_operations busy ON busy.identity_id = bi.id AND busy.stop_confirmed_at IS NULL
                 WHERE tr.id = a.scope_id))
@@ -3961,9 +4302,9 @@ WHEN NOT EXISTS (
   )
 )
 OR (NEW.evidence_id IS NOT NULL AND EXISTS (
-  SELECT 1 FROM config_test_run_check_results r WHERE r.evidence_id = NEW.evidence_id))
-BEGIN SELECT RAISE(ABORT, 'config_test_run result must be one exact PromQL result, an atomically committed Journey ResultProposal, or a terminal technical gap'); END;
-CREATE TRIGGER trg_config_test_run_local_journey_result AFTER INSERT ON config_test_run_check_results
+  SELECT 1 FROM config_verification_run_check_results r WHERE r.evidence_id = NEW.evidence_id))
+BEGIN SELECT RAISE(ABORT, 'config_verification_run result must be one exact PromQL result, an atomically committed Journey ResultProposal, or a terminal technical gap'); END;
+CREATE TRIGGER trg_config_verification_run_local_journey_result AFTER INSERT ON config_verification_run_check_results
 WHEN NEW.result_digest IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM browser_journey_results j WHERE j.attempt_id = NEW.attempt_id)
 BEGIN
@@ -3993,12 +4334,12 @@ BEGIN
     WHERE json_type(je.value) IS NOT 'object'
        OR json_type(je.value, '$.business_system_id') IS NOT 'integer'
        OR json_type(je.value, '$.config_version_id') IS NOT 'integer'
-       OR json_type(je.value, '$.test_run_id') IS NOT 'integer'
+       OR json_type(je.value, '$.verification_run_id') IS NOT 'integer'
        OR json_type(je.value, '$.expected_business_system_row_version') IS NOT 'integer'
        OR COALESCE(json_type(je.value, '$.expected_current_config_version_id'), 'missing') NOT IN ('integer','null')
        OR EXISTS (
          SELECT 1 FROM json_each(je.value) member
-         WHERE member.key NOT IN ('business_system_id','config_version_id','test_run_id','expected_current_config_version_id','expected_business_system_row_version')
+         WHERE member.key NOT IN ('business_system_id','config_version_id','verification_run_id','expected_current_config_version_id','expected_business_system_row_version')
        )
   )
   OR (SELECT COUNT(*) FROM json_each(NEW.items_json)) <>
@@ -4022,7 +4363,7 @@ BEGIN
   OR EXISTS (SELECT 1 FROM json_each(NEW.items_json) je
      JOIN business_systems bs ON bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
      WHERE bs.enabled = 0);
-  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；test_run Passed；并发前提匹配。
+  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；Config Verification Run Passed；并发前提匹配。
   --    使用 json_each 遍历 items_json 中的每个 item 进行重验。
   SELECT RAISE(ABORT, 'activation item validation failed')
   WHERE EXISTS (
@@ -4031,7 +4372,7 @@ BEGIN
       SELECT 1
       FROM business_systems bs
       JOIN business_system_config_versions v ON v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)
-      JOIN config_test_runs t ON t.id = CAST(je.value ->> '$.test_run_id' AS INTEGER)
+      JOIN config_verification_runs t ON t.id = CAST(je.value ->> '$.verification_run_id' AS INTEGER)
       WHERE bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
         AND v.business_system_id = bs.id
         AND v.published_at IS NULL
@@ -4039,6 +4380,7 @@ BEGIN
         AND t.business_system_id = bs.id
         AND t.config_version_id = v.id
         AND t.label_contract_version_id = NEW.contract_id
+        AND t.purpose = 'prepublish' AND t.verification_manifest_item_id IS NULL
         AND t.state = 'Passed'
         AND (CAST(je.value ->> '$.expected_current_config_version_id' AS INTEGER) IS bs.current_config_version_id
              OR (je.value ->> '$.expected_current_config_version_id' IS NULL AND bs.current_config_version_id IS NULL))
@@ -4090,7 +4432,7 @@ WHEN NEW.state <> 'Queued'
 BEGIN SELECT RAISE(ABORT, 'execution_attempt must be created Queued before input freeze and dispatch'); END;
 
 -- execution_attempts 作用域闭合（DATA-ATTEMPT-002）：每种固定工作模式只引用其权威 scope；
--- run_check/config_test_run 还必须引用 scope 当前配置中的 browser check。PromQL 由 Quoin 直接采集，
+-- run_check/config_verification_run 还必须引用 scope 当前配置中的 browser check。PromQL 由 Quoin 直接采集，
 -- 不得虚构 Lintel inspection_collection Attempt。
 CREATE TRIGGER trg_execution_attempts_scope_exists BEFORE INSERT ON execution_attempts
 WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
@@ -4104,10 +4446,10 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         SELECT 1 FROM knowledge_import_batches b WHERE b.id = NEW.scope_id AND b.state = 'Processing'))
    OR (NEW.scope_type = 'embedding_generation' AND NOT EXISTS (
         SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id))
-   OR (NEW.scope_type = 'connection' AND NOT EXISTS (
-        SELECT 1 FROM connections c WHERE c.id = NEW.scope_id AND c.type = 'model_provider'))
-   OR (NEW.scope_type = 'config_test_run' AND NOT EXISTS (
-        SELECT 1 FROM config_test_runs t JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
+    OR (NEW.scope_type = 'connection' AND NOT EXISTS (
+         SELECT 1 FROM connections c WHERE c.id = NEW.scope_id))
+   OR (NEW.scope_type = 'config_verification_run' AND NOT EXISTS (
+        SELECT 1 FROM config_verification_runs t JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
         JOIN config_checks c ON c.plan_id = p.id
         WHERE t.id = NEW.scope_id AND t.state = 'Running'
           AND c.check_key = NEW.check_key AND c.kind = 'browser'
@@ -4142,14 +4484,14 @@ WHEN NOT EXISTS (
       WHEN 'embedding' THEN 'embedding_v1'
       WHEN 'inspection_collection' THEN 'inspection_collection_v1'
       WHEN 'browser_exploration' THEN 'browser_exploration_v1'
-      WHEN 'model_provider_probe' THEN 'model_provider_probe_v1'
+      WHEN 'connection_probe' THEN 'connection_probe_v1'
     END)
 BEGIN SELECT RAISE(ABORT, 'attempt input snapshot schema_kind must match the versioned schema of the same Queued Attempt type'); END;
 CREATE TRIGGER trg_attempt_input_item_closure BEFORE INSERT ON attempt_input_items
 WHEN NOT EXISTS (
   SELECT 1 FROM attempt_input_snapshots s JOIN execution_attempts a ON a.id = s.attempt_id
   WHERE s.id = NEW.snapshot_id AND a.state = 'Queued'
-    AND (NEW.connection_revision_id IS NULL OR (a.attempt_type = 'model_provider_probe' AND EXISTS (
+    AND (NEW.connection_revision_id IS NULL OR (a.attempt_type = 'connection_probe' AND EXISTS (
       SELECT 1 FROM connection_revisions r WHERE r.id = NEW.connection_revision_id AND r.connection_id = a.scope_id))))
 BEGIN SELECT RAISE(ABORT, 'attempt input items may only be frozen for the same Queued Attempt and valid fixed-mode source'); END;
 -- 派发前必须已经存在可重建的输入谱系与固定工作模式版本；Plinth 模型工作还必须绑定真实探测通过的模型 grant。
@@ -4166,9 +4508,19 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
         SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'chat_model')))
   OR (NEW.attempt_type = 'embedding' AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL OR NOT EXISTS (
       SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'embedding')))
-  OR (NEW.attempt_type = 'model_provider_probe' AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL
-      OR NOT EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'chat_model')
-      OR NOT EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'embedding')))
+  OR (NEW.attempt_type = 'connection_probe' AND (
+      NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL
+      OR NOT EXISTS (
+        SELECT 1 FROM connections c WHERE c.id = NEW.scope_id AND (
+          (c.type = 'model_provider'
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'model_probe_chat')
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'model_probe_embedding'))
+          OR (c.type = 'thanos'
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'thanos_probe'))
+          OR (c.type = 'kubernetes'
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'kubernetes_probe'))
+        )
+      )))
   OR (NEW.runtime_slot = 'lintel' AND NEW.agent_version IS NOT NULL)
 )
 BEGIN SELECT RAISE(ABORT, 'attempt cannot dispatch without frozen input, release binding, and required model grant'); END;
@@ -4205,51 +4557,68 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'inspection report must bind its Running inspection_analysis Attempt'); END;
 
--- 模型能力、业务系统连接映射与 Attempt grant 必须闭合到同一 connection/revision/generation。
-CREATE TRIGGER trg_model_provider_capabilities_type BEFORE INSERT ON model_provider_capabilities
+-- Connection Probe header/typed child 闭合到同一 connection/revision/generation/action set。
+CREATE TRIGGER trg_connection_probe_results_closure BEFORE INSERT ON connection_probe_results
 WHEN NOT EXISTS (
-  SELECT 1 FROM connection_revisions r
-  JOIN connections c ON c.id = r.connection_id
+  SELECT 1 FROM connections c
+  JOIN connection_revisions r ON r.id = NEW.connection_revision_id AND r.connection_id = c.id
   JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = c.id
-  JOIN execution_attempts a ON a.id = NEW.probe_attempt_id
-  WHERE r.id = NEW.connection_revision_id AND c.type = 'model_provider'
-    AND json_extract(r.config_json, '$.chatModelId') = NEW.chat_model_id
-    AND json_extract(r.config_json, '$.embeddingModelId') = NEW.embedding_model_id
-    AND (json_type(r.config_json, '$.contextBudgetTokens') IS NULL
-         OR json_extract(r.config_json, '$.contextBudgetTokens') = NEW.context_budget_tokens)
-    AND (json_type(r.config_json, '$.maxOutputTokens') IS NULL
-         OR json_extract(r.config_json, '$.maxOutputTokens') = NEW.max_output_tokens)
-    AND a.attempt_type = 'model_provider_probe' AND a.scope_type = 'connection'
-    AND a.scope_id = c.id AND a.state = 'Running'
+  JOIN execution_attempts a ON a.id = NEW.attempt_id
+  WHERE c.id = NEW.connection_id AND c.type = NEW.connection_type
+    AND g.key_binding_revision = NEW.root_binding_revision
+    AND a.attempt_type = 'connection_probe' AND a.scope_type = 'connection' AND a.scope_id = c.id
+    AND a.state = 'Running'
     AND EXISTS (
       SELECT 1 FROM attempt_connection_grants ag
       WHERE ag.attempt_id = a.id AND ag.connection_id = c.id
-        AND ag.connection_revision_id = NEW.connection_revision_id
-        AND ag.credential_generation_id = NEW.credential_generation_id
-        AND ag.purpose = 'chat_model'
-    )
-    AND EXISTS (
-      SELECT 1 FROM attempt_connection_grants ag
-      WHERE ag.attempt_id = a.id AND ag.connection_id = c.id
-        AND ag.connection_revision_id = NEW.connection_revision_id
-        AND ag.credential_generation_id = NEW.credential_generation_id
-        AND ag.purpose = 'embedding'
-    )
-    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded')
-    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'embedding' AND m.status = 'succeeded')
-    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.operation = 'chat'
-                AND m.status = 'cancelled' AND m.termination_reason = 'cancelled')
-    AND (NEW.request_id_observed = 0 OR EXISTS (
-          SELECT 1 FROM model_calls m WHERE m.attempt_id = a.id AND m.provider_request_id IS NOT NULL))
-    AND (NEW.native_tool_calling_supported = 0 OR EXISTS (
-          SELECT 1 FROM model_calls m JOIN tool_calls t ON t.model_call_id = m.id
-          WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded' AND t.status = 'succeeded'))
-    AND (NEW.multi_tool_call_supported = 0 OR EXISTS (
-          SELECT 1 FROM model_calls m JOIN tool_calls t ON t.model_call_id = m.id
-          WHERE m.attempt_id = a.id AND m.operation = 'chat' AND m.status = 'succeeded' AND t.status = 'succeeded'
-          GROUP BY m.id HAVING COUNT(*) >= 2))
+        AND ag.connection_revision_id = r.id AND ag.credential_generation_id = g.id
+        AND ag.qualified_probe_result_id IS NULL
+        AND ag.purpose = CASE c.type
+          WHEN 'model_provider' THEN 'model_probe_chat'
+          WHEN 'thanos' THEN 'thanos_probe'
+          WHEN 'kubernetes' THEN 'kubernetes_probe'
+        END)
 )
-BEGIN SELECT RAISE(ABORT, 'model capability probe must close over its Running probe Attempt, provider revision, and real chat/embedding calls'); END;
+BEGIN SELECT RAISE(ABORT, 'connection probe result must close over its Running supervisor probe Attempt and exact connection binding'); END;
+CREATE TRIGGER trg_connection_probe_attempt_terminal_closure BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.attempt_type = 'connection_probe' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+  AND NOT EXISTS (
+    SELECT 1 FROM connection_probe_results p
+    WHERE p.attempt_id = OLD.id
+      AND p.outcome = CASE NEW.state
+        WHEN 'Succeeded' THEN 'passed'
+        WHEN 'Failed' THEN 'failed'
+        WHEN 'Cancelled' THEN 'cancelled'
+        WHEN 'Interrupted' THEN 'interrupted'
+      END
+      AND ((p.connection_type = 'model_provider' AND EXISTS (
+              SELECT 1 FROM model_provider_connection_probe_results x WHERE x.probe_result_id = p.id))
+        OR (p.connection_type = 'thanos' AND EXISTS (
+              SELECT 1 FROM thanos_connection_probe_results x WHERE x.probe_result_id = p.id))
+        OR (p.connection_type = 'kubernetes' AND EXISTS (
+              SELECT 1 FROM kubernetes_connection_probe_results x WHERE x.probe_result_id = p.id)))
+  )
+BEGIN SELECT RAISE(ABORT, 'connection probe Attempt terminal state requires one matching immutable typed result'); END;
+CREATE TRIGGER trg_model_provider_connection_probe_results_closure BEFORE INSERT ON model_provider_connection_probe_results
+WHEN NOT EXISTS (
+  SELECT 1 FROM connection_probe_results p
+  JOIN connection_revisions r ON r.id = p.connection_revision_id
+  WHERE p.id = NEW.probe_result_id AND p.connection_type = 'model_provider'
+    AND json_extract(r.config_json, '$.chatModelId') = NEW.chat_model_id
+    AND (json_type(r.config_json, '$.embeddingModelId') IS NULL OR json_extract(r.config_json, '$.embeddingModelId') = NEW.embedding_model_id)
+    AND (json_type(r.config_json, '$.contextBudgetTokens') IS NULL OR json_extract(r.config_json, '$.contextBudgetTokens') = NEW.context_budget_tokens)
+    AND (json_type(r.config_json, '$.maxOutputTokens') IS NULL OR json_extract(r.config_json, '$.maxOutputTokens') = NEW.max_output_tokens)
+    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'succeeded')
+    AND (NEW.embedding_supported = 0 OR EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'embedding' AND m.status = 'succeeded'))
+    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'cancelled' AND m.termination_reason = 'cancelled')
+)
+BEGIN SELECT RAISE(ABORT, 'model-provider probe child must match its header, provider config and real calls'); END;
+CREATE TRIGGER trg_thanos_connection_probe_results_closure BEFORE INSERT ON thanos_connection_probe_results
+WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type = 'thanos')
+BEGIN SELECT RAISE(ABORT, 'Thanos probe child must match a Thanos probe header'); END;
+CREATE TRIGGER trg_kubernetes_connection_probe_results_closure BEFORE INSERT ON kubernetes_connection_probe_results
+WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type = 'kubernetes')
+BEGIN SELECT RAISE(ABORT, 'Kubernetes probe child must match a Kubernetes probe header'); END;
 CREATE TRIGGER trg_connections_model_provider_insert_disabled BEFORE INSERT ON connections
 WHEN NEW.type = 'model_provider' AND NEW.enabled = 1
 BEGIN SELECT RAISE(ABORT, 'model_provider must be created disabled until its revision and credential pass the real capability probe'); END;
@@ -4260,14 +4629,27 @@ WHEN NEW.enabled = 1 AND NEW.revalidation_required = 0 AND (
     WHERE g.id = NEW.current_credential_generation_id AND g.connection_id = NEW.id
       AND g.key_binding_revision = k.binding_revision))
 BEGIN SELECT RAISE(ABORT, 'enabled validated connection requires a current credential under the current root key binding'); END;
+CREATE TRIGGER trg_connection_enable_qualification_closure BEFORE INSERT ON connection_enable_qualifications
+WHEN NOT EXISTS (
+  SELECT 1 FROM connections c
+  JOIN connection_probe_results p ON p.id = NEW.probe_result_id AND p.connection_id = c.id
+  JOIN model_provider_connection_probe_results m ON m.probe_result_id = p.id
+  JOIN credential_generations g ON g.id = p.credential_generation_id
+  JOIN root_key_state k ON k.id = 1 AND k.binding_revision = g.key_binding_revision
+  WHERE c.id = NEW.connection_id AND c.type = 'model_provider' AND c.enabled = 0
+    AND NEW.enabled_row_version = c.row_version + 1
+    AND p.connection_revision_id = c.current_revision_id
+    AND p.credential_generation_id = c.current_credential_generation_id
+    AND p.root_binding_revision = k.binding_revision AND p.outcome = 'passed'
+    AND m.streaming_supported = 1 AND m.native_tool_calling_supported = 1
+    AND m.cancellation_observed = 1 AND m.usage_observed = 1 AND m.embedding_supported = 1)
+BEGIN SELECT RAISE(ABORT, 'enable qualification must select a passed probe for the exact current model-provider binding'); END;
 CREATE TRIGGER trg_connections_enable_requires_probe BEFORE UPDATE OF enabled, current_revision_id, current_credential_generation_id ON connections
 WHEN NEW.type = 'model_provider' AND NEW.enabled = 1 AND (
-  NEW.current_revision_id IS NULL OR NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
-    SELECT 1 FROM model_provider_capabilities p WHERE p.connection_revision_id = NEW.current_revision_id
-      AND p.credential_generation_id = NEW.current_credential_generation_id
-      AND p.streaming_supported = 1 AND p.native_tool_calling_supported = 1
-      AND p.cancellation_observed = 1 AND p.usage_observed = 1 AND p.embedding_supported = 1))
-BEGIN SELECT RAISE(ABORT, 'enabled model_provider requires a probed current revision with streaming, native tools, cancellation, and usage'); END;
+  OLD.enabled <> 0 OR NEW.current_revision_id IS NULL OR NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM connection_enable_qualifications q
+    WHERE q.connection_id = NEW.id AND q.enabled_row_version = NEW.row_version))
+BEGIN SELECT RAISE(ABORT, 'model_provider enable must atomically append an explicit immutable qualification event'); END;
 CREATE TRIGGER trg_business_system_kubernetes_connection_type BEFORE INSERT ON business_system_kubernetes_connections
 WHEN NOT EXISTS (SELECT 1 FROM connections c WHERE c.id = NEW.connection_id AND c.type = 'kubernetes')
 BEGIN SELECT RAISE(ABORT, 'business system binding requires a kubernetes connection'); END;
@@ -4279,38 +4661,50 @@ WHEN NOT EXISTS (
   JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = c.id
   JOIN root_key_state k ON k.id = 1 AND g.key_binding_revision = k.binding_revision
   WHERE a.id = NEW.attempt_id AND a.state IN ('Queued','Assigned','Running')
-    AND ((a.attempt_type = 'model_provider_probe' AND NEW.purpose IN ('chat_model','embedding')
-          AND c.type = 'model_provider' AND c.current_revision_id = NEW.connection_revision_id
-          AND c.current_credential_generation_id = NEW.credential_generation_id)
-      OR (c.enabled = 1 AND c.revalidation_required = 0
-        AND c.current_revision_id = NEW.connection_revision_id
-        AND c.current_credential_generation_id = NEW.credential_generation_id
-        AND ((NEW.purpose IN ('chat_model','embedding') AND c.type = 'model_provider'
-          AND EXISTS (SELECT 1 FROM model_provider_capabilities p WHERE p.connection_revision_id = r.id
-            AND p.credential_generation_id = g.id
-            AND p.streaming_supported = 1 AND p.native_tool_calling_supported = 1
-            AND p.cancellation_observed = 1 AND p.usage_observed = 1
-            AND (NEW.purpose <> 'embedding' OR p.embedding_supported = 1)))
-        OR (NEW.purpose = 'thanos_query' AND c.type = 'thanos')
-        OR (NEW.purpose = 'kubernetes_read' AND c.type = 'kubernetes'
-            AND EXISTS (SELECT 1 FROM business_system_kubernetes_connections m
-                        WHERE m.business_system_id = NEW.business_system_id AND m.connection_id = c.id AND m.state = 'Active')))))
+    AND c.current_revision_id = NEW.connection_revision_id
+    AND c.current_credential_generation_id = NEW.credential_generation_id
+    AND (
+      (a.attempt_type = 'connection_probe' AND a.scope_type = 'connection' AND a.scope_id = c.id
+        AND NEW.qualified_probe_result_id IS NULL
+        AND ((c.type = 'model_provider' AND NEW.purpose IN ('model_probe_chat','model_probe_embedding'))
+          OR (c.type = 'thanos' AND NEW.purpose = 'thanos_probe')
+          OR (c.type = 'kubernetes' AND NEW.purpose = 'kubernetes_probe')))
+      OR (c.enabled = 1 AND c.revalidation_required = 0 AND (
+        (NEW.purpose IN ('chat_model','embedding') AND c.type = 'model_provider'
+          AND EXISTS (
+            SELECT 1 FROM connection_enable_qualifications q
+            JOIN connection_probe_results p ON p.id = q.probe_result_id
+            JOIN model_provider_connection_probe_results m ON m.probe_result_id = p.id
+            WHERE q.connection_id = c.id AND q.enabled_row_version = c.row_version
+              AND p.id = NEW.qualified_probe_result_id AND p.connection_revision_id = r.id
+              AND p.credential_generation_id = g.id AND p.outcome = 'passed'
+              AND m.streaming_supported = 1 AND m.native_tool_calling_supported = 1
+              AND m.cancellation_observed = 1 AND m.usage_observed = 1
+              AND (NEW.purpose <> 'embedding' OR m.embedding_supported = 1))
+        )
+        OR (NEW.purpose = 'thanos_query' AND c.type = 'thanos' AND NEW.qualified_probe_result_id IS NULL)
+        OR (NEW.purpose = 'kubernetes_read' AND c.type = 'kubernetes' AND NEW.qualified_probe_result_id IS NULL
+          AND EXISTS (SELECT 1 FROM business_system_kubernetes_connections map
+                      WHERE map.business_system_id = NEW.business_system_id AND map.connection_id = c.id AND map.state = 'Active'))
+      ))
+    )
     AND (NEW.created_by_tool_call_id IS NULL OR EXISTS (
       SELECT 1 FROM tool_calls t WHERE t.id = NEW.created_by_tool_call_id AND t.attempt_id = NEW.attempt_id))
 )
-BEGIN SELECT RAISE(ABORT, 'attempt connection grant must close over the same active attempt, connection, revision, credential, purpose, and business-system mapping'); END;
+BEGIN SELECT RAISE(ABORT, 'attempt connection grant must close over the exact active binding, purpose and selected qualification'); END;
 CREATE TRIGGER trg_model_call_grant_closure BEFORE INSERT ON model_calls
 WHEN NOT EXISTS (
   SELECT 1 FROM attempt_connection_grants g
   WHERE g.id = NEW.connection_grant_id AND g.attempt_id = NEW.attempt_id
-    AND ((NEW.operation = 'chat' AND g.purpose = 'chat_model') OR (NEW.operation = 'embedding' AND g.purpose = 'embedding'))
+    AND ((NEW.operation = 'chat' AND g.purpose IN ('chat_model','model_probe_chat'))
+      OR (NEW.operation = 'embedding' AND g.purpose IN ('embedding','model_probe_embedding')))
 )
 BEGIN SELECT RAISE(ABORT, 'model call must use the same Attempt model/embedding grant'); END;
 CREATE TRIGGER trg_model_call_operation_attempt BEFORE INSERT ON model_calls
 WHEN NOT EXISTS (
   SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Running'
-    AND ((NEW.operation = 'embedding' AND a.attempt_type IN ('embedding','model_provider_probe'))
-      OR (NEW.operation = 'chat' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe')))
+    AND ((NEW.operation = 'embedding' AND a.attempt_type IN ('embedding','connection_probe'))
+      OR (NEW.operation = 'chat' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','connection_probe')))
 )
 BEGIN SELECT RAISE(ABORT, 'model call operation must match a Running fixed Plinth work mode'); END;
 CREATE TRIGGER trg_model_call_input_item_closure BEFORE INSERT ON model_call_input_items
@@ -4359,7 +4753,7 @@ WHEN NEW.status <> 'pending' OR NOT EXISTS (
   SELECT 1 FROM model_calls m JOIN execution_attempts a ON a.id = m.attempt_id
   WHERE m.id = NEW.model_call_id AND m.attempt_id = NEW.attempt_id AND m.call_seq = NEW.call_seq AND m.status = 'succeeded'
     AND EXISTS (SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = m.id AND o.complete = 1)
-    AND a.state = 'Running' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe')
+    AND a.state = 'Running' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','connection_probe')
 )
 BEGIN SELECT RAISE(ABORT, 'tool call must be inserted pending after a successful model call in the same Running Attempt'); END;
 CREATE TRIGGER trg_tool_call_proposal_closure BEFORE INSERT ON tool_calls
@@ -4454,8 +4848,8 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     WHERE NEW.scope_type = 'run_check' AND r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
       AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
     UNION ALL
-    SELECT 1 FROM config_test_run_check_results r
-    WHERE NEW.scope_type = 'config_test_run' AND r.test_run_id = NEW.scope_id
+    SELECT 1 FROM config_verification_run_check_results r
+    WHERE NEW.scope_type = 'config_verification_run' AND r.verification_run_id = NEW.scope_id
       AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
       AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL))
 )
@@ -4497,10 +4891,13 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
                 AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.knowledge_version_id = i.knowledge_version_id
                                 AND e.embedding_generation_id = NEW.scope_id AND e.state = 'ready'))
       OR NOT EXISTS (SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id AND g.vector_dim IS NOT NULL)))
-  OR (NEW.attempt_type = 'model_provider_probe' AND NOT EXISTS (
-      SELECT 1 FROM model_provider_capabilities c JOIN connection_revisions r ON r.id = c.connection_revision_id
-       WHERE c.probe_attempt_id = NEW.id AND r.connection_id = NEW.scope_id))
-  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','model_provider_probe') AND (
+  OR (NEW.attempt_type = 'connection_probe' AND NOT EXISTS (
+      SELECT 1 FROM connection_probe_results p
+      WHERE p.attempt_id = NEW.id AND p.connection_id = NEW.scope_id
+        AND ((p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
+          OR (p.connection_type = 'thanos' AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id))
+          OR (p.connection_type = 'kubernetes' AND EXISTS (SELECT 1 FROM kubernetes_connection_probe_results k WHERE k.probe_result_id = p.id)))))
+  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction') AND (
       NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.id AND m.status = 'succeeded')
       OR EXISTS (
         SELECT 1 FROM model_calls m
@@ -4577,40 +4974,347 @@ CREATE TRIGGER trg_config_discoveries_parent_frozen BEFORE INSERT ON config_disc
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_test_runs t WHERE t.config_version_id = NEW.config_version_id)
+    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = NEW.config_version_id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_discoveries can only be inserted while parent config is draft with no test runs, no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_discoveries can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
 CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_test_runs t WHERE t.config_version_id = NEW.config_version_id)
+    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = NEW.config_version_id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no test runs, no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
 CREATE TRIGGER trg_config_checks_parent_frozen BEFORE INSERT ON config_checks
 WHEN NOT EXISTS (
   SELECT 1 FROM config_plans p JOIN business_system_config_versions v ON v.id = p.config_version_id
   WHERE p.id = NEW.plan_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_test_runs t WHERE t.config_version_id = v.id)
+    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = v.id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = v.id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no test runs, no publications, and no inspection runs'); END;
--- check_key 只在其 plan 父作用域内唯一；config_test_run 以 plan_key+check_key 复合定位，
+BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
+-- check_key 只在其 plan 父作用域内唯一；config_verification_run 以 plan_key+check_key 复合定位，
 -- 因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
 CREATE TRIGGER trg_config_discoveries_identity_labels_unique BEFORE INSERT ON config_discoveries
 WHEN (SELECT COUNT(*) FROM json_each(NEW.identity_labels_json)) <> (SELECT COUNT(DISTINCT value) FROM json_each(NEW.identity_labels_json))
 BEGIN SELECT RAISE(ABORT, 'identity_labels must not contain duplicates'); END;
--- 12.42 配置 Test Run 纳入任务变更日志（DATA-SSE-004）：与权威状态同一事务派生。
-CREATE TRIGGER trg_task_change_log_config_test_run_insert AFTER INSERT ON config_test_runs
+-- 12.42 配置验证 Run 纳入任务变更日志（DATA-SSE-004）：与权威状态同一事务派生。
+CREATE TRIGGER trg_task_change_log_config_verification_run_insert AFTER INSERT ON config_verification_runs
 BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('config_test_run', NEW.id, 'created', NEW.row_version);
+  VALUES ('config_verification_run', NEW.id, 'created', NEW.row_version);
 END;
-CREATE TRIGGER trg_task_change_log_config_test_run_state AFTER UPDATE OF state ON config_test_runs
+CREATE TRIGGER trg_task_change_log_config_verification_run_state AFTER UPDATE OF state ON config_verification_runs
 WHEN NEW.state <> OLD.state
 BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('config_test_run', NEW.id, 'state_changed', NEW.row_version);
+  VALUES ('config_verification_run', NEW.id, 'state_changed', NEW.row_version);
 END;
+
+
+-- 12.43 Deployment Acceptance 不可变闭包与 finalize receipt。
+CREATE TRIGGER trg_verification_manifest_admin_session BEFORE INSERT ON verification_invocation_manifests
+WHEN NOT EXISTS (
+  SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
+  WHERE s.id = NEW.admin_session_id AND s.user_id = NEW.principal_user_id
+    AND s.revoked_at IS NULL AND u.role = 'admin' AND u.enabled = 1
+    AND s.auth_revision_at_issue = u.auth_revision
+    AND julianday(NEW.created_at) < julianday(s.idle_expires_at)
+    AND julianday(NEW.created_at) < julianday(s.absolute_expires_at))
+BEGIN SELECT RAISE(ABORT, 'verification manifest requires the initiating active Admin Session'); END;
+
+CREATE TRIGGER trg_verification_items_manifest_open BEFORE INSERT ON verification_invocation_items
+WHEN EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = NEW.invocation_id)
+  OR NOT EXISTS (
+    SELECT 1 FROM verification_invocation_manifests m
+    WHERE m.id = NEW.invocation_id AND NEW.item_seq <= m.item_count
+      AND (SELECT COUNT(*) FROM verification_invocation_items i WHERE i.invocation_id = m.id) < m.item_count)
+BEGIN SELECT RAISE(ABORT, 'verification manifest item set is closed by its immutable item_count'); END;
+CREATE TRIGGER trg_verification_results_manifest_open BEFORE INSERT ON verification_item_results
+WHEN EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN verification_finalization_receipts r ON r.invocation_id = i.invocation_id
+  WHERE i.id = NEW.item_id)
+  OR NOT EXISTS (
+    SELECT 1 FROM verification_invocation_items i
+    JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+    WHERE i.id = NEW.item_id
+      AND (SELECT COUNT(*) FROM verification_invocation_items all_items WHERE all_items.invocation_id = m.id) = m.item_count)
+BEGIN SELECT RAISE(ABORT, 'verification results require the complete immutable manifest item set and no final receipt'); END;
+CREATE TRIGGER trg_verification_result_input_closure BEFORE INSERT ON verification_item_results
+WHEN NOT EXISTS (SELECT 1 FROM verification_invocation_items i WHERE i.id = NEW.item_id AND i.input_digest = NEW.input_digest)
+BEGIN SELECT RAISE(ABORT, 'verification result input digest must match its frozen manifest item'); END;
+CREATE TRIGGER trg_verification_result_artifact_closure BEFORE INSERT ON verification_item_results
+WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN artifacts a ON a.id = NEW.artifact_id AND a.kind = 'verification_attachment'
+    AND a.owner_type = 'verification_invocation' AND a.owner_id = i.invocation_id
+    AND a.retention_kind = 'long_term' AND a.body_expired = 0
+  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.result_digest
+  WHERE i.id = NEW.item_id)
+BEGIN SELECT RAISE(ABORT, 'verification result artifact must be its long-term canonical Test Result under the same invocation'); END;
+CREATE TRIGGER trg_verification_result_deadline_closure BEFORE INSERT ON verification_item_results
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+  WHERE i.id = NEW.item_id
+    AND julianday(NEW.observed_at) >= julianday(m.started_at)
+    AND julianday(NEW.observed_at) <= julianday(m.deadline_at)
+    AND julianday(NEW.committed_at) >= julianday(m.started_at)
+    AND julianday(NEW.committed_at) <= julianday(m.deadline_at))
+BEGIN SELECT RAISE(ABORT, 'verification result is outside the fixed eight-hour point-in-time closure'); END;
+CREATE TRIGGER trg_verification_result_conflict_record AFTER INSERT ON verification_item_results
+BEGIN
+  INSERT OR IGNORE INTO verification_result_conflicts (item_id, first_result_id, conflicting_result_id, created_at)
+  SELECT NEW.item_id, prior.id, NEW.id, NEW.committed_at
+  FROM verification_item_results prior
+  WHERE prior.item_id = NEW.item_id AND prior.id < NEW.id AND prior.result_digest <> NEW.result_digest;
+END;
+CREATE TRIGGER trg_verification_result_conflict_closure BEFORE INSERT ON verification_result_conflicts
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_item_results a
+  JOIN verification_item_results b ON b.id = NEW.conflicting_result_id
+  JOIN verification_invocation_items i ON i.id = NEW.item_id
+  WHERE a.id = NEW.first_result_id AND a.item_id = NEW.item_id AND b.item_id = NEW.item_id
+    AND a.result_digest <> b.result_digest
+    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = i.invocation_id))
+BEGIN SELECT RAISE(ABORT, 'verification conflict must bind two different results of the same open invocation item'); END;
+
+CREATE TRIGGER trg_verification_helper_import_closure BEFORE INSERT ON verification_helper_imports
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_manifests m
+  JOIN artifacts a ON a.id = NEW.artifact_id AND a.kind = 'verification_attachment'
+    AND a.owner_type = 'verification_invocation' AND a.owner_id = m.id
+    AND a.retention_kind = 'long_term' AND a.body_expired = 0
+  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.report_digest
+  WHERE m.id = NEW.invocation_id AND m.canonical_input_digest = NEW.request_digest
+    AND julianday(NEW.received_at) >= julianday(m.started_at)
+    AND julianday(NEW.received_at) <= julianday(m.deadline_at)
+    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = m.id))
+BEGIN SELECT RAISE(ABORT, 'helper import must bind the open manifest request and its exact long-term report artifact'); END;
+
+CREATE TRIGGER trg_verification_subject_drift_closure BEFORE INSERT ON verification_subject_drifts
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+  WHERE i.id = NEW.item_id AND i.invocation_id = NEW.invocation_id AND i.object_kind = NEW.object_kind
+    AND julianday(NEW.observed_at) >= julianday(m.started_at)
+    AND julianday(NEW.observed_at) <= julianday(m.deadline_at)
+    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = m.id))
+BEGIN SELECT RAISE(ABORT, 'subject drift must bind one matching item in an open invocation observation window'); END;
+
+CREATE TRIGGER trg_verification_deployment_locator_kind BEFORE INSERT ON verification_deployment_item_locators
+WHEN NOT EXISTS (SELECT 1 FROM verification_invocation_items i WHERE i.id = NEW.item_id AND i.object_kind = 'deployment')
+BEGIN SELECT RAISE(ABORT, 'deployment locator requires a deployment item'); END;
+CREATE TRIGGER trg_verification_connection_locator_kind BEFORE INSERT ON verification_connection_item_locators
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN connection_revisions r ON r.id = NEW.connection_revision_id AND r.connection_id = NEW.connection_id
+  JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = NEW.connection_id
+  WHERE i.id = NEW.item_id AND i.object_kind = 'connection' AND g.key_binding_revision = NEW.root_binding_revision)
+BEGIN SELECT RAISE(ABORT, 'connection locator requires one exact connection binding'); END;
+CREATE TRIGGER trg_verification_config_locator_kind BEFORE INSERT ON verification_config_item_locators
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN business_system_config_versions v ON v.id = NEW.config_version_id
+  WHERE i.id = NEW.item_id AND i.object_kind = 'config' AND v.business_system_id = NEW.business_system_id
+    AND v.label_contract_version_id = NEW.label_contract_version_id)
+BEGIN SELECT RAISE(ABORT, 'config locator requires one exact config binding'); END;
+CREATE TRIGGER trg_verification_browser_locator_kind BEFORE INSERT ON verification_browser_identity_item_locators
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN browser_identities b ON b.id = NEW.browser_identity_id
+  JOIN browser_identity_revisions r ON r.id = NEW.identity_revision_id AND r.business_system_id = b.business_system_id
+  JOIN browser_profile_generations g ON g.id = NEW.profile_generation_id AND g.identity_id = b.id
+    AND g.identity_revision_id = r.id
+  WHERE i.id = NEW.item_id AND i.object_kind = 'browser_identity')
+BEGIN SELECT RAISE(ABORT, 'browser locator requires one exact identity revision/profile generation'); END;
+CREATE TRIGGER trg_verification_observation_locator_kind BEFORE INSERT ON verification_ui_observation_item_locators
+WHEN NOT EXISTS (SELECT 1 FROM verification_invocation_items i WHERE i.id = NEW.item_id AND i.object_kind = 'ui_observation')
+BEGIN SELECT RAISE(ABORT, 'observation locator requires a ui_observation item'); END;
+
+CREATE TRIGGER trg_verification_typed_observation_closure BEFORE INSERT ON verification_typed_observations
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_item_results r
+  JOIN verification_invocation_items i ON i.id = r.item_id
+  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+  JOIN sessions s ON s.id = NEW.admin_session_id AND s.revoked_at IS NULL
+  JOIN users u ON u.id = s.user_id AND u.enabled = 1 AND u.role = 'admin' AND s.auth_revision_at_issue = u.auth_revision
+  WHERE r.id = NEW.result_id AND i.object_kind = 'ui_observation'
+    AND r.producer_type = 'admin_observation' AND m.admin_session_id = NEW.admin_session_id
+    AND julianday(NEW.submitted_at) < julianday(s.idle_expires_at)
+    AND julianday(NEW.submitted_at) < julianday(s.absolute_expires_at)
+    AND julianday(NEW.submitted_at) >= julianday(m.started_at)
+    AND julianday(NEW.submitted_at) <= julianday(m.deadline_at)
+    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts fr WHERE fr.invocation_id = m.id)
+    AND ((NEW.visual_result = 'passed' AND NEW.motion_result = 'passed' AND NEW.focus_occlusion_result = 'passed' AND r.outcome = 'passed')
+      OR ((NEW.visual_result = 'failed' OR NEW.motion_result = 'failed' OR NEW.focus_occlusion_result = 'failed')
+        AND r.outcome = 'failed' AND r.category = 'functional_assertion_failed')))
+BEGIN SELECT RAISE(ABORT, 'typed observation must be submitted by the initiating Admin Session and match its result'); END;
+
+CREATE TRIGGER trg_verification_finalization_closure BEFORE INSERT ON verification_finalization_receipts
+WHEN NOT EXISTS (
+  SELECT 1 FROM verification_invocation_manifests m
+  JOIN artifacts a ON a.id = NEW.canonical_artifact_id AND a.kind = 'verification_bundle'
+    AND a.owner_type = 'verification_invocation' AND a.owner_id = m.id
+    AND a.retention_kind = 'long_term' AND a.body_expired = 0
+  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.final_result_digest
+  WHERE m.id = NEW.invocation_id
+    AND julianday(NEW.snapshot_at) >= julianday(m.started_at)
+    AND julianday(NEW.snapshot_at) <= julianday(m.deadline_at)
+    AND julianday(NEW.finalized_at) >= julianday(NEW.snapshot_at)
+    AND julianday(NEW.finalized_at) <= julianday(m.deadline_at)
+    AND julianday(a.created_at) <= julianday(NEW.finalized_at)
+    AND ((NEW.finalized_by_type = 'initiating_admin_session' AND m.admin_session_id = NEW.finalized_by_session_id
+        AND EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.id = NEW.finalized_by_session_id AND s.revoked_at IS NULL
+            AND u.enabled = 1 AND u.role = 'admin' AND s.auth_revision_at_issue = u.auth_revision
+            AND julianday(NEW.finalized_at) < julianday(s.idle_expires_at)
+            AND julianday(NEW.finalized_at) < julianday(s.absolute_expires_at)))
+      OR (NEW.finalized_by_type = 'system_deadline' AND NEW.finalized_by_session_id IS NULL
+        AND julianday(NEW.finalized_at) <= julianday(m.deadline_at)))
+    AND m.applicable_set_digest = NEW.applicable_set_digest
+    AND m.manifest_digest = NEW.manifest_digest
+    AND m.item_set_digest = NEW.item_set_digest
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_invocation_items i
+      WHERE i.invocation_id = m.id AND (
+        NOT EXISTS (SELECT 1 FROM verification_item_results r WHERE r.item_id = i.id)
+        OR (i.object_kind = 'deployment' AND NOT EXISTS (SELECT 1 FROM verification_deployment_item_locators l WHERE l.item_id = i.id))
+        OR (i.object_kind = 'connection' AND NOT EXISTS (SELECT 1 FROM verification_connection_item_locators l WHERE l.item_id = i.id))
+        OR (i.object_kind = 'config' AND NOT EXISTS (SELECT 1 FROM verification_config_item_locators l WHERE l.item_id = i.id))
+        OR (i.object_kind = 'browser_identity' AND NOT EXISTS (SELECT 1 FROM verification_browser_identity_item_locators l WHERE l.item_id = i.id))
+        OR (i.object_kind = 'ui_observation' AND (NOT EXISTS (SELECT 1 FROM verification_ui_observation_item_locators l WHERE l.item_id = i.id)
+          OR EXISTS (
+            SELECT 1 FROM verification_item_results r
+            WHERE r.item_id = i.id AND r.category IN ('passed','functional_assertion_failed')
+              AND NOT EXISTS (SELECT 1 FROM verification_typed_observations o WHERE o.result_id = r.id)
+          )))
+      ))
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_invocation_items i
+      JOIN verification_item_results r ON r.item_id = i.id
+      WHERE i.invocation_id = m.id AND julianday(r.observed_at) > julianday(NEW.snapshot_at))
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_helper_imports h
+      WHERE h.invocation_id = m.id AND julianday(h.received_at) > julianday(NEW.snapshot_at))
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_typed_observations o
+      JOIN verification_item_results r ON r.id = o.result_id
+      JOIN verification_invocation_items i ON i.id = r.item_id
+      WHERE i.invocation_id = m.id AND julianday(o.submitted_at) > julianday(NEW.snapshot_at))
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_subject_drifts d
+      WHERE d.invocation_id = m.id AND julianday(d.observed_at) > julianday(NEW.snapshot_at))
+    AND NOT EXISTS (
+      SELECT 1 FROM verification_invocation_items i
+      JOIN verification_item_results r ON r.item_id = i.id
+      WHERE i.invocation_id = m.id AND r.category = 'subject_drift'
+        AND NOT EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id AND d.item_id = i.id))
+    AND (
+      (NEW.overall_outcome = 'failed' AND (
+        EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'failed')
+        OR EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)))
+      OR (NEW.overall_outcome = 'warned'
+        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'failed')
+        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)
+        AND (EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'warned')
+          OR EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id)))
+      OR (NEW.overall_outcome = 'passed'
+        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i LEFT JOIN verification_item_results r ON r.item_id = i.id AND r.outcome = 'passed' WHERE i.invocation_id = m.id AND r.id IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)
+        AND NOT EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id))
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'verification receipt requires complete typed items and deterministic severity aggregation'); END;
+
+-- Browser deployment verification freezes the current identity generation into a clone and requires explicit cleanup evidence.
+CREATE TRIGGER trg_browser_deployment_verification_insert_closure BEFORE INSERT ON browser_operations
+WHEN NEW.kind = 'deployment_verification' AND NOT EXISTS (
+  SELECT 1 FROM verification_invocation_items i
+  JOIN verification_browser_identity_item_locators l ON l.item_id = i.id
+  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
+  WHERE i.id = NEW.verification_manifest_item_id AND l.browser_identity_id = NEW.identity_id
+    AND l.identity_revision_id = NEW.identity_revision_id AND l.profile_generation_id = NEW.profile_generation_id
+    AND m.admin_session_id = NEW.actor_session_id
+    AND julianday(NEW.requested_at) <= julianday(m.deadline_at)
+    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts fr WHERE fr.invocation_id = m.id))
+BEGIN SELECT RAISE(ABORT, 'deployment browser verification must bind the manifest-frozen identity and initiating Admin Session'); END;
+CREATE TRIGGER trg_browser_deployment_result_closure BEFORE INSERT ON browser_deployment_verification_results
+WHEN NOT EXISTS (
+  SELECT 1 FROM browser_operations o
+  JOIN verification_item_results vr ON vr.id = NEW.verification_result_id
+  JOIN verification_invocation_items vi ON vi.id = vr.item_id AND vi.id = o.verification_manifest_item_id
+  WHERE o.id = NEW.operation_id AND o.kind = 'deployment_verification'
+    AND o.clone_identity = NEW.clone_identity AND o.lintel_boot_id = NEW.original_boot_id
+    AND ((NEW.functional_outcome IN ('passed','warned') AND o.state = 'Succeeded')
+      OR (NEW.functional_outcome = 'failed' AND o.state = 'Failed'))
+    AND (
+      (NEW.cleanup_outcome = 'clean' AND NEW.cleanup_boot_id = NEW.original_boot_id
+        AND o.stop_confirmed_at IS NOT NULL AND o.stop_confirmation_basis = 'same_boot_cleanup_ack'
+        AND lower(hex(o.cleanup_state_hash)) = NEW.cleanup_state_hash)
+      OR (NEW.cleanup_outcome = 'residue' AND NEW.cleanup_boot_id = NEW.original_boot_id
+        AND (o.stop_confirmed_at IS NULL OR o.stop_confirmation_basis <> 'same_boot_cleanup_ack'))
+      OR (NEW.cleanup_outcome = 'indeterminate'
+        AND (o.stop_confirmed_at IS NULL OR o.stop_confirmation_basis <> 'same_boot_cleanup_ack')))
+    AND (
+      (NEW.cleanup_outcome = 'residue' AND vr.outcome = 'failed' AND vr.category = 'cleanup_residue')
+      OR (NEW.cleanup_outcome <> 'residue' AND NEW.functional_outcome = 'failed'
+        AND vr.outcome = 'failed' AND vr.category = 'functional_assertion_failed')
+      OR (NEW.cleanup_outcome = 'indeterminate' AND NEW.functional_outcome <> 'failed'
+        AND vr.outcome = 'warned' AND vr.category = 'cleanup_indeterminate')
+      OR (NEW.cleanup_outcome = 'clean' AND NEW.functional_outcome = 'passed'
+        AND vr.outcome = 'passed' AND vr.category = 'passed')
+      OR (NEW.cleanup_outcome = 'clean' AND NEW.functional_outcome = 'warned'
+        AND vr.outcome = 'warned' AND vr.category IN ('environment_unavailable','infrastructure_interrupted'))))
+BEGIN SELECT RAISE(ABORT, 'browser deployment result must bind its manifest item, functional result and same-boot cleanup evidence'); END;
+CREATE TRIGGER trg_browser_deployment_result_no_update BEFORE UPDATE ON browser_deployment_verification_results
+BEGIN SELECT RAISE(ABORT, 'browser deployment verification result is immutable'); END;
+CREATE TRIGGER trg_browser_deployment_result_no_delete BEFORE DELETE ON browser_deployment_verification_results
+BEGIN SELECT RAISE(ABORT, 'browser deployment verification result is immutable'); END;
+
+CREATE TRIGGER trg_lintel_recovery_receipt_closure BEFORE INSERT ON lintel_recovery_receipts
+WHEN NOT EXISTS (
+  SELECT 1 FROM maintenance_state m
+  JOIN runtime_credentials oldc ON oldc.id = NEW.old_runtime_credential_id
+    AND oldc.slot = 'lintel' AND oldc.generation = NEW.old_token_generation AND oldc.retired_at IS NOT NULL
+  JOIN runtime_credentials newc ON newc.id = NEW.replacement_runtime_credential_id
+    AND newc.slot = 'lintel' AND newc.generation = NEW.replacement_token_generation
+    AND newc.confirmed_at IS NOT NULL AND newc.first_authenticated_at IS NOT NULL AND newc.retired_at IS NULL
+  JOIN runtime_slots s ON s.slot = 'lintel' AND s.state = 'registered'
+    AND s.current_credential_id = newc.id AND s.pending_credential_id IS NULL AND s.retiring_credential_id IS NULL
+  WHERE m.id = 1 AND m.active = 1 AND m.reason = 'LintelRecovery' AND m.row_version = NEW.maintenance_revision)
+BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt requires active maintenance, a retired old credential, and one authenticated replacement current credential'); END;
+CREATE TRIGGER trg_lintel_recovery_receipt_no_update BEFORE UPDATE ON lintel_recovery_receipts
+BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt is immutable'); END;
+CREATE TRIGGER trg_lintel_recovery_receipt_no_delete BEFORE DELETE ON lintel_recovery_receipts
+BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt is immutable'); END;
+
+-- Deployment Acceptance tables are append-only; only the receipt constitutes finalization.
+CREATE TRIGGER trg_verification_manifests_no_update BEFORE UPDATE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
+CREATE TRIGGER trg_verification_manifests_no_delete BEFORE DELETE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
+CREATE TRIGGER trg_verification_items_no_update BEFORE UPDATE ON verification_invocation_items BEGIN SELECT RAISE(ABORT, 'verification items are immutable'); END;
+CREATE TRIGGER trg_verification_items_no_delete BEFORE DELETE ON verification_invocation_items BEGIN SELECT RAISE(ABORT, 'verification items are immutable'); END;
+CREATE TRIGGER trg_verification_deployment_locators_no_update BEFORE UPDATE ON verification_deployment_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_deployment_locators_no_delete BEFORE DELETE ON verification_deployment_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_connection_locators_no_update BEFORE UPDATE ON verification_connection_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_connection_locators_no_delete BEFORE DELETE ON verification_connection_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_config_locators_no_update BEFORE UPDATE ON verification_config_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_config_locators_no_delete BEFORE DELETE ON verification_config_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_browser_locators_no_update BEFORE UPDATE ON verification_browser_identity_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_browser_locators_no_delete BEFORE DELETE ON verification_browser_identity_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_ui_locators_no_update BEFORE UPDATE ON verification_ui_observation_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_ui_locators_no_delete BEFORE DELETE ON verification_ui_observation_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
+CREATE TRIGGER trg_verification_item_results_no_update BEFORE UPDATE ON verification_item_results BEGIN SELECT RAISE(ABORT, 'verification results are immutable'); END;
+CREATE TRIGGER trg_verification_item_results_no_delete BEFORE DELETE ON verification_item_results BEGIN SELECT RAISE(ABORT, 'verification results are immutable'); END;
+CREATE TRIGGER trg_verification_conflicts_no_update BEFORE UPDATE ON verification_result_conflicts BEGIN SELECT RAISE(ABORT, 'verification conflicts are immutable'); END;
+CREATE TRIGGER trg_verification_conflicts_no_delete BEFORE DELETE ON verification_result_conflicts BEGIN SELECT RAISE(ABORT, 'verification conflicts are immutable'); END;
+CREATE TRIGGER trg_verification_helper_imports_no_update BEFORE UPDATE ON verification_helper_imports BEGIN SELECT RAISE(ABORT, 'verification helper imports are immutable'); END;
+CREATE TRIGGER trg_verification_helper_imports_no_delete BEFORE DELETE ON verification_helper_imports BEGIN SELECT RAISE(ABORT, 'verification helper imports are immutable'); END;
+CREATE TRIGGER trg_verification_observations_no_update BEFORE UPDATE ON verification_typed_observations BEGIN SELECT RAISE(ABORT, 'verification observations are immutable'); END;
+CREATE TRIGGER trg_verification_observations_no_delete BEFORE DELETE ON verification_typed_observations BEGIN SELECT RAISE(ABORT, 'verification observations are immutable'); END;
+CREATE TRIGGER trg_verification_subject_drifts_no_update BEFORE UPDATE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
+CREATE TRIGGER trg_verification_subject_drifts_no_delete BEFORE DELETE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
+CREATE TRIGGER trg_verification_receipts_no_update BEFORE UPDATE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
+CREATE TRIGGER trg_verification_receipts_no_delete BEFORE DELETE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/verification-result-profile.schema.json",
+  "x-quoin-contract-version": 1,
+  "title": "Quoin v1 verification result profile",
+  "type": "object",
+  "required": ["contract_version", "profile_id", "outcomes", "categories", "conflict_rule", "subject_drift_rule", "diagnostic_rule", "time_closure", "aggregation"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 1 },
+    "profile_id": { "const": "quoin-test-result-v1" },
+    "outcomes": { "const": ["passed", "warned", "failed"] },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["code", "outcome", "priority", "meaning", "gate_effect"],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "enum": ["passed", "functional_assertion_failed", "subject_drift", "environment_unavailable", "operator_cancelled", "infrastructure_interrupted", "cleanup_indeterminate", "cleanup_residue", "verifier_conflict", "verifier_invariant_violation", "not_run"] },
+          "outcome": { "enum": ["passed", "warned", "failed"] },
+          "priority": { "type": "integer", "minimum": 0 },
+          "meaning": { "type": "string", "minLength": 1 },
+          "gate_effect": { "enum": ["pass", "warn", "fail"] }
+        }
+      }
+    },
+    "conflict_rule": {
+      "type": "object",
+      "required": ["different_result_digest", "same_result_digest"],
+      "additionalProperties": false,
+      "properties": {
+        "different_result_digest": { "const": "failed" },
+        "same_result_digest": { "const": "idempotent" }
+      }
+    },
+    "subject_drift_rule": { "const": "warned_and_never_retarget" },
+    "diagnostic_rule": {
+      "type": "object",
+      "required": ["trigger_from_required_categories", "incomplete_representation", "causal_result_id_required", "excluded_from_required_item_set", "excluded_from_suite_verdict", "may_not_change_trigger_result", "rerun_requires_new_invocation"],
+      "additionalProperties": false,
+      "properties": {
+        "trigger_from_required_categories": { "const": ["failed", "warned", "not_run"] },
+        "incomplete_representation": { "const": "not_run" },
+        "causal_result_id_required": { "const": true },
+        "excluded_from_required_item_set": { "const": true },
+        "excluded_from_suite_verdict": { "const": true },
+        "may_not_change_trigger_result": { "const": true },
+        "rerun_requires_new_invocation": { "const": true }
+      }
+    },
+    "time_closure": {
+      "type": "object",
+      "required": ["started_at_source", "snapshot_at_source", "finalized_at_source", "observation_deadline_seconds", "observation_facts_not_after", "snapshot_at_not_after", "finalized_at_not_before", "finalized_at_not_after", "unfinished_item_category"],
+      "additionalProperties": false,
+      "properties": {
+        "started_at_source": { "const": "manifest_started_at" },
+        "snapshot_at_source": { "const": "finalization_receipt_snapshot_at" },
+        "finalized_at_source": { "const": "finalization_receipt_finalized_at" },
+        "observation_deadline_seconds": { "const": 28800 },
+        "observation_facts_not_after": { "const": "snapshot_at" },
+        "snapshot_at_not_after": { "const": "manifest_deadline_at" },
+        "finalized_at_not_before": { "const": "snapshot_at" },
+        "finalized_at_not_after": { "const": "manifest_deadline_at" },
+        "unfinished_item_category": { "const": "not_run" }
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "required": ["failed_if", "warned_if", "passed_if"],
+      "additionalProperties": false,
+      "properties": {
+        "failed_if": { "const": "any_item_failed_or_conflicted" },
+        "warned_if": { "const": "no_failed_and_any_warned_or_subject_drift" },
+        "passed_if": { "const": "all_items_passed" }
+      }
+    }
+  }
+}

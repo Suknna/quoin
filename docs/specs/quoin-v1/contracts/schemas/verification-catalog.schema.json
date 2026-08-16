@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/verification-catalog.schema.json",
+  "x-quoin-contract-version": 1,
+  "title": "Quoin v1 verification scenario catalog",
+  "type": "object",
+  "required": ["contract_version", "catalog_id", "catalog_state", "result_profile_id", "contract_refs", "capability_definitions", "validation_roots", "environments", "scenarios"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 1 },
+    "catalog_id": { "const": "quoin-v1-verification" },
+    "catalog_state": { "enum": ["prototype_pending", "frozen"] },
+    "result_profile_id": { "const": "quoin-test-result-v1" },
+    "contract_refs": {
+      "type": "object",
+      "required": ["connection_probes_sha256", "result_profile_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "connection_probes_sha256": { "$ref": "#/$defs/digest" },
+        "result_profile_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "capability_definitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/capabilityDefinition" }
+    },
+    "validation_roots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/validationRoot" }
+    },
+    "environments": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/environment" }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scenario" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$", "maxLength": 160 },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "capabilityDefinition": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["environment", "deployment_backend", "architecture", "kubernetes_version", "docker_version", "compose_version", "browser_evidence", "fault_backend", "external_stack"] }
+      }
+    },
+    "applicability": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": { "mode": { "const": "always" } }
+        },
+        {
+          "type": "object",
+          "required": ["mode", "backend", "architecture"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "const": "deployment_target" },
+            "backend": { "enum": ["compose", "kubernetes"] },
+            "architecture": { "enum": ["linux/amd64", "linux/arm64"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["mode", "object_kind"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "const": "for_each_current_object" },
+            "object_kind": { "enum": ["connection", "config", "browser_identity"] }
+          }
+        }
+      ]
+    },
+    "validationRoot": {
+      "type": "object",
+      "required": ["id", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]+-[0-9]{3}$" },
+        "source": { "type": "string", "minLength": 1 },
+        "anchor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["id", "kind", "native", "requires_release_artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["contract_harness", "process_harness", "docker_compose", "kubernetes", "real_external_system", "human_browser"] },
+        "native": { "type": "boolean" },
+        "requires_release_artifacts": { "type": "boolean" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "title", "status", "layer", "requirement", "validation_roots", "executor", "phases", "depends_on", "proof_refs", "required_capabilities", "subject", "fixtures", "cells", "evidence", "cleanup", "timeout_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["active", "retired"] },
+        "successor": { "$ref": "#/$defs/id" },
+        "retirement_reason": { "type": "string", "minLength": 1 },
+        "layer": { "enum": ["contract_gate", "release_qualification", "deployment_acceptance"] },
+        "requirement": { "enum": ["required", "diagnostic"] },
+        "validation_roots": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "executor": {
+          "type": "object",
+          "required": ["kind", "entrypoint"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["ci", "quoin", "deployment_helper", "runtime", "admin_observation"] },
+            "entrypoint": { "type": "string", "minLength": 1 },
+            "requires_admin_session": { "type": "boolean" },
+            "requires_product_credentials": { "type": "boolean" }
+          }
+        },
+        "phases": {
+          "type": "object",
+          "required": ["setup", "action", "assert", "teardown"],
+          "additionalProperties": false,
+          "properties": {
+            "setup": { "type": "string", "minLength": 1 },
+            "action": { "type": "string", "minLength": 1 },
+            "assert": { "type": "string", "minLength": 1 },
+            "teardown": { "type": "string", "minLength": 1 }
+          }
+        },
+        "depends_on": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "proof_refs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "required_capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "subject": {
+          "type": "object",
+          "required": ["kind", "selector"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "enum": ["release", "deployment", "connection", "config", "browser_identity", "ui_surface"] },
+            "selector": { "type": "string", "minLength": 1 },
+            "drift_fields": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "fixtures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "locator"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "kind": { "enum": ["repository_file", "generated_data", "release_artifact", "external_target", "fault_profile"] },
+              "locator": { "type": "string", "minLength": 1 },
+              "digest_required": { "type": "boolean" }
+            }
+          }
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "environment_id", "architecture", "applicability", "required_capabilities", "parameters", "assertions"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "environment_id": { "$ref": "#/$defs/id" },
+              "architecture": { "enum": ["not_applicable", "linux/amd64", "linux/arm64"] },
+              "applicability": { "$ref": "#/$defs/applicability" },
+              "required_capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+              "parameters": { "type": "object", "additionalProperties": true },
+              "assertions": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "kind", "expected"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "$ref": "#/$defs/id" },
+                    "kind": { "enum": ["exit_code", "schema_valid", "sql_rejected", "protocol_event", "http_response", "metric", "state", "digest_equal", "resource_absent", "human_observation"] },
+                    "expected": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["test_names", "attachments", "redaction_profile"],
+          "additionalProperties": false,
+          "properties": {
+            "test_names": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+            "attachments": { "type": "array", "uniqueItems": true, "items": { "enum": ["structured_result", "stdout", "stderr", "logs", "metrics", "trace", "screenshot", "video", "database", "manifest", "sigstore_bundle"] } },
+            "redaction_profile": { "const": "verification-redaction-v1" }
+          }
+        },
+        "cleanup": {
+          "type": "object",
+          "required": ["required", "entrypoint", "success_assertions"],
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" },
+            "entrypoint": { "type": "string", "minLength": 1 },
+            "success_assertions": { "type": "array", "items": { "$ref": "#/$defs/id" } }
+          }
+        },
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 28800 },
+        "diagnostic_trigger_categories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["failed", "warned", "not_run"] }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "requirement": { "const": "diagnostic" } }, "required": ["requirement"] },
+          "then": {
+            "required": ["diagnostic_trigger_categories"],
+            "properties": { "diagnostic_trigger_categories": { "type": "array", "minItems": 1 } }
+          },
+          "else": { "properties": { "diagnostic_trigger_categories": false } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "retired" } }, "required": ["status"] },
+          "then": { "required": ["successor", "retirement_reason"], "properties": { "successor": {}, "retirement_reason": {} } },
+          "else": { "properties": { "successor": false, "retirement_reason": false } }
+        },
+        {
+          "if": { "properties": { "id": { "const": "fault.network" } }, "required": ["id"] },
+          "then": {
+            "properties": {
+              "cells": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "parameters": {
+                      "type": "object",
+                      "required": ["fault_provider", "fault"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "fault_provider": { "const": "toxiproxy" },
+                        "fault": { "enum": ["latency", "timeout", "reset_peer", "bandwidth", "limit_data"] }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layer": { "const": "deployment_acceptance" },
+              "cells": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "applicability": {
+                      "type": "object",
+                      "properties": { "mode": { "const": "always" } },
+                      "required": ["mode"]
+                    }
+                  },
+                  "required": ["applicability"]
+                }
+              }
+            },
+            "required": ["layer", "cells"]
+          },
+          "then": {
+            "properties": {
+              "id": { "const": "ui.deployment-observation" },
+              "subject": {
+                "type": "object",
+                "properties": { "kind": { "const": "ui_surface" } },
+                "required": ["kind"]
+              },
+              "executor": {
+                "type": "object",
+                "properties": { "kind": { "const": "admin_observation" } },
+                "required": ["kind"]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "id": { "const": "fault.protocol-delivery" } }, "required": ["id"] },
+          "then": {
+            "properties": {
+              "cells": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "parameters": {
+                      "type": "object",
+                      "required": ["fault_provider", "fault"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "fault_provider": { "const": "protocol_fixture" },
+                        "fault": { "enum": ["reorder", "duplicate"] }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

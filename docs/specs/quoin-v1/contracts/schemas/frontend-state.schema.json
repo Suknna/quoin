@@ -232,7 +232,7 @@
         "kind": { "const": "task_state" },
         "objectType": {
           "type": "string",
-          "enum": ["initial_analysis", "execution_attempt", "inspection_run", "inspection_report", "tool_call", "knowledge_import_batch", "knowledge_candidate", "browser_operation", "config_test_run"]
+          "enum": ["initial_analysis", "execution_attempt", "inspection_run", "inspection_report", "tool_call", "knowledge_import_batch", "knowledge_candidate", "browser_operation", "config_verification_run"]
         },
         "objectId": { "$ref": "#/$defs/locatorId" },
         "state": { "type": "string", "minLength": 1 },
@@ -284,7 +284,7 @@
           "then": { "properties": { "state": { "enum": ["Queued", "WaitingForCapacity", "Starting", "Running", "AwaitingReconnect", "Succeeded", "Failed", "Cancelled", "Interrupted"] } } }
         },
         {
-          "if": { "properties": { "objectType": { "const": "config_test_run" } }, "required": ["objectType"] },
+          "if": { "properties": { "objectType": { "const": "config_verification_run" } }, "required": ["objectType"] },
           "then": { "properties": { "state": { "enum": ["Queued", "Running", "Passed", "Failed", "Cancelled", "Interrupted"] } } }
         }
       ]

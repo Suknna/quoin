@@ -1,0 +1,91 @@
+contract_version: 1
+profile_id: quoin-test-result-v1
+outcomes:
+  - passed
+  - warned
+  - failed
+categories:
+  - code: passed
+    outcome: passed
+    priority: 0
+    meaning: Frozen subject and declared assertions passed with complete evidence.
+    gate_effect: pass
+  - code: not_run
+    outcome: warned
+    priority: 10
+    meaning: The fixed applicable item had no executable result at the eight-hour deadline.
+    gate_effect: warn
+  - code: operator_cancelled
+    outcome: warned
+    priority: 20
+    meaning: The initiating Admin cancelled unfinished work; completed immutable results remain authoritative.
+    gate_effect: warn
+  - code: environment_unavailable
+    outcome: warned
+    priority: 30
+    meaning: A declared external environment or target was unavailable without contradicting a product assertion.
+    gate_effect: warn
+  - code: infrastructure_interrupted
+    outcome: warned
+    priority: 40
+    meaning: Harness or infrastructure interruption prevented a conclusive product assertion.
+    gate_effect: warn
+  - code: cleanup_indeterminate
+    outcome: warned
+    priority: 50
+    meaning: Required cleanup completion could not be determined; any subject-specific reuse fence remains until its documented recovery path completes.
+    gate_effect: warn
+  - code: subject_drift
+    outcome: warned
+    priority: 60
+    meaning: A frozen mutable subject changed; the item is never retargeted and must be rerun in a new invocation.
+    gate_effect: warn
+  - code: functional_assertion_failed
+    outcome: failed
+    priority: 100
+    meaning: An executable assertion contradicted the expected behavior.
+    gate_effect: fail
+  - code: cleanup_residue
+    outcome: failed
+    priority: 110
+    meaning: Same-boot cleanup observed residual browser process, tunnel, clone, file, handle, or lease state.
+    gate_effect: fail
+  - code: verifier_conflict
+    outcome: failed
+    priority: 120
+    meaning: Two semantically different immutable results attempted to occupy the same frozen item key.
+    gate_effect: fail
+  - code: verifier_invariant_violation
+    outcome: failed
+    priority: 130
+    meaning: The deterministic verifier observed an unknown or structurally impossible result classification.
+    gate_effect: fail
+conflict_rule:
+  different_result_digest: failed
+  same_result_digest: idempotent
+subject_drift_rule: warned_and_never_retarget
+diagnostic_rule:
+  trigger_from_required_categories:
+    - failed
+    - warned
+    - not_run
+  incomplete_representation: not_run
+  causal_result_id_required: true
+  excluded_from_required_item_set: true
+  excluded_from_suite_verdict: true
+  may_not_change_trigger_result: true
+  rerun_requires_new_invocation: true
+time_closure:
+  started_at_source: manifest_started_at
+  snapshot_at_source: finalization_receipt_snapshot_at
+  finalized_at_source: finalization_receipt_finalized_at
+  observation_deadline_seconds: 28800
+  observation_facts_not_after: snapshot_at
+  snapshot_at_not_after: manifest_deadline_at
+  finalized_at_not_before: snapshot_at
+  finalized_at_not_after: manifest_deadline_at
+  unfinished_item_category: not_run
+aggregation:
+  failed_if: any_item_failed_or_conflicted
+  warned_if: no_failed_and_any_warned_or_subject_drift
+  passed_if: all_items_passed

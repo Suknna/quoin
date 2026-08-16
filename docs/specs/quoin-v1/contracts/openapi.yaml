@@ -56,7 +56,7 @@ tags:
   - name: setup
     description: 首次设置与就绪状态
   - name: maintenance
-    description: 恢复、升级与根密钥 rebind 的隔离状态和安全退出
+    description: 恢复、升级、根密钥 rebind 与 Lintel offline recovery 的隔离状态和安全退出
   - name: alerts
     description: 告警列表、详情、初步分析与接入问题
   - name: investigations
@@ -73,6 +73,8 @@ tags:
     description: Artifact 与来源材料的上传下载
   - name: realtime
     description: SSE 变更流
+  - name: verification
+    description: Release Qualification 与 Deployment Acceptance 的不可变 manifest、结果、观察和 receipt
 paths:
   /api/v1/auth/login:
     post:
@@ -534,7 +536,7 @@ paths:
       operationId: exitMaintenance
       x-quoin-maintenance-access: allowed
       summary: 验证全部安全条件并退出维护（Admin）
-      description: 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip（SEC-MAINT-003..005）。
+      description: 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip。`LintelRecovery` 对本端点稳定返回 409，只能由 deployment helper 以不可变 recovery receipt finalize/exit（SEC-MAINT-003..005）。
       requestBody:
         required: true
         content:
@@ -2753,11 +2755,11 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/verifications:
     get:
       tags: [config]
-      operationId: listConfigTestRuns
-      summary: 指定不可变配置版本的 Config Test Run 历史
+      operationId: listConfigVerificationRuns
+      summary: 指定不可变配置版本的 Config Verification Run 历史
       description: 按 `(created_at DESC, id DESC)` 游标分页；用于配置版本详情在刷新或深链后重建完整测试历史（HTTP-PAGE-005、UI-SYSTEM-005）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
@@ -2766,7 +2768,7 @@ paths:
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Config Test Run 历史分页。
+          description: Config Verification Run 历史分页。
           content:
             application/json:
               schema:
@@ -2776,7 +2778,7 @@ paths:
                   items:
                     type: array
                     items:
-                      $ref: '#/components/schemas/ConfigTestRunSummary'
+                      $ref: '#/components/schemas/ConfigVerificationRunSummary'
                   nextCursor:
                     $ref: '#/components/schemas/Cursor'
         '401':
@@ -2787,10 +2789,10 @@ paths:
           $ref: '#/components/responses/NotFound'
     post:
       tags: [config]
-      operationId: runConfigTestRun
+      operationId: runConfigVerificationRun
       x-external-dependency: true
-      summary: 对指定草稿版本执行配置 Test Run（精确绑定草稿与目标 Label Contract；实际 Journey 使用准入时当前兼容 Catalog）
-      description: 独立持久化的配置校验执行（DATA-CONFIG-007），不参与巡检 one-active-plan 约束；Journey 等待浏览器 slot 时 Test Run 保持 Running；Passed 表示绑定配置版本全部 check 都有 ok+Evidence 结果行并作为 Label Contract 联合激活证据（DATA-CONFIG-002）。Disabled 系统可执行；执行所需依赖不可用时返回 503（PromQL check 依赖 Thanos；仅包含 browser check 时才依赖 Lintel）。
+      summary: 对指定草稿执行 purpose=prepublish 的 Config Verification Run
+      description: ConfigVerificationRun 是唯一机械执行模型（DATA-CONFIG-007）。本端点只接受 prepublish，精确绑定草稿与目标 Label Contract，并可作为联合激活证据；deployment_acceptance 复用同一模型但只由冻结 manifest 编排、绑定 current published config 且绝不移动发布指针。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -2799,7 +2801,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CommandRequest'
+              $ref: '#/components/schemas/ConfigVerificationRunRequest'
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
@@ -2808,11 +2810,11 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '202':
-          description: Test Run 已受理（独立配置校验执行）。
+          description: Verification Run 已受理（独立配置校验执行）。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ConfigTestRunDetail'
+                $ref: '#/components/schemas/ConfigVerificationRunDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2821,16 +2823,16 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs/{testRunId}:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}:
     get:
       tags: [config]
-      operationId: getConfigTestRun
-      summary: 配置 Test Run 详情（含逐 check 结果与 resultDetail）
-      description: 独立持久化执行的权威详情重读（DATA-CONFIG-007）；状态/结果变化经 streamTaskEvents 推送（objectType=config_test_run，HTTP-SSE-006）。
+      operationId: getConfigVerificationRun
+      summary: 配置 Verification Run 详情（含逐 check 结果与 resultDetail）
+      description: 独立持久化执行的权威详情重读（DATA-CONFIG-007）；状态/结果变化经 streamTaskEvents 推送（objectType=config_verification_run，HTTP-SSE-006）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
-        - name: testRunId
+        - name: verificationRunId
           in: path
           required: true
           schema:
@@ -2839,27 +2841,27 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '200':
-          description: Test Run 详情。
+          description: Verification Run 详情。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ConfigTestRunDetail'
+                $ref: '#/components/schemas/ConfigVerificationRunDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-  /api/v1/business-systems/{systemKey}/config/{versionId}/test-runs/{testRunId}/cancel:
+  /api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel:
     post:
       tags: [config]
-      operationId: cancelConfigTestRun
+      operationId: cancelConfigVerificationRun
       x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
-      summary: 取消配置 Test Run（clientCommandId + expectedRowVersion）
-      description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Test Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Test Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
+      summary: 取消配置 Verification Run（clientCommandId + expectedRowVersion）
+      description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Verification Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Verification Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
-        - name: testRunId
+        - name: verificationRunId
           in: path
           required: true
           schema:
@@ -2882,7 +2884,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ConfigTestRunDetail'
+                $ref: '#/components/schemas/ConfigVerificationRunDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3301,7 +3303,7 @@ paths:
       tags: [config]
       operationId: getLabelContractActivationReadiness
       summary: 联合激活就绪视图（逐启用系统：可激活候选与阻塞原因）
-      description: 从权威状态派生：对每个启用业务系统列出全部可由激活命令显式选择的未发布配置版本 + Passed config_test_run 证据对；更新草稿或后续失败的 Test Run 不得否定仍合法的旧候选。仅在不存在任何可激活候选时返回阻塞原因（DATA-CONFIG-002/007）。
+      description: 从权威状态派生：对每个启用业务系统列出全部可由激活命令显式选择的未发布配置版本 + Passed config_verification_run 证据对；更新草稿或后续失败的 Verification Run 不得否定仍合法的旧候选。仅在不存在任何可激活候选时返回阻塞原因（DATA-CONFIG-002/007）。
       parameters:
         - $ref: '#/components/parameters/ContractVersion'
       responses:
@@ -3525,10 +3527,10 @@ paths:
   /api/v1/connections/{connectionName}/probe:
     post:
       tags: [adminops]
-      operationId: probeModelProvider
+      operationId: probeConnection
       x-external-dependency: true
-      summary: 对当前 Model Provider revision 执行真实能力探测（Admin）
-      description: 仅适用于 model_provider；当前 revision 必须已由 Admin 选择或手工填写 chatModelId/embeddingModelId，否则 409。创建 model_provider_probe Attempt，绑定 current revision/generation（允许连接 disabled 或 RevalidationRequired）。成功能力行是启用该 current pair 的前提（HTTP-COMMAND-013）。
+      summary: 对当前 Connection revision/generation 执行固定真实动作集（Admin）
+      description: 适用于 model_provider、thanos 与 kubernetes。Quoin supervisor 直接执行 `connection-probes.yaml` 按 type 声明的固定动作集，不启动普通 agent worker；Attempt 与 typed result 1:1，绑定 current revision/generation/root binding 与 action-set digest。模型连接成功结果可被显式选为后续正常模型调用的 qualification；其它类型结果只作配置验证证据。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
       requestBody:
@@ -3539,7 +3541,7 @@ paths:
               $ref: '#/components/schemas/CommandRequest'
       responses:
         '202':
-          description: 能力探测 Attempt 已创建。
+          description: Connection Probe Attempt 已创建。
           content:
             application/json:
               schema:
@@ -3558,13 +3560,46 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/connections/{connectionName}/probe-results:
+    get:
+      tags: [adminops]
+      operationId: listConnectionProbeResults
+      x-quoin-maintenance-access: trust-rebuild
+      summary: 读取不可变 Connection Probe typed result 历史
+      description: 按 `(finishedAt DESC, id DESC)` 游标分页；结果精确绑定 connection/revision/generation/root binding/action-set digest。不会把“最新成功”隐式提升为模型 qualification。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Connection Probe result 分页。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ConnectionProbeResult'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/connections/{connectionName}/enable:
     post:
       tags: [adminops]
       operationId: enableConnection
       x-external-dependency: true
       summary: 启用连接并清除 RevalidationRequired（Admin）
-      description: 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）；model_provider 还必须有 current revision/generation 的成功真实 capability probe（HTTP-COMMAND-013）。
+      description: 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）。model_provider 必须在请求中显式选择同 current revision/generation 的 passed Connection Probe result；该不可变 qualification ID 进入后续 Attempt grant。Thanos/Kubernetes 不建立全局 qualification 指针。
       parameters:
         - $ref: '#/components/parameters/ConnectionName'
       requestBody:
@@ -3572,7 +3607,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/VersionedCommandRequest'
+              $ref: '#/components/schemas/EnableConnectionRequest'
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
@@ -4590,6 +4625,207 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '410':
           $ref: '#/components/responses/Gone'
+  /api/v1/deployment-verifications:
+    get:
+      tags: [verification]
+      operationId: listDeploymentVerifications
+      summary: 读取 Deployment Acceptance invocation 历史
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Invocation manifest/receipt 摘要分页。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeploymentVerificationSummary'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [verification]
+      operationId: startDeploymentVerification
+      x-external-dependency: true
+      summary: 以当前 Release/部署配置/公开 Origin 与对象集合创建不可变验收 manifest（Admin）
+      description: 同一事务冻结 applicable set 与每项 inputDigest；固定 `startedAt`，硬截止为 startedAt+8h。配置项绑定 current published Config/Label Contract，连接绑定当前 revision/generation/root binding，Browser 绑定当前 identity revision/profile generation。之后对象变化只追加 SubjectDrift，不改写 manifest。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDeploymentVerificationRequest'
+      responses:
+        '202':
+          description: Manifest 已冻结并开始执行。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentVerificationDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/deployment-verifications/{invocationId}:
+    get:
+      tags: [verification]
+      operationId: getDeploymentVerification
+      summary: 读取不可变 manifest、items、append-only results/conflicts/drift 与 final receipt
+      parameters:
+        - $ref: '#/components/parameters/InvocationId'
+      responses:
+        '200':
+          description: Deployment Acceptance 权威详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentVerificationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/deployment-verifications/{invocationId}/cancel:
+    post:
+      tags: [verification]
+      operationId: cancelDeploymentVerification
+      x-external-dependency: true
+      summary: 停止未开始/运行中的 item，并按已观测到的真实结果 finalize（Admin）
+      description: 不存在可变 invocation status；取消先追加 `operator_cancelled/not_run` item result，再等待已派发工作形成终态并写唯一 receipt。已 finalization 的 invocation 幂等返回原 receipt。
+      parameters:
+        - $ref: '#/components/parameters/InvocationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '200':
+          description: 已停止或已 finalization；返回当前详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentVerificationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/deployment-verifications/{invocationId}/helper-request:
+    get:
+      tags: [verification]
+      operationId: exportDeploymentVerificationHelperRequest
+      summary: 导出绑定该 invocation manifest 的不可变停机 helper request（Admin）
+      description: request 只含非秘密 subject、item 与 digest；不得包含产品 Session、Connection 或 Credential。相同 invocation 重读必须返回相同 requestDigest。
+      parameters:
+        - $ref: '#/components/parameters/InvocationId'
+      responses:
+        '200':
+          description: 可交给同发布版本 `quoin-deploy verify` 的类型化请求。
+          content:
+            application/yaml:
+              schema:
+                $ref: './schemas/deployment-verification.schema.json#/$defs/helperRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/deployment-verifications/{invocationId}/helper-reports:
+    post:
+      tags: [verification]
+      operationId: importDeploymentVerificationHelperReport
+      summary: 导入停机 helper report 并追加绑定 item results（Admin）
+      description: Quoin 必须重验 invocationId、manifestDigest、requestDigest、release subject、每项 inputDigest 与 evidence digest；同 reportDigest 幂等，不同结果形成 verifier conflict，已 finalization 后拒绝迟到导入。
+      parameters:
+        - $ref: '#/components/parameters/InvocationId'
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              $ref: './schemas/deployment-verification.schema.json#/$defs/helperReport'
+      responses:
+        '200':
+          description: 已幂等导入既有 report。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentVerificationDetail'
+        '201':
+          description: report 及其结果已追加。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentVerificationDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/deployment-verifications/{invocationId}/observations:
+    post:
+      tags: [verification]
+      operationId: submitDeploymentVerificationObservation
+      summary: 由启动该 invocation 的同一 Admin Session 提交一个 typed UI observation
+      description: observation 只接受 manifest 内尚无结果的精确 browser/arch/viewport/motion cell；同 inputDigest+resultDigest 重试返回原结果，不同 payload 形成 conflict 并使总结果 FAILED。
+      parameters:
+        - $ref: '#/components/parameters/InvocationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitVerificationObservationRequest'
+      responses:
+        '201':
+          description: typed observation 已追加。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationItemResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
 components:
   securitySchemes:
     sessionCookie:
@@ -4677,6 +4913,12 @@ components:
         $ref: '#/components/schemas/LocatorId'
     AttemptId:
       name: attemptId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/LocatorId'
+    InvocationId:
+      name: invocationId
       in: path
       required: true
       schema:
@@ -4930,6 +5172,24 @@ components:
         - $ref: '#/components/schemas/CommandBase'
         - $ref: '#/components/schemas/ExpectedRowVersion'
       description: 修改当前状态/current 指针但非取消语义的领域命令（HTTP-COMMAND-002）。
+    EnableConnectionRequest:
+      allOf:
+        - $ref: '#/components/schemas/VersionedCommandRequest'
+        - type: object
+          properties:
+            qualifiedProbeResultId:
+              $ref: '#/components/schemas/LocatorId'
+      description: model_provider 必须显式提供同 current binding 的 passed probe result；其它连接类型必须省略该字段。
+    ConfigVerificationRunRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          required: [purpose]
+          properties:
+            purpose:
+              type: string
+              const: prepublish
+      description: Web 配置页面只创建 prepublish；deployment_acceptance 由 Deployment Acceptance manifest 编排器内部创建。
     CancelRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5292,7 +5552,7 @@ components:
           type: boolean
         reason:
           type: [string, 'null']
-          enum: [Restore, Upgrade, RootKeyRebind, null]
+          enum: [Restore, Upgrade, RootKeyRebind, LintelRecovery, null]
         rowVersion:
           type: integer
           minimum: 1
@@ -5316,7 +5576,7 @@ components:
             properties:
               reason:
                 type: string
-                enum: [Restore, Upgrade, RootKeyRebind]
+                enum: [Restore, Upgrade, RootKeyRebind, LintelRecovery]
               enteredAt:
                 $ref: '#/components/schemas/Timestamp'
           else:
@@ -5334,7 +5594,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [AdminPassword, User, Connection, RuntimeSlot, AlertSource, BrowserIdentity, ActiveAttempt, ActiveBrowserOperation, BackupPreflight, SchemaMigration, ReleaseVersion, Integrity, SearchProjection]
+          enum: [AdminPassword, User, Connection, RuntimeSlot, AlertSource, BrowserIdentity, ActiveAttempt, ActiveBrowserOperation, BackupPreflight, SchemaMigration, ReleaseVersion, Integrity, SearchProjection, LintelRecoveryFence]
         objectKey:
           type: string
           minLength: 1
@@ -5364,7 +5624,7 @@ components:
             expectedReason:
               type: string
               enum: [Restore, Upgrade, RootKeyRebind]
-      description: expectedRowVersion/expectedReason 必须与当前 active maintenance_state 一致；不存在 force/skip。
+      description: expectedRowVersion/expectedReason 必须与当前 active maintenance_state 一致；expectedReason 不接受 LintelRecovery；不存在 force/skip。
     RuntimeSlot:
       type: object
       required: [slot, state, currentGeneration, rowVersion, connected]
@@ -5686,7 +5946,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         type:
           type: string
-          enum: [initial_analysis, investigation, inspection_analysis, inspection_collection, browser_exploration, knowledge_extraction, embedding, model_provider_probe]
+          enum: [initial_analysis, investigation, inspection_analysis, inspection_collection, browser_exploration, knowledge_extraction, embedding, connection_probe]
         state:
           type: string
           enum: [Queued, Assigned, Running, Cancelling, Succeeded, Failed, Cancelled, Interrupted]
@@ -6537,7 +6797,7 @@ components:
       properties:
         objectType:
           type: string
-          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_test_run]
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_verification_run]
         objectId:
           $ref: '#/components/schemas/LocatorId'
         rowVersion:
@@ -6950,7 +7210,14 @@ components:
           $ref: '#/components/schemas/NullableLocatorId'
         kind:
           type: string
-          enum: [manual_login, authentication_probe, journey, exploration]
+          enum: [manual_login, authentication_probe, journey, exploration, deployment_verification]
+        actorSessionId:
+          $ref: '#/components/schemas/LocatorId'
+        verificationManifestItemId:
+          $ref: '#/components/schemas/LocatorId'
+        cloneIdentity:
+          type: string
+          minLength: 1
         state:
           type: string
           enum: [Queued, WaitingForCapacity, Starting, Running, AwaitingReconnect, Succeeded, Failed, Cancelled, Interrupted]
@@ -6976,8 +7243,12 @@ components:
           description: Lintel 已确认该 operation 的 Chromium/隧道不存在；领域终态存在但本字段缺失时身份仍被占用。
         stopConfirmationBasis:
           type: string
-          enum: [not_dispatched, start_rejected, stop_ack, inventory_absent, new_boot]
+          enum: [not_dispatched, start_rejected, stop_ack, same_boot_cleanup_ack, inventory_absent, new_boot, new_boot_cleanup_confirmed, externally_fenced_storage_retired]
           description: 物理停止确认的唯一审计依据；必须与 stopConfirmedAt 成对出现。
+        cleanupStateHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: same_boot_cleanup_ack 或 new_boot_cleanup_confirmed 的规范 typed cleanup observation SHA-256。
         startedByUsername:
           type: string
         probeResults:
@@ -7103,7 +7374,7 @@ components:
           then:
             properties:
               stopConfirmationBasis:
-                enum: [start_rejected, stop_ack, inventory_absent, new_boot]
+                enum: [start_rejected, stop_ack, same_boot_cleanup_ack, inventory_absent, new_boot, new_boot_cleanup_confirmed, externally_fenced_storage_retired]
         - if:
             properties:
               kind:
@@ -7145,6 +7416,47 @@ components:
             properties:
               terminalReason:
                 enum: [new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, authentication_probe_unavailable, artifact_commit_failed, cancelled, parent_terminal, lease_expired, runtime_unavailable, browser_crashed, protocol_error]
+        - if:
+            properties: {kind: {const: deployment_verification}}
+            required: [kind]
+          then:
+            required: [profileGenerationId, actorSessionId, verificationManifestItemId, cloneIdentity]
+            properties:
+              actorSessionId:
+                $ref: '#/components/schemas/LocatorId'
+              verificationManifestItemId:
+                $ref: '#/components/schemas/LocatorId'
+              cloneIdentity:
+                type: string
+                minLength: 1
+              terminalReason:
+                enum: [shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, grace_expired, session_revoked, cancelled, runtime_unavailable, browser_crashed, protocol_error]
+              stopConfirmationBasis:
+                enum: [not_dispatched, start_rejected, same_boot_cleanup_ack, new_boot_cleanup_confirmed, externally_fenced_storage_retired]
+          else:
+            properties:
+              actorSessionId: false
+              verificationManifestItemId: false
+              cloneIdentity: false
+        - if:
+            properties:
+              stopConfirmationBasis:
+                enum: [same_boot_cleanup_ack, new_boot_cleanup_confirmed]
+            required: [stopConfirmationBasis]
+          then:
+            required: [cleanupStateHash]
+            properties:
+              cleanupStateHash: {}
+          else:
+            properties:
+              cleanupStateHash: false
+        - if:
+            properties: {state: {const: AwaitingReconnect}}
+            required: [state]
+          then:
+            properties:
+              kind:
+                enum: [manual_login, deployment_verification]
     BrowserIdentitySummary:
       type: object
       additionalProperties: false
@@ -7351,16 +7663,16 @@ components:
               description: 启用业务系统的兼容目标配置版本与逐系统并发前提；零启用系统时必须为空数组；全部就绪才原子激活（DATA-CONFIG-002）。
               items:
                 type: object
-                required: [businessSystemKey, configVersionId, testRunId, expectedCurrentConfigVersionId, expectedBusinessSystemRowVersion]
+                required: [businessSystemKey, configVersionId, verificationRunId, expectedCurrentConfigVersionId, expectedBusinessSystemRowVersion]
                 additionalProperties: false
                 properties:
                   businessSystemKey:
                     $ref: '#/components/schemas/StableKey'
                   configVersionId:
                     $ref: '#/components/schemas/LocatorId'
-                  testRunId:
+                  verificationRunId:
                     $ref: '#/components/schemas/LocatorId'
-                    description: 引用该 (businessSystemKey, configVersionId, target contract) 的 Passed 配置 Test Run；联合激活必须逐系统重验其状态、完整检查结果与归属，否则 409（DATA-CONFIG-002/007）。
+                    description: 引用该 (businessSystemKey, configVersionId, target contract) 的 Passed 配置 Verification Run；联合激活必须逐系统重验其状态、完整检查结果与归属，否则 409（DATA-CONFIG-002/007）。
                   expectedCurrentConfigVersionId:
                     $ref: '#/components/schemas/NullableLocatorId'
                     description: 该业务系统当前已发布配置版本并发前提；null 表示当前无已发布版本；不匹配返回 409（DATA-CONFIG-002）。
@@ -7410,20 +7722,20 @@ components:
           uniqueItems: true
           items:
             type: object
-            required: [configVersionId, passedTestRunId]
+            required: [configVersionId, passedVerificationRunId]
             additionalProperties: false
             properties:
               configVersionId:
                 $ref: '#/components/schemas/LocatorId'
-              passedTestRunId:
+              passedVerificationRunId:
                 $ref: '#/components/schemas/LocatorId'
-                description: 精确绑定该未发布配置版本与目标契约、状态为 Passed 的 Config Test Run；激活请求复制为 testRunId。
+                description: 精确绑定该未发布配置版本与目标契约、状态为 Passed 的 Config Verification Run；激活请求复制为 verificationRunId。
         blockers:
           type: array
           uniqueItems: true
           items:
             type: string
-            enum: [no_compatible_version, test_run_missing, test_run_pending, test_run_failed, test_run_cancelled, test_run_interrupted]
+            enum: [no_compatible_version, verification_run_missing, verification_run_pending, verification_run_failed, verification_run_cancelled, verification_run_interrupted]
       oneOf:
         - properties:
             activationCandidates:
@@ -7435,13 +7747,19 @@ components:
               maxItems: 0
             blockers:
               minItems: 1
-      description: activationCandidates 包含所有数据库实际可接受的显式候选对；blockers 仅在候选集合为空时存在。不得用“最新草稿”或“最新 Test Run”覆盖仍合法的旧候选。
-    ConfigTestRunSummary:
+      description: activationCandidates 包含所有数据库实际可接受的显式候选对；blockers 仅在候选集合为空时存在。不得用“最新草稿”或“最新 Verification Run”覆盖仍合法的旧候选。
+    ConfigVerificationRunSummary:
       type: object
-      required: [id, configVersionId, labelContractVersionId, state, rowVersion, createdAt]
+      required: [id, purpose, configVersionId, labelContractVersionId, state, rowVersion, createdAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
+        purpose:
+          type: string
+          enum: [prepublish, deployment_acceptance]
+        verificationManifestItemId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 仅 deployment_acceptance 存在；精确指向冻结 manifest config item。
         configVersionId:
           $ref: '#/components/schemas/LocatorId'
         labelContractVersionId:
@@ -7457,6 +7775,16 @@ components:
         createdAt:
           $ref: '#/components/schemas/Timestamp'
       allOf:
+        - if:
+            properties:
+              purpose:
+                const: deployment_acceptance
+            required: [purpose]
+          then:
+            required: [verificationManifestItemId]
+          else:
+            not:
+              required: [verificationManifestItemId]
         - if:
             properties:
               state:
@@ -7477,16 +7805,16 @@ components:
             properties:
               evidenceAt: {}
             required: [evidenceAt]
-    ConfigTestRunDetail:
+    ConfigVerificationRunDetail:
       allOf:
-        - $ref: '#/components/schemas/ConfigTestRunSummary'
+        - $ref: '#/components/schemas/ConfigVerificationRunSummary'
         - type: object
           required: [checkResults]
           properties:
             checkResults:
               type: array
               items:
-                $ref: '#/components/schemas/ConfigTestRunCheckResult'
+                $ref: '#/components/schemas/ConfigVerificationRunCheckResult'
             resultDetail:
               type: string
               description: Failed/Cancelled/Interrupted 的人类可读失败或中止原因（非秘密）。
@@ -7505,7 +7833,7 @@ components:
               properties:
                 resultDetail: {}
               required: [resultDetail]
-    ConfigTestRunCheckResult:
+    ConfigVerificationRunCheckResult:
       oneOf:
         - type: object
           required: [planKey, checkKey, status, evidenceId]
@@ -7621,14 +7949,106 @@ components:
           $ref: '#/components/schemas/LocatorId'
         config:
           $ref: '#/components/schemas/ModelProviderConnectionNonSecret'
-        capability:
-          $ref: '#/components/schemas/ModelProviderCapabilitySummary'
-          description: 仅当 current revision/generation 已完成真实 probe 时存在；缺失表示未验证且不可启用。
-    ModelProviderCapabilitySummary:
+        enableQualificationProbeResultId:
+          $ref: '#/components/schemas/LocatorId'
+          description: 由当前 enabled rowVersion 对应的 immutable enable-qualification event 派生；不是可写的 current/latest qualification 指针。disabled 时缺失。
+        enableQualificationProbeResult:
+          $ref: '#/components/schemas/ConnectionProbeResult'
+          description: 服务端按同一 immutable enable event 解析的 typed result；不得隐式选择最新成功 probe。
+    ConnectionProbeResult:
+      type: object
+      required: [id, attemptId, connectionType, connectionRevisionId, credentialGenerationId, rootBindingRevision, actionSetId, actionSetVersion, probeContractDigest, outcome, resultDigest, startedAt, finishedAt, details]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        attemptId:
+          $ref: '#/components/schemas/LocatorId'
+        connectionType:
+          type: string
+          enum: [model_provider, thanos, kubernetes]
+        connectionRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        credentialGenerationId:
+          $ref: '#/components/schemas/LocatorId'
+        rootBindingRevision:
+          type: integer
+          minimum: 1
+        actionSetId:
+          type: string
+        actionSetVersion:
+          type: integer
+          minimum: 1
+        probeContractDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        outcome:
+          type: string
+          enum: [passed, failed, cancelled, interrupted]
+        resultDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+        finishedAt:
+          $ref: '#/components/schemas/Timestamp'
+        details:
+          oneOf:
+            - $ref: '#/components/schemas/ModelProviderConnectionProbeDetails'
+            - $ref: '#/components/schemas/ThanosConnectionProbeDetails'
+            - $ref: '#/components/schemas/KubernetesConnectionProbeDetails'
+      description: connectionType 与 details 变体必须一致；该闭合由服务端 typed child 表与 JSON Schema fixtures 共同校验。
+    ThanosConnectionProbeDetails:
+      type: object
+      required: [kind, query, responseType, sampleCount, sampleValue]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          const: thanos
+        query:
+          type: string
+          const: vector(1)
+        responseType:
+          type: string
+          const: vector
+        sampleCount:
+          type: integer
+          const: 1
+        sampleValue:
+          type: string
+    KubernetesConnectionProbeDetails:
+      type: object
+      required: [kind, effectiveNamespace, versionOk, coreDiscoveryOk, groupedDiscoveryOk, podsGetAllowed, podsListAllowed, eventsListAllowed, podsLogGetAllowed]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          const: kubernetes
+        effectiveNamespace:
+          type: string
+        versionOk:
+          type: boolean
+        coreDiscoveryOk:
+          type: boolean
+        groupedDiscoveryOk:
+          type: boolean
+        podsGetAllowed:
+          type: boolean
+        podsListAllowed:
+          type: boolean
+        eventsListAllowed:
+          type: boolean
+        podsLogGetAllowed:
+          type: boolean
+    ModelProviderConnectionProbeDetails:
       type: object
       additionalProperties: false
-      required: [probeAttemptId, chatModelId, embeddingModelId, supportsStreaming, supportsNativeTools, supportsParallelToolCalls, supportsCancel, supportsUsage, supportsRequestId, supportsEmbeddings, contextBudgetTokens, maxOutputTokens, testedAt]
+      required: [kind, probeAttemptId, chatModelId, embeddingModelId, supportsStreaming, supportsNativeTools, supportsParallelToolCalls, supportsCancel, supportsUsage, supportsRequestId, supportsEmbeddings, contextBudgetTokens, maxOutputTokens, testedAt]
       properties:
+        kind:
+          type: string
+          const: model_provider
         probeAttemptId:
           $ref: '#/components/schemas/LocatorId'
         chatModelId:
@@ -8405,7 +8825,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         kind:
           type: string
-          enum: [attachment, screenshot, trace, tool_result, report_file]
+          enum: [attachment, screenshot, trace, tool_result, report_file, verification_bundle, verification_attachment]
         sensitive:
           type: boolean
         retentionKind:
@@ -8413,7 +8833,7 @@ components:
           enum: [long_term, generated]
         ownerType:
           type: string
-          enum: [investigation_message, evidence, tool_call, browser_operation, inspection_report, backup, source_material]
+          enum: [investigation_message, evidence, tool_call, browser_operation, inspection_report, backup, source_material, verification_invocation]
           description: 逻辑所有者类型；与 ownerId 的权威表由 DATA-ARTIFACT-003 机械闭合。
         ownerId:
           $ref: '#/components/schemas/LocatorId'
@@ -8494,7 +8914,7 @@ components:
           description: "task_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。"
         objectType:
           type: string
-          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_test_run]
+          enum: [initial_analysis, execution_attempt, inspection_run, inspection_report, tool_call, knowledge_import_batch, knowledge_candidate, browser_operation, config_verification_run]
         objectId:
           $ref: '#/components/schemas/LocatorId'
         changeType:
@@ -8510,3 +8930,253 @@ components:
         type:
           type: string
           const: resync_required
+    StartDeploymentVerificationRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+      description: 其它输入全部由服务端从当前 release、deployment config、public Origin 与数据库对象集合机械发现；普通用户不填写内部 locator。
+    DeploymentVerificationSummary:
+      type: object
+      required: [id, releaseSubjectDigest, catalogDigest, resultProfileDigest, deploymentConfigDigest, publicOriginDigest, applicableSetDigest, itemCount, itemSetDigest, manifestDigest, startedAt, deadlineAt, progress]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        releaseSubjectDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        catalogDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        resultProfileDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        deploymentConfigDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        publicOriginDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        applicableSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        itemCount:
+          type: integer
+          minimum: 1
+        itemSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        manifestDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        startedAt:
+          $ref: '#/components/schemas/Timestamp'
+        deadlineAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: startedAt + 8 小时，固定不续期。
+        progress:
+          type: object
+          required: [total, completed]
+          additionalProperties: false
+          properties:
+            total:
+              type: integer
+              minimum: 1
+            completed:
+              type: integer
+              minimum: 0
+        receipt:
+          $ref: '#/components/schemas/DeploymentVerificationReceipt'
+      description: 不含可变 invocation status；是否 finalization 只由 receipt 是否存在表达。
+    DeploymentVerificationDetail:
+      allOf:
+        - $ref: '#/components/schemas/DeploymentVerificationSummary'
+        - type: object
+          required: [items, results, conflicts, subjectDrifts]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/VerificationInvocationItem'
+            results:
+              type: array
+              items:
+                $ref: '#/components/schemas/VerificationItemResult'
+            conflicts:
+              type: array
+              items:
+                $ref: '#/components/schemas/VerificationResultConflict'
+            subjectDrifts:
+              type: array
+              items:
+                $ref: '#/components/schemas/VerificationSubjectDrift'
+    VerificationInvocationItem:
+      type: object
+      required: [id, itemSeq, scenarioId, cellId, objectKind, inputDigest]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        itemSeq:
+          type: integer
+          minimum: 1
+        scenarioId:
+          type: string
+        cellId:
+          type: string
+        objectKind:
+          type: string
+          enum: [deployment, connection, config, browser_identity, ui_observation]
+        inputDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        locator:
+          type: object
+          additionalProperties: true
+          description: 按 objectKind 的 typed non-secret locator；交换文档的封闭形状由 deployment-verification.schema.json 唯一拥有。
+    VerificationItemResult:
+      type: object
+      required: [id, itemId, inputDigest, resultDigest, producerType, outcome, category, observedAt, committedAt, evidenceIndexDigest]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        itemId:
+          $ref: '#/components/schemas/LocatorId'
+        inputDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        resultDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        producerType:
+          type: string
+          enum: [quoin, runtime, deployment_helper, admin_observation]
+        outcome:
+          type: string
+          enum: [passed, warned, failed]
+        category:
+          type: string
+          enum: [passed, functional_assertion_failed, cleanup_residue, verifier_conflict, subject_drift, environment_unavailable, operator_cancelled, infrastructure_interrupted, cleanup_indeterminate, not_run, verifier_invariant_violation]
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+        committedAt:
+          $ref: '#/components/schemas/Timestamp'
+        evidenceIndexDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        artifact:
+          $ref: '#/components/schemas/ArtifactSummary'
+    VerificationResultConflict:
+      type: object
+      required: [id, itemId, firstResultId, conflictingResultId, createdAt]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        itemId:
+          $ref: '#/components/schemas/LocatorId'
+        firstResultId:
+          $ref: '#/components/schemas/LocatorId'
+        conflictingResultId:
+          $ref: '#/components/schemas/LocatorId'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    VerificationSubjectDrift:
+      type: object
+      required: [objectKind, driftField, itemId, frozenDigest, currentDigest, observedAt]
+      additionalProperties: false
+      properties:
+        objectKind:
+          type: string
+          enum: [deployment, connection, config, browser_identity, ui_observation]
+        driftField:
+          type: string
+          enum: [release_subject_digest, deployment_config_digest, public_origin_digest, connection_revision, credential_generation, root_binding_revision, probe_contract_digest, config_version, label_contract_version, browser_identity_revision, browser_profile_generation, browser_inventory_observation, browser_artifact_digest, browser_artifact_version]
+        itemId:
+          $ref: '#/components/schemas/LocatorId'
+        frozenDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        currentDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        observedAt:
+          $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if: {properties: {objectKind: {const: deployment}}, required: [objectKind]}
+          then: {properties: {driftField: {enum: [release_subject_digest, deployment_config_digest, public_origin_digest]}}}
+        - if: {properties: {objectKind: {const: connection}}, required: [objectKind]}
+          then: {properties: {driftField: {enum: [connection_revision, credential_generation, root_binding_revision, probe_contract_digest]}}}
+        - if: {properties: {objectKind: {const: config}}, required: [objectKind]}
+          then: {properties: {driftField: {enum: [config_version, label_contract_version]}}}
+        - if: {properties: {objectKind: {const: browser_identity}}, required: [objectKind]}
+          then: {properties: {driftField: {enum: [browser_identity_revision, browser_profile_generation, browser_inventory_observation]}}}
+        - if: {properties: {objectKind: {const: ui_observation}}, required: [objectKind]}
+          then: {properties: {driftField: {enum: [release_subject_digest, public_origin_digest, browser_artifact_digest, browser_artifact_version]}}}
+    DeploymentVerificationReceipt:
+      type: object
+      required: [id, manifestDigest, applicableSetDigest, itemSetDigest, resultSetDigest, helperImportSetDigest, typedObservationSetDigest, conflictSetDigest, subjectDriftDigest, overallOutcome, finalResultDigest, canonicalArtifactId, snapshotAt, finalizedAt]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        manifestDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        applicableSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        itemSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        resultSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        helperImportSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        typedObservationSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        conflictSetDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        subjectDriftDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        overallOutcome:
+          type: string
+          enum: [passed, warned, failed]
+        finalResultDigest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        canonicalArtifactId:
+          $ref: '#/components/schemas/LocatorId'
+        snapshotAt:
+          $ref: '#/components/schemas/Timestamp'
+        finalizedAt:
+          $ref: '#/components/schemas/Timestamp'
+    SubmitVerificationObservationRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          required: [itemId, inputDigest, visualResult, motionResult, focusOcclusionResult]
+          properties:
+            itemId:
+              $ref: '#/components/schemas/LocatorId'
+            inputDigest:
+              type: string
+              pattern: '^[0-9a-f]{64}$'
+            visualResult:
+              type: string
+              enum: [passed, failed]
+            motionResult:
+              type: string
+              enum: [passed, failed]
+            focusOcclusionResult:
+              type: string
+              enum: [passed, failed]
+            note:
+              type: string
+              maxLength: 2000
+      description: item 已冻结 browser artifact/version/arch/viewport/motion；服务端按 typed 字段生成 resultDigest，不接受用户提交结论摘要或原始页面内容。

@@ -1,0 +1,494 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/verification-evidence.schema.json",
+  "x-quoin-contract-version": 1,
+  "title": "Quoin v1 verification evidence index",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "invocation_id",
+    "layer",
+    "subject_digest",
+    "verification_catalog_digest",
+    "result_profile_digest",
+    "generated_at",
+    "redaction_profile",
+    "items"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "invocation_id": {
+      "$ref": "#/$defs/id"
+    },
+    "layer": {
+      "enum": [
+        "contract_gate",
+        "release_qualification",
+        "deployment_acceptance"
+      ]
+    },
+    "subject_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "verification_catalog_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "result_profile_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "manifest_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "redaction_profile": {
+      "const": "verification-redaction-v1"
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "layer": {
+            "const": "deployment_acceptance"
+          }
+        },
+        "required": [
+          "layer"
+        ]
+      },
+      "then": {
+        "properties": {
+          "manifest_digest": {
+            "$ref": "#/$defs/digest"
+          }
+        },
+        "required": [
+          "manifest_digest"
+        ]
+      },
+      "else": {
+        "properties": {
+          "manifest_digest": false
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "maxLength": 160
+    },
+    "cellId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,159}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "assertion": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "expected",
+        "actual",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/cellId"
+        },
+        "kind": {
+          "enum": [
+            "exit_code",
+            "schema_valid",
+            "sql_rejected",
+            "protocol_event",
+            "http_response",
+            "metric",
+            "state",
+            "digest_equal",
+            "resource_absent",
+            "human_observation"
+          ]
+        },
+        "expected": {},
+        "actual": {},
+        "result": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "detail_code": {
+          "$ref": "#/$defs/cellId"
+        }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "required": [
+        "kind",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "retention_class",
+        "sensitive"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "structured_result",
+            "stdout",
+            "stderr",
+            "logs",
+            "metrics",
+            "trace",
+            "screenshot",
+            "video",
+            "database",
+            "manifest",
+            "sigstore_bundle"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retention_class": {
+          "enum": [
+            "long_term",
+            "generated"
+          ]
+        },
+        "sensitive": {
+          "type": "boolean"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "architecture", "toolchain_digest", "capability_ids"],
+      "properties": {
+        "backend": { "enum": ["contract", "process", "compose", "kubernetes", "deployment_site", "real_external", "human_browser"] },
+        "architecture": { "enum": ["not_applicable", "linux/amd64", "linux/arm64"] },
+        "kubernetes_version": { "type": "string", "minLength": 1 },
+        "docker_engine_version": { "type": "string", "minLength": 1 },
+        "compose_version": { "type": "string", "minLength": 1 },
+        "browser_artifact": { "enum": ["playwright_chromium", "branded_chrome"] },
+        "browser_version": { "type": "string", "minLength": 1 },
+        "toolchain_digest": { "$ref": "#/$defs/digest" },
+        "external_stack_digest": { "$ref": "#/$defs/digest" },
+        "fault_backend_digest": { "$ref": "#/$defs/digest" },
+        "capability_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/scenarioId" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "backend": { "const": "kubernetes" } }, "required": ["backend"] },
+          "then": { "required": ["kubernetes_version"], "properties": { "kubernetes_version": {} } },
+          "else": { "properties": { "kubernetes_version": false } }
+        },
+        {
+          "if": { "properties": { "backend": { "const": "compose" } }, "required": ["backend"] },
+          "then": { "required": ["docker_engine_version", "compose_version"], "properties": { "docker_engine_version": {}, "compose_version": {} } },
+          "else": { "properties": { "docker_engine_version": false, "compose_version": false } }
+        },
+        {
+          "if": { "properties": { "backend": { "const": "human_browser" } }, "required": ["backend"] },
+          "then": { "required": ["browser_artifact", "browser_version"], "properties": { "browser_artifact": {}, "browser_version": {} } },
+          "else": { "properties": { "browser_artifact": false, "browser_version": false } }
+        }
+      ]
+    },
+    "cleanup": {
+      "type": "object",
+      "required": [
+        "required",
+        "outcome",
+        "assertions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "clean",
+            "residue",
+            "indeterminate",
+            "not_run"
+          ]
+        },
+        "assertions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "required": {
+                "const": false
+              }
+            },
+            "required": [
+              "required"
+            ]
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "clean",
+                  "not_run"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "scenario_id",
+        "cell_id",
+        "input_digest",
+        "result_digest",
+        "outcome",
+        "category",
+        "started_at",
+        "finished_at",
+        "authoritative_recorded_at",
+        "authoritative_time_source",
+        "environment_digest",
+        "environment",
+        "tool_version",
+        "argv_sanitized",
+        "exit_code",
+        "assertions",
+        "attachments",
+        "cleanup",
+        "causal_ids",
+        "proof_refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scenario_id": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "cell_id": {
+          "$ref": "#/$defs/cellId"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "result_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "warned",
+            "failed"
+          ]
+        },
+        "category": {
+          "enum": [
+            "passed",
+            "not_run",
+            "operator_cancelled",
+            "environment_unavailable",
+            "infrastructure_interrupted",
+            "cleanup_indeterminate",
+            "subject_drift",
+            "functional_assertion_failed",
+            "cleanup_residue",
+            "verifier_conflict",
+            "verifier_invariant_violation"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "authoritative_recorded_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "authoritative_time_source": {
+          "enum": [
+            "quoin_commit_time",
+            "ci_runner_clock",
+            "helper_received_time"
+          ]
+        },
+        "environment_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "argv_sanitized": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
+        },
+        "cleanup": {
+          "$ref": "#/$defs/cleanup"
+        },
+        "causal_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "proof_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/scenarioId"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "const": "passed"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "warned"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "not_run",
+                  "operator_cancelled",
+                  "environment_unavailable",
+                  "infrastructure_interrupted",
+                  "cleanup_indeterminate",
+                  "subject_drift"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "functional_assertion_failed",
+                  "cleanup_residue",
+                  "verifier_conflict",
+                  "verifier_invariant_violation"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

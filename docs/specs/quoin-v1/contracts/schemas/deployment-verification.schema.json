@@ -1,0 +1,677 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/blob/main/docs/specs/quoin-v1/contracts/schemas/deployment-verification.schema.json",
+  "title": "Quoin Deployment Verification Exchange Documents",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/helperRequest"
+    },
+    {
+      "$ref": "#/$defs/helperReport"
+    }
+  ],
+  "$defs": {
+    "nonEmpty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "positiveId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+    },
+    "deploymentLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "releaseSubjectDigest",
+        "deploymentConfigDigest",
+        "publicOriginDigest",
+        "backend",
+        "architecture"
+      ],
+      "properties": {
+        "kind": {
+          "const": "deployment"
+        },
+        "releaseSubjectDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deploymentConfigDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "publicOriginDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backend": {
+          "enum": [
+            "compose",
+            "kubernetes"
+          ]
+        },
+        "architecture": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        }
+      }
+    },
+    "connectionLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "connectionId",
+        "connectionType",
+        "revisionId",
+        "credentialGenerationId",
+        "rootBindingRevision",
+        "probeContractDigest"
+      ],
+      "properties": {
+        "kind": {
+          "const": "connection"
+        },
+        "connectionId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "connectionType": {
+          "enum": [
+            "model_provider",
+            "thanos",
+            "kubernetes"
+          ]
+        },
+        "revisionId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "credentialGenerationId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "rootBindingRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "probeContractDigest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "configLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "businessSystemId",
+        "configVersionId",
+        "labelContractVersionId"
+      ],
+      "properties": {
+        "kind": {
+          "const": "config"
+        },
+        "businessSystemId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "configVersionId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "labelContractVersionId": {
+          "$ref": "#/$defs/positiveId"
+        }
+      }
+    },
+    "browserIdentityLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "browserIdentityId",
+        "identityRevisionId",
+        "currentGenerationId",
+        "currentInventoryDigest"
+      ],
+      "properties": {
+        "kind": {
+          "const": "browser_identity"
+        },
+        "browserIdentityId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "identityRevisionId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "currentGenerationId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "currentInventoryDigest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "uiObservationLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "browserArtifact",
+        "browserVersion",
+        "architecture",
+        "viewportCssPx",
+        "motion"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ui_observation"
+        },
+        "browserArtifact": {
+          "enum": [
+            "playwright_chromium",
+            "branded_chrome"
+          ]
+        },
+        "browserVersion": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "architecture": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        },
+        "viewportCssPx": {
+          "enum": [
+            320,
+            768,
+            1024,
+            1440
+          ]
+        },
+        "motion": {
+          "enum": [
+            "normal",
+            "reduced"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "browserArtifact": { "const": "branded_chrome" }
+            },
+            "required": ["browserArtifact"]
+          },
+          "then": {
+            "properties": {
+              "architecture": { "const": "linux/amd64" }
+            }
+          }
+        }
+      ]
+    },
+    "typedLocator": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/deploymentLocator"
+        },
+        {
+          "$ref": "#/$defs/connectionLocator"
+        },
+        {
+          "$ref": "#/$defs/configLocator"
+        },
+        {
+          "$ref": "#/$defs/browserIdentityLocator"
+        },
+        {
+          "$ref": "#/$defs/uiObservationLocator"
+        }
+      ]
+    },
+    "requestItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "scenarioId",
+        "cellId",
+        "inputDigest",
+        "typedLocator"
+      ],
+      "properties": {
+        "itemId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "scenarioId": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "cellId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "inputDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "typedLocator": {
+          "$ref": "#/$defs/typedLocator"
+        }
+      }
+    },
+    "helperRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "invocationId",
+        "manifestDigest",
+        "itemSetDigest",
+        "releaseSubjectDigest",
+        "catalogDigest",
+        "resultProfileDigest",
+        "deploymentConfigDigest",
+        "publicOriginDigest",
+        "backend",
+        "architecture",
+        "generatedAt",
+        "deadlineAt",
+        "items"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "documentType": {
+          "const": "helper_request"
+        },
+        "invocationId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "manifestDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "itemSetDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "releaseSubjectDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "catalogDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resultProfileDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deploymentConfigDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "publicOriginDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backend": {
+          "enum": [
+            "compose",
+            "kubernetes"
+          ]
+        },
+        "architecture": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        },
+        "generatedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "deadlineAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/requestItem"
+          },
+          "uniqueItems": true,
+          "x-quoin-unique-by": "itemId"
+        }
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "expected",
+        "actual",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "expected": {},
+        "actual": {},
+        "result": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "sha256",
+        "sizeBytes"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "stdout",
+            "stderr",
+            "log",
+            "other"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mediaType": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "reportItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "scenarioId",
+        "cellId",
+        "inputDigest",
+        "resultDigest",
+        "outcome",
+        "category",
+        "startedAt",
+        "finishedAt",
+        "argvSanitized",
+        "exitCode",
+        "assertions",
+        "attachments",
+        "cleanupOutcome"
+      ],
+      "properties": {
+        "itemId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "scenarioId": {
+          "$ref": "#/$defs/scenarioId"
+        },
+        "cellId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "inputDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resultDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "warned",
+            "failed"
+          ]
+        },
+        "category": {
+          "enum": [
+            "passed",
+            "functional_assertion_failed",
+            "cleanup_residue",
+            "verifier_conflict",
+            "subject_drift",
+            "environment_unavailable",
+            "operator_cancelled",
+            "infrastructure_interrupted",
+            "cleanup_indeterminate",
+            "not_run",
+            "verifier_invariant_violation"
+          ]
+        },
+        "startedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "argvSanitized": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        },
+        "attachments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
+        },
+        "cleanupOutcome": {
+          "enum": [
+            "clean",
+            "residue",
+            "indeterminate",
+            "not_run"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "const": "passed"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "functional_assertion_failed",
+                  "cleanup_residue",
+                  "verifier_conflict",
+                  "verifier_invariant_violation"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "warned"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "subject_drift",
+                  "environment_unavailable",
+                  "operator_cancelled",
+                  "infrastructure_interrupted",
+                  "cleanup_indeterminate",
+                  "not_run"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "category": { "const": "passed" } }, "required": ["category"] },
+          "then": { "properties": { "cleanupOutcome": { "const": "clean" } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "cleanup_residue" } }, "required": ["category"] },
+          "then": { "properties": { "cleanupOutcome": { "const": "residue" } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "cleanup_indeterminate" } }, "required": ["category"] },
+          "then": { "properties": { "cleanupOutcome": { "const": "indeterminate" } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "not_run" } }, "required": ["category"] },
+          "then": { "properties": { "cleanupOutcome": { "const": "not_run" } } }
+        }
+      ]
+    },
+    "helperReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "invocationId",
+        "manifestDigest",
+        "itemSetDigest",
+        "releaseSubjectDigest",
+        "catalogDigest",
+        "resultProfileDigest",
+        "deploymentConfigDigest",
+        "publicOriginDigest",
+        "backend",
+        "architecture",
+        "helperRequestDigest",
+        "startedAt",
+        "finishedAt",
+        "items"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "documentType": {
+          "const": "helper_report"
+        },
+        "invocationId": {
+          "$ref": "#/$defs/positiveId"
+        },
+        "manifestDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "itemSetDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "releaseSubjectDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "catalogDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resultProfileDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deploymentConfigDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "publicOriginDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "backend": {
+          "enum": [
+            "compose",
+            "kubernetes"
+          ]
+        },
+        "architecture": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        },
+        "helperRequestDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/reportItem"
+          },
+          "uniqueItems": true,
+          "x-quoin-unique-by": "itemId"
+        }
+      }
+    }
+  },
+  "x-quoin-contract-version": 1
+}

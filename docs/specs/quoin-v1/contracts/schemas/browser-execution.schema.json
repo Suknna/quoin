@@ -6,6 +6,7 @@
   "oneOf": [
     { "$ref": "#/$defs/manualLoginInput" },
     { "$ref": "#/$defs/authenticationProbeInput" },
+    { "$ref": "#/$defs/deploymentVerificationInput" },
     { "$ref": "#/$defs/inspectionCollectionInput" },
     { "$ref": "#/$defs/browserJourneyResult" }
   ],
@@ -79,6 +80,28 @@
             }
           ]
         },
+        "probe": { "$ref": "#/$defs/journeyBinding" }
+      }
+    },
+    "deploymentVerificationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "identity", "verificationInvocationItemId", "cloneIdentity", "probe"],
+      "properties": {
+        "schemaKind": { "const": "deployment_verification_v1" },
+        "operationId": { "$ref": "#/$defs/locatorId" },
+        "identity": {
+          "allOf": [
+            { "$ref": "#/$defs/identityBinding" },
+            {
+              "type": "object",
+              "properties": { "profileGenerationId": { "$ref": "#/$defs/locatorId" } },
+              "required": ["profileGenerationId"]
+            }
+          ]
+        },
+        "verificationInvocationItemId": { "$ref": "#/$defs/locatorId" },
+        "cloneIdentity": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$" },
         "probe": { "$ref": "#/$defs/journeyBinding" }
       }
     },

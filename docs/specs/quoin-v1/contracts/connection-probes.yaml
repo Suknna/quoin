@@ -1,0 +1,106 @@
+contract_version: 1
+catalog_id: connection-probes-v1
+closed_action_sets: true
+connection_types:
+  - type: model_provider
+    action_set_id: model-provider-capabilities-v1
+    action_set_version: 1
+    executor: plinth_supervisor
+    actions:
+      - id: chat-stream
+        operation_kind: model_chat_stream
+        operation: Send one fixed non-sensitive chat prompt and consume a real streamed response.
+        request: { profile: fixed-nonsensitive-chat-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [stream_opened, multiple_chunks_or_terminal_chunk, valid_utf8, terminal_completion]
+      - id: native-tool-call
+        operation_kind: model_native_tool_call
+        operation: Offer one fixed no-side-effect tool schema and require a native structured tool call.
+        request: { profile: fixed-native-tool-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [native_tool_call_observed, arguments_schema_valid]
+      - id: parallel-tool-calls
+        operation_kind: model_parallel_tool_calls
+        operation: Offer two fixed no-side-effect tools and request both in one assistant turn.
+        request: { profile: fixed-parallel-tools-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [multiple_tool_calls_observed, stable_call_ids]
+      - id: cancellation
+        operation_kind: model_cancel
+        operation: Start a fixed long response, persist the model call, cancel it, and observe provider termination.
+        request: { profile: fixed-cancellable-chat-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [cancel_propagated, cancelled_terminal_state]
+      - id: usage-and-request-id
+        operation_kind: model_usage_request_id
+        operation: Complete a fixed chat request and inspect typed provider metadata.
+        request: { profile: fixed-usage-chat-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [usage_observed, request_id_observed]
+      - id: embedding
+        operation_kind: model_embedding
+        operation: Embed one fixed non-sensitive sentence using the configured embedding model.
+        request: { profile: fixed-nonsensitive-embedding-v1 }
+        side_effect: provider_ephemeral_request
+        assertions: [vector_non_empty, dimension_matches_configured]
+    pass_expression: chat-stream && native-tool-call && parallel-tool-calls && cancellation && usage-and-request-id && embedding
+  - type: thanos
+    action_set_id: thanos-query-v1
+    action_set_version: 1
+    executor: plinth_supervisor
+    actions:
+      - id: vector-one
+        operation_kind: prometheus_query
+        operation: Execute query=vector(1) against the configured Prometheus-compatible query endpoint.
+        request: { method: GET, path: /api/v1/query, query: vector(1) }
+        side_effect: none
+        assertions: [http_success, response_type_vector, sample_count_one, sample_value_one]
+    pass_expression: vector-one
+  - type: kubernetes
+    action_set_id: kubernetes-read-capabilities-v1
+    action_set_version: 1
+    executor: plinth_supervisor
+    actions:
+      - id: server-version
+        operation_kind: http_get
+        operation: Read Kubernetes server version.
+        request: { method: GET, path: /version }
+        side_effect: none
+        assertions: [response_success, git_version_non_empty]
+      - id: core-discovery
+        operation_kind: http_get
+        operation: Read Kubernetes core API discovery.
+        request: { method: GET, path: /api }
+        side_effect: none
+        assertions: [response_success, versions_non_empty]
+      - id: grouped-discovery
+        operation_kind: http_get
+        operation: Read Kubernetes grouped API discovery.
+        request: { method: GET, path: /apis }
+        side_effect: none
+        assertions: [response_success, groups_present]
+      - id: ssar-pods-get
+        operation_kind: self_subject_access_review
+        operation: Check get pods in the one deterministically resolved effective namespace.
+        request: { method: POST, path: /apis/authorization.k8s.io/v1/selfsubjectaccessreviews, namespace_resolution: defaultNamespace_then_currentContext_then_default, group: "", resource: pods, subresource: "", verb: get }
+        side_effect: none
+        assertions: [allowed]
+      - id: ssar-pods-list
+        operation_kind: self_subject_access_review
+        operation: Check list pods in the one deterministically resolved effective namespace.
+        request: { method: POST, path: /apis/authorization.k8s.io/v1/selfsubjectaccessreviews, namespace_resolution: defaultNamespace_then_currentContext_then_default, group: "", resource: pods, subresource: "", verb: list }
+        side_effect: none
+        assertions: [allowed]
+      - id: ssar-events-list
+        operation_kind: self_subject_access_review
+        operation: Check list events in the one deterministically resolved effective namespace.
+        request: { method: POST, path: /apis/authorization.k8s.io/v1/selfsubjectaccessreviews, namespace_resolution: defaultNamespace_then_currentContext_then_default, group: "", resource: events, subresource: "", verb: list }
+        side_effect: none
+        assertions: [allowed]
+      - id: ssar-pods-log-get
+        operation_kind: self_subject_access_review
+        operation: Check get pods/log in the one deterministically resolved effective namespace.
+        request: { method: POST, path: /apis/authorization.k8s.io/v1/selfsubjectaccessreviews, namespace_resolution: defaultNamespace_then_currentContext_then_default, group: "", resource: pods, subresource: log, verb: get }
+        side_effect: none
+        assertions: [allowed]
+    pass_expression: server-version && core-discovery && grouped-discovery && ssar-pods-get && ssar-pods-list && ssar-events-list && ssar-pods-log-get

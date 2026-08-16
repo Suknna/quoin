@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "documentType": "helper_request",
+  "invocationId": "42",
+  "manifestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "itemSetDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "releaseSubjectDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "catalogDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "resultProfileDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "deploymentConfigDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "publicOriginDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "backend": "compose",
+  "architecture": "linux/amd64",
+  "generatedAt": "2026-08-11T00:00:00Z",
+  "deadlineAt": "2026-08-11T08:00:00Z",
+  "items": [
+    {
+      "itemId": "101",
+      "scenarioId": "deployment.verify-only",
+      "cellId": "compose-linux-amd64",
+      "inputDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "typedLocator": {
+        "kind": "deployment",
+        "releaseSubjectDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "deploymentConfigDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "publicOriginDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "backend": "compose",
+        "architecture": "linux/amd64"
+      }
+    }
+  ]
+}

@@ -1,0 +1,5445 @@
+contract_version: 1
+catalog_id: quoin-v1-verification
+catalog_state: frozen
+result_profile_id: quoin-test-result-v1
+contract_refs:
+  connection_probes_sha256: 02713a72ecc31f57aa8f7f33313f4d8661c82e093385cca4902585f2d2486265
+  result_profile_sha256: 482aeb306bd97388d768d74b7832c1cd80c326fb8e04059cb88a4da2d4dacef0
+capability_definitions:
+  - id: environment.contract-harness
+    kind: environment
+  - id: environment.process-harness
+    kind: environment
+  - id: backend.compose
+    kind: deployment_backend
+  - id: backend.kubernetes
+    kind: deployment_backend
+  - id: architecture.linux-amd64
+    kind: architecture
+  - id: architecture.linux-arm64
+    kind: architecture
+  - id: kubernetes.version.maintained-0-latest-patch
+    kind: kubernetes_version
+  - id: kubernetes.version.maintained-1-latest-patch
+    kind: kubernetes_version
+  - id: kubernetes.version.maintained-2-latest-patch
+    kind: kubernetes_version
+  - id: docker.version.release-pinned
+    kind: docker_version
+  - id: compose.version.release-pinned
+    kind: compose_version
+  - id: browser.playwright-chromium-linux-amd64
+    kind: browser_evidence
+  - id: browser.playwright-chromium-linux-arm64
+    kind: browser_evidence
+  - id: browser.branded-chrome-linux-amd64
+    kind: browser_evidence
+  - id: browser.evidence.typed-observation
+    kind: browser_evidence
+  - id: fault.go-fuse-native
+    kind: fault_backend
+  - id: fault.toxiproxy.digest-pinned
+    kind: fault_backend
+  - id: fault.protocol-fixture
+    kind: fault_backend
+  - id: external.openai-compatible-fixture
+    kind: external_stack
+  - id: external.transport-stack
+    kind: external_stack
+  - id: external.current-connection
+    kind: external_stack
+  - id: external.current-business-system
+    kind: external_stack
+validation_roots:
+  - id: ARCH-VALIDATION-001
+    source: docs/specs/quoin-v1/architecture.md
+    anchor: arch-validation-001
+  - id: ARCH-VALIDATION-002
+    source: docs/specs/quoin-v1/architecture.md
+    anchor: arch-validation-002
+  - id: ARCH-VALIDATION-003
+    source: docs/specs/quoin-v1/architecture.md
+    anchor: arch-validation-003
+  - id: HTTP-VALIDATION-001
+    source: docs/specs/quoin-v1/http-api.md
+    anchor: http-validation-001
+  - id: HTTP-VALIDATION-002
+    source: docs/specs/quoin-v1/http-api.md
+    anchor: http-validation-002
+  - id: HTTP-VALIDATION-003
+    source: docs/specs/quoin-v1/http-api.md
+    anchor: http-validation-003
+  - id: HTTP-VALIDATION-004
+    source: docs/specs/quoin-v1/http-api.md
+    anchor: http-validation-004
+  - id: HTTP-VALIDATION-005
+    source: docs/specs/quoin-v1/http-api.md
+    anchor: http-validation-005
+  - id: CFG-VALIDATION-001
+    source: docs/specs/quoin-v1/inspection-config.md
+    anchor: cfg-validation-001
+  - id: CFG-VALIDATION-002
+    source: docs/specs/quoin-v1/inspection-config.md
+    anchor: cfg-validation-002
+  - id: CFG-VALIDATION-003
+    source: docs/specs/quoin-v1/inspection-config.md
+    anchor: cfg-validation-003
+  - id: CFG-VALIDATION-004
+    source: docs/specs/quoin-v1/inspection-config.md
+    anchor: cfg-validation-004
+  - id: CFG-VALIDATION-005
+    source: docs/specs/quoin-v1/inspection-config.md
+    anchor: cfg-validation-005
+  - id: OPS-VERIFY-001
+    source: docs/specs/quoin-v1/operations.md
+    anchor: ops-verify-001
+  - id: OPS-VERIFY-002
+    source: docs/specs/quoin-v1/operations.md
+    anchor: ops-verify-002
+  - id: OPS-VERIFY-003
+    source: docs/specs/quoin-v1/operations.md
+    anchor: ops-verify-003
+  - id: OPS-VERIFY-004
+    source: docs/specs/quoin-v1/operations.md
+    anchor: ops-verify-004
+  - id: DATA-VALIDATION-001
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-001
+  - id: DATA-VALIDATION-002
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-002
+  - id: DATA-VALIDATION-003
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-003
+  - id: DATA-VALIDATION-004
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-004
+  - id: DATA-VALIDATION-005
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-005
+  - id: DATA-VALIDATION-006
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-006
+  - id: DATA-VALIDATION-007
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-007
+  - id: DATA-VALIDATION-008
+    source: docs/specs/quoin-v1/persistence.md
+    anchor: data-validation-008
+  - id: RUNTIME-VALIDATION-001
+    source: docs/specs/quoin-v1/runtime-protocol.md
+    anchor: runtime-validation-001
+  - id: RUNTIME-VALIDATION-002
+    source: docs/specs/quoin-v1/runtime-protocol.md
+    anchor: runtime-validation-002
+  - id: RUNTIME-VALIDATION-003
+    source: docs/specs/quoin-v1/runtime-protocol.md
+    anchor: runtime-validation-003
+  - id: RUNTIME-VALIDATION-004
+    source: docs/specs/quoin-v1/runtime-protocol.md
+    anchor: runtime-validation-004
+  - id: UI-TEST-001
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-001
+  - id: UI-TEST-002
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-002
+  - id: UI-TEST-003
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-003
+  - id: UI-TEST-004
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-004
+  - id: UI-TEST-005
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-005
+  - id: UI-TEST-006
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-006
+  - id: UI-TEST-007
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-007
+  - id: UI-TEST-008
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-008
+  - id: UI-TEST-009
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-009
+  - id: UI-TEST-010
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-010
+  - id: UI-TEST-011
+    source: docs/specs/quoin-v1/frontend.md
+    anchor: ui-test-011
+  - id: SEC-VALIDATION-001
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-001
+  - id: SEC-VALIDATION-002
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-002
+  - id: SEC-VALIDATION-003
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-003
+  - id: SEC-VALIDATION-004
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-004
+  - id: SEC-VALIDATION-005
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-005
+  - id: SEC-VALIDATION-006
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-006
+  - id: SEC-VALIDATION-007
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-007
+  - id: SEC-VALIDATION-008
+    source: docs/specs/quoin-v1/security.md
+    anchor: sec-validation-008
+  - id: VERIFY-VALIDATION-001
+    source: docs/specs/quoin-v1/verification.md
+    anchor: verify-validation-001
+  - id: VERIFY-VALIDATION-002
+    source: docs/specs/quoin-v1/verification.md
+    anchor: verify-validation-002
+  - id: VERIFY-VALIDATION-003
+    source: docs/specs/quoin-v1/verification.md
+    anchor: verify-validation-003
+  - id: VERIFY-VALIDATION-004
+    source: docs/specs/quoin-v1/verification.md
+    anchor: verify-validation-004
+environments:
+  - id: contract-harness
+    kind: contract_harness
+    native: false
+    requires_release_artifacts: false
+    description: Schema, parser and static contract harness.
+  - id: process-harness
+    kind: process_harness
+    native: false
+    requires_release_artifacts: false
+    description: Real processes with deterministic adapters and injected clocks.
+  - id: compose-native
+    kind: docker_compose
+    native: true
+    requires_release_artifacts: true
+    description: One-shot real Docker Compose deployment on the declared native architecture.
+  - id: kubernetes-native
+    kind: kubernetes
+    native: true
+    requires_release_artifacts: true
+    description: One-shot real Kubernetes deployment on the declared native architecture.
+  - id: real-external
+    kind: real_external_system
+    native: true
+    requires_release_artifacts: false
+    description: Configured real external endpoint or business system.
+  - id: human-browser
+    kind: human_browser
+    native: true
+    requires_release_artifacts: true
+    description: Real browser artifact plus typed observer observation.
+scenarios:
+  - id: contracts.machine
+    title: Compile and adversarially validate all machine contracts
+    validation_roots:
+      - ARCH-VALIDATION-001
+      - HTTP-VALIDATION-001
+      - HTTP-VALIDATION-002
+      - CFG-VALIDATION-001
+      - CFG-VALIDATION-005
+      - OPS-VERIFY-004
+      - DATA-VALIDATION-001
+      - DATA-VALIDATION-002
+      - RUNTIME-VALIDATION-001
+      - VERIFY-VALIDATION-001
+      - VERIFY-VALIDATION-004
+      - RUNTIME-VALIDATION-004
+      - SEC-VALIDATION-008
+      - UI-TEST-011
+    subject:
+      kind: release
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: contract-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.contract-harness
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: contract_gate
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-contracts
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-contracts --phase setup
+      action: ci/verify-contracts --phase action
+      assert: ci/verify-contracts --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - contracts.machine.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: protocol.interleavings
+    title: Execute deterministic HTTP, SQLite, Runtime and worker event interleavings
+    validation_roots:
+      - ARCH-VALIDATION-002
+      - HTTP-VALIDATION-003
+      - DATA-VALIDATION-005
+      - DATA-VALIDATION-006
+      - DATA-VALIDATION-007
+      - DATA-VALIDATION-008
+      - RUNTIME-VALIDATION-002
+    subject:
+      kind: release
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: contract_gate
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-interleavings
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-interleavings --phase setup
+      action: ci/verify-interleavings --phase action
+      assert: ci/verify-interleavings --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - protocol.interleavings.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: config.pipeline
+    title: Validate strict YAML, PromQL AST and immutable config verification projection
+    validation_roots:
+      - CFG-VALIDATION-002
+      - CFG-VALIDATION-003
+      - CFG-VALIDATION-004
+    subject:
+      kind: config
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: contract_gate
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-config-pipeline
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-config-pipeline --phase setup
+      action: ci/verify-config-pipeline --phase action
+      assert: ci/verify-config-pipeline --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - config.pipeline.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: integration.model-provider-fixture
+    title: Black-box the deterministic OpenAI-compatible fixture contract
+    validation_roots:
+      - ARCH-VALIDATION-003
+    subject:
+      kind: release
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+          - external.openai-compatible-fixture
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-model-provider-fixture
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-model-provider-fixture --phase setup
+      action: ci/verify-model-provider-fixture --phase action
+      assert: ci/verify-model-provider-fixture --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - integration.model-provider-fixture.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: production.transport
+    title: Validate real ingress where applicable plus gRPC, noVNC and runtime transport behavior on every native target
+    validation_roots:
+      - HTTP-VALIDATION-004
+      - RUNTIME-VALIDATION-003
+    subject:
+      kind: deployment
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - external.transport-stack
+        parameters:
+          backend: compose
+        assertions:
+          - id: sse-resume-and-timeout
+            kind: protocol_event
+            expected: passed
+          - id: grpc-cancel-and-fence
+            kind: protocol_event
+            expected: passed
+          - id: novnc-reconnect-and-identity-release
+            kind: protocol_event
+            expected: passed
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - external.transport-stack
+        parameters:
+          backend: compose
+        assertions:
+          - id: sse-resume-and-timeout
+            kind: protocol_event
+            expected: passed
+          - id: grpc-cancel-and-fence
+            kind: protocol_event
+            expected: passed
+          - id: novnc-reconnect-and-identity-release
+            kind: protocol_event
+            expected: passed
+      - id: kubernetes-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - external.transport-stack
+        parameters:
+          backend: kubernetes
+        assertions:
+          - id: sse-resume-and-timeout
+            kind: protocol_event
+            expected: passed
+          - id: grpc-cancel-and-fence
+            kind: protocol_event
+            expected: passed
+          - id: novnc-reconnect-and-identity-release
+            kind: protocol_event
+            expected: passed
+          - id: ingress-buffering-compression-idle-timeout
+            kind: protocol_event
+            expected: passed
+      - id: kubernetes-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - external.transport-stack
+        parameters:
+          backend: kubernetes
+        assertions:
+          - id: sse-resume-and-timeout
+            kind: protocol_event
+            expected: passed
+          - id: grpc-cancel-and-fence
+            kind: protocol_event
+            expected: passed
+          - id: novnc-reconnect-and-identity-release
+            kind: protocol_event
+            expected: passed
+          - id: ingress-buffering-compression-idle-timeout
+            kind: protocol_event
+            expected: passed
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite production-transport
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite production-transport --phase setup
+      action: quoin-deploy <compose|helm> verify --suite production-transport --phase action
+      assert: quoin-deploy <compose|helm> verify --suite production-transport --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - production.transport.compose-linux-amd64
+        - production.transport.compose-linux-arm64
+        - production.transport.kubernetes-linux-amd64
+        - production.transport.kubernetes-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
+  - id: security.adversarial
+    title: Execute authentication, root-key, reveal, download and sentinel-leak adversarial suites
+    validation_roots:
+      - SEC-VALIDATION-001
+      - SEC-VALIDATION-002
+      - SEC-VALIDATION-003
+      - SEC-VALIDATION-004
+      - SEC-VALIDATION-006
+      - SEC-VALIDATION-007
+    subject:
+      kind: release
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-security
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-security --phase setup
+      action: ci/verify-security --phase action
+      assert: ci/verify-security --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - security.adversarial.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: release.native-matrix
+    title: Qualify the release on native Compose and the six-cell maintained-Kubernetes window
+    validation_roots:
+      - OPS-VERIFY-001
+      - OPS-VERIFY-002
+      - OPS-VERIFY-003
+      - VERIFY-VALIDATION-002
+    subject:
+      kind: release
+      selector: release_manifest_subject_and_platform_digests
+      drift_fields: []
+    fixtures:
+      - id: release-manifest
+        kind: release_artifact
+        locator: release-manifest.json
+        digest_required: true
+      - id: offline-archive
+        kind: release_artifact
+        locator: quoin-offline-archive
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - docker.version.release-pinned
+          - compose.version.release-pinned
+        parameters:
+          backend: compose
+          docker_version: release-pinned
+          compose_version: release-pinned
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - docker.version.release-pinned
+          - compose.version.release-pinned
+        parameters:
+          backend: compose
+          docker_version: release-pinned
+          compose_version: release-pinned
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-0-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-0-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_0.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-0-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-0-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_0.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-1-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-1-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_1.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-1-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-1-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_1.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-2-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-2-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_2.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+      - id: kubernetes-maintained-2-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-2-latest-patch
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_2.latest_patch
+        assertions:
+          - id: four-images-running
+            kind: state
+            expected: all_required_images_by_index_digest
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: all_ready_and_scraped
+          - id: registration-and-browser
+            kind: protocol_event
+            expected: runtime_registration_and_real_browser_passed
+          - id: backup-restore-upgrade
+            kind: state
+            expected: stateful_lifecycle_passed
+          - id: sentinel-scan
+            kind: state
+            expected: no_leak
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite release-qualification
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite release-qualification --phase setup
+      action: quoin-deploy <compose|helm> verify --suite release-qualification --phase action
+      assert: quoin-deploy <compose|helm> verify --suite release-qualification --phase assert
+      teardown: quoin-deploy <compose|helm> verify --suite release-qualification --phase teardown
+    depends_on: []
+    proof_refs:
+      - contracts.machine
+    required_capabilities: []
+    evidence:
+      test_names:
+        - release.native-matrix.compose-linux-amd64
+        - release.native-matrix.compose-linux-arm64
+        - release.native-matrix.kubernetes-maintained-0-linux-amd64
+        - release.native-matrix.kubernetes-maintained-0-linux-arm64
+        - release.native-matrix.kubernetes-maintained-1-linux-amd64
+        - release.native-matrix.kubernetes-maintained-1-linux-arm64
+        - release.native-matrix.kubernetes-maintained-2-linux-amd64
+        - release.native-matrix.kubernetes-maintained-2-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+        - logs
+        - metrics
+        - trace
+        - manifest
+        - sigstore_bundle
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: true
+      entrypoint: quoin-deploy <compose|helm> verify --suite release-qualification
+      success_assertions:
+        - temporary-environment-removed
+    timeout_seconds: 28800
+  - id: ui.automated
+    title: Run browser automation for routing, auth, concurrency, waiting and domain workbenches across the fixed viewport and motion matrix
+    validation_roots:
+      - HTTP-VALIDATION-005
+      - UI-TEST-001
+      - UI-TEST-002
+      - UI-TEST-003
+      - UI-TEST-005
+      - UI-TEST-006
+      - UI-TEST-007
+      - UI-TEST-008
+      - UI-TEST-009
+      - UI-TEST-010
+      - UI-TEST-011
+    subject:
+      kind: ui_surface
+      selector: release_subject_and_qualification_site
+      drift_fields:
+        - release_subject_digest
+        - browser_artifact_digest
+        - public_origin_digest
+    fixtures:
+      - id: release-browser-artifacts
+        kind: release_artifact
+        locator: release-manifest.browser.artifacts
+        digest_required: true
+      - id: branded-chrome
+        kind: external_target
+        locator: qualification-resolved-branded-chrome-build
+        digest_required: true
+      - id: qualification-site
+        kind: generated_data
+        locator: qualification.publicOriginDigest
+        digest_required: true
+    cells:
+      - id: playwright-chromium-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: dom-contracts
+            kind: state
+            expected: passed
+          - id: keyboard-navigation
+            kind: state
+            expected: passed
+          - id: focus-visibility-and-occlusion
+            kind: state
+            expected: passed
+          - id: target-size
+            kind: state
+            expected: passed
+          - id: responsive-reflow
+            kind: state
+            expected: passed
+          - id: axe-rules
+            kind: state
+            expected: passed
+          - id: domain-behavior
+            kind: state
+            expected: passed
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-ui-automation
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-ui-automation --phase setup
+      action: ci/verify-ui-automation --phase action
+      assert: ci/verify-ui-automation --phase assert
+      teardown: no-op
+    depends_on:
+      - release.native-matrix
+    proof_refs:
+      - contracts.machine
+    required_capabilities: []
+    evidence:
+      test_names:
+        - ui.automated.playwright-chromium-linux-amd64-320-normal
+        - ui.automated.playwright-chromium-linux-amd64-320-reduced
+        - ui.automated.playwright-chromium-linux-amd64-768-normal
+        - ui.automated.playwright-chromium-linux-amd64-768-reduced
+        - ui.automated.playwright-chromium-linux-amd64-1024-normal
+        - ui.automated.playwright-chromium-linux-amd64-1024-reduced
+        - ui.automated.playwright-chromium-linux-amd64-1440-normal
+        - ui.automated.playwright-chromium-linux-amd64-1440-reduced
+        - ui.automated.branded-chrome-linux-amd64-320-normal
+        - ui.automated.branded-chrome-linux-amd64-320-reduced
+        - ui.automated.branded-chrome-linux-amd64-768-normal
+        - ui.automated.branded-chrome-linux-amd64-768-reduced
+        - ui.automated.branded-chrome-linux-amd64-1024-normal
+        - ui.automated.branded-chrome-linux-amd64-1024-reduced
+        - ui.automated.branded-chrome-linux-amd64-1440-normal
+        - ui.automated.branded-chrome-linux-amd64-1440-reduced
+        - ui.automated.playwright-chromium-linux-arm64-320-normal
+        - ui.automated.playwright-chromium-linux-arm64-320-reduced
+        - ui.automated.playwright-chromium-linux-arm64-768-normal
+        - ui.automated.playwright-chromium-linux-arm64-768-reduced
+        - ui.automated.playwright-chromium-linux-arm64-1024-normal
+        - ui.automated.playwright-chromium-linux-arm64-1024-reduced
+        - ui.automated.playwright-chromium-linux-arm64-1440-normal
+        - ui.automated.playwright-chromium-linux-arm64-1440-reduced
+      attachments:
+        - structured_result
+        - trace
+        - screenshot
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 28800
+  - id: ui.manual-observation
+    title: Record the fixed 24-cell UI visual, motion and focus observation matrix
+    validation_roots:
+      - UI-TEST-002
+      - UI-TEST-003
+      - UI-TEST-004
+    subject:
+      kind: ui_surface
+      selector: release_subject_and_qualification_site
+      drift_fields:
+        - release_subject_digest
+        - browser_artifact_digest
+        - public_origin_digest
+    fixtures:
+      - id: release-browser-artifacts
+        kind: release_artifact
+        locator: release-manifest.browser.artifacts
+        digest_required: true
+      - id: branded-chrome
+        kind: external_target
+        locator: qualification-resolved-branded-chrome-build
+        digest_required: true
+      - id: qualification-site
+        kind: generated_data
+        locator: qualification.publicOriginDigest
+        digest_required: true
+    cells:
+      - id: playwright-chromium-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: admin_observation
+      entrypoint: ci/record-ui-observation
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/record-ui-observation --phase setup
+      action: ci/record-ui-observation --phase action
+      assert: ci/record-ui-observation --phase assert
+      teardown: no-op
+    depends_on:
+      - ui.automated
+    proof_refs:
+      - contracts.machine
+    required_capabilities: []
+    evidence:
+      test_names:
+        - ui.manual-observation.playwright-chromium-linux-amd64-320-normal
+        - ui.manual-observation.playwright-chromium-linux-amd64-320-reduced
+        - ui.manual-observation.playwright-chromium-linux-amd64-768-normal
+        - ui.manual-observation.playwright-chromium-linux-amd64-768-reduced
+        - ui.manual-observation.playwright-chromium-linux-amd64-1024-normal
+        - ui.manual-observation.playwright-chromium-linux-amd64-1024-reduced
+        - ui.manual-observation.playwright-chromium-linux-amd64-1440-normal
+        - ui.manual-observation.playwright-chromium-linux-amd64-1440-reduced
+        - ui.manual-observation.branded-chrome-linux-amd64-320-normal
+        - ui.manual-observation.branded-chrome-linux-amd64-320-reduced
+        - ui.manual-observation.branded-chrome-linux-amd64-768-normal
+        - ui.manual-observation.branded-chrome-linux-amd64-768-reduced
+        - ui.manual-observation.branded-chrome-linux-amd64-1024-normal
+        - ui.manual-observation.branded-chrome-linux-amd64-1024-reduced
+        - ui.manual-observation.branded-chrome-linux-amd64-1440-normal
+        - ui.manual-observation.branded-chrome-linux-amd64-1440-reduced
+        - ui.manual-observation.playwright-chromium-linux-arm64-320-normal
+        - ui.manual-observation.playwright-chromium-linux-arm64-320-reduced
+        - ui.manual-observation.playwright-chromium-linux-arm64-768-normal
+        - ui.manual-observation.playwright-chromium-linux-arm64-768-reduced
+        - ui.manual-observation.playwright-chromium-linux-arm64-1024-normal
+        - ui.manual-observation.playwright-chromium-linux-arm64-1024-reduced
+        - ui.manual-observation.playwright-chromium-linux-arm64-1440-normal
+        - ui.manual-observation.playwright-chromium-linux-arm64-1440-reduced
+      attachments:
+        - structured_result
+        - screenshot
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 28800
+  - id: fault.storage
+    title: Inject deterministic path-scoped storage errno and operation failures through Quoin faultfs
+    validation_roots:
+      - DATA-VALIDATION-004
+      - OPS-VERIFY-002
+    subject:
+      kind: deployment
+      selector: ephemeral_qualification_deployment
+      drift_fields:
+        - image_digest
+        - storage_layout_digest
+    fixtures:
+      - id: go-fuse-v2.9.0
+        kind: repository_file
+        locator: github.com/hanwen/go-fuse@3183e469f466607a92dd8c2cb44f966d7d69993b
+        digest_required: true
+      - id: storage-fault-profile
+        kind: fault_profile
+        locator: contracts/verification-catalog.yaml#fault.storage
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64-enospc
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: enospc
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: enospc
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-edquot
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: edquot
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: edquot
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-erofs
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: erofs
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: erofs
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-fsync-eio
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: fsync-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: fsync-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-rename-eio
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: rename-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: rename-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-enospc
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: enospc
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: enospc
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-edquot
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: edquot
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: edquot
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-erofs
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: erofs
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: erofs
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-fsync-eio
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: fsync-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: fsync-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-rename-eio
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: rename-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: rename-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-enospc
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: enospc
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: enospc
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-edquot
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: edquot
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: edquot
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-erofs
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: erofs
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: erofs
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-fsync-eio
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: fsync-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: fsync-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-rename-eio
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: rename-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: rename-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-enospc
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: enospc
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: enospc
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-edquot
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: edquot
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: edquot
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-erofs
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: erofs
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: erofs
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-fsync-eio
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: fsync-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: fsync-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-rename-eio
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.go-fuse-native
+        parameters:
+          fault_provider: go-fuse-loopback-v2.9.0
+          fault: rename-eio
+          paths:
+            - sqlite
+            - artifact-staging
+            - backup-output
+        assertions:
+          - id: fault-observed
+            kind: state
+            expected: rename-eio
+          - id: no-false-success
+            kind: state
+            expected: true
+          - id: recovery-action-exposed
+            kind: state
+            expected: true
+          - id: integrity-preserved
+            kind: state
+            expected: true
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite storage-faults
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite storage-faults --phase setup
+      action: quoin-deploy <compose|helm> verify --suite storage-faults --phase action
+      assert: quoin-deploy <compose|helm> verify --suite storage-faults --phase assert
+      teardown: quoin-deploy <compose|helm> verify --suite storage-faults --phase teardown
+    depends_on:
+      - release.native-matrix
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - fault.storage.compose-linux-amd64-enospc
+        - fault.storage.compose-linux-amd64-edquot
+        - fault.storage.compose-linux-amd64-erofs
+        - fault.storage.compose-linux-amd64-fsync-eio
+        - fault.storage.compose-linux-amd64-rename-eio
+        - fault.storage.compose-linux-arm64-enospc
+        - fault.storage.compose-linux-arm64-edquot
+        - fault.storage.compose-linux-arm64-erofs
+        - fault.storage.compose-linux-arm64-fsync-eio
+        - fault.storage.compose-linux-arm64-rename-eio
+        - fault.storage.kubernetes-linux-amd64-enospc
+        - fault.storage.kubernetes-linux-amd64-edquot
+        - fault.storage.kubernetes-linux-amd64-erofs
+        - fault.storage.kubernetes-linux-amd64-fsync-eio
+        - fault.storage.kubernetes-linux-amd64-rename-eio
+        - fault.storage.kubernetes-linux-arm64-enospc
+        - fault.storage.kubernetes-linux-arm64-edquot
+        - fault.storage.kubernetes-linux-arm64-erofs
+        - fault.storage.kubernetes-linux-arm64-fsync-eio
+        - fault.storage.kubernetes-linux-arm64-rename-eio
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+        - logs
+        - database
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: true
+      entrypoint: quoin-deploy <compose|helm> verify --suite storage-faults
+      success_assertions:
+        - fuse-unmounted
+        - temporary-data-removed
+    timeout_seconds: 28800
+  - id: fault.network
+    title: Inject the closed Toxiproxy TCP fault vocabulary on real native deployments
+    validation_roots:
+      - ARCH-VALIDATION-002
+      - RUNTIME-VALIDATION-002
+    subject:
+      kind: deployment
+      selector: ephemeral_qualification_deployment
+      drift_fields:
+        - image_digest
+        - network_topology_digest
+    fixtures:
+      - id: toxiproxy
+        kind: external_target
+        locator: qualification-resolved-toxiproxy-image-digest
+        digest_required: true
+      - id: network-fault-profile
+        kind: fault_profile
+        locator: contracts/verification-catalog.yaml#fault.network
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64-latency
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: latency
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-timeout
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: timeout
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-reset_peer
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: reset_peer
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-bandwidth
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: bandwidth
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-amd64-limit_data
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: limit_data
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-latency
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: latency
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-timeout
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: timeout
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-reset_peer
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: reset_peer
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-bandwidth
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: bandwidth
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: compose-linux-arm64-limit_data
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: limit_data
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-latency
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: latency
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-timeout
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: timeout
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-reset_peer
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: reset_peer
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-bandwidth
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: bandwidth
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64-limit_data
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: limit_data
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-latency
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: latency
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-timeout
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: timeout
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-reset_peer
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: reset_peer
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-bandwidth
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: bandwidth
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64-limit_data
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - fault.toxiproxy.digest-pinned
+        parameters:
+          fault_provider: toxiproxy
+          fault: limit_data
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: bounded-retry
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite network-faults --phase setup
+      action: quoin-deploy <compose|helm> verify --suite network-faults --phase action
+      assert: quoin-deploy <compose|helm> verify --suite network-faults --phase assert
+      teardown: quoin-deploy <compose|helm> verify --suite network-faults --phase teardown
+    depends_on:
+      - release.native-matrix
+    proof_refs:
+      - protocol.interleavings
+    required_capabilities: []
+    evidence:
+      test_names:
+        - fault.network.compose-linux-amd64-latency
+        - fault.network.compose-linux-amd64-timeout
+        - fault.network.compose-linux-amd64-reset_peer
+        - fault.network.compose-linux-amd64-bandwidth
+        - fault.network.compose-linux-amd64-limit_data
+        - fault.network.compose-linux-arm64-latency
+        - fault.network.compose-linux-arm64-timeout
+        - fault.network.compose-linux-arm64-reset_peer
+        - fault.network.compose-linux-arm64-bandwidth
+        - fault.network.compose-linux-arm64-limit_data
+        - fault.network.kubernetes-linux-amd64-latency
+        - fault.network.kubernetes-linux-amd64-timeout
+        - fault.network.kubernetes-linux-amd64-reset_peer
+        - fault.network.kubernetes-linux-amd64-bandwidth
+        - fault.network.kubernetes-linux-amd64-limit_data
+        - fault.network.kubernetes-linux-arm64-latency
+        - fault.network.kubernetes-linux-arm64-timeout
+        - fault.network.kubernetes-linux-arm64-reset_peer
+        - fault.network.kubernetes-linux-arm64-bandwidth
+        - fault.network.kubernetes-linux-arm64-limit_data
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: true
+      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults --phase cleanup
+      success_assertions:
+        - toxiproxy-removed
+        - proxy-routes-restored
+    timeout_seconds: 28800
+  - id: fault.protocol-delivery
+    title: Inject deterministic protocol-message reorder and duplicate delivery
+    validation_roots:
+      - ARCH-VALIDATION-002
+      - RUNTIME-VALIDATION-002
+    subject:
+      kind: deployment
+      selector: protocol_harness
+      drift_fields: []
+    fixtures:
+      - id: protocol-fault-fixtures
+        kind: repository_file
+        locator: testdata/protocol-faults
+        digest_required: true
+    cells:
+      - id: reorder
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+          - fault.protocol-fixture
+        parameters:
+          fault_provider: protocol_fixture
+          fault: reorder
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+      - id: duplicate
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+          - fault.protocol-fixture
+        parameters:
+          fault_provider: protocol_fixture
+          fault: duplicate
+        assertions:
+          - id: fault-deterministic
+            kind: state
+            expected: true
+          - id: idempotent-reconciliation
+            kind: state
+            expected: true
+          - id: no-false-terminal-success
+            kind: state
+            expected: true
+    status: active
+    layer: contract_gate
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-protocol-delivery-faults
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-protocol-delivery-faults --phase setup
+      action: ci/verify-protocol-delivery-faults --phase action
+      assert: ci/verify-protocol-delivery-faults --phase assert
+      teardown: no-op
+    depends_on:
+      - protocol.interleavings
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - fault.protocol-delivery.reorder
+        - fault.protocol-delivery.duplicate
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
+  - id: fault.time
+    title: Drive timeout and lease boundaries with injected deterministic clocks
+    validation_roots:
+      - HTTP-VALIDATION-003
+      - SEC-VALIDATION-001
+      - SEC-VALIDATION-004
+    subject:
+      kind: deployment
+      selector: process_harness
+      drift_fields: []
+    fixtures:
+      - id: clock-fixtures
+        kind: repository_file
+        locator: testdata/time-boundaries
+        digest_required: true
+    cells:
+      - id: session-idle-expiry
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters:
+          clock: injected_monotonic_and_wall_clock
+          boundary: session-idle-expiry
+        assertions:
+          - id: before-boundary
+            kind: state
+            expected: not_expired
+          - id: at-boundary
+            kind: state
+            expected: specified_transition
+          - id: after-boundary
+            kind: state
+            expected: stable_terminal_or_expired
+      - id: attempt-lease-expiry
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters:
+          clock: injected_monotonic_and_wall_clock
+          boundary: attempt-lease-expiry
+        assertions:
+          - id: before-boundary
+            kind: state
+            expected: not_expired
+          - id: at-boundary
+            kind: state
+            expected: specified_transition
+          - id: after-boundary
+            kind: state
+            expected: stable_terminal_or_expired
+      - id: reconnect-grace
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters:
+          clock: injected_monotonic_and_wall_clock
+          boundary: reconnect-grace
+        assertions:
+          - id: before-boundary
+            kind: state
+            expected: not_expired
+          - id: at-boundary
+            kind: state
+            expected: specified_transition
+          - id: after-boundary
+            kind: state
+            expected: stable_terminal_or_expired
+      - id: reveal-handle-expiry
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters:
+          clock: injected_monotonic_and_wall_clock
+          boundary: reveal-handle-expiry
+        assertions:
+          - id: before-boundary
+            kind: state
+            expected: not_expired
+          - id: at-boundary
+            kind: state
+            expected: specified_transition
+          - id: after-boundary
+            kind: state
+            expected: stable_terminal_or_expired
+      - id: verification-eight-hour-deadline
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters:
+          clock: injected_monotonic_and_wall_clock
+          boundary: verification-eight-hour-deadline
+        assertions:
+          - id: before-boundary
+            kind: state
+            expected: not_expired
+          - id: at-boundary
+            kind: state
+            expected: specified_transition
+          - id: after-boundary
+            kind: state
+            expected: stable_terminal_or_expired
+    status: active
+    layer: contract_gate
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-time-boundaries
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-time-boundaries --phase setup
+      action: ci/verify-time-boundaries --phase action
+      assert: ci/verify-time-boundaries --phase assert
+      teardown: no-op
+    depends_on:
+      - protocol.interleavings
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - fault.time.session-idle-expiry
+        - fault.time.attempt-lease-expiry
+        - fault.time.reconnect-grace
+        - fault.time.reveal-handle-expiry
+        - fault.time.verification-eight-hour-deadline
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
+  - id: deployment.verify-only
+    title: Verify the installed release without product user or external connection credentials
+    validation_roots:
+      - OPS-VERIFY-003
+      - VERIFY-VALIDATION-003
+    subject:
+      kind: deployment
+      selector: frozen_deployment_config_and_release_subject
+      drift_fields:
+        - release_subject_digest
+        - deployment_config_digest
+        - public_origin_digest
+    fixtures:
+      - id: deployment-verification-request
+        kind: generated_data
+        locator: deployment-verification.schema.json#/$defs/helperRequest
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+        parameters:
+          mode: verify-only
+          helper_credentials: none
+        assertions:
+          - id: release-digest-match
+            kind: digest_equal
+            expected: true
+          - id: workload-shape-match
+            kind: state
+            expected: true
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: true
+          - id: no-product-credentials
+            kind: state
+            expected: true
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+        parameters:
+          mode: verify-only
+          helper_credentials: none
+        assertions:
+          - id: release-digest-match
+            kind: digest_equal
+            expected: true
+          - id: workload-shape-match
+            kind: state
+            expected: true
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: true
+          - id: no-product-credentials
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+        parameters:
+          mode: verify-only
+          helper_credentials: none
+        assertions:
+          - id: release-digest-match
+            kind: digest_equal
+            expected: true
+          - id: workload-shape-match
+            kind: state
+            expected: true
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: true
+          - id: no-product-credentials
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+        parameters:
+          mode: verify-only
+          helper_credentials: none
+        assertions:
+          - id: release-digest-match
+            kind: digest_equal
+            expected: true
+          - id: workload-shape-match
+            kind: state
+            expected: true
+          - id: readiness-and-metrics
+            kind: http_response
+            expected: true
+          - id: no-product-credentials
+            kind: state
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite deployment-acceptance
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase setup
+      action: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase action
+      assert: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs:
+      - contracts.machine
+      - release.native-matrix
+    required_capabilities: []
+    evidence:
+      test_names:
+        - deployment.verify-only.compose-linux-amd64
+        - deployment.verify-only.compose-linux-arm64
+        - deployment.verify-only.kubernetes-linux-amd64
+        - deployment.verify-only.kubernetes-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+        - metrics
+        - manifest
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
+  - id: ui.deployment-observation
+    title: Record the fixed 24-cell typed UI observation against the deployed site
+    validation_roots:
+      - UI-TEST-002
+      - UI-TEST-003
+      - UI-TEST-004
+    subject:
+      kind: ui_surface
+      selector: frozen_release_browser_artifacts_and_deployment_public_origin
+      drift_fields:
+        - release_subject_digest
+        - browser_artifact_digest
+        - browser_artifact_version
+        - public_origin_digest
+    fixtures:
+      - id: release-browser-artifacts
+        kind: release_artifact
+        locator: release-manifest.browser.artifacts
+        digest_required: true
+      - id: deployed-site
+        kind: generated_data
+        locator: manifest.publicOriginDigest
+        digest_required: true
+    cells:
+      - id: playwright-chromium-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-320-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-768-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-normal
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: branded-chrome-linux-amd64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.branded-chrome-linux-amd64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: branded_chrome
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-320-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 320
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-768-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 768
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1024-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1024
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-normal
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: normal
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+      - id: playwright-chromium-linux-arm64-1440-reduced
+        environment_id: human-browser
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - browser.playwright-chromium-linux-arm64
+          - browser.evidence.typed-observation
+        parameters:
+          browser_artifact: playwright_chromium
+          viewport_width_css_px: 1440
+          motion_mode: reduced
+        assertions:
+          - id: visual-comprehension
+            kind: human_observation
+            expected: passed
+          - id: motion-feedback
+            kind: human_observation
+            expected: passed
+          - id: focus-not-occluded
+            kind: human_observation
+            expected: passed
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: admin_observation
+      entrypoint: POST /api/v1/deployment-verifications/{invocationId}/observations
+      requires_admin_session: true
+      requires_product_credentials: false
+    phases:
+      setup: POST /api/v1/deployment-verifications/{invocationId}/observations --phase setup
+      action: POST /api/v1/deployment-verifications/{invocationId}/observations --phase action
+      assert: POST /api/v1/deployment-verifications/{invocationId}/observations --phase assert
+      teardown: no-op
+    depends_on:
+      - deployment.verify-only
+    proof_refs:
+      - ui.manual-observation
+    required_capabilities: []
+    evidence:
+      test_names:
+        - ui.deployment-observation.playwright-chromium-linux-amd64-320-normal
+        - ui.deployment-observation.playwright-chromium-linux-amd64-320-reduced
+        - ui.deployment-observation.playwright-chromium-linux-amd64-768-normal
+        - ui.deployment-observation.playwright-chromium-linux-amd64-768-reduced
+        - ui.deployment-observation.playwright-chromium-linux-amd64-1024-normal
+        - ui.deployment-observation.playwright-chromium-linux-amd64-1024-reduced
+        - ui.deployment-observation.playwright-chromium-linux-amd64-1440-normal
+        - ui.deployment-observation.playwright-chromium-linux-amd64-1440-reduced
+        - ui.deployment-observation.branded-chrome-linux-amd64-320-normal
+        - ui.deployment-observation.branded-chrome-linux-amd64-320-reduced
+        - ui.deployment-observation.branded-chrome-linux-amd64-768-normal
+        - ui.deployment-observation.branded-chrome-linux-amd64-768-reduced
+        - ui.deployment-observation.branded-chrome-linux-amd64-1024-normal
+        - ui.deployment-observation.branded-chrome-linux-amd64-1024-reduced
+        - ui.deployment-observation.branded-chrome-linux-amd64-1440-normal
+        - ui.deployment-observation.branded-chrome-linux-amd64-1440-reduced
+        - ui.deployment-observation.playwright-chromium-linux-arm64-320-normal
+        - ui.deployment-observation.playwright-chromium-linux-arm64-320-reduced
+        - ui.deployment-observation.playwright-chromium-linux-arm64-768-normal
+        - ui.deployment-observation.playwright-chromium-linux-arm64-768-reduced
+        - ui.deployment-observation.playwright-chromium-linux-arm64-1024-normal
+        - ui.deployment-observation.playwright-chromium-linux-arm64-1024-reduced
+        - ui.deployment-observation.playwright-chromium-linux-arm64-1440-normal
+        - ui.deployment-observation.playwright-chromium-linux-arm64-1440-reduced
+      attachments:
+        - structured_result
+        - screenshot
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 28800
+  - id: deployment.migrations
+    title: Upgrade every published historical fixture and compare sqlite_master
+    validation_roots:
+      - DATA-VALIDATION-003
+    subject:
+      kind: deployment
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: process-harness
+        architecture: not_applicable
+        applicability:
+          mode: always
+        required_capabilities:
+          - environment.process-harness
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: ci
+      entrypoint: ci/verify-migrations
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: ci/verify-migrations --phase setup
+      action: ci/verify-migrations --phase action
+      assert: ci/verify-migrations --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - deployment.migrations.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: deployment.restore-isolation
+    title: Restore real state and prove identity isolation before reopening
+    validation_roots:
+      - SEC-VALIDATION-005
+    subject:
+      kind: deployment
+      selector: frozen_manifest_subject
+      drift_fields:
+        - deployment_config_digest
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: restore-complete
+            kind: state
+            expected: true
+          - id: identity-isolation-proved
+            kind: state
+            expected: true
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: restore-complete
+            kind: state
+            expected: true
+          - id: identity-isolation-proved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: restore-complete
+            kind: state
+            expected: true
+          - id: identity-isolation-proved
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: restore-complete
+            kind: state
+            expected: true
+          - id: identity-isolation-proved
+            kind: state
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> restore --verify-isolation
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> restore --verify-isolation --phase setup
+      action: quoin-deploy <compose|helm> restore --verify-isolation --phase action
+      assert: quoin-deploy <compose|helm> restore --verify-isolation --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs:
+      - deployment.migrations
+      - release.native-matrix
+    required_capabilities: []
+    fixtures: []
+    evidence:
+      test_names:
+        - deployment.restore-isolation.compose-linux-amd64
+        - deployment.restore-isolation.compose-linux-arm64
+        - deployment.restore-isolation.kubernetes-linux-amd64
+        - deployment.restore-isolation.kubernetes-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
+  - id: connection.current-bindings
+    title: Probe every current Connection revision and credential generation
+    validation_roots:
+      - ARCH-VALIDATION-003
+    subject:
+      kind: connection
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: real-external
+        architecture: not_applicable
+        applicability:
+          mode: for_each_current_object
+          object_kind: connection
+        required_capabilities:
+          - external.current-connection
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: quoin
+      entrypoint: connection-probe:all-current
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: connection-probe:all-current --phase setup
+      action: connection-probe:all-current --phase action
+      assert: connection-probe:all-current --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - connection.current-bindings.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: config.current-versions
+    title: Verify every current published business-system config without retargeting
+    validation_roots:
+      - CFG-VALIDATION-004
+    subject:
+      kind: config
+      selector: frozen_manifest_subject
+      drift_fields: []
+    fixtures:
+      - id: repository-contracts
+        kind: repository_file
+        locator: docs/specs/quoin-v1/contracts
+        digest_required: true
+    cells:
+      - id: default
+        environment_id: real-external
+        architecture: not_applicable
+        applicability:
+          mode: for_each_current_object
+          object_kind: config
+        required_capabilities:
+          - external.current-business-system
+        parameters: {}
+        assertions:
+          - id: command-exit-zero
+            kind: exit_code
+            expected: 0
+          - id: structured-result-valid
+            kind: schema_valid
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: quoin
+      entrypoint: config-verification:all-current
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: config-verification:all-current --phase setup
+      action: config-verification:all-current --phase action
+      assert: config-verification:all-current --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs: []
+    required_capabilities: []
+    evidence:
+      test_names:
+        - config.current-versions.default
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 1800
+  - id: browser.current-identities
+    title: Clone and verify every current Browser Identity, then prove same-boot cleanup
+    validation_roots:
+      - RUNTIME-VALIDATION-003
+    subject:
+      kind: browser_identity
+      selector: all_current_browser_identities
+      drift_fields:
+        - identity_revision_id
+        - current_generation_id
+        - inventory_digest
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: functional-verdict-recorded
+            kind: state
+            expected: true
+          - id: cleanup-outcome-recorded
+            kind: state
+            expected: clean
+          - id: operation-process-absent
+            kind: state
+            expected: true
+          - id: cgroup-empty
+            kind: state
+            expected: true
+          - id: chromium-absent
+            kind: state
+            expected: true
+          - id: x0vnc-and-novnc-absent
+            kind: state
+            expected: true
+          - id: clone-namespace-absent
+            kind: state
+            expected: true
+          - id: temporary-files-absent
+            kind: state
+            expected: true
+          - id: runtime-handle-absent
+            kind: state
+            expected: true
+          - id: slot-lease-released
+            kind: state
+            expected: true
+          - id: stop-confirmed-and-lock-released-atomically
+            kind: state
+            expected: true
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: functional-verdict-recorded
+            kind: state
+            expected: true
+          - id: cleanup-outcome-recorded
+            kind: state
+            expected: clean
+          - id: operation-process-absent
+            kind: state
+            expected: true
+          - id: cgroup-empty
+            kind: state
+            expected: true
+          - id: chromium-absent
+            kind: state
+            expected: true
+          - id: x0vnc-and-novnc-absent
+            kind: state
+            expected: true
+          - id: clone-namespace-absent
+            kind: state
+            expected: true
+          - id: temporary-files-absent
+            kind: state
+            expected: true
+          - id: runtime-handle-absent
+            kind: state
+            expected: true
+          - id: slot-lease-released
+            kind: state
+            expected: true
+          - id: stop-confirmed-and-lock-released-atomically
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: functional-verdict-recorded
+            kind: state
+            expected: true
+          - id: cleanup-outcome-recorded
+            kind: state
+            expected: clean
+          - id: operation-process-absent
+            kind: state
+            expected: true
+          - id: cgroup-empty
+            kind: state
+            expected: true
+          - id: chromium-absent
+            kind: state
+            expected: true
+          - id: x0vnc-and-novnc-absent
+            kind: state
+            expected: true
+          - id: clone-namespace-absent
+            kind: state
+            expected: true
+          - id: temporary-files-absent
+            kind: state
+            expected: true
+          - id: runtime-handle-absent
+            kind: state
+            expected: true
+          - id: slot-lease-released
+            kind: state
+            expected: true
+          - id: stop-confirmed-and-lock-released-atomically
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: functional-verdict-recorded
+            kind: state
+            expected: true
+          - id: cleanup-outcome-recorded
+            kind: state
+            expected: clean
+          - id: operation-process-absent
+            kind: state
+            expected: true
+          - id: cgroup-empty
+            kind: state
+            expected: true
+          - id: chromium-absent
+            kind: state
+            expected: true
+          - id: x0vnc-and-novnc-absent
+            kind: state
+            expected: true
+          - id: clone-namespace-absent
+            kind: state
+            expected: true
+          - id: temporary-files-absent
+            kind: state
+            expected: true
+          - id: runtime-handle-absent
+            kind: state
+            expected: true
+          - id: slot-lease-released
+            kind: state
+            expected: true
+          - id: stop-confirmed-and-lock-released-atomically
+            kind: state
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: runtime
+      entrypoint: lintel:deployment-verification
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: lintel:deployment-verification --phase setup
+      action: lintel:deployment-verification --phase action
+      assert: lintel:deployment-verification --phase assert
+      teardown: lintel:deployment-verification-cleanup --phase teardown
+    depends_on:
+      - config.current-versions
+    proof_refs:
+      - release.native-matrix
+    required_capabilities: []
+    fixtures: []
+    evidence:
+      test_names:
+        - browser.current-identities.compose-linux-amd64
+        - browser.current-identities.compose-linux-arm64
+        - browser.current-identities.kubernetes-linux-amd64
+        - browser.current-identities.kubernetes-linux-arm64
+      attachments:
+        - structured_result
+        - trace
+        - screenshot
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: true
+      entrypoint: lintel:deployment-verification-cleanup
+      success_assertions:
+        - operation-process-absent
+        - cgroup-empty
+        - chromium-absent
+        - x0vnc-and-novnc-absent
+        - clone-namespace-absent
+        - temporary-files-absent
+        - runtime-handle-absent
+        - slot-lease-released
+        - stop-confirmed-and-lock-released-atomically
+    timeout_seconds: 3600
+  - id: browser.lintel-recovery
+    title: Recover an indeterminate or residual browser cleanup fence offline
+    validation_roots:
+      - SEC-VALIDATION-005
+      - OPS-VERIFY-002
+    subject:
+      kind: browser_identity
+      selector: frozen_recovery_report_and_affected_operations
+      drift_fields:
+        - old_slot_id
+        - old_token_generation
+        - disposition_digest
+    fixtures:
+      - id: isolated-recovery-fence
+        kind: fault_profile
+        locator: deployment-helper:provision-disposable-indeterminate-lintel-cleanup
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: maintenance-state-exclusive
+            kind: state
+            expected: LintelRecovery
+          - id: old-workload-and-process-fenced
+            kind: state
+            expected: true
+          - id: storage-disposition
+            kind: state
+            expected:
+              - exclusively_reattached
+              - retired
+          - id: replacement-token-generation-advanced
+            kind: state
+            expected: true
+          - id: recovery-receipt-append-only
+            kind: state
+            expected: true
+          - id: old-result-never-reclassified
+            kind: state
+            expected: true
+          - id: retired-identity-authentication-required
+            kind: state
+            expected: true
+          - id: post-verify-passed
+            kind: state
+            expected: true
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: compose
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: maintenance-state-exclusive
+            kind: state
+            expected: LintelRecovery
+          - id: old-workload-and-process-fenced
+            kind: state
+            expected: true
+          - id: storage-disposition
+            kind: state
+            expected:
+              - exclusively_reattached
+              - retired
+          - id: replacement-token-generation-advanced
+            kind: state
+            expected: true
+          - id: recovery-receipt-append-only
+            kind: state
+            expected: true
+          - id: old-result-never-reclassified
+            kind: state
+            expected: true
+          - id: retired-identity-authentication-required
+            kind: state
+            expected: true
+          - id: post-verify-passed
+            kind: state
+            expected: true
+      - id: kubernetes-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/amd64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+        parameters: {}
+        assertions:
+          - id: maintenance-state-exclusive
+            kind: state
+            expected: LintelRecovery
+          - id: old-workload-and-process-fenced
+            kind: state
+            expected: true
+          - id: storage-disposition
+            kind: state
+            expected:
+              - exclusively_reattached
+              - retired
+          - id: replacement-token-generation-advanced
+            kind: state
+            expected: true
+          - id: recovery-receipt-append-only
+            kind: state
+            expected: true
+          - id: old-result-never-reclassified
+            kind: state
+            expected: true
+          - id: retired-identity-authentication-required
+            kind: state
+            expected: true
+          - id: post-verify-passed
+            kind: state
+            expected: true
+      - id: kubernetes-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: deployment_target
+          backend: kubernetes
+          architecture: linux/arm64
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+        parameters: {}
+        assertions:
+          - id: maintenance-state-exclusive
+            kind: state
+            expected: LintelRecovery
+          - id: old-workload-and-process-fenced
+            kind: state
+            expected: true
+          - id: storage-disposition
+            kind: state
+            expected:
+              - exclusively_reattached
+              - retired
+          - id: replacement-token-generation-advanced
+            kind: state
+            expected: true
+          - id: recovery-receipt-append-only
+            kind: state
+            expected: true
+          - id: old-result-never-reclassified
+            kind: state
+            expected: true
+          - id: retired-identity-authentication-required
+            kind: state
+            expected: true
+          - id: post-verify-passed
+            kind: state
+            expected: true
+    status: active
+    layer: deployment_acceptance
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> recover-lintel
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> recover-lintel --phase setup
+      action: quoin-deploy <compose|helm> recover-lintel --phase action
+      assert: quoin-deploy <compose|helm> recover-lintel --phase assert
+      teardown: no-op
+    depends_on: []
+    proof_refs:
+      - release.native-matrix
+    required_capabilities: []
+    evidence:
+      test_names:
+        - browser.lintel-recovery.compose-linux-amd64
+        - browser.lintel-recovery.compose-linux-arm64
+        - browser.lintel-recovery.kubernetes-linux-amd64
+        - browser.lintel-recovery.kubernetes-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+        - manifest
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: false
+      entrypoint: none
+      success_assertions: []
+    timeout_seconds: 3600
