@@ -1,0 +1,26 @@
+document: helm-install
+publicOrigin: https://quoin.internal.example
+publicIngress:
+  enabled: true
+  className: nginx
+  host: quoin.internal.example
+  tlsSecretName: quoin-public-tls
+steleIngress:
+  enabled: true
+  className: nginx
+  host: alerts.internal.example
+  tlsSecretName: quoin-stele-tls
+storage:
+  quoinData:
+    capacity: 20Gi
+    accessMode: ReadWriteOncePod
+  quoinBackup:
+    capacity: 100Gi
+    accessMode: ReadWriteOncePod
+  plinthState:
+    capacity: 10Gi
+    accessMode: ReadWriteOncePod
+  lintelState:
+    capacity: 20Gi
+    accessMode: ReadWriteOncePod
+lintelBrowserSlots: 2

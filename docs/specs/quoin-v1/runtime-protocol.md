@@ -9,7 +9,7 @@
 - **RUNTIME-SCOPE-001 —** 四组件 gRPC 的 service、RPC、message、stream 方向与枚举值 **MUST** 只由 `contracts/runtime.proto`（`quoin.runtime.v1`）定义；本文件 **MUST NOT** 声明 proto 中不存在的服务、消息、字段或枚举值（SPEC-AUTHORITY-001/003）。
 - **RUNTIME-SCOPE-002 —** 本文件 **MUST** 只拥有无法由 proto 表达的跨流语义：握手顺序、身份裁决、lease/fencing、调和、提交顺序裁决、故障与恢复；不重复 proto 已表达的形状。（来源：README「权威源与事实所有权」、Issue #8）
 - **RUNTIME-SCOPE-003 —** locator（attempt、operation、artifact、source、credential 等）在 proto 中 **MUST** 使用 `int64`，与 SQLite INTEGER 及 HTTP 十进制字符串表示一致（DATA-IDENT-002）；`0` 表示无该 locator，边界校验见 RUNTIME-VALIDATION-004。
-- **RUNTIME-SCOPE-004 —** 数值型调优参数（heartbeat 周期、lease 时长、上传 chunk 大小、流队列深度、重附着宽限期、轮换窗口）**MUST** 由部署配置与原型测量决定，本文件与 proto **MUST NOT** 冻结具体数值；proto 只提供承载这些值的字段类型与语义（Timestamp/Duration/uint64/uint32）。（来源：CONTEXT「执行尝试」「健康语义」、Issue #11 研究结论）
+- **RUNTIME-SCOPE-004 —** 数值型协议调优参数（heartbeat 周期、lease 时长、上传 chunk 大小、流队列深度、重附着宽限期、轮换窗口）**MUST** 由原型测量后作为同一 Release 的内部常量冻结并由四组件共享，**MUST NOT** 成为 Helm values、Compose 输入、Admin 设置或组件自由组合配置；本文件与 proto 只拥有字段类型与语义（Timestamp/Duration/uint64/uint32），具体数值由版本化 release source 锁拥有。（来源：CONTEXT「执行尝试」「健康语义」、Issue #11 研究结论、Issue #17 Q17.1/Q17.22）
 
 ## 2. 身份与认证
 
@@ -116,7 +116,7 @@
 
 ## 11. 注册与轮换
 
-- **RUNTIME-REG-001 —** 一次性注册令牌只存在于进程内存，固定 60 秒、单次成功消费、绑定发起 Admin Session、slot 与 generation；HTTP `replaceRuntimeSlot` + `revealRuntimeRegistrationToken` 遵循 SEC-REVEAL-*。令牌/handle 不得进入 SQLite、日志、审计、Artifact 或命令持久结果。（来源：Issue #16、HTTP-COMMAND-012、RUNTIME-AUTH-006）
+- **RUNTIME-REG-001 —** 一次性注册令牌只存在于进程内存，固定 60 秒、单次成功消费、绑定发起 Admin Session、slot 与 generation；HTTP `prepareRuntimeRegistration` + `revealRuntimeRegistrationToken` 遵循 SEC-REVEAL-*。令牌/handle 不得进入 SQLite、日志、审计、Artifact 或命令持久结果。（来源：Issue #16、HTTP-COMMAND-012、RUNTIME-AUTH-006）
 - **RUNTIME-REG-002 —** `RuntimeControl.Register` **MUST** 只接受注册窗口中的请求：验证内存令牌的 slot/generation、单次消费和 release version；同一事务创建已确认 credential、设置 current、slot 转 registered，返回长期 token/generation。supervisor 原子持久化到 0600 状态卷。响应丢失后令牌不得重放，恢复必须由 Admin 再次 replace。（来源：DATA-RUNTIME-001/002、SEC-REVEAL-*）
 - **RUNTIME-REG-003 —** slot 已 registered、generation/slot 不匹配、token 过期/消费等拒绝映射保持封闭 canonical gRPC status；detail 只含非秘密说明。（来源：RUNTIME-ERROR-001、SEC-ERROR-001）
 - **RUNTIME-REG-004 —** 长期 token 两阶段轮换只走已认证控制流：① Quoin 创建未确认 credential 并设 pending，发送 `IssueToken`；② Runtime 原子持久化新 token 后回 `TokenPersisted`；③ Quoin写 `confirmed_at`，单条 UPDATE 把 pending 提升为 current、原 current 移入 retiring；④ Quoin 以 `GoAway{ROTATED}` 关闭旧 epoch，Runtime 用新 token 重连；⑤ 新 current 首次成功认证时写 `first_authenticated_at`，旧 generation 进入用户可见 Pending Retirement；⑥ 只有 Admin 的 `retireRuntimeCredential` 才清 retiring 并永久退休旧 generation。步骤⑤ **MUST NOT** 自动执行步骤⑥，也不设 TTL。（来源：CONTEXT「服务身份」「安全、身份与恢复」、Issue #16、DATA-RUNTIME-002）

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/plinth-worker-tools.schema.json",
+  "title": "Plinth worker tool catalogue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "owner", "base_distribution", "base_image", "architectures", "bash_tool", "packages", "executable_paths", "readonly_runtime_paths", "forbidden_runtime_actions"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "owner": { "const": "OPS-IMAGE-004" },
+    "base_distribution": { "const": "debian-13" },
+    "base_image": { "const": "debian13_slim" },
+    "architectures": { "const": ["linux/amd64", "linux/arm64"] },
+    "bash_tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "argv", "cwd", "inherit_environment", "environment"],
+      "properties": {
+        "executable": { "const": "/bin/bash" },
+        "argv": { "const": ["--noprofile", "--norc", "-c"] },
+        "cwd": { "const": "attempt_workspace" },
+        "inherit_environment": { "const": false },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "required": ["PATH", "LANG", "LC_ALL", "TMPDIR"]
+        }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "versions"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]*$" },
+          "versions": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["linux/amd64", "linux/arm64"],
+            "properties": {
+              "linux/amd64": { "type": "string", "minLength": 1 },
+              "linux/arm64": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "executable_paths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^/(?:bin|usr/bin)/[A-Za-z0-9._+-]+$" }
+    },
+    "readonly_runtime_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["common", "linux/amd64", "linux/arm64"],
+      "properties": {
+        "common": { "$ref": "#/$defs/pathList" },
+        "linux/amd64": { "$ref": "#/$defs/pathList" },
+        "linux/arm64": { "$ref": "#/$defs/pathList" }
+      }
+    },
+    "forbidden_runtime_actions": {
+      "type": "array",
+      "const": ["package_install", "network_download", "inherited_credentials", "executable_outside_catalog"]
+    }
+  },
+  "$defs": {
+    "pathList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^/" }
+    }
+  }
+}

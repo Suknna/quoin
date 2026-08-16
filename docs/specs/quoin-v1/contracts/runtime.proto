@@ -250,7 +250,7 @@ message RegisterRuntimeRequest {
 
 // Register 响应：长期服务 token 仅此一次返回；supervisor 必须原子持久化到权限 0600
 // 的专用状态卷（RUNTIME-REG-002）。响应丢失时不得重放一次性令牌——slot 已 registered
-// 的恢复路径是 Admin 重新执行 replaceRuntimeSlot（HTTP-COMMAND-012）。
+// 的恢复路径是 Admin 重新执行 prepareRuntimeRegistration（HTTP-COMMAND-012）。
 message RegisterRuntimeResponse {
   RuntimeSlot slot = 1;
   uint64 generation = 2;         // 与请求一致（runtime_credentials.generation）
@@ -354,7 +354,7 @@ message HelloAck {
 }
 
 // 心跳：更新瞬时连接投影（connected/lastSeenAt）；不写 runtime_slots.row_version
-// （DATA-RUNTIME-001）；周期为部署配置，不在协议冻结数值（RUNTIME-CTRL-005）。
+// （DATA-RUNTIME-001）；周期为同一 Release 的内部常量，不在协议冻结数值（RUNTIME-SCOPE-004、RUNTIME-CTRL-005）。
 message Heartbeat {
   uint64 seq = 1;                  // 当前连接内单调递增
   repeated int64 active_attempts = 2; // Runtime 当前正在执行的 attempt（调和输入）
@@ -365,7 +365,7 @@ message Heartbeat {
 // 容量投影（部署内部）：只用于派发决策提示，不是权威事实（RUNTIME-CTRL-005）。
 message Capacity {
   uint32 running = 1;
-  uint32 max = 2;                  // 部署配置的并发上限
+  uint32 max = 2;                  // 当前 boot 固定容量；Plinth 来自 Release 常量，Lintel 来自 browserSlots
 }
 
 // 派发：Quoin 先持久化 Attempt（Assigned，带 slot/boot/epoch/lease）后发送本消息

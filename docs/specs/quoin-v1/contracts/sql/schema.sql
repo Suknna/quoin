@@ -23,6 +23,8 @@
 --     （DATA-MIGRATION-*），本文件不包含迁移种子。
 -- ============================================================================
 
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 PRAGMA recursive_triggers = ON;
 
@@ -1724,19 +1726,63 @@ CREATE TABLE backup_settings (
   updated_at      TEXT NOT NULL
 ) STRICT;
 
+-- Backup Run 是可恢复的受限状态机：HTTP 202 先插入 queued，执行器再推进 running，
+-- 终态 succeeded|failed 不可改写。启动调和把遗留 queued|running 显式推进 failed（OPS-BACKUP-001..004）。
+CREATE TABLE artifact_retention_settings (
+  id                       INTEGER PRIMARY KEY CHECK (id = 1),
+  generated_retention_days INTEGER NOT NULL DEFAULT 90 CHECK (generated_retention_days >= 1),
+  row_version              INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  updated_by               INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  updated_at               TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE backups (
   id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  status          TEXT NOT NULL CHECK (status IN ('succeeded','failed')),
+  status          TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed')),
+  stage           TEXT NOT NULL CHECK (stage IN ('queued','preflight','database_snapshot','artifact_copy','manifest_publish','completed')),
+  trigger_kind    TEXT NOT NULL CHECK (trigger_kind IN ('manual','scheduled','upgrade')),
+  execution_mode  TEXT NOT NULL CHECK (execution_mode IN ('online','offline')),
+  scheduled_for   TEXT,  -- UTC 计划边界；仅 scheduled 非空，用于停机 catch-up 幂等
   db_sha256       TEXT CHECK (db_sha256 IS NULL OR length(db_sha256) = 64),
   manifest_sha256 TEXT CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
   artifact_count  INTEGER CHECK (artifact_count IS NULL OR artifact_count >= 0),
   manifest_path   TEXT,
-  error_detail    TEXT,
+  error_code      TEXT CHECK (error_code IS NULL OR (length(error_code) BETWEEN 1 AND 128)),
+  retryable       INTEGER CHECK (retryable IS NULL OR retryable IN (0,1)),
+  error_detail    TEXT CHECK (error_detail IS NULL OR (length(error_detail) BETWEEN 1 AND 4096)),
+  row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  started_at      TEXT,
+  completed_at    TEXT,
   triggered_by    INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  CHECK ((status = 'succeeded' AND db_sha256 IS NOT NULL AND manifest_sha256 IS NOT NULL AND manifest_path IS NOT NULL) OR status = 'failed')
+  CHECK (
+    (trigger_kind = 'manual' AND execution_mode = 'online' AND scheduled_for IS NULL AND triggered_by IS NOT NULL)
+    OR (trigger_kind = 'manual' AND execution_mode = 'offline' AND scheduled_for IS NULL AND triggered_by IS NULL)
+    OR (trigger_kind = 'scheduled' AND execution_mode = 'online' AND scheduled_for IS NOT NULL AND triggered_by IS NULL)
+    OR (trigger_kind = 'upgrade' AND execution_mode = 'online' AND scheduled_for IS NULL AND triggered_by IS NOT NULL)
+  ),
+  CHECK (
+    (status = 'queued' AND stage = 'queued' AND started_at IS NULL AND completed_at IS NULL
+      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND manifest_path IS NULL
+      AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
+    OR
+    (status = 'running' AND stage IN ('preflight','database_snapshot','artifact_copy','manifest_publish')
+      AND started_at IS NOT NULL AND completed_at IS NULL
+      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND manifest_path IS NULL
+      AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
+    OR
+    (status = 'succeeded' AND stage = 'completed' AND started_at IS NOT NULL AND completed_at IS NOT NULL
+      AND db_sha256 IS NOT NULL AND manifest_sha256 IS NOT NULL AND artifact_count IS NOT NULL AND manifest_path IS NOT NULL
+      AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
+    OR
+    (status = 'failed' AND stage <> 'completed' AND completed_at IS NOT NULL AND db_sha256 IS NULL AND manifest_sha256 IS NULL
+      AND artifact_count IS NULL AND manifest_path IS NULL AND error_code IS NOT NULL AND retryable IS NOT NULL AND error_detail IS NOT NULL)
+  )
 ) STRICT;
 CREATE INDEX idx_backups_created ON backups (created_at);
+CREATE UNIQUE INDEX ux_backups_active ON backups ((1)) WHERE status IN ('queued','running');
+CREATE UNIQUE INDEX ux_backups_scheduled_for ON backups (scheduled_for) WHERE trigger_kind = 'scheduled';
 
 CREATE TABLE schema_state (
   id             INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1771,7 +1817,7 @@ CREATE TABLE maintenance_state (
 CREATE TABLE maintenance_items (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   maintenance_revision INTEGER NOT NULL CHECK (maintenance_revision >= 1),
-  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','SchemaMigration','ReleaseVersion','Integrity','SearchProjection')),
+  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','ActiveAttempt','ActiveBrowserOperation','BackupPreflight','SchemaMigration','ReleaseVersion','Integrity','SearchProjection')),
   object_key           TEXT NOT NULL CHECK (length(object_key) BETWEEN 1 AND 256),
   safe_state           TEXT NOT NULL CHECK (safe_state IN ('Safe','Blocking')),
   detail_code          TEXT NOT NULL CHECK (length(detail_code) BETWEEN 1 AND 128),
@@ -2594,6 +2640,12 @@ BEGIN SELECT RAISE(ABORT, 'reusable_knowledge row_version must increase exactly 
 CREATE TRIGGER trg_backup_settings_row_version_increment BEFORE UPDATE ON backup_settings
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'backup_settings row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_artifact_retention_settings_row_version_increment BEFORE UPDATE ON artifact_retention_settings
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'artifact_retention_settings row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_backups_row_version_increment BEFORE UPDATE ON backups
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'backups row_version must increase exactly by 1'); END;
 CREATE TRIGGER trg_runtime_credentials_row_version_increment BEFORE UPDATE ON runtime_credentials
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'runtime_credentials row_version must increase exactly by 1'); END;
@@ -2743,6 +2795,8 @@ CREATE TRIGGER trg_schema_state_no_delete BEFORE DELETE ON schema_state
 BEGIN SELECT RAISE(ABORT, 'schema_state is a single-row table'); END;
 CREATE TRIGGER trg_backup_settings_no_delete BEFORE DELETE ON backup_settings
 BEGIN SELECT RAISE(ABORT, 'backup_settings is a single-row table'); END;
+CREATE TRIGGER trg_artifact_retention_settings_no_delete BEFORE DELETE ON artifact_retention_settings
+BEGIN SELECT RAISE(ABORT, 'artifact_retention_settings is a single-row table'); END;
 
 -- 12.25 当前指针必须指向同一聚合的对象（归属校验）
 CREATE TRIGGER trg_connections_revision_owner_insert AFTER INSERT ON connections
@@ -2959,9 +3013,56 @@ CREATE TRIGGER trg_alert_source_credentials_origin_immutable BEFORE UPDATE OF
   source_id, digest, supersedes_credential_id, created_at ON alert_source_credentials
 BEGIN SELECT RAISE(ABORT, 'alert_source_credential origin is immutable'); END;
 -- Attempt 可追加多条不可变 attempt_connection_grants；execution_attempts 不再携带单连接伪权威。
--- 备份记录是审计等价历史：禁止 UPDATE（DATA-BACKUP-007）
-CREATE TRIGGER trg_backups_no_update BEFORE UPDATE ON backups
-BEGIN SELECT RAISE(ABORT, 'backups is append-only'); END;
+-- Backup Run 仅允许 queued -> running|failed、running -> running|succeeded|failed；阶段只前进，终态不可变。
+-- 行身份、触发来源与 created_at 不可改写；每次合法状态推进恰好递增 row_version（OPS-BACKUP-001..004）。
+CREATE TRIGGER trg_backups_identity_immutable BEFORE UPDATE OF id, trigger_kind, execution_mode, scheduled_for, created_at, triggered_by ON backups
+BEGIN SELECT RAISE(ABORT, 'backup run identity is immutable'); END;
+CREATE TRIGGER trg_backups_transition BEFORE UPDATE ON backups
+WHEN NOT (
+  (OLD.status = 'queued' AND NEW.status IN ('running','failed'))
+  OR (OLD.status = 'running' AND NEW.status IN ('running','succeeded','failed'))
+)
+BEGIN SELECT RAISE(ABORT, 'invalid backup run transition'); END;
+CREATE TRIGGER trg_backups_transition_stage_consistent BEFORE UPDATE ON backups
+WHEN
+  (OLD.status = 'queued' AND NEW.status = 'running' AND NEW.stage <> 'preflight')
+  OR (OLD.status = 'queued' AND NEW.status = 'failed' AND NEW.stage <> 'queued')
+  OR (OLD.status = 'running' AND NEW.status = 'failed' AND NEW.stage <> OLD.stage)
+  OR (OLD.status = 'running' AND NEW.status = 'succeeded' AND OLD.stage <> 'manifest_publish')
+BEGIN SELECT RAISE(ABORT, 'backup run transition stage is inconsistent'); END;
+CREATE TRIGGER trg_backups_stage_forward BEFORE UPDATE ON backups
+WHEN OLD.status = 'running' AND NEW.status = 'running' AND (
+  CASE NEW.stage
+    WHEN 'preflight' THEN 1
+    WHEN 'database_snapshot' THEN 2
+    WHEN 'artifact_copy' THEN 3
+    WHEN 'manifest_publish' THEN 4
+    ELSE 0
+  END < CASE OLD.stage
+    WHEN 'preflight' THEN 1
+    WHEN 'database_snapshot' THEN 2
+    WHEN 'artifact_copy' THEN 3
+    WHEN 'manifest_publish' THEN 4
+    ELSE 0
+  END
+  OR CASE NEW.stage
+    WHEN 'preflight' THEN 1
+    WHEN 'database_snapshot' THEN 2
+    WHEN 'artifact_copy' THEN 3
+    WHEN 'manifest_publish' THEN 4
+    ELSE 0
+  END > CASE OLD.stage
+    WHEN 'preflight' THEN 1
+    WHEN 'database_snapshot' THEN 2
+    WHEN 'artifact_copy' THEN 3
+    WHEN 'manifest_publish' THEN 4
+    ELSE 0
+  END + 1
+)
+BEGIN SELECT RAISE(ABORT, 'backup run stage must remain or advance by one'); END;
+CREATE TRIGGER trg_backups_updated_at_changes BEFORE UPDATE ON backups
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN SELECT RAISE(ABORT, 'backup run update must change updated_at'); END;
 CREATE TRIGGER trg_maintenance_state_insert_inactive BEFORE INSERT ON maintenance_state
 WHEN NEW.active <> 0 OR NEW.reason IS NOT NULL OR NEW.entered_at IS NOT NULL OR NEW.entered_by_type IS NOT NULL OR NEW.entered_by_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'maintenance_state must be seeded inactive before entering maintenance'); END;

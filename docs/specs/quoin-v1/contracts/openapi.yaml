@@ -490,6 +490,44 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/v1/maintenance/upgrade/prepare:
+    post:
+      tags: [maintenance]
+      operationId: prepareUpgrade
+      x-quoin-maintenance-access: upgrade-prepare
+      x-external-dependency: true
+      summary: 进入升级维护并调和到可安全停机（Admin）
+      description: |
+        幂等版本化命令。首次调用在单个事务中进入 reason=Upgrade 的 maintenance、阻止新业务工作并创建当前 revision
+        的非空确定性清单。后台调和器持续把 active Attempt/Browser Operation 项投影为 Blocking；全部活动工作结束后，
+        自动创建并完整验证一个升级前 Backup Run，成功才把 BackupPreflight 标为 Safe。失败保留维护状态和失败 Backup Run；
+        Admin 修复原因后用新 clientCommandId 重试本操作。维护期间仅本操作、getMaintenanceState、exitMaintenance 和明确标记
+        upgrade-drain 的取消命令可用；不存在强制跳过备份或活动工作 fence 的参数。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionedCommandRequest'
+      responses:
+        '202':
+          description: 已进入或继续 Upgrade 调和；调用方轮询 getMaintenanceState，全部项目 Safe 后才能停机。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/maintenance/exit:
     post:
       tags: [maintenance]
@@ -537,24 +575,23 @@ paths:
                 $ref: '#/components/schemas/RuntimeStatus'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /api/v1/runtime-slots/{slot}/replace:
+  /api/v1/runtime-slots/{slot}/registration/prepare:
     post:
       tags: [adminops]
-      operationId: replaceRuntimeSlot
+      operationId: prepareRuntimeRegistration
       x-quoin-maintenance-access: trust-rebuild
       x-external-dependency: true
-      summary: 替换 Runtime slot（Admin；状态卷丢失时重建，不创建第二个 Runtime）
+      summary: 准备 Runtime 首次注册或替换注册（Admin）
       description: |
-        幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-010）：同一事务先确认
-        fence（DATA-RUNTIME-001b：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），
-        且 lintel 另无任何 active Browser Operation（非终态，或虽终态但 `stopConfirmedAt` 仍为空）），否则返回 409 active_conflict 且不得先行吊销；通过后
-         单条 UPDATE 把 slot 置为 revoked 并清空 current/pending/retiring 凭据指针（AFTER 触发器 trg_runtime_slots_replace_retire_all
-        自动 retire 该 slot 全部未退休凭据；被引用行在指针清空前禁止手动 retire，DATA-RUNTIME-001/002），同时生成内存短生命周期、
-         固定 60 秒、同 Session、单次成功消费的一次性注册令牌 reveal handle（SEC-REVEAL-*）。响应只含非秘密元数据；
-         registrationTokenAvailable=true 时携带 registrationTokenHandle，由 `revealRuntimeRegistrationToken`
-         一次性换取 raw 注册令牌（绑定 slot 与该 slot 下一个 credential generation）；同 Session 以相同
-         clientCommandId 重放时，仍有效且未消费则返回同一 handle，否则 registrationTokenAvailable=false，绝不重新生成。
-        长期服务 token 只经已认证 gRPC 控制面下发/轮换（runtime-protocol.md），不进入 HTTP 响应。
+        幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-012）。slot 为 unregistered 时不得要求
+        replace 既有凭据，保持 unregistered 并直接准备 generation=1 的一次性注册令牌。slot 已注册或 revoked 时，命令先确认
+        DATA-RUNTIME-001b fence：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），且 lintel
+        另无 active Browser Operation（非终态，或虽终态但 stopConfirmedAt 仍为空）；冲突返回 409 且不得先吊销。通过后把 slot
+        置 revoked 并清空 current/pending/retiring 指针，触发器 retire 该 slot 全部未退休凭据。事务提交后创建内存 60 秒、同
+        Session、单次成功消费的 reveal handle；registrationTokenAvailable=true 时携带 registrationTokenHandle，由
+        revealRuntimeRegistrationToken 换取绑定 slot 与下一个 generation 的 raw 注册令牌。同 Session 同 clientCommandId 重放时，
+        原 handle 仍有效且未消费才返回同一 handle，否则 registrationTokenAvailable=false，绝不重新生成。长期 token 只经 TLS
+        Register RPC 下发并由一次性注册子命令原子写入 Runtime 状态卷，不进入 HTTP、部署 YAML、Secret 或日志。
       parameters:
         - $ref: '#/components/parameters/RuntimeSlot'
       requestBody:
@@ -571,11 +608,11 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '200':
-          description: slot 已进入替换流程；首次实时响应可能携带 registrationTokenHandle。
+          description: slot 已进入首次注册或替换注册准备；首次实时响应可能携带 registrationTokenHandle。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RuntimeSlotReplacement'
+                $ref: '#/components/schemas/RuntimeRegistrationPreparation'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -590,7 +627,7 @@ paths:
       summary: 一次性显示 Runtime 注册令牌（Admin；消费单次 reveal handle）
       description: |
         非领域写命令（HTTP-COMMAND-012）：不携带 clientCommandId；路由无 slot 路径参数，只接受
-         replaceRuntimeSlot 返回的内存 60 秒、同 Session、单次成功消费的 registrationTokenHandle，
+         prepareRuntimeRegistration 返回的内存 60 秒、同 Session、单次成功消费的 registrationTokenHandle，
          不接受 slot 本身。消费前重验当前 Session 与 Admin；授权成功先写不含 handle/raw 的 Audit Event。
          handle 与 raw 注册令牌均不落盘（SQLite、client_commands、日志、审计、Artifact、响应快照均禁止）；
          handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403（SEC-REVEAL-*）。
@@ -961,6 +998,7 @@ paths:
     post:
       tags: [alerts]
       operationId: cancelInitialAnalysis
+      x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
       summary: 取消 Initial Analysis（独立幂等 cancellation fence）
       description: 先事务提交 fence；成功与取消按 SQLite 提交顺序裁决（DATA-TX-005）；成功先提交时返回已完成对象而非 409（HTTP-COMMAND-005）。
@@ -1497,6 +1535,7 @@ paths:
     post:
       tags: [investigations]
       operationId: cancelInvestigationAttempt
+      x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
       summary: 取消调查 active Attempt（cancellation fence）
       description: 成功先提交则返回已完成；取消先提交则迟到结果不产生有效输出（DATA-TX-005）。不得复用已 abort 的流请求 signal（HTTP-STREAM-005）。
@@ -1775,6 +1814,7 @@ paths:
     post:
       tags: [inspections]
       operationId: cancelInspectionRun
+      x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
       summary: 取消巡检 Run（cancellation fence；已完成检查保留）
       parameters:
@@ -2261,6 +2301,7 @@ paths:
     post:
       tags: [knowledge]
       operationId: cancelKnowledgeImportBatch
+      x-quoin-maintenance-access: upgrade-drain
       summary: 取消导入批次（batch 级 fence；禁止后续编辑/确认但保留 Candidate）
       description: Cancelled 是 batch 级 fence（DATA-KNOWLEDGE-005）；携带 clientCommandId 与 expectedRowVersion（DATA-COMMAND-005）。
       parameters:
@@ -2811,6 +2852,7 @@ paths:
     post:
       tags: [config]
       operationId: cancelConfigTestRun
+      x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
       summary: 取消配置 Test Run（clientCommandId + expectedRowVersion）
       description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Test Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Test Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
@@ -3094,6 +3136,7 @@ paths:
     post:
       tags: [config]
       operationId: cancelBrowserLoginOperation
+      x-quoin-maintenance-access: upgrade-drain
       summary: 取消当前操作者的人工登录 operation
       parameters:
         - $ref: '#/components/parameters/SystemKey'
@@ -4006,7 +4049,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '202':
-          description: 备份已受理。
+          description: 已在同一命令事务创建唯一 queued Backup Run；返回固定形状状态投影（OPS-BACKUP-001）。
           content:
             application/json:
               schema:
@@ -4122,6 +4165,51 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/Unprocessable'
+  /api/v1/artifacts/retention-settings:
+    get:
+      tags: [adminops]
+      operationId: getArtifactRetentionSettings
+      summary: 生成型 Artifact 在线保留设置（Admin）
+      responses:
+        '200':
+          description: 当前生成型 Artifact 在线保留设置。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactRetentionSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      tags: [adminops]
+      operationId: updateArtifactRetentionSettings
+      summary: 更新生成型 Artifact 在线保留设置（Admin）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtifactRetentionSettingsUpdate'
+      responses:
+        '200':
+          description: 设置已更新；只影响此后创建的生成型 Artifact，既有 expiresAt 不回写。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactRetentionSettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /api/v1/evidence/{evidenceId}:
     get:
       tags: [artifacts]
@@ -5246,7 +5334,7 @@ components:
       properties:
         kind:
           type: string
-          enum: [AdminPassword, User, Connection, RuntimeSlot, AlertSource, BrowserIdentity, SchemaMigration, ReleaseVersion, Integrity, SearchProjection]
+          enum: [AdminPassword, User, Connection, RuntimeSlot, AlertSource, BrowserIdentity, ActiveAttempt, ActiveBrowserOperation, BackupPreflight, SchemaMigration, ReleaseVersion, Integrity, SearchProjection]
         objectKey:
           type: string
           minLength: 1
@@ -5386,7 +5474,7 @@ components:
       dependentRequired:
         retiringGeneration: [retirementState]
         retirementState: [retiringGeneration]
-    RuntimeSlotReplacement:
+    RuntimeRegistrationPreparation:
       type: object
       required: [slot, state, currentGeneration, rowVersion, registrationTokenAvailable]
       additionalProperties: false
@@ -5396,8 +5484,8 @@ components:
           enum: [plinth, lintel]
         state:
           type: string
-          const: revoked
-          description: 替换后 slot 恒为 revoked，等待新 Runtime 用注册令牌注册（DATA-RUNTIME-001）。
+          enum: [unregistered, revoked]
+          description: 首次准备保持 unregistered；替换准备进入 revoked，二者都等待 Runtime 用注册令牌注册（DATA-RUNTIME-001）。
         currentGeneration:
           type: integer
           const: 0
@@ -5435,7 +5523,7 @@ components:
           type: string
           minLength: 32
           maxLength: 256
-          description: replaceRuntimeSlot 返回的 60 秒同 Session 一次性句柄；不接受 slot 本身（SEC-REVEAL-*）。
+          description: prepareRuntimeRegistration 返回的 60 秒同 Session 一次性句柄；不接受 slot 本身（SEC-REVEAL-*）。
     RuntimeRegistrationTokenRevealResult:
       type: object
       required: [slot, generation, registrationToken]
@@ -7970,26 +8058,159 @@ components:
         - $ref: '#/components/schemas/ExpectedRowVersion'
     BackupSummary:
       type: object
-      required: [id, status, createdAt]
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - stage
+        - triggerKind
+        - executionMode
+        - scheduledFor
+        - rowVersion
+        - createdAt
+        - updatedAt
+        - startedAt
+        - completedAt
+        - dbSha256
+        - manifestSha256
+        - artifactCount
+        - errorCode
+        - retryable
+        - errorDetail
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
         status:
           type: string
-          enum: [succeeded, failed]
+          enum: [queued, running, succeeded, failed]
+        stage:
+          type: string
+          enum: [queued, preflight, database_snapshot, artifact_copy, manifest_publish, completed]
+          description: 当前或失败时最后持久阶段；只允许按 OPS-BACKUP-003 前进。
+        triggerKind:
+          type: string
+          enum: [manual, scheduled, upgrade]
+        executionMode:
+          type: string
+          enum: [online, offline]
+          description: Web/scheduler/upgrade 创建 online；停机部署 helper 创建 offline。
+        scheduledFor:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+          description: 仅 scheduled 非空的 UTC 计划边界；用于停机 catch-up 幂等。
+        rowVersion:
+          type: integer
+          minimum: 1
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+        updatedAt:
+          $ref: '#/components/schemas/Timestamp'
+        startedAt:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        completedAt:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
         dbSha256:
-          type: string
+          type: [string, 'null']
           pattern: '^[0-9a-f]{64}$'
         manifestSha256:
-          type: string
+          type: [string, 'null']
           pattern: '^[0-9a-f]{64}$'
         artifactCount:
-          type: integer
+          type: [integer, 'null']
           minimum: 0
+        errorCode:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 128
+        retryable:
+          type: [boolean, 'null']
         errorDetail:
-          type: string
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 4096
+      allOf:
+        - if:
+            properties:
+              triggerKind: { const: scheduled }
+            required: [triggerKind]
+          then:
+            properties:
+              executionMode: { const: online }
+              scheduledFor: { $ref: '#/components/schemas/Timestamp' }
+          else:
+            properties:
+              scheduledFor: { type: 'null' }
+        - if:
+            properties:
+              executionMode: { const: offline }
+            required: [executionMode]
+          then:
+            properties:
+              triggerKind: { const: manual }
+        - if:
+            properties:
+              status: { const: queued }
+            required: [status]
+          then:
+            properties:
+              stage: { const: queued }
+              startedAt: { type: 'null' }
+              completedAt: { type: 'null' }
+              dbSha256: { type: 'null' }
+              manifestSha256: { type: 'null' }
+              artifactCount: { type: 'null' }
+              errorCode: { type: 'null' }
+              retryable: { type: 'null' }
+              errorDetail: { type: 'null' }
+        - if:
+            properties:
+              status: { const: running }
+            required: [status]
+          then:
+            properties:
+              stage: { enum: [preflight, database_snapshot, artifact_copy, manifest_publish] }
+              startedAt: { $ref: '#/components/schemas/Timestamp' }
+              completedAt: { type: 'null' }
+              dbSha256: { type: 'null' }
+              manifestSha256: { type: 'null' }
+              artifactCount: { type: 'null' }
+              errorCode: { type: 'null' }
+              retryable: { type: 'null' }
+              errorDetail: { type: 'null' }
+        - if:
+            properties:
+              status: { const: succeeded }
+            required: [status]
+          then:
+            properties:
+              stage: { const: completed }
+              startedAt: { $ref: '#/components/schemas/Timestamp' }
+              completedAt: { $ref: '#/components/schemas/Timestamp' }
+              dbSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+              manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+              artifactCount: { type: integer, minimum: 0 }
+              errorCode: { type: 'null' }
+              retryable: { type: 'null' }
+              errorDetail: { type: 'null' }
+        - if:
+            properties:
+              status: { const: failed }
+            required: [status]
+          then:
+            properties:
+              stage: { enum: [queued, preflight, database_snapshot, artifact_copy, manifest_publish] }
+              completedAt: { $ref: '#/components/schemas/Timestamp' }
+              dbSha256: { type: 'null' }
+              manifestSha256: { type: 'null' }
+              artifactCount: { type: 'null' }
+              errorCode: { type: string, minLength: 1, maxLength: 128 }
+              retryable: { type: boolean }
+              errorDetail: { type: string, minLength: 1, maxLength: 4096 }
     BackupSettings:
       type: object
       required: [enabled, timezone, retentionCount, rowVersion]
@@ -8030,6 +8251,29 @@ components:
             - required: [timezone]
             - required: [retentionCount]
       description: 至少提供一个设置字段（anyOf 强制），防止无变化更新；expectedRowVersion 取当前 BackupSettings.rowVersion。
+    ArtifactRetentionSettings:
+      type: object
+      additionalProperties: false
+      required: [generatedRetentionDays, rowVersion]
+      properties:
+        generatedRetentionDays:
+          type: integer
+          minimum: 1
+          description: 创建生成型 Artifact 时计算固定 expiresAt 使用的天数；默认 90。
+        rowVersion:
+          type: integer
+          minimum: 1
+    ArtifactRetentionSettingsUpdate:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+        - $ref: '#/components/schemas/ExpectedRowVersion'
+        - type: object
+          required: [generatedRetentionDays]
+          properties:
+            generatedRetentionDays:
+              type: integer
+              minimum: 1
+      description: expectedRowVersion 取当前 ArtifactRetentionSettings.rowVersion；只影响此后创建的生成型 Artifact。
     TextAttachmentSummary:
       type: object
       additionalProperties: false

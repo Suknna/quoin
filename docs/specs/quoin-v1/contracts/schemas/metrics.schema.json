@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/metrics.schema.json",
+  "title": "Quoin metrics catalogue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "owner", "closed_labels", "enum_sources", "label_sets", "histogram_buckets", "families"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "owner": { "const": "OPS-METRIC-001" },
+    "closed_labels": { "const": true },
+    "enum_sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/enumSource" }
+    },
+    "label_sets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/labelSet" }
+    },
+    "histogram_buckets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": true,
+        "items": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "families": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/family" }
+    }
+  },
+  "$defs": {
+    "enumSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "symbol", "parser", "transform"],
+          "properties": {
+            "path": { "type": "string", "pattern": "^contracts/" },
+            "symbol": { "type": "string", "minLength": 1 },
+            "parser": { "type": "string", "minLength": 1 },
+            "exclude": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "transform": {
+              "oneOf": [
+                { "type": "string", "enum": ["identity", "lowercase", "snake_case"] },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["strip_prefix", "case"],
+                  "properties": {
+                    "strip_prefix": { "type": "string" },
+                    "case": { "const": "lowercase" }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["values", "authority"],
+          "properties": {
+            "values": { "$ref": "#/$defs/values" },
+            "authority": { "const": "metrics" }
+          }
+        }
+      ]
+    },
+    "values": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "labelSet": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["values", "authority"],
+          "properties": {
+            "values": { "$ref": "#/$defs/values" },
+            "authority": { "const": "metrics" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["values_from"],
+          "properties": { "values_from": { "type": "string", "minLength": 1 } }
+        }
+      ]
+    },
+    "family": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "help", "labels", "preinitialize"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "type": { "enum": ["counter", "gauge", "histogram"] },
+        "help": { "type": "string", "minLength": 1 },
+        "labels": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        },
+        "buckets": { "type": "string", "minLength": 1 },
+        "preinitialize": { "const": true }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "histogram" } } },
+          "then": { "required": ["buckets"] },
+          "else": { "not": { "required": ["buckets"] } }
+        }
+      ]
+    }
+  }
+}

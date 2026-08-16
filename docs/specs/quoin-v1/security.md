@@ -45,7 +45,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 ## 4. 权限与服务身份
 
 - **SEC-AUTHZ-001 —** 权限矩阵 **MUST** 以 CONTEXT「权限」和 HTTP-PERM-* 为唯一人类/HTTP 语义；所有 HTTP 与 gRPC 入口都 **MUST** 服务端检查主体类型、当前状态、操作权限和对象归属，**MUST NOT** 依赖前端、模型、worker 或调用方隐藏字段。（来源：CONTEXT「权限」、Issue #16）
-- **SEC-AUTHZ-002 —** Quoin **MUST** 拒绝禁用或降级最后一个有效 Admin；离线首个 Admin 创建和全部 Admin 无法登录时的重置 **MUST** 要求 Quoin 停止且独占 SQLite，**MUST NOT** 提供网络 bootstrap、邮件找回或安全问题。（来源：CONTEXT「管理员离线恢复」）
+- **SEC-AUTHZ-002 —** Quoin **MUST** 拒绝禁用或降级最后一个有效 Admin；`quoin admin create` **MUST** 只接受无 `users` 行的空白库，全部 Admin 无法登录时的 `quoin admin reset-password` **MUST** 只修改已存在 Admin；两者都要求长期 Quoin 停止且独占 SQLite。部署包 **MAY** 仅按 OPS-PACKAGE-003 用 attached TTY 包装空白库创建，**MUST NOT** 提供网络 bootstrap、邮件找回或安全问题。（来源：CONTEXT「管理员离线恢复」）
 - **SEC-SERVICE-001 —** Plinth、Lintel 与 Stele token **MUST** 使用封闭主体类型和最小 RPC scope；Plinth/Lintel 长期 token 只保存 32-byte digest，Stele token 只由部署 Secret 文件提供。服务 token **MUST NOT** 被 Web Admin Session、worker 或模型复用。（来源：CONTEXT「服务身份」、RUNTIME-AUTH-*）
 - **SEC-SERVICE-002 —** 每个 gRPC 请求和 stream 建立 **MUST** 复核 token、slot/service 类型、release version 与当前吊销状态；吊销、slot 替换或凭据退休 **MUST** 立即关闭对应控制流、浏览器流与上传流并禁止旧 token 重连。（来源：CONTEXT「服务身份」、RUNTIME-REVOKE-001）
 - **SEC-SERVICE-003 —** Runtime token 轮换在新 token 已持久化确认并提升为 current 的同一原子切换中，旧 generation **MUST** 立即进入可认证的 `retiring` 角色，保证新 token 首次认证前仍可恢复；此时用户态显示“等待新 token 首次使用”。新 current 首次成功认证后才把该旧 generation 标示为 Pending Retirement，并允许 Admin 显式退休。同一 slot 始终只有一个 active connection epoch，新连接按 Runtime 协议替代旧 epoch。系统 **MUST NOT** 按时间或一次成功自动退休旧 token；retiring 角色、Pending Retirement 状态与首次使用时间 **MUST** 持久可见并审计。（来源：Issue #16 Q16.10、CONTEXT「服务身份」）
@@ -61,6 +61,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-KEY-006 —** 永久丢失根密钥后的 rebind **MUST** 只由停机、独占 SQLite 的离线命令执行，并要求部署操作者显式确认全部现有可逆凭据将不可再解密；命令 **MUST** 创建新 verifier、递增 binding revision、把全部 Connection 隔离为需重新录入并进入 `RootKeyRebind` 维护原因。旧密文 **MUST** 保留为历史且不得再尝试解密。（来源：Issue #16 Q16.11）
 - **SEC-KEY-007 —** v1 **MUST NOT** 支持同时加载多个根密钥、在线 rewrap 或自动 rebind。普通备份恢复使用原根密钥；若恢复时已确定该密钥不可得，恢复工具 **MUST** 在发布恢复库前直接建立 `RootKeyRebind` 隔离状态（不得先进入无法安全退出的 `Restore` 再切 reason），随后按 SEC-KEY-006 rebind 和重新录入凭据。（来源：Issue #16 Q16.1/Q16.11）
 - **SEC-KEY-008 —** 连接命令的 `password`/`kubeconfig`/`apiKey` 值以及可供离线猜测的 hash、HMAC 或 verifier **MUST NOT** 进入命令摘要、SQLite、审计或日志。摘要只记录秘密字段存在性和非秘密语义；同一 `client_command_id` 的秘密重放一律丢弃并返回原结果，用户编辑秘密后的新提交必须生成新命令 ID（HTTP-COMMAND-002/003、DATA-COMMAND-002/003）。（来源：Issue #16 Q16.1/Q16.17 的机械后果、Issue #9 幂等契约）
+- **SEC-KEY-009 —** Helm bootstrap Job 或 Compose bootstrap 命令只可在机器证明目标 SQLite/持久卷尚未初始化时生成根密钥、Stele service token 与内部 TLS 材料；任一持久状态已存在而对应 Secret/文件缺失时必须失败并要求恢复原材料，**MUST NOT** 自动生成替代值。Helm 模板 **MUST NOT** 使用 `randBytes` 等把秘密复制进 release history；生成内容只写目标 Kubernetes Secret 或权限受限的本地 secret 文件。（来源：Issue #17 Q17.40 B、OPS-SECRET-001..003）
 
 ## 6. 一次性秘密 reveal 与轮换
 
@@ -94,9 +95,9 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-RESTORE-003 —** 恢复隔离事务 **MUST** 清除全部 Web Session、retire 全部 Runtime credential 与 Active 告警 Bearer、把固定 Runtime slot 置 revoked、禁用除 TTY 选定恢复 Admin 外的用户并要求该 Admin 改临时密码、把全部 Connection 置 RevalidationRequired、把 Browser Identity 置 AuthenticationRequired，并写入维护状态、逐对象清单与 system Audit Event。（来源：Issue #16 Q16.13、CONTEXT「一致备份」）
 - **SEC-RESTORE-004 —** 普通 SQLite 恢复 **MUST NOT** 轮换数据库外的 Stele service token或根密钥；Stele token 只有在部署 Secret 泄漏或安全事件响应时轮换。恢复期间 Stele Delivery **MUST** 返回可重试 unavailable，**MUST NOT** 使用旧快照中的告警 Bearer接入。（来源：Issue #16 Q16.6、CONTEXT「服务身份」）
 - **SEC-MAINT-001 —** 恢复、协调升级与根密钥 rebind **MUST** 复用 `maintenance_state` 单行聚合，并以封闭 reason 区分各自清单；状态与逐对象项目的机器字段、约束由 `contracts/sql/schema.sql` 拥有。维护进入和退出 **MUST** 审计，状态 **MUST NOT** 由进程重启自动清除。（来源：Issue #16 Q16.7/Q16.13）
-- **SEC-MAINT-002 —** OpenAPI operation 默认在维护中拒绝；只有机器标记允许的登录、登出、当前用户、改密、维护/健康诊断与审计读取、Admin 信任重建与 `exitMaintenance` **MAY** 执行。SSE、业务上传下载、任务、调度和告警接入 **MUST** 拒绝；HTTP 使用 503，Stele 使用可重试 unavailable，Runtime 只允许注册/认证与状态重建而不得派发工作。（来源：Issue #16 Q16.7/Q16.13）
+- **SEC-MAINT-002 —** OpenAPI operation 默认在维护中拒绝；只有机器标记允许的登录、登出、当前用户、改密、维护/健康诊断与审计读取、Admin 信任重建与 `exitMaintenance` **MAY** 执行。`reason=Upgrade` 时还只允许 `prepareUpgrade` 调和预检与显式 `upgrade-drain` 取消既有工作；不得用该例外创建新任务或调用通用备份 API。SSE、业务上传下载、任务、调度和告警接入 **MUST** 拒绝；HTTP 使用 503，Stele 使用可重试 unavailable，Runtime 只允许注册/认证与状态重建而不得派发工作。（来源：Issue #16 Q16.7/Q16.13、Issue #17 Q17.10/Q17.21）
 - **SEC-MAINT-003 —** 恢复清单 **MUST** 按“已重建或明确不可用”判定安全：User 已重新启用或保持 disabled；Connection 已重验/重录或保持 disabled；Runtime slot 已重新注册或保持 revoked；告警源已有新凭据或保持 disabled；Browser Identity 的 AuthenticationRequired 本身是安全状态。退出 **MUST NOT** 强迫所有可选集成 Ready。（来源：Issue #16 Q16.13）
-- **SEC-MAINT-004 —** 升级清单 **MUST** 只验证版本、迁移和协调升级条件，**MUST NOT** 错误要求恢复身份；RootKeyRebind 清单 **MUST** 要求全部旧 binding Connection 已重新录入或保持 disabled。（来源：Issue #16 Q16.11/Q16.13）
+- **SEC-MAINT-004 —** 升级清单 **MUST** 包含 active Attempt、active Browser Operation、升级前 Backup Run、版本、迁移和协调升级条件，**MUST NOT** 错误要求恢复身份；进入 Upgrade maintenance 后活动工作必须自然结束或由 Admin 显式取消，完整验证升级前备份成功后才允许停机。RootKeyRebind 清单 **MUST** 要求全部旧 binding Connection 已重新录入或保持 disabled。（来源：Issue #16 Q16.11/Q16.13、Issue #17 Q17.10/Q17.21）
 - **SEC-MAINT-005 —** `exitMaintenance` **MUST** 是 Admin 领域写命令，携带 `client_command_id` 与当前 maintenance row version；同一事务 **MUST** 重验当前 Admin、reason 对应的非空清单、全部阻塞项目和并发版本，成功后退出并审计。active maintenance 的 row version 在进入后至退出事务前 **MUST** 冻结，禁止用空转版本推进脱离清单 revision。v1 **MUST NOT** 提供 force、skip、仅 UI checkbox 或自动退出路径。（来源：Issue #16 Q16.7/Q16.13）
 
 ## 10. 验证门

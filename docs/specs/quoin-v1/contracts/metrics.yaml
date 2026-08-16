@@ -1,0 +1,416 @@
+contract_version: 1
+owner: OPS-METRIC-001
+closed_labels: true
+
+enum_sources:
+  openapi_route_group:
+    path: contracts/openapi.yaml
+    symbol: tags[].name
+    parser: openapi-tags
+    transform: identity
+  openapi_method:
+    path: contracts/openapi.yaml
+    symbol: paths.*.[get|post|put|patch|delete]
+    parser: openapi-methods
+    transform: lowercase
+  runtime_slot:
+    path: contracts/runtime.proto
+    symbol: quoin.runtime.v1.RuntimeSlot
+    parser: proto-enum
+    exclude: [RUNTIME_SLOT_UNSPECIFIED]
+    transform:
+      strip_prefix: RUNTIME_SLOT_
+      case: lowercase
+  attempt_type:
+    path: contracts/runtime.proto
+    symbol: quoin.runtime.v1.AttemptType
+    parser: proto-enum
+    exclude: [ATTEMPT_TYPE_UNSPECIFIED]
+    transform:
+      strip_prefix: ATTEMPT_TYPE_
+      case: lowercase
+  maintenance_reason:
+    path: contracts/sql/schema.sql
+    symbol: maintenance_state.reason
+    parser: sqlite-check-in-values
+    transform: snake_case
+  attempt_termination_reason:
+    path: contracts/runtime.proto
+    symbol: quoin.runtime.v1.TerminationReason
+    parser: proto-enum
+    exclude: [TERMINATION_REASON_UNSPECIFIED]
+    transform:
+      strip_prefix: TERMINATION_REASON_
+      case: lowercase
+  model_operation:
+    path: contracts/sql/schema.sql
+    symbol: model_calls.operation
+    parser: sqlite-check-in-values
+    transform: identity
+  model_call_status:
+    path: contracts/sql/schema.sql
+    symbol: model_calls.status
+    parser: sqlite-check-in-values
+    transform: identity
+  tool_execution_mode:
+    path: contracts/sql/schema.sql
+    symbol: tool_calls.execution_mode
+    parser: sqlite-check-in-values
+    transform: identity
+  tool_call_status:
+    path: contracts/sql/schema.sql
+    symbol: tool_calls.status
+    parser: sqlite-check-in-values
+    transform: identity
+  rpc_group:
+    path: contracts/runtime.proto
+    symbol: quoin.runtime.v1.services
+    parser: proto-services
+    transform: snake_case
+  delivery_status:
+    path: contracts/runtime.proto
+    symbol: quoin.runtime.v1.DeliveryStatus
+    parser: proto-enum
+    exclude: [DELIVERY_STATUS_UNSPECIFIED]
+    transform:
+      strip_prefix: DELIVERY_STATUS_
+      case: lowercase
+  storage_operation:
+    values: [sqlite, artifact, backup]
+    authority: metrics
+
+label_sets:
+  route_group:
+    values_from: openapi_route_group
+  method:
+    values_from: openapi_method
+  status_class:
+    values: [2xx, 3xx, 4xx, 5xx]
+    authority: metrics
+  grpc_status:
+    values:
+      - ok
+      - cancelled
+      - unknown
+      - invalid_argument
+      - deadline_exceeded
+      - not_found
+      - already_exists
+      - permission_denied
+      - resource_exhausted
+      - failed_precondition
+      - aborted
+      - out_of_range
+      - unimplemented
+      - internal
+      - unavailable
+      - data_loss
+      - unauthenticated
+    authority: metrics
+  runtime_slot:
+    values_from: runtime_slot
+  attempt_type:
+    values_from: attempt_type
+  maintenance_reason:
+    values_from: maintenance_reason
+  rpc_group:
+    values_from: rpc_group
+  attempt_termination_reason:
+    values_from: attempt_termination_reason
+  model_operation:
+    values_from: model_operation
+  model_call_status:
+    values_from: model_call_status
+  tool_execution_mode:
+    values_from: tool_execution_mode
+  tool_call_status:
+    values_from: tool_call_status
+  token_direction:
+    values: [input, output]
+    authority: metrics
+  storage_operation:
+    values_from: storage_operation
+  quoin_storage:
+    values: [data, backup]
+    authority: metrics
+  plinth_storage:
+    values: [state, workspace]
+    authority: metrics
+  lintel_storage:
+    values: [state, shm]
+    authority: metrics
+  stream:
+    values: [alert_changes, task_changes, investigation_messages]
+    authority: metrics
+  delivery_status:
+    values_from: delivery_status
+
+histogram_buckets:
+  interactive_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+  backup_seconds: [1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200]
+
+families:
+  - name: quoin_ready
+    type: gauge
+    help: Whether Quoin can serve its current ready-mode responsibilities.
+    labels: []
+    preinitialize: true
+  - name: quoin_accepting_work
+    type: gauge
+    help: Whether Quoin is accepting new domain work.
+    labels: []
+    preinitialize: true
+  - name: quoin_maintenance
+    type: gauge
+    help: Whether Quoin maintenance is active for each closed reason.
+    labels: [maintenance_reason]
+    preinitialize: true
+  - name: quoin_upgrade_prepared
+    type: gauge
+    help: Whether the current Upgrade maintenance revision is fully safe and has a succeeded pre-upgrade backup.
+    labels: []
+    preinitialize: true
+  - name: quoin_storage_writable
+    type: gauge
+    help: Whether each Quoin persistent storage target passed the durability probe.
+    labels: [quoin_storage]
+    preinitialize: true
+  - name: quoin_storage_write_failures_total
+    type: counter
+    help: Quoin persistent storage write failures grouped by a closed storage operation class.
+    labels: [storage_operation]
+    preinitialize: true
+  - name: quoin_http_requests_total
+    type: counter
+    help: Quoin HTTP requests grouped by closed route, method, and status class.
+    labels: [route_group, method, status_class]
+    preinitialize: true
+  - name: quoin_http_request_duration_seconds
+    type: histogram
+    help: Completed non-streaming Quoin HTTP request duration grouped by closed route, method, and status class; SSE and upgraded WebSocket lifetimes are excluded.
+    labels: [route_group, method, status_class]
+    buckets: interactive_seconds
+    preinitialize: true
+  - name: quoin_grpc_server_requests_total
+    type: counter
+    help: Quoin gRPC server requests grouped by service and canonical status.
+    labels: [rpc_group, grpc_status]
+    preinitialize: true
+  - name: quoin_grpc_server_request_duration_seconds
+    type: histogram
+    help: Quoin gRPC server request duration grouped by service and canonical status.
+    labels: [rpc_group, grpc_status]
+    buckets: interactive_seconds
+    preinitialize: true
+  - name: quoin_runtime_connected
+    type: gauge
+    help: Whether each logical Runtime slot has an accepted current control stream.
+    labels: [runtime_slot]
+    preinitialize: true
+  - name: quoin_attempts_active
+    type: gauge
+    help: Current nonterminal execution attempts grouped by authoritative attempt type.
+    labels: [attempt_type]
+    preinitialize: true
+  - name: quoin_stream_queue_overflows_total
+    type: counter
+    help: Realtime stream queue overflows grouped by closed stream class.
+    labels: [stream]
+    preinitialize: true
+  - name: quoin_backup_active
+    type: gauge
+    help: Whether a queued or running Backup Run exists.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_running_since_timestamp_seconds
+    type: gauge
+    help: Unix timestamp when the running Backup Run entered running, or zero.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_last_success_timestamp_seconds
+    type: gauge
+    help: Unix timestamp of the latest successful Backup Run, or zero.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_last_online_manual_success_timestamp_seconds
+    type: gauge
+    help: Unix timestamp of the latest successful online manual Backup Run, or zero; used by the credential-free deployment helper without mistaking scheduled work for the requested run.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_failures_total
+    type: counter
+    help: Backup Runs that reached failed during this Quoin process lifetime.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_duration_seconds
+    type: histogram
+    help: Terminal Backup Run duration observed by this Quoin process.
+    labels: []
+    buckets: backup_seconds
+    preinitialize: true
+  - name: quoin_backup_last_failure_timestamp_seconds
+    type: gauge
+    help: Unix timestamp of the latest failed Backup Run, or zero when no failure exists.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_schedule_overdue
+    type: gauge
+    help: Whether an enabled backup schedule has an elapsed due instant not covered by a succeeding scheduled Backup Run.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_oldest_active_age_seconds
+    type: gauge
+    help: Age in seconds of the oldest queued or running Backup Run, or zero when none is active.
+    labels: []
+    preinitialize: true
+  - name: quoin_artifact_gc_last_success_timestamp_seconds
+    type: gauge
+    help: Unix timestamp of the latest successful Artifact GC pass, or zero.
+    labels: []
+    preinitialize: true
+
+  - name: plinth_ready
+    type: gauge
+    help: Whether Plinth can accept work from Quoin.
+    labels: []
+    preinitialize: true
+  - name: plinth_quoin_connected
+    type: gauge
+    help: Whether Plinth has an accepted current Quoin control stream.
+    labels: []
+    preinitialize: true
+  - name: plinth_storage_writable
+    type: gauge
+    help: Whether each Plinth local storage target passed its write probe.
+    labels: [plinth_storage]
+    preinitialize: true
+  - name: plinth_attempts_active
+    type: gauge
+    help: Current Plinth worker processes grouped by authoritative attempt type.
+    labels: [attempt_type]
+    preinitialize: true
+  - name: plinth_grpc_client_requests_total
+    type: counter
+    help: Plinth gRPC client requests grouped by service and canonical status.
+    labels: [rpc_group, grpc_status]
+    preinitialize: true
+  - name: plinth_attempts_succeeded_total
+    type: counter
+    help: Successful Plinth attempts grouped by authoritative attempt type.
+    labels: [attempt_type]
+    preinitialize: true
+  - name: plinth_attempt_failures_total
+    type: counter
+    help: Failed or cancelled Plinth attempts grouped by authoritative type and termination reason.
+    labels: [attempt_type, attempt_termination_reason]
+    preinitialize: true
+  - name: plinth_model_calls_total
+    type: counter
+    help: Physical model calls grouped by authoritative operation and status.
+    labels: [model_operation, model_call_status]
+    preinitialize: true
+  - name: plinth_model_call_duration_seconds
+    type: histogram
+    help: Physical model call duration grouped by authoritative operation and status.
+    labels: [model_operation, model_call_status]
+    buckets: interactive_seconds
+    preinitialize: true
+  - name: plinth_model_provider_retries_total
+    type: counter
+    help: Additional physical requests for the same logical model call.
+    labels: [model_operation]
+    preinitialize: true
+  - name: plinth_model_tokens_total
+    type: counter
+    help: Provider-reported model tokens grouped only by input or output direction.
+    labels: [token_direction]
+    preinitialize: true
+  - name: plinth_tool_calls_total
+    type: counter
+    help: Physical Tool Calls grouped by authoritative execution mode and status.
+    labels: [tool_execution_mode, tool_call_status]
+    preinitialize: true
+  - name: plinth_tool_call_duration_seconds
+    type: histogram
+    help: Physical Tool Call duration grouped by authoritative execution mode and status.
+    labels: [tool_execution_mode, tool_call_status]
+    buckets: interactive_seconds
+    preinitialize: true
+  - name: plinth_artifact_spill_bytes_total
+    type: counter
+    help: Complete Tool result bytes redirected to Artifact storage after inline limits.
+    labels: []
+    preinitialize: true
+  - name: plinth_context_evicted_turns_total
+    type: counter
+    help: Complete old conversation turns omitted from a model input projection.
+    labels: []
+    preinitialize: true
+  - name: plinth_sandbox_launch_failures_total
+    type: counter
+    help: Worker launches rejected because the sandbox contract was unavailable.
+    labels: []
+    preinitialize: true
+  - name: plinth_control_reconnects_total
+    type: counter
+    help: New Plinth control-stream connection attempts after the first boot attempt.
+    labels: []
+    preinitialize: true
+  - name: plinth_cancellation_duration_seconds
+    type: histogram
+    help: Duration from cancellation fence observation to worker termination.
+    labels: []
+    buckets: interactive_seconds
+    preinitialize: true
+
+  - name: lintel_ready
+    type: gauge
+    help: Whether Lintel can accept browser work from Quoin.
+    labels: []
+    preinitialize: true
+  - name: lintel_quoin_connected
+    type: gauge
+    help: Whether Lintel has an accepted current Quoin control stream.
+    labels: []
+    preinitialize: true
+  - name: lintel_storage_writable
+    type: gauge
+    help: Whether each Lintel state or shared-memory target passed its probe.
+    labels: [lintel_storage]
+    preinitialize: true
+  - name: lintel_browser_slots
+    type: gauge
+    help: Configured browser slots in this Lintel boot.
+    labels: []
+    preinitialize: true
+  - name: lintel_browser_slots_used
+    type: gauge
+    help: Browser slots currently occupied by physical browser work.
+    labels: []
+    preinitialize: true
+  - name: lintel_grpc_client_requests_total
+    type: counter
+    help: Lintel gRPC client requests grouped by service and canonical status.
+    labels: [rpc_group, grpc_status]
+    preinitialize: true
+
+  - name: stele_ready
+    type: gauge
+    help: Whether Stele can authenticate and relay Alertmanager deliveries.
+    labels: []
+    preinitialize: true
+  - name: stele_quoin_available
+    type: gauge
+    help: Whether Stele can currently reach an accepted same-version Quoin relay service.
+    labels: []
+    preinitialize: true
+  - name: stele_deliveries_total
+    type: counter
+    help: Stele delivery attempts grouped by the authoritative relay DeliveryStatus.
+    labels: [delivery_status]
+    preinitialize: true
+  - name: stele_grpc_client_requests_total
+    type: counter
+    help: Stele gRPC client requests grouped by service and canonical status.
+    labels: [rpc_group, grpc_status]
+    preinitialize: true

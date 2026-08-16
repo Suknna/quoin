@@ -1,0 +1,130 @@
+contract_version: 1
+owner: OPS-IMAGE-004
+base_distribution: debian-13
+base_image: debian13_slim
+architectures: [linux/amd64, linux/arm64]
+
+bash_tool:
+  executable: /bin/bash
+  argv: [--noprofile, --norc, -c]
+  cwd: attempt_workspace
+  inherit_environment: false
+  environment:
+    PATH: /usr/bin:/bin
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
+    TMPDIR: "${ATTEMPT_WORKSPACE}/tmp"
+
+packages:
+  - name: bash
+    versions: { linux/amd64: "5.2.37-2+b9", linux/arm64: "5.2.37-2+b9" }
+  - name: coreutils
+    versions: { linux/amd64: "9.7-3", linux/arm64: "9.7-3" }
+  - name: findutils
+    versions: { linux/amd64: "4.10.0-3", linux/arm64: "4.10.0-3" }
+  - name: grep
+    versions: { linux/amd64: "3.11-4", linux/arm64: "3.11-4+b1" }
+  - name: sed
+    versions: { linux/amd64: "4.9-2+deb13u1", linux/arm64: "4.9-2+deb13u1" }
+  - name: gawk
+    versions: { linux/amd64: "1:5.2.1-2+b1", linux/arm64: "1:5.2.1-2+b2" }
+  - name: jq
+    versions: { linux/amd64: "1.7.1-6+deb13u3", linux/arm64: "1.7.1-6+deb13u3" }
+  - name: file
+    versions: { linux/amd64: "1:5.46-5", linux/arm64: "1:5.46-5" }
+  - name: tar
+    versions: { linux/amd64: "1.35+dfsg-3.1", linux/arm64: "1.35+dfsg-3.1" }
+  - name: gzip
+    versions: { linux/amd64: "1.13-1", linux/arm64: "1.13-1" }
+  - name: xz-utils
+    versions: { linux/amd64: "5.8.1-1+deb13u1", linux/arm64: "5.8.1-1+deb13u1" }
+  - name: unzip
+    versions: { linux/amd64: "6.0-29+deb13u1", linux/arm64: "6.0-29+deb13u1" }
+  - name: ripgrep
+    versions: { linux/amd64: "14.1.1-1+b4", linux/arm64: "14.1.1-1+b4" }
+  - name: diffutils
+    versions: { linux/amd64: "1:3.10-4", linux/arm64: "1:3.10-4" }
+
+executable_paths:
+  - /bin/bash
+  - /usr/bin/awk
+  - /usr/bin/base64
+  - /usr/bin/basename
+  - /usr/bin/cat
+  - /usr/bin/chmod
+  - /usr/bin/cp
+  - /usr/bin/cmp
+  - /usr/bin/cut
+  - /usr/bin/date
+  - /usr/bin/diff
+  - /usr/bin/dirname
+  - /usr/bin/du
+  - /usr/bin/env
+  - /usr/bin/file
+  - /usr/bin/find
+  - /usr/bin/gawk
+  - /usr/bin/grep
+  - /usr/bin/gunzip
+  - /usr/bin/gzip
+  - /usr/bin/head
+  - /usr/bin/join
+  - /usr/bin/jq
+  - /usr/bin/ls
+  - /usr/bin/mkdir
+  - /usr/bin/mktemp
+  - /usr/bin/mv
+  - /usr/bin/od
+  - /usr/bin/paste
+  - /usr/bin/readlink
+  - /usr/bin/realpath
+  - /usr/bin/rg
+  - /usr/bin/rm
+  - /usr/bin/rmdir
+  - /usr/bin/sed
+  - /usr/bin/sha256sum
+  - /usr/bin/sort
+  - /usr/bin/split
+  - /usr/bin/stat
+  - /usr/bin/tail
+  - /usr/bin/tar
+  - /usr/bin/tee
+  - /usr/bin/touch
+  - /usr/bin/tr
+  - /usr/bin/uniq
+  - /usr/bin/unlink
+  - /usr/bin/unxz
+  - /usr/bin/unzip
+  - /usr/bin/wc
+  - /usr/bin/xargs
+  - /usr/bin/xz
+
+readonly_runtime_paths:
+  common:
+    - /bin/bash
+    - /usr/bin
+    - /usr/lib
+    - /lib
+    - /etc/alternatives
+    - /etc/ld.so.cache
+    - /etc/nsswitch.conf
+    - /etc/passwd
+    - /etc/group
+    - /usr/share/locale
+    - /usr/share/misc/magic.mgc
+    - /dev/null
+    - /dev/urandom
+    - /proc/self
+  linux/amd64:
+    - /lib64/ld-linux-x86-64.so.2
+    - /lib/x86_64-linux-gnu
+    - /usr/lib/x86_64-linux-gnu
+  linux/arm64:
+    - /lib/ld-linux-aarch64.so.1
+    - /lib/aarch64-linux-gnu
+    - /usr/lib/aarch64-linux-gnu
+
+forbidden_runtime_actions:
+  - package_install
+  - network_download
+  - inherited_credentials
+  - executable_outside_catalog

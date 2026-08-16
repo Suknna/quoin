@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/release-inputs.schema.json",
+  "title": "Quoin release input lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "architectures", "base_images", "component_bases", "playwright", "lintel_runtime"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "architectures": {
+      "type": "array",
+      "const": ["linux/amd64", "linux/arm64"]
+    },
+    "base_images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["debian13_slim", "distroless_static_debian13_nonroot"],
+      "properties": {
+        "debian13_slim": { "$ref": "#/$defs/multiPlatformInput" },
+        "distroless_static_debian13_nonroot": { "$ref": "#/$defs/multiPlatformInput" }
+      }
+    },
+    "component_bases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quoin", "plinth", "lintel", "stele"],
+      "properties": {
+        "quoin": { "const": "distroless_static_debian13_nonroot" },
+        "plinth": { "const": "debian13_slim" },
+        "lintel": { "const": "debian13_slim" },
+        "stele": { "const": "distroless_static_debian13_nonroot" }
+      }
+    },
+    "playwright": { "$ref": "#/$defs/playwrightInput" },
+    "lintel_runtime": { "$ref": "#/$defs/lintelRuntime" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "bareSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "multiPlatformInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "source_tag", "index_digest", "platforms"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "source_tag": { "type": "string", "minLength": 1 },
+        "index_digest": { "$ref": "#/$defs/sha256" },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": { "$ref": "#/$defs/sha256" },
+            "linux/arm64": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    "browserArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "sha256", "bytes"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "sha256": { "$ref": "#/$defs/bareSha256" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "sourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/bareSha256" }
+      }
+    },
+    "packageVersions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linux/amd64", "linux/arm64"],
+      "properties": {
+        "linux/amd64": { "type": "string", "minLength": 1 },
+        "linux/arm64": { "type": "string", "minLength": 1 }
+      }
+    },
+    "lintelPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "versions"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]*$" },
+        "versions": { "$ref": "#/$defs/packageVersions" }
+      }
+    },
+    "lintelRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["playwright_native_deps", "package_source", "executables", "packages"],
+      "properties": {
+        "playwright_native_deps": { "$ref": "#/$defs/sourceFile" },
+        "package_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_image", "install_recommends"],
+          "properties": {
+            "base_image": { "const": "debian13_slim" },
+            "install_recommends": { "const": false }
+          }
+        },
+        "executables": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^/" }
+        },
+        "packages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/lintelPackage" }
+        }
+      }
+    },
+    "playwrightInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source_tag", "browsers_json", "registry_source", "chromium_revision", "chromium_version", "artifacts"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "source_tag": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "browsers_json": { "$ref": "#/$defs/sourceFile" },
+        "registry_source": { "$ref": "#/$defs/sourceFile" },
+        "chromium_revision": { "type": "string", "pattern": "^[0-9]+$" },
+        "chromium_version": { "type": "string", "minLength": 1 },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": { "$ref": "#/$defs/browserArtifact" },
+            "linux/arm64": { "$ref": "#/$defs/browserArtifact" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -31,6 +31,10 @@
 contracts/
 ├── openapi.yaml
 ├── runtime.proto
+├── metrics.yaml
+├── plinth-worker-tools.yaml
+├── release-inputs.yaml
+├── examples/
 ├── quoin/
 │   └── plinth/
 │       └── worker/
@@ -47,6 +51,13 @@ contracts/
 | `contracts/openapi.yaml` | HTTP 路由、方法、输入输出结构、状态码和可机械表达的 HTTP 契约 |
 | `contracts/runtime.proto` | 四组件 gRPC service、RPC、message、stream 与 wire-level 枚举 |
 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | Plinth supervisor ↔ worker 本地 stdio framed protobuf message 与 wire-level 枚举 |
+| `contracts/metrics.yaml` | 四组件 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
+| `contracts/plinth-worker-tools.yaml` | Plinth worker 的 Bash 调用、固定工具包/版本、可执行路径与 Landlock 只读运行时路径 |
+| `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 |
+| `contracts/examples/` | 由相应 JSON Schema 校验的最少 Helm/Compose 安装输入示例，不是独立权威源 |
+| `contracts/schemas/deployment-config.schema.json` | 四组件启动配置字段、类型、默认值边界与跨平台投影结构 |
+| `contracts/schemas/release-manifest.schema.json` | Release 四镜像/双架构 digest、浏览器、Chart/Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
+| `contracts/schemas/readiness-response.schema.json` | 四组件 `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
 | `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog、Browser Tool、Browser Execution 与 Frontend State 等独立 JSON 文档格式 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
@@ -60,7 +71,13 @@ contracts/
 | HTTP 字段、类型、路由和状态码 | `contracts/openapi.yaml` | `http-api.md` 解释跨请求语义、事务和状态转换 |
 | 跨组件 gRPC service、message、字段、枚举与 stream 形状 | `contracts/runtime.proto` | `runtime-protocol.md` 解释握手、lease、fencing、重连和调和 |
 | Plinth supervisor ↔ worker 本地 stdio message、字段与枚举 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | `architecture.md` 解释 framing、sandbox、执行顺序和故障语义 |
-| YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | `inspection-config.md` 解释发布、兼容、运行和错误语义 |
+| 四组件 Prometheus family/type/help/bucket/label 与枚举投影 | `contracts/metrics.yaml` | `contracts/schemas/metrics.schema.json` 校验目录；`operations.md` 解释可达性、语义、告警与验证 |
+| Plinth worker 本地 Bash/Debian package/工具路径与只读运行时路径 | `contracts/plinth-worker-tools.yaml` | `contracts/schemas/plinth-worker-tools.schema.json` 校验目录；`architecture.md` 与 `operations.md` 解释执行和镜像边界 |
+| Helm/Compose 最少安装输入与四组件生成配置 | `contracts/schemas/deployment-config.schema.json` | `contracts/examples/*-install.yaml` 给出可校验最小输入；`operations.md` 解释启动、拒绝与投影 |
+| 基础镜像、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 | `contracts/release-inputs.yaml` | `contracts/schemas/release-inputs.schema.json` 校验锁；`operations.md` 解释镜像与供应链边界 |
+| Release digest、在线/离线资产名、工件、Sigstore bundle 映射、契约版本与验收摘要 | `contracts/schemas/release-manifest.schema.json` | `operations.md` 解释发布、离线包、升级与回滚 |
+| 四组件 `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
+| 其他 YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | 对应主题 Markdown 解释发布、兼容、运行和错误语义 |
 | SQLite 表、列、索引、外键和数据库约束 | `contracts/sql/schema.sql` | `persistence.md` 解释聚合、事务、生命周期和迁移约束 |
 | 跨协议不变量、事务边界、状态转换、权限、运行行为和无法由单份机器契约表达的约束 | 对应主题 Markdown | 机器契约只承载其可机械表达部分 |
 | 决策理由、备选方案、外部证据与原型结论 | 已关闭 Wayfinder ticket 及其证据 commit | 规格只保留必要的来源链接，不复制研究报告 |
