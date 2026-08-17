@@ -1,0 +1,166 @@
+name: quoin
+services:
+  secret-bootstrap:
+    image: quoin/quoin:v0.1.0-dev
+    command: ["secrets", "bootstrap", "--config", "/etc/quoin/component.yaml"]
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - {{.QuoinConfigBind}}
+      - {{.DataBind}}
+      - {{.SecretsRWBind}}
+    tmpfs: [/tmp]
+    restart: "no"
+  admin-bootstrap:
+    image: quoin/quoin:v0.1.0-dev
+    command: ["admin", "create", "--config", "/etc/quoin/component.yaml"]
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    stdin_open: true
+    tty: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      secret-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - {{.QuoinConfigBind}}
+      - {{.DataBind}}
+      - {{.BackupBind}}
+      - {{.SecretsROBind}}
+    tmpfs: [/tmp]
+    restart: "no"
+  quoin:
+    image: quoin/quoin:v0.1.0-dev
+    command: ["serve", "--config", "/etc/quoin/component.yaml"]
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    depends_on:
+      secret-bootstrap:
+        condition: service_completed_successfully
+      admin-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - {{.QuoinConfigBind}}
+      - {{.DataBind}}
+      - {{.BackupBind}}
+      - {{.SecretsROBind}}
+    tmpfs: [/tmp]
+    expose: ["8080", "8443", "9090"]
+{{- if .Loopback}}
+    ports:
+      - "127.0.0.1:{{.QuoinPort}}:8080"
+    networks: [internal, edge]
+{{- else if .ExternalNetwork}}
+    networks: [internal, proxy]
+{{- else}}
+    networks: [internal]
+{{- end}}
+    healthcheck:
+      test: [CMD, /quoin-healthcheck, http://127.0.0.1:9090/livez]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+  plinth:
+    image: quoin/plinth:v0.1.0-dev
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    depends_on:
+      admin-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - {{.PlinthConfigBind}}
+      - {{.PlinthStateBind}}
+      - {{.PlinthWorkBind}}
+      - {{.RuntimeCABind}}
+    tmpfs: [/tmp]
+    expose: ["9090"]
+    healthcheck:
+      test: [CMD, /quoin-healthcheck, http://127.0.0.1:9090/livez]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks: [internal]
+    restart: unless-stopped
+  lintel:
+    image: quoin/lintel:v0.1.0-dev
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    shm_size: {{.LintelShmSize}}
+    depends_on:
+      admin-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - {{.LintelConfigBind}}
+      - {{.LintelStateBind}}
+      - {{.RuntimeCABind}}
+    tmpfs: [/tmp]
+    expose: ["9090"]
+    healthcheck:
+      test: [CMD, /quoin-healthcheck, http://127.0.0.1:9090/livez]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks: [internal]
+    restart: unless-stopped
+  stele:
+    image: quoin/stele:v0.1.0-dev
+    user: "{{.UID}}:{{.GID}}"
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    depends_on:
+      admin-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - {{.SteleConfigBind}}
+      - {{.RuntimeCABind}}
+      - {{.SteleTokenBind}}
+    tmpfs: [/tmp]
+    expose: ["8080", "9090"]
+{{- if .Loopback}}
+    ports:
+      - "127.0.0.1:{{.StelePort}}:8080"
+    networks: [internal, edge]
+{{- else if .ExternalNetwork}}
+    networks: [internal, proxy]
+{{- else}}
+    networks: [internal]
+{{- end}}
+    healthcheck:
+      test: [CMD, /quoin-healthcheck, http://127.0.0.1:9090/livez]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+networks:
+  internal:
+    internal: true
+{{- if .Loopback}}
+  edge: {}
+{{- else if .ExternalNetwork}}
+  proxy:
+    external: true
+    name: {{.ExternalNetworkName}}
+{{- end}}

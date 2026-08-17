@@ -1,0 +1,9 @@
+# Excludes apply to the build context of build/package/Dockerfile only.
+*
+!go.mod
+!go.sum
+!cmd
+!cmd/**
+!internal
+!internal/**
+!build/package/Dockerfile

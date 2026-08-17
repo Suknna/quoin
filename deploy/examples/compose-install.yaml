@@ -1,0 +1,8 @@
+document: compose-install
+publicOrigin: https://quoin.example.com
+publishMode: loopback
+quoinPublicHostPort: 8080
+steleWebhookHostPort: 8081
+secretDirectory: /var/lib/quoin/secrets
+lintelBrowserSlots: 1
+lintelShmSizeBytes: 1073741824
