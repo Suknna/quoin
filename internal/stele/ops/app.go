@@ -8,8 +8,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/stele"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func Run(ctx context.Context, configPath string) error {
@@ -34,7 +37,24 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	webhook := &http.Server{Addr: ":8080", Handler: http.NotFoundHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
+	relay, err := stele.NewRelay(config.QuoinRuntimeEndpoint, config.QuoinRuntimeCAFile, config.ServiceTokenFile)
+	if err != nil {
+		return fmt.Errorf("connect Quoin Runtime: %w", err)
+	}
+	defer relay.Close()
+	webhook := &http.Server{Addr: ":8080", Handler: stele.NewWebhook(relay, prometheus.NewRegistry()), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 60 * time.Second}
+	// Transition readiness once the credential snapshot is loaded; before
+	// that the webhook returns 503 (OPS-HEALTH-005, RUNTIME-STELE-002).
+	go func() {
+		for {
+			if relay.Ready() {
+				server.SetReadiness(sharedops.Readiness{Component: "stele", Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
+			} else {
+				server.SetReadiness(sharedops.Readiness{Component: "stele", Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
+			}
+			time.Sleep(time.Second)
+		}
+	}()
 	errCh := make(chan error, 2)
 	go func() { errCh <- server.Run(ctx) }()
 	go func() { errCh <- webhook.ListenAndServe() }()
