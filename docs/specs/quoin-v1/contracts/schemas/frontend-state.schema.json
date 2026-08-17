@@ -46,7 +46,6 @@
           "uniqueItems": true
         },
         "businessSystem": { "type": "string", "minLength": 1, "maxLength": 200 },
-        "source": { "type": "string", "minLength": 1, "maxLength": 200 },
         "tab": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },

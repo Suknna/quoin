@@ -85,6 +85,7 @@ paths:
       x-quoin-cache-control: no-store
       x-external-dependency: true
       summary: 登录并签发 Session Cookie
+      description: 成功登录时服务端从本请求 User-Agent 机械归一有界设备/浏览器摘要写入 Session.client_label；不保存原始 User-Agent。
       security: []
       requestBody:
         required: true
@@ -3560,6 +3561,66 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/connections/{connectionName}/probe-attempts/{attemptId}:
+    get:
+      tags: [adminops]
+      operationId: getConnectionProbeAttempt
+      x-quoin-maintenance-access: trust-rebuild
+      summary: 重读 Connection Probe Attempt（Admin）
+      description: 返回持久 Attempt 状态；ConnectionDetail.activeProbeAttempt 允许刷新后发现当前 active probe，终态 typed result 另经 probe-results 读取。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/AttemptId'
+      responses:
+        '200':
+          description: 当前权威 Connection Probe Attempt。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/connections/{connectionName}/probe-attempts/{attemptId}/cancel:
+    post:
+      tags: [adminops]
+      operationId: cancelConnectionProbeAttempt
+      x-quoin-maintenance-access: upgrade-drain
+      summary: 取消 active Connection Probe Attempt（Admin）
+      description: 只允许取消该 Connection 的 active connection_probe Attempt；取消先提交则建立 cancellation fence，迟到上游结果只留审计，不产生 typed probe result。
+      parameters:
+        - $ref: '#/components/parameters/ConnectionName'
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '200':
+          description: 返回当前权威 Connection Probe Attempt。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/connections/{connectionName}/probe-results:
     get:
       tags: [adminops]
@@ -5208,7 +5269,7 @@ components:
           description: 15–128 Unicode 字符（NFC 规范化后校验）；登录不重跑 blocklist，失败由 Quoin 有界进程内冷却状态裁决。
     UserSummary:
       type: object
-      required: [id, username, displayName, role, enabled, authRevision, rowVersion, passwordChangeRequired]
+      required: [id, username, displayName, role, enabled, authRevision, rowVersion, passwordChangeRequired, lastLoginAt]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
@@ -5232,6 +5293,10 @@ components:
         passwordChangeRequired:
           type: boolean
           description: 受限 Session 依据（DATA-AUTH-001/002）。
+        lastLoginAt:
+          type: [string, 'null']
+          format: date-time
+          description: 从该用户 Session 的最大 created_at 机械派生；从未登录为 null，不建立第二份登录事实（UI-ADMIN-003）。
     PasswordChangeRequest:
       type: object
       required: [currentPassword, newPassword]
@@ -5247,10 +5312,15 @@ components:
           description: 15–128 Unicode 字符；NFC 后执行嵌入 blocklist 与上下文比较；成功改密在同一事务清除强制改密标志并撤销其他 Session。
     SessionInfo:
       type: object
-      required: [id, createdAt, lastActiveAt, idleExpiresAt, absoluteExpiresAt, current]
+      required: [id, clientLabel, createdAt, lastActiveAt, idleExpiresAt, absoluteExpiresAt, current]
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
+        clientLabel:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: 登录时由服务端从 User-Agent 机械归一的设备/浏览器摘要；不返回原始 User-Agent（UI-AUTH-004）。
         createdAt:
           $ref: '#/components/schemas/Timestamp'
         lastActiveAt:
@@ -5455,7 +5525,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         operationKind:
           type: string
-          enum: [manual_login, authentication_probe, journey, exploration]
+          enum: [manual_login, authentication_probe, journey, exploration, deployment_verification]
         occupiedSince:
           $ref: '#/components/schemas/Timestamp'
         detail:
@@ -7430,7 +7500,7 @@ components:
                 type: string
                 minLength: 1
               terminalReason:
-                enum: [shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, grace_expired, session_revoked, cancelled, runtime_unavailable, browser_crashed, protocol_error]
+                enum: [new_boot, shutdown, slot_revoked, slot_replaced, profile_missing, profile_manifest_invalid, chromium_revision_mismatch, authentication_required, grace_expired, session_revoked, cancelled, runtime_unavailable, browser_crashed, protocol_error]
               stopConfirmationBasis:
                 enum: [not_dispatched, start_rejected, same_boot_cleanup_ack, new_boot_cleanup_confirmed, externally_fenced_storage_retired]
           else:
@@ -8106,6 +8176,9 @@ components:
               type: integer
               minimum: 0
               description: generation 总数；历史经 listCredentialGenerations 游标分页读取（HTTP-PAGE-005）。
+            activeProbeAttempt:
+              $ref: '#/components/schemas/AttemptSummary'
+              description: 当前 Connection 的 active connection_probe Attempt；无 active probe 时省略，供刷新后恢复等待/取消入口。
     RevisionSummary:
       type: object
       required: [id, revisionSeq, config, createdAt]
