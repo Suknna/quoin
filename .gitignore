@@ -1,3 +1,8 @@
-# Local agent runtime artifacts
+node_modules/
+web/node_modules/
+web/playwright-report/
+web/test-results/
+.artifacts/
+.pi/
 .pi-subagents/
-.pi/subagents/
+.DS_Store
