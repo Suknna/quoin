@@ -56,6 +56,7 @@ CREATE TABLE sessions (
   user_id              INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   session_token_digest BLOB NOT NULL UNIQUE CHECK (length(session_token_digest) = 32), -- raw 32-byte bearer 的 SHA-256 digest；raw bearer 只存在于 Cookie 与认证瞬间内存（DATA-AUTH-003）
   auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
+  client_label         TEXT NOT NULL CHECK (length(client_label) BETWEEN 1 AND 200), -- 登录时由服务端从 User-Agent 机械归一为设备/浏览器摘要；不保存原始 header（UI-AUTH-004）
   created_at           TEXT NOT NULL,
   last_active_at       TEXT NOT NULL,
   idle_expires_at      TEXT NOT NULL,     -- 空闲 12 小时
@@ -81,7 +82,7 @@ WHEN NOT EXISTS (
   WHERE u.id = NEW.user_id AND u.enabled = 1 AND u.auth_revision = NEW.auth_revision_at_issue
 )
 BEGIN SELECT RAISE(ABORT, 'session must bind the enabled user current auth_revision'); END;
-CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, created_at ON sessions
+CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, client_label, created_at ON sessions
 BEGIN SELECT RAISE(ABORT, 'session issue identity is immutable'); END;
 CREATE TRIGGER trg_sessions_revocation_sticky BEFORE UPDATE OF revoked_at ON sessions
 WHEN NEW.revoked_at IS NOT OLD.revoked_at AND (OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL)
@@ -945,7 +946,7 @@ CREATE TABLE browser_operations (
       'authentication_required','authentication_probe_unavailable','artifact_commit_failed','cancelled','parent_terminal',
       'lease_expired','runtime_unavailable','browser_crashed','protocol_error'))
     OR (kind = 'deployment_verification' AND terminal_reason IN (
-      'shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
+      'new_boot','shutdown','slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
       'authentication_required','grace_expired','session_revoked','cancelled','runtime_unavailable','browser_crashed','protocol_error'))),
   CHECK ((stop_confirmed_at IS NULL) = (stop_confirmation_basis IS NULL)),
   CHECK (stop_confirmed_at IS NULL OR state IN ('Succeeded','Failed','Cancelled','Interrupted')),
@@ -1805,7 +1806,8 @@ CREATE TABLE artifacts (
   body_expired   INTEGER NOT NULL DEFAULT 0 CHECK (body_expired IN (0,1)),
   created_at     TEXT NOT NULL,
   created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  CHECK (kind <> 'trace' OR sensitive = 1)
+  CHECK (kind <> 'trace' OR sensitive = 1),
+  CHECK ((retention_kind = 'generated' AND expires_at IS NOT NULL) OR (retention_kind = 'long_term' AND expires_at IS NULL))
 ) STRICT;
 CREATE INDEX idx_artifacts_owner ON artifacts (owner_type, owner_id);
 CREATE INDEX idx_artifacts_blob ON artifacts (blob_id);
@@ -1821,7 +1823,7 @@ CREATE TABLE runtime_artifact_uploads (
   connection_epoch INTEGER NOT NULL CHECK (connection_epoch >= 1), -- 旧 epoch 上传只审计、拒绝提交
   owner_type     TEXT NOT NULL,
   owner_id       INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file','verification_bundle','verification_attachment')),
+  kind           TEXT NOT NULL CHECK (kind IN ('attachment','screenshot','trace','tool_result','report_file')),
   media_type     TEXT NOT NULL,
   retention_kind TEXT NOT NULL CHECK (retention_kind IN ('long_term','generated')),
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)),

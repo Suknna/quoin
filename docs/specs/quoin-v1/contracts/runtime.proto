@@ -162,7 +162,7 @@ enum AttemptRejectReason {
   ATTEMPT_REJECT_REASON_INTERNAL = 3;           // Runtime 内部错误；Attempt 转 Failed
 }
 
-// artifacts.kind 的 wire 表达（DATA-ARTIFACT-003）。
+// Runtime 可上传的 artifacts.kind 封闭子集（DATA-ARTIFACT-003/006）；verification_bundle 与 verification_attachment 由 Quoin/Deployment Helper 本地耐久路径创建，不经过 Runtime ArtifactService。
 enum ArtifactKind {
   ARTIFACT_KIND_UNSPECIFIED = 0;
   ARTIFACT_KIND_ATTACHMENT = 1;
@@ -211,7 +211,7 @@ enum BrowserCloseReason {
   BROWSER_CLOSE_REASON_SLOT_REVOKED = 4;    // Lintel slot 凭据吊销
   BROWSER_CLOSE_REASON_SLOT_REPLACED = 5;   // Lintel slot 被替换
   BROWSER_CLOSE_REASON_SHUTDOWN = 6;        // 有序停机
-  BROWSER_CLOSE_REASON_NEW_BOOT = 7;        // Lintel 新 boot 被接受：旧 operation Interrupted，身份锁释放
+  BROWSER_CLOSE_REASON_NEW_BOOT = 7;        // Lintel 新 boot 被接受：旧 operation 进入 Interrupted；身份锁按 kind 的停止确认 basis 释放，deployment_verification 仍须 clone sweep
   BROWSER_CLOSE_REASON_PROFILE_PUBLISHED = 8; // profile generation 已原子发布，立即关闭 tunnel/Chromium
   BROWSER_CLOSE_REASON_OPERATION_TERMINAL = 9; // Browser Operation 已进入其它终态
 }
@@ -591,6 +591,14 @@ message ModelTokenDelta {
   string text = 4;
 }
 
+enum ModelCallCompletionRejectReason {
+  MODEL_CALL_COMPLETION_REJECT_REASON_UNSPECIFIED = 0;
+  MODEL_CALL_COMPLETION_REJECT_REASON_ATTEMPT_TERMINAL = 1;
+  MODEL_CALL_COMPLETION_REJECT_REASON_STALE_STREAM = 2;
+  MODEL_CALL_COMPLETION_REJECT_REASON_DIGEST_CONFLICT = 3;
+  MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION = 4;
+}
+
 enum ModelCallOutcome {
   MODEL_CALL_OUTCOME_UNSPECIFIED = 0;
   MODEL_CALL_OUTCOME_SUCCEEDED = 1;
@@ -608,7 +616,6 @@ enum ModelCallFailureReason {
   MODEL_CALL_FAILURE_REASON_CANCELLED = 6;
   MODEL_CALL_FAILURE_REASON_ARTIFACT_COMMIT_FAILED = 7;
   MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR = 8; // 请求明确未到达 provider 或由 adapter 证明无不确定副作用；可物理重试
-  MODEL_CALL_FAILURE_REASON_ATTEMPT_TERMINAL = 9; // cancellation fence/终态已提交；绝不可重试
 }
 
 message CompleteModelCall {
@@ -670,6 +677,7 @@ message CompleteModelCallAck {
   int64 model_call_id = 3;
   repeated ToolCallAuthorization tool_calls = 4;
   string detail = 5;
+  ModelCallCompletionRejectReason reject_reason = 6; // accepted=false 时必为封闭非零值；accepted=true 时 UNSPECIFIED
 }
 
 message BeginToolCall {
@@ -936,7 +944,9 @@ message PublishBrowserProfileResult {
 // Quoin 已提交 operation 终态后发送的幂等进程停止 fence。Lintel 不得据此改写领域终态；
 // 只停止 operation_id 对应的进程/隧道并清理 trace staging/临时 profile，不得按 identity 杀死后续 operation。
 // 重复消息必须回同一规范 cleanup observation；同 boot 无成功 typed Ack 不得声称已清理。Quoin 收到
-// SUCCEEDED Ack 前保留身份/容量 fence；新 boot 只能令旧 cleanup 进入 indeterminate，必须走 LintelRecovery。
+// SUCCEEDED Ack 前保留身份/容量 fence。正常新 boot 可在 Browser Ready 前完成全量清扫：普通 operation
+// 以 new_boot 确认，deployment_verification 以 typed Ack + new_boot_cleanup_confirmed 确认；只有 Token/状态损坏
+// 使正常清扫链路无法建立时才进入 indeterminate 并要求 LintelRecovery。
 message StopBrowserOperation {
   int64 operation_id = 1;
   BrowserCloseReason reason = 2;
