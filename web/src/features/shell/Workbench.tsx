@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RuntimeStatus, UserSummary } from '../../api/generated/types'
 import { api } from '../../app/api'
+import { AlertDetail } from '../alerts/AlertDetail'
+import { AlertSourceForm } from '../alerts/AlertSourceForm'
+import { AlertsList } from '../alerts/AlertsList'
+import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -29,12 +33,19 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [profileOpen, setProfileOpen] = useState(false)
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [runtimeError, setRuntimeError] = useState(false)
+  const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
+  const [intakeOpen, setIntakeOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
   useEffect(() => {
     void api.runtime().then(setRuntime).catch(() => setRuntimeError(true))
-    const sync = () => setActive(moduleFromPath())
+    const sync = () => {
+      setActive(moduleFromPath())
+      const match = window.location.pathname.match(/^\/alerts\/(\d+)/)
+      setSelectedOccurrence(match ? match[1] : null)
+    }
+    sync()
     window.addEventListener('popstate', sync)
     return () => window.removeEventListener('popstate', sync)
   }, [])
@@ -43,6 +54,12 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
     window.history.pushState({}, '', path)
     setActive(key)
     setDrawerOpen(false)
+    setSelectedOccurrence(null)
+  }
+
+  function selectOccurrence(id: string) {
+    window.history.pushState({}, '', `/alerts/${id}`)
+    setSelectedOccurrence(id)
   }
 
   async function logout() {
@@ -76,10 +93,21 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           <p className="eyebrow">{activeModule.label}</p>
           <h1>{activeModule.label}</h1>
         </div>
-        <div className="inline-status" role="status">
-          <span className="status-dot waiting" />
-          <div><strong>此能力尚未接入</strong><p>当前安装已经就绪；后续纵向票会在这里加入真实对象。</p></div>
-        </div>
+        {active === 'alerts' && (
+          <>
+            <div className="segmented" aria-label="告警视图">
+              <button aria-pressed={!intakeOpen} onClick={() => setIntakeOpen(false)}>当前</button>
+              <button aria-pressed={intakeOpen} onClick={() => setIntakeOpen(true)}>接入问题</button>
+            </div>
+            {intakeOpen ? <IntakeIssuesList /> : <AlertsList onSelect={selectOccurrence} />}
+          </>
+        )}
+        {active !== 'alerts' && (
+          <div className="inline-status" role="status">
+            <span className="status-dot waiting" />
+            <div><strong>此能力尚未接入</strong><p>当前安装已经就绪；后续纵向票会在这里加入真实对象。</p></div>
+          </div>
+        )}
         {active === 'admin' && (
           <section className="runtime-summary" aria-labelledby="runtime-title">
             <h2 id="runtime-title">运行组件</h2>
@@ -93,11 +121,24 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         )}
       </aside>
       <main className="detail-pane" tabIndex={-1}>
-        <div className="empty-state">
-          <ModuleIcon name={activeModule.key} large />
-          <h2>{activeModule.label}尚无可查看内容</h2>
-          <p>这里不会展示虚构数据。相应能力接入后，你可以从左侧选择真实对象查看详情。</p>
-        </div>
+        {active === 'alerts' && selectedOccurrence ? (
+          <AlertDetail occurrenceId={selectedOccurrence} onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null) }} />
+        ) : active === 'alerts' ? (
+          <div className="detail-content">
+            <div className="empty-state">
+              <ModuleIcon name="alerts" large />
+              <h2>选择一条告警查看详情</h2>
+              <p>左侧列出当前 Firing 的告警；接入问题在第二栏顶部切换。</p>
+            </div>
+            {user.role === 'admin' && <AlertSourceForm onCreated={() => undefined} />}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <ModuleIcon name={activeModule.key} large />
+            <h2>{activeModule.label}尚无可查看内容</h2>
+            <p>这里不会展示虚构数据。相应能力接入后，你可以从左侧选择真实对象查看详情。</p>
+          </div>
+        )}
       </main>
     </div>
   )

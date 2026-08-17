@@ -9,7 +9,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   reporter: [
     ['list'],
-    ['html', { outputDir: '../.artifacts/tickets/T01/playwright-report', open: 'never' }],
+    ['html', { outputDir: '../.artifacts/tickets/T03/playwright-report', open: 'never' }],
   ],
   use: {
     baseURL: 'http://127.0.0.1:18080',
@@ -20,7 +20,7 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command: 'bash ../test/e2e/compose/server.sh',
-    url: 'http://127.0.0.1:18080/',
+    url: 'http://127.0.0.1:18083/ready',
     reuseExistingServer: false,
     timeout: 420_000,
     stdout: 'ignore',
