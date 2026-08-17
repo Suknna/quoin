@@ -41,8 +41,12 @@ func main() {
 	}
 	// Read scripted bootstrap answers before any Docker child can inherit and
 	// drain piped stdin; interactive runs keep passthrough stdin instead.
+	// QUOIN_DEPLOY_SCRIPTED=1 forces the scripted pty path even under a real
+	// terminal (used by automated acceptance so `go test` in a TTY cannot
+	// accidentally leave the admin container waiting for a human).
+	forceScripted := os.Getenv("QUOIN_DEPLOY_SCRIPTED") == "1"
 	var scripted *composeprojection.AdminAnswers
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if forceScripted || !term.IsTerminal(int(os.Stdin.Fd())) {
 		answers, inputErr := composeprojection.ReadAdminAnswers()
 		if inputErr != nil {
 			failInput(inputErr.Error())
@@ -130,10 +134,27 @@ func deploymentStateDirectory() (string, error) {
 	return filepath.Join(base, "quoin", "compose"), nil
 }
 
+// running reports whether the EXACT projected compose file already has a live
+// Quoin. Containers from a different config file (stale stack from another
+// state dir) must not count: they are cleaned up before a fresh install.
 func running(composeFile string) bool {
 	command := exec.Command("docker", "compose", "--project-name", "quoin", "--file", composeFile, "ps", "--status", "running", "--quiet", "quoin")
 	output, err := command.Output()
-	return err == nil && len(output) > 0
+	if err != nil || len(output) == 0 {
+		return false
+	}
+	// Verify the running container's config file equals our projection.
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return false
+	}
+	container := strings.TrimSpace(lines[0])
+	inspect := exec.Command("docker", "inspect", container, "--format", "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}")
+	configFile, err := inspect.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(configFile)) == composeFile
 }
 
 func run(name string, arguments ...string) error {

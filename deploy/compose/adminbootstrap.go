@@ -46,6 +46,7 @@ func RunAdminBootstrapScripted(composeFile string, answers AdminAnswers) (string
 		return "", fmt.Errorf("the two typed temporary passwords do not match")
 	}
 	command := exec.Command("docker", "compose", "--project-name", "quoin", "--file", composeFile, "run", "--rm", "admin-bootstrap")
+	command.Env = append(os.Environ(), "DOCKER_CLI_HINTS=false")
 	master, err := pty.Start(command)
 	if err != nil {
 		return "", fmt.Errorf("allocate bootstrap pseudo-terminal: %w", err)
@@ -57,7 +58,7 @@ func RunAdminBootstrapScripted(composeFile string, answers AdminAnswers) (string
 	go func() { result <- command.Wait() }()
 
 	step := 0
-	deadline := time.After(180 * time.Second)
+	deadline := time.After(60 * time.Second)
 	buffer := make([]byte, 4096)
 	session := &strings.Builder{}
 	for {
@@ -65,7 +66,7 @@ func RunAdminBootstrapScripted(composeFile string, answers AdminAnswers) (string
 		case <-deadline:
 			command.Process.Kill()
 			<-result
-			return sanitizeTranscript(session.String()), fmt.Errorf("admin bootstrap timed out waiting for prompt %q", adminPrompts[step].marker)
+			return sanitizeTranscript(session.String()), fmt.Errorf("admin bootstrap timed out waiting for prompt %q; session so far:\n%s", adminPrompts[step].marker, debugSession(session.String()))
 		default:
 		}
 		read, readErr := master.Read(buffer)
@@ -100,6 +101,17 @@ func RunAdminBootstrapScripted(composeFile string, answers AdminAnswers) (string
 
 // sanitizeTranscript keeps only machine result lines from the raw session so
 // echoed non-secret input can never be mistaken for a log contract.
+// debugSession returns the raw session with control chars stripped, for the
+// timeout error path only (never contains secret input).
+func debugSession(session string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, session)
+}
+
 func sanitizeTranscript(session string) string {
 	filtered := &strings.Builder{}
 	scanner := bufio.NewScanner(strings.NewReader(session))
