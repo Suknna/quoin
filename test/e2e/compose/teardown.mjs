@@ -22,6 +22,7 @@ function record(name, command) {
 
 if (existsSync(composeFile)) {
   record('playwright containers+networks', `docker compose --project-name quoin --file "${composeFile}" down --remove-orphans`)
+  record('playwright alertmanager+forwarder', 'docker rm -f e2e-am e2e-fwd')
 }
 record('playwright images', 'docker rmi quoin/quoin:v0.1.0-dev quoin/plinth:v0.1.0-dev quoin/lintel:v0.1.0-dev quoin/stele:v0.1.0-dev')
 if (existsSync(stack)) {
