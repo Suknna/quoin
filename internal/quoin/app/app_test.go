@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/app"
@@ -171,4 +172,141 @@ func merge(base, extra map[string]string) map[string]string {
 		joined[key] = value
 	}
 	return joined
+}
+
+// TestAlertSourceRevealLifecycleOverRealServer drives the frozen reveal
+// lifecycle over the real Huma surface: create → replay (same handle) →
+// reveal once → second reveal 410 → replay after consume reports
+// revealAvailable=false; Operator role is forbidden from both commands.
+func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	secrets := filepath.Join(root, "secrets")
+	config := contract.QuoinConfig{
+		Component: "quoin", PublicOrigin: "https://quoin.example.com",
+		DataDirectory:             filepath.Join(root, "data"),
+		BackupDirectory:           filepath.Join(root, "backup"),
+		RootKeyFile:               filepath.Join(secrets, "root-key"),
+		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
+		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
+		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
+	}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service, err := auth.NewService(database.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const temporary = "Correct horse battery staple 2026!"
+	if _, err := service.CreateFirstAdmin(ctx, "admin", "Quoin Admin", temporary); err != nil {
+		t.Fatal(err)
+	}
+	// A second non-admin user (Operator) exercises the 403 paths; user
+	// management lands in a later ticket, so the operator row is inserted
+	// directly with the real Argon2id hash.
+	operatorPHC, err := auth.HashPassword("Operator passphrase 2026!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SQL.ExecContext(ctx, `INSERT INTO users(username,display_name,role,enabled,password_phc,password_change_required,created_at,updated_at) VALUES(?,'Ops Operator','operator',1,?,0,?,?)`,
+		"operator", operatorPHC, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin))
+	defer server.Close()
+	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
+
+	adminCookie := loginCookie(t, server, origin, "admin", temporary, true)
+	operatorCookie := loginCookie(t, server, origin, "operator", "Operator passphrase 2026!", false)
+
+	create := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
+	var created struct {
+		SourceKey       string `json:"sourceKey"`
+		CredentialID    string `json:"credentialId"`
+		RevealAvailable bool   `json:"revealAvailable"`
+		RevealHandle    string `json:"revealHandle"`
+	}
+	if err := json.Unmarshal([]byte(create.body), &created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.RevealAvailable || created.RevealHandle == "" || created.SourceKey != "prod-am" {
+		t.Fatalf("create response malformed: %s", create.body)
+	}
+
+	// Replay with the same clientCommandId returns the original source and the
+	// same still-valid handle (HTTP-COMMAND-003 / SEC-REVEAL-003).
+	replay := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
+	var replayed struct {
+		SourceKey       string `json:"sourceKey"`
+		RevealHandle    string `json:"revealHandle"`
+		RevealAvailable bool   `json:"revealAvailable"`
+	}
+	if err := json.Unmarshal([]byte(replay.body), &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.SourceKey != "prod-am" || replayed.RevealHandle != created.RevealHandle || !replayed.RevealAvailable {
+		t.Fatalf("replay must return the original handle: %s", replay.body)
+	}
+
+	// Replaying with a DIFFERENT payload under the same command id conflicts.
+	mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources`, `{"key":"other-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusConflict)
+
+	// Operator is forbidden from both commands.
+	mustPost(t, server, merge(origin, map[string]string{"Cookie": operatorCookie}),
+		`/api/v1/alert-sources`, `{"key":"ops-am","protocol":"alertmanager","clientCommandId":"cmd-0002"}`, http.StatusForbidden)
+	mustPost(t, server, merge(origin, map[string]string{"Cookie": operatorCookie}),
+		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusForbidden)
+
+	// Reveal succeeds exactly once; the second consume of the same handle is 410.
+	reveal := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusOK)
+	var revealed struct {
+		CredentialID string `json:"credentialId"`
+		BearerToken  string `json:"bearerToken"`
+	}
+	if err := json.Unmarshal([]byte(reveal.body), &revealed); err != nil {
+		t.Fatal(err)
+	}
+	if len(revealed.BearerToken) != 43 {
+		t.Fatalf("bearer shape wrong: %q", revealed.BearerToken)
+	}
+	mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusGone)
+
+	// After consume, a replay of the same command reports revealAvailable=false
+	// and never re-creates the credential (SEC-REVEAL-*).
+	after := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
+	var afterConsume struct {
+		RevealAvailable bool `json:"revealAvailable"`
+	}
+	if err := json.Unmarshal([]byte(after.body), &afterConsume); err != nil {
+		t.Fatal(err)
+	}
+	if afterConsume.RevealAvailable {
+		t.Fatalf("replay after consume must not offer a handle: %s", after.body)
+	}
+}
+
+func loginCookie(t *testing.T, server *httptest.Server, origin map[string]string, username, password string, changePassword bool) string {
+	t.Helper()
+	login := mustPost(t, server, origin, `/api/v1/auth/login`,
+		`{"username":"`+username+`","password":"`+password+`"}`, http.StatusOK)
+	cookie := splitCookie(login.headers.Get("Set-Cookie"))
+	if changePassword {
+		mustDo(t, server, http.MethodPut, merge(origin, map[string]string{"Cookie": cookie}),
+			`/api/v1/auth/password`,
+			`{"currentPassword":"`+password+`","newPassword":"Fresh personal passphrase 2027!"}`, http.StatusNoContent)
+	}
+	return cookie
 }

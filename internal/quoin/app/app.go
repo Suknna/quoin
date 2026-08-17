@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -17,26 +19,37 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	generatedweb "github.com/Suknna/quoin/internal/gen/web"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"google.golang.org/grpc"
 )
 
 type servers struct {
-	public  *http.Server
-	runtime *http.Server
-	ops     *sharedops.Server
+	public *http.Server
+	ops    *sharedops.Server
+	relay  *grpc.Server
 }
 
 type apiServer struct {
-	auth *auth.Service
-	db   *sql.DB
+	auth     *auth.Service
+	db       *sql.DB
+	alerts   *alerts.Service
+	reveals  *secrets.Store
+	commands *commandReplay
 }
 
 // NewAPIServer is the testable constructor for the Quoin public surface.
 func NewAPIServer(service *auth.Service, db *sql.DB) *apiServer {
-	return &apiServer{auth: service, db: db}
+	return &apiServer{
+		auth: service, db: db,
+		alerts:   alerts.NewService(db),
+		reveals:  secrets.NewStore(),
+		commands: newCommandReplay(),
+	}
 }
 
 type authInput struct {
@@ -118,11 +131,17 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if !hasUsers {
 		return fmt.Errorf("no administrator exists; run attached Admin bootstrap first")
 	}
-	application := &apiServer{auth: authService, db: database.SQL}
+	application := NewAPIServer(authService, database.SQL)
 	serverSet, err := application.newServers(config)
 	if err != nil {
 		return err
 	}
+	serviceToken, err := os.ReadFile(config.SteleServiceTokenFile)
+	if err != nil {
+		return fmt.Errorf("read Stele service token: %w", err)
+	}
+	serverSet.relay = grpc.NewServer()
+	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
 	return serverSet.run(ctx, config)
 }
 
@@ -131,12 +150,11 @@ func (application *apiServer) newServers(config contract.QuoinConfig) (*servers,
 	if err != nil {
 		return nil, err
 	}
-	runtimeServer := &http.Server{Addr: ":8443", Handler: http.NotFoundHandler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13}}
 	opsServer, err := sharedops.New("quoin", ":9090", sharedops.Ready)
 	if err != nil {
 		return nil, err
 	}
-	return &servers{public: &http.Server{Addr: ":8080", Handler: public, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, runtime: runtimeServer, ops: opsServer}, nil
+	return &servers{public: &http.Server{Addr: ":8080", Handler: public, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer}, nil
 }
 
 // NewHandler builds the same-origin public surface: the real Huma API plus the
@@ -168,6 +186,7 @@ func (application *apiServer) register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword", DefaultStatus: http.StatusNoContent}, application.changePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout", DefaultStatus: http.StatusNoContent}, application.logout)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
+	application.registerAlertRoutes(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
@@ -216,6 +235,7 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 	if err != nil {
 		return nil, authFailure(err, "完成登出")
 	}
+	application.reveals.InvalidateSession(secrets.SessionDigest(input.Session))
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
 	}
@@ -298,16 +318,27 @@ func (application *apiServer) registerStatic(mux *http.ServeMux) {
 }
 
 func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) error {
-	errCh := make(chan error, 3)
+	runtimeListener, err := net.Listen("tcp", ":8443")
+	if err != nil {
+		return fmt.Errorf("listen Runtime gRPC: %w", err)
+	}
+	tlsConfig, err := tls.LoadX509KeyPair(config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile)
+	if err != nil {
+		return fmt.Errorf("load Runtime TLS identity: %w", err)
+	}
+	errCh := make(chan error, 4)
 	go func() { errCh <- serverSet.public.ListenAndServe() }()
 	go func() {
-		errCh <- serverSet.runtime.ListenAndServeTLS(config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile)
+		// grpc-go enforces ALPN "h2" for TLS clients (>=1.67); the Runtime
+		// listener must offer it.
+		runtimeTLS := &tls.Config{Certificates: []tls.Certificate{tlsConfig}, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}}
+		errCh <- serverSet.relay.Serve(tls.NewListener(runtimeListener, runtimeTLS))
 	}()
 	go func() { errCh <- serverSet.ops.Run(ctx) }()
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, grpc.ErrServerStopped) {
 			return err
 		}
 	}
@@ -315,8 +346,8 @@ func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) 
 	// closing budget stays inside the reserved >=15s connection-close window.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	serverSet.relay.GracefulStop()
 	_ = serverSet.public.Shutdown(shutdownCtx)
-	_ = serverSet.runtime.Shutdown(shutdownCtx)
 	return nil
 }
 
