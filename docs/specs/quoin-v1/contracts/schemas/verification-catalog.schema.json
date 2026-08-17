@@ -80,6 +80,17 @@
             "mode": { "const": "for_each_current_object" },
             "object_kind": { "enum": ["connection", "config", "browser_identity"] }
           }
+        },
+        {
+          "type": "object",
+          "required": ["mode", "object_kind", "backend", "architecture"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "const": "deployment_target_for_each_current_object" },
+            "object_kind": { "enum": ["connection", "config", "browser_identity"] },
+            "backend": { "enum": ["compose", "kubernetes"] },
+            "architecture": { "enum": ["linux/amd64", "linux/arm64"] }
+          }
         }
       ]
     },

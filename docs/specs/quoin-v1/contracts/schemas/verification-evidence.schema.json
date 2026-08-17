@@ -200,7 +200,29 @@
         "sensitive": {
           "type": "boolean"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": ["stdout", "stderr", "logs", "metrics", "trace", "screenshot", "video", "database"]
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "retention_class": { "const": "generated" }
+            }
+          },
+          "else": {
+            "properties": {
+              "retention_class": { "const": "long_term" }
+            }
+          }
+        }
+      ]
     },
     "environment": {
       "type": "object",

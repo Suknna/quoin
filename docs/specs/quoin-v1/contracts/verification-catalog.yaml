@@ -46,6 +46,8 @@ capability_definitions:
     kind: external_stack
   - id: external.transport-stack
     kind: external_stack
+  - id: external.monitoring-stack
+    kind: external_stack
   - id: external.current-connection
     kind: external_stack
   - id: external.current-business-system
@@ -207,6 +209,9 @@ validation_roots:
   - id: VERIFY-VALIDATION-004
     source: docs/specs/quoin-v1/verification.md
     anchor: verify-validation-004
+  - id: VERIFY-VALIDATION-005
+    source: docs/specs/quoin-v1/verification.md
+    anchor: verify-validation-005
 environments:
   - id: contract-harness
     kind: contract_harness
@@ -708,6 +713,7 @@ scenarios:
       - OPS-VERIFY-002
       - OPS-VERIFY-003
       - VERIFY-VALIDATION-002
+      - VERIFY-VALIDATION-004
     subject:
       kind: release
       selector: release_manifest_subject_and_platform_digests
@@ -737,19 +743,76 @@ scenarios:
           docker_version: release-pinned
           compose_version: release-pinned
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: compose-linux-arm64
@@ -767,19 +830,76 @@ scenarios:
           docker_version: release-pinned
           compose_version: release-pinned
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-0-linux-amd64
@@ -795,19 +915,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_0.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-0-linux-arm64
@@ -823,19 +1000,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_0.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-1-linux-amd64
@@ -851,19 +1085,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_1.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-1-linux-arm64
@@ -879,19 +1170,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_1.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-2-linux-amd64
@@ -907,19 +1255,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_2.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
       - id: kubernetes-maintained-2-linux-arm64
@@ -935,19 +1340,76 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_2.latest_patch
         assertions:
-          - id: four-images-running
+          - id: four-images-by-index-digest
             kind: state
-            expected: all_required_images_by_index_digest
-          - id: readiness-and-metrics
+            expected: true
+          - id: live-ready-metrics-scraped
             kind: http_response
-            expected: all_ready_and_scraped
-          - id: registration-and-browser
-            kind: protocol_event
-            expected: runtime_registration_and_real_browser_passed
-          - id: backup-restore-upgrade
+            expected: true
+          - id: fresh-secret-bootstrap
             kind: state
-            expected: stateful_lifecycle_passed
-          - id: sentinel-scan
+            expected: passed
+          - id: existing-data-missing-secret-fail-closed
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-gates-long-running-workloads
+            kind: state
+            expected: passed
+          - id: admin-bootstrap-failure-retry-never-starts-workloads-early
+            kind: state
+            expected: passed
+          - id: first-admin-login
+            kind: http_response
+            expected: passed
+          - id: runtime-stdin-registration-and-token-replacement
+            kind: protocol_event
+            expected: passed
+          - id: old-runtime-token-rejected
+            kind: protocol_event
+            expected: passed
+          - id: plinth-tool-and-sandbox-self-check
+            kind: state
+            expected: passed
+          - id: lintel-real-browser-novnc-profile-trace
+            kind: protocol_event
+            expected: passed
+          - id: stele-delivery
+            kind: protocol_event
+            expected: passed
+          - id: artifact-backup-and-ops-observation
+            kind: state
+            expected: passed
+          - id: offline-backup-fallback
+            kind: state
+            expected: passed
+          - id: offline-restore-and-isolation
+            kind: state
+            expected: passed
+          - id: restored-identities-invalidated
+            kind: state
+            expected: passed
+          - id: n-minus-one-upgrade-and-prewrite-rollback
+            kind: state
+            expected: passed
+          - id: retained-volume-service-recreation
+            kind: state
+            expected: passed
+          - id: sigterm-shutdown
+            kind: state
+            expected: passed
+          - id: storage-faults
+            kind: state
+            expected: passed
+          - id: offline-archive-signature-import-and-digest-readback
+            kind: state
+            expected: passed
+          - id: release-manifest-sigstore-and-workload-shape
+            kind: state
+            expected: passed
+          - id: verifier-holds-no-product-or-connection-credentials
+            kind: state
+            expected: true
+          - id: sentinel-scan-release-artifacts-logs-traces-evidence
             kind: state
             expected: no_leak
     status: active
@@ -992,6 +1454,332 @@ scenarios:
       entrypoint: quoin-deploy <compose|helm> verify --suite release-qualification
       success_assertions:
         - temporary-environment-removed
+    timeout_seconds: 28800
+  - id: integration.monitoring-stack
+    title: Validate Prometheus, Alertmanager and Thanos happy paths against official digest-pinned images on every native release cell
+    validation_roots:
+      - VERIFY-VALIDATION-005
+    subject:
+      kind: deployment
+      selector: release_subject_and_official_monitoring_stack_digests
+      drift_fields:
+        - release_subject_digest
+    fixtures:
+      - id: prometheus-official
+        kind: external_target
+        locator: qualification-resolved-prometheus-image-digest
+        digest_required: true
+      - id: alertmanager-official
+        kind: external_target
+        locator: qualification-resolved-alertmanager-image-digest
+        digest_required: true
+      - id: thanos-official
+        kind: external_target
+        locator: qualification-resolved-thanos-image-digest
+        digest_required: true
+      - id: protocol-error-fixtures
+        kind: repository_file
+        locator: testdata/external-protocol-faults
+        digest_required: true
+    cells:
+      - id: compose-linux-amd64
+        environment_id: compose-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-amd64
+          - docker.version.release-pinned
+          - compose.version.release-pinned
+          - external.monitoring-stack
+        parameters:
+          backend: compose
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: compose-linux-arm64
+        environment_id: compose-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.compose
+          - architecture.linux-arm64
+          - docker.version.release-pinned
+          - compose.version.release-pinned
+          - external.monitoring-stack
+        parameters:
+          backend: compose
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-0-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-0-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_0.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-0-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-0-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_0.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-1-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-1-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_1.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-1-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-1-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_1.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-2-linux-amd64
+        environment_id: kubernetes-native
+        architecture: linux/amd64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-amd64
+          - kubernetes.version.maintained-2-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_2.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+      - id: kubernetes-maintained-2-linux-arm64
+        environment_id: kubernetes-native
+        architecture: linux/arm64
+        applicability:
+          mode: always
+        required_capabilities:
+          - backend.kubernetes
+          - architecture.linux-arm64
+          - kubernetes.version.maintained-2-latest-patch
+          - external.monitoring-stack
+        parameters:
+          backend: kubernetes
+          kubernetes_version_selector: maintained_minor_2.latest_patch
+        assertions:
+          - id: prometheus-query-happy-path
+            kind: http_response
+            expected: passed
+          - id: thanos-prometheus-api-query-semantics
+            kind: http_response
+            expected: passed
+          - id: alertmanager-webhook-delivery
+            kind: protocol_event
+            expected: passed
+          - id: stele-ingest-and-occurrence-projection
+            kind: state
+            expected: passed
+          - id: deterministic-protocol-error-fixtures
+            kind: state
+            expected: passed
+          - id: tcp-fault-primitives
+            kind: state
+            expected: passed
+    status: active
+    layer: release_qualification
+    requirement: required
+    executor:
+      kind: deployment_helper
+      entrypoint: quoin-deploy <compose|helm> verify --suite monitoring-stack
+      requires_admin_session: false
+      requires_product_credentials: false
+    phases:
+      setup: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase setup
+      action: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase action
+      assert: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase assert
+      teardown: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase teardown
+    depends_on:
+      - release.native-matrix
+      - fault.network
+    proof_refs:
+      - protocol.interleavings
+    required_capabilities: []
+    evidence:
+      test_names:
+        - integration.monitoring-stack.compose-linux-amd64
+        - integration.monitoring-stack.compose-linux-arm64
+        - integration.monitoring-stack.kubernetes-maintained-0-linux-amd64
+        - integration.monitoring-stack.kubernetes-maintained-0-linux-arm64
+        - integration.monitoring-stack.kubernetes-maintained-1-linux-amd64
+        - integration.monitoring-stack.kubernetes-maintained-1-linux-arm64
+        - integration.monitoring-stack.kubernetes-maintained-2-linux-amd64
+        - integration.monitoring-stack.kubernetes-maintained-2-linux-arm64
+      attachments:
+        - structured_result
+        - stdout
+        - stderr
+        - logs
+        - metrics
+      redaction_profile: verification-redaction-v1
+    cleanup:
+      required: true
+      entrypoint: quoin-deploy <compose|helm> verify --suite monitoring-stack
+      success_assertions:
+        - monitoring-stack-removed
+        - temporary-data-removed
     timeout_seconds: 28800
   - id: ui.automated
     title: Run browser automation for routing, auth, concurrency, waiting and domain workbenches across the fixed viewport and motion matrix
@@ -3704,7 +4492,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults --phase cleanup
+      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults --phase teardown
       success_assertions:
         - toxiproxy-removed
         - proxy-routes-restored
@@ -5019,7 +5807,8 @@ scenarios:
         environment_id: compose-native
         architecture: linux/amd64
         applicability:
-          mode: deployment_target
+          mode: deployment_target_for_each_current_object
+          object_kind: browser_identity
           backend: compose
           architecture: linux/amd64
         required_capabilities:
@@ -5064,7 +5853,8 @@ scenarios:
         environment_id: compose-native
         architecture: linux/arm64
         applicability:
-          mode: deployment_target
+          mode: deployment_target_for_each_current_object
+          object_kind: browser_identity
           backend: compose
           architecture: linux/arm64
         required_capabilities:
@@ -5109,7 +5899,8 @@ scenarios:
         environment_id: kubernetes-native
         architecture: linux/amd64
         applicability:
-          mode: deployment_target
+          mode: deployment_target_for_each_current_object
+          object_kind: browser_identity
           backend: kubernetes
           architecture: linux/amd64
         required_capabilities:
@@ -5154,7 +5945,8 @@ scenarios:
         environment_id: kubernetes-native
         architecture: linux/arm64
         applicability:
-          mode: deployment_target
+          mode: deployment_target_for_each_current_object
+          object_kind: browser_identity
           backend: kubernetes
           architecture: linux/arm64
         required_capabilities:

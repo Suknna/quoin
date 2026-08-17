@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Suknna/quoin/blob/main/docs/specs/quoin-v1/contracts/schemas/deployment-verification.schema.json",
+  "$id": "https://raw.githubusercontent.com/Suknna/quoin/main/docs/specs/quoin-v1/contracts/schemas/deployment-verification.schema.json",
   "title": "Quoin Deployment Verification Exchange Documents",
   "oneOf": [
     {
