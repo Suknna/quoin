@@ -55,7 +55,7 @@ CREATE TABLE sessions (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   user_id              INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   session_token_digest BLOB NOT NULL UNIQUE CHECK (length(session_token_digest) = 32), -- raw 32-byte bearer 的 SHA-256 digest；raw bearer 只存在于 Cookie 与认证瞬间内存（DATA-AUTH-003）
-  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
+  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0), -- 自行改密事务只允许精确前进到当前 User revision；其他签发身份字段不可改写（DATA-AUTH-005）
   client_label         TEXT NOT NULL CHECK (length(client_label) BETWEEN 1 AND 200), -- 登录时由服务端从 User-Agent 机械归一为设备/浏览器摘要；不保存原始 header（UI-AUTH-004）
   created_at           TEXT NOT NULL,
   last_active_at       TEXT NOT NULL,
@@ -82,8 +82,20 @@ WHEN NOT EXISTS (
   WHERE u.id = NEW.user_id AND u.enabled = 1 AND u.auth_revision = NEW.auth_revision_at_issue
 )
 BEGIN SELECT RAISE(ABORT, 'session must bind the enabled user current auth_revision'); END;
-CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, auth_revision_at_issue, client_label, created_at ON sessions
+CREATE TRIGGER trg_sessions_issue_identity_immutable BEFORE UPDATE OF user_id, session_token_digest, client_label, created_at ON sessions
 BEGIN SELECT RAISE(ABORT, 'session issue identity is immutable'); END;
+CREATE TRIGGER trg_sessions_auth_revision_forward BEFORE UPDATE OF auth_revision_at_issue ON sessions
+WHEN OLD.revoked_at IS NOT NULL
+  OR NEW.auth_revision_at_issue <> OLD.auth_revision_at_issue + 1
+  OR NOT EXISTS (
+    SELECT 1 FROM users u
+    WHERE u.id = OLD.user_id AND u.enabled = 1 AND u.auth_revision = NEW.auth_revision_at_issue
+  )
+  OR EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.user_id = OLD.user_id AND s.id <> OLD.id AND s.revoked_at IS NULL
+  )
+BEGIN SELECT RAISE(ABORT, 'current session auth revision must advance exactly once after every other user session is revoked'); END;
 CREATE TRIGGER trg_sessions_revocation_sticky BEFORE UPDATE OF revoked_at ON sessions
 WHEN NEW.revoked_at IS NOT OLD.revoked_at AND (OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL)
 BEGIN SELECT RAISE(ABORT, 'session revocation is terminal'); END;
