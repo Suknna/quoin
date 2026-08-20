@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
@@ -45,6 +46,16 @@ type Channel struct {
 	Config ChannelConfig
 	bootID string
 	epoch  uint64 // per-boot connection counter (RUNTIME-CTRL-004)
+	// Tasks executes connection_probe dispatches when wired (T07).
+	Tasks TaskSupervisor
+	// live-stream send state; guarded by outboundMu.
+	outboundMu  sync.Mutex
+	outboundSeq uint64
+	sendStream  interface {
+		Send(*runtimev1.ControlEnvelope) error
+	}
+	cancelMu sync.Mutex
+	active   map[int64]context.CancelFunc
 }
 
 type ChannelConfig struct {
@@ -195,6 +206,10 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		ConnectionEpoch: channel.epoch,
 		ReleaseVersion:  buildinfo.Release,
 	}
+	channel.outboundMu.Lock()
+	channel.sendStream = stream
+	channel.active = map[int64]context.CancelFunc{}
+	channel.outboundMu.Unlock()
 	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
 		return err
 	}
@@ -213,6 +228,11 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
 	}
 	sharedops.LogEvent("plinth", "info", "runtime.connected", "quoin="+channel.Config.QuoinEndpoint)
+	// All outbound frames (heartbeats, task replies) share one serialized
+	// sender and one per-direction message-id sequence (RUNTIME-CTRL-009).
+	channel.outboundMu.Lock()
+	channel.outboundSeq = 1 // Hello consumed id 1
+	channel.outboundMu.Unlock()
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 	go func() {
@@ -223,8 +243,8 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 				return
 			case <-heartbeat.C:
 				seq++
-				if err := stream.Send(&runtimev1.ControlEnvelope{
-					MessageId: 2 + seq, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+				if err := channel.sendEnvelope(&runtimev1.ControlEnvelope{
+					ConnectionEpoch: channel.epoch, BootId: channel.bootID,
 					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: seq}},
 				}); err != nil {
 					return
@@ -232,6 +252,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			}
 		}
 	}()
+	sink := &FrameSink{channel: channel}
 	for {
 		envelope, err := stream.Recv()
 		if err != nil {
@@ -240,11 +261,59 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			}
 			return fmt.Errorf("控制流结束: %w", err)
 		}
-		_ = envelope
-		// T06 keeps the stream; dispatch frames are ignored until the
-		// attempt tickets arrive.
+		switch payload := envelope.Msg.(type) {
+		case *runtimev1.ControlEnvelope_DispatchAttempt:
+			if channel.Tasks != nil {
+				task := payload.DispatchAttempt
+				go channel.Tasks.HandleDispatchAttempt(ctx, sink, client, task, channel.stopTask)
+			}
+		case *runtimev1.ControlEnvelope_CancelAttempt:
+			if channel.Tasks != nil {
+				channel.Tasks.HandleCancelAttempt(ctx, sink, payload.CancelAttempt, channel.stopTask)
+			}
+		case *runtimev1.ControlEnvelope_ResultAck:
+			ack := payload.ResultAck
+			sharedops.LogEvent("plinth", "info", "runtime.result_ack", fmt.Sprintf("attempt=%d accepted=%v detail=%s", ack.GetAttemptId(), ack.GetAccepted(), ack.GetDetail()))
+		default:
+			// Handshake-adjacent and lintel-only frames do not concern the
+			// plinth task slice.
+		}
 	}
 }
+
+// sendEnvelope serializes an outbound frame with the next message id.
+func (channel *Channel) sendEnvelope(envelope *runtimev1.ControlEnvelope) error {
+	channel.outboundMu.Lock()
+	defer channel.outboundMu.Unlock()
+	if channel.sendStream == nil {
+		return errors.New("控制流发送端未就绪")
+	}
+	channel.outboundSeq++
+	envelope.MessageId = channel.outboundSeq
+	envelope.ConnectionEpoch = channel.epoch
+	envelope.BootId = channel.bootID
+	return channel.sendStream.Send(envelope)
+}
+
+// TaskSupervisor executes deterministic connection_probe dispatches (T07).
+type TaskSupervisor interface {
+	HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool)
+	HandleCancelAttempt(ctx context.Context, sink *FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool)
+}
+
+// FrameSink replies on the live control stream with correct fencing.
+type FrameSink struct{ channel *Channel }
+
+// Send replies with one envelope (ids and fencing applied centrally).
+func (sink *FrameSink) Send(envelope *runtimev1.ControlEnvelope) error {
+	return sink.channel.sendEnvelope(envelope)
+}
+
+// Epoch is the live connection epoch for outgoing frames.
+func (sink *FrameSink) Epoch() uint64 { return sink.channel.epoch }
+
+// BootID is the live boot identity.
+func (sink *FrameSink) BootID() string { return sink.channel.bootID }
 
 func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	caBody, err := os.ReadFile(channel.Config.QuoinRuntimeCAFile)
@@ -261,4 +330,36 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	return grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})),
 	)
+}
+
+// RegisterTask records the cancel func of one running attempt.
+func (channel *Channel) RegisterTask(attemptID int64, cancel context.CancelFunc) {
+	channel.cancelMu.Lock()
+	defer channel.cancelMu.Unlock()
+	if channel.active == nil {
+		channel.active = map[int64]context.CancelFunc{}
+	}
+	channel.active[attemptID] = cancel
+}
+
+// stopTask cancels one running attempt and reports whether it was live.
+func (channel *Channel) stopTask(attemptID int64) bool {
+	channel.cancelMu.Lock()
+	cancel, live := channel.active[attemptID]
+	delete(channel.active, attemptID)
+	channel.cancelMu.Unlock()
+	if live {
+		cancel()
+	}
+	return live
+}
+
+// BearerToken returns the current long-term token for RPCs made outside
+// the control stream (FetchCredentialGrant).
+func (channel *Channel) BearerToken() (string, error) {
+	state, err := channel.loadToken()
+	if err != nil {
+		return "", err
+	}
+	return state.LongTermToken, nil
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
+	"github.com/Suknna/quoin/internal/plinth/supervisor"
 )
 
 // RunServe is the long-lived serve path: ops endpoint plus the outbound
@@ -23,6 +24,7 @@ func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedo
 	if err != nil {
 		return err
 	}
+	channel.Tasks = &supervisor.Supervisor{Channel: channel}
 	go func() {
 		for {
 			select {
