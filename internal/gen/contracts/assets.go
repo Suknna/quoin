@@ -16,4 +16,7 @@ var (
 
 	//go:embed metrics.yaml
 	MetricsYAML []byte
+
+	//go:embed connection-probes.yaml
+	ConnectionProbesYAML []byte
 )
