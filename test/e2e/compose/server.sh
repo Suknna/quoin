@@ -8,6 +8,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 stack="$repo_root/.artifacts/e2e-stack"
+# A failed prior webServer leaves owned fixtures behind (teardown.mjs only
+# runs on successful startup); clear them before recreating.
+docker rm -f e2e-fwd e2e-am quoin-t07-thanos >/dev/null 2>&1 || true
+docker compose --project-name quoin down --remove-orphans >/dev/null 2>&1 || true
 evidence="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T03}"
 rm -rf "$stack"
 mkdir -p "$stack" "$evidence"
@@ -125,6 +129,23 @@ if [ "$probe_seen" != "1" ]; then
   { echo "FATAL: T03Probe never reached the Quoin alert store (last snapshot: ${SNAPSHOT:-none})"; } | tee -a "$evidence/playwright-server.log" >&2
   exit 1
 fi
+# --- T07 fixtures: a real Thanos target and a registered Plinth ----------
+image_proxy2="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
+docker rm -f quoin-t07-thanos >/dev/null 2>&1 || true
+NET=$(docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1)
+docker run -d --name quoin-t07-thanos --network "$NET" thanosio/thanos:v0.36.0 query --http-address=0.0.0.0:9090 --log.level=warn >>"$evidence/playwright-server.log" 2>&1
+# Register plinth so supervisor probes dispatch live (attached stdin keeps
+# the token out of argv and logs).
+PLINTH_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["plinth"]["rowVersion"]))')
+PREP=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t07-prepare-$RANDOM\",\"expectedRowVersion\":$PLINTH_ROW}" "$BASE/api/v1/runtime-slots/plinth/registration/prepare")
+HANDLE=$(printf '%s' "$PREP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["registrationTokenHandle"])')
+REVEAL=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"registrationTokenHandle\":\"$HANDLE\"}" "$BASE/api/v1/runtime-slots/registration-token/reveal")
+printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T plinth register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
+# Create the UI-visible connection (one-time secret in the request body only).
+curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d '{"clientCommandId":"e2e-t07-create-1","name":"main-thanos","connection":{"type":"thanos","baseUrl":"http://quoin-t07-thanos:9090","password":"e2e-thanos-secret"}}' \
+  "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+
 # The fixture doubles as the ready marker: tests only run once every step
 # (login/change/source/reveal/AM alert) has completed.
 printf '%s' "$newpass" > "$stack/admin-new-password"
