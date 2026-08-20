@@ -10,18 +10,21 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"strconv"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	generatedweb "github.com/Suknna/quoin/internal/gen/web"
+	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -40,6 +43,7 @@ type apiServer struct {
 	alerts   *alerts.Service
 	reveals  *secrets.Store
 	commands *commandReplay
+	runtime  *qruntime.Service
 }
 
 // NewAPIServer is the testable constructor for the Quoin public surface.
@@ -49,6 +53,7 @@ func NewAPIServer(service *auth.Service, db *sql.DB) *apiServer {
 		alerts:   alerts.NewService(db),
 		reveals:  secrets.NewStore(),
 		commands: newCommandReplay(),
+		runtime:  qruntime.NewService(db),
 	}
 }
 
@@ -95,11 +100,13 @@ type noContentOutput struct {
 }
 
 type runtimeSlot struct {
-	Slot              string `json:"slot"`
-	State             string `json:"state"`
-	CurrentGeneration int    `json:"currentGeneration"`
-	RowVersion        int64  `json:"rowVersion"`
-	Connected         bool   `json:"connected"`
+	Slot              string  `json:"slot"`
+	State             string  `json:"state"`
+	CurrentGeneration int64   `json:"currentGeneration"`
+	RowVersion        int64   `json:"rowVersion"`
+	Connected         bool    `json:"connected"`
+	BootID            string  `json:"bootId,omitempty"`
+	ConnectionEpoch   *uint64 `json:"connectionEpoch,omitempty"`
 }
 
 type runtimeStatus struct {
@@ -142,6 +149,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	serverSet.relay = grpc.NewServer()
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
+	RegisterRuntimeControl(serverSet.relay, application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest())
 	return serverSet.run(ctx, config)
 }
 
@@ -189,6 +197,7 @@ func (application *apiServer) register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
+	application.registerRuntimeRoutes(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
@@ -241,6 +250,7 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 		return nil, authFailure(err, "完成登出")
 	}
 	application.reveals.InvalidateSession(secrets.SessionDigest(input.Session))
+	application.runtime.InvalidateSession(secrets.SessionDigest(input.Session))
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
 	}
@@ -248,33 +258,34 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 }
 
 func (application *apiServer) runtimeStatus(ctx context.Context, input *authInput) (*runtimeOutput, error) {
-	session, err := application.auth.Authenticate(ctx, input.Session)
-	if err != nil {
-		return nil, authFailure(err, "读取 Runtime 状态")
+	if _, err := application.authenticateFull(ctx, input.Session, "读取 Runtime 状态"); err != nil {
+		return nil, err
 	}
-	if session.User.PasswordChangeRequired {
-		return nil, huma.Error403Forbidden("请先修改临时密码")
-	}
-	rows, err := application.db.QueryContext(ctx, `SELECT slot,state,row_version FROM runtime_slots ORDER BY slot`)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
-	}
-	defer rows.Close()
-	status := runtimeStatus{}
-	for rows.Next() {
-		var slot runtimeSlot
-		if err := rows.Scan(&slot.Slot, &slot.State, &slot.RowVersion); err != nil {
-			return nil, err
+	output := &runtimeOutput{}
+	for _, slot := range []string{"plinth", "lintel"} {
+		view, err := application.runtime.View(ctx, slot)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
 		}
-		slot.CurrentGeneration = 0
-		slot.Connected = false
-		if slot.Slot == "plinth" {
-			status.Plinth = slot
+		rendered := runtimeSlot{
+			Slot: view.Slot, State: string(view.State),
+			CurrentGeneration: view.CurrentGeneration, RowVersion: view.RowVersion,
+			Connected: view.Connected,
+		}
+		// Transient projection fields exist only while connected
+		// (RuntimeSlot contract: connected=false carries no boot/epoch).
+		if view.Connected {
+			rendered.BootID = view.BootID
+			epoch := view.ConnectionEpoch
+			rendered.ConnectionEpoch = epoch
+		}
+		if slot == "plinth" {
+			output.Body.Plinth = rendered
 		} else {
-			status.Lintel = slot
+			output.Body.Lintel = rendered
 		}
 	}
-	return &runtimeOutput{Body: status}, rows.Err()
+	return output, nil
 }
 
 // authFailure maps authentication outcomes once for every session-carrying
