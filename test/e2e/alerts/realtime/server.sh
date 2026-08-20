@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# T04 Playwright webServer bootstrap: builds the four local images if
+# missing, performs the real scripted compose install, then attaches the
+# Alertmanager fixture containers to the quoin_internal network so the
+# webhook path never depends on host.docker.internal or host loopback
+# publishing (plain Linux dockerd provides neither). Teardown is the shared
+# test/e2e/compose/teardown.mjs (same container names, stack directory and
+# compose project).
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+cd "$repo_root"
+
+# The ticket teardown removes the four locally built images, so this fixture
+# rebuilds them; restricted networks need the module mirror the host Go
+# itself uses (it lives in the go env file, not the shell environment).
+export QUOIN_IMAGE_GOPROXY="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
+
+stack="$repo_root/.artifacts/e2e-stack"
+evidence="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T04}"
+rm -rf "$stack"
+mkdir -p "$stack" "$evidence"
+
+bash build/package/images.sh
+go build -o "$stack/quoin-deploy" ./cmd/quoin-deploy
+
+password="e2e-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)-2026"
+printf '%s' "$password" > "$stack/admin-temp-password"
+chmod 600 "$stack/admin-temp-password"
+
+sed "s|REPLACE_WITH_STACK_DIR|$stack|" test/e2e/compose/compose-install.yaml > "$stack/install.yaml"
+
+printf 'admin\nE2E Admin\n%s\n%s\n' "$password" "$password" | \
+  XDG_STATE_HOME="$stack/state" "$stack/quoin-deploy" compose install --config "$stack/install.yaml" \
+  2>&1 | tee "$evidence/playwright-server.log"
+exec 2>>"$evidence/playwright-server.log"
+
+# Drive the fixture: login, change password, create the alert source, reveal
+# the bearer. No tracing: the admin/new passwords and the revealed bearer
+# must never reach the evidence log (they only travel as curl -d bodies).
+BASE=http://127.0.0.1:18080
+ORIGIN='Origin: https://quoin.example.com'
+LOGIN_HEADERS=$(mktemp)
+curl -s -D "$LOGIN_HEADERS" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d "{\"username\":\"admin\",\"password\":\"$password\"}" "$BASE/api/v1/auth/login" >/dev/null
+SESSION_COOKIE=$(awk 'tolower($1)=="set-cookie:" {print $2}' "$LOGIN_HEADERS" | tr -d '\r' | head -1)
+echo "$SESSION_COOKIE" > "$stack/session-cookie"
+CJ="Cookie: $SESSION_COOKIE"
+newpass="e2e-$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)-2027"
+curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X PUT \
+  -d "{\"currentPassword\":\"$password\",\"newPassword\":\"$newpass\"}" "$BASE/api/v1/auth/password" \
+  -o "$stack/put.json" -w 'change-password-http=%{http_code}\n' 2>&1 | tee -a "$evidence/playwright-server.log"
+cat "$stack/put.json" >> "$evidence/playwright-server.log" 2>/dev/null || true
+META=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d '{"key":"e2e-am","protocol":"alertmanager","clientCommandId":"e2e-cmd-t04a"}' "$BASE/api/v1/alert-sources")
+HANDLE=$(printf '%s' "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['revealHandle'])")
+BEARER=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d "{\"revealHandle\":\"$HANDLE\"}" "$BASE/api/v1/alert-sources/credentials/reveal" | python3 -c "import json,sys; print(json.load(sys.stdin)['bearerToken'])")
+
+# Forwarder + Alertmanager both live on quoin_internal: the forwarder
+# attaches the bearer and posts straight to stele:8081 (the same webhook
+# listener Stele exposes inside the deployment network), and Alertmanager
+# reaches the forwarder by container DNS name. No host gateway involved.
+mkdir -p "$stack/am"
+cat > "$stack/am/forwarder.py" <<'PYEOF'
+import http.server, urllib.request, urllib.error, os
+class S(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(n)
+        req = urllib.request.Request(os.environ['STELE_URL'], data=body, method='POST', headers={'Content-Type': self.headers.get('Content-Type','application/json'), 'Authorization': 'Bearer ' + os.environ['STELE_BEARER']})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                self.send_response(resp.status); self.end_headers()
+        except urllib.error.HTTPError as e:
+            self.send_response(e.code); self.end_headers()
+        except Exception as e:
+            self.send_response(502); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('0.0.0.0', 8099), S).serve_forever()
+PYEOF
+# Forwarder + Alertmanager start on the default bridge (this dockerd drops
+# -p publishing on user-defined networks) and are then attached to
+# quoin_internal: the forwarder attaches the bearer and posts straight to
+# stele:8080 (the same webhook listener Stele exposes inside the deployment
+# network), and Alertmanager reaches the forwarder by container DNS name —
+# no host gateway or host.docker.internal involved.
+docker run -d --name e2e-fwd \
+  -p 127.0.0.1:18082:8099 \
+  -e "STELE_URL=http://stele:8080/" -e "STELE_BEARER=$BEARER" \
+  -v "$stack/am/forwarder.py:/forwarder.py:ro" python:3.12-slim python /forwarder.py >/dev/null
+docker network connect quoin_internal e2e-fwd
+cat > "$stack/am/alertmanager.yml" <<'EOF'
+route:
+  receiver: sink
+  group_wait: 0s
+  group_interval: 1s
+  repeat_interval: 1h
+receivers:
+- name: sink
+  webhook_configs:
+  - url: http://e2e-fwd:8099/
+    send_resolved: true
+EOF
+docker run -d --name e2e-am \
+  -p 127.0.0.1:19093:9093 \
+  -v "$stack/am/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" prom/alertmanager:v0.28.1 >/dev/null
+docker network connect quoin_internal e2e-am
+am_ready=0
+for _ in $(seq 1 30); do
+  if curl -sf http://127.0.0.1:19093/-/healthy >/dev/null 2>&1; then am_ready=1; break; fi
+  sleep 1
+done
+if [ "$am_ready" != "1" ]; then
+  { echo "FATAL: Alertmanager never became ready"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T04Baseline severity=info instance=fixture-1 job=quoin; then
+  { echo "FATAL: amtool could not fire T04Baseline"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+probe_seen=0
+for _ in $(seq 1 30); do
+  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
+  if printf '%s' "$SNAPSHOT" | grep -q T04Baseline; then probe_seen=1; break; fi
+  sleep 1
+done
+if [ "$probe_seen" != "1" ]; then
+  { echo "FATAL: T04Baseline never reached the Quoin alert store (last snapshot: ${SNAPSHOT:-none})"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+printf '%s' "$newpass" > "$stack/admin-new-password"
+chmod 600 "$stack/admin-new-password"
+
+set +x
+cat > "$stack/ready.py" <<PYEOF
+import http.server, os
+class S(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if os.path.exists('$stack/admin-new-password'):
+            self.send_response(200); self.end_headers()
+        else:
+            self.send_response(503); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('0.0.0.0', 18083), S).serve_forever()
+PYEOF
+python3 "$stack/ready.py" &
+exec docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele
