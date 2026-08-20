@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
+import { ModelProviderFields } from '../connections/model-provider/ModelProviderFields'
+import { buildModelProviderConnection, type ModelProviderFormValue } from '../connections/model-provider/api'
 import {
   ConnectionsApiError,
   cancelProbeAttempt,
@@ -48,8 +50,9 @@ export function ConnectionsPanel() {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
-  const [createType, setCreateType] = useState<'thanos' | 'kubernetes'>('thanos')
+  const [createType, setCreateType] = useState<'thanos' | 'kubernetes' | 'model_provider'>('thanos')
   const [form, setForm] = useState({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
+  const [providerForm, setProviderForm] = useState<ModelProviderFormValue>({ baseUrl: '', apiKey: '', chatModelId: '', embeddingModelId: '', contextBudgetTokens: '8192', maxOutputTokens: '1024' })
 
   const reload = useCallback(async (selection = selected) => {
     try {
@@ -107,19 +110,24 @@ export function ConnectionsPanel() {
     event.preventDefault()
     setError('')
     setNotice('')
-    const input: CreateConnectionInput = { type: createType }
-    if (createType === 'thanos') {
-      input.baseUrl = form.baseUrl.trim()
-      input.username = form.username.trim()
-      input.password = form.password
-    } else {
-      input.kubeconfig = form.kubeconfig
-      input.defaultNamespace = form.defaultNamespace.trim()
-    }
     try {
-      await createConnection(form.name.trim(), input)
+      if (createType === 'model_provider') {
+        await createConnection(form.name.trim(), buildModelProviderConnection(providerForm) as unknown as CreateConnectionInput)
+      } else {
+        const input: CreateConnectionInput = { type: createType }
+        if (createType === 'thanos') {
+          input.baseUrl = form.baseUrl.trim()
+          input.username = form.username.trim()
+          input.password = form.password
+        } else {
+          input.kubeconfig = form.kubeconfig
+          input.defaultNamespace = form.defaultNamespace.trim()
+        }
+        await createConnection(form.name.trim(), input)
+      }
       setNotice('连接已创建。秘密已加密保存，之后无法再次查看。')
       setForm({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
+      setProviderForm({ baseUrl: '', apiKey: '', chatModelId: '', embeddingModelId: '', contextBudgetTokens: '8192', maxOutputTokens: '1024' })
       setCreating(false)
       await reload(form.name.trim())
       setSelected(form.name.trim())
@@ -169,6 +177,16 @@ export function ConnectionsPanel() {
       if (detail.enabled) {
         await disableConnection(detail.name, detail.rowVersion)
         setNotice('连接已停用。')
+      } else if (detail.type === 'model_provider') {
+        // Model providers enable only against an explicit passed
+        // qualification: use the newest passed result of this connection.
+        const passed = [...results].reverse().find((result) => result.outcome === 'passed')
+        if (!passed) {
+          setError('模型供应商需要先通过探测，才能启用。')
+          return
+        }
+        await enableConnection(detail.name, detail.rowVersion, passed.id)
+        setNotice('连接已启用。')
       } else {
         await enableConnection(detail.name, detail.rowVersion)
         setNotice('连接已启用。')
@@ -193,9 +211,10 @@ export function ConnectionsPanel() {
           <h3>新建连接</h3>
           <label>
             类型
-            <select value={createType} onChange={(event) => setCreateType(event.target.value as 'thanos' | 'kubernetes')}>
+            <select value={createType} onChange={(event) => setCreateType(event.target.value as 'thanos' | 'kubernetes' | 'model_provider')}>
               <option value="thanos">Thanos 查询</option>
               <option value="kubernetes">Kubernetes 只读</option>
+              <option value="model_provider">模型供应商</option>
             </select>
           </label>
           <label>
@@ -217,7 +236,7 @@ export function ConnectionsPanel() {
                 <input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" />
               </label>
             </>
-          ) : (
+          ) : createType === 'kubernetes' ? (
             <>
               <label>
                 kubeconfig（一次性提交，保存后不可查看）
@@ -228,6 +247,8 @@ export function ConnectionsPanel() {
                 <input value={form.defaultNamespace} onChange={(event) => setForm({ ...form, defaultNamespace: event.target.value })} placeholder="default" />
               </label>
             </>
+          ) : (
+            <ModelProviderFields value={providerForm} onChange={setProviderForm} />
           )}
           <div className="admin-action-row">
             <button type="submit">创建</button>
