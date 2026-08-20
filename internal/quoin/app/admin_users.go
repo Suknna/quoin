@@ -21,10 +21,10 @@ import (
 
 // problemError serializes to the frozen ErrorModel shape (HTTP-ERROR-001).
 type problemError struct {
-	status      int    `json:"-"`
-	Code        string `json:"code"`
-	Message     string `json:"message"`
-	Retryable   bool   `json:"retryable"`
+	status      int            `json:"-"`
+	Code        string         `json:"code"`
+	Message     string         `json:"message"`
+	Retryable   bool           `json:"retryable"`
 	FieldErrors []problemField `json:"fieldErrors,omitempty"`
 	Conflict    map[string]any `json:"conflict,omitempty"`
 }
@@ -138,9 +138,9 @@ func (application *apiServer) registerAdminUserRoutes(api huma.API) {
 }
 
 func (application *apiServer) listUsers(ctx context.Context, input *struct {
-	Session string        `cookie:"__Host-quoin-session"`
-	Cursor  string        `query:"cursor"`
-	Limit   int           `query:"limit"`
+	Session string `cookie:"__Host-quoin-session"`
+	Cursor  string `query:"cursor"`
+	Limit   int    `query:"limit"`
 }) (*usersListOutput, error) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取用户列表"); err != nil {
 		return nil, err
@@ -205,11 +205,11 @@ func (application *apiServer) updateUser(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	UserID  string `path:"userId"`
 	Body    struct {
-		ClientCommandID  string  `json:"clientCommandId" minLength:"8" maxLength:"128"`
-		ExpectedRow      int64   `json:"expectedRowVersion" minimum:"1"`
-		DisplayName      *string `json:"displayName,omitempty" maxLength:"200"`
-		Enabled          *bool   `json:"enabled,omitempty"`
-		Role             *string `json:"role,omitempty"`
+		ClientCommandID string  `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		ExpectedRow     int64   `json:"expectedRowVersion" minimum:"1"`
+		DisplayName     *string `json:"displayName,omitempty" maxLength:"200"`
+		Enabled         *bool   `json:"enabled,omitempty"`
+		Role            *string `json:"role,omitempty"`
 	}
 }) (*struct {
 	Body auth.User
@@ -385,9 +385,9 @@ func (application *apiServer) revokeOwnSession(ctx context.Context, input *struc
 }
 
 func (application *apiServer) listAuditEvents(ctx context.Context, input *struct {
-	Session  string `cookie:"__Host-quoin-session"`
-	Cursor   string `query:"cursor"`
-	Limit    int    `query:"limit"`
+	Session   string `cookie:"__Host-quoin-session"`
+	Cursor    string `query:"cursor"`
+	Limit     int    `query:"limit"`
 	ActorType string `query:"actorType"`
 	Action    string `query:"action"`
 	From      string `query:"from"`
