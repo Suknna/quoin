@@ -165,13 +165,20 @@ func asItems[T any](items []T) []T {
 	return items
 }
 
-func (application *apiServer) listAlerts(ctx context.Context, input *authInput) (*alertSnapshotOutput, error) {
+func (application *apiServer) listAlerts(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	State   string `query:"state" enum:"Firing,Resolved"`
+}) (*alertSnapshotOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
 	}
 	_ = session
-	snapshot, err := application.alerts.AlertSnapshot(ctx)
+	state := input.State
+	if state == "" {
+		state = "Firing"
+	}
+	snapshot, err := application.alerts.AlertSnapshot(ctx, state)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("无法读取告警列表", err)
 	}
@@ -311,10 +318,49 @@ func (application *apiServer) registerAlertRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alerts/{occurrenceId}", OperationID: "getAlertOccurrence"}, application.getAlertOccurrence)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alerts/{occurrenceId}/observations", OperationID: "listAlertObservations"}, application.listAlertObservations)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-intake-issues", OperationID: "listAlertIntakeIssues"}, application.listIntakeIssues)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-intake-issues/{issueId}/acknowledge", OperationID: "acknowledgeIntakeIssue", Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusTooManyRequests}}, application.acknowledgeIntakeIssue)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-sources", OperationID: "listAlertSources"}, application.listAlertSources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-sources/{sourceKey}", OperationID: "getAlertSource"}, application.getAlertSource)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources", OperationID: "createAlertSource", DefaultStatus: http.StatusCreated}, application.createAlertSource)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/credentials/reveal", OperationID: "revealAlertSourceCredential"}, application.revealAlertSourceCredential)
+}
+
+// acknowledgeIntakeIssue is the Admin-only, one-way sticky confirmation
+// (DATA-ALERT-011): stale expectedRowVersion returns 409, an unknown issue
+// 404, Operator gets 403.
+func (application *apiServer) acknowledgeIntakeIssue(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	IssueID string `path:"issueId"`
+	Body    struct {
+		ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
+	}
+}) (*struct {
+	Status int `header:"-"`
+}, error) {
+	session, err := application.auth.Authenticate(ctx, input.Session)
+	if err != nil {
+		return nil, huma.Error401Unauthorized("请重新登录")
+	}
+	if session.User.Role != "admin" {
+		return nil, huma.Error403Forbidden("需要管理员权限")
+	}
+	issueID, err := strconv.ParseInt(input.IssueID, 10, 64)
+	if err != nil || issueID <= 0 {
+		return nil, huma.Error404NotFound("接入问题不存在", nil)
+	}
+	applied, err := application.alerts.AcknowledgeIntakeIssue(ctx, issueID, session.User.ID, input.Body.ExpectedRowVersion, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("无法确认接入问题", err)
+	}
+	if !applied {
+		// Either the expected row version is stale or the issue is already
+		// acknowledged — both are deterministic conflicts for the caller.
+		return nil, huma.Error409Conflict("接入问题版本已变化，请刷新后重试", fmt.Errorf("row_version_conflict"))
+	}
+	return &struct {
+		Status int `header:"-"`
+	}{Status: http.StatusNoContent}, nil
 }
 
 func isUniqueViolation(err error) bool {

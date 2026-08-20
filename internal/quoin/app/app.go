@@ -171,6 +171,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	apiConfig.CreateHooks = nil
 	api := humago.New(mux, apiConfig)
 	application.register(api)
+	application.registerAlertStream(mux)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()

@@ -28,14 +28,18 @@ type AlertSnapshot struct {
 	NextCursor  string              `json:"nextCursor,omitempty"`
 }
 
-// AlertSnapshot returns the Firing-occurrence snapshot plus the current
-// alert_change_log high-water sequence (DATA-SSE-009 / HTTP-PAGE-006).
-func (service *Service) AlertSnapshot(ctx context.Context) (AlertSnapshot, error) {
+// AlertSnapshot returns the occurrence snapshot filtered by state (Firing
+// is the default current view; Resolved is the history view) plus the
+// current alert_change_log high-water (DATA-SSE-009 / HTTP-PAGE-006).
+func (service *Service) AlertSnapshot(ctx context.Context, state string) (AlertSnapshot, error) {
+	if state != "Firing" && state != "Resolved" {
+		state = "Firing"
+	}
 	var seq int64
 	if err := service.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_change_log`).Scan(&seq); err != nil {
 		return AlertSnapshot{}, err
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT id, state, row_version, first_seen_at, last_state_change_at, resolved_at, labels_canonical FROM alert_occurrences WHERE state='Firing' ORDER BY last_state_change_at DESC, id DESC`)
+	rows, err := service.db.QueryContext(ctx, `SELECT id, state, row_version, first_seen_at, last_state_change_at, resolved_at, labels_canonical FROM alert_occurrences WHERE state=? ORDER BY last_state_change_at DESC, id DESC`, state)
 	if err != nil {
 		return AlertSnapshot{}, err
 	}
