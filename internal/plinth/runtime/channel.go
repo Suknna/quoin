@@ -56,6 +56,9 @@ type Channel struct {
 	}
 	cancelMu sync.Mutex
 	active   map[int64]context.CancelFunc
+	replyMu  sync.Mutex
+	nextCorr uint64
+	waiters  map[uint64]chan *runtimev1.ControlEnvelope
 }
 
 type ChannelConfig struct {
@@ -274,6 +277,11 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		case *runtimev1.ControlEnvelope_ResultAck:
 			ack := payload.ResultAck
 			sharedops.LogEvent("plinth", "info", "runtime.result_ack", fmt.Sprintf("attempt=%d accepted=%v detail=%s", ack.GetAttemptId(), ack.GetAccepted(), ack.GetDetail()))
+			channel.deliverReply(envelope)
+		case *runtimev1.ControlEnvelope_BeginModelCallAck:
+			channel.deliverReply(envelope)
+		case *runtimev1.ControlEnvelope_CompleteModelCallAck:
+			channel.deliverReply(envelope)
 		default:
 			// Handshake-adjacent and lintel-only frames do not concern the
 			// plinth task slice.
@@ -362,4 +370,58 @@ func (channel *Channel) BearerToken() (string, error) {
 		return "", err
 	}
 	return state.LongTermToken, nil
+}
+
+// allocateCorrelation reserves a unique correlation id for one
+// request/reply pair.
+func (channel *Channel) allocateCorrelation() (uint64, chan *runtimev1.ControlEnvelope) {
+	channel.replyMu.Lock()
+	defer channel.replyMu.Unlock()
+	if channel.waiters == nil {
+		channel.waiters = map[uint64]chan *runtimev1.ControlEnvelope{}
+	}
+	channel.nextCorr++
+	waiter := make(chan *runtimev1.ControlEnvelope, 1)
+	channel.waiters[channel.nextCorr] = waiter
+	return channel.nextCorr, waiter
+}
+
+// deliverReply routes one reply envelope to its waiter (no waiter: audit
+// only — stale or duplicate replies are dropped).
+func (channel *Channel) deliverReply(envelope *runtimev1.ControlEnvelope) {
+	channel.replyMu.Lock()
+	waiter, live := channel.waiters[envelope.GetCorrelationId()]
+	if live {
+		delete(channel.waiters, envelope.GetCorrelationId())
+	}
+	channel.replyMu.Unlock()
+	if live {
+		waiter <- envelope
+	}
+}
+
+// Request sends one envelope and waits for the correlated reply.
+func (channel *Channel) Request(ctx context.Context, envelope *runtimev1.ControlEnvelope) (*runtimev1.ControlEnvelope, error) {
+	correlation, waiter := channel.allocateCorrelation()
+	envelope.CorrelationId = correlation
+	if err := channel.sendEnvelope(envelope); err != nil {
+		channel.replyMu.Lock()
+		delete(channel.waiters, correlation)
+		channel.replyMu.Unlock()
+		return nil, err
+	}
+	select {
+	case reply := <-waiter:
+		return reply, nil
+	case <-ctx.Done():
+		channel.replyMu.Lock()
+		delete(channel.waiters, correlation)
+		channel.replyMu.Unlock()
+		return nil, ctx.Err()
+	case <-time.After(30 * time.Second):
+		channel.replyMu.Lock()
+		delete(channel.waiters, correlation)
+		channel.replyMu.Unlock()
+		return nil, errors.New("控制流请求超时未收到回复")
+	}
 }

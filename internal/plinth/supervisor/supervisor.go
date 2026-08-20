@@ -16,6 +16,7 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
+	"github.com/Suknna/quoin/internal/plinth/modelprovider"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"google.golang.org/grpc/metadata"
 )
@@ -51,9 +52,19 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 
 	input := dispatch.GetInput()
 	grants := input.GetConnectionGrants()
-	if len(grants) != 1 {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "派发缺少唯一的凭据 grant")
+	if len(grants) == 0 {
+		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "派发缺少凭据 grant")
 		return
+	}
+	// Pick the primary grant: thanos/kubernetes probes carry one; the
+	// model_provider qualification carries chat + embedding and every
+	// action fetches through the chat grant.
+	grant := grants[0]
+	for _, candidate := range grants {
+		if candidate.GetPurpose() == "model_probe_chat" || candidate.GetPurpose() == "thanos_probe" || candidate.GetPurpose() == "kubernetes_probe" {
+			grant = candidate
+			break
+		}
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
 	bearer, bearerErr := supervisor.Channel.BearerToken()
@@ -62,8 +73,8 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "读取状态卷 token 失败: "+bearerErr.Error())
 		return
 	}
-	grant, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
-		GrantId:         grants[0].GetGrantId(),
+	grantPayload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+		GrantId:         grant.GetGrantId(),
 		AttemptId:       attemptID,
 		BootId:          sink.BootID(),
 		ConnectionEpoch: sink.Epoch(),
@@ -80,13 +91,13 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		detailJSON json.RawMessage
 		schemaKind string
 	)
-	switch grant.GetConnectionType() {
+	switch grantPayload.GetConnectionType() {
 	case "thanos":
 		var config plinthconnections.ThanosConfig
 		var secret plinthconnections.ThanosSecret
-		configErr := json.Unmarshal(grant.GetRevisionConfigJson(), &config)
-		if grant.GetThanos() != nil {
-			secret = plinthconnections.ThanosSecret{Username: grant.GetThanos().GetUsername(), Password: grant.GetThanos().GetPassword()}
+		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
+		if grantPayload.GetThanos() != nil {
+			secret = plinthconnections.ThanosSecret{Username: grantPayload.GetThanos().GetUsername(), Password: grantPayload.GetThanos().GetPassword()}
 		}
 		schemaKind = "connection_probe_thanos_v1"
 		if configErr != nil {
@@ -105,9 +116,9 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	case "kubernetes":
 		var config plinthconnections.KubernetesConfig
 		var secret plinthconnections.KubernetesSecret
-		configErr := json.Unmarshal(grant.GetRevisionConfigJson(), &config)
-		if grant.GetKubernetes() != nil {
-			secret = plinthconnections.KubernetesSecret{Kubeconfig: grant.GetKubernetes().GetKubeconfig()}
+		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
+		if grantPayload.GetKubernetes() != nil {
+			secret = plinthconnections.KubernetesSecret{Kubeconfig: grantPayload.GetKubernetes().GetKubeconfig()}
 		}
 		schemaKind = "connection_probe_kubernetes_v1"
 		if configErr != nil {
@@ -123,8 +134,29 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		} else {
 			detailJSON = mustJSON(detail)
 		}
+	case "model_provider":
+		sharedops.LogEvent("plinth", "info", "probe.model_provider_start", fmt.Sprintf("attempt=%d type=%s", attemptID, grantPayload.GetConnectionType()))
+		var config plinthconnections.ModelProviderConfig
+		var secret plinthconnections.ModelProviderSecret
+		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
+		if grantPayload.GetModelProvider() != nil {
+			secret = plinthconnections.ModelProviderSecret{APIKey: grantPayload.GetModelProvider().GetApiKey()}
+		}
+		schemaKind = "connection_probe_model_provider_v1"
+		if configErr != nil {
+			sharedops.LogEvent("plinth", "error", "probe.model_provider_config", configErr.Error()+" raw="+string(grantPayload.GetRevisionConfigJson()))
+			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": "model_provider", "error": "revision 配置无法解析: " + configErr.Error()})
+			break
+		}
+		probeCtx := modelprovider.WithAttempt(ctx, attemptID)
+		ledger := &modelprovider.StreamLedger{Sink: sink, Channel: supervisor.Channel}
+		result := modelprovider.Run(probeCtx, modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens}, secret.APIKey, config.EmbeddingModelID != "", ledger)
+		outcome = "failed"
+		if result.Passed {
+			outcome = "passed"
+		}
+		detailJSON = mustJSON(modelProviderDetail(result, config))
 	default:
-		// model_provider capability probes are T08's supervisor slice.
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "model_provider capability probes arrive with T08")
 		return
 	}
@@ -234,6 +266,34 @@ func withError(detail json.RawMessage, err error) json.RawMessage {
 	}
 	if body, marshalErr := json.Marshal(merged); marshalErr == nil {
 		return body
+	}
+	return detail
+}
+
+// modelProviderDetail builds the frozen typed detail for the qualification.
+func modelProviderDetail(result modelprovider.Outcome, config plinthconnections.ModelProviderConfig) map[string]any {
+	detail := map[string]any{
+		"kind":                       "model_provider",
+		"chatModelId":                result.ChatModelID,
+		"contextBudgetTokens":        config.ContextBudgetTokens,
+		"maxOutputTokens":            config.MaxOutputTokens,
+		"streamingSupported":         result.Capability.StreamingSupported,
+		"nativeToolCallingSupported": result.Capability.NativeToolCalling,
+		"multiToolCallSupported":     result.Capability.MultiToolCall,
+		"cancellationObserved":       result.Capability.CancellationObserved,
+		"usageObserved":              result.Capability.UsageObserved,
+		"requestIdObserved":          result.Capability.RequestIDObserved,
+		"embeddingSupported":         result.Capability.EmbeddingSupported,
+	}
+	if result.Capability.EmbeddingSupported {
+		detail["embeddingModelId"] = result.EmbeddingModelID
+		detail["embeddingVectorDim"] = result.Capability.EmbeddingVectorDim
+	} else {
+		detail["embeddingModelId"] = nil
+		detail["embeddingVectorDim"] = nil
+	}
+	if !result.Passed {
+		detail["error"] = result.Detail
 	}
 	return detail
 }
