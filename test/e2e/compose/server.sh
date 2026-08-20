@@ -20,7 +20,9 @@ mkdir -p "$stack" "$evidence"
 # (same authority as the Go acceptance runs: QUOIN_IMAGE_GOPROXY falling back
 # to `go env GOPROXY`, whose value often lives only in the go env file).
 image_proxy="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
-QUOIN_IMAGE_GOPROXY="$image_proxy" bash build/package/images.sh
+# Always rebuild: the web dist and Go sources may both have changed since
+# the images were last built, and a stale image would test old code.
+QUOIN_IMAGE_GOPROXY="$image_proxy" QUOIN_FORCE_IMAGE_BUILD=1 bash build/package/images.sh
 go build -o "$stack/quoin-deploy" ./cmd/quoin-deploy
 
 password="e2e-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)-2026"
@@ -129,6 +131,18 @@ if [ "$probe_seen" != "1" ]; then
   { echo "FATAL: T03Probe never reached the Quoin alert store (last snapshot: ${SNAPSHOT:-none})"; } | tee -a "$evidence/playwright-server.log" >&2
   exit 1
 fi
+# --- T08 fixtures: the deterministic model provider + UI connections -----
+pkill -f "fixtures/model-provider" >/dev/null 2>&1 || true
+go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
+("$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &)
+GW2=$(docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
+curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d '{"clientCommandId":"e2e-t08-create-1","name":"main-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW2"':18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
+  "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d '{"clientCommandId":"e2e-t08-create-2","name":"broken-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW2"':18443","chatModelId":"fixture-broken-stream","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
+  "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+
 # --- T07 fixtures: a real Thanos target and a registered Plinth ----------
 image_proxy2="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
 docker rm -f quoin-t07-thanos >/dev/null 2>&1 || true
