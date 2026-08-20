@@ -10,9 +10,9 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -188,13 +188,17 @@ func (application *apiServer) register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout", DefaultStatus: http.StatusNoContent}, application.logout)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 	application.registerAlertRoutes(api)
+	application.registerAdminUserRoutes(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
 	result, retryAfter, err := application.auth.Login(ctx, input.Body.Username, input.Body.Password, input.UserAgent)
 	if err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			return nil, huma.NewError(http.StatusTooManyRequests, "Too Many Requests", fmt.Errorf("retry after %s", retryAfter.Round(time.Second)))
+			// HTTP-ERROR-006: 429 responses carry a Retry-After header with the
+			// predictable recovery window (cooldown remainder in seconds).
+			limited := huma.NewError(http.StatusTooManyRequests, "Too Many Requests")
+			return nil, huma.ErrorWithHeaders(limited, http.Header{"Retry-After": {strconv.Itoa(int(retryAfter.Round(time.Second).Seconds()))}})
 		}
 		if errors.Is(err, auth.ErrUnauthenticated) {
 			return nil, huma.Error401Unauthorized("用户名或密码错误")
