@@ -106,7 +106,14 @@ func connectionError(err error) error {
 		return problem(http.StatusNotFound, "not_found", "目标连接不存在。")
 	case errors.Is(err, connections.ErrValidation):
 		return problemUnprocessable("连接字段不满足要求，请检查后重试。")
+	case errors.Is(err, connections.ErrActiveConflict):
+		problemErr := problem(http.StatusConflict, "active_conflict", "当前状态下不能执行该操作。")
+		problemErr.Conflict = map[string]any{"code": "active_conflict", "objectType": "connection"}
+		return problemErr
+	case errors.Is(err, connections.ErrTypeMismatch):
+		return problemUnprocessable("轮换必须保持连接类型不变。")
 	default:
+		sharedops.LogEvent("quoin", "error", "connection.unexpected_error", err.Error())
 		return problem(http.StatusInternalServerError, "unavailable", "暂时无法完成操作，请重试。")
 	}
 }
@@ -145,6 +152,7 @@ func (application *apiServer) registerConnectionRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/enable", OperationID: "enableConnection"}, application.enableConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/disable", OperationID: "disableConnection"}, application.disableConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/model-providers/discover", OperationID: "discoverProviderModels"}, application.discoverProviderModels)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/rotate", OperationID: "rotateConnectionCredential"}, application.rotateConnectionCredential)
 	application.connectionDetailRoutes(api)
 }
 
@@ -477,14 +485,16 @@ func (application *apiServer) cancelProbeOnStream(view connections.AttemptView) 
 	if view.State != "Cancelling" {
 		return
 	}
-	dispatcher := application.cancelDispatchFunc
-	if dispatcher == nil {
+	if application.cancelDispatchFunc == nil {
 		// No stream surface mounted: finalize locally (unit harnesses and
 		// Queued attempts never reached a runtime).
 		_ = application.connections.RecordCancelAck(context.Background(), view.ID)
 		return
 	}
-	if err := dispatcher(context.Background(), view.ID); err != nil {
+	// The fence is committed; a failed CancelAttempt send never invalidates
+	// it — finalization converges via CancelAck on the live stream or the
+	// lease/失联 rules (RUNTIME-TASK-006/CANCEL-003). Only audit here.
+	if err := application.cancelDispatchFunc(context.Background(), view.ID); err != nil {
 		sharedops.LogEvent("quoin", "error", "probe.cancel_dispatch", err.Error())
 	}
 }
@@ -711,4 +721,48 @@ func (application *apiServer) discoverProviderModels(ctx context.Context, input 
 		}{ID: model.ID, Metadata: model.Metadata})
 	}
 	return output, nil
+}
+
+// rotateConnectionCredential creates the next revision/generation and
+// atomically switches the current pair (T09): the old secret stops being
+// handed out; enabled model providers disable first and every rotation
+// requires a fresh passed probe before enabling again.
+func (application *apiServer) rotateConnectionCredential(ctx context.Context, input *struct {
+	Session        string `cookie:"__Host-quoin-session"`
+	ConnectionName string `path:"connectionName"`
+	Body           struct {
+		ClientCommandID string                `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		ExpectedRow     int64                 `json:"expectedRowVersion" minimum:"1"`
+		Connection      connectionConfigInput `json:"connection"`
+	}
+}) (*struct {
+	Body connectionDetailJSON `json:"body"`
+}, error) {
+	session, err := application.authenticateAdmin(ctx, input.Session, "轮换连接凭据")
+	if err != nil {
+		return nil, err
+	}
+	nonSecret, secret, secretPresent, splitErr := splitConfig(input.Body.Connection)
+	if splitErr != nil {
+		return nil, problemUnprocessable("连接配置不完整：" + splitErr.Error())
+	}
+	summary, rotateErr := application.connections.Rotate(ctx, input.ConnectionName, input.Body.ExpectedRow, connections.CreateInput{
+		Name: input.ConnectionName, Type: input.Body.Connection.Type,
+		NonSecretJSON: nonSecret, Secret: secret, SecretPresent: secretPresent,
+	}, session.User.ID, input.Body.ClientCommandID)
+	if rotateErr != nil {
+		return nil, connectionError(rotateErr)
+	}
+	revisions, generations, err := application.connections.Counts(ctx, summary.ID)
+	if err != nil {
+		return nil, connectionError(err)
+	}
+	detail := connectionDetailJSON{connectionSummaryJSON: renderConnection(summary), RevisionCount: revisions, GenerationCount: generations}
+	if active, found, activeErr := application.connections.ActiveProbeAttempt(ctx, summary.ID); activeErr == nil && found {
+		rendered := renderAttempt(active)
+		detail.ActiveProbeAttempt = &rendered
+	}
+	return &struct {
+		Body connectionDetailJSON `json:"body"`
+	}{Body: detail}, nil
 }

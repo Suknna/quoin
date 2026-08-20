@@ -180,9 +180,16 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 	if state != "Running" {
 		return ErrActiveConflict
 	}
+	// The cancelled closure binds the pair the attempt's grant froze —
+	// NOT the connection's current pointers: a rotation committed while the
+	// probe was in flight must not break the cancellation closure (T09).
 	var connectionType string
 	var revisionID, generationID int64
-	if err := conn.QueryRowContext(ctx, `SELECT type,current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, scopeID).Scan(&connectionType, &revisionID, &generationID); err != nil {
+	if err := conn.QueryRowContext(ctx, `
+		SELECT c.type, ag.connection_revision_id, ag.credential_generation_id
+		FROM connections c
+		JOIN attempt_connection_grants ag ON ag.attempt_id=? AND ag.connection_id=c.id
+		ORDER BY ag.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
 		return err
 	}
 	var bindingRevision int

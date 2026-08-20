@@ -243,3 +243,63 @@ func TestListRendersConfig(t *testing.T) {
 		t.Fatalf("summary projection wrong: %+v", summaries[0])
 	}
 }
+
+func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := context.Background()
+	input := thanosInput("original-secret-value")
+	input.Name = "rotate-thanos"
+	summary, err := service.Create(ctx, input, 1, "cmd-rotate-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registerPlinthSlot(database); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grantID, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-rotate", 1, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("bind: %v %v", err, ok)
+	}
+	if err := service.AcceptProbe(ctx, attemptID, "boot-rotate", 1); err != nil {
+		t.Fatal(err)
+	}
+	// Rotate while the probe is in flight: the current pair switches.
+	rotated, err := service.Rotate(ctx, summary.Name, summary.RowVersion, thanosInput("next-secret-value"), 1, "cmd-rotate-1")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated.CurrentGenerationID == summary.CurrentGenerationID || rotated.CurrentRevisionID == summary.CurrentRevisionID {
+		t.Fatalf("rotate must switch the current pair: %+v vs %+v", rotated, summary)
+	}
+	if rotated.RevalidationRequired != true {
+		t.Fatalf("rotate must require revalidation: %+v", rotated)
+	}
+	// Command replay without secret comparison.
+	replayed, err := service.Rotate(ctx, summary.Name, rotated.RowVersion, thanosInput("replayed-other-secret"), 1, "cmd-rotate-1")
+	if err != nil {
+		t.Fatalf("rotate replay: %v", err)
+	}
+	if replayed.RowVersion != rotated.RowVersion {
+		t.Fatalf("rotate replay must return the original summary, got %+v vs %+v", replayed, rotated)
+	}
+	// The in-flight probe's late result closes over the OLD frozen pair,
+	// not the rotated current (commit-order race).
+	detail := []byte(`{"kind":"thanos","query":"vector(1)","responseType":"vector","sampleCount":1,"sampleValue":"1"}`)
+	result := connections.TypedProbeResult{Outcome: "passed", Detail: detail, ResultDigest: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
+	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`}}
+	if err := service.CommitProbeResult(ctx, attemptID, "boot-rotate", 1, result, child); err != nil {
+		t.Fatalf("late result must close over the frozen pair: %v", err)
+	}
+	var closedRevision, closedGeneration int64
+	if err := database.QueryRow(`SELECT connection_revision_id,credential_generation_id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&closedRevision, &closedGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if closedRevision != summary.CurrentRevisionID || closedGeneration != summary.CurrentGenerationID {
+		t.Fatalf("late result closed the wrong pair: got (%d,%d) want (%d,%d)", closedRevision, closedGeneration, summary.CurrentRevisionID, summary.CurrentGenerationID)
+	}
+	_ = grantID
+}

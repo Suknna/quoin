@@ -567,3 +567,106 @@ func boolInt(value bool) int {
 	}
 	return 0
 }
+
+// Rotate creates the next revision and credential generation in one
+// transaction and atomically switches the current pair (T09,
+// HTTP-COMMAND-013): the old secret stops being handed out immediately;
+// enabled model providers are disabled first (v1: disable-then-switch) and
+// every rotated connection requires a fresh passed probe before enabling
+// again (revalidation_required).
+func (service *Service) Rotate(ctx context.Context, name string, expectedRowVersion int64, input CreateInput, createdBy int64, clientCommandID string) (Summary, error) {
+	config, err := validateConfig(input.Type, input.NonSecretJSON)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := validateSecret(input.Type, input.Secret); err != nil {
+		return Summary{}, err
+	}
+	digest := auth.DigestCommand("connection.rotate", map[string]any{
+		"name": name, "type": input.Type,
+		"nonSecret": string(input.NonSecretJSON), "secretPresent": input.SecretPresent,
+	})
+	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, createdBy, clientCommandID); lookupErr == nil && found && record.RequestDigest == digest {
+		var replayed Summary
+		if err := json.Unmarshal([]byte(record.ResultPayload), &replayed); err == nil {
+			return replayed, nil
+		}
+	}
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return Summary{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	var id int64
+	var connectionType string
+	var enabled, revalidation int
+	var rowVersion int64
+	if err := conn.QueryRowContext(ctx, `SELECT id,type,enabled,revalidation_required,row_version FROM connections WHERE name=?`, name).Scan(&id, &connectionType, &enabled, &revalidation, &rowVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Summary{}, ErrNotFound
+		}
+		return Summary{}, err
+	}
+	if rowVersion != expectedRowVersion {
+		return Summary{}, &RowVersionError{ID: id, Current: rowVersion}
+	}
+	if connectionType != input.Type {
+		return Summary{}, ErrTypeMismatch
+	}
+	now := service.now().UTC().Format(time.RFC3339Nano)
+	var bindingRevision int
+	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+		return Summary{}, err
+	}
+	var nextRevisionSeq int64
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision_seq),0)+1 FROM connection_revisions WHERE connection_id=?`, id).Scan(&nextRevisionSeq); err != nil {
+		return Summary{}, err
+	}
+	revision, err := conn.ExecContext(ctx, `INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,?,?,?,?)`, id, nextRevisionSeq, string(config), createdBy, now)
+	if err != nil {
+		return Summary{}, err
+	}
+	revisionID, err := revision.LastInsertId()
+	if err != nil {
+		return Summary{}, err
+	}
+	generationID, err := service.insertGeneration(ctx, conn, id, input.Type, bindingRevision, input.Secret, createdBy, now)
+	if err != nil {
+		return Summary{}, err
+	}
+	// v1 semantics: an enabled model provider is disabled by the rotation;
+	// every rotation marks the pair as requiring a fresh passed probe.
+	nextEnabled := 0
+	if enabled == 1 && connectionType != TypeModelProvider {
+		nextEnabled = 1
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,enabled=?,revalidation_required=1,row_version=row_version+1 WHERE id=?`, revisionID, generationID, nextEnabled, id); err != nil {
+		return Summary{}, err
+	}
+	committed = true
+	summary, summaryErr := service.getOn(ctx, conn, name)
+	if summaryErr != nil {
+		return Summary{}, summaryErr
+	}
+	projection, err := json.Marshal(summary)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := auth.RecordCommand(ctx, conn, createdBy, clientCommandID, "connection.rotate", digest, "committed", "connection", id, string(projection)); err != nil {
+		return Summary{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return Summary{}, err
+	}
+	conn.Close()
+	return service.Get(ctx, name)
+}

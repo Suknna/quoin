@@ -288,7 +288,15 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 	var connectionType string
 	var revisionID, generationID int64
 	var bindingRevision int
-	if err := conn.QueryRowContext(ctx, `SELECT type,current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, scopeID).Scan(&connectionType, &revisionID, &generationID); err != nil {
+	// The closure binds the pair the attempt's grant froze — NOT the
+	// connection's current pointers: a rotation committed while the probe
+	// was in flight must not silently re-attribute the result to the new
+	// pair (T09 revoke/rotate-vs-result commit-order race).
+	if err := conn.QueryRowContext(ctx, `
+		SELECT c.type, ag.connection_revision_id, ag.credential_generation_id
+		FROM connections c
+		JOIN attempt_connection_grants ag ON ag.attempt_id=? AND ag.connection_id=c.id
+		ORDER BY ag.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
 		return err
 	}
 	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
