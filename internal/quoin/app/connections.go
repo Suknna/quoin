@@ -13,6 +13,7 @@ import (
 	"strconv"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
 
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/danielgtaylor/huma/v2"
@@ -143,6 +144,7 @@ func (application *apiServer) registerConnectionRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/probe", OperationID: "probeConnection"}, application.probeConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/enable", OperationID: "enableConnection"}, application.enableConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/disable", OperationID: "disableConnection"}, application.disableConnection)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/model-providers/discover", OperationID: "discoverProviderModels"}, application.discoverProviderModels)
 	application.connectionDetailRoutes(api)
 }
 
@@ -654,6 +656,59 @@ func (application *apiServer) listCredentialGenerations(ctx context.Context, inp
 	}
 	if more && len(generations) > 0 {
 		output.Body.NextCursor = strconv.FormatInt(generations[len(generations)-1].GenerationSeq, 10)
+	}
+	return output, nil
+}
+
+// discoverProviderModels probes the upstream /v1/models endpoint with the
+// form's Base URL and API key (input helper only, never a qualification):
+// credentials exist only in request memory (HTTP-COMMAND model discovery).
+func (application *apiServer) discoverProviderModels(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	Body    struct {
+		BaseURL string `json:"baseUrl" format:"uri"`
+		APIKey  string `json:"apiKey,omitempty"`
+	}
+}) (*struct {
+	Body struct {
+		Available bool `json:"available"`
+		Items     []struct {
+			ID       string         `json:"id"`
+			Metadata map[string]any `json:"metadata,omitempty"`
+		} `json:"items"`
+		Detail string `json:"detail,omitempty"`
+	}
+}, error) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "发现模型列表"); err != nil {
+		return nil, err
+	}
+	output := &struct {
+		Body struct {
+			Available bool `json:"available"`
+			Items     []struct {
+				ID       string         `json:"id"`
+				Metadata map[string]any `json:"metadata,omitempty"`
+			} `json:"items"`
+			Detail string `json:"detail,omitempty"`
+		}
+	}{}
+	models, err := modelprovider.DiscoverUpstream(ctx, input.Body.BaseURL, input.Body.APIKey)
+	if err != nil {
+		output.Body.Available = false
+		output.Body.Detail = "暂时无法从该地址读取模型列表；可以直接手工填写模型 ID。"
+		return output, nil
+	}
+	if len(models) == 0 {
+		output.Body.Available = false
+		output.Body.Detail = "上游未返回任何模型；可以直接手工填写模型 ID。"
+		return output, nil
+	}
+	output.Body.Available = true
+	for _, model := range models {
+		output.Body.Items = append(output.Body.Items, struct {
+			ID       string         `json:"id"`
+			Metadata map[string]any `json:"metadata,omitempty"`
+		}{ID: model.ID, Metadata: model.Metadata})
 	}
 	return output, nil
 }

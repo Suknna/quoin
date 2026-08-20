@@ -234,6 +234,10 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			service.handleResultProposal(ctx, envelope, payload.ResultProposal)
 		case *runtimev1.ControlEnvelope_CancelAck:
 			service.handleCancelAck(ctx, payload.CancelAck)
+		case *runtimev1.ControlEnvelope_BeginModelCall:
+			service.handleBeginModelCall(ctx, envelope, payload.BeginModelCall)
+		case *runtimev1.ControlEnvelope_CompleteModelCall:
+			service.handleCompleteModelCall(ctx, envelope, payload.CompleteModelCall)
 		case *runtimev1.ControlEnvelope_ProfileInventoryReport:
 			// v1: reports are accepted and logged; a complete empty report
 			// clears nothing further because no identities exist yet.

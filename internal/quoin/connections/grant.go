@@ -264,6 +264,19 @@ func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, co
 		_, err := conn.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			headerID, effective, 0, 0, 0, 0, 0, 0, 0, `{"kind":"kubernetes","cancelled":true}`)
 		return err
+	case TypeModelProvider:
+		var configJSON string
+		_ = conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=(SELECT current_revision_id FROM connections WHERE id=?)`, connectionID).Scan(&configJSON)
+		var config struct {
+			ChatModelID         string `json:"chatModelId"`
+			EmbeddingModelID    string `json:"embeddingModelId"`
+			ContextBudgetTokens int    `json:"contextBudgetTokens"`
+			MaxOutputTokens     int    `json:"maxOutputTokens"`
+		}
+		_ = json.Unmarshal([]byte(configJSON), &config)
+		_, err := conn.ExecContext(ctx, `INSERT INTO model_provider_connection_probe_results(probe_result_id,chat_model_id,embedding_model_id,context_budget_tokens,max_output_tokens,streaming_supported,native_tool_calling_supported,multi_tool_call_supported,cancellation_observed,usage_observed,request_id_observed,embedding_supported,embedding_vector_dim,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			headerID, config.ChatModelID, nil, config.ContextBudgetTokens, config.MaxOutputTokens, 0, 0, 0, 0, 0, 0, 0, nil, `{"kind":"model_provider","cancelled":true}`)
+		return err
 	default:
 		return fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
 	}

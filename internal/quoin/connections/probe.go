@@ -131,16 +131,25 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 	if _, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(?,1,'connection_config',?,?)`, snapshotID, hex.EncodeToString(inputDigest[:]), summary.CurrentRevisionID); err != nil {
 		return 0, err
 	}
-	// Probe grant binds the current pair (DATA-CONN-008: *_probe purposes
-	// belong to the connection_probe attempt of the same connection).
-	purpose := summary.Type + "_probe"
-	grantInsert, err := conn.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now)
-	if err != nil {
-		return 0, err
+	// Probe grants bind the current pair (DATA-CONN-008). The frozen
+	// dispatch trigger requires model_provider attempts to carry BOTH the
+	// chat and the embedding probe purposes; other types carry one.
+	purposes := []string{summary.Type + "_probe"}
+	if summary.Type == TypeModelProvider {
+		purposes = []string{"model_probe_chat", "model_probe_embedding"}
 	}
-	grantID, err := grantInsert.LastInsertId()
-	if err != nil {
-		return 0, err
+	var grantID int64
+	for _, purpose := range purposes {
+		grantInsert, grantErr := conn.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now)
+		if grantErr != nil {
+			return 0, grantErr
+		}
+		if purpose == purposes[0] {
+			grantID, grantErr = grantInsert.LastInsertId()
+			if grantErr != nil {
+				return 0, grantErr
+			}
+		}
 	}
 	// Assign to the live plinth stream (slot must be registered).
 	if binding == nil || binding.State != qruntime.StateRegistered || !binding.Connected {
@@ -159,6 +168,10 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 		return 0, err
 	}
 	committed = true
+	// Release the pooled connection before the dispatch callback: the
+	// dispatcher re-reads the attempt grants from the same single-connection
+	// pool and would otherwise self-deadlock.
+	conn.Close()
 	if dispatch != nil {
 		dispatch(attemptID, summary, *binding.ConnectionEpoch, binding.BootID, grantID, input, contractDigest, actionSetID, actionSetVersion)
 	}
@@ -200,6 +213,23 @@ type ThanosProbeChild struct {
 	DetailJSON   string
 }
 
+// ModelProviderProbeChild carries the model provider typed-child columns.
+type ModelProviderProbeChild struct {
+	ChatModelID                string
+	EmbeddingModelID           *string
+	ContextBudgetTokens        int
+	MaxOutputTokens            int
+	StreamingSupported         bool
+	NativeToolCallingSupported bool
+	MultiToolCallSupported     bool
+	CancellationObserved       bool
+	UsageObserved              bool
+	RequestIDObserved          bool
+	EmbeddingSupported         bool
+	EmbeddingVectorDim         int
+	DetailJSON                 string
+}
+
 // KubernetesProbeChild carries the kubernetes typed-child columns.
 type KubernetesProbeChild struct {
 	EffectiveNamespace string
@@ -215,8 +245,9 @@ type KubernetesProbeChild struct {
 
 // TypedChild selects the connection-type closed child row variant.
 type TypedChild struct {
-	Thanos     *ThanosProbeChild
-	Kubernetes *KubernetesProbeChild
+	Thanos        *ThanosProbeChild
+	Kubernetes    *KubernetesProbeChild
+	ModelProvider *ModelProviderProbeChild
 }
 
 // CommitProbeResult is the single terminal closure: header +
@@ -301,8 +332,31 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 			headerID, child.Kubernetes.EffectiveNamespace, boolInt(child.Kubernetes.VersionOK), boolInt(child.Kubernetes.CoreDiscoveryOK), boolInt(child.Kubernetes.GroupedDiscoveryOK), boolInt(child.Kubernetes.PodsGetAllowed), boolInt(child.Kubernetes.PodsListAllowed), boolInt(child.Kubernetes.EventsListAllowed), boolInt(child.Kubernetes.PodsLogGetAllowed), child.Kubernetes.DetailJSON); err != nil {
 			return err
 		}
+	case TypeModelProvider:
+		if child.ModelProvider == nil {
+			return fmt.Errorf("model provider probe result requires the model provider typed child")
+		}
+		var embeddingModelID any
+		var embeddingVectorDim any
+		if child.ModelProvider.EmbeddingSupported {
+			if child.ModelProvider.EmbeddingModelID == nil || *child.ModelProvider.EmbeddingModelID == "" {
+				return fmt.Errorf("embedding-supported probe requires embeddingModelId")
+			}
+			if child.ModelProvider.EmbeddingVectorDim < 1 {
+				return fmt.Errorf("embedding-supported probe requires a positive vector dimension")
+			}
+			embeddingModelID = *child.ModelProvider.EmbeddingModelID
+			embeddingVectorDim = child.ModelProvider.EmbeddingVectorDim
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO model_provider_connection_probe_results(probe_result_id,chat_model_id,embedding_model_id,context_budget_tokens,max_output_tokens,streaming_supported,native_tool_calling_supported,multi_tool_call_supported,cancellation_observed,usage_observed,request_id_observed,embedding_supported,embedding_vector_dim,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			headerID, child.ModelProvider.ChatModelID, embeddingModelID, child.ModelProvider.ContextBudgetTokens, child.ModelProvider.MaxOutputTokens,
+			boolInt(child.ModelProvider.StreamingSupported), boolInt(child.ModelProvider.NativeToolCallingSupported), boolInt(child.ModelProvider.MultiToolCallSupported),
+			boolInt(child.ModelProvider.CancellationObserved), boolInt(child.ModelProvider.UsageObserved), boolInt(child.ModelProvider.RequestIDObserved),
+			boolInt(child.ModelProvider.EmbeddingSupported), embeddingVectorDim, child.ModelProvider.DetailJSON); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("connection type %q has no supervisor probe child (model provider probes are T08)", connectionType)
+		return fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
 	}
 	// Terminal state and termination reason commit in one versioned update.
 	terminalState := "Succeeded"
@@ -400,7 +454,7 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT k.detail_json FROM kubernetes_connection_probe_results k WHERE k.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
+	rows, err := service.db.QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT k.detail_json FROM kubernetes_connection_probe_results k WHERE k.probe_result_id=r.id),''),COALESCE((SELECT m.detail_json FROM model_provider_connection_probe_results m WHERE m.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -408,14 +462,16 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	var results []ProbeResultView
 	for rows.Next() {
 		var view ProbeResultView
-		var thanosDetail, k8sDetail string
-		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &k8sDetail); err != nil {
+		var thanosDetail, k8sDetail, mpDetail string
+		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &k8sDetail, &mpDetail); err != nil {
 			return nil, false, err
 		}
-		if thanosDetail != "" {
-			view.DetailJSON = thanosDetail
-		} else {
+		view.DetailJSON = thanosDetail
+		if view.DetailJSON == "" {
 			view.DetailJSON = k8sDetail
+		}
+		if view.DetailJSON == "" {
+			view.DetailJSON = mpDetail
 		}
 		results = append(results, view)
 	}

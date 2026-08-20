@@ -47,6 +47,25 @@ func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID in
 	if err != nil {
 		return err
 	}
+	// The input snapshot carries every attempt grant (model_provider
+	// probes dispatch with chat + embedding purposes).
+	var grants []*runtimev1.ConnectionGrant
+	if service.Connections != nil {
+		rows, grantErr := service.Connections.DB().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
+		if grantErr != nil {
+			return grantErr
+		}
+		for rows.Next() {
+			var grantID, revisionID, generationID int64
+			var purpose string
+			if err := rows.Scan(&grantID, &revisionID, &generationID, &purpose); err != nil {
+				rows.Close()
+				return err
+			}
+			grants = append(grants, &runtimev1.ConnectionGrant{GrantId: grantID, ConnectionRevisionId: revisionID, CredentialGenerationId: generationID, Purpose: purpose})
+		}
+		rows.Close()
+	}
 	actionSetID, actionSetVersion, err := connections.ActionSet(summary.Type)
 	if err != nil {
 		return err
@@ -63,17 +82,12 @@ func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID in
 				ScopeId:       summary.ID,
 				LeaseDeadline: timestamppb.New(time.Now().UTC().Add(probeLeaseWindow())),
 				Input: &runtimev1.AttemptInputSnapshot{
-					SchemaKind:    "connection_probe_v1",
-					CanonicalJson: input,
-					ContentDigest: digest[:],
-					ArtifactRefs:  nil,
-					AgentVersion:  "",
-					ConnectionGrants: []*runtimev1.ConnectionGrant{{
-						GrantId:                grantID,
-						ConnectionRevisionId:   summary.CurrentRevisionID,
-						CredentialGenerationId: summary.CurrentGenerationID,
-						Purpose:                summary.Type + "_probe",
-					}},
+					SchemaKind:       "connection_probe_v1",
+					CanonicalJson:    input,
+					ContentDigest:    digest[:],
+					ArtifactRefs:     nil,
+					AgentVersion:     "",
+					ConnectionGrants: grants,
 				},
 			},
 		},
@@ -311,9 +325,43 @@ func parseTypedChild(schemaKind string, detail json.RawMessage) (*connections.Ty
 			PodsListAllowed: parsed.PodsListAllowed, EventsListAllowed: parsed.EventsListAllowed,
 			PodsLogGetAllowed: parsed.PodsLogGetAllowed, DetailJSON: string(detail),
 		}}, nil
+	case "connection_probe_model_provider_v1":
+		var parsed modelProviderDetailJSON
+		if err := json.Unmarshal(detail, &parsed); err != nil {
+			return nil, fmt.Errorf("model provider detail unparseable: %w", err)
+		}
+		if parsed.Kind != "model_provider" {
+			return nil, fmt.Errorf("model provider detail kind mismatch")
+		}
+		return &connections.TypedChild{ModelProvider: &connections.ModelProviderProbeChild{
+			ChatModelID: parsed.ChatModelID, EmbeddingModelID: parsed.EmbeddingModelID,
+			ContextBudgetTokens: parsed.ContextBudgetTokens, MaxOutputTokens: parsed.MaxOutputTokens,
+			StreamingSupported: parsed.StreamingSupported, NativeToolCallingSupported: parsed.NativeToolCallingSupported,
+			MultiToolCallSupported: parsed.MultiToolCallSupported, CancellationObserved: parsed.CancellationObserved,
+			UsageObserved: parsed.UsageObserved, RequestIDObserved: parsed.RequestIDObserved,
+			EmbeddingSupported: parsed.EmbeddingSupported, EmbeddingVectorDim: parsed.EmbeddingVectorDim,
+			DetailJSON: string(detail),
+		}}, nil
 	default:
 		return nil, fmt.Errorf("unknown probe result schema kind %q", schemaKind)
 	}
+}
+
+// modelProviderDetailJSON is the supervisor's canonical qualification detail.
+type modelProviderDetailJSON struct {
+	Kind                       string  `json:"kind"`
+	ChatModelID                string  `json:"chatModelId"`
+	EmbeddingModelID           *string `json:"embeddingModelId"`
+	ContextBudgetTokens        int     `json:"contextBudgetTokens"`
+	MaxOutputTokens            int     `json:"maxOutputTokens"`
+	StreamingSupported         bool    `json:"streamingSupported"`
+	NativeToolCallingSupported bool    `json:"nativeToolCallingSupported"`
+	MultiToolCallSupported     bool    `json:"multiToolCallSupported"`
+	CancellationObserved       bool    `json:"cancellationObserved"`
+	UsageObserved              bool    `json:"usageObserved"`
+	RequestIDObserved          bool    `json:"requestIdObserved"`
+	EmbeddingSupported         bool    `json:"embeddingSupported"`
+	EmbeddingVectorDim         int     `json:"embeddingVectorDim,omitempty"`
 }
 
 // dispatchCancel sends the committed cancellation fence to the runtime that
