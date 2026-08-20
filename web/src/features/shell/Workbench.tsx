@@ -6,6 +6,7 @@ import { AlertSourceForm } from '../alerts/AlertSourceForm'
 import { AlertsList } from '../alerts/AlertsList'
 import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
 import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
+import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -36,6 +37,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [runtimeError, setRuntimeError] = useState(false)
   const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
+  const [adminSegment, setAdminSegment] = useState<'users' | 'runtimes'>('users')
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
@@ -112,6 +114,10 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         )}
         {active === 'admin' && (
           <>
+          <div className="segmented admin-segment" aria-label="管理视图">
+            <button aria-selected={adminSegment === 'users'} onClick={() => setAdminSegment('users')}>用户与会话</button>
+            <button aria-selected={adminSegment === 'runtimes'} onClick={() => setAdminSegment('runtimes')}>运行组件</button>
+          </div>
           <section className="runtime-summary" aria-labelledby="runtime-title">
             <h2 id="runtime-title">运行组件</h2>
             {runtimeError && <p>暂时无法读取组件状态。</p>}
@@ -126,7 +132,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       </aside>
       <main className="detail-pane" tabIndex={-1}>
         {active === 'admin' && user.role === 'admin' ? (
-          <AdminUsersPanel currentUser={user} />
+          adminSegment === 'runtimes' ? <RuntimesPanel /> : <AdminUsersPanel currentUser={user} />
         ) : active === 'alerts' && selectedOccurrence ? (
           <AlertDetail occurrenceId={selectedOccurrence} onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null) }} />
         ) : active === 'alerts' ? (

@@ -238,3 +238,8 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .admin-audit-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; font-size: 13px; }
 .admin-audit-action { font-weight: 650; }
 
+/* Admin runtimes module (T06) */
+.admin-segment { margin: 14px 14px 4px; }
+.runtime-card { border: 1px solid var(--line); border-radius: 11px; background: var(--paper); padding: 16px; }
+.runtime-facts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0 4px; font-size: 13px; color: #3e413b; }
+.runtime-facts .status-pill { background: var(--ok-soft); color: var(--ok-ink); }
