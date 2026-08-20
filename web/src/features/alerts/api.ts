@@ -67,8 +67,8 @@ export interface IntakeIssue {
   rowVersion: number
 }
 
-export async function fetchAlerts(): Promise<AlertSnapshot> {
-  const response = await fetch('/api/v1/alerts', { credentials: 'include' })
+export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing'): Promise<AlertSnapshot> {
+  const response = await fetch(`/api/v1/alerts?state=${state}`, { credentials: 'include' })
   if (!response.ok) throw new Error('告警列表加载失败')
   return (await response.json()) as AlertSnapshot
 }
@@ -122,4 +122,23 @@ export async function revealCredential(handle: string): Promise<RevealCredential
 export function newClientCommandId(): string {
   const raw = crypto.getRandomValues(new Uint8Array(18))
   return Array.from(raw, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export async function acknowledgeIntakeIssue(id: string, expectedRowVersion: number): Promise<void> {
+  const response = await fetch(`/api/v1/alert-intake-issues/${id}/acknowledge`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
+  })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new ApiLikeError(problem?.detail ?? '无法确认接入问题', response.status)
+  }
+}
+
+export class ApiLikeError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+  }
 }

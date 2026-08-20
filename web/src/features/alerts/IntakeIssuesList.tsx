@@ -1,16 +1,56 @@
-import { useEffect, useState } from 'react'
-import type { IntakeIssue } from './api'
-import { fetchIntakeIssues } from './api'
+import { useCallback, useEffect, useState } from 'react'
+import { acknowledgeIntakeIssue, ApiLikeError, fetchIntakeIssues, type IntakeIssue } from './api'
 
-export function IntakeIssuesList() {
+const REFRESH_MS = 15_000
+
+interface IntakeIssuesProps {
+  isAdmin: boolean
+}
+
+// Intake issues are a separate query (CONTEXT 告警接入问题): they are not
+// Occurrence lifecycle and carry no SSE change channel. The list refreshes
+// on a light timer and after each acknowledgement.
+export function IntakeIssuesList({ isAdmin }: IntakeIssuesProps) {
   const [issues, setIssues] = useState<IntakeIssue[]>([])
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const [ackError, setAckError] = useState('')
+
+  const refresh = useCallback(async () => {
+    try {
+      const page = await fetchIntakeIssues()
+      setIssues(page.items ?? [])
+      setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '接入问题加载失败')
+    }
+  }, [])
 
   useEffect(() => {
-    void fetchIntakeIssues()
-      .then((page) => setIssues(page.items ?? []))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '接入问题加载失败'))
-  }, [])
+    void refresh()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh()
+    }, REFRESH_MS)
+    return () => window.clearInterval(timer)
+  }, [refresh])
+
+  async function acknowledge(issue: IntakeIssue) {
+    setBusy(issue.id)
+    setAckError('')
+    try {
+      await acknowledgeIntakeIssue(issue.id, issue.rowVersion)
+      await refresh()
+    } catch (reason) {
+      if (reason instanceof ApiLikeError && reason.status === 409) {
+        setAckError('这条问题的版本已变化，正在刷新最新状态。')
+        await refresh()
+      } else {
+        setAckError(reason instanceof Error ? reason.message : '无法确认接入问题')
+      }
+    } finally {
+      setBusy('')
+    }
+  }
 
   if (error) {
     return <div className="inline-status" role="alert"><div><strong>接入问题暂时不可用</strong><p>{error}</p></div></div>
@@ -24,21 +64,33 @@ export function IntakeIssuesList() {
     )
   }
   return (
-    <ul className="object-list-items">
-      {issues.map((issue) => (
-        <li key={issue.id}>
-          <div className="object-row static">
-            <span className={`intake-kind ${issue.kind}`}>{kindLabel(issue.kind)}</span>
-            <span className="object-row-main">
-              <strong>已发生 {issue.occurrenceCount} 次</strong>
-              <span className="object-row-meta">
-                <time dateTime={issue.lastSeenAt}>{new Date(issue.lastSeenAt).toLocaleString()}</time>
+    <div>
+      {ackError && <p className="list-note" role="status">{ackError}</p>}
+      <ul className="object-list-items">
+        {issues.map((issue) => (
+          <li key={issue.id}>
+            <div className="object-row static">
+              <span className={`intake-kind ${issue.kind}`}>{kindLabel(issue.kind)}</span>
+              <span className="object-row-main">
+                <strong>已发生 {issue.occurrenceCount} 次</strong>
+                <span className="object-row-meta">
+                  <time dateTime={issue.lastSeenAt}>{new Date(issue.lastSeenAt).toLocaleString()}</time>
+                </span>
               </span>
-            </span>
-          </div>
-        </li>
-      ))}
-    </ul>
+              {isAdmin && (
+                <button
+                  className="text-button compact"
+                  disabled={busy === issue.id}
+                  onClick={() => void acknowledge(issue)}
+                >
+                  {busy === issue.id ? '正在标记…' : '标记已处理'}
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

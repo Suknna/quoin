@@ -34,7 +34,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [runtimeError, setRuntimeError] = useState(false)
   const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
-  const [intakeOpen, setIntakeOpen] = useState(false)
+  const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
@@ -96,10 +96,11 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         {active === 'alerts' && (
           <>
             <div className="segmented" aria-label="告警视图">
-              <button aria-pressed={!intakeOpen} onClick={() => setIntakeOpen(false)}>当前</button>
-              <button aria-pressed={intakeOpen} onClick={() => setIntakeOpen(true)}>接入问题</button>
+              <button aria-pressed={alertSegment === 'current'} onClick={() => setAlertSegment('current')}>当前</button>
+              <button aria-pressed={alertSegment === 'history'} onClick={() => setAlertSegment('history')}>历史</button>
+              <button aria-pressed={alertSegment === 'intake'} onClick={() => setAlertSegment('intake')}>接入问题</button>
             </div>
-            {intakeOpen ? <IntakeIssuesList /> : <AlertsList onSelect={selectOccurrence} />}
+            {alertSegment === 'intake' ? <IntakeIssuesList isAdmin={user.role === 'admin'} /> : <AlertsList view={alertSegment === 'history' ? 'Resolved' : 'Firing'} onSelect={selectOccurrence} />}
           </>
         )}
         {active !== 'alerts' && (

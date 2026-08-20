@@ -1,48 +1,58 @@
-import { useEffect, useState } from 'react'
-import type { AlertOccurrenceSummary, AlertSnapshot } from './api'
-import { fetchAlerts } from './api'
+import { useEffect } from 'react'
+import { useStreamPhase } from '../../app/realtime/hooks'
+import type { AlertOccurrenceSummary } from './api'
+import { useLiveAlerts } from './useLiveAlerts'
 
 interface AlertsProps {
+  view: 'Firing' | 'Resolved'
   onSelect: (id: string) => void
 }
 
-export function AlertsList({ onSelect }: AlertsProps) {
-  const [snapshot, setSnapshot] = useState<AlertSnapshot | null>(null)
-  const [error, setError] = useState('')
+export function AlertsList({ view, onSelect }: AlertsProps) {
+  const live = useLiveAlerts(view)
+  const phase = useStreamPhase()
 
   useEffect(() => {
-    const cancelled = { value: false }
-    void fetchAlerts()
-      .then((snapshot) => { if (!cancelled.value) setSnapshot(snapshot) })
-      .catch((reason: unknown) => { if (!cancelled.value) setError(reason instanceof Error ? reason.message : '告警列表加载失败') })
-    return () => { cancelled.value = true }
-  }, [])
+    const onScroll = () => live.setAtTop(window.scrollY < 80)
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [live])
 
-  if (error) {
+  if (live.error) {
     return (
       <div className="inline-status" role="alert">
-        <div><strong>告警列表暂时不可用</strong><p>{error}</p></div>
+        <div><strong>告警列表暂时不可用</strong><p>{live.error}</p></div>
       </div>
     )
   }
-  if (!snapshot) {
+  if (live.loading && live.items.length === 0) {
     return <div className="inline-status"><div><strong>正在读取告警…</strong></div></div>
   }
-  const items = snapshot.items ?? []
-  if (items.length === 0) {
+  if (live.items.length === 0 && live.pendingNew === 0) {
     return (
       <div className="inline-status">
         <span className="status-dot waiting" />
-        <div><strong>当前没有 Firing 告警</strong><p>Alertmanager 送达的新告警会出现在这里。</p></div>
+        <div>
+          <strong>{view === 'Firing' ? '当前没有 Firing 告警' : '还没有已恢复的告警'}</strong>
+          <p>{view === 'Firing' ? 'Alertmanager 送达的新告警会实时出现在这里。' : '告警恢复后会进入历史视图。'}</p>
+        </div>
       </div>
     )
   }
   return (
-    <ul className="object-list-items">
-      {items.map((occurrence) => (
-        <AlertRow key={occurrence.id} occurrence={occurrence} onSelect={onSelect} />
-      ))}
-    </ul>
+    <div className="live-list" aria-busy={phase === 'recovering' || undefined}>
+      {live.pendingNew > 0 && (
+        <button className="new-content-pill" onClick={live.mergePending}>
+          有 {live.pendingNew} 条新告警，点击查看
+        </button>
+      )}
+      <ul className="object-list-items">
+        {live.items.map((occurrence) => (
+          <AlertRow key={occurrence.id} occurrence={occurrence} onSelect={onSelect} />
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -53,7 +63,7 @@ function AlertRow({ occurrence, onSelect }: { occurrence: AlertOccurrenceSummary
   return (
     <li>
       <button className="object-row" onClick={() => onSelect(occurrence.id)}>
-        <span className="alert-state firing" aria-label="Firing">●</span>
+        <span className={`alert-state ${occurrence.state === 'Firing' ? 'firing' : 'resolved'}`} aria-label={occurrence.state}>{occurrence.state === 'Firing' ? '●' : '○'}</span>
         <span className="object-row-main">
           <strong>{alertname}</strong>
           <span className="object-row-meta">

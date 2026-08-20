@@ -194,3 +194,26 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .credential-reveal code { user-select: all; font-size: 14px; padding: 9px; border-radius: 7px; background: var(--code-bg); color: var(--code-ink); word-break: break-all; }
 .credential-reveal p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .detail-empty { padding: 40px; text-align: center; color: var(--muted); }
+
+/* T04 实时列表：新内容缓冲入口与轻量状态注记 */
+.new-content-pill {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 8px 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--accent);
+  font-weight: 650;
+  cursor: pointer;
+}
+.list-note {
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(176, 88, 40, 0.08);
+  color: #6d4a1f;
+  font-size: 13px;
+}
+.text-button.compact { min-height: 34px; padding: 4px 10px; font-size: 13px; }

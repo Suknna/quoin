@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useOccurrenceVersions } from '../../app/realtime/hooks'
 import type { AlertOccurrenceSummary, ObservationSummary } from './api'
 import { fetchObservations, fetchOccurrence } from './api'
 
@@ -6,6 +7,8 @@ export function AlertDetail({ occurrenceId, onBack }: { occurrenceId: string; on
   const [occurrence, setOccurrence] = useState<AlertOccurrenceSummary | null>(null)
   const [observations, setObservations] = useState<ObservationSummary[]>([])
   const [error, setError] = useState('')
+  const versions = useOccurrenceVersions()
+  const liveVersion = versions.get(occurrenceId)
 
   useEffect(() => {
     const cancelled = { value: false }
@@ -14,6 +17,7 @@ export function AlertDetail({ occurrenceId, onBack }: { occurrenceId: string; on
         if (cancelled.value) return
         setOccurrence(detail)
         setObservations(observationPage.items ?? [])
+        setError('')
       })
       .catch((reason: unknown) => {
         if (cancelled.value) return
@@ -21,6 +25,23 @@ export function AlertDetail({ occurrenceId, onBack }: { occurrenceId: string; on
       })
     return () => { cancelled.value = true }
   }, [occurrenceId])
+
+  useEffect(() => {
+    // The event stream only signals "version advanced"; the authoritative
+    // body is re-read here (HTTP-SSE-005). liveVersion changes identity only
+    // when a strictly newer rowVersion was observed for this occurrence.
+    if (liveVersion === undefined || occurrence === null) return
+    if (liveVersion <= occurrence.rowVersion) return
+    let cancelled = false
+    void Promise.all([fetchOccurrence(occurrenceId), fetchObservations(occurrenceId)])
+      .then(([detail, observationPage]) => {
+        if (cancelled) return
+        setOccurrence(detail)
+        setObservations(observationPage.items ?? [])
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [liveVersion, occurrenceId, occurrence])
 
   if (error) {
     return (
