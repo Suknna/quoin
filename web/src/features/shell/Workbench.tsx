@@ -5,6 +5,7 @@ import { AlertDetail } from '../alerts/AlertDetail'
 import { AlertSourceForm } from '../alerts/AlertSourceForm'
 import { AlertsList } from '../alerts/AlertsList'
 import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
+import { ConnectionsPanel } from '../admin/connections/ConnectionsPanel'
 import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
 import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
 
@@ -37,7 +38,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [runtimeError, setRuntimeError] = useState(false)
   const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
-  const [adminSegment, setAdminSegment] = useState<'users' | 'runtimes'>('users')
+  const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
@@ -116,6 +117,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           <>
           <div className="segmented admin-segment" aria-label="管理视图">
             <button aria-selected={adminSegment === 'users'} onClick={() => setAdminSegment('users')}>用户与会话</button>
+            <button aria-selected={adminSegment === 'connections'} onClick={() => setAdminSegment('connections')}>连接</button>
             <button aria-selected={adminSegment === 'runtimes'} onClick={() => setAdminSegment('runtimes')}>运行组件</button>
           </div>
           <section className="runtime-summary" aria-labelledby="runtime-title">
@@ -132,7 +134,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       </aside>
       <main className="detail-pane" tabIndex={-1}>
         {active === 'admin' && user.role === 'admin' ? (
-          adminSegment === 'runtimes' ? <RuntimesPanel /> : <AdminUsersPanel currentUser={user} />
+          adminSegment === 'runtimes' ? <RuntimesPanel /> : adminSegment === 'connections' ? <ConnectionsPanel /> : <AdminUsersPanel currentUser={user} />
         ) : active === 'alerts' && selectedOccurrence ? (
           <AlertDetail occurrenceId={selectedOccurrence} onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null) }} />
         ) : active === 'alerts' ? (

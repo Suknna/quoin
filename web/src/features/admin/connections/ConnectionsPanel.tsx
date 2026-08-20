@@ -1,0 +1,302 @@
+import { useCallback, useEffect, useState } from 'react'
+import {
+  ConnectionsApiError,
+  cancelProbeAttempt,
+  createConnection,
+  disableConnection,
+  enableConnection,
+  fetchConnection,
+  fetchProbeAttempt,
+  listConnections,
+  listProbeResults,
+  probeConnection,
+  type ConnectionDetailView,
+  type ConnectionSummaryView,
+  type CreateConnectionInput,
+  type ProbeAttemptView,
+  type ProbeResultView,
+} from './api'
+
+// Admin connections panel (T07): typed connections with one-time-secret
+// creation, supervisor probe dispatch with live attempt state, immutable
+// result history and enable/disable with row-version fences.
+
+const typeLabels: Record<ConnectionSummaryView['type'], string> = {
+  thanos: 'Thanos 查询',
+  kubernetes: 'Kubernetes 只读',
+  model_provider: '模型供应商',
+}
+
+const stateLabels: Record<ProbeAttemptView['state'], string> = {
+  Queued: '排队中（等待运行组件连接）',
+  Assigned: '已派发',
+  Running: '探测运行中',
+  Cancelling: '正在取消',
+  Succeeded: '已完成',
+  Failed: '失败',
+  Cancelled: '已取消',
+  Interrupted: '被中断',
+}
+
+const activeStates: ProbeAttemptView['state'][] = ['Queued', 'Assigned', 'Running', 'Cancelling']
+
+export function ConnectionsPanel() {
+  const [connections, setConnections] = useState<ConnectionSummaryView[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [detail, setDetail] = useState<ConnectionDetailView | null>(null)
+  const [results, setResults] = useState<ProbeResultView[]>([])
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [createType, setCreateType] = useState<'thanos' | 'kubernetes'>('thanos')
+  const [form, setForm] = useState({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
+
+  const reload = useCallback(async (selection = selected) => {
+    try {
+      const items = await listConnections()
+      setConnections(items)
+      if (selection && items.some((item) => item.name === selection)) {
+        const [nextDetail, nextResults] = await Promise.all([fetchConnection(selection), listProbeResults(selection)])
+        setDetail(nextDetail)
+        setResults(nextResults)
+      } else {
+        setDetail(null)
+        setResults([])
+      }
+      setError('')
+    } catch (loadError) {
+      setError(loadError instanceof ConnectionsApiError ? loadError.message : '暂时无法读取连接。')
+    }
+  }, [selected])
+
+  useEffect(() => {
+    // Initial load + visibility-gated refresh (same shape as the users
+    // panel); every setState inside reload() runs after its first await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- static-analysis false positive on this async loader
+    void reload()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void reload()
+    }, 10_000)
+    return () => window.clearInterval(timer)
+  }, [reload])
+
+  // Poll the active probe attempt so the operator sees dispatch → result
+  // without leaving the panel (state updates happen in the async callback,
+  // not synchronously within the effect).
+  useEffect(() => {
+    const active = detail?.activeProbeAttempt
+    if (!active || !selected || !activeStates.includes(active.state)) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await fetchProbeAttempt(selected, active.id)
+        } catch {
+          // The attempt read failing still refreshes the authoritative view.
+        }
+        await reload()
+      })()
+    }, 1500)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [detail, selected, reload])
+
+  async function submitCreation(event: React.FormEvent) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    const input: CreateConnectionInput = { type: createType }
+    if (createType === 'thanos') {
+      input.baseUrl = form.baseUrl.trim()
+      input.username = form.username.trim()
+      input.password = form.password
+    } else {
+      input.kubeconfig = form.kubeconfig
+      input.defaultNamespace = form.defaultNamespace.trim()
+    }
+    try {
+      await createConnection(form.name.trim(), input)
+      setNotice('连接已创建。秘密已加密保存，之后无法再次查看。')
+      setForm({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
+      setCreating(false)
+      await reload(form.name.trim())
+      setSelected(form.name.trim())
+    } catch (createError) {
+      setError(createError instanceof ConnectionsApiError ? createError.message : '创建失败，请重试。')
+    }
+  }
+
+  async function runProbe() {
+    if (!selected) {
+      return
+    }
+    setError('')
+    setNotice('')
+    try {
+      const attempt = await probeConnection(selected)
+      setNotice(`探测已受理（${stateLabels[attempt.state]}）。`)
+      await reload()
+    } catch (probeError) {
+      setError(probeError instanceof ConnectionsApiError ? probeError.message : '探测发起失败。')
+    }
+  }
+
+  async function cancelActive() {
+    const active = detail?.activeProbeAttempt
+    if (!selected || !active) {
+      return
+    }
+    setError('')
+    try {
+      await cancelProbeAttempt(selected, active.id, active.rowVersion)
+      setNotice('取消请求已提交。')
+      await reload()
+    } catch (cancelError) {
+      setError(cancelError instanceof ConnectionsApiError ? cancelError.message : '取消失败。')
+      await reload()
+    }
+  }
+
+  async function toggleEnabled() {
+    if (!detail) {
+      return
+    }
+    setError('')
+    setNotice('')
+    try {
+      if (detail.enabled) {
+        await disableConnection(detail.name, detail.rowVersion)
+        setNotice('连接已停用。')
+      } else {
+        await enableConnection(detail.name, detail.rowVersion)
+        setNotice('连接已启用。')
+      }
+      await reload()
+    } catch (toggleError) {
+      setError(toggleError instanceof ConnectionsApiError ? toggleError.message : '操作失败，请刷新后重试。')
+      await reload()
+    }
+  }
+
+  return (
+    <div className="detail-content admin-connections">
+      <header className="admin-connections-head">
+        <h2>连接</h2>
+        <button className="text-button compact" onClick={() => setCreating(true)}>新建连接</button>
+      </header>
+      {notice && <p className="admin-notice" role="status">{notice}</p>}
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {creating && (
+        <form className="admin-create-form admin-reset-form" onSubmit={submitCreation}>
+          <h3>新建连接</h3>
+          <label>
+            类型
+            <select value={createType} onChange={(event) => setCreateType(event.target.value as 'thanos' | 'kubernetes')}>
+              <option value="thanos">Thanos 查询</option>
+              <option value="kubernetes">Kubernetes 只读</option>
+            </select>
+          </label>
+          <label>
+            名称
+            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required maxLength={200} placeholder="main-thanos" />
+          </label>
+          {createType === 'thanos' ? (
+            <>
+              <label>
+                查询入口 URL
+                <input value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} required placeholder="https://thanos.example.com" />
+              </label>
+              <label>
+                用户名（可选）
+                <input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} placeholder="probe" />
+              </label>
+              <label>
+                密码（一次性提交，保存后不可查看）
+                <input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" />
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                kubeconfig（一次性提交，保存后不可查看）
+                <textarea className="admin-kubeconfig" value={form.kubeconfig} onChange={(event) => setForm({ ...form, kubeconfig: event.target.value })} required rows={8} spellCheck={false} placeholder="apiVersion: v1&#10;kind: Config&#10;..." />
+              </label>
+              <label>
+                默认命名空间（可选）
+                <input value={form.defaultNamespace} onChange={(event) => setForm({ ...form, defaultNamespace: event.target.value })} placeholder="default" />
+              </label>
+            </>
+          )}
+          <div className="admin-action-row">
+            <button type="submit">创建</button>
+            <button type="button" className="text-button" onClick={() => setCreating(false)}>取消</button>
+          </div>
+        </form>
+      )}
+      <ul className="admin-connection-list" role="list">
+        {connections.map((connection) => (
+          <li key={connection.name} className="object-row">
+            <button
+              className={`object-row-main${selected === connection.name ? ' selected' : ''}`}
+              onClick={() => {
+                setSelected(connection.name)
+                void reload(connection.name)
+              }}
+            >
+              <strong>{connection.name}</strong>
+              <span className="admin-muted">
+                {typeLabels[connection.type]} · {connection.enabled ? '已启用' : '未启用'}
+                {connection.revalidationRequired ? ' · 需重新验证' : ''}
+              </span>
+            </button>
+          </li>
+        ))}
+        {connections.length === 0 && <li className="admin-muted">还没有连接。点击“新建连接”创建第一个。</li>}
+      </ul>
+      {detail && (
+        <section className="connection-detail-card" aria-labelledby="connection-detail-title">
+          <h3 id="connection-detail-title">{detail.name}</h3>
+          <div className="runtime-facts">
+            <span className="status-pill">{typeLabels[detail.type]}</span>
+            <span>{detail.enabled ? '已启用' : '未启用'}</span>
+            <span>revision × {detail.revisionCount}</span>
+            <span>凭据 × {detail.generationCount}</span>
+          </div>
+          <div className="admin-action-row">
+            <button onClick={runProbe}>运行探测</button>
+            {detail.activeProbeAttempt ? (
+              <button className="text-button" onClick={cancelActive}>
+                取消探测（{stateLabels[detail.activeProbeAttempt.state]}）
+              </button>
+            ) : (
+              <button className="text-button" onClick={toggleEnabled}>
+                {detail.enabled ? '停用' : '启用'}
+              </button>
+            )}
+          </div>
+          {detail.activeProbeAttempt && (
+            <p className="admin-muted" role="status">
+              当前探测：{stateLabels[detail.activeProbeAttempt.state]}
+              {detail.activeProbeAttempt.state === 'Queued' ? '，将在 Plinth 连接后自动派发。' : ''}
+            </p>
+          )}
+          <h4>探测历史</h4>
+          <ul className="admin-audit-list" role="list">
+            {results.map((result) => (
+              <li key={result.id}>
+                <span className={result.outcome === 'passed' ? '' : 'admin-danger'}>
+                  {result.outcome === 'passed' ? '通过' : result.outcome === 'failed' ? '失败' : result.outcome === 'cancelled' ? '已取消' : '被中断'}
+                </span>
+                <span className="admin-muted">{new Date(result.finishedAt).toLocaleString()}</span>
+                <span className="admin-muted admin-mono">{result.actionSetId} v{result.actionSetVersion}</span>
+              </li>
+            ))}
+            {results.length === 0 && <li className="admin-muted">还没有探测记录。</li>}
+          </ul>
+        </section>
+      )}
+    </div>
+  )
+}
