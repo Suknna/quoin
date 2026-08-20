@@ -3,6 +3,11 @@ FROM golang:1.26.1-alpine3.22 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum ./
+# GOPROXY is a build argument so restricted networks can point the image
+# build at their module mirror (e.g. --build-arg GOPROXY=https://goproxy.cn,direct);
+# the default matches Go's own default.
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 RUN go mod download
 COPY . .
 ARG TARGETOS=linux

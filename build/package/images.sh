@@ -17,5 +17,7 @@ for target in quoin plinth lintel stele; do
     echo "image quoin/$target:v0.1.0-dev already present"
     continue
   fi
-  docker build -f build/package/Dockerfile --target "$target" -t "quoin/$target:v0.1.0-dev" .
+  docker build -f build/package/Dockerfile --target "$target" \
+    ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
+    -t "quoin/$target:v0.1.0-dev" .
 done
