@@ -12,7 +12,11 @@ evidence="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T03}"
 rm -rf "$stack"
 mkdir -p "$stack" "$evidence"
 
-bash build/package/images.sh
+# Restricted networks need the module mirror passed into the image build
+# (same authority as the Go acceptance runs: QUOIN_IMAGE_GOPROXY falling back
+# to `go env GOPROXY`, whose value often lives only in the go env file).
+image_proxy="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
+QUOIN_IMAGE_GOPROXY="$image_proxy" bash build/package/images.sh
 go build -o "$stack/quoin-deploy" ./cmd/quoin-deploy
 
 password="e2e-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)-2026"
@@ -51,7 +55,11 @@ META=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST
 HANDLE=$(printf '%s' "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['revealHandle'])")
 BEARER=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d "{\"revealHandle\":\"$HANDLE\"}" "$BASE/api/v1/alert-sources/credentials/reveal" | python3 -c "import json,sys; print(json.load(sys.stdin)['bearerToken'])")
-# forwarder + Alertmanager
+# Forwarder + Alertmanager live on quoin_internal (plain Linux dockerd
+# provides no host.docker.internal): the forwarder attaches the bearer and
+# posts straight to stele:8080 (the same webhook listener Stele exposes
+# inside the deployment network), and Alertmanager reaches the forwarder by
+# container DNS name. Same approach as the T04 fixture.
 mkdir -p "$stack/am"
 cat > "$stack/am/forwarder.py" <<'PYEOF'
 import http.server, urllib.request, urllib.error, os
@@ -70,9 +78,11 @@ class S(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 http.server.HTTPServer(('0.0.0.0', 8099), S).serve_forever()
 PYEOF
-docker run -d --name e2e-fwd -p 127.0.0.1:18082:8099 \
-  -e "STELE_URL=http://host.docker.internal:18081/" -e "STELE_BEARER=$BEARER" \
+docker run -d --name e2e-fwd \
+  -p 127.0.0.1:18082:8099 \
+  -e "STELE_URL=http://stele:8080/" -e "STELE_BEARER=$BEARER" \
   -v "$stack/am/forwarder.py:/forwarder.py:ro" python:3.12-slim python /forwarder.py >/dev/null
+docker network connect quoin_internal e2e-fwd
 cat > "$stack/am/alertmanager.yml" <<'EOF'
 route:
   receiver: sink
@@ -82,11 +92,12 @@ route:
 receivers:
 - name: sink
   webhook_configs:
-  - url: http://host.docker.internal:18082/
+  - url: http://e2e-fwd:8099/
     send_resolved: true
 EOF
 docker run -d --name e2e-am -p 127.0.0.1:19093:9093 \
   -v "$stack/am/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" prom/alertmanager:v0.28.1 >/dev/null
+docker network connect quoin_internal e2e-am
 # Wait for Alertmanager to be ready (first pull can take a while), then fire
 # the probe alert; a failure here is loud (the fixture never flips to ready).
 am_ready=0
