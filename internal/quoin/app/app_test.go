@@ -50,7 +50,7 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin))
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
 	defer server.Close()
 
 	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
@@ -98,9 +98,9 @@ func splitCookie(setCookie string) string {
 	return strings.Split(setCookie, ";")[0]
 }
 
-func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, origin string) http.Handler {
+func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, origin string, rootKeyFile string) http.Handler {
 	t.Helper()
-	handler, err := app.NewHandler(app.NewAPIServer(service, db), origin)
+	handler, err := app.NewHandler(app.NewAPIServer(service, db, rootKeyFile), origin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin))
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
 	defer server.Close()
 	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
 

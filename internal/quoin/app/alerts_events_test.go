@@ -66,7 +66,7 @@ func newSSEStack(t *testing.T) *sseStack {
 	if _, err := authService.CreateFirstAdmin(ctx, "admin", "SSE Admin", password); err != nil {
 		t.Fatal(err)
 	}
-	application := app.NewAPIServer(authService, database.SQL)
+	application := app.NewAPIServer(authService, database.SQL, config.RootKeyFile)
 	handler, err := app.NewHandler(application, config.PublicOrigin)
 	if err != nil {
 		t.Fatal(err)

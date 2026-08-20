@@ -50,7 +50,7 @@ func newAdminSurface(t *testing.T) (*httptest.Server, map[string]string) {
 	if _, err := service.CreateFirstAdmin(ctx, "admin", "Quoin Admin", temporary); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin))
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
 	t.Cleanup(server.Close)
 	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
 	login := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"`+temporary+`"}`, http.StatusOK)

@@ -18,12 +18,14 @@ import (
 
 	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	generatedweb "github.com/Suknna/quoin/internal/gen/web"
 	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
@@ -38,23 +40,40 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth     *auth.Service
-	db       *sql.DB
-	alerts   *alerts.Service
-	reveals  *secrets.Store
-	commands *commandReplay
-	runtime  *qruntime.Service
+	auth               *auth.Service
+	db                 *sql.DB
+	alerts             *alerts.Service
+	reveals            *secrets.Store
+	commands           *commandReplay
+	runtime            *qruntime.Service
+	connections        *connections.Service
+	rootKey            func() ([]byte, error)
+	probeDispatchFunc  func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc func(ctx context.Context, attemptID int64) error
 }
 
 // NewAPIServer is the testable constructor for the Quoin public surface.
-func NewAPIServer(service *auth.Service, db *sql.DB) *apiServer {
-	return &apiServer{
+// NewAPIServer is the testable constructor for the Quoin public surface.
+// rootKeyFile feeds the credential envelope codec (T07); pass an empty
+// string only in tests that never touch connections.
+func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
+	application := &apiServer{
 		auth: service, db: db,
 		alerts:   alerts.NewService(db),
 		reveals:  secrets.NewStore(),
 		commands: newCommandReplay(),
 		runtime:  qruntime.NewService(db),
 	}
+	application.rootKey = func() ([]byte, error) {
+		if rootKeyFile == "" {
+			return nil, fmt.Errorf("root key file not configured")
+		}
+		return os.ReadFile(rootKeyFile)
+	}
+	application.connections = connections.NewService(db, application.rootKey)
+	connections.SetReleaseVersion(buildinfo.Release)
+	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
+	return application
 }
 
 type authInput struct {
@@ -138,7 +157,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if !hasUsers {
 		return fmt.Errorf("no administrator exists; run attached Admin bootstrap first")
 	}
-	application := NewAPIServer(authService, database.SQL)
+	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
 	serverSet, err := application.newServers(config)
 	if err != nil {
 		return err
@@ -149,7 +168,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	serverSet.relay = grpc.NewServer()
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
-	RegisterRuntimeControl(serverSet.relay, application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest())
+	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest(), application.connections)
+	application.probeDispatchFunc = controlService.dispatchAttempt
+	application.cancelDispatchFunc = controlService.dispatchCancel
+	RegisterRuntimeControl(serverSet.relay, controlService)
 	return serverSet.run(ctx, config)
 }
 
@@ -198,6 +220,7 @@ func (application *apiServer) register(api huma.API) {
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
 	application.registerRuntimeRoutes(api)
+	application.registerConnectionRoutes(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {

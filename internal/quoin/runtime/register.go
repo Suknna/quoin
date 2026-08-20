@@ -147,6 +147,23 @@ type HelloDecision struct {
 // Adjudicate authenticates a Connect bearer and validates the Hello fields
 // (RUNTIME-AUTH-003/004, RUNTIME-CTRL-002..004/010). catalogDigest is only
 // required for lintel (empty expectation for plinth).
+// ValidateBearer reports whether the raw bearer is the slot's current
+// long-term token (used by non-stream RPCs such as FetchCredentialGrant).
+func (service *Service) ValidateBearer(ctx context.Context, bearer string, slotName string) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(bearer)
+	if err != nil || len(raw) != 32 {
+		return false
+	}
+	digest := sha256.Sum256(raw)
+	var state string
+	var currentID int
+	err = service.db.QueryRowContext(ctx, `SELECT s.state, s.current_credential_id FROM runtime_slots s JOIN runtime_credentials c ON c.id=s.current_credential_id WHERE s.slot=? AND c.token_digest=?`, slotName, digest[:]).Scan(&state, &currentID)
+	if err != nil || state != string(StateRegistered) {
+		return false
+	}
+	return true
+}
+
 func (service *Service) Adjudicate(ctx context.Context, bearer string, slotName, bootID string, epoch uint64, releaseVersion, currentRelease, expectedCatalogDigest, journeyCatalogDigest string) (HelloDecision, error) {
 	decision := HelloDecision{}
 	raw, err := base64.RawURLEncoding.DecodeString(bearer)

@@ -7,10 +7,13 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -23,6 +26,10 @@ type RuntimeService struct {
 	runtimev1.UnimplementedRuntimeControlServer
 	Slots          *qruntime.Service
 	ReleaseVersion string
+	// Connections owns connection_probe attempts and credential grants
+	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
+	// not exercise the task slice.
+	Connections *connections.Service
 	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
 	// Lintel must agree on (RUNTIME-CTRL-010); empty means no catalog
 	// embedded yet, which keeps lintel handshake-rejected with CATALOG_
@@ -135,7 +142,17 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		sharedops.LogEvent("quoin", "info", "runtime.hello_rejected", "slot="+slot+" reason="+decision.Reason)
 		return status.Error(codes.Unauthenticated, "handshake rejected")
 	}
-	closing := service.Slots.AttachStream(slot, hello.GetBootId(), hello.GetConnectionEpoch())
+	var outbound sync.Mutex
+	sender := func(envelope any) error {
+		outbound.Lock()
+		defer outbound.Unlock()
+		proto, ok := envelope.(*runtimev1.ControlEnvelope)
+		if !ok {
+			return fmt.Errorf("unsupported envelope type")
+		}
+		return stream.Send(proto)
+	}
+	closing := service.Slots.AttachStreamWithSender(slot, hello.GetBootId(), hello.GetConnectionEpoch(), sender)
 	defer service.Slots.DetachStream(slot)
 	ack := &runtimev1.ControlEnvelope{
 		MessageId:       1,
@@ -153,6 +170,11 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		return err
 	}
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
+	if slot == qruntime.SlotPlinth {
+		// Queued connection probes (created while disconnected) bind to
+		// this live stream and dispatch immediately.
+		go service.dispatchQueuedProbes(context.Background())
+	}
 	// Empty-profile inventory request for lintel (RUNTIME-BROWSER-002): the
 	// readiness fence needs a complete report even with zero profiles.
 	if slot == qruntime.SlotLintel && decision.ProfileReconcileRequired {
@@ -206,6 +228,12 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		switch payload := envelope.Msg.(type) {
 		case *runtimev1.ControlEnvelope_Heartbeat:
 			service.Slots.Touch(slot)
+		case *runtimev1.ControlEnvelope_AttemptAccept:
+			service.handleAttemptAccept(ctx, envelope, payload.AttemptAccept)
+		case *runtimev1.ControlEnvelope_ResultProposal:
+			service.handleResultProposal(ctx, envelope, payload.ResultProposal)
+		case *runtimev1.ControlEnvelope_CancelAck:
+			service.handleCancelAck(ctx, payload.CancelAck)
 		case *runtimev1.ControlEnvelope_ProfileInventoryReport:
 			// v1: reports are accepted and logged; a complete empty report
 			// clears nothing further because no identities exist yet.
@@ -240,7 +268,13 @@ func mapRejectReason(reason string) string {
 	}
 }
 
+// NewRuntimeControl builds the control-stream service; keep the value so
+// the HTTP surface can reuse its task dispatcher.
+func NewRuntimeControl(slots *qruntime.Service, releaseVersion, catalogDigest string, taskConnections *connections.Service) *RuntimeService {
+	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest, Connections: taskConnections}
+}
+
 // RegisterRuntimeControl mounts the service on an existing gRPC server.
-func RegisterRuntimeControl(server *grpc.Server, slots *qruntime.Service, releaseVersion, catalogDigest string) {
-	runtimev1.RegisterRuntimeControlServer(server, &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest})
+func RegisterRuntimeControl(server *grpc.Server, service *RuntimeService) {
+	runtimev1.RegisterRuntimeControlServer(server, service)
 }
