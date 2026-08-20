@@ -1,0 +1,282 @@
+// Package runtime implements Lintel's outbound Runtime channel (T06): the
+// attached-stdin one-time registration subcommand, atomic token persistence
+// and the outbound Connect loop carrying the Journey Catalog digest,
+// browser capacity and Chromium revision in the Hello (RUNTIME-CTRL-010).
+// The catalog is embedded as an empty journeys object for this stage; a
+// later release builds the full catalog and both sides must agree on its
+// JCS digest.
+package runtime
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/Suknna/quoin/internal/buildinfo"
+	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	sharedops "github.com/Suknna/quoin/internal/ops"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+)
+
+// EmptyCatalogJCS is the RFC 8785 JCS serialization of the minimal v1
+// catalog (no journeys). Quoin computes the digest of the same bytes, so
+// both sides agree without either re-serializing (DATA-CONFIG-008).
+const EmptyCatalogJCS = `{"catalog_version":"v1-empty","journeys":{}}`
+
+// EmptyCatalogDigest is SHA-256(EmptyCatalogJCS), hex.
+func EmptyCatalogDigest() string {
+	sum := sha256.Sum256([]byte(EmptyCatalogJCS))
+	return hex.EncodeToString(sum[:])
+}
+
+// EmptyCatalogVersion identifies the embedded catalog version.
+const EmptyCatalogVersion = "v1-empty"
+
+type stateFile struct {
+	Slot          string `json:"slot"`
+	Generation    int64  `json:"generation"`
+	LongTermToken string `json:"longTermToken"`
+}
+
+type Channel struct {
+	Config ChannelConfig
+	bootID string
+	epoch  uint64 // per-boot connection counter (RUNTIME-CTRL-004)
+}
+
+type ChannelConfig struct {
+	Slot               string // "lintel"
+	QuoinEndpoint      string
+	QuoinRuntimeCAFile string
+	StateDirectory     string
+	BrowserSlots       uint32
+	ChromiumRevision   string
+}
+
+func NewChannel(config ChannelConfig) (*Channel, error) {
+	bootRaw := make([]byte, 16)
+	if _, err := rand.Read(bootRaw); err != nil {
+		return nil, err
+	}
+	return &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw)}, nil
+}
+
+func (channel *Channel) tokenPath() string {
+	return filepath.Join(channel.Config.StateDirectory, "runtime-token.json")
+}
+
+// RunRegister consumes the one-time token from attached stdin and persists
+// the long-term token atomically (mirror of the Plinth flow).
+func (channel *Channel) RunRegister(ctx context.Context) error {
+	buffer := make([]byte, 256)
+	total := 0
+	_ = os.Stdin.SetReadDeadline(time.Now().Add(2 * time.Minute))
+	for total < len(buffer) {
+		n, err := os.Stdin.Read(buffer[total:])
+		if err != nil {
+			return fmt.Errorf("读取注册令牌（attached stdin）失败: %w", err)
+		}
+		total += n
+		if buffer[total-1] == '\n' || buffer[total-1] == '\r' {
+			break
+		}
+	}
+	text := trimWhitespace(string(buffer[:total]))
+	var parsed struct {
+		Slot       string `json:"slot"`
+		Generation int64  `json:"generation"`
+		Token      string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return fmt.Errorf("注册令牌格式必须是 {slot,generation,token} JSON: %w", err)
+	}
+	connection, err := channel.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	client := runtimev1.NewRuntimeControlClient(connection)
+	response, err := client.Register(metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+parsed.Token)), &runtimev1.RegisterRuntimeRequest{
+		Slot:           runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
+		OneTimeToken:   parsed.Token,
+		Generation:     uint64(parsed.Generation),
+		BootId:         channel.bootID,
+		ReleaseVersion: buildinfo.Release,
+	})
+	if err != nil {
+		return fmt.Errorf("注册失败: %w", err)
+	}
+	if err := channel.persist(response.GetLongTermToken(), int64(response.GetGeneration())); err != nil {
+		return err
+	}
+	fmt.Printf("注册成功：generation=%d。长期 token 已写入状态卷。\n", response.GetGeneration())
+	return nil
+}
+
+func trimWhitespace(value string) string {
+	start, end := 0, len(value)
+	for start < end && (value[start] == ' ' || value[start] == '\n' || value[start] == '\r' || value[start] == '\t') {
+		start++
+	}
+	for end > start && (value[end-1] == ' ' || value[end-1] == '\n' || value[end-1] == '\r' || value[end-1] == '\t') {
+		end--
+	}
+	return value[start:end]
+}
+
+func (channel *Channel) persist(token string, generation int64) error {
+	if err := os.MkdirAll(channel.Config.StateDirectory, 0o700); err != nil {
+		return err
+	}
+	body, err := json.Marshal(stateFile{Slot: channel.Config.Slot, Generation: generation, LongTermToken: token})
+	if err != nil {
+		return err
+	}
+	temp := channel.tokenPath() + ".tmp"
+	if err := os.WriteFile(temp, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temp, channel.tokenPath())
+}
+
+func (channel *Channel) loadToken() (stateFile, error) {
+	var state stateFile
+	body, err := os.ReadFile(channel.tokenPath())
+	if err != nil {
+		return state, err
+	}
+	if err := json.Unmarshal(body, &state); err != nil {
+		return state, err
+	}
+	if state.LongTermToken == "" || state.Generation == 0 {
+		return state, errors.New("状态卷 token 不完整")
+	}
+	return state, nil
+}
+
+// RunConnect keeps the lintel control stream alive; the Hello carries the
+// catalog digest/version, browser capacity and Chromium revision
+// (RUNTIME-CTRL-010), and each new boot answers the ProfileInventoryRequest
+// with a complete empty report (RUNTIME-BROWSER-002).
+func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Server) error {
+	state, err := channel.loadToken()
+	if err != nil {
+		return fmt.Errorf("尚未注册（读取状态卷失败）: %w", err)
+	}
+	connection, err := channel.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	client := runtimev1.NewRuntimeControlClient(connection)
+	streamCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+state.LongTermToken))
+	stream, err := client.Connect(streamCtx)
+	if err != nil {
+		return err
+	}
+	channel.epoch++
+	hello := &runtimev1.Hello{
+		Slot:                  runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
+		BootId:                channel.bootID,
+		ConnectionEpoch:       channel.epoch,
+		ReleaseVersion:        buildinfo.Release,
+		JourneyCatalogDigest:  EmptyCatalogDigest(),
+		JourneyCatalogVersion: EmptyCatalogVersion,
+		BrowserCapacitySlots:  channel.Config.BrowserSlots,
+		ChromiumRevision:      channel.Config.ChromiumRevision,
+	}
+	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
+		return err
+	}
+	ack, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	helloAck := ack.GetHelloAck()
+	if helloAck == nil || !helloAck.GetAccepted() {
+		if readiness != nil {
+			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.RuntimeUnregistered})
+		}
+		return fmt.Errorf("握手被拒绝: %s", helloAck.GetRejectReason())
+	}
+	if readiness != nil {
+		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
+	}
+	sharedops.LogEvent("lintel", "info", "runtime.connected", "quoin="+channel.Config.QuoinEndpoint)
+	heartbeat := time.NewTicker(10 * time.Second)
+	defer heartbeat.Stop()
+	go func() {
+		seq := uint64(0)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-heartbeat.C:
+				seq++
+				if err := stream.Send(&runtimev1.ControlEnvelope{
+					MessageId: 2 + seq, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: seq}},
+				}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	for {
+		envelope, err := stream.Recv()
+		if err != nil {
+			if readiness != nil {
+				readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
+			}
+			return fmt.Errorf("控制流结束: %w", err)
+		}
+		if request := envelope.GetProfileInventoryRequest(); request != nil {
+			// v1 empty-profile inventory: a single complete empty report
+			// (RUNTIME-BROWSER-002; identity catalog arrives with later
+			// tickets and no profiles exist yet).
+			if err := stream.Send(&runtimev1.ControlEnvelope{
+				MessageId: envelope.MessageId + 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+				CorrelationId: envelope.MessageId,
+				Msg: &runtimev1.ControlEnvelope_ProfileInventoryReport{
+					ProfileInventoryReport: &runtimev1.ProfileInventoryReport{
+						InventoryId: request.GetInventoryId(),
+						Profiles:    nil,
+						Complete:    true,
+					},
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
+	caBody, err := os.ReadFile(channel.Config.QuoinRuntimeCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Quoin Runtime CA: %w", err)
+	}
+	// The generated config carries a full https:// URL; gRPC dial targets
+	// are bare host:port with the TLS identity supplied by the pool below.
+	endpoint := strings.TrimPrefix(strings.TrimPrefix(channel.Config.QuoinEndpoint, "https://"), "http://")
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBody) {
+		return nil, errors.New("Quoin Runtime CA 证书无法解析")
+	}
+	return grpc.NewClient(endpoint,
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})),
+	)
+}
