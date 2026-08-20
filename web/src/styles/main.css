@@ -217,3 +217,24 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
   font-size: 13px;
 }
 .text-button.compact { min-height: 34px; padding: 4px 10px; font-size: 13px; }
+
+/* Admin users module (T05) */
+.admin-user-list, .admin-session-list, .admin-audit-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.admin-user-list .object-row.selected { background: var(--surface-hover); box-shadow: inset 0 0 0 2px var(--accent); }
+.admin-muted { color: var(--muted); }
+.admin-warn { padding: 1px 6px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-ink); }
+.admin-user-actions form, .admin-create-form form, .admin-reset-form { display: grid; gap: 8px; max-width: 430px; }
+.admin-user-actions label, .admin-create-form label, .admin-reset-form label { font-size: 13px; font-weight: 650; }
+.admin-user-actions input, .admin-create-form input, .admin-reset-form input,
+.admin-user-actions select, .admin-create-form select { border: 1px solid var(--input-line); border-radius: 8px; padding: 10px 12px; min-height: 42px; background: white; }
+.admin-checkbox { display: flex; align-items: center; gap: 8px; }
+.admin-checkbox input { min-height: 0; width: 16px; height: 16px; }
+.admin-action-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.admin-danger { color: var(--danger); }
+.admin-notice { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--ok-soft); color: var(--ok-ink); font-size: 14px; }
+.admin-reset-form { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.admin-session-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.admin-session-list .object-row-main { display: grid; gap: 3px; font-size: 13px; }
+.admin-audit-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; font-size: 13px; }
+.admin-audit-action { font-weight: 650; }
+

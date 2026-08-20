@@ -5,6 +5,7 @@ import { AlertDetail } from '../alerts/AlertDetail'
 import { AlertSourceForm } from '../alerts/AlertSourceForm'
 import { AlertsList } from '../alerts/AlertsList'
 import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
+import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -110,6 +111,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           </div>
         )}
         {active === 'admin' && (
+          <>
           <section className="runtime-summary" aria-labelledby="runtime-title">
             <h2 id="runtime-title">运行组件</h2>
             {runtimeError && <p>暂时无法读取组件状态。</p>}
@@ -119,10 +121,13 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
               <RuntimeRow label="Stele" state="dependency_unavailable" />
             </>}
           </section>
+          </>
         )}
       </aside>
       <main className="detail-pane" tabIndex={-1}>
-        {active === 'alerts' && selectedOccurrence ? (
+        {active === 'admin' && user.role === 'admin' ? (
+          <AdminUsersPanel currentUser={user} />
+        ) : active === 'alerts' && selectedOccurrence ? (
           <AlertDetail occurrenceId={selectedOccurrence} onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null) }} />
         ) : active === 'alerts' ? (
           <div className="detail-content">
