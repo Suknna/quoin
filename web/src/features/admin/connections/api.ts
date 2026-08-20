@@ -171,3 +171,27 @@ export async function disableConnection(name: string, expectedRowVersion: number
   }
   return (await response.json()) as ConnectionSummaryView
 }
+
+export interface RotateConnectionInput extends CreateConnectionInput {
+  modelProvider?: ModelProviderRotateFields
+}
+
+export interface ModelProviderRotateFields {
+  chatModelId: string
+  embeddingModelId: string
+  contextBudgetTokens: number
+  maxOutputTokens: number
+}
+
+export async function rotateConnection(name: string, expectedRowVersion: number, connection: Record<string, unknown>): Promise<ConnectionDetailView> {
+  const response = await fetch(`/api/v1/connections/${encodeURIComponent(name)}/rotate`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion, connection }),
+  })
+  if (!response.ok) {
+    throw await failure(response, '暂时无法轮换凭据。')
+  }
+  return (await response.json()) as ConnectionDetailView
+}

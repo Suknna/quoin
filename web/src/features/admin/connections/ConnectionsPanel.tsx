@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ModelProviderFields } from '../connections/model-provider/ModelProviderFields'
 import { buildModelProviderConnection, type ModelProviderFormValue } from '../connections/model-provider/api'
+import { rotateConnection } from './api'
 import {
   ConnectionsApiError,
   cancelProbeAttempt,
@@ -53,6 +54,7 @@ export function ConnectionsPanel() {
   const [createType, setCreateType] = useState<'thanos' | 'kubernetes' | 'model_provider'>('thanos')
   const [form, setForm] = useState({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
   const [providerForm, setProviderForm] = useState<ModelProviderFormValue>({ baseUrl: '', apiKey: '', chatModelId: '', embeddingModelId: '', contextBudgetTokens: '8192', maxOutputTokens: '1024' })
+  const [rotating, setRotating] = useState(false)
 
   const reload = useCallback(async (selection = selected) => {
     try {
@@ -133,6 +135,35 @@ export function ConnectionsPanel() {
       setSelected(form.name.trim())
     } catch (createError) {
       setError(createError instanceof ConnectionsApiError ? createError.message : '创建失败，请重试。')
+    }
+  }
+
+  async function runRotate(event: React.FormEvent) {
+    event.preventDefault()
+    if (!detail) {
+      return
+    }
+    setError('')
+    setNotice('')
+    try {
+      let connectionBody: Record<string, unknown>
+      if (detail.type === 'model_provider') {
+        connectionBody = buildModelProviderConnection(providerForm)
+        connectionBody.type = 'model_provider'
+      } else if (detail.type === 'thanos') {
+        connectionBody = { type: 'thanos', baseUrl: form.baseUrl.trim(), username: form.username.trim(), password: form.password }
+      } else {
+        connectionBody = { type: 'kubernetes', kubeconfig: form.kubeconfig, defaultNamespace: form.defaultNamespace.trim() }
+      }
+      const rotated = await rotateConnection(detail.name, detail.rowVersion, connectionBody)
+      setNotice('凭据已轮换：旧秘密立即停用；需要重新通过探测才能启用。')
+      setRotating(false)
+      setForm({ name: detail.name, baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
+      setProviderForm({ baseUrl: String((rotated.config as Record<string, unknown>)?.baseUrl ?? ''), apiKey: '', chatModelId: String((rotated.config as Record<string, unknown>)?.chatModelId ?? ''), embeddingModelId: String((rotated.config as Record<string, unknown>)?.embeddingModelId ?? ''), contextBudgetTokens: '8192', maxOutputTokens: '1024' })
+      await reload()
+    } catch (rotateError) {
+      setError(rotateError instanceof ConnectionsApiError ? rotateError.message : '轮换失败，请刷新后重试。')
+      await reload()
     }
   }
 
@@ -296,7 +327,41 @@ export function ConnectionsPanel() {
                 {detail.enabled ? '停用' : '启用'}
               </button>
             )}
+            <button className="text-button" onClick={() => setRotating(!rotating)}>轮换凭据</button>
           </div>
+          {rotating && (
+            <form className="admin-create-form admin-reset-form" onSubmit={runRotate}>
+              <h3>轮换 {detail.name} 的凭据</h3>
+              <p className="admin-muted">提交新秘密后旧秘密立即停用；探测与启用都针对新的凭据。</p>
+              {detail.type === 'model_provider' ? (
+                <ModelProviderFields value={providerForm} onChange={setProviderForm} />
+              ) : detail.type === 'thanos' ? (
+                <>
+                  <label>
+                    查询入口 URL
+                    <input value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} required />
+                  </label>
+                  <label>
+                    用户名（可选）
+                    <input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
+                  </label>
+                  <label>
+                    新密码（一次性提交，保存后不可查看）
+                    <input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" />
+                  </label>
+                </>
+              ) : (
+                <label>
+                  新 kubeconfig（一次性提交，保存后不可查看）
+                  <textarea className="admin-kubeconfig" value={form.kubeconfig} onChange={(event) => setForm({ ...form, kubeconfig: event.target.value })} required rows={8} spellCheck={false} />
+                </label>
+              )}
+              <div className="admin-action-row">
+                <button type="submit">提交轮换</button>
+                <button type="button" className="text-button" onClick={() => setRotating(false)}>取消</button>
+              </div>
+            </form>
+          )}
           {detail.activeProbeAttempt && (
             <p className="admin-muted" role="status">
               当前探测：{stateLabels[detail.activeProbeAttempt.state]}
