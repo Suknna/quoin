@@ -15,32 +15,122 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plinth/agent"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
+	"github.com/Suknna/quoin/internal/plinth/model"
 	"github.com/Suknna/quoin/internal/plinth/modelprovider"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
+	"github.com/Suknna/quoin/internal/plinth/worker"
 	"google.golang.org/grpc/metadata"
 )
 
-// Supervisor executes connection_probe dispatches on the live channel.
+// Supervisor executes dispatched attempts on the live channel: the
+// deterministic connection_probe action sets (T07/T08) and the initial
+// analysis agent attempts (T10) via a fresh sandboxed worker process.
 type Supervisor struct {
 	Channel *runtime.Channel
+	// WorkspaceRoot is the per-attempt workspace parent directory
+	// (ARCH-WORKER-001: one fresh workspace per attempt).
+	WorkspaceRoot string
 }
 
 // HandleDispatchAttempt runs one dispatched probe attempt to a typed
 // terminal result proposal.
 func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
+
+	// Supervisor scope: only connection_probe and initial_analysis
+	// attempts exist here (RUNTIME-SCOPE).
+	switch dispatch.GetAttemptType() {
+	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
+		supervisor.runProbe(parent, sink, client, dispatch, stopTask)
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS:
+		supervisor.runAnalysis(parent, sink, client, dispatch, stopTask)
+	default:
+		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
+	}
+}
+
+// runAnalysis drives one initial-analysis attempt through a fresh worker
+// process (ARCH-WORKER-001/002).
+func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
+	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	supervisor.Channel.RegisterTask(attemptID, cancel)
 	defer stopTask(attemptID)
-
-	// Supervisor scope: only connection_probe attempts exist here
-	// (RUNTIME-SCOPE: agent-worker attempts arrive with their own tickets).
-	if dispatch.GetAttemptType() != runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE {
-		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor only executes connection_probe attempts")
+	input := dispatch.GetInput()
+	if input == nil {
+		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "dispatch carries no input snapshot")
 		return
 	}
+	// The frozen input snapshot carries the model contract (model id and
+	// budgets, ARCH-AGENT-003); the supervisor resolves the base URL and
+	// the API key through the attempt-scoped grant (never persisted).
+	analysisInput, err := agent.ParseInput(input.GetCanonicalJson())
+	if err != nil {
+		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "input snapshot carries no model contract")
+		return
+	}
+	grant, ok := supervisor.primaryGrant(input, "chat_model")
+	if !ok {
+		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "dispatch lacks the chat_model grant")
+		return
+	}
+	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
+	bearer, bearerErr := supervisor.Channel.BearerToken()
+	if bearerErr != nil {
+		grantCancel()
+		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "读取状态卷 token 失败: "+bearerErr.Error())
+		return
+	}
+	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: sink.BootID(), ConnectionEpoch: sink.Epoch(),
+	})
+	grantCancel()
+	if err != nil || payload.GetModelProvider() == nil {
+		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "获取模型凭据 grant 失败")
+		return
+	}
+	var config plinthconnections.ModelProviderConfig
+	if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil || config.BaseURL == "" {
+		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "模型供应商 revision 配置无法解析")
+		return
+	}
+	runner := &worker.Runner{
+		Sink: sink, Channel: supervisor.Channel, Client: client,
+		Artifacts: supervisor.Channel.Artifacts,
+		Config: worker.RunnerConfig{
+			WorkspaceRoot: supervisor.WorkspaceRoot,
+			ModelContract: model.Contract{
+				ModelID: analysisInput.ModelContract.ModelID, BaseURL: config.BaseURL,
+				APIKey:        payload.GetModelProvider().GetApiKey(),
+				ContextBudget: analysisInput.ModelContract.ContextBudgetTokens,
+				MaxOutput:     analysisInput.ModelContract.MaxOutputTokens,
+				Streaming:     true,
+			},
+		},
+	}
+	runner.Run(ctx, attemptID, dispatch)
+}
+
+// primaryGrant returns the dispatch grant with the given purpose.
+func (supervisor *Supervisor) primaryGrant(input *runtimev1.AttemptInputSnapshot, purpose string) (*runtimev1.ConnectionGrant, bool) {
+	for _, grant := range input.GetConnectionGrants() {
+		if grant.GetPurpose() == purpose {
+			return grant, true
+		}
+	}
+	return nil, false
+}
+
+// runProbe keeps the T07/T08 deterministic probe slice.
+func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
+	attemptID := dispatch.GetAttemptId()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	supervisor.Channel.RegisterTask(attemptID, cancel)
+	defer stopTask(attemptID)
 	if err := sink.Send(&runtimev1.ControlEnvelope{
 		CorrelationId: uint64(attemptID),
 		Msg:           &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: attemptID}},

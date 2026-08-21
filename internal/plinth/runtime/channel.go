@@ -48,6 +48,9 @@ type Channel struct {
 	epoch  uint64 // per-boot connection counter (RUNTIME-CTRL-004)
 	// Tasks executes connection_probe dispatches when wired (T07).
 	Tasks TaskSupervisor
+	// Artifacts is the ArtifactService client on the live connection
+	// (T10: tool_result uploads and attempt-scoped reads).
+	Artifacts runtimev1.ArtifactServiceClient
 	// live-stream send state; guarded by outboundMu.
 	outboundMu  sync.Mutex
 	outboundSeq uint64
@@ -202,6 +205,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	if err != nil {
 		return err
 	}
+	channel.Artifacts = runtimev1.NewArtifactServiceClient(connection)
 	channel.epoch++
 	hello := &runtimev1.Hello{
 		Slot:            runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
@@ -282,6 +286,13 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			channel.deliverReply(envelope)
 		case *runtimev1.ControlEnvelope_CompleteModelCallAck:
 			channel.deliverReply(envelope)
+		case *runtimev1.ControlEnvelope_BeginToolCallAck:
+			channel.deliverReply(envelope)
+		case *runtimev1.ControlEnvelope_CompleteToolCallAck:
+			channel.deliverReply(envelope)
+		case *runtimev1.ControlEnvelope_ModelTokenDelta:
+			// Transient observer deltas never reply; the ledger is the
+			// authority (RUNTIME-AGENT).
 		default:
 			// Handshake-adjacent and lintel-only frames do not concern the
 			// plinth task slice.

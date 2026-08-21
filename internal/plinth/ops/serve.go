@@ -24,7 +24,7 @@ func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedo
 	if err != nil {
 		return err
 	}
-	channel.Tasks = &supervisor.Supervisor{Channel: channel}
+	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory}
 	go func() {
 		for {
 			select {

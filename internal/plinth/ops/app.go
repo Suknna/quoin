@@ -8,6 +8,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
+	"golang.org/x/sys/unix"
 )
 
 func Run(ctx context.Context, configPath string) error {
@@ -17,6 +18,11 @@ func Run(ctx context.Context, configPath string) error {
 	}
 	if config.Component != "plinth" {
 		return fmt.Errorf("configuration component must be plinth")
+	}
+	// The supervisor makes itself non-dumpable so the sandboxed worker can
+	// never read its /proc environ/fd/mem/maps/ns (ARCH-WORKER-007).
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("set supervisor non-dumpable: %w", err)
 	}
 	if _, err := os.ReadFile(config.QuoinRuntimeCAFile); err != nil {
 		return fmt.Errorf("read Quoin Runtime CA: %w", err)
