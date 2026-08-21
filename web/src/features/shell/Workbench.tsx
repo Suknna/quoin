@@ -37,6 +37,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null)
   const [runtimeError, setRuntimeError] = useState(false)
   const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
+  const [openAnalysisId, setOpenAnalysisId] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
   const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
   const profileButton = useRef<HTMLButtonElement>(null)
@@ -48,6 +49,8 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       setActive(moduleFromPath())
       const match = window.location.pathname.match(/^\/alerts\/(\d+)/)
       setSelectedOccurrence(match ? match[1] : null)
+      const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
+      setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
     }
     sync()
     window.addEventListener('popstate', sync)
@@ -136,7 +139,13 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         {active === 'admin' && user.role === 'admin' ? (
           adminSegment === 'runtimes' ? <RuntimesPanel /> : adminSegment === 'connections' ? <ConnectionsPanel /> : <AdminUsersPanel currentUser={user} />
         ) : active === 'alerts' && selectedOccurrence ? (
-          <AlertDetail occurrenceId={selectedOccurrence} onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null) }} />
+          <AlertDetail
+            occurrenceId={selectedOccurrence}
+            openAnalysisId={openAnalysisId ?? undefined}
+            onOpenAnalysis={(analysisId) => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}/analyses/${analysisId}`); setOpenAnalysisId(analysisId) }}
+            onCloseAnalysis={() => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}`); setOpenAnalysisId(null) }}
+            onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null); setOpenAnalysisId(null) }}
+          />
         ) : active === 'alerts' ? (
           <div className="detail-content">
             <div className="empty-state">

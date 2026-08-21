@@ -1,14 +1,29 @@
 import { useEffect, useState } from 'react'
 import { useOccurrenceVersions } from '../../app/realtime/hooks'
+import { AnalysisDetail } from '../analysis/AnalysisDetail'
+import { AnalysisPanel } from '../analysis/AnalysisPanel'
+import type { InitialAnalysisDetail } from '../analysis/api'
+import { fetchAnalysis } from '../analysis/api'
 import type { AlertOccurrenceSummary, ObservationSummary } from './api'
 import { fetchObservations, fetchOccurrence } from './api'
 
-export function AlertDetail({ occurrenceId, onBack }: { occurrenceId: string; onBack: () => void }) {
+export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCloseAnalysis, onBack }: { occurrenceId: string; openAnalysisId?: string; onOpenAnalysis?: (analysisId: string) => void; onCloseAnalysis?: () => void; onBack: () => void }) {
   const [occurrence, setOccurrence] = useState<AlertOccurrenceSummary | null>(null)
   const [observations, setObservations] = useState<ObservationSummary[]>([])
   const [error, setError] = useState('')
+  const [reading, setReading] = useState<InitialAnalysisDetail | null>(null)
   const versions = useOccurrenceVersions()
   const liveVersion = versions.get(occurrenceId)
+
+  // A shared/refreshed URL restores the reading layer (UI-ROUTE-003).
+  useEffect(() => {
+    if (!openAnalysisId) return
+    let cancelled = false
+    void fetchAnalysis(occurrenceId, openAnalysisId)
+      .then((detail) => { if (!cancelled) setReading(detail) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [occurrenceId, openAnalysisId])
 
   useEffect(() => {
     const cancelled = { value: false }
@@ -87,6 +102,12 @@ export function AlertDetail({ occurrenceId, onBack }: { occurrenceId: string; on
           ))}
         </ol>
       </section>
+      <AnalysisPanel occurrenceId={occurrenceId} onOpenAnalysis={(detail) => { setReading(detail); onOpenAnalysis?.(detail.id) }} />
+      {reading && (
+        <div className="reading-overlay">
+          <AnalysisDetail occurrenceId={occurrenceId} analysisId={reading.id} onClose={() => { setReading(null); onCloseAnalysis?.() }} />
+        </div>
+      )}
     </div>
   )
 }
