@@ -20,16 +20,19 @@ import (
 	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	generatedweb "github.com/Suknna/quoin/internal/gen/web"
 	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
+	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/investigation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
@@ -44,19 +47,21 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth                 *auth.Service
-	db                   *sql.DB
-	alerts               *alerts.Service
-	reveals              *secrets.Store
-	commands             *commandReplay
-	runtime              *qruntime.Service
-	connections          *connections.Service
-	analyses             *analysis.Service
-	artifacts            *artifact.Store
-	rootKey              func() ([]byte, error)
-	probeDispatchFunc    func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc   func(ctx context.Context, attemptID int64) error
-	analysisDispatchFunc func(ctx context.Context, attemptID int64) error
+	auth                      *auth.Service
+	db                        *sql.DB
+	alerts                    *alerts.Service
+	reveals                   *secrets.Store
+	commands                  *commandReplay
+	runtime                   *qruntime.Service
+	connections               *connections.Service
+	analyses                  *analysis.Service
+	investigations            *investigation.Service
+	artifacts                 *artifact.Store
+	rootKey                   func() ([]byte, error)
+	probeDispatchFunc         func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc        func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc      func(ctx context.Context, attemptID int64) error
+	investigationDispatchFunc func(ctx context.Context, attemptID int64) error
 }
 
 // NewAPIServer is the testable constructor for the Quoin public surface.
@@ -64,12 +69,14 @@ type apiServer struct {
 // string only in tests that never touch connections.
 func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
 	application := &apiServer{
-		auth: service, db: db,
-		alerts:   alerts.NewService(db),
-		reveals:  secrets.NewStore(),
-		commands: newCommandReplay(),
-		runtime:  qruntime.NewService(db),
-		analyses: analysis.NewService(db),
+		auth:           service,
+		db:             db,
+		alerts:         alerts.NewService(db),
+		reveals:        secrets.NewStore(),
+		commands:       newCommandReplay(),
+		runtime:        qruntime.NewService(db),
+		analyses:       analysis.NewService(db),
+		investigations: investigation.NewService(db),
 	}
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
@@ -185,12 +192,35 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// grant (the frozen grant closure requires the succeeded state); wire
 	// the grant write into CompleteToolCall's transaction.
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
+	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest(), application.connections)
 	controlService.Analyses = application.analyses
+	controlService.Investigations = application.investigations
 	controlService.Artifacts = artifactStore
 	application.probeDispatchFunc = controlService.dispatchAttempt
 	application.cancelDispatchFunc = controlService.dispatchCancelRouted
 	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
+	investigationRuntime := &appinvestigation.RuntimeSlice{
+		Service: application.investigations,
+		DB:      application.db,
+		SlotView: func(ctx context.Context) (appinvestigation.PlinthView, error) {
+			view, err := application.runtime.View(ctx, qruntime.SlotPlinth)
+			if err != nil {
+				return appinvestigation.PlinthView{}, err
+			}
+			slice := appinvestigation.PlinthView{Connected: view.Connected, BootID: view.BootID}
+			if view.ConnectionEpoch != nil {
+				slice.ConnectionEpoch = *view.ConnectionEpoch
+			}
+			return slice, nil
+		},
+		SendEnvelope: func(envelope *runtimev1.ControlEnvelope) error {
+			return controlService.sendEnvelope(qruntime.SlotPlinth, envelope)
+		},
+		TerminationReason: terminationReasonOf,
+	}
+	controlService.InvestigationRuntime = investigationRuntime
+	application.investigationDispatchFunc = investigationRuntime.Dispatch
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	// T12: the periodic lease sweeper converges attempts whose runtime
@@ -252,6 +282,32 @@ func (application *apiServer) register(api huma.API) {
 	application.registerAnalysisRoutes(api)
 	application.registerTaskSnapshot(api)
 	application.registerEvidenceRoutes(api)
+	investigationHandler := &appinvestigation.Handler{
+		Service: application.investigations,
+		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateFull(ctx, cookie, "使用调查")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+		// The established stream re-checks the session every tick; any
+		// revocation/expiry closes it silently (Q214, SEC-SESSION-002).
+		SessionValid: func(ctx context.Context, cookie string) bool {
+			_, err := application.authenticateFull(ctx, cookie, "使用调查")
+			return err == nil
+		},
+		// Resolved at request time like the analysis dispatch funcs: the
+		// runtime slice is wired in Run() after the servers are built, so
+		// a register-time capture would stay nil forever.
+		Dispatch: func(ctx context.Context, attemptID int64) error {
+			if application.investigationDispatchFunc == nil {
+				return errors.New("investigation dispatch not wired")
+			}
+			return application.investigationDispatchFunc(ctx, attemptID)
+		},
+	}
+	investigationHandler.Register(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {

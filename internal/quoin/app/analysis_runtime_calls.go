@@ -18,6 +18,23 @@ import (
 // the wire mappers for input items, roles, failure modes and termination
 // reasons.
 
+// agentAttempts resolves the shared attempt machine of the owning agent
+// slice (the attempt rows are one authority; the per-aggregate services
+// only differ in their deterministic input rebuilders).
+func (service *RuntimeService) agentAttempts(attemptType string) *attempt.Service {
+	switch attemptType {
+	case "investigation":
+		if service.Investigations != nil {
+			return service.Investigations.Attempts()
+		}
+	case "initial_analysis":
+		if service.Analyses != nil {
+			return service.Analyses.Attempts()
+		}
+	}
+	return nil
+}
+
 // handleBeginModelCallRouted opens the physical model call row for the
 // owning slice: probes keep the T08 fixed-profile ledger; agent attempts
 // commit through the attempt package (ARCH-AGENT-006).
@@ -31,7 +48,8 @@ func (service *RuntimeService) handleBeginModelCallRouted(ctx context.Context, e
 		service.handleBeginModelCall(ctx, envelope, begin)
 		return
 	}
-	if attemptType != "initial_analysis" {
+	attempts := service.agentAttempts(attemptType)
+	if attempts == nil {
 		service.rejectBegin(ctx, envelope, begin, "attempt type not handled")
 		return
 	}
@@ -59,7 +77,7 @@ func (service *RuntimeService) handleBeginModelCallRouted(ctx context.Context, e
 			Role: inputRoleOf(item.GetRole()),
 		})
 	}
-	callID, err := service.Analyses.Attempts().BeginModelCall(ctx, attempt.BeginCall{
+	callID, err := attempts.BeginModelCall(ctx, attempt.BeginCall{
 		AttemptID: begin.GetAttemptId(), CallSeq: int(begin.GetCallSeq()), RetrySeq: int(begin.GetRetrySeq()),
 		ModelID: begin.GetModelId(), PromptDigest: hex.EncodeToString(begin.GetPromptDigest()),
 		ToolSchemaDigest: hex.EncodeToString(begin.GetToolSchemaDigest()),
@@ -108,7 +126,8 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		service.handleCompleteModelCall(ctx, envelope, complete)
 		return
 	}
-	if attemptType != "initial_analysis" {
+	attempts := service.agentAttempts(attemptType)
+	if attempts == nil {
 		service.rejectComplete(ctx, envelope, complete, "attempt type not handled", runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
@@ -147,7 +166,7 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 			ArgumentsDigest: hex.EncodeToString(tool.GetArgumentsDigest()),
 		})
 	}
-	authorizations, err := service.Analyses.Attempts().CompleteModelCall(ctx, attempt.CompleteCall{
+	authorizations, err := attempts.CompleteModelCall(ctx, attempt.CompleteCall{
 		AttemptID: complete.GetAttemptId(), CallID: complete.GetModelCallId(),
 		Outcome: outcome, FailureReason: failureReason,
 		ProviderRequestID: complete.GetProviderRequestId(), LatencyMS: int64(complete.GetLatencyMs()),
@@ -201,7 +220,23 @@ func (service *RuntimeService) handleBeginToolCallRouted(ctx context.Context, en
 		BootId:          envelope.GetBootId(),
 		Msg:             &runtimev1.ControlEnvelope_BeginToolCallAck{BeginToolCallAck: &runtimev1.BeginToolCallAck{AttemptId: begin.GetAttemptId(), ToolCallId: begin.GetToolCallId()}},
 	}
-	if err := service.Analyses.Attempts().BeginToolCall(ctx, begin.GetAttemptId(), begin.GetToolCallId()); err != nil {
+	attemptType, err := service.attemptTypeOf(ctx, begin.GetAttemptId())
+	if err != nil {
+		ack.GetBeginToolCallAck().Accepted = false
+		ack.GetBeginToolCallAck().Detail = "attempt lookup failed: " + err.Error()
+		sharedops.LogEvent("quoin", "error", "toolcall.begin_rejected", err.Error())
+		_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+		return
+	}
+	attempts := service.agentAttempts(attemptType)
+	if attempts == nil {
+		ack.GetBeginToolCallAck().Accepted = false
+		ack.GetBeginToolCallAck().Detail = "attempt type not handled"
+		sharedops.LogEvent("quoin", "error", "toolcall.begin_rejected", attemptType)
+		_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+		return
+	}
+	if err := attempts.BeginToolCall(ctx, begin.GetAttemptId(), begin.GetToolCallId()); err != nil {
 		ack.GetBeginToolCallAck().Accepted = false
 		ack.GetBeginToolCallAck().Detail = err.Error()
 		sharedops.LogEvent("quoin", "error", "toolcall.begin_rejected", err.Error())
@@ -237,6 +272,16 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		reject("outcome unspecified")
 		return
 	}
+	attemptType, err := service.attemptTypeOf(ctx, complete.GetAttemptId())
+	if err != nil {
+		reject("attempt lookup failed: " + err.Error())
+		return
+	}
+	attempts := service.agentAttempts(attemptType)
+	if attempts == nil {
+		reject("attempt type not handled")
+		return
+	}
 	payload := complete.GetPayload()
 	var resultJSON string
 	if payload != nil && len(payload.GetCanonicalJson()) > 0 {
@@ -247,7 +292,7 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		}
 		resultJSON = string(payload.GetCanonicalJson())
 	}
-	evidenceIDs, err := service.Analyses.Attempts().CompleteToolCall(ctx, attempt.ToolResult{
+	evidenceIDs, err := attempts.CompleteToolCall(ctx, attempt.ToolResult{
 		AttemptID: complete.GetAttemptId(), ToolCallID: complete.GetToolCallId(),
 		Outcome: outcome, ResultJSON: resultJSON, ArtifactID: complete.GetArtifactId(),
 		ErrorCode: complete.GetErrorCode(), ErrorDetail: complete.GetErrorDetail(),

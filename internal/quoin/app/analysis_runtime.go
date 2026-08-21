@@ -97,7 +97,7 @@ func (service *RuntimeService) dispatchQueuedAnalyses(ctx context.Context) {
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		return
 	}
-	ids, err := service.Analyses.Attempts().QueuedAgentAttempts(ctx)
+	ids, err := service.Analyses.Attempts().QueuedAgentAttempts(ctx, "initial_analysis")
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "analysis.queue_scan", err.Error())
 		return
@@ -122,6 +122,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())
 		}
+	case "investigation":
+		if service.Investigations != nil {
+			if err := service.Investigations.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "investigation.accept_failed", err.Error())
+			}
+		}
 	case "connection_probe":
 		if service.Connections != nil {
 			if err := service.Connections.AcceptProbe(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
@@ -144,6 +150,14 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	}
 	if attemptType == "connection_probe" {
 		service.handleResultProposal(ctx, envelope, proposal)
+		return
+	}
+	if attemptType == "investigation" {
+		if service.InvestigationRuntime != nil {
+			service.InvestigationRuntime.HandleResultProposal(ctx, envelope, proposal)
+		} else {
+			sharedops.LogEvent("quoin", "info", "result.investigation_unwired", "")
+		}
 		return
 	}
 	if attemptType != "initial_analysis" {
@@ -207,6 +221,12 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *r
 	case "initial_analysis":
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.cancel_ack", err.Error())
+		}
+	case "investigation":
+		if service.Investigations != nil {
+			if err := service.Investigations.CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "investigation.cancel_ack", err.Error())
+			}
 		}
 	case "connection_probe":
 		if service.Connections != nil {

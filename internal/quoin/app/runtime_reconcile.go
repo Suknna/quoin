@@ -91,9 +91,19 @@ func (service *RuntimeService) onPlinthAttached(ctx context.Context, helloBoot s
 		sameBoot = append(sameBoot, view)
 	}
 	if len(sameBoot) == 0 {
+		// Even with nothing bound, a Queued investigation created while the
+		// slot was disconnected must dispatch now that the stream is live
+		// (RUNTIME-TASK-005: the send command is the trigger; the stream is
+		// the carrier).
+		if service.InvestigationRuntime != nil {
+			service.InvestigationRuntime.DispatchQueued(ctx)
+		}
 		return
 	}
 	service.reconcileSameBoot(ctx, helloBoot, helloEpoch, sameBoot)
+	if service.InvestigationRuntime != nil {
+		service.InvestigationRuntime.DispatchQueued(ctx)
+	}
 }
 
 // finalizeLoss routes one loss convergence to the owning scope aggregate.
@@ -110,6 +120,12 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 	}
 	if _, err := attempts.Interrupt(ctx, view.ID, reason); err != nil {
 		sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+		return
+	}
+	if view.AttemptType == "investigation" && service.Investigations != nil {
+		// Close the attached stream with the interruption terminal view
+		// (HTTP-STREAM-006: detach/loss never leaves the observer hanging).
+		service.Investigations.NotifyTerminal(ctx, view.ID)
 	}
 }
 
@@ -121,6 +137,12 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 	case "initial_analysis":
 		if service.Analyses != nil {
 			if err := service.Analyses.CancelAck(ctx, attemptID); err != nil {
+				sharedops.LogEvent("quoin", "error", "reconcile.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+			}
+		}
+	case "investigation":
+		if service.Investigations != nil {
+			if err := service.Investigations.CancelAck(ctx, attemptID); err != nil {
 				sharedops.LogEvent("quoin", "error", "reconcile.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
 			}
 		}
@@ -189,13 +211,20 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
+			if view.State == "Assigned" && view.AttemptType == "investigation" && service.Investigations != nil {
+				// The investigation aggregate has no separate state row;
+				// the attempt row is the authority.
+				if err := service.Investigations.AcceptAttempt(ctx, view.ID, bootID, 0); err != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
+				}
+			}
 			continue
 		}
 		switch view.State {
 		case "Assigned":
 			// Never accepted by the runtime: idempotent re-dispatch with
 			// the frozen binding (RUNTIME-TASK-005).
-			if err := service.reDispatchAnalysis(ctx, view); err != nil {
+			if err := service.reDispatchAgentAttempt(ctx, view); err != nil {
 				sharedops.LogEvent("quoin", "error", "reconcile.redispatch", fmt.Sprintf("attempt=%d %v", view.ID, err))
 			} else {
 				sharedops.LogEvent("quoin", "info", "reconcile.redispatched", fmt.Sprintf("attempt=%d", view.ID))
@@ -217,12 +246,12 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 	}
 }
 
-// reDispatchAnalysis re-sends the DispatchAttempt frame for one Assigned
-// analysis attempt with its frozen binding (the schema forbids rebinding;
+// reDispatchAgentAttempt re-sends the DispatchAttempt frame for one Assigned
+// agent attempt with its frozen binding (the schema forbids rebinding;
 // the accept fence matches the boot, RUNTIME-TASK-005).
-func (service *RuntimeService) reDispatchAnalysis(ctx context.Context, view attempt.View) error {
-	if service.Analyses == nil {
-		return fmt.Errorf("analysis service not wired")
+func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view attempt.View) error {
+	if service.Analyses == nil && service.Investigations == nil {
+		return fmt.Errorf("agent services not wired")
 	}
 	attempts := service.attemptsService()
 	input, err := attempts.DispatchInputFor(ctx, view.ID)
@@ -252,14 +281,20 @@ func (service *RuntimeService) reDispatchAnalysis(ctx context.Context, view atte
 	if view.BootID != nil {
 		bindingBoot = *view.BootID
 	}
+	attemptWire := runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS
+	scopeWire := runtimev1.ScopeType_SCOPE_TYPE_ANALYSIS
+	if view.AttemptType == "investigation" {
+		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION
+		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION
+	}
 	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
 		ConnectionEpoch: bindingEpoch,
 		CorrelationId:   uint64(view.ID),
 		BootId:          bindingBoot,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId:     view.ID,
-			AttemptType:   runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS,
-			ScopeType:     runtimev1.ScopeType_SCOPE_TYPE_ANALYSIS,
+			AttemptType:   attemptWire,
+			ScopeType:     scopeWire,
 			ScopeId:       view.ScopeID,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input: &runtimev1.AttemptInputSnapshot{
@@ -331,12 +366,18 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 			}
 			for _, item := range swept {
 				sharedops.LogEvent("quoin", "info", "reconcile.swept", fmt.Sprintf("attempt=%d final=%s", item.AttemptID, item.Final))
-				if item.Type != "initial_analysis" {
-					continue
-				}
-				if service.Analyses != nil {
-					if err := service.Analyses.CommitInterruption(ctx, item.AttemptID, "lease_expired"); err != nil {
-						sharedops.LogEvent("quoin", "error", "reconcile.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, err))
+				switch item.Type {
+				case "initial_analysis":
+					if service.Analyses != nil {
+						if err := service.Analyses.CommitInterruption(ctx, item.AttemptID, "lease_expired"); err != nil {
+							sharedops.LogEvent("quoin", "error", "reconcile.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, err))
+						}
+					}
+				case "investigation":
+					if service.Investigations != nil {
+						// The sweep converged the attempt row; close any
+						// attached stream with the interruption terminal view.
+						service.Investigations.NotifyTerminal(ctx, item.AttemptID)
 					}
 				}
 			}

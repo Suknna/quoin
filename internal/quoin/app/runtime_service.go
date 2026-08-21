@@ -14,8 +14,10 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
+	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/investigation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,6 +37,12 @@ type RuntimeService struct {
 	// Analyses owns initial-analysis attempts (T10); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Analyses *analysis.Service
+	// Investigations owns investigation attempts (T13); nil keeps the
+	// handshake-only behaviour for tests that do not exercise it.
+	Investigations *investigation.Service
+	// InvestigationRuntime carries the investigation runtime slice
+	// (dispatch, result adjudication, delta fan-out).
+	InvestigationRuntime *appinvestigation.RuntimeSlice
 	// Artifacts is the Artifact store the ArtifactService adapts (T10).
 	Artifacts *artifact.Store
 	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
@@ -195,6 +203,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
+		go service.dispatchQueuedInvestigations(context.Background())
 	}
 	// Empty-profile inventory request for lintel (RUNTIME-BROWSER-002): the
 	// readiness fence needs a complete report even with zero profiles.
@@ -273,6 +282,17 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			service.handleBeginToolCallRouted(ctx, envelope, payload.BeginToolCall)
 		case *runtimev1.ControlEnvelope_CompleteToolCall:
 			service.handleCompleteToolCallRouted(ctx, envelope, payload.CompleteToolCall)
+		case *runtimev1.ControlEnvelope_ModelTokenDelta:
+			// Transient visible deltas fan out to the investigation stream
+			// feeds only (RUNTIME-AGENT-004); the analysis slice has no
+			// display stream and drops them.
+			if service.InvestigationRuntime != nil {
+				delta := payload.ModelTokenDelta
+				attemptType, lookupErr := service.attemptTypeOf(ctx, delta.GetAttemptId())
+				if lookupErr == nil && attemptType == "investigation" {
+					service.InvestigationRuntime.HandleDelta(delta.GetAttemptId(), delta.GetModelCallId(), delta.GetDeltaSeq(), delta.GetText())
+				}
+			}
 		case *runtimev1.ControlEnvelope_ProfileInventoryReport:
 			// v1: reports are accepted and logged; a complete empty report
 			// clears nothing further because no identities exist yet.
@@ -311,6 +331,16 @@ func mapRejectReason(reason string) string {
 // the HTTP surface can reuse its task dispatcher.
 func NewRuntimeControl(slots *qruntime.Service, releaseVersion, catalogDigest string, taskConnections *connections.Service) *RuntimeService {
 	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest, Connections: taskConnections}
+}
+
+// dispatchQueuedInvestigations binds and dispatches every Queued
+// investigation attempt after a Plinth stream attaches (created while
+// disconnected).
+func (service *RuntimeService) dispatchQueuedInvestigations(ctx context.Context) {
+	if service.InvestigationRuntime == nil {
+		return
+	}
+	service.InvestigationRuntime.DispatchQueued(ctx)
 }
 
 // RegisterRuntimeControl mounts the service on an existing gRPC server.
