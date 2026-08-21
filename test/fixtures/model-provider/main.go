@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -27,6 +28,7 @@ func main() {
 			"object": "list",
 			"data": []map[string]any{
 				{"id": "fixture-chat-1", "object": "model", "owned_by": "fixture"},
+				{"id": "fixture-chat-thanos", "object": "model", "owned_by": "fixture"},
 				{"id": "fixture-embed-1", "object": "model", "owned_by": "fixture"},
 			},
 		})
@@ -133,6 +135,51 @@ func (body chatRequest) hasToolResult() bool {
 	return false
 }
 
+// thanosArtifactID extracts the committed artifact locator from the
+// thanos_query tool result the fixture itself drives (the model context
+// receives the artifact summary inside the result payload).
+func thanosArtifactID(body chatRequest) string {
+	for _, message := range body.Messages {
+		if message.Role != "tool" {
+			continue
+		}
+		match := thanosArtifactPattern.FindStringSubmatch(fmt.Sprint(message.Content))
+		if len(match) == 2 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+var thanosArtifactPattern = regexp.MustCompile(`"artifact"\s*:\s*\{"id"\s*:\s*"(\d+)"`)
+
+// toolMessageCount counts the committed tool-result messages the agent
+// already carries (one per executed tool call).
+func toolMessageCount(body chatRequest) int {
+	count := 0
+	for _, message := range body.Messages {
+		if message.Role == "tool" {
+			count++
+		}
+	}
+	return count
+}
+
+// toolCallChunk renders one streaming tool-call delta chunk (an empty name
+// carries the trailing arguments fragment like the T10 fixture).
+func toolCallChunk(model, callID, toolName, arguments string) map[string]any {
+	return map[string]any{
+		"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+		"choices": []any{map[string]any{
+			"index": 0, "finish_reason": nil,
+			"delta": map[string]any{"tool_calls": []any{map[string]any{
+				"index": 0, "id": callID, "type": "function",
+				"function": map[string]any{"name": toolName, "arguments": arguments},
+			}}},
+		}},
+	}
+}
+
 // serveStream emits SSE chunks; the broken model id disconnects after two
 // chunks (partial stream failure fixture). The agent's first call answers a
 // streaming native tool call (bash); its continuation returns the final
@@ -148,6 +195,65 @@ func serveStream(writer http.ResponseWriter, body chatRequest) {
 		}
 	}
 	model := body.Model
+	if body.isAgentFirstTurn() && model == "fixture-chat-thanos" {
+		log.Printf("agent first turn (thanos): streaming native thanos_query tool call")
+		chunk(mustJSONChunk(toolCallChunk(model, "call-agent-thanos", "thanos_query", `{"query":"big"}`)))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(toolCallChunk(model, "call-agent-thanos", "", "")))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
+	if artifactID := thanosArtifactID(body); artifactID != "" && model == "fixture-chat-thanos" && toolMessageCount(body) == 1 {
+		log.Printf("agent continuation (thanos): streaming artifact_read on the spilled result")
+		chunk(mustJSONChunk(toolCallChunk(model, "call-agent-read", "artifact_read", fmt.Sprintf(`{"artifactId":"%s"}`, artifactID))))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(toolCallChunk(model, "call-agent-read", "", "")))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
+	if model == "fixture-chat-thanos" {
+		// A committed tool result reaches the model context verbatim; the
+		// bounded diagnostic log pins the exact sealed payload the agent
+		// branch sees (success preview or structured failure).
+		if body.hasToolResult() {
+			for _, message := range body.Messages {
+				if message.Role == "tool" {
+					content := fmt.Sprint(message.Content)
+					if len(content) > 400 {
+						content = content[:400]
+					}
+					log.Printf("tool result payload: %s", content)
+				}
+			}
+		}
+		log.Printf("agent continuation (thanos): streaming text diagnosis (%d words)", 10)
+		words := []string{"初步诊断：", "该告警", "通过", "thanos-proof", "只读查询", "确认了", "指标现状", "，", "建议按", "排查顺序继续。"}
+		for _, word := range words {
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+				}},
+			}))
+			time.Sleep(150 * time.Millisecond)
+		}
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
 	if body.isAgentFirstTurn() {
 		log.Printf("agent first turn: streaming native bash tool call")
 		// One deterministic streaming tool call: bash. The split
