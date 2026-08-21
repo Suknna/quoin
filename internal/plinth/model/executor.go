@@ -69,11 +69,15 @@ type Failure struct {
 
 // Authorization is the durable identity of one pending tool call the
 // Quoin ledger assigned (CompleteModelCallAck, ARCH-TOOL-001).
+// ConnectionGrants are the non-secret bindings frozen for observation
+// tools (ARCH-INPUT-003); the supervisor fetches the credential through
+// exactly these grants before executing the tool.
 type Authorization struct {
 	ToolCallID         int64
 	ProviderIndex      uint32
 	ProviderToolCallID string
 	FailureMode        string
+	ConnectionGrants   []*runtimev1.ConnectionGrant
 }
 
 // Execute runs one logical chat call: BeginModelCall → provider stream →
@@ -206,6 +210,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 		authorizations = append(authorizations, Authorization{
 			ToolCallID: wire.GetToolCallId(), ProviderIndex: wire.GetProviderIndex(),
 			ProviderToolCallID: wire.GetProviderToolCallId(), FailureMode: wire.GetFailureMode().String(),
+			ConnectionGrants: wire.GetConnectionGrants(),
 		})
 	}
 	return callID, assistantText, proposed, authorizations, responseDigestRaw, nil, nil

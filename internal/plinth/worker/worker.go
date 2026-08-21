@@ -130,6 +130,12 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 	}
 	callSeq := uint32(0)
 	inputItems := initialInputItems(start)
+	// Deterministic Evidence and Artifact ids accumulate from the sealed
+	// Tool Results (Quoin commits both before ToolResult reaches the
+	// worker); the final proposal references them explicitly
+	// (DATA-ANALYSIS-002).
+	var evidenceIDs []int64
+	var artifactIDs []int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -240,6 +246,7 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 				AttemptId: attemptID,
 				Msg: &workerv1.WorkerEnvelope_WorkerResultProposal{WorkerResultProposal: &workerv1.WorkerResultProposal{
 					SchemaKind: OutputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:],
+					EvidenceIds: evidenceIDs, ArtifactIds: artifactIDs,
 				}},
 			}); err != nil {
 				return err
@@ -330,6 +337,13 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 			resultDigest := sha256.Sum256(toolResult.GetResultJson())
 			messages = append(messages, agent.ToolResultMessage(call.ProviderToolCallID, call.ToolName, toolResult.GetResultJson()))
 			inputItems = append(inputItems, toolResultItem(call.ToolCallID, resultDigest[:]))
+			// Quoin committed the Evidence and the Artifact before the
+			// ToolResult arrived (ARCH-TOOL-003); the final output must
+			// reference exactly those sealed objects.
+			evidenceIDs = append(evidenceIDs, toolResult.GetEvidenceIds()...)
+			if artifactRef := toolResult.GetArtifactRef(); artifactRef != nil && artifactRef.GetArtifactId() != 0 {
+				artifactIDs = append(artifactIDs, artifactRef.GetArtifactId())
+			}
 		}
 	}
 }

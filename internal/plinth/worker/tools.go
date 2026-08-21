@@ -58,6 +58,9 @@ func ProviderToolsJSON() ([]byte, error) {
 		toolSchema("artifact_grep", "在 Artifact 文本内按 RE2 正则搜索；返回有界匹配片段与截断标记。", map[string]any{
 			"artifactId": map[string]any{"type": "string"}, "pattern": map[string]any{"type": "string"},
 		}, []string{"artifactId", "pattern"}),
+		toolSchema("thanos_query", "对全局 Thanos 执行一次只读 PromQL 即时查询（instant query）；模型只提供 query 表达式，连接与凭据由 Quoin 确定性解析，结果作为不可变 Evidence 封存。", map[string]any{
+			"query": map[string]any{"type": "string"},
+		}, []string{"query"}),
 	}
 	wrapped := make([]any, 0, len(tools))
 	for _, tool := range tools {
@@ -117,7 +120,7 @@ func runtimeGOARCH() string {
 // (mirrors the Quoin-side catalog; pinned equal by tools_test.go).
 func ExecutionModeFor(name string) string {
 	switch name {
-	case "artifact_read", "artifact_grep":
+	case "artifact_read", "artifact_grep", "thanos_query":
 		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
 	default:
 		return "TOOL_EXECUTION_MODE_WORKER_LOCAL"

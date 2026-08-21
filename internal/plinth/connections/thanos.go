@@ -157,3 +157,11 @@ func thanosHTTPClient(config ThanosConfig) (*http.Client, error) {
 	}
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, Timeout: probeTimeout}, nil
 }
+
+// NewHTTPClient builds the HTTP client for the frozen Thanos connection
+// projection (shared by the probe executor and the supervisor-typed
+// thanos_query tool; the query tool bounds each call with its own context
+// deadline on top of the client timeout).
+func NewHTTPClient(config ThanosConfig) (*http.Client, error) {
+	return thanosHTTPClient(config)
+}
