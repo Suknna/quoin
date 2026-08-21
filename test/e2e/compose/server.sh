@@ -144,7 +144,6 @@ curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
 
 # --- T07 fixtures: a real Thanos target and a registered Plinth ----------
-image_proxy2="${QUOIN_IMAGE_GOPROXY:-$(go env GOPROXY)}"
 docker rm -f quoin-t07-thanos >/dev/null 2>&1 || true
 NET=$(docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1)
 docker run -d --name quoin-t07-thanos --network "$NET" thanosio/thanos:v0.36.0 query --http-address=0.0.0.0:9090 --log.level=warn >>"$evidence/playwright-server.log" 2>&1
@@ -159,6 +158,49 @@ printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); p
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t07-create-1","name":"main-thanos","connection":{"type":"thanos","baseUrl":"http://quoin-t07-thanos:9090","password":"e2e-thanos-secret"}}' \
   "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+
+# --- T10 fixtures: an enabled qualified provider + a firing analysis alert -
+# The probe runs through the real command path (creation never auto-probes);
+# poll the immutable probe-results endpoint, then enable.
+curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d '{"clientCommandId":"e2e-t10-probe-$RANDOM"}' \
+  "$BASE/api/v1/connections/main-openai/probe" >>"$evidence/playwright-server.log"
+enable_ok=0
+for _ in $(seq 1 60); do
+  PROBE_ID=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/main-openai/probe-results" 2>/dev/null | python3 -c 'import json,sys
+try:
+    items=json.load(sys.stdin).get("items",[])
+    print(next((i["id"] for i in items if i.get("outcome")=="passed"), ""))
+except Exception:
+    print("")' 2>/dev/null)
+  if [ -n "$PROBE_ID" ]; then
+    CONN_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/main-openai" 2>/dev/null)
+    ROW_VER=$(printf '%s' "$CONN_ROW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
+    ENABLE=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+      -d "{\"clientCommandId\":\"e2e-t10-enable-$RANDOM\",\"expectedRowVersion\":$ROW_VER,\"qualifiedProbeResultId\":\"$PROBE_ID\"}" \
+      "$BASE/api/v1/connections/main-openai/enable")
+    if printf '%s' "$ENABLE" | grep -q '"enabled":true'; then enable_ok=1; break; fi
+  fi
+  sleep 2
+done
+if [ "$enable_ok" != "1" ]; then
+  { echo "FATAL: main-openai never qualified/enabled for T10"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T10Probe severity=critical instance=db-2 job=quoin; then
+  { echo "FATAL: amtool could not fire T10Probe"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+t10_seen=0
+for _ in $(seq 1 30); do
+  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
+  if printf '%s' "$SNAPSHOT" | grep -q T10Probe; then t10_seen=1; break; fi
+  sleep 1
+done
+if [ "$t10_seen" != "1" ]; then
+  { echo "FATAL: T10Probe never reached the Quoin alert store"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
 
 # The fixture doubles as the ready marker: tests only run once every step
 # (login/change/source/reveal/AM alert) has completed.

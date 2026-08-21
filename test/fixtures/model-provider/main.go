@@ -35,22 +35,14 @@ func main() {
 		if !authorize(writer, request) {
 			return
 		}
-		var body struct {
-			Model    string `json:"model"`
-			Stream   bool   `json:"stream"`
-			Messages []struct {
-				Role    string `json:"role"`
-				Content any    `json:"content"`
-			} `json:"messages"`
-			Tools []map[string]any `json:"tools"`
-		}
+		var body chatRequest
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			http.Error(writer, "invalid body", http.StatusBadRequest)
 			return
 		}
 		writer.Header().Set("X-Request-Id", "req-fixture-"+fmt.Sprint(time.Now().UnixNano()))
 		if body.Stream {
-			serveStream(writer, body.Model)
+			serveStream(writer, body)
 			return
 		}
 		serveCompletion(writer, body)
@@ -102,9 +94,50 @@ func writeJSON(writer http.ResponseWriter, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
+// chatRequest mirrors the deterministic chat request fields the fixture
+// branches on (streaming agent mode included).
+type chatRequest struct {
+	Model    string `json:"model"`
+	Stream   bool   `json:"stream"`
+	Messages []struct {
+		Role      string `json:"role"`
+		Content   any    `json:"content"`
+		ToolCalls []struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+		ToolCallID string `json:"tool_call_id"`
+	} `json:"messages"`
+	Tools []map[string]any `json:"tools"`
+}
+
+// isAgentFirstTurn reports whether this streaming request is the T10 agent's
+// first call: the fixed initial-analysis user prompt plus the tool schema.
+func (body chatRequest) isAgentFirstTurn() bool {
+	if len(body.Tools) == 0 {
+		return false
+	}
+	return strings.Contains(promptText(body.Messages), "请分析以下告警") && !body.hasToolResult()
+}
+
+// hasToolResult reports whether any message carries a committed tool result
+// (the agent's second call carries the workspace tool result preview).
+func (body chatRequest) hasToolResult() bool {
+	for _, message := range body.Messages {
+		if message.Role == "tool" && strings.Contains(fmt.Sprint(message.Content), `"success"`) {
+			return true
+		}
+	}
+	return false
+}
+
 // serveStream emits SSE chunks; the broken model id disconnects after two
-// chunks (partial stream failure fixture).
-func serveStream(writer http.ResponseWriter, model string) {
+// chunks (partial stream failure fixture). The agent's first call answers a
+// streaming native tool call (bash); its continuation returns the final
+// text diagnosis.
+func serveStream(writer http.ResponseWriter, body chatRequest) {
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-store")
 	flusher, _ := writer.(http.Flusher)
@@ -114,9 +147,65 @@ func serveStream(writer http.ResponseWriter, model string) {
 			flusher.Flush()
 		}
 	}
+	model := body.Model
+	if body.isAgentFirstTurn() {
+		log.Printf("agent first turn: streaming native bash tool call")
+		// One deterministic streaming tool call: bash. The split
+		// arguments stream exercises the delta accumulation path. Chunks
+		// are built with encoding/json so the stream is always valid JSON.
+		toolCall := func(arguments any) map[string]any {
+			return map[string]any{
+				"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "finish_reason": nil,
+					"delta": map[string]any{"tool_calls": []any{arguments}},
+				}},
+			}
+		}
+		chunk(mustJSONChunk(toolCall(map[string]any{
+			"index": 0, "id": "call-agent-bash", "type": "function",
+			"function": map[string]any{"name": "bash", "arguments": "{\"command\":\"echo agent-fixture-proof\"}"},
+		})))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(toolCall(map[string]any{
+			"index": 0, "function": map[string]any{"arguments": ""},
+		})))
+		time.Sleep(150 * time.Millisecond)
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
+	if body.hasToolResult() {
+		log.Printf("agent continuation: streaming text diagnosis (%d words)", 10)
+		words := []string{"初步诊断：", "该告警", "为", "agent-fixture-proof", "场景", "的可复现示例", "，", "建议按", "排查顺序", "确认。"}
+		for _, word := range words {
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+				}},
+			}))
+			time.Sleep(150 * time.Millisecond)
+		}
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
+	log.Printf("default stream: %d probe words", 4)
 	words := []string{"count", "ing", " slow", "ly"}
 	for index, word := range words {
-		chunk(fmt.Sprintf(`{"id":"chat-fixture","object":"chat.completion.chunk","model":%q,"choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, model, word))
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-fixture", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{
+				"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+			}},
+		}))
 		if model == "fixture-broken-stream" && index == 1 {
 			// Partial stream failure: hang up before [DONE].
 			if hijacker, ok := writer.(http.Hijacker); ok {
@@ -128,8 +217,21 @@ func serveStream(writer http.ResponseWriter, model string) {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	chunk(`{"id":"chat-fixture","object":"chat.completion.chunk","model":` + jsonQuote(model) + `,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+	chunk(mustJSONChunk(map[string]any{
+		"id": "chat-fixture", "object": "chat.completion.chunk", "model": model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+	}))
 	chunk("[DONE]")
+}
+
+// mustJSONChunk renders one SSE chunk payload (marshal errors are
+// impossible for these shapes; a panic would be loud and immediate).
+func mustJSONChunk(value any) string {
+	body, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
 }
 
 func jsonQuote(value string) string {
@@ -138,15 +240,7 @@ func jsonQuote(value string) string {
 }
 
 // serveCompletion answers tool calls deterministically by prompt content.
-func serveCompletion(writer http.ResponseWriter, body struct {
-	Model    string `json:"model"`
-	Stream   bool   `json:"stream"`
-	Messages []struct {
-		Role    string `json:"role"`
-		Content any    `json:"content"`
-	} `json:"messages"`
-	Tools []map[string]any `json:"tools"`
-}) {
+func serveCompletion(writer http.ResponseWriter, body chatRequest) {
 	prompt := promptText(body.Messages)
 	switch {
 	case strings.Contains(prompt, "both probe tools"):
@@ -191,8 +285,15 @@ func serveCompletion(writer http.ResponseWriter, body struct {
 }
 
 func promptText(messages []struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role      string `json:"role"`
+	Content   any    `json:"content"`
+	ToolCalls []struct {
+		ID       string `json:"id"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	} `json:"tool_calls"`
+	ToolCallID string `json:"tool_call_id"`
 }) string {
 	var text string
 	for _, message := range messages {

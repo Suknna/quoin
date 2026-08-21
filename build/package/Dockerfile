@@ -27,9 +27,16 @@ COPY --from=build /out/quoin /quoin
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/quoin"]
 
-FROM scratch AS plinth
+FROM debian:13-slim AS plinth-base
+# The frozen worker tool catalog (contracts/plinth-worker-tools.yaml, owner
+# OPS-IMAGE-004): the sandboxed agent worker executes this exact tool set
+# inside the image; the Landlock read-only rules anchor the same paths.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash coreutils findutils grep sed gawk jq file tar gzip xz-utils unzip ripgrep diffutils ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM plinth-base AS plinth
 USER 65532:65532
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/plinth /plinth
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/plinth"]
