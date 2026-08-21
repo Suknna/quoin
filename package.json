@@ -4,5 +4,8 @@
   "packageManager": "pnpm@10.30.3",
   "scripts": {
     "web:build": "pnpm --dir web build"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   }
 }
