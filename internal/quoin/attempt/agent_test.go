@@ -90,7 +90,7 @@ func TestAgentModelCallWithToolClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	resultJSON := `{"success":true,"output":"agent-fixture-proof\n"}`
-	if err := service.CompleteToolCall(ctx, ToolResult{
+	if _, err := service.CompleteToolCall(ctx, ToolResult{
 		AttemptID: attemptID, ToolCallID: authorizations[0].ToolCallID,
 		Outcome: "succeeded", ResultJSON: resultJSON,
 	}); err != nil {

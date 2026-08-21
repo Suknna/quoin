@@ -20,8 +20,11 @@ import (
 // the worker binary and the dispatch row carry it (DATA-ATTEMPT-001).
 const AgentVersion = "initial-analysis-v1"
 
-// ToolSchemaVersion names the fixed tool-schema generation.
-const ToolSchemaVersion = "initial-analysis-tools-v1"
+// ToolSchemaVersion names the fixed tool-schema generation. T11 added
+// thanos_query (typed read-only Thanos evidence), which changes the
+// canonical schema bytes: the generation advances so both sides and the
+// persisted model_calls.tool_schema_version stay consistent.
+const ToolSchemaVersion = "initial-analysis-tools-v2"
 
 // ToolDef is one fixed tool in the catalog.
 type ToolDef struct {
@@ -34,6 +37,10 @@ type ToolDef struct {
 	// required kind; "required" keys must be present.
 	Arguments map[string]ArgumentKind
 	Required  []string
+	// ProducesEvidence marks a supervisor_typed observation tool: a
+	// succeeded execution commits deterministic Evidence together with
+	// the Tool Call terminal state (ARCH-TOOL-005, DATA-EVIDENCE-001).
+	ProducesEvidence bool
 }
 
 // ArgumentKind is the JSON kind of one argument.
@@ -84,6 +91,12 @@ var InitialAnalysisTools = []ToolDef{
 		Description: "在 Artifact 文本内按 RE2 正则搜索；返回有界匹配片段与截断标记。",
 		Arguments:   map[string]ArgumentKind{"artifactId": KindString, "pattern": KindString},
 		Required:    []string{"artifactId", "pattern"},
+	},
+	{
+		Name: "thanos_query", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ProducesEvidence: true,
+		Description: "对全局 Thanos 执行一次只读 PromQL 即时查询（instant query）；模型只提供 query 表达式，连接与凭据由 Quoin 确定性解析，结果作为不可变 Evidence 封存。",
+		Arguments:   map[string]ArgumentKind{"query": KindString},
+		Required:    []string{"query"},
 	},
 }
 

@@ -219,12 +219,14 @@ type ProposedTool struct {
 }
 
 // ToolAuthorization is the CompleteModelCallAck authorization for one
-// pending tool call (ARCH-TOOL-001).
+// pending tool call (ARCH-TOOL-001). Grants are the non-secret connection
+// bindings frozen for observation tools (ARCH-INPUT-003).
 type ToolAuthorization struct {
 	ToolCallID         int64
 	ProviderIndex      uint32
 	ProviderToolCallID string
 	FailureMode        string
+	Grants             []ToolGrant
 }
 
 // CompleteCall seals one model call and creates the pending tool_calls rows
@@ -394,10 +396,24 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 			if err != nil {
 				return nil, err
 			}
-			authorizations = append(authorizations, ToolAuthorization{
+			authorization := ToolAuthorization{
 				ToolCallID: toolCallID, ProviderIndex: uint32(index),
 				ProviderToolCallID: item.proposed.ProviderToolCallID, FailureMode: item.definition.FailureMode,
-			})
+			}
+			// Observation tools freeze their connection binding inside this
+			// same transaction (ARCH-INPUT-003); an unresolvable route fails
+			// the whole model call (RUNTIME-AGENT-005).
+			if needsConnectionGrant(item.definition) {
+				if service.ToolGrantResolver == nil {
+					return nil, fmt.Errorf("%w: tool %s needs a grant resolver", ErrLedgerDenied, item.definition.Name)
+				}
+				grants, err := service.ToolGrantResolver(ctx, conn, completion.AttemptID, toolCallID, item.definition)
+				if err != nil {
+					return nil, err
+				}
+				authorization.Grants = grants
+			}
+			authorizations = append(authorizations, authorization)
 		}
 	} else {
 		if completion.FailureReason == "" {
@@ -418,7 +434,10 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 }
 
 // BeginToolCall moves one pending tool call to running after re-checking
-// the attempt fence and the grant bindings (ARCH-TOOL-002/003).
+// the attempt fence and the frozen connection grant closure
+// (ARCH-TOOL-002/003, DATA-CONN-002: the execution authorization re-reads
+// the connection state; a disable/rotation/rebind committed first
+// refuses execution).
 func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID int64) error {
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -440,6 +459,29 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 	}
 	if state != "Running" {
 		return fmt.Errorf("%w: attempt %d is %s", ErrLedgerDenied, attemptID, state)
+	}
+	var callAttempt int64
+	var status, toolName string
+	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,status,tool_name FROM tool_calls WHERE id=?`, toolCallID).Scan(&callAttempt, &status, &toolName); err != nil {
+		return err
+	}
+	if callAttempt != attemptID {
+		return fmt.Errorf("%w: tool call %d belongs to attempt %d", ErrLedgerDenied, toolCallID, callAttempt)
+	}
+	if status != "pending" {
+		return fmt.Errorf("%w: tool call %d is %s", ErrLedgerDenied, toolCallID, status)
+	}
+	definition, known := LookupTool(toolName)
+	if !known {
+		return fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
+	}
+	if needsConnectionGrant(definition) {
+		if service.ToolGrantValidator == nil {
+			return fmt.Errorf("%w: tool %s has no grant validator wired", ErrLedgerDenied, toolName)
+		}
+		if err := service.ToolGrantValidator(ctx, conn, attemptID, toolCallID, definition); err != nil {
+			return fmt.Errorf("%w: grant validation: %v", ErrLedgerDenied, err)
+		}
 	}
 	result, err := conn.ExecContext(ctx, `
 		UPDATE tool_calls SET status='running', started_at=?, row_version=row_version+1
@@ -469,16 +511,18 @@ type ToolResult struct {
 }
 
 // CompleteToolCall seals one tool execution: the canonical result preview,
-// the artifact link and the terminal state in one transaction
-// (ARCH-TOOL-003/005, ARCH-OUTPUT-005).
-func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult) error {
+// the artifact link, the deterministic Evidence of observation tools and
+// the terminal state in one transaction (ARCH-TOOL-003/005,
+// ARCH-OUTPUT-005, DATA-EVIDENCE-001). It returns the committed evidence
+// ids for the CompleteToolCallAck.
+func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult) ([]int64, error) {
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
+		return nil, err
 	}
 	committed := false
 	defer func() {
@@ -487,48 +531,47 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 		}
 	}()
 	var callAttempt int64
-	var status string
-	var failureMode string
-	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,status,failure_mode FROM tool_calls WHERE id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode); err != nil {
-		return err
+	var status, failureMode, toolName string
+	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,status,failure_mode,tool_name FROM tool_calls WHERE id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode, &toolName); err != nil {
+		return nil, err
 	}
 	if callAttempt != result.AttemptID {
-		return fmt.Errorf("%w: tool call %d belongs to attempt %d", ErrLedgerDenied, result.ToolCallID, callAttempt)
+		return nil, fmt.Errorf("%w: tool call %d belongs to attempt %d", ErrLedgerDenied, result.ToolCallID, callAttempt)
 	}
 	if status != "running" {
-		return fmt.Errorf("%w: tool call %d is %s", ErrLedgerDenied, result.ToolCallID, status)
+		return nil, fmt.Errorf("%w: tool call %d is %s", ErrLedgerDenied, result.ToolCallID, status)
 	}
 	if result.Outcome == "succeeded" {
 		if result.ResultJSON == "" {
-			return fmt.Errorf("%w: succeeded tool call requires a result preview", ErrLedgerDenied)
+			return nil, fmt.Errorf("%w: succeeded tool call requires a result preview", ErrLedgerDenied)
 		}
 		if !jsonValid([]byte(result.ResultJSON), "object") {
-			return fmt.Errorf("%w: tool result preview must be a JSON object", ErrLedgerDenied)
+			return nil, fmt.Errorf("%w: tool result preview must be a JSON object", ErrLedgerDenied)
 		}
 	} else {
 		if result.ErrorCode == "" {
-			return fmt.Errorf("%w: non-success tool call requires an error code", ErrLedgerDenied)
+			return nil, fmt.Errorf("%w: non-success tool call requires an error code", ErrLedgerDenied)
 		}
 		if failureMode == "return_to_model" && result.Outcome == "failed" && result.ResultJSON == "" {
-			return fmt.Errorf("%w: return_to_model failure requires a model-visible result", ErrLedgerDenied)
+			return nil, fmt.Errorf("%w: return_to_model failure requires a model-visible result", ErrLedgerDenied)
 		}
 		if result.Outcome == "failed" && result.ResultJSON != "" && !jsonValid([]byte(result.ResultJSON), "object") {
-			return fmt.Errorf("%w: tool failure preview must be a JSON object", ErrLedgerDenied)
+			return nil, fmt.Errorf("%w: tool failure preview must be a JSON object", ErrLedgerDenied)
 		}
 	}
 	if result.ArtifactID != 0 {
 		var ownerTool, ownerType string
 		if err := conn.QueryRowContext(ctx, `SELECT owner_type, owner_id FROM artifacts WHERE id=?`, result.ArtifactID).Scan(&ownerType, &ownerTool); err != nil {
-			return fmt.Errorf("%w: artifact %d unknown: %v", ErrLedgerDenied, result.ArtifactID, err)
+			return nil, fmt.Errorf("%w: artifact %d unknown: %v", ErrLedgerDenied, result.ArtifactID, err)
 		}
 		if ownerType != "tool_call" || ownerTool != fmt.Sprint(result.ToolCallID) {
-			return fmt.Errorf("%w: artifact %d is not owned by tool call %d", ErrLedgerDenied, result.ArtifactID, result.ToolCallID)
+			return nil, fmt.Errorf("%w: artifact %d is not owned by tool call %d", ErrLedgerDenied, result.ArtifactID, result.ToolCallID)
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	state := map[string]string{"succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled"}[result.Outcome]
 	if state == "" {
-		return fmt.Errorf("%w: unknown tool outcome %q", ErrLedgerDenied, result.Outcome)
+		return nil, fmt.Errorf("%w: unknown tool outcome %q", ErrLedgerDenied, result.Outcome)
 	}
 	var artifactID sql.NullInt64
 	if result.ArtifactID != 0 {
@@ -542,25 +585,52 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 	if result.ErrorDetail != "" {
 		errorDetail = sql.NullString{String: result.ErrorDetail, Valid: true}
 	}
+	// Observation tools commit their deterministic Evidence BEFORE the
+	// terminal state advances (DATA-EVIDENCE-001 and the frozen
+	// trg_evidence_attempt_tool_closure demand the Tool Call still
+	// running at the Evidence INSERT), all in the same transaction.
+	var evidenceIDs []int64
+	if result.Outcome == "succeeded" && service.EvidenceWriter != nil {
+		definition, known := LookupTool(toolName)
+		if !known {
+			return nil, fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
+		}
+		if definition.ProducesEvidence {
+			ids, err := service.EvidenceWriter(ctx, conn, result.AttemptID, result.ToolCallID, result.ArtifactID,
+				[]byte(result.ResultJSON), definition.Name)
+			if err != nil {
+				return nil, fmt.Errorf("%w: evidence commit: %v", ErrLedgerDenied, err)
+			}
+			evidenceIDs = ids
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `
 		UPDATE tool_calls SET status=?, result_json=?, result_artifact_id=?, error_detail=?, ended_at=?, row_version=row_version+1
 		WHERE id=? AND attempt_id=? AND status='running'`,
 		state, resultJSON, artifactID, errorDetail, now, result.ToolCallID, result.AttemptID); err != nil {
-		return err
+		return nil, err
 	}
 	// The frozen grant closure requires the tool call to be succeeded, so
 	// the read grant is written AFTER the seal, still in the same
 	// transaction (trg_attempt_artifact_grants_closure).
 	if result.ArtifactID != 0 && service.ToolResultGrants != nil {
 		if err := service.ToolResultGrants(ctx, conn, result.AttemptID, result.ArtifactID, result.ToolCallID); err != nil {
-			return fmt.Errorf("%w: tool result grant: %v", ErrLedgerDenied, err)
+			return nil, fmt.Errorf("%w: tool result grant: %v", ErrLedgerDenied, err)
 		}
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
+		return nil, err
 	}
 	committed = true
-	return nil
+	return evidenceIDs, nil
+}
+
+// needsConnectionGrant reports whether the fixed tool definition freezes a
+// connection binding inside the Tool Call persistence transaction
+// (ARCH-INPUT-003): supervisor_typed observation tools resolve their
+// deployment connection per tool call; the model never selects it.
+func needsConnectionGrant(definition ToolDef) bool {
+	return definition.ExecutionMode == "supervisor_typed" && definition.ProducesEvidence
 }
 
 // ToolCallView is the read projection of one tool call (used by the tool

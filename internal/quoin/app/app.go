@@ -224,6 +224,9 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	application.register(api)
 	application.registerAlertStream(mux)
 	application.registerTaskStream(mux)
+	// The artifact download streams raw bytes with the frozen security
+	// headers (HTTP-FILE-003), so it owns the response head directly.
+	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -245,6 +248,7 @@ func (application *apiServer) register(api huma.API) {
 	application.registerConnectionRoutes(api)
 	application.registerAnalysisRoutes(api)
 	application.registerTaskSnapshot(api)
+	application.registerEvidenceRoutes(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {

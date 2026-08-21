@@ -415,6 +415,11 @@ type TextSlice struct {
 // ErrBodyExpired reports an artifact whose body the GC already cleared.
 var ErrBodyExpired = errors.New("artifact body expired")
 
+// ErrNotFound reports an unknown artifact locator (metadata and body
+// reads answer 404; an expired body is NOT not-found — its metadata
+// stays readable while the body alone answers 410).
+var ErrNotFound = errors.New("artifact not found")
+
 // ReadText fences the attempt/boot/epoch/grant binding and returns a
 // bounded line slice. startLine is 1-based.
 func (store *Store) ReadText(ctx context.Context, attemptID, artifactID int64, bootID string, epoch uint64, startLine int64, maxLines int) (TextSlice, error) {
@@ -647,6 +652,89 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+// Metadata is the frozen ArtifactSummary read projection (the HTTP
+// getArtifactMetadata surface).
+type Metadata struct {
+	ID            int64
+	Kind          string
+	Sensitive     bool
+	RetentionKind string
+	OwnerType     string
+	OwnerID       int64
+	SizeBytes     int64
+	SHA256        string
+	BodyExpired   bool
+	ExpiresAt     *string
+	CreatedAt     string
+}
+
+// Metadata returns the logical metadata of one artifact row (the logical
+// artifacts row is the authorization authority, DATA-ARTIFACT-003).
+func (store *Store) Metadata(ctx context.Context, artifactID int64) (Metadata, error) {
+	var meta Metadata
+	var sensitive, bodyExpired int
+	var expiresAt sql.NullString
+	err := store.db.QueryRowContext(ctx, `
+		SELECT a.id, a.kind, a.sensitive, a.retention_kind, a.owner_type, a.owner_id,
+		       b.size_bytes, b.sha256, a.body_expired, a.expires_at, a.created_at
+		FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.id=?`, artifactID).
+		Scan(&meta.ID, &meta.Kind, &sensitive, &meta.RetentionKind, &meta.OwnerType, &meta.OwnerID,
+			&meta.SizeBytes, &meta.SHA256, &bodyExpired, &expiresAt, &meta.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Metadata{}, ErrNotFound
+	}
+	if err != nil {
+		return Metadata{}, err
+	}
+	meta.Sensitive = sensitive == 1
+	meta.BodyExpired = bodyExpired == 1
+	if expiresAt.Valid {
+		meta.ExpiresAt = &expiresAt.String
+	}
+	return meta, nil
+}
+
+// ErrBodyExpired reports an artifact whose body passed its retention
+// fence (DATA-ARTIFACT-003: metadata stays, the body refuses reads).
+
+// RecordDownloadAudit appends the non-secret download audit event before
+// the body streams (DATA-ARTIFACT-003, HTTP-FILE-003/004: authorization
+// happens first, then the audit, then the bytes).
+func (store *Store) RecordDownloadAudit(ctx context.Context, actorType string, actorID, artifactID int64) error {
+	now := store.now().Format(time.RFC3339Nano)
+	result, err := store.db.ExecContext(ctx, `
+		INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at)
+		VALUES(?,?,?,?,?,?,?)`, actorType, actorID, "artifact.download", "success", "artifact", artifactID, now)
+	if err != nil {
+		return err
+	}
+	auditID, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	_, err = store.db.ExecContext(ctx, `
+		INSERT INTO audit_event_targets(audit_event_id,target_type,target_id) VALUES(?,?,?)`, auditID, "artifact", artifactID)
+	return err
+}
+
+// OpenBody streams the physical blob of one live artifact body. The caller
+// owns the returned file and must close it. Expired bodies refuse reads
+// while their metadata and references remain durable (DATA-ARTIFACT-003/004).
+func (store *Store) OpenBody(ctx context.Context, artifactID int64) (*os.File, Metadata, error) {
+	meta, err := store.Metadata(ctx, artifactID)
+	if err != nil {
+		return nil, Metadata{}, err
+	}
+	if meta.BodyExpired {
+		return nil, meta, ErrBodyExpired
+	}
+	file, err := os.Open(store.blobPath(meta.SHA256))
+	if err != nil {
+		return nil, meta, err
+	}
+	return file, meta, nil
 }
 
 func isTextMedia(mediaType string) bool {

@@ -81,10 +81,11 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 		return GrantPayload{}, fmt.Errorf("%w: grant belongs to attempt %d", ErrGrantDenied, grantAttempt)
 	}
 	var state string
+	var attemptType string
 	var attemptBoot sql.NullString
 	var attemptEpoch sql.NullInt64
 	var scopeID int64
-	if err := conn.QueryRowContext(ctx, `SELECT state,scope_id,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &scopeID, &attemptBoot, &attemptEpoch); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT state,attempt_type,scope_id,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &attemptType, &scopeID, &attemptBoot, &attemptEpoch); err != nil {
 		return GrantPayload{}, err
 	}
 	if state != "Assigned" && state != "Running" {
@@ -96,7 +97,11 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 	if attemptEpoch.Valid && attemptEpoch.Int64 != int64(epoch) {
 		return GrantPayload{}, fmt.Errorf("%w: epoch fence", ErrGrantDenied)
 	}
-	if scopeID != connectionID {
+	// Probe attempts scope on the connection itself; agent attempts bind
+	// the connection through the grant row created inside the tool call
+	// persistence transaction (ARCH-INPUT-003), so the scope fence only
+	// applies to the probe closure.
+	if attemptType == "connection_probe" && scopeID != connectionID {
 		return GrantPayload{}, fmt.Errorf("%w: grant does not belong to the attempt's connection", ErrGrantDenied)
 	}
 	var connectionType string

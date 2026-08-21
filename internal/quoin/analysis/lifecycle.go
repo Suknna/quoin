@@ -258,9 +258,12 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 		return fmt.Errorf("result without a succeeded model call: %w", err)
 	}
 	if len(result.ArtifactIDs) > 0 || len(result.EvidenceIDs) > 0 {
-		// T11 closes Evidence/Artifact references; T10 seals a model-only
-		// output and must reject stray references rather than store them.
-		return fmt.Errorf("evidence/artifact references arrive with T11")
+		// T11 closes the Evidence/Artifact references (DATA-ANALYSIS-002):
+		// every reference must belong to this attempt before the output
+		// seals them; stray locators keep the seal deterministic.
+		if err := validateReferences(ctx, conn, result); err != nil {
+			return fmt.Errorf("evidence/artifact references do not close: %w", err)
+		}
 	}
 	now := service.nowText()
 	outputInsert, err := conn.ExecContext(ctx, `
@@ -273,7 +276,20 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 	if err != nil {
 		return err
 	}
-	_ = outputID
+	for ordinal, evidenceID := range result.EvidenceIDs {
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO initial_analysis_output_evidence(output_id,evidence_id,ordinal)
+			VALUES(?,?,?)`, outputID, evidenceID, ordinal); err != nil {
+			return err
+		}
+	}
+	for ordinal, artifactID := range result.ArtifactIDs {
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO initial_analysis_output_artifacts(output_id,artifact_id,ordinal)
+			VALUES(?,?,?)`, outputID, artifactID, ordinal); err != nil {
+			return err
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Succeeded', ended_at=?, row_version=row_version+1
@@ -367,4 +383,42 @@ func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
 		UPDATE initial_analyses SET state='Cancelled', row_version=row_version+1
 		WHERE id=? AND state='Running'`, scopeID)
 	return err
+}
+
+// validateReferences re-checks the sealed output's reference closure on
+// the caller's transaction (DATA-ANALYSIS-002): every Evidence must belong
+// to this attempt, every Artifact must be granted to this attempt through
+// its own tool results, and neither list may repeat.
+func validateReferences(ctx context.Context, conn *sql.Conn, result Result) error {
+	seenEvidence := map[int64]bool{}
+	for _, evidenceID := range result.EvidenceIDs {
+		if evidenceID <= 0 || seenEvidence[evidenceID] {
+			return fmt.Errorf("evidence %d is not a unique positive locator", evidenceID)
+		}
+		seenEvidence[evidenceID] = true
+		var attemptID int64
+		if err := conn.QueryRowContext(ctx, `SELECT attempt_id FROM evidence WHERE id=?`, evidenceID).Scan(&attemptID); err != nil {
+			return fmt.Errorf("evidence %d: %w", evidenceID, err)
+		}
+		if attemptID != result.AttemptID {
+			return fmt.Errorf("evidence %d belongs to attempt %d, not %d", evidenceID, attemptID, result.AttemptID)
+		}
+	}
+	seenArtifacts := map[int64]bool{}
+	for _, artifactID := range result.ArtifactIDs {
+		if artifactID <= 0 || seenArtifacts[artifactID] {
+			return fmt.Errorf("artifact %d is not a unique positive locator", artifactID)
+		}
+		seenArtifacts[artifactID] = true
+		var granted int
+		if err := conn.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM attempt_artifact_grants WHERE attempt_id=? AND artifact_id=?`,
+			result.AttemptID, artifactID).Scan(&granted); err != nil {
+			return err
+		}
+		if granted != 1 {
+			return fmt.Errorf("artifact %d is not granted to attempt %d", artifactID, result.AttemptID)
+		}
+	}
+	return nil
 }

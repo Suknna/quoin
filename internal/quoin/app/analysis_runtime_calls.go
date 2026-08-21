@@ -101,7 +101,7 @@ func (service *RuntimeService) rejectBegin(ctx context.Context, envelope *runtim
 func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, complete *runtimev1.CompleteModelCall) {
 	attemptType, err := service.attemptTypeOf(ctx, complete.GetAttemptId())
 	if err != nil {
-		service.rejectComplete(ctx, envelope, complete, "attempt lookup failed: "+err.Error())
+		service.rejectComplete(ctx, envelope, complete, "attempt lookup failed: "+err.Error(), runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
 	if attemptType == "connection_probe" {
@@ -109,7 +109,7 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		return
 	}
 	if attemptType != "initial_analysis" {
-		service.rejectComplete(ctx, envelope, complete, "attempt type not handled")
+		service.rejectComplete(ctx, envelope, complete, "attempt type not handled", runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
 	ack := &runtimev1.ControlEnvelope{
@@ -118,9 +118,10 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		BootId:          envelope.GetBootId(),
 		Msg:             &runtimev1.ControlEnvelope_CompleteModelCallAck{CompleteModelCallAck: &runtimev1.CompleteModelCallAck{AttemptId: complete.GetAttemptId(), ModelCallId: complete.GetModelCallId()}},
 	}
-	reject := func(detail string) {
+	reject := func(detail string, reason runtimev1.ModelCallCompletionRejectReason) {
 		ack.GetCompleteModelCallAck().Accepted = false
 		ack.GetCompleteModelCallAck().Detail = detail
+		ack.GetCompleteModelCallAck().RejectReason = reason
 		_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
 		sharedops.LogEvent("quoin", "error", "modelcall.agent_complete_rejected", detail)
 	}
@@ -135,7 +136,7 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		failureReason = "cancelled"
 	case runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED:
 	default:
-		reject("outcome unspecified")
+		reject("outcome unspecified", runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
 	var proposed []attempt.ProposedTool
@@ -156,25 +157,38 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		ResponseDigest: hex.EncodeToString(complete.GetResponseDigest()), ResponseComplete: complete.GetResponseComplete(),
 	})
 	if err != nil {
-		reject(err.Error())
+		// The closed rejection covers every ledger refusal including an
+		// unresolvable tool route (RUNTIME-AGENT-005): no tool call rows
+		// were created and the runtime seals the physical call failed.
+		reject(err.Error(), runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
 	for _, authorization := range authorizations {
-		ack.GetCompleteModelCallAck().ToolCalls = append(ack.GetCompleteModelCallAck().ToolCalls, &runtimev1.ToolCallAuthorization{
+		wire := &runtimev1.ToolCallAuthorization{
 			ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
 			ProviderToolCallId: authorization.ProviderToolCallID, FailureMode: failureModeOf(authorization.FailureMode),
-		})
+		}
+		// Observation tools travel with their frozen non-secret connection
+		// binding (ARCH-INPUT-003); the supervisor fetches the credential
+		// through exactly this grant before executing the tool.
+		for _, grant := range authorization.Grants {
+			wire.ConnectionGrants = append(wire.ConnectionGrants, &runtimev1.ConnectionGrant{
+				GrantId: grant.GrantID, ConnectionRevisionId: grant.ConnectionRevisionID,
+				CredentialGenerationId: grant.CredentialGenerationID, Purpose: grant.Purpose,
+			})
+		}
+		ack.GetCompleteModelCallAck().ToolCalls = append(ack.GetCompleteModelCallAck().ToolCalls, wire)
 	}
 	ack.GetCompleteModelCallAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
 }
 
-func (service *RuntimeService) rejectComplete(ctx context.Context, envelope *runtimev1.ControlEnvelope, complete *runtimev1.CompleteModelCall, detail string) {
+func (service *RuntimeService) rejectComplete(ctx context.Context, envelope *runtimev1.ControlEnvelope, complete *runtimev1.CompleteModelCall, detail string, reason runtimev1.ModelCallCompletionRejectReason) {
 	_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
 		ConnectionEpoch: envelope.GetConnectionEpoch(),
 		CorrelationId:   envelope.GetCorrelationId(),
 		BootId:          envelope.GetBootId(),
-		Msg:             &runtimev1.ControlEnvelope_CompleteModelCallAck{CompleteModelCallAck: &runtimev1.CompleteModelCallAck{AttemptId: complete.GetAttemptId(), ModelCallId: complete.GetModelCallId(), Accepted: false, Detail: detail}},
+		Msg:             &runtimev1.ControlEnvelope_CompleteModelCallAck{CompleteModelCallAck: &runtimev1.CompleteModelCallAck{AttemptId: complete.GetAttemptId(), ModelCallId: complete.GetModelCallId(), Accepted: false, Detail: detail, RejectReason: reason}},
 	})
 }
 
@@ -233,7 +247,7 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		}
 		resultJSON = string(payload.GetCanonicalJson())
 	}
-	err := service.Analyses.Attempts().CompleteToolCall(ctx, attempt.ToolResult{
+	evidenceIDs, err := service.Analyses.Attempts().CompleteToolCall(ctx, attempt.ToolResult{
 		AttemptID: complete.GetAttemptId(), ToolCallID: complete.GetToolCallId(),
 		Outcome: outcome, ResultJSON: resultJSON, ArtifactID: complete.GetArtifactId(),
 		ErrorCode: complete.GetErrorCode(), ErrorDetail: complete.GetErrorDetail(),
@@ -243,7 +257,7 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		return
 	}
 	ack.GetCompleteToolCallAck().Accepted = true
-	ack.GetCompleteToolCallAck().EvidenceIds = nil
+	ack.GetCompleteToolCallAck().EvidenceIds = evidenceIDs
 	if payload != nil {
 		ack.GetCompleteToolCallAck().CommittedPayload = &runtimev1.ResultPayload{
 			SchemaKind: payload.GetSchemaKind(), CanonicalJson: payload.GetCanonicalJson(),

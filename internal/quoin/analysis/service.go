@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/evidence"
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // SchemaKind is the frozen input schema identifier for initial-analysis
@@ -56,6 +58,7 @@ func (err *RowVersionError) Error() string {
 type Service struct {
 	db       *sql.DB
 	attempts *attempt.Service
+	evidence *evidence.Service
 	now      func() time.Time
 	// commandReplay is the bounded in-process idempotency ledger
 	// (principal, client_command_id) -> analysis result, mirroring the
@@ -71,7 +74,9 @@ type replayEntry struct {
 }
 
 // NewService builds the analysis service on the product database and
-// wires the deterministic input rebuilder into the shared attempt machine.
+// wires the deterministic input rebuilder and the tool observation hooks
+// (grant resolution/validation for thanos_query, deterministic Evidence)
+// into the shared attempt machine.
 func NewService(db *sql.DB) *Service {
 	service := &Service{
 		db:       db,
@@ -80,11 +85,34 @@ func NewService(db *sql.DB) *Service {
 		replay:   map[string]replayEntry{},
 	}
 	service.attempts.SnapshotRebuilder = service.RebuildInput
+	service.evidence = evidence.NewService(db)
+	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
+	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) ([]attempt.ToolGrant, error) {
+		if tool.Name != thanos.QueryToolName {
+			return nil, fmt.Errorf("tool %s has no grant resolver", tool.Name)
+		}
+		grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
+		if err != nil {
+			return nil, err
+		}
+		return []attempt.ToolGrant{grant}, nil
+	}
+	service.attempts.ToolGrantValidator = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) error {
+		if tool.Name != thanos.QueryToolName {
+			return fmt.Errorf("tool %s has no grant validator", tool.Name)
+		}
+		return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
+	}
+	service.attempts.EvidenceWriter = service.evidence.WriteForToolCall
 	return service
 }
 
 // Attempts exposes the shared attempt state machine to the runtime slice.
 func (service *Service) Attempts() *attempt.Service { return service.attempts }
+
+// Evidence exposes the evidence authority to the app layer (read paths
+// and the deterministic projector registry).
+func (service *Service) Evidence() *evidence.Service { return service.evidence }
 
 // DB exposes the product database to the app layer for read-only routing
 // queries (attempt type lookups etc.).

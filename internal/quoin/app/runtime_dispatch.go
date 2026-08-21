@@ -236,6 +236,7 @@ func (service *RuntimeService) FetchCredentialGrant(ctx context.Context, request
 	}
 	payload, err := service.Connections.FulfillGrant(ctx, request.GetGrantId(), request.GetAttemptId(), request.GetBootId(), request.GetConnectionEpoch())
 	if err != nil {
+		sharedops.LogEvent("quoin", "error", "grant.fulfill_denied", fmt.Sprintf("grant=%d attempt=%d: %v", request.GetGrantId(), request.GetAttemptId(), err))
 		return nil, status.Error(codes.PermissionDenied, "grant denied")
 	}
 	response := &runtimev1.FetchCredentialGrantResponse{

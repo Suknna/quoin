@@ -57,6 +57,21 @@ type Service struct {
 	// frozen closure requires the tool call to be succeeded first). Nil
 	// skips the grant (probes never produce artifacts).
 	ToolResultGrants func(ctx context.Context, conn *sql.Conn, attemptID, artifactID, toolCallID int64) error
+	// ToolGrantResolver freezes the connection binding of one observation
+	// tool inside CompleteModelCall's transaction, right after the pending
+	// tool_calls row exists (ARCH-INPUT-003). A resolution failure fails
+	// the whole model call (RUNTIME-AGENT-005: an unresolvable tool route
+	// is invalid_response). Nil refuses tools that need a grant.
+	ToolGrantResolver func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) ([]ToolGrant, error)
+	// ToolGrantValidator re-checks the frozen binding before a pending
+	// observation tool may begin executing (DATA-CONN-002). Nil skips the
+	// check (tools without grants).
+	ToolGrantValidator func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) error
+	// EvidenceWriter commits the deterministic Evidence of one succeeded
+	// observation tool inside CompleteToolCall's transaction, while the
+	// tool call is still running (ARCH-TOOL-003, DATA-EVIDENCE-001). Nil
+	// skips evidence (non-observation tools).
+	EvidenceWriter func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID, artifactID int64, payloadJSON []byte, toolName string) ([]int64, error)
 }
 
 // ReleaseVersion returns the quoin release string dispatched attempts
@@ -336,6 +351,17 @@ type Grant struct {
 	CredentialGenerationID  int64
 	Purpose                 string
 	ConnectionProbeResultID int64
+}
+
+// ToolGrant is the non-secret connection binding frozen inside the Tool
+// Call persistence transaction (ARCH-INPUT-003); it travels in the
+// CompleteModelCallAck authorization so the supervisor can fetch the
+// credential for exactly one tool execution.
+type ToolGrant struct {
+	GrantID                int64
+	ConnectionRevisionID   int64
+	CredentialGenerationID int64
+	Purpose                string
 }
 
 // DispatchInput is everything DispatchAttempt.input carries (RUNTIME-TASK-011).
