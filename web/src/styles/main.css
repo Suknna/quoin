@@ -261,6 +261,7 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .analysis-progress { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; }
 .analysis-progress p { margin: 0; }
 .analysis-latest { margin-top: 0.75rem; }
+.analysis-outcome { margin: 0.5rem 0 0; color: var(--text-muted); }
 .analysis-preview { white-space: pre-wrap; color: var(--text-muted); margin: 0.25rem 0 0.5rem; }
 .analysis-history { list-style: none; margin: 0.75rem 0 0; padding: 0; }
 .analysis-history-item { display: flex; gap: 0.75rem; align-items: center; width: 100%; padding: 0.4rem 0; background: none; border: none; cursor: pointer; text-align: left; }

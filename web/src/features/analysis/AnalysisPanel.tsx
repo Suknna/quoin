@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { InitialAnalysisDetail, InitialAnalysisSummary } from './api'
-import { analysisCommandId, cancelAnalysis, createAnalysis, fetchAnalyses, fetchAnalysis, isActive, stateLabel } from './api'
+import { analysisCommandId, cancelAnalysis, createAnalysis, fetchAnalyses, fetchAnalysis, fetchAttempts, isActive, reasonLabel, stateLabel } from './api'
 
 // AnalysisPanel is the inline Initial Analysis section of the alert detail
 // (UI-ALERT-004): one primary action, the real stage while running, the
@@ -12,6 +12,7 @@ export function AnalysisPanel({ occurrenceId, onOpenAnalysis }: { occurrenceId: 
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [outcomeReason, setOutcomeReason] = useState('')
   const timer = useRef<number | null>(null)
 
 	const load = () => {
@@ -30,6 +31,27 @@ export function AnalysisPanel({ occurrenceId, onOpenAnalysis }: { occurrenceId: 
 	}, [occurrenceId])
 
   const active = items.find((item) => isActive(item.state))
+
+  // A terminal technical outcome explains itself: the latest attempt's
+  // termination reason reads back through the immutable attempt history
+  // so 失败/中断 never render as bare state pills (UI-ALERT-004).
+  useEffect(() => {
+    if (!detail || detail.state === 'Succeeded') {
+      setOutcomeReason('')
+      return
+    }
+    if (isActive(detail.state)) return
+    let cancelled = false
+    void fetchAttempts(occurrenceId, detail.id)
+      .then((page) => {
+        if (cancelled) return
+        const history = page.items ?? []
+        const latest = history.length > 0 ? history[history.length - 1] : undefined // attempts read back oldest-first
+        setOutcomeReason(reasonLabel(latest?.terminationReason))
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [occurrenceId, detail?.id, detail?.state]) // eslint-disable-line react-hooks/exhaustive-deps
 
 	// The active analysis is polled for its authoritative state; the
 	// task SSE is the transport-level live channel, polling re-reads the
@@ -123,6 +145,9 @@ export function AnalysisPanel({ occurrenceId, onOpenAnalysis }: { occurrenceId: 
           <p className="analysis-preview">{detail.output.content.slice(0, 240)}{detail.output.content.length > 240 ? '…' : ''}</p>
           <button className="text-button" onClick={() => onOpenAnalysis(detail)}>查看完整分析</button>
         </div>
+      )}
+      {detail && !isActive(detail.state) && outcomeReason && (
+        <p className="analysis-outcome" role="note">{stateLabel(detail.state)} · {outcomeReason}。可重新发起初步分析。</p>
       )}
       <ol className="analysis-history" aria-label="分析历史">
         {items.filter((item) => !isActive(item.state)).map((item) => (

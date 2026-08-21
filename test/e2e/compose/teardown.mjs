@@ -1,7 +1,7 @@
 // Playwright global teardown: removes every resource the e2e stack owns and
 // records the disposition into the ticket cleanup evidence.
 import { execSync } from 'node:child_process'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export default async function globalTeardown() {
@@ -40,5 +40,6 @@ if (existsSync(cleanupPath)) {
   }
 }
 cleanup.playwright = { resources: disposals, note: 'e2e stack removed after Chromium ticket acceptance' }
+mkdirSync(evidenceDir, { recursive: true })
 writeFileSync(cleanupPath, JSON.stringify(cleanup, null, 2))
 }

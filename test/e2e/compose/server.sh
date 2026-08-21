@@ -267,6 +267,22 @@ if [ "$t11_seen" != "1" ]; then
   exit 1
 fi
 
+# --- T12 fixtures: a slow provider alert for the recovery UI scenario ---
+if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T12SlowPage severity=warning instance=db-4 job=quoin; then
+  { echo "FATAL: amtool could not fire T12SlowPage"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+t12_seen=0
+for _ in $(seq 1 30); do
+  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
+  if printf '%s' "$SNAPSHOT" | grep -q T12SlowPage; then t12_seen=1; break; fi
+  sleep 1
+done
+if [ "$t12_seen" != "1" ]; then
+  { echo "FATAL: T12SlowPage never reached the Quoin alert store"; } | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+
 # The fixture doubles as the ready marker: tests only run once every step
 # (login/change/source/reveal/AM alert) has completed.
 printf '%s' "$newpass" > "$stack/admin-new-password"

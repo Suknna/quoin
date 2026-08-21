@@ -195,6 +195,54 @@ func serveStream(writer http.ResponseWriter, body chatRequest) {
 		}
 	}
 	model := body.Model
+	prompt := promptText(body.Messages)
+	// T12 recovery fixtures branch on the alert name carried inside the
+	// agent's frozen occurrence context: a long slow text stream (cancel /
+	// reconnect / lease windows) and a partial stream that hangs up before
+	// [DONE] (partial-token-then-failure).
+	if body.isAgentFirstTurn() && strings.Contains(prompt, "T12Partial") {
+		log.Printf("agent first turn (T12Partial): partial tokens then hang up")
+		for _, word := range []string{"初步诊断：", "中断前"} {
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t12", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+				}},
+			}))
+			time.Sleep(150 * time.Millisecond)
+		}
+		if hijacker, ok := writer.(http.Hijacker); ok {
+			if connection, _, err := hijacker.Hijack(); err == nil {
+				_ = connection.Close()
+				return
+			}
+		}
+		return
+	}
+	if body.isAgentFirstTurn() && strings.Contains(prompt, "T12Slow") {
+		log.Printf("agent first turn (T12Slow): slow text stream (%d words)", 36)
+		words := make([]string, 0, 36)
+		words = append(words, "初步诊断：", "该告警", "在")
+		for index := 0; index < 30; index++ {
+			words = append(words, fmt.Sprintf("第%d段", index+1))
+		}
+		words = append(words, "排查", "完成。")
+		for _, word := range words {
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t12", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+				}},
+			}))
+			time.Sleep(300 * time.Millisecond)
+		}
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-t12", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
 	if body.isAgentFirstTurn() && model == "fixture-chat-thanos" {
 		log.Printf("agent first turn (thanos): streaming native thanos_query tool call")
 		chunk(mustJSONChunk(toolCallChunk(model, "call-agent-thanos", "thanos_query", `{"query":"big"}`)))

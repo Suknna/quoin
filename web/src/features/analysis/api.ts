@@ -86,3 +86,32 @@ export function stateLabel(state: InitialAnalysisSummary['state']): string {
 export function isActive(state: InitialAnalysisSummary['state']): boolean {
   return state === 'Queued' || state === 'Running'
 }
+
+// fetchAttempts reads the immutable attempt history of one analysis
+// (listInitialAnalysisAttempts); the latest attempt's terminationReason
+// explains technical failures and interruptions to the operator.
+export async function fetchAttempts(occurrenceId: string, analysisId: string): Promise<{ items: AttemptSummary[] }> {
+  const response = await fetch(`/api/v1/alerts/${occurrenceId}/analyses/${analysisId}/attempts`, { credentials: 'include' })
+  if (!response.ok) throw new Error('分析执行历史加载失败')
+  return (await response.json()) as { items: AttemptSummary[] }
+}
+
+// reasonLabel projects one machine termination reason onto the plain
+// language an operator reads (UI copy stays Chinese; the raw enum is only
+// a secondary diagnostic detail).
+export function reasonLabel(reason?: string): string {
+  switch (reason) {
+    case 'lease_expired': return '运行时连接丢失且租约到期'
+    case 'replaced': return '运行时被替换'
+    case 'revoked': return '运行时凭据被吊销'
+    case 'provider_unavailable': return '模型供应商暂时不可用'
+    case 'timeout': return '模型调用超时'
+    case 'rate_limited': return '模型调用被限流'
+    case 'invalid_response': return '模型返回无法解析'
+    case 'context_too_large': return '输入超出模型上下文'
+    case 'sandbox_unavailable': return '沙箱不可用'
+    case 'worker_protocol_error': return '执行进程异常退出'
+    case 'cancelled': return '操作者取消'
+    default: return ''
+  }
+}
