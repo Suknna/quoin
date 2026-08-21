@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { InitialAnalysisDetail } from './api'
 import { fetchAnalysis, stateLabel } from './api'
+import { ToolDetails } from './tool-details/ToolDetails'
 
 // AnalysisDetail is the full-workbench reading layer for one immutable
 // Initial Analysis (UI-READING-001, UI-ROUTE-003): the sealed output with
@@ -31,10 +32,13 @@ export function AnalysisDetail({ occurrenceId, analysisId, onClose }: { occurren
             <p className="detail-muted">创建于 {formatTime(detail.createdAt)} · 共 {detail.attemptCount} 次执行 Attempt{detail.output ? ` · 模型 ${detail.output.modelId}` : ''}</p>
           </header>
           {detail.output ? (
-            <article className="analysis-output" aria-label="分析结论">
-              {detail.output.content.split('\n').map((line, index) => <p key={index}>{line || '\u00A0'}</p>)}
-              <footer className="detail-muted">结论不可变地封存于 {formatTime(detail.output.createdAt)}；Succeeded 只表示模型分析完成，不表示告警正常或诊断已验证。</footer>
-            </article>
+            <>
+              <article className="analysis-output" aria-label="分析结论">
+                {detail.output.content.split('\n').map((line, index) => <p key={index}>{line || '\u00A0'}</p>)}
+                <footer className="detail-muted">结论不可变地封存于 {formatTime(detail.output.createdAt)}；Succeeded 只表示模型分析完成，不表示告警正常或诊断已验证。</footer>
+              </article>
+              <ToolDetails evidenceIds={detail.output.evidenceIds ?? []} />
+            </>
           ) : (
             <div className="inline-status" role="status">
               <span className="status-dot waiting" />

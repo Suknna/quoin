@@ -1,0 +1,14 @@
+/* ---- Analysis tool details (T11) ---- */
+.tool-details { margin-top: 1.5rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.tool-details h2 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+.tool-evidence-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+.tool-evidence-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; }
+.tool-evidence-item header { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.tool-evidence-item header time { margin-left: auto; font-size: 0.8rem; }
+.tool-evidence-facts { margin: 0.5rem 0 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.tool-evidence-facts div { display: flex; gap: 0.75rem; align-items: baseline; }
+.tool-evidence-facts dt { color: var(--text-muted); font-size: 0.8rem; min-width: 4.5rem; }
+.tool-evidence-facts dd { margin: 0; overflow-wrap: anywhere; }
+.tool-evidence-facts code { font-size: 0.85rem; }
+.tool-evidence-body { margin-top: 0.5rem; }
+.tool-output-preview { background: var(--surface-alt, rgba(128, 128, 128, 0.08)); border-radius: 6px; padding: 0.6rem; overflow: auto; max-height: 18rem; font-size: 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.5rem 0 0; }
