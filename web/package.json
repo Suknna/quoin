@@ -12,10 +12,13 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@assistant-ui/react": "0.15.14",
+    "@assistant-ui/react-data-stream": "0.12.26",
     "@vitejs/plugin-react": "6.0.5",
-    "vite": "8.2.1",
+    "assistant-stream": "0.3.37",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "vite": "8.2.1"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

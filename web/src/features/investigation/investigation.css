@@ -1,0 +1,158 @@
+/* 调查模块样式：列表、首条消息输入与对话区（assistant-ui 基座 + 本地状态反馈）。 */
+
+.investigation-pane {
+  display: flex;
+  flex-direction: column;
+  /* The chat must own a bounded viewport for scroll-follow to exist:
+     .detail-pane grows with the document, so the pane pins itself to the
+     window height (32px detail-pane padding on each side). */
+  width: min(960px, 100%);
+  height: calc(100vh - 64px);
+  min-height: 0;
+}
+
+.investigation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px 8px;
+}
+
+.investigation-header h2 {
+  margin: 2px 0 0;
+  font-size: 1.05rem;
+}
+
+.investigation-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 18px 10px;
+}
+
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #555);
+}
+
+.list-actions {
+  padding: 8px 12px 4px;
+}
+
+.investigation-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.investigation-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 1px solid var(--border, #ececec);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.investigation-item:hover,
+.investigation-item:focus-visible {
+  background: var(--hover, #f2f6fb);
+  outline: none;
+}
+
+.investigation-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.investigation-activity {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #777);
+}
+
+.new-investigation {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  min-height: 0;
+  flex: 1;
+}
+
+.chat-input-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.chat-input {
+  flex: 1;
+  min-height: 140px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.chat-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-scroll-capture {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px;
+}
+
+.chat-scroll-capture .chat-thread {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-scroll-capture .chat-viewport {
+  min-height: 0;
+  flex: 1;
+  /* The follow logic needs the viewport to be the single scroll owner. */
+  overflow-y: auto;
+}
+
+.chat-new-reply {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #d9d9d9);
+  background: var(--panel, #fff);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.list-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}

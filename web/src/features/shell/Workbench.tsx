@@ -8,6 +8,9 @@ import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
 import { ConnectionsPanel } from '../admin/connections/ConnectionsPanel'
 import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
 import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
+import { InvestigationChat } from '../investigation/InvestigationChat'
+import { InvestigationsList } from '../investigation/InvestigationsList'
+import { NewInvestigation, type InvestigationSourceRef } from '../investigation/NewInvestigation'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -15,6 +18,25 @@ interface WorkbenchProps {
 }
 
 type ModuleKey = 'alerts' | 'investigations' | 'inspections' | 'business-systems' | 'knowledge' | 'admin'
+
+type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
+
+function investigationViewFromPath(): InvestigationView {
+  const match = window.location.pathname.match(/^\/investigations\/(\d+)/)
+  if (match) return { kind: 'chat', investigationId: match[1] }
+  if (window.location.pathname === '/investigations/new') {
+    const params = new URLSearchParams(window.location.search)
+    const sources: InvestigationSourceRef[] = []
+    for (const occurrence of params.getAll('occurrence')) {
+      if (/^\d+$/.test(occurrence)) sources.push({ type: 'occurrence', sourceId: occurrence })
+    }
+    for (const analysis of params.getAll('initialAnalysis')) {
+      if (/^\d+$/.test(analysis)) sources.push({ type: 'initial_analysis', sourceId: analysis })
+    }
+    return { kind: 'new', sources }
+  }
+  return { kind: 'list' }
+}
 
 const modules: Array<{ key: ModuleKey; label: string; path: string; adminOnly?: boolean }> = [
   { key: 'alerts', label: '告警', path: '/alerts' },
@@ -40,6 +62,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [openAnalysisId, setOpenAnalysisId] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
   const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
+  const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
@@ -51,6 +74,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       setSelectedOccurrence(match ? match[1] : null)
       const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
       setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
+      setInvestigationView(investigationViewFromPath())
     }
     sync()
     window.addEventListener('popstate', sync)
@@ -67,6 +91,31 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   function selectOccurrence(id: string) {
     window.history.pushState({}, '', `/alerts/${id}`)
     setSelectedOccurrence(id)
+  }
+
+	function openInvestigation(investigationId: string) {
+		window.history.pushState({}, '', `/investigations/${investigationId}`)
+		setActive('investigations')
+		setInvestigationView({ kind: 'chat', investigationId })
+	}
+
+	function newInvestigation(sources: InvestigationSourceRef[]) {
+		const params = new URLSearchParams()
+		for (const source of sources) {
+			if (source.type === 'occurrence') params.append('occurrence', source.sourceId)
+			if (source.type === 'initial_analysis') params.append('initialAnalysis', source.sourceId)
+		}
+		const query = params.size > 0 ? `?${params.toString()}` : ''
+		window.history.pushState({}, '', `/investigations/new${query}`)
+		// pushState fires no popstate event: the module must switch here or
+		// the entry point from an alert detail stays on the alerts module.
+		setActive('investigations')
+		setInvestigationView({ kind: 'new', sources })
+	}
+
+  function backToInvestigations() {
+    window.history.pushState({}, '', '/investigations')
+    setInvestigationView({ kind: 'list' })
   }
 
   async function logout() {
@@ -134,6 +183,13 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           </section>
           </>
         )}
+		{active === 'investigations' && (
+			<InvestigationsList
+				key={investigationView.kind}
+				onOpen={openInvestigation}
+				onNew={() => newInvestigation([])}
+			/>
+		)}
       </aside>
       <main className="detail-pane" tabIndex={-1}>
         {active === 'admin' && user.role === 'admin' ? (
@@ -144,6 +200,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             openAnalysisId={openAnalysisId ?? undefined}
             onOpenAnalysis={(analysisId) => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}/analyses/${analysisId}`); setOpenAnalysisId(analysisId) }}
             onCloseAnalysis={() => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}`); setOpenAnalysisId(null) }}
+            onStartInvestigation={() => newInvestigation([{ type: 'occurrence', sourceId: selectedOccurrence }])}
             onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null); setOpenAnalysisId(null) }}
           />
         ) : active === 'alerts' ? (
@@ -154,6 +211,23 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
               <p>左侧列出当前 Firing 的告警；接入问题在第二栏顶部切换。</p>
             </div>
             {user.role === 'admin' && <AlertSourceForm onCreated={() => undefined} />}
+          </div>
+        ) : active === 'investigations' && investigationView.kind === 'new' ? (
+          <NewInvestigation
+            sources={investigationView.sources}
+            onCreated={(investigationId) => openInvestigation(investigationId)}
+            onBack={backToInvestigations}
+          />
+        ) : active === 'investigations' && investigationView.kind === 'chat' ? (
+          <InvestigationChat investigationId={investigationView.investigationId} onBack={backToInvestigations} />
+        ) : active === 'investigations' ? (
+          <div className="detail-content">
+            <div className="empty-state">
+              <ModuleIcon name="investigations" large />
+              <h2>从一次调查开始</h2>
+              <p>新建空白调查直接描述问题，或从告警/初步分析进入并自动携带来源。</p>
+              <button className="primary-button" onClick={() => newInvestigation([])}>新建调查</button>
+            </div>
           </div>
         ) : (
           <div className="empty-state">

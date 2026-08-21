@@ -7,7 +7,7 @@ import { fetchAnalysis } from '../analysis/api'
 import type { AlertOccurrenceSummary, ObservationSummary } from './api'
 import { fetchObservations, fetchOccurrence } from './api'
 
-export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCloseAnalysis, onBack }: { occurrenceId: string; openAnalysisId?: string; onOpenAnalysis?: (analysisId: string) => void; onCloseAnalysis?: () => void; onBack: () => void }) {
+export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCloseAnalysis, onBack, onStartInvestigation }: { occurrenceId: string; openAnalysisId?: string; onOpenAnalysis?: (analysisId: string) => void; onCloseAnalysis?: () => void; onBack: () => void; onStartInvestigation?: () => void }) {
   const [occurrence, setOccurrence] = useState<AlertOccurrenceSummary | null>(null)
   const [observations, setObservations] = useState<ObservationSummary[]>([])
   const [error, setError] = useState('')
@@ -78,6 +78,9 @@ export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCl
         <h1>{String(occurrence.labels?.['alertname'] ?? '(无名称)')}</h1>
         {occurrence.state === 'Resolved' && <span className="status-pill resolved">已恢复</span>}
         {occurrence.state === 'Firing' && <span className="status-pill firing">Firing</span>}
+        {onStartInvestigation && (
+          <button className="secondary-button compact" onClick={onStartInvestigation}>发起调查</button>
+        )}
       </header>
       <section className="detail-section" aria-labelledby="labels-title">
         <h2 id="labels-title">标签</h2>
