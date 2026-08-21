@@ -10,12 +10,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
-	"github.com/Suknna/quoin/internal/plinth/agent"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/model"
 	"github.com/Suknna/quoin/internal/plinth/modelprovider"
@@ -41,21 +41,23 @@ type Supervisor struct {
 func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 
-	// Supervisor scope: only connection_probe and initial_analysis
-	// attempts exist here (RUNTIME-SCOPE).
+	// Supervisor scope: connection_probe and plinth agent attempts exist
+	// here (RUNTIME-SCOPE); every agent attempt runs through a fresh
+	// sandboxed worker with its attempt type's frozen input schema.
 	switch dispatch.GetAttemptType() {
 	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
 		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
-	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS:
-		supervisor.runAnalysis(parent, sink, client, dispatch, binding, stopTask)
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION:
+		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
 	}
 }
 
-// runAnalysis drives one initial-analysis attempt through a fresh worker
-// process (ARCH-WORKER-001/002).
-func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
+// runAgent drives one initial-analysis or investigation attempt through a
+// fresh worker process (ARCH-WORKER-001/002); the attempt type selects the
+// worker's work mode and failure payload schema.
+func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -66,10 +68,14 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "dispatch carries no input snapshot")
 		return
 	}
+	failureSchema := "initial_analysis_output_v1"
+	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
+		failureSchema = "investigation_output_v1"
+	}
 	// The frozen input snapshot carries the model contract (model id and
 	// budgets, ARCH-AGENT-003); the supervisor resolves the base URL and
 	// the API key through the attempt-scoped grant (never persisted).
-	analysisInput, err := agent.ParseInput(input.GetCanonicalJson())
+	contract, err := parseModelContract(input.GetCanonicalJson())
 	if err != nil {
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "input snapshot carries no model contract")
 		return
@@ -83,7 +89,7 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 	bearer, bearerErr := supervisor.Channel.BearerToken()
 	if bearerErr != nil {
 		grantCancel()
-		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "读取状态卷 token 失败: "+bearerErr.Error())
+		supervisor.proposeFailure(sink, attemptID, failureSchema, "读取状态卷 token 失败: "+bearerErr.Error())
 		return
 	}
 	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
@@ -91,12 +97,12 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 	})
 	grantCancel()
 	if err != nil || payload.GetModelProvider() == nil {
-		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "获取模型凭据 grant 失败")
+		supervisor.proposeFailure(sink, attemptID, failureSchema, "获取模型凭据 grant 失败")
 		return
 	}
 	var config plinthconnections.ModelProviderConfig
 	if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil || config.BaseURL == "" {
-		supervisor.proposeFailure(sink, attemptID, "initial_analysis_output_v1", "模型供应商 revision 配置无法解析")
+		supervisor.proposeFailure(sink, attemptID, failureSchema, "模型供应商 revision 配置无法解析")
 		return
 	}
 	runner := &worker.Runner{
@@ -106,15 +112,40 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 		Config: worker.RunnerConfig{
 			WorkspaceRoot: supervisor.WorkspaceRoot,
 			ModelContract: model.Contract{
-				ModelID: analysisInput.ModelContract.ModelID, BaseURL: config.BaseURL,
+				ModelID: contract.ModelContract.ModelID, BaseURL: config.BaseURL,
 				APIKey:        payload.GetModelProvider().GetApiKey(),
-				ContextBudget: analysisInput.ModelContract.ContextBudgetTokens,
-				MaxOutput:     analysisInput.ModelContract.MaxOutputTokens,
+				ContextBudget: contract.ModelContract.ContextBudgetTokens,
+				MaxOutput:     contract.ModelContract.MaxOutputTokens,
 				Streaming:     true,
 			},
 		},
 	}
 	runner.Run(ctx, attemptID, dispatch)
+}
+
+// parseModelContract extracts the frozen chat contract shared by both
+// agent input schemas (initial_analysis_v1 / investigation_v1).
+func parseModelContract(canonical []byte) (struct {
+	ModelContract struct {
+		ModelID             string `json:"modelId"`
+		ContextBudgetTokens int    `json:"contextBudgetTokens"`
+		MaxOutputTokens     int    `json:"maxOutputTokens"`
+	} `json:"modelContract"`
+}, error) {
+	var contract struct {
+		ModelContract struct {
+			ModelID             string `json:"modelId"`
+			ContextBudgetTokens int    `json:"contextBudgetTokens"`
+			MaxOutputTokens     int    `json:"maxOutputTokens"`
+		} `json:"modelContract"`
+	}
+	if err := json.Unmarshal(canonical, &contract); err != nil {
+		return contract, err
+	}
+	if contract.ModelContract.ModelID == "" {
+		return contract, errors.New("model contract missing")
+	}
+	return contract, nil
 }
 
 // primaryGrant returns the dispatch grant with the given purpose.

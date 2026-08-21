@@ -10,7 +10,6 @@ import (
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"github.com/Suknna/quoin/internal/plinth/agent"
 )
 
 // inputItem is the worker-side lineage item.
@@ -25,9 +24,9 @@ type inputItem struct {
 // initialInputItems builds the first request lineage: the fixed system
 // contract, the fixed tool schema and the frozen attempt input snapshot
 // (the snapshot row id is resolved by Quoin, which owns the row).
-func initialInputItems(start *workerv1.StartAttempt) []inputItem {
+func initialInputItems(prompt string, start *workerv1.StartAttempt) []inputItem {
 	return []inputItem{
-		{seq: 1, kind: "system_contract", digest: digestOf(agent.SystemPrompt), role: "system"},
+		{seq: 1, kind: "system_contract", digest: digestOf(prompt), role: "system"},
 		{seq: 2, kind: "tool_schema", digest: start.GetToolSchemaDigest(), role: "system"},
 		{seq: 3, kind: "snapshot", digest: start.GetContentDigest(), role: "system"},
 	}

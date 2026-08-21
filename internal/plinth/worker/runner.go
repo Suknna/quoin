@@ -52,6 +52,10 @@ type Runner struct {
 	// failure with the provider's real reason instead of a generic
 	// protocol error (RUNTIME-TASK-009).
 	lastModelFailure string
+	// failureSchemaKind is the attempt type's frozen failure payload
+	// schema (proposeFailure must not stamp an analysis schema onto an
+	// investigation attempt).
+	failureSchemaKind string
 }
 
 type toolMeta struct {
@@ -83,6 +87,14 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	runner.Channel.RegisterTask(attemptID, cancel)
+	// The frozen attempt-type map picks the work mode and the failure
+	// payload schema (RUNTIME-TASK-003: agent attempts dispatch to plinth).
+	workMode := workerv1.WorkMode_WORK_MODE_INITIAL_ANALYSIS
+	runner.failureSchemaKind = OutputSchemaKind
+	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
+		workMode = workerv1.WorkMode_WORK_MODE_INVESTIGATION
+		runner.failureSchemaKind = InvestigationOutputSchemaKind
+	}
 	workspaceDir := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
 	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
 		runner.proposeFailure(attemptID, "sandbox_unavailable", "workspace create failed: "+err.Error())
@@ -95,7 +107,7 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 			sharedops.LogEvent("plinth", "warn", "worker.workspace_cleanup", err.Error())
 		}
 	}()
-	if err := runner.runWorker(ctx, attemptID, dispatch, workspaceDir); err != nil {
+	if err := runner.runWorker(ctx, attemptID, dispatch, workspaceDir, workMode); err != nil {
 		// The worker already proposed a result on the normal paths; a
 		// protocol-level exit maps to a structured technical failure.
 		sharedops.LogEvent("plinth", "error", "worker.run_failed", fmt.Sprintf("attempt=%d %v", attemptID, err))
@@ -104,7 +116,7 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 }
 
 // runWorker spawns the fresh worker process and bridges its frames.
-func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *runtimev1.DispatchAttempt, workspaceDir string) error {
+func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *runtimev1.DispatchAttempt, workspaceDir string, workMode workerv1.WorkMode) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -149,7 +161,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 		return errors.New("dispatch carries no input snapshot")
 	}
 	start := &workerv1.StartAttempt{
-		Mode:       workerv1.WorkMode_WORK_MODE_INITIAL_ANALYSIS,
+		Mode:       workMode,
 		SchemaKind: input.GetSchemaKind(), CanonicalJson: input.GetCanonicalJson(),
 		ContentDigest: input.GetContentDigest(), AgentVersion: input.GetAgentVersion(),
 	}
@@ -396,6 +408,10 @@ func (runner *Runner) proposeFailure(attemptID int64, reason, detail string) {
 	}
 	canonical := []byte(`""`)
 	digest := sha256.Sum256(canonical)
+	schemaKind := runner.failureSchemaKind
+	if schemaKind == "" {
+		schemaKind = OutputSchemaKind
+	}
 	runner.Channel.RegisterResult(&runtimev1.ResultProposal{
 		AttemptId:         attemptID,
 		BootId:            runner.Binding.BootID,
@@ -403,7 +419,7 @@ func (runner *Runner) proposeFailure(attemptID int64, reason, detail string) {
 		Outcome:           runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED,
 		TerminationReason: terminationEnum(reason),
 		Payload: &runtimev1.ResultPayload{
-			SchemaKind: "initial_analysis_output_v1", CanonicalJson: canonical,
+			SchemaKind: schemaKind, CanonicalJson: canonical,
 			ContentDigest: digest[:],
 		},
 	})

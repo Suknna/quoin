@@ -23,8 +23,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Config carries the process-level worker inputs (argv only; the
-// environment is cleared by the supervisor and never read).
 type Config struct {
 	WorkspaceDir   string
 	SupervisorPID  int
@@ -39,10 +37,54 @@ type Config struct {
 // successful initial analysis (mirrors the Quoin-side constant).
 const OutputSchemaKind = "initial_analysis_output_v1"
 
+// InvestigationOutputSchemaKind is the frozen result payload schema
+// identifier for a successful investigation turn (mirrors the Quoin-side
+// investigation.OutputSchemaKind).
+const InvestigationOutputSchemaKind = "investigation_output_v1"
+
 // maxModelRetries bounds the worker-side physical retry budget per logical
 // call (ARCH-AGENT-004: only transport-class failures with no visible
 // chunk may retry).
 const maxModelRetries = 3
+
+// attemptMode pins the frozen per-attempt-type contract: input schema,
+// agent generation, system prompt, message assembly and result payload
+// schema (DATA-ATTEMPT-001: attempt_type + "_v1").
+type attemptMode struct {
+	schemaKind       string
+	agentVersion     string
+	outputSchemaKind string
+	prompt           string
+	buildMessages    func(canonical []byte) ([]*schema.Message, error)
+}
+
+var initialAnalysisMode = attemptMode{
+	schemaKind:       "initial_analysis_v1",
+	agentVersion:     WorkerAgentVersion,
+	outputSchemaKind: OutputSchemaKind,
+	prompt:           agent.SystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInitialMessages(input)
+	},
+}
+
+var investigationMode = attemptMode{
+	schemaKind:       "investigation_v1",
+	agentVersion:     WorkerInvestigationAgentVersion,
+	outputSchemaKind: InvestigationOutputSchemaKind,
+	prompt:           agent.InvestigationSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInvestigationInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInvestigationMessages(input)
+	},
+}
 
 // Run drives one attempt to a terminal outcome. Exit code 0 means the
 // attempt concluded normally (result proposed or cancelled); exit code 1
@@ -81,7 +123,8 @@ func Run(ctx context.Context, config Config) error {
 		return fmt.Errorf("%w: first frame must be StartAttempt", ErrProtocol)
 	}
 	attemptID := start.GetAttemptId()
-	if err := verifyStart(startAttempt); err != nil {
+	mode, err := verifyStart(startAttempt)
+	if err != nil {
 		_ = writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_StartAttemptAck{
 			StartAttemptAck: &workerv1.StartAttemptAck{Accepted: false, Detail: err.Error()},
 		}})
@@ -92,29 +135,33 @@ func Run(ctx context.Context, config Config) error {
 	}}); err != nil {
 		return err
 	}
-	return runLoop(ctx, config, reader, writer, attemptID, startAttempt)
+	return runLoop(ctx, config, reader, writer, attemptID, startAttempt, mode)
 }
 
-// verifyStart enforces the frozen input contract (ARCH-WORKER-006).
-func verifyStart(start *workerv1.StartAttempt) error {
-	if start.GetSchemaKind() != "initial_analysis_v1" {
-		return fmt.Errorf("unsupported schema_kind %q", start.GetSchemaKind())
+// verifyStart enforces the frozen input contract (ARCH-WORKER-006) and
+// resolves the attempt mode.
+func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
+	var mode attemptMode
+	switch start.GetSchemaKind() {
+	case initialAnalysisMode.schemaKind:
+		mode = initialAnalysisMode
+	case investigationMode.schemaKind:
+		mode = investigationMode
+	default:
+		return attemptMode{}, fmt.Errorf("unsupported schema_kind %q", start.GetSchemaKind())
 	}
-	if start.GetAgentVersion() != WorkerAgentVersion {
-		return fmt.Errorf("agent version mismatch: worker %s, dispatch %s", WorkerAgentVersion, start.GetAgentVersion())
+	if start.GetAgentVersion() != mode.agentVersion {
+		return attemptMode{}, fmt.Errorf("agent version mismatch: worker %s, dispatch %s", mode.agentVersion, start.GetAgentVersion())
 	}
 	sum := sha256.Sum256(start.GetCanonicalJson())
 	if hex.EncodeToString(sum[:]) != hex.EncodeToString(start.GetContentDigest()) {
-		return errors.New("input content digest mismatch")
+		return attemptMode{}, errors.New("input content digest mismatch")
 	}
-	return nil
+	return mode, nil
 }
 
-// runLoop implements the sequential model loop (ARCH-AGENT-002): build
-// context → one chat request → execute prepared tool calls in order →
-// repeat until a final result or cancellation.
-func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *FrameWriter, attemptID int64, start *workerv1.StartAttempt) error {
-	input, err := agent.ParseInput(start.GetCanonicalJson())
+func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *FrameWriter, attemptID int64, start *workerv1.StartAttempt, mode attemptMode) error {
+	messages, err := mode.buildMessages(start.GetCanonicalJson())
 	if err != nil {
 		fmt.Fprintf(config.Stderr, "input_rejected: %v\n", err)
 		return err
@@ -124,12 +171,8 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 		return err
 	}
 	toolsDigest := sha256.Sum256(toolsJSON)
-	messages, err := agent.BuildInitialMessages(input)
-	if err != nil {
-		return err
-	}
 	callSeq := uint32(0)
-	inputItems := initialInputItems(start)
+	inputItems := initialInputItems(mode.prompt, start)
 	// Deterministic Evidence and Artifact ids accumulate from the sealed
 	// Tool Results (Quoin commits both before ToolResult reaches the
 	// worker); the final proposal references them explicitly
@@ -245,7 +288,7 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 			if err := writer.Send(&workerv1.WorkerEnvelope{
 				AttemptId: attemptID,
 				Msg: &workerv1.WorkerEnvelope_WorkerResultProposal{WorkerResultProposal: &workerv1.WorkerResultProposal{
-					SchemaKind: OutputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:],
+					SchemaKind: mode.outputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:],
 					EvidenceIds: evidenceIDs, ArtifactIds: artifactIDs,
 				}},
 			}); err != nil {

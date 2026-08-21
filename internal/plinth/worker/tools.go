@@ -28,6 +28,10 @@ import (
 // attempt.AgentVersion.
 const WorkerAgentVersion = "initial-analysis-v1"
 
+// WorkerInvestigationAgentVersion pins the investigation agent generation
+// (mirrors investigation.AgentVersion).
+const WorkerInvestigationAgentVersion = "investigation-v1"
+
 // Spill thresholds (ARCH-OUTPUT-001, RUNTIME-ARTIFACT-001).
 const (
 	spillBytes = 50 * 1024

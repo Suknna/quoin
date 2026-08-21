@@ -80,6 +80,75 @@ func BuildInitialMessages(input Input) ([]*schema.Message, error) {
 	}, nil
 }
 
+// InvestigationSystemPrompt is the fixed agent contract for investigation
+// attempts (rendered identically by every worker of this agent version;
+// its digest travels in BeginModelCall.prompt_digest for audit and rebuild).
+const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
+1. 用通俗中文与用户对话，先理解问题，再给出排查思路；
+2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；
+3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据。`
+
+// InvestigationRendererVersion identifies the investigation prompt renderer
+// generation.
+const InvestigationRendererVersion = "investigation-renderer-v1"
+
+// InvestigationInput is the worker's view of the frozen investigation_v1
+// snapshot: the active-branch messages, the provenance references and the
+// chat contract.
+type InvestigationInput struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Sources       []json.RawMessage `json:"sources"`
+	ModelContract struct {
+		ModelID             string `json:"modelId"`
+		ContextBudgetTokens int    `json:"contextBudgetTokens"`
+		MaxOutputTokens     int    `json:"maxOutputTokens"`
+	} `json:"modelContract"`
+}
+
+// ParseInvestigationInput decodes and validates the frozen
+// investigation_v1 input.
+func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
+	var input InvestigationInput
+	if err := json.Unmarshal(canonical, &input); err != nil {
+		return InvestigationInput{}, fmt.Errorf("investigation_v1 input unparseable: %w", err)
+	}
+	if len(input.Messages) == 0 {
+		return InvestigationInput{}, fmt.Errorf("investigation_v1 input carries no messages")
+	}
+	if input.ModelContract.ModelID == "" {
+		return InvestigationInput{}, fmt.Errorf("investigation_v1 input missing model contract")
+	}
+	return input, nil
+}
+
+// BuildInvestigationMessages assembles the first request: the fixed system
+// contract, the provenance references (references only — never bodies) and
+// the active-branch messages in order.
+func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
+	messages := []*schema.Message{schema.SystemMessage(InvestigationSystemPrompt)}
+	if len(input.Sources) > 0 {
+		contextBody, err := json.MarshalIndent(map[string]any{"调查来源引用": input.Sources}, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, schema.SystemMessage("本次调查关联以下不可变来源（仅引用，不代表结论）：\n"+string(contextBody)))
+	}
+	for _, item := range input.Messages {
+		switch item.Role {
+		case "user":
+			messages = append(messages, schema.UserMessage(item.Content))
+		case "assistant":
+			messages = append(messages, schema.AssistantMessage(item.Content, nil))
+		default:
+			return nil, fmt.Errorf("investigation_v1 carries unknown message role %q", item.Role)
+		}
+	}
+	return messages, nil
+}
+
 // ToolResultMessage builds the Eino tool result message for one committed
 // tool result (role=tool, bound to the provider tool call id).
 func ToolResultMessage(providerToolCallID, toolName string, resultJSON []byte) *schema.Message {

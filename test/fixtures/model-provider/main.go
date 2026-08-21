@@ -196,6 +196,55 @@ func serveStream(writer http.ResponseWriter, body chatRequest) {
 	}
 	model := body.Model
 	prompt := promptText(body.Messages)
+	// T13 investigation fixtures branch on the frozen investigation system
+	// contract: a deterministic Chinese answer (the acceptance asserts the
+	// multi-byte deltas survive the byte-level SSE framing exactly) and a
+	// partial-then-hangup branch that drives the attempt failure and the
+	// error frame.
+	if strings.Contains(prompt, "只读运维调查代理") {
+		if strings.Contains(prompt, "T13Broken") {
+			log.Printf("investigation (T13Broken): partial tokens then hang up")
+			for _, word := range []string{"开始", "分析"} {
+				chunk(mustJSONChunk(map[string]any{
+					"id": "chat-t13", "object": "chat.completion.chunk", "model": model,
+					"choices": []any{map[string]any{
+						"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+					}},
+				}))
+				time.Sleep(120 * time.Millisecond)
+			}
+			if hijacker, ok := writer.(http.Hijacker); ok {
+				if connection, _, err := hijacker.Hijack(); err == nil {
+					_ = connection.Close()
+					return
+				}
+			}
+			return
+		}
+		log.Printf("investigation: streaming deterministic Chinese answer (%d words)", 15)
+		words := []string{"调查结论：", "该", "告警", "最可能", "是", "短时", "资源", "波动", "引起", "，", "建议", "观察", "后续", "指标", "（fixture-proof-t13）"}
+		delay := 80 * time.Millisecond
+		// The UI-CHAT-003 turn (capacity/dependency wording) streams slowly
+		// so the e2e reader detach lands mid-stream deterministically.
+		if strings.Contains(prompt, "容量、依赖") {
+			delay = 400 * time.Millisecond
+		}
+		for _, word := range words {
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t13", "object": "chat.completion.chunk", "model": model,
+				"choices": []any{map[string]any{
+					"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil,
+				}},
+			}))
+			time.Sleep(delay)
+		}
+		chunk(mustJSONChunk(map[string]any{
+			"id": "chat-t13", "object": "chat.completion.chunk", "model": model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		}))
+		chunk("[DONE]")
+		return
+	}
 	// T12 recovery fixtures branch on the alert name carried inside the
 	// agent's frozen occurrence context: a long slow text stream (cancel /
 	// reconnect / lease windows) and a partial stream that hangs up before
