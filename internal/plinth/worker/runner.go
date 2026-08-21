@@ -8,6 +8,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,7 @@ type Runner struct {
 	Channel   *plinthruntime.Channel
 	Client    runtimev1.RuntimeControlClient
 	Artifacts runtimev1.ArtifactServiceClient
+	Binding   plinthruntime.DispatchBinding
 	Config    RunnerConfig
 	// retries tracks the physical retry sequence per logical call (the
 	// worker re-sends ChatModelRequest after a retryable failure).
@@ -45,6 +47,11 @@ type Runner struct {
 	// tools tracks the durable identity of each prepared tool call
 	// (toolCallID -> tool name + execution mode).
 	tools map[int64]toolMeta
+	// lastModelFailure carries the most recent structured model-call
+	// failure class so a worker exit without a result proposes the attempt
+	// failure with the provider's real reason instead of a generic
+	// protocol error (RUNTIME-TASK-009).
+	lastModelFailure string
 }
 
 type toolMeta struct {
@@ -124,6 +131,13 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 	if err := process.Start(); err != nil {
 		return fmt.Errorf("spawn worker: %w", err)
 	}
+	// Every exit path stops and reaps the worker process: a protocol
+	// error must never leak the sandboxed child (ARCH-WORKER-001: one
+	// fresh workspace per attempt, destroyed with the process).
+	defer func() {
+		_ = process.Process.Kill()
+		_, _ = process.Process.Wait()
+	}()
 	sharedops.LogEvent("plinth", "info", "worker.started", fmt.Sprintf("attempt=%d pid=%d", attemptID, process.Process.Pid))
 	go drainStderr(stderr, attemptID)
 	writer := NewFrameWriter(stdin)
@@ -183,7 +197,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 		process.Process.Kill()
 		return err
 	}
-	executor := &model.Executor{Sink: runner.Sink, Channel: runner.Channel, Client: runner.Client}
+	executor := &model.Executor{Sink: runner.Sink, Channel: runner.Channel, Client: runner.Client, Binding: runner.Binding}
 	// Bridge loop: the worker proposes; the supervisor persists via Quoin
 	// and answers; the loop ends at WorkerResultProposal or cancel.
 	resultProposed := false
@@ -240,6 +254,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 				return fmt.Errorf("model executor: %w", execErr)
 			}
 			if failure != nil {
+				runner.lastModelFailure = failure.Reason
 				if failure.Retryable {
 					runner.advanceRetry(request.GetCallSeq())
 				}
@@ -314,8 +329,17 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 			}
 		case *workerv1.WorkerEnvelope_WorkerResultProposal:
 			proposal := message.WorkerResultProposal
-			if err := runner.commitResult(ctx, attemptID, proposal); err != nil {
+			ack, err := runner.commitResult(ctx, attemptID, proposal)
+			switch {
+			case err != nil:
 				return err
+			case ack != nil && !ack.GetAccepted():
+				// Quoin adjudicated the attempt terminal through another
+				// path (cancellation fence or loss convergence won the commit
+				// race): the worker's result is a late result — audit only. The
+				// worker is answered deterministically and the attempt is NOT
+				// re-proposed (DATA-ATTEMPT-004).
+				sharedops.LogEvent("plinth", "info", "worker.result_late", fmt.Sprintf("attempt=%d detail=%s", attemptID, ack.GetDetail()))
 			}
 			resultProposed = true
 			if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_WorkerResultAck{
@@ -338,48 +362,73 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 	}
 }
 
-// commitResult proposes the worker's final domain output to Quoin and
-// relays the adjudication (RUNTIME-TASK-008/012).
-func (runner *Runner) commitResult(ctx context.Context, attemptID int64, proposal *workerv1.WorkerResultProposal) error {
-	reply, err := runner.Channel.Request(ctx, &runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{
-			AttemptId: attemptID, BootId: runner.Sink.BootID(), ConnectionEpoch: runner.Sink.Epoch(),
-			Outcome: runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
-			Payload: &runtimev1.ResultPayload{
-				SchemaKind: proposal.GetSchemaKind(), CanonicalJson: proposal.GetCanonicalJson(),
-				ContentDigest: proposal.GetContentDigest(), EvidenceIds: proposal.GetEvidenceIds(),
-				ArtifactIds: proposal.GetArtifactIds(),
-			},
-		}},
+// commitResult proposes the worker's final domain output through the
+// channel's reliable delivery and returns the adjudication ack
+// (RUNTIME-TASK-008/012). The frozen dispatch binding identifies the
+// attempt on Quoin even after same-boot reconnects; a rejected ack means
+// the attempt was already terminal through another commit-order winner.
+func (runner *Runner) commitResult(ctx context.Context, attemptID int64, proposal *workerv1.WorkerResultProposal) (*runtimev1.ResultAck, error) {
+	ack, err := runner.Channel.ProposeResult(ctx, &runtimev1.ResultProposal{
+		AttemptId:       attemptID,
+		BootId:          runner.Binding.BootID,
+		ConnectionEpoch: runner.Binding.Epoch,
+		Outcome:         runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED,
+		Payload: &runtimev1.ResultPayload{
+			SchemaKind: proposal.GetSchemaKind(), CanonicalJson: proposal.GetCanonicalJson(),
+			ContentDigest: proposal.GetContentDigest(), EvidenceIds: proposal.GetEvidenceIds(),
+			ArtifactIds: proposal.GetArtifactIds(),
+		},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ack := reply.GetResultAck()
-	if ack == nil {
-		return errors.New("result ack missing")
-	}
-	if !ack.GetAccepted() {
-		return fmt.Errorf("result rejected: %s", ack.GetDetail())
-	}
-	return nil
+	return ack, nil
 }
 
-// proposeFailure closes the attempt as a structured technical failure.
+// proposeFailure registers a structured technical failure as the
+// attempt's terminal result for reliable delivery: the frozen binding
+// identifies the attempt, and a provider failure class that already
+// sealed a model call maps to the attempt's termination reason instead of
+// a generic protocol error (RUNTIME-TASK-009).
 func (runner *Runner) proposeFailure(attemptID int64, reason, detail string) {
-	_ = runner.Sink.Send(&runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{
-			AttemptId: attemptID, BootId: runner.Sink.BootID(), ConnectionEpoch: runner.Sink.Epoch(),
-			Outcome:           runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED,
-			TerminationReason: terminationEnum(reason),
-			Payload: &runtimev1.ResultPayload{
-				SchemaKind: "initial_analysis_output_v1", CanonicalJson: []byte(`""`),
-			},
-		}},
+	if mapped := attemptTerminationFor(runner.lastModelFailure); mapped != "" {
+		reason = mapped
+	}
+	canonical := []byte(`""`)
+	digest := sha256.Sum256(canonical)
+	runner.Channel.RegisterResult(&runtimev1.ResultProposal{
+		AttemptId:         attemptID,
+		BootId:            runner.Binding.BootID,
+		ConnectionEpoch:   runner.Binding.Epoch,
+		Outcome:           runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED,
+		TerminationReason: terminationEnum(reason),
+		Payload: &runtimev1.ResultPayload{
+			SchemaKind: "initial_analysis_output_v1", CanonicalJson: canonical,
+			ContentDigest: digest[:],
+		},
 	})
 	sharedops.LogEvent("plinth", "info", "worker.proposed_failure", fmt.Sprintf("attempt=%d reason=%s detail=%s", attemptID, reason, detail))
+}
+
+// attemptTerminationFor maps one sealed model-call failure class onto the
+// attempt's closed termination reasons (the SQL enum carries no
+// transport_error; a transport-class provider failure is the provider
+// being unavailable from the attempt's viewpoint).
+func attemptTerminationFor(modelFailure string) string {
+	switch modelFailure {
+	case "timeout":
+		return "timeout"
+	case "rate_limited":
+		return "rate_limited"
+	case "invalid_response":
+		return "invalid_response"
+	case "context_overflow":
+		return "context_too_large"
+	case "transport_error", "provider_unavailable":
+		return "provider_unavailable"
+	default:
+		return ""
+	}
 }
 
 // terminationEnum resolves one stable termination-reason name to its wire

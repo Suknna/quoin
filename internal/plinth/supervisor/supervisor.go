@@ -34,18 +34,20 @@ type Supervisor struct {
 	WorkspaceRoot string
 }
 
-// HandleDispatchAttempt runs one dispatched probe attempt to a typed
-// terminal result proposal.
-func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
+// HandleDispatchAttempt runs one dispatched attempt to a typed terminal
+// result proposal. The binding is the frozen (boot, epoch) identity of the
+// dispatch; terminal proposals carry it so Quoin adjudicates against the
+// frozen row binding even after same-boot reconnects (RUNTIME-TASK-008).
+func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 
 	// Supervisor scope: only connection_probe and initial_analysis
 	// attempts exist here (RUNTIME-SCOPE).
 	switch dispatch.GetAttemptType() {
 	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
-		supervisor.runProbe(parent, sink, client, dispatch, stopTask)
+		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS:
-		supervisor.runAnalysis(parent, sink, client, dispatch, stopTask)
+		supervisor.runAnalysis(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
 	}
@@ -53,7 +55,7 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 
 // runAnalysis drives one initial-analysis attempt through a fresh worker
 // process (ARCH-WORKER-001/002).
-func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
+func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -85,7 +87,7 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 		return
 	}
 	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
-		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: sink.BootID(), ConnectionEpoch: sink.Epoch(),
+		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
 	})
 	grantCancel()
 	if err != nil || payload.GetModelProvider() == nil {
@@ -100,6 +102,7 @@ func (supervisor *Supervisor) runAnalysis(parent context.Context, sink *runtime.
 	runner := &worker.Runner{
 		Sink: sink, Channel: supervisor.Channel, Client: client,
 		Artifacts: supervisor.Channel.Artifacts,
+		Binding:   binding,
 		Config: worker.RunnerConfig{
 			WorkspaceRoot: supervisor.WorkspaceRoot,
 			ModelContract: model.Contract{
@@ -125,7 +128,7 @@ func (supervisor *Supervisor) primaryGrant(input *runtimev1.AttemptInputSnapshot
 }
 
 // runProbe keeps the T07/T08 deterministic probe slice.
-func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool) {
+func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -166,8 +169,8 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 	grantPayload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
 		GrantId:         grant.GetGrantId(),
 		AttemptId:       attemptID,
-		BootId:          sink.BootID(),
-		ConnectionEpoch: sink.Epoch(),
+		BootId:          binding.BootID,
+		ConnectionEpoch: binding.Epoch,
 	})
 	grantCancel()
 	if err != nil {
@@ -268,8 +271,8 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		CorrelationId: uint64(attemptID),
 		Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{
 			AttemptId:       attemptID,
-			BootId:          sink.BootID(),
-			ConnectionEpoch: sink.Epoch(),
+			BootId:          binding.BootID,
+			ConnectionEpoch: binding.Epoch,
 			Outcome:         outcomeFor(outcome),
 			Payload: &runtimev1.ResultPayload{
 				SchemaKind:    schemaKind,

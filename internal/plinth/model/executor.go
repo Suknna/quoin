@@ -53,6 +53,11 @@ type Executor struct {
 	Sink    *runtime.FrameSink
 	Channel *runtime.Channel
 	Client  runtimev1.RuntimeControlClient
+	// Binding is the frozen (boot, epoch) identity of the dispatched
+	// attempt: FetchCredentialGrant carries it (Quoin fences grants against
+	// the frozen row binding, not the live stream epoch — a same-boot
+	// reconnect raises the stream epoch without rebinding the attempt).
+	Binding runtime.DispatchBinding
 	// DeltaHook receives visible stream deltas (wired by the runner to the
 	// worker's ChatModelChunk and the control-stream ModelTokenDelta).
 	DeltaHook func(ctx context.Context, delta string) error
@@ -65,6 +70,10 @@ type Failure struct {
 	Retryable         bool
 	ProviderRequestID string
 	ModelCallID       int64 // 0 when no ledger row exists
+	// PartialText carries the already-exposed visible stream text when the
+	// provider failed mid-stream: the physical audit row must persist it
+	// as an incomplete output (RUNTIME-AGENT-005, DATA-AUDIT-003).
+	PartialText string
 }
 
 // Authorization is the durable identity of one pending tool call the
@@ -120,36 +129,37 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 		return 0, "", nil, nil, nil, &Failure{Reason: "invalid_response", Detail: detail}, nil
 	}
 	callID := ack.GetModelCallId()
-	fail := func(reason, detail string, retryable bool, requestID string) (int64, string, []ProposedTool, []Authorization, []byte, *Failure, error) {
-		// Seal the failed physical call so the audit row exists
-		// (ARCH-AGENT-005).
-		_ = executor.completeFailure(ctx, attemptID, callID, reason, requestID)
-		return callID, "", nil, nil, nil, &Failure{Reason: reason, Detail: detail, Retryable: retryable, ProviderRequestID: requestID, ModelCallID: callID}, nil
+	fail := func(reason, detail string, retryable bool, requestID string, partialText string) (int64, string, []ProposedTool, []Authorization, []byte, *Failure, error) {
+		// Seal the failed physical call so the audit row exists, including
+		// any already-exposed partial text as an incomplete output
+		// (ARCH-AGENT-005, RUNTIME-AGENT-005).
+		_ = executor.completeFailure(ctx, attemptID, callID, reason, requestID, partialText)
+		return callID, "", nil, nil, nil, &Failure{Reason: reason, Detail: detail, Retryable: retryable, ProviderRequestID: requestID, ModelCallID: callID, PartialText: partialText}, nil
 	}
 	grant := ack.GetModelProviderGrant()
 	if grant == nil {
-		return fail("provider_unavailable", "begin ack lacks the model provider grant", false, "")
+		return fail("provider_unavailable", "begin ack lacks the model provider grant", false, "", "")
 	}
 	secret, err := executor.fetchGrant(ctx, grant.GetGrantId(), attemptID)
 	if err != nil {
-		return fail("provider_unavailable", "credential grant denied: "+err.Error(), false, "")
+		return fail("provider_unavailable", "credential grant denied: "+err.Error(), false, "", "")
 	}
 	var messages []*schema.Message
 	if err := json.Unmarshal(messagesJSON, &messages); err != nil {
-		return fail("invalid_response", "messages_json unparseable: "+err.Error(), false, "")
+		return fail("invalid_response", "messages_json unparseable: "+err.Error(), false, "", "")
 	}
 	chatModel, capture, err := newAdapter(ctx, toolsJSON, secret, contract)
 	if err != nil {
-		return fail("invalid_response", err.Error(), false, "")
+		return fail("invalid_response", err.Error(), false, "", "")
 	}
 	started := time.Now()
-	assistantText, toolCalls, usage, finishReason, chunkSeen, callErr := executor.callProvider(ctx, chatModel, messages, contract)
+	assistantText, toolCalls, usage, finishReason, chunkSeen, partialText, callErr := executor.callProvider(ctx, chatModel, messages, contract)
 	if callErr != nil {
 		reason, retryable := classifyProviderError(callErr)
 		if chunkSeen {
 			retryable = false
 		}
-		return fail(reason, callErr.Error(), retryable, capture.RequestID())
+		return fail(reason, callErr.Error(), retryable, capture.RequestID(), partialText)
 	}
 	latency := time.Since(started).Milliseconds()
 	proposed := make([]ProposedTool, 0, len(toolCalls))
@@ -166,11 +176,11 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 	}
 	responseDigest, err := canonicalResponseDigest(assistantText, proposed)
 	if err != nil {
-		return fail("invalid_response", err.Error(), false, capture.RequestID())
+		return fail("invalid_response", err.Error(), false, capture.RequestID(), "")
 	}
 	responseDigestRaw, err := hex.DecodeString(responseDigest)
 	if err != nil {
-		return fail("invalid_response", "response digest decode: "+err.Error(), false, capture.RequestID())
+		return fail("invalid_response", "response digest decode: "+err.Error(), false, capture.RequestID(), "")
 	}
 	completion := &runtimev1.CompleteModelCall{
 		AttemptId: attemptID, ModelCallId: callID,
@@ -183,7 +193,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 	for _, tool := range proposed {
 		argumentsRaw, decodeErr := hex.DecodeString(tool.ArgumentsDigest)
 		if decodeErr != nil {
-			return fail("invalid_response", "arguments digest decode: "+decodeErr.Error(), false, capture.RequestID())
+			return fail("invalid_response", "arguments digest decode: "+decodeErr.Error(), false, capture.RequestID(), "")
 		}
 		completion.ToolCalls = append(completion.ToolCalls, &runtimev1.ProposedToolCall{
 			ProviderIndex: tool.ProviderIndex, ProviderToolCallId: tool.ProviderToolCallID,
@@ -195,7 +205,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 		Msg: &runtimev1.ControlEnvelope_CompleteModelCall{CompleteModelCall: completion},
 	})
 	if err != nil {
-		return fail("transport_error", "complete round trip failed: "+err.Error(), false, capture.RequestID())
+		return fail("transport_error", "complete round trip failed: "+err.Error(), false, capture.RequestID(), assistantText)
 	}
 	completeAck := reply.GetCompleteModelCallAck()
 	if completeAck == nil || !completeAck.GetAccepted() {
@@ -203,7 +213,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 		if completeAck != nil {
 			detail = completeAck.GetDetail()
 		}
-		return fail("invalid_response", detail, false, capture.RequestID())
+		return fail("invalid_response", detail, false, capture.RequestID(), assistantText)
 	}
 	var authorizations []Authorization
 	for _, wire := range completeAck.GetToolCalls() {
@@ -217,8 +227,9 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 }
 
 // completeFailure seals a failed physical call row (best effort; the
-// worker already has the failure on its way).
-func (executor *Executor) completeFailure(ctx context.Context, attemptID, callID int64, reason, requestID string) error {
+// worker already has the failure on its way). Exposed partial text
+// persists as an incomplete output for the audit trail.
+func (executor *Executor) completeFailure(ctx context.Context, attemptID, callID int64, reason, requestID, partialText string) error {
 	if callID == 0 {
 		return nil
 	}
@@ -235,23 +246,28 @@ func (executor *Executor) completeFailure(ctx context.Context, attemptID, callID
 	case "transport_error":
 		failureReason = runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR
 	}
+	completion := &runtimev1.CompleteModelCall{
+		AttemptId: attemptID, ModelCallId: callID,
+		Outcome:           runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED,
+		FailureReason:     failureReason,
+		ProviderRequestId: requestID,
+		ResponseComplete:  false,
+	}
+	if partialText != "" {
+		completion.AssistantText = partialText
+	}
 	_, err := executor.roundTrip(ctx, &runtimev1.ControlEnvelope{
-		Msg: &runtimev1.ControlEnvelope_CompleteModelCall{CompleteModelCall: &runtimev1.CompleteModelCall{
-			AttemptId: attemptID, ModelCallId: callID,
-			Outcome:           runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED,
-			FailureReason:     failureReason,
-			ProviderRequestId: requestID,
-		}},
+		Msg: &runtimev1.ControlEnvelope_CompleteModelCall{CompleteModelCall: completion},
 	})
 	return err
 }
 
 // callProvider runs the adapter and relays visible stream deltas.
-func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.ChatModel, messages []*schema.Message, contract Contract) (text string, toolCalls []schema.ToolCall, usage *schema.TokenUsage, finishReason string, chunkSeen bool, err error) {
+func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.ChatModel, messages []*schema.Message, contract Contract) (text string, toolCalls []schema.ToolCall, usage *schema.TokenUsage, finishReason string, chunkSeen bool, partialText string, err error) {
 	if !contract.Streaming {
 		message, err := chatModel.Generate(ctx, messages)
 		if err != nil {
-			return "", nil, nil, "", false, err
+			return "", nil, nil, "", false, "", err
 		}
 		usage := &schema.TokenUsage{}
 		if message.ResponseMeta != nil && message.ResponseMeta.Usage != nil {
@@ -261,11 +277,11 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 		if message.ResponseMeta != nil {
 			finish = message.ResponseMeta.FinishReason
 		}
-		return message.Content, message.ToolCalls, usage, finish, false, nil
+		return message.Content, message.ToolCalls, usage, finish, false, "", nil
 	}
 	stream, err := chatModel.Stream(ctx, messages)
 	if err != nil {
-		return "", nil, nil, "", false, err
+		return "", nil, nil, "", false, "", err
 	}
 	defer stream.Close()
 	var final *schema.Message
@@ -285,7 +301,9 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 			break
 		}
 		if recvErr != nil {
-			return "", nil, nil, "", chunkSeen, recvErr
+			// The accumulated visible text is part of the audit trail even
+			// though it never becomes a valid output (RUNTIME-AGENT-005).
+			return "", nil, nil, "", chunkSeen, accumulated, recvErr
 		}
 		final = message
 		// Each delta carries its own content slice; the durable text is
@@ -295,7 +313,7 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 			accumulated += message.Content
 			if executor.DeltaHook != nil {
 				if err := executor.DeltaHook(ctx, message.Content); err != nil {
-					return "", nil, nil, "", chunkSeen, err
+					return "", nil, nil, "", chunkSeen, accumulated, err
 				}
 			}
 			chunkSeen = true
@@ -320,7 +338,7 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 		}
 	}
 	if final == nil {
-		return "", nil, nil, "", chunkSeen, errors.New("provider stream ended without a final message")
+		return "", nil, nil, "", chunkSeen, accumulated, errors.New("provider stream ended without a final message")
 	}
 	usage = &schema.TokenUsage{}
 	if final.ResponseMeta != nil && final.ResponseMeta.Usage != nil {
@@ -341,7 +359,7 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 			Function: schema.FunctionCall{Name: entry.name, Arguments: entry.args.String()},
 		})
 	}
-	return accumulated, merged, usage, finish, chunkSeen, nil
+	return accumulated, merged, usage, finish, chunkSeen, "", nil
 }
 
 // classifyProviderError maps adapter errors onto the frozen failure
@@ -379,7 +397,7 @@ func (executor *Executor) fetchGrant(ctx context.Context, grantID, attemptID int
 	grantCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	reply, err := executor.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
-		GrantId: grantID, AttemptId: attemptID, BootId: executor.Sink.BootID(), ConnectionEpoch: executor.Sink.Epoch(),
+		GrantId: grantID, AttemptId: attemptID, BootId: executor.Binding.BootID, ConnectionEpoch: executor.Binding.Epoch,
 	})
 	if err != nil {
 		return "", err

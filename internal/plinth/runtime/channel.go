@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -58,10 +60,33 @@ type Channel struct {
 		Send(*runtimev1.ControlEnvelope) error
 	}
 	cancelMu sync.Mutex
-	active   map[int64]context.CancelFunc
-	replyMu  sync.Mutex
-	nextCorr uint64
-	waiters  map[uint64]chan *runtimev1.ControlEnvelope
+	// active survives control-stream reconnects within this boot: the
+	// task goroutines keep running while the stream re-establishes, so the
+	// registry must not be wiped per connection (T12, RUNTIME-TASK-005).
+	active map[int64]context.CancelFunc
+	// pendingMu guards the reliable terminal-result registry (T12,
+	// RUNTIME-TASK-008): every terminal ResultProposal is retried until a
+	// ResultAck survives the stream it travelled on.
+	pendingMu sync.Mutex
+	pending   map[int64]*pendingResult
+	replyMu   sync.Mutex
+	nextCorr  uint64
+	waiters   map[uint64]chan *runtimev1.ControlEnvelope
+}
+
+// pendingResult is one terminal result awaiting a durable ResultAck.
+type pendingResult struct {
+	proposal *runtimev1.ResultProposal
+	ack      chan *runtimev1.ResultAck
+}
+
+// DispatchBinding is the frozen (boot, epoch) identity of one dispatched
+// attempt: terminal proposals carry this binding, never the live stream's
+// current epoch (Quoin adjudicates against the frozen row binding,
+// RUNTIME-TASK-008).
+type DispatchBinding struct {
+	BootID string
+	Epoch  uint64
 }
 
 type ChannelConfig struct {
@@ -77,7 +102,10 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	if _, err := rand.Read(bootRaw); err != nil {
 		return nil, err
 	}
-	return &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw)}, nil
+	return &Channel{
+		Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw),
+		active: map[int64]context.CancelFunc{}, pending: map[int64]*pendingResult{},
+	}, nil
 }
 
 func (channel *Channel) tokenPath() string {
@@ -215,7 +243,6 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	}
 	channel.outboundMu.Lock()
 	channel.sendStream = stream
-	channel.active = map[int64]context.CancelFunc{}
 	channel.outboundMu.Unlock()
 	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
 		return err
@@ -268,35 +295,71 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			}
 			return fmt.Errorf("控制流结束: %w", err)
 		}
-		switch payload := envelope.Msg.(type) {
-		case *runtimev1.ControlEnvelope_DispatchAttempt:
-			if channel.Tasks != nil {
-				task := payload.DispatchAttempt
-				go channel.Tasks.HandleDispatchAttempt(ctx, sink, client, task, channel.stopTask)
+		channel.dispatchServerFrame(ctx, sink, client, envelope)
+	}
+}
+
+// dispatchServerFrame adjudicates one inbound control-stream frame
+// (RUNTIME-CTRL-008 dedup, RUNTIME-TASK-005 reconcile, RUNTIME-TASK-008
+// ack completion). Extracted from the receive loop so the interleavings
+// are unit-testable without a live gRPC stream.
+func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, envelope *runtimev1.ControlEnvelope) {
+	switch payload := envelope.Msg.(type) {
+	case *runtimev1.ControlEnvelope_DispatchAttempt:
+		if channel.Tasks != nil {
+			task := payload.DispatchAttempt
+			// Physical dispatch dedup (RUNTIME-CTRL-008): an attempt this
+			// boot already executes re-acks its accept; an attempt whose
+			// terminal result still awaits its ack re-delivers that result;
+			// neither ever spawns a second worker.
+			if channel.TaskActive(task.GetAttemptId()) {
+				_ = sink.Send(&runtimev1.ControlEnvelope{
+					CorrelationId: uint64(task.GetAttemptId()),
+					Msg:           &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: task.GetAttemptId()}},
+				})
+				return
 			}
-		case *runtimev1.ControlEnvelope_CancelAttempt:
-			if channel.Tasks != nil {
-				channel.Tasks.HandleCancelAttempt(ctx, sink, payload.CancelAttempt, channel.stopTask)
+			if channel.HasPendingResult(task.GetAttemptId()) {
+				channel.DeliverPendingResults()
+				return
 			}
-		case *runtimev1.ControlEnvelope_ResultAck:
-			ack := payload.ResultAck
-			sharedops.LogEvent("plinth", "info", "runtime.result_ack", fmt.Sprintf("attempt=%d accepted=%v detail=%s", ack.GetAttemptId(), ack.GetAccepted(), ack.GetDetail()))
-			channel.deliverReply(envelope)
-		case *runtimev1.ControlEnvelope_BeginModelCallAck:
-			channel.deliverReply(envelope)
-		case *runtimev1.ControlEnvelope_CompleteModelCallAck:
-			channel.deliverReply(envelope)
-		case *runtimev1.ControlEnvelope_BeginToolCallAck:
-			channel.deliverReply(envelope)
-		case *runtimev1.ControlEnvelope_CompleteToolCallAck:
-			channel.deliverReply(envelope)
-		case *runtimev1.ControlEnvelope_ModelTokenDelta:
-			// Transient observer deltas never reply; the ledger is the
-			// authority (RUNTIME-AGENT).
-		default:
-			// Handshake-adjacent and lintel-only frames do not concern the
-			// plinth task slice.
+			binding := DispatchBinding{BootID: envelope.GetBootId(), Epoch: envelope.GetConnectionEpoch()}
+			go channel.Tasks.HandleDispatchAttempt(ctx, sink, client, task, binding, channel.stopTask)
 		}
+	case *runtimev1.ControlEnvelope_CancelAttempt:
+		if channel.Tasks != nil {
+			channel.Tasks.HandleCancelAttempt(ctx, sink, payload.CancelAttempt, channel.stopTask)
+		}
+	case *runtimev1.ControlEnvelope_ReconcileRequest:
+		// Same-boot reconnect reconciliation (RUNTIME-TASK-005): pending
+		// terminal results are flushed BEFORE the report so Quoin never
+		// observes an attempt as lost while its un-acked result is still
+		// in flight (deterministic wire ordering).
+		channel.DeliverPendingResults()
+		_ = sink.Send(&runtimev1.ControlEnvelope{
+			CorrelationId: envelope.GetCorrelationId(),
+			Msg:           &runtimev1.ControlEnvelope_ReconcileReport{ReconcileReport: &runtimev1.ReconcileReport{RunningAttemptIds: channel.ActiveAttempts()}},
+		})
+	case *runtimev1.ControlEnvelope_ResultAck:
+		ack := payload.ResultAck
+		sharedops.LogEvent("plinth", "info", "runtime.result_ack", fmt.Sprintf("attempt=%d accepted=%v detail=%s", ack.GetAttemptId(), ack.GetAccepted(), ack.GetDetail()))
+		if !channel.completePendingResult(ack.GetAttemptId(), ack) {
+			channel.deliverReply(envelope)
+		}
+	case *runtimev1.ControlEnvelope_BeginModelCallAck:
+		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_CompleteModelCallAck:
+		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_BeginToolCallAck:
+		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_CompleteToolCallAck:
+		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_ModelTokenDelta:
+		// Transient observer deltas never reply; the ledger is the
+		// authority (RUNTIME-AGENT).
+	default:
+		// Handshake-adjacent and lintel-only frames do not concern the
+		// plinth task slice.
 	}
 }
 
@@ -314,9 +377,10 @@ func (channel *Channel) sendEnvelope(envelope *runtimev1.ControlEnvelope) error 
 	return channel.sendStream.Send(envelope)
 }
 
-// TaskSupervisor executes deterministic connection_probe dispatches (T07).
+// TaskSupervisor executes dispatched attempts (T07 probes, T10 agent
+// analysis) and answers cancellation.
 type TaskSupervisor interface {
-	HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, stopTask func(int64) bool)
+	HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding DispatchBinding, stopTask func(int64) bool)
 	HandleCancelAttempt(ctx context.Context, sink *FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool)
 }
 
@@ -348,6 +412,13 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	}
 	return grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})),
+		// Dead-stream detection: a network partition that only drops packets
+		// (docker bridge detach) leaves TCP sends buffered forever without
+		// keepalive; the heartbeat failure then breaks the loop quickly and
+		// the reconnect path takes over (T12, RUNTIME-CTRL-006).
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time: 20 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true,
+		}),
 	)
 }
 
@@ -436,3 +507,141 @@ func (channel *Channel) Request(ctx context.Context, envelope *runtimev1.Control
 		return nil, errors.New("控制流请求超时未收到回复")
 	}
 }
+
+// TaskActive reports whether this boot is still executing the attempt.
+func (channel *Channel) TaskActive(attemptID int64) bool {
+	channel.cancelMu.Lock()
+	defer channel.cancelMu.Unlock()
+	_, live := channel.active[attemptID]
+	return live
+}
+
+// ActiveAttempts returns the sorted ids this boot is actually executing
+// (the ReconcileReport payload, RUNTIME-TASK-005).
+func (channel *Channel) ActiveAttempts() []int64 {
+	channel.cancelMu.Lock()
+	defer channel.cancelMu.Unlock()
+	ids := make([]int64, 0, len(channel.active))
+	for id := range channel.active {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// HasPendingResult reports whether a terminal result of the attempt still
+// awaits a surviving ResultAck.
+func (channel *Channel) HasPendingResult(attemptID int64) bool {
+	channel.pendingMu.Lock()
+	defer channel.pendingMu.Unlock()
+	_, live := channel.pending[attemptID]
+	return live
+}
+
+// completePendingResult hands one ResultAck to the registered waiter and
+// reports whether a pending entry existed (duplicate acks are dropped).
+func (channel *Channel) completePendingResult(attemptID int64, ack *runtimev1.ResultAck) bool {
+	channel.pendingMu.Lock()
+	entry, live := channel.pending[attemptID]
+	if live {
+		delete(channel.pending, attemptID)
+	}
+	channel.pendingMu.Unlock()
+	if !live {
+		return false
+	}
+	select {
+	case entry.ack <- ack:
+	default:
+	}
+	return true
+}
+
+// RegisterResult records one terminal result for reliable delivery without
+// waiting (the failure paths of the supervisor use this; delivery and the
+// ack are the channel's responsibility).
+func (channel *Channel) RegisterResult(proposal *runtimev1.ResultProposal) {
+	channel.pendingMu.Lock()
+	if channel.pending == nil {
+		channel.pending = map[int64]*pendingResult{}
+	}
+	channel.pending[proposal.GetAttemptId()] = &pendingResult{proposal: proposal, ack: make(chan *runtimev1.ResultAck, 1)}
+	channel.pendingMu.Unlock()
+	channel.DeliverPendingResults()
+}
+
+// ProposeResult registers one terminal result and blocks until Quoin
+// adjudicates it (a ResultAck arrives), the caller's context ends or the
+// delivery window closes with the process. Reconnects re-deliver
+// automatically; Quoin's idempotent adjudication makes every replay safe.
+func (channel *Channel) ProposeResult(ctx context.Context, proposal *runtimev1.ResultProposal) (*runtimev1.ResultAck, error) {
+	entry := &pendingResult{proposal: proposal, ack: make(chan *runtimev1.ResultAck, 1)}
+	channel.pendingMu.Lock()
+	if channel.pending == nil {
+		channel.pending = map[int64]*pendingResult{}
+	}
+	channel.pending[proposal.GetAttemptId()] = entry
+	channel.pendingMu.Unlock()
+	channel.DeliverPendingResults()
+	select {
+	case ack := <-entry.ack:
+		return ack, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// DeliverPendingResults sends every outstanding terminal result on the
+// live stream (fire-and-forget: the recv loop completes entries from the
+// ResultAck; a lost ack leaves the entry registered for the next round).
+// Attempts are delivered in ascending id order for deterministic wiring.
+func (channel *Channel) DeliverPendingResults() {
+	channel.pendingMu.Lock()
+	ids := make([]int64, 0, len(channel.pending))
+	entries := make(map[int64]*pendingResult, len(channel.pending))
+	for id, entry := range channel.pending {
+		ids = append(ids, id)
+		entries[id] = entry
+	}
+	channel.pendingMu.Unlock()
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		proposal := entries[id].proposal
+		if err := channel.sendEnvelope(&runtimev1.ControlEnvelope{
+			CorrelationId: uint64(id),
+			Msg:           &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: proposal},
+		}); err != nil {
+			sharedops.LogEvent("plinth", "info", "runtime.result_pending", fmt.Sprintf("attempt=%d delivery deferred: %v", id, err))
+			return
+		}
+	}
+}
+
+// RunResultDeliveryLoop retries outstanding terminal results on a fixed
+// cadence while the process lives: it covers acks lost on a healthy stream
+// and re-delivers everything after a reconnect (T12, RUNTIME-TASK-008).
+func (channel *Channel) RunResultDeliveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(resultDeliveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if channel.HasAnyPendingResult() {
+				channel.DeliverPendingResults()
+			}
+		}
+	}
+}
+
+// HasAnyPendingResult reports whether any terminal result is outstanding.
+func (channel *Channel) HasAnyPendingResult() bool {
+	channel.pendingMu.Lock()
+	defer channel.pendingMu.Unlock()
+	return len(channel.pending) > 0
+}
+
+// resultDeliveryInterval is the fixed retry cadence for outstanding
+// terminal results (RUNTIME-SCOPE-004: frozen release-internal constant).
+const resultDeliveryInterval = 3 * time.Second

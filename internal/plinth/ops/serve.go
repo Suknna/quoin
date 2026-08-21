@@ -25,6 +25,9 @@ func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedo
 		return err
 	}
 	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory}
+	// Terminal results retry until a ResultAck survives the stream it
+	// travelled on (T12, RUNTIME-TASK-008); the loop is boot-scoped.
+	go channel.RunResultDeliveryLoop(ctx)
 	go func() {
 		for {
 			select {

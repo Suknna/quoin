@@ -77,7 +77,7 @@ func TestAdapterStreamingToolCallAndContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	executor := &Executor{DeltaHook: func(ctx context.Context, delta string) error { return nil }}
-	text, toolCalls, _, finish, _, err := executor.callProvider(context.Background(), adapter,
+	text, toolCalls, _, finish, _, _, err := executor.callProvider(context.Background(), adapter,
 		[]*schema.Message{schema.SystemMessage("s"), schema.UserMessage("u")}, contract)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestAdapterStreamingToolCallAndContent(t *testing.T) {
 		t.Fatalf("arguments=%q", args)
 	}
 	// The continuation turn accumulates the visible content deltas.
-	text2, toolCalls2, _, finish2, _, err := executor.callProvider(context.Background(), adapter,
+	text2, toolCalls2, _, finish2, _, _, err := executor.callProvider(context.Background(), adapter,
 		[]*schema.Message{schema.SystemMessage("s"), {Role: schema.Tool, Content: `{"success":true}`}}, contract)
 	if err != nil {
 		t.Fatal(err)
