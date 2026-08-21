@@ -326,13 +326,12 @@ func (service *Service) ActiveAttempt(ctx context.Context, scopeType string, sco
 	return id, nil
 }
 
-// QueuedAgentAttempts lists plinth agent attempts still waiting for a live
-// stream (created while the slot was disconnected).
-func (service *Service) QueuedAgentAttempts(ctx context.Context) ([]int64, error) {
+// QueuedAgentAttempts lists plinth agent attempts of one type still
+// waiting for a live stream (created while the slot was disconnected).
+func (service *Service) QueuedAgentAttempts(ctx context.Context, attemptType string) ([]int64, error) {
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT id FROM execution_attempts
-		WHERE attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction')
-		  AND state='Queued' ORDER BY id`)
+		WHERE attempt_type=? AND state='Queued' ORDER BY id`, attemptType)
 	if err != nil {
 		return nil, err
 	}

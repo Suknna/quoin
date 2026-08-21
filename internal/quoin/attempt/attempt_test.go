@@ -362,7 +362,7 @@ func TestQueuedAgentAttemptsAndDispatchInput(t *testing.T) {
 	service := NewService(db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
-	ids, err := service.QueuedAgentAttempts(ctx)
+	ids, err := service.QueuedAgentAttempts(ctx, "initial_analysis")
 	if err != nil || len(ids) != 1 || ids[0] != attemptID {
 		t.Fatalf("queued=%v err=%v", ids, err)
 	}
