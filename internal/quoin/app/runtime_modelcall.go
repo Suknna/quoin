@@ -20,7 +20,8 @@ import (
 )
 
 // handleBeginModelCall opens one running ledger row and returns its id with
-// the model grant reference (RUNTIME-MODEL ledger).
+// the model grant reference (RUNTIME-MODEL ledger). Agent attempts route
+// through handleBeginModelCallRouted.
 func (service *RuntimeService) handleBeginModelCall(ctx context.Context, envelope *runtimev1.ControlEnvelope, begin *runtimev1.BeginModelCall) {
 	ack := &runtimev1.ControlEnvelope{
 		ConnectionEpoch: envelope.GetConnectionEpoch(),

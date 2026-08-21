@@ -13,6 +13,8 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/analysis"
+	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
@@ -30,6 +32,11 @@ type RuntimeService struct {
 	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
 	// not exercise the task slice.
 	Connections *connections.Service
+	// Analyses owns initial-analysis attempts (T10); nil keeps the
+	// handshake-only behaviour for tests that do not exercise it.
+	Analyses *analysis.Service
+	// Artifacts is the Artifact store the ArtifactService adapts (T10).
+	Artifacts *artifact.Store
 	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
 	// Lintel must agree on (RUNTIME-CTRL-010); empty means no catalog
 	// embedded yet, which keeps lintel handshake-rejected with CATALOG_
@@ -171,9 +178,10 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	}
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
 	if slot == qruntime.SlotPlinth {
-		// Queued connection probes (created while disconnected) bind to
-		// this live stream and dispatch immediately.
+		// Queued connection probes and agent attempts (created while
+		// disconnected) bind to this live stream and dispatch immediately.
 		go service.dispatchQueuedProbes(context.Background())
+		go service.dispatchQueuedAnalyses(context.Background())
 	}
 	// Empty-profile inventory request for lintel (RUNTIME-BROWSER-002): the
 	// readiness fence needs a complete report even with zero profiles.
@@ -229,15 +237,19 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		case *runtimev1.ControlEnvelope_Heartbeat:
 			service.Slots.Touch(slot)
 		case *runtimev1.ControlEnvelope_AttemptAccept:
-			service.handleAttemptAccept(ctx, envelope, payload.AttemptAccept)
+			service.handleAttemptAcceptRouted(ctx, envelope, payload.AttemptAccept)
 		case *runtimev1.ControlEnvelope_ResultProposal:
-			service.handleResultProposal(ctx, envelope, payload.ResultProposal)
+			service.handleResultProposalRouted(ctx, envelope, payload.ResultProposal)
 		case *runtimev1.ControlEnvelope_CancelAck:
-			service.handleCancelAck(ctx, payload.CancelAck)
+			service.handleCancelAckRouted(ctx, payload.CancelAck)
 		case *runtimev1.ControlEnvelope_BeginModelCall:
-			service.handleBeginModelCall(ctx, envelope, payload.BeginModelCall)
+			service.handleBeginModelCallRouted(ctx, envelope, payload.BeginModelCall)
 		case *runtimev1.ControlEnvelope_CompleteModelCall:
-			service.handleCompleteModelCall(ctx, envelope, payload.CompleteModelCall)
+			service.handleCompleteModelCallRouted(ctx, envelope, payload.CompleteModelCall)
+		case *runtimev1.ControlEnvelope_BeginToolCall:
+			service.handleBeginToolCallRouted(ctx, envelope, payload.BeginToolCall)
+		case *runtimev1.ControlEnvelope_CompleteToolCall:
+			service.handleCompleteToolCallRouted(ctx, envelope, payload.CompleteToolCall)
 		case *runtimev1.ControlEnvelope_ProfileInventoryReport:
 			// v1: reports are accepted and logged; a complete empty report
 			// clears nothing further because no identities exist yet.

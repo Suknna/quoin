@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,9 @@ import (
 	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
+	"github.com/Suknna/quoin/internal/quoin/analysis"
+	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
@@ -40,19 +44,21 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth               *auth.Service
-	db                 *sql.DB
-	alerts             *alerts.Service
-	reveals            *secrets.Store
-	commands           *commandReplay
-	runtime            *qruntime.Service
-	connections        *connections.Service
-	rootKey            func() ([]byte, error)
-	probeDispatchFunc  func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc func(ctx context.Context, attemptID int64) error
+	auth                 *auth.Service
+	db                   *sql.DB
+	alerts               *alerts.Service
+	reveals              *secrets.Store
+	commands             *commandReplay
+	runtime              *qruntime.Service
+	connections          *connections.Service
+	analyses             *analysis.Service
+	artifacts            *artifact.Store
+	rootKey              func() ([]byte, error)
+	probeDispatchFunc    func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc   func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc func(ctx context.Context, attemptID int64) error
 }
 
-// NewAPIServer is the testable constructor for the Quoin public surface.
 // NewAPIServer is the testable constructor for the Quoin public surface.
 // rootKeyFile feeds the credential envelope codec (T07); pass an empty
 // string only in tests that never touch connections.
@@ -63,6 +69,7 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		reveals:  secrets.NewStore(),
 		commands: newCommandReplay(),
 		runtime:  qruntime.NewService(db),
+		analyses: analysis.NewService(db),
 	}
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
@@ -72,6 +79,7 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 	}
 	application.connections = connections.NewService(db, application.rootKey)
 	connections.SetReleaseVersion(buildinfo.Release)
+	attempt.SetReleaseVersion(buildinfo.Release)
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
 	return application
 }
@@ -168,10 +176,23 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	serverSet.relay = grpc.NewServer()
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
+	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
+	if err != nil {
+		return fmt.Errorf("open artifact store: %w", err)
+	}
+	application.artifacts = artifactStore
+	// The attempt ledger seals a tool call before its tool_result read
+	// grant (the frozen grant closure requires the succeeded state); wire
+	// the grant write into CompleteToolCall's transaction.
+	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest(), application.connections)
+	controlService.Analyses = application.analyses
+	controlService.Artifacts = artifactStore
 	application.probeDispatchFunc = controlService.dispatchAttempt
-	application.cancelDispatchFunc = controlService.dispatchCancel
+	application.cancelDispatchFunc = controlService.dispatchCancelRouted
+	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
 	RegisterRuntimeControl(serverSet.relay, controlService)
+	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	return serverSet.run(ctx, config)
 }
 
@@ -202,6 +223,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	api := humago.New(mux, apiConfig)
 	application.register(api)
 	application.registerAlertStream(mux)
+	application.registerTaskStream(mux)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -221,6 +243,8 @@ func (application *apiServer) register(api huma.API) {
 	application.registerAdminUserRoutes(api)
 	application.registerRuntimeRoutes(api)
 	application.registerConnectionRoutes(api)
+	application.registerAnalysisRoutes(api)
+	application.registerTaskSnapshot(api)
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
