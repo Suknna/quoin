@@ -384,14 +384,19 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 	return nil
 }
 
-// AcceptProbe moves Assigned → Running (AttemptAccept).
+// AcceptProbe moves Assigned → Running (AttemptAccept). The fence matches
+// the dispatch boot only: the frozen schema makes the binding epoch
+// immutable once set, so a re-dispatched Assigned probe accepts on the
+// newer epoch of the same boot (RUNTIME-TASK-005); the inbound envelope
+// fence already proved the frame arrived on the current stream.
 func (service *Service) AcceptProbe(ctx context.Context, attemptID int64, bootID string, epoch uint64) error {
-	result, err := service.db.ExecContext(ctx, `UPDATE execution_attempts SET state='Running',accepted_at=?,row_version=row_version+1 WHERE id=? AND state='Assigned' AND boot_id=? AND connection_epoch=?`, service.now().UTC().Format(time.RFC3339Nano), attemptID, bootID, epoch)
+	_ = epoch // transport context only; see the fence note above
+	result, err := service.db.ExecContext(ctx, `UPDATE execution_attempts SET state='Running',accepted_at=?,row_version=row_version+1 WHERE id=? AND state='Assigned' AND boot_id=?`, service.now().UTC().Format(time.RFC3339Nano), attemptID, bootID)
 	if err != nil {
 		return err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		return fmt.Errorf("attempt %d not in the expected Assigned state for this boot/epoch", attemptID)
+		return fmt.Errorf("attempt %d not in the expected Assigned state for this boot", attemptID)
 	}
 	return nil
 }

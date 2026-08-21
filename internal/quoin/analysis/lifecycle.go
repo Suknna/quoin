@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Attempt lifecycle: technical-failure retry, the cancellation fence, the
@@ -31,16 +32,13 @@ func (service *Service) Retry(ctx context.Context, analysisID, principalID int64
 	if state != "Failed" {
 		return 0, fmt.Errorf("%w: analysis %d is %s", ErrActiveConflict, analysisID, state)
 	}
-	// Frozen-schema fence discovered during T10 (see the ticket amendment
-	// comment): trg_initial_analyses_terminal_immutable +
-	// trg_initial_analyses_state_transition make Failed terminal, while
-	// trg_execution_attempts_scope_exists requires the analysis to be
-	// Queued/Running when its attempt row is inserted. Same-analysis
-	// retry after failure therefore has no legal transition set in the
-	// frozen schema; the retry reopen arrives with T12 (contract
-	// amendment). The endpoint answers the deterministic conflict instead
-	// of pretending the reopen happened.
-	return 0, fmt.Errorf("%w: analysis %d is Failed and the frozen schema closes Failed as terminal (retry reopen arrives with T12)", ErrActiveConflict, analysisID)
+	// The frozen schema closes Failed as terminal (trg_initial_analyses_
+	// terminal_immutable), so same-analysis retry has no legal transition;
+	// the operator retry path is a fresh analysis on the same occurrence
+	// (Create accepts it once the terminal one leaves the active set). The
+	// endpoint answers the deterministic conflict instead of pretending the
+	// reopen happened.
+	return 0, fmt.Errorf("%w: analysis %d is Failed and the frozen schema closes Failed as terminal (operator retry creates a new analysis on the occurrence)", ErrActiveConflict, analysisID)
 }
 
 // CancelOutcome classifies what the cancellation fence decided.
@@ -241,14 +239,27 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 		return fmt.Errorf("attempt %d is not an initial analysis attempt", result.AttemptID)
 	}
 	if state != "Running" {
-		return ErrLateResult
+		// A replay of an already-adjudicated result rebuilds the original
+		// verdict instead of surfacing a late-result error (RUNTIME-TASK-008
+		// idempotent adjudication; the runtime retries its terminal
+		// proposal until an ack survives). A divergent result stays a
+		// late result.
+		return service.replaySealedResult(ctx, conn, result, state)
 	}
 	var bootID string
 	var epoch int64
-	if err := conn.QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, result.AttemptID).Scan(&bootID, &epoch); err != nil {
+	var leaseUntil string
+	if err := conn.QueryRowContext(ctx, `SELECT boot_id,connection_epoch,lease_until FROM execution_attempts WHERE id=?`, result.AttemptID).Scan(&bootID, &epoch, &leaseUntil); err != nil {
 		return err
 	}
 	if bootID != result.BootID || epoch != int64(result.Epoch) {
+		return ErrLateResult
+	}
+	// RUNTIME-TASK-008: a result whose lease already burned down must not
+	// produce a valid domain output even if the sweeper has not yet
+	// converged the row (the sweep window is seconds; the lease is the
+	// authority). Audit only.
+	if leaseDeadline, err := time.Parse(time.RFC3339Nano, leaseUntil); err != nil || !service.now().Before(leaseDeadline) {
 		return ErrLateResult
 	}
 	var modelID string
@@ -297,6 +308,15 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 		now, result.AttemptID, result.BootID, result.Epoch); err != nil {
 		return err
 	}
+	// Crash-window repair: the accept's two transactions can die between
+	// them (attempt Running, analysis still Queued). The attempt state is
+	// the authority — promote the analysis in the same transaction so the
+	// seal never strands a Queued analysis over a terminal attempt.
+	if _, err := conn.ExecContext(ctx, `
+		UPDATE initial_analyses SET state='Running', row_version=row_version+1
+		WHERE id=? AND state='Queued'`, scopeID); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `
 		UPDATE initial_analyses SET state='Succeeded', row_version=row_version+1
 		WHERE id=? AND state='Running'`, scopeID); err != nil {
@@ -338,6 +358,24 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 	if attemptType != "initial_analysis" || scopeType != "analysis" {
 		return fmt.Errorf("attempt %d is not an initial analysis attempt", result.AttemptID)
 	}
+	var attemptState string
+	if err := conn.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, result.AttemptID).Scan(&attemptState); err != nil {
+		return err
+	}
+	if attemptState != "Running" {
+		// Same replay contract as the success seal (RUNTIME-TASK-008):
+		// an identical failure replays its original verdict.
+		return service.replaySealedResult(ctx, conn, result, attemptState)
+	}
+	// RUNTIME-TASK-008: a burned-down lease rejects the result (audit only)
+	// even before the sweeper converges the row.
+	var leaseUntil string
+	if err := conn.QueryRowContext(ctx, `SELECT lease_until FROM execution_attempts WHERE id=?`, result.AttemptID).Scan(&leaseUntil); err != nil {
+		return err
+	}
+	if leaseDeadline, err := time.Parse(time.RFC3339Nano, leaseUntil); err != nil || !service.now().Before(leaseDeadline) {
+		return ErrLateResult
+	}
 	now := service.nowText()
 	reason := result.Termination
 	if reason == "" {
@@ -356,7 +394,7 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 	}
 	if _, err := conn.ExecContext(ctx, `
 		UPDATE initial_analyses SET state='Failed', row_version=row_version+1
-		WHERE id=? AND state='Running'`, scopeID); err != nil {
+		WHERE id=? AND state IN ('Queued','Running')`, scopeID); err != nil {
 		return err
 	}
 	if err := recordAudit(ctx, conn, "system", 0, "initial_analysis.failed", "success", "initial_analysis", scopeID, now); err != nil {
@@ -370,10 +408,15 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 }
 
 // CancelAck finishes the analysis cancellation once the runtime confirmed
-// the attempt stopped (RUNTIME-CANCEL-003).
+// the attempt stopped (RUNTIME-CANCEL-003). Idempotent: an attempt the
+// loss convergence already closed as Cancelled still converges its
+// analysis (a late duplicate ack must not strand the analysis Running).
 func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
 	if err := service.attempts.CancelAck(ctx, attemptID); err != nil {
-		return err
+		var state string
+		if lookupErr := service.db.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); lookupErr != nil || state != "Cancelled" {
+			return err
+		}
 	}
 	var scopeID int64
 	if err := service.db.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
@@ -381,7 +424,7 @@ func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
 	}
 	_, err := service.db.ExecContext(ctx, `
 		UPDATE initial_analyses SET state='Cancelled', row_version=row_version+1
-		WHERE id=? AND state='Running'`, scopeID)
+		WHERE id=? AND state IN ('Queued','Running')`, scopeID)
 	return err
 }
 
@@ -420,5 +463,99 @@ func validateReferences(ctx context.Context, conn *sql.Conn, result Result) erro
 			return fmt.Errorf("artifact %d is not granted to attempt %d", artifactID, result.AttemptID)
 		}
 	}
+	return nil
+}
+
+// replaySealedResult rebuilds the original verdict for one terminal
+// attempt: an identical success (this attempt's sealed output row matches
+// the proposal bytes) or an identical failure (same termination reason)
+// replays as success so the runtime's reliable-delivery retry observes the
+// original ResultAck (RUNTIME-TASK-008); anything else stays a late result
+// (audit only, DATA-ATTEMPT-004).
+func (service *Service) replaySealedResult(ctx context.Context, conn *sql.Conn, result Result, state string) error {
+	if !result.Succeeded {
+		if state == "Failed" {
+			var sealed string
+			if err := conn.QueryRowContext(ctx, `SELECT termination_reason FROM execution_attempts WHERE id=?`, result.AttemptID).Scan(&sealed); err != nil {
+				return err
+			}
+			if sealed == result.Termination || (sealed == "worker_protocol_error" && result.Termination == "") {
+				return nil
+			}
+		}
+		return ErrLateResult
+	}
+	if state != "Succeeded" {
+		return ErrLateResult
+	}
+	var content string
+	if err := conn.QueryRowContext(ctx, `SELECT content FROM initial_analysis_outputs WHERE attempt_id=?`, result.AttemptID).Scan(&content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLateResult
+		}
+		return err
+	}
+	var proposed string
+	if err := json.Unmarshal(result.Canonical, &proposed); err != nil || proposed != content {
+		return ErrLateResult
+	}
+	return nil
+}
+
+// CommitInterruption closes one attempt with its loss reason and moves the
+// analysis to the matching terminal state in the same transaction
+// (RUNTIME-TASK-006): Interrupted analyses stay inspectable and the
+// occurrence becomes eligible for a fresh analysis; a Cancelling attempt
+// converges to Cancelled (the fence exception).
+func (service *Service) CommitInterruption(ctx context.Context, attemptID int64, reason string) error {
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	var scopeID int64
+	if err := conn.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return err
+	}
+	final, err := service.attempts.InterruptOn(ctx, conn, attemptID, reason)
+	if err != nil {
+		return err
+	}
+	switch final {
+	case "Interrupted":
+		if _, err := conn.ExecContext(ctx, `
+			UPDATE initial_analyses SET state='Interrupted', row_version=row_version+1
+			WHERE id=? AND state IN ('Queued','Running')`, scopeID); err != nil {
+			return err
+		}
+		if err := recordAudit(ctx, conn, "system", 0, "initial_analysis.interrupted", "success", "initial_analysis", scopeID, service.nowText()); err != nil {
+			return err
+		}
+	case "Cancelled":
+		if _, err := conn.ExecContext(ctx, `
+			UPDATE initial_analyses SET state='Cancelled', row_version=row_version+1
+			WHERE id=? AND state IN ('Queued','Running')`, scopeID); err != nil {
+			return err
+		}
+		if err := recordAudit(ctx, conn, "system", 0, "initial_analysis.cancelled", "success", "initial_analysis", scopeID, service.nowText()); err != nil {
+			return err
+		}
+	default:
+		// The attempt already reached a terminal result; the analysis
+		// followed it there. Nothing to converge.
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }

@@ -315,8 +315,16 @@ func TestCreateDispatchAcceptSeal(t *testing.T) {
 	if detail.State != "Succeeded" || detail.Output == nil || detail.Output.Content != "这是初步分析结论。" {
 		t.Fatalf("detail=%+v", detail)
 	}
-	// A late result after success loses (DATA-TX-005).
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); !errors.Is(err, ErrLateResult) {
+	// An identical replay of the sealed result is idempotent (T12,
+	// RUNTIME-TASK-008: the runtime retries its terminal proposal until
+	// an ack survives; the retry observes the original verdict).
+	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); err != nil {
+		t.Fatalf("identical replay rejected: %v", err)
+	}
+	// A divergent late result after success still loses (DATA-TX-005).
+	otherContent, _ := json.Marshal("另一个迟到的结论")
+	otherDigest := sha256.Sum256(otherContent)
+	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: otherContent, Digest: otherDigest[:]}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("late result=%v", err)
 	}
 	// Re-analysis creates a NEW analysis after success.

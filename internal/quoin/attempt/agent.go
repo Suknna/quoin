@@ -98,11 +98,57 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose='chat_model' ORDER BY id LIMIT 1`, begin.AttemptID).Scan(&grantID); err != nil {
 		return 0, fmt.Errorf("%w: chat_model grant missing: %v", ErrLedgerDenied, err)
 	}
+	// Replay of the same physical call (a lost BeginModelCallAck after a
+	// stream drop) must return the original row instead of rejecting:
+	// the frozen digests prove it is the same request (RUNTIME-AGENT-005
+	// idempotent ledger; a divergent resend conflicts).
+	var existingID int64
+	var existingPrompt, existingTools, existingRendered string
+	err = conn.QueryRowContext(ctx, `
+		SELECT id, prompt_digest, tool_schema_digest, rendered_request_digest
+		FROM model_calls WHERE attempt_id=? AND call_seq=? AND retry_seq=?`,
+		begin.AttemptID, begin.CallSeq, begin.RetrySeq).Scan(&existingID, &existingPrompt, &existingTools, &existingRendered)
+	if err == nil {
+		if existingPrompt != begin.PromptDigest || existingTools != begin.ToolSchemaDigest || existingRendered != begin.RenderedDigest {
+			return 0, fmt.Errorf("%w: replay of call %d carries divergent digests", ErrLedgerDenied, existingID)
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return 0, err
+		}
+		committed = true
+		return existingID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
 	if begin.RetrySeq > 0 {
-		var previous string
-		err := conn.QueryRowContext(ctx, `SELECT status FROM model_calls WHERE attempt_id=? AND call_seq=? AND retry_seq=?`, begin.AttemptID, begin.CallSeq, begin.RetrySeq-1).Scan(&previous)
-		if err != nil || previous != "failed" {
+		var prevID int64
+		var previous, prevPrompt, prevTools, prevRendered string
+		err = conn.QueryRowContext(ctx, `
+			SELECT id,status,prompt_digest,tool_schema_digest,rendered_request_digest
+			FROM model_calls WHERE attempt_id=? AND call_seq=? AND retry_seq=?`,
+			begin.AttemptID, begin.CallSeq, begin.RetrySeq-1).Scan(&prevID, &previous, &prevPrompt, &prevTools, &prevRendered)
+		if errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("%w: retry_seq %d has no failed predecessor", ErrLedgerDenied, begin.RetrySeq)
+		}
+		if err != nil {
+			return 0, err
+		}
+		if previous == "running" &&
+			prevPrompt == begin.PromptDigest && prevTools == begin.ToolSchemaDigest && prevRendered == begin.RenderedDigest {
+			// Lost-ack alias: the runtime believed the predecessor failed and
+			// resent with retry_seq+1, but identical digests prove the
+			// predecessor IS this physical call (its Begin ack was lost with
+			// a dropped stream). Return the live row instead of breaking the
+			// retry chain (RUNTIME-AGENT-005 idempotent ledger).
+			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+				return 0, err
+			}
+			committed = true
+			return prevID, nil
+		}
+		if previous != "failed" {
+			return 0, fmt.Errorf("%w: retry_seq %d predecessor is %q", ErrLedgerDenied, begin.RetrySeq, previous)
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -314,7 +360,11 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 		return nil, fmt.Errorf("%w: call %d belongs to attempt %d", ErrLedgerDenied, completion.CallID, callAttempt)
 	}
 	if status != "running" {
-		return nil, fmt.Errorf("%w: call %d already %s", ErrLedgerDenied, completion.CallID, status)
+		// Replay of an already-sealed physical call (a lost
+		// CompleteModelCallAck after a stream drop) must rebuild the
+		// original Ack instead of rejecting (RUNTIME-AGENT-005); a
+		// divergent resend conflicts.
+		return service.replayCompleteModelCall(ctx, conn, completion, status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var authorizations []ToolAuthorization
@@ -418,6 +468,21 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 	} else {
 		if completion.FailureReason == "" {
 			return nil, fmt.Errorf("%w: non-success model call requires a termination reason", ErrLedgerDenied)
+		}
+		// Any already-exposed partial response persists as an incomplete
+		// output row (RUNTIME-AGENT-005, DATA-AUDIT-003): it is physical
+		// audit only and can never seal the call.
+		if completion.AssistantText != "" {
+			partial := map[string]any{"assistantText": completion.AssistantText, "finishReason": completion.FinishReason, "tool_calls": []any{}}
+			partialJSON, err := json.Marshal(partial)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := conn.ExecContext(ctx, `
+				INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at)
+				VALUES(?,0,?,?,?,?)`, completion.CallID, string(partialJSON), sha256Hex(partialJSON), completion.FinishReason, now); err != nil {
+				return nil, err
+			}
 		}
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE model_calls SET provider_request_id=?,latency_ms=?,status=?,termination_reason=?,ended_at=?

@@ -19,10 +19,17 @@ import (
 	"time"
 )
 
-// DispatchLease is the finite lease window a bound attempt carries
-// (RUNTIME-TASK-002). The frozen release source owns the value; the
-// deployment-configurable knob arrives with the deployment tickets.
-const DispatchLease = 5 * time.Minute
+// DispatchLease is the finite lease window every dispatched attempt
+// carries and every heartbeat/reconcile renewal extends (RUNTIME-TASK-002/
+// 007). One frozen release-internal constant owns the value for probes and
+// agent attempts alike (RUNTIME-SCOPE-004): with the 10s heartbeat cadence
+// it bounds the post-disconnect interruption latency at two minutes while
+// tolerating a same-boot reconnect window of the same length.
+const DispatchLease = 2 * time.Minute
+
+// SweepInterval is the periodic lease-sweep cadence (RUNTIME-SCOPE-004:
+// frozen release-internal constant, not a deployment input).
+const SweepInterval = 5 * time.Second
 
 // SetReleaseVersion feeds the quoin release string every dispatched
 // attempt must freeze (DATA-ATTEMPT-001).
@@ -99,6 +106,7 @@ type View struct {
 	RuntimeSlot       *string
 	BootID            *string
 	ConnectionEpoch   *int64
+	LeaseUntil        *string
 	StartedAt         *string
 	EndedAt           *string
 	TerminationReason *string
@@ -161,13 +169,19 @@ func (service *Service) BindToStream(ctx context.Context, attemptID int64, bootI
 }
 
 // Accept moves an Assigned attempt to Running and records accepted_at
-// (RUNTIME-TASK-004). The boot/epoch pair must match the dispatch binding.
+// (RUNTIME-TASK-004). The fence matches the dispatch boot: the frozen
+// schema makes the binding epoch immutable once set, so an Assigned
+// attempt that was idempotently re-dispatched after a same-boot reconnect
+// (RUNTIME-TASK-005) still accepts on the newer epoch — the inbound
+// envelope fence already proved the frame arrived on the current stream.
+// A different boot can never accept (new-boot attempts interrupt first).
 func (service *Service) Accept(ctx context.Context, attemptID int64, bootID string, epoch uint64) error {
+	_ = epoch // transport context only; see the fence note above
 	result, err := service.db.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Running', accepted_at=?, started_at=?, row_version=row_version+1
-		WHERE id=? AND state='Assigned' AND boot_id=? AND connection_epoch=?`,
-		service.nowText(), service.nowText(), attemptID, bootID, epoch)
+		WHERE id=? AND state='Assigned' AND boot_id=?`,
+		service.nowText(), service.nowText(), attemptID, bootID)
 	if err != nil {
 		return err
 	}

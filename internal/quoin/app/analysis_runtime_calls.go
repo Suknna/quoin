@@ -278,9 +278,13 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
 }
 
-// dispatchCancelRouted sends the committed cancellation fence to the
+// dispatchCancelRouted delivers the committed cancellation fence to the
 // runtime that owns the attempt (RUNTIME-CANCEL-001..003), routed by
-// attempt type.
+// attempt type. The frame travels on the CURRENT stream (the runtime's
+// stop is keyed by attempt id; an attempt whose frozen binding predates a
+// same-boot reconnect must still be stoppable — the old epoch's envelope
+// would be dropped by the envelope fence). Not connected: the loss
+// convergence (stream end / lease sweeper) closes the fence.
 func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attemptID int64) error {
 	attemptType, err := service.attemptTypeOf(ctx, attemptID)
 	if err != nil {
@@ -302,10 +306,19 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		// Unbound attempts finalize locally.
 		return service.Analyses.CancelAck(ctx, attemptID)
 	}
+	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
+	if err != nil {
+		return err
+	}
+	if !view.Connected || view.ConnectionEpoch == nil {
+		// The runtime is unreachable; the stream-end convergence or the
+		// lease sweeper closes the Cancelling state deterministically.
+		return nil
+	}
 	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
-		ConnectionEpoch: uint64(epoch.Int64),
+		ConnectionEpoch: *view.ConnectionEpoch,
 		CorrelationId:   uint64(attemptID),
-		BootId:          boot.String,
+		BootId:          view.BootID,
 		Msg:             &runtimev1.ControlEnvelope_CancelAttempt{CancelAttempt: &runtimev1.CancelAttempt{AttemptId: attemptID}},
 	})
 }

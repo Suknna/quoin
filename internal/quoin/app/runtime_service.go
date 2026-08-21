@@ -42,6 +42,9 @@ type RuntimeService struct {
 	// embedded yet, which keeps lintel handshake-rejected with CATALOG_
 	// MISMATCH until a release embeds one.
 	CatalogDigest string
+	// reconcile carries the pending same-boot ReconcileReport waiter
+	// (T12, RUNTIME-TASK-005).
+	reconcile reconcileState
 }
 
 func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {
@@ -160,7 +163,15 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		return stream.Send(proto)
 	}
 	closing := service.Slots.AttachStreamWithSender(slot, hello.GetBootId(), hello.GetConnectionEpoch(), sender)
-	defer service.Slots.DetachStream(slot)
+	defer func() {
+		service.Slots.DetachStream(slot)
+		if slot == qruntime.SlotPlinth {
+			// The stream ended: Cancelling attempts of this binding converge
+			// (RUNTIME-CANCEL-003); Running attempts keep their lease window
+			// for a same-boot reconnect (RUNTIME-TASK-005).
+			service.onPlinthStreamEnded(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
+		}
+	}()
 	ack := &runtimev1.ControlEnvelope{
 		MessageId:       1,
 		ConnectionEpoch: hello.GetConnectionEpoch(),
@@ -178,8 +189,10 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	}
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
 	if slot == qruntime.SlotPlinth {
-		// Queued connection probes and agent attempts (created while
-		// disconnected) bind to this live stream and dispatch immediately.
+		// Reconnect adjudication first (new-boot interrupts, same-boot
+		// reconcile), then queued attempts created while the slot was
+		// disconnected bind to this live stream and dispatch immediately.
+		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 	}
@@ -236,6 +249,16 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		switch payload := envelope.Msg.(type) {
 		case *runtimev1.ControlEnvelope_Heartbeat:
 			service.Slots.Touch(slot)
+			if slot == qruntime.SlotPlinth {
+				// Heartbeats renew the live stream's attempt leases
+				// (RUNTIME-TASK-007; runtime_slots stays memory-only,
+				// RUNTIME-CTRL-005).
+				service.renewPlinthLeases(ctx, hello.GetBootId())
+			}
+		case *runtimev1.ControlEnvelope_ReconcileReport:
+			if slot == qruntime.SlotPlinth {
+				service.deliverReconcileReport(slot, payload.ReconcileReport.GetRunningAttemptIds())
+			}
 		case *runtimev1.ControlEnvelope_AttemptAccept:
 			service.handleAttemptAcceptRouted(ctx, envelope, payload.AttemptAccept)
 		case *runtimev1.ControlEnvelope_ResultProposal:

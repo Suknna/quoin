@@ -193,6 +193,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
+	// T12: the periodic lease sweeper converges attempts whose runtime
+	// disappeared without reconnecting (RUNTIME-TASK-006).
+	go controlService.RunLeaseSweeper(ctx)
 	return serverSet.run(ctx, config)
 }
 

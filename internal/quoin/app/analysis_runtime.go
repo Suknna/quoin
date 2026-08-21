@@ -19,17 +19,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// analysisLease is the dispatch lease window for agent attempts (the
-// frozen release source owns the value; deployment configuration arrives
-// with the deployment tickets).
-const analysisLease = "5m"
-
+// analysisLeaseWindow returns the dispatch lease window for agent
+// attempts: attempt.DispatchLease is the single frozen authority
+// (RUNTIME-SCOPE-004).
 func analysisLeaseWindow() time.Duration {
-	window, err := time.ParseDuration(analysisLease)
-	if err != nil || window <= 0 {
-		return 5 * time.Minute
-	}
-	return window
+	return attempt.DispatchLease
 }
 
 // dispatchAnalysisAttempt binds one Queued agent attempt to the live

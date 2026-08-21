@@ -17,6 +17,7 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc/codes"
@@ -24,9 +25,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// probeLease is the dispatch lease window for supervisor-executed probes
-// (deployment-configurable later; the frozen release source owns the value).
-const probeLease = "5m"
+// The dispatch lease window is attempt.DispatchLease (single frozen
+// authority, RUNTIME-SCOPE-004).
 
 // sendEnvelope stamps per-direction ids and forwards to the slot's live
 // stream; a failed send is audited and retried by the queued dispatcher.
@@ -128,11 +128,9 @@ func (service *RuntimeService) dispatchQueuedProbes(ctx context.Context) {
 }
 
 func probeLeaseWindow() time.Duration {
-	window, err := time.ParseDuration(probeLease)
-	if err != nil || window <= 0 {
-		return 5 * time.Minute
-	}
-	return window
+	// attempt.DispatchLease is the single frozen lease authority for
+	// probes and agent attempts alike (RUNTIME-SCOPE-004).
+	return attempt.DispatchLease
 }
 
 // handleAttemptAccept records Assigned -> Running (RUNTIME-TASK-004).
@@ -204,7 +202,7 @@ func (service *RuntimeService) handleResultProposal(ctx context.Context, envelop
 		reject(err.Error())
 		return
 	}
-	if err := service.Connections.CommitProbeResult(ctx, proposal.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), typed, child); err != nil {
+	if err := service.Connections.CommitProbeResult(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), typed, child); err != nil {
 		reject(err.Error())
 		return
 	}
