@@ -19,4 +19,7 @@ var (
 
 	//go:embed connection-probes.yaml
 	ConnectionProbesYAML []byte
+
+	//go:embed plinth-worker-tools.yaml
+	PlinthWorkerToolsYAML []byte
 )
