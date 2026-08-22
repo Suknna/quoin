@@ -146,7 +146,10 @@ type publishBody struct {
 }
 
 func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *struct {
-	authCookie
+	// Flattened rather than embedded: huma v2.39.1 does not bind cookie
+	// parameters from embedded structs when the input also has a Body (same
+	// frozen workaround as passwordInput).
+	Session  string `cookie:"__Host-quoin-session"`
 	SystemKey string `path:"systemKey"`
 	VersionID string `path:"versionId"`
 	Body      publishBody
@@ -245,8 +248,11 @@ type activationBody struct {
 }
 
 func (handler *Handler) activateLabelContract(ctx context.Context, input *struct {
-	authCookie
-	ContractVersion int64 `path:"contractVersion"`
+	// Flattened rather than embedded: huma v2.39.1 does not bind cookie
+	// parameters from embedded structs when the input also has a Body (same
+	// frozen workaround as passwordInput).
+	Session         string `cookie:"__Host-quoin-session"`
+	ContractVersion int64  `path:"contractVersion"`
 	Body            activationBody
 }) (*struct {
 	CacheControl string               `header:"Cache-Control"`
