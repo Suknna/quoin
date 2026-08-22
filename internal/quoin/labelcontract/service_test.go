@@ -191,9 +191,10 @@ func TestActivateRejectsStalePreconditionsAtomically(t *testing.T) {
 	if activeCount != 1 {
 		t.Fatalf("aborted activation must not flip states: %d", activeCount)
 	}
-	// Re-activating the already-active contract is an invalid state.
+	// Re-activating the already-activated contract (new command id, valid
+	// preconditions) hits the one-time activation uniqueness.
 	if _, err := service.Activate(context.Background(), 1, "cmd-activate-0005", ActivateInput{
-		ContractVersion: 1, ExpectedStateRowVersion: 2, ExpectedTargetRowVersion: 2,
+		ContractVersion: 1, ExpectedStateRowVersion: 2, ExpectedTargetRowVersion: 2, ExpectedCurrentContractID: ptrInt64(1),
 	}); err == nil {
 		t.Fatal("activating an already-activated contract must fail")
 	}
@@ -268,3 +269,5 @@ func TestListAndGet(t *testing.T) {
 		t.Fatalf("missing version must be NotFound, got %v", err)
 	}
 }
+
+func ptrInt64(value int64) *int64 { return &value }

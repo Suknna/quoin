@@ -85,6 +85,10 @@ func buildItemsJSON(items []ActivationItem) string {
 func mapActivationAbort(err error, input ActivateInput) error {
 	message := err.Error()
 	switch {
+	case strings.Contains(message, "UNIQUE constraint failed: label_contract_activations.contract_id"):
+		// The contract already carries an activation row: each version
+		// activates at most once (DATA-CONFIG-002 one-time activation).
+		return &ConflictError{Code: "row_version_conflict", Detail: "目标契约不是未激活草稿（可能刚被激活），请刷新后重试", ObjectID: input.ContractVersion}
 	case strings.Contains(message, "activation items must be closed objects"):
 		return &BadRequestError{Reason: "compatibleVersions 项必须是封闭的 typed 字段且每个业务系统只出现一次"}
 	case strings.Contains(message, "activation target must be an unactivated draft"):
