@@ -279,7 +279,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	apiConfig.Transformers = []huma.Transformer{}
 	apiConfig.CreateHooks = nil
 	api := humago.New(mux, apiConfig)
-	application.register(api)
+	configHandler := application.register(api)
 	application.registerAlertStream(mux)
 	application.registerTaskStream(mux)
 	// The artifact download streams raw bytes with the frozen security
@@ -290,9 +290,9 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
 	// The strict-YAML config uploads and the template download own their
 	// response heads the same way (T16).
-	mux.HandleFunc("POST /api/v1/business-systems", application.configHandler.ServeBusinessSystemUpload)
-	mux.HandleFunc("POST /api/v1/label-contracts", application.configHandler.ServeLabelContractUpload)
-	mux.HandleFunc("GET /api/v1/templates/business-system", application.configHandler.ServeBusinessSystemTemplate)
+	mux.HandleFunc("POST /api/v1/business-systems", configHandler.ServeBusinessSystemUpload)
+	mux.HandleFunc("POST /api/v1/label-contracts", configHandler.ServeLabelContractUpload)
+	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -302,7 +302,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	return securityHeaders(requireBrowserOrigin(csrf.Handler(mux))), nil
 }
 
-func (application *apiServer) register(api huma.API) {
+func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/login", OperationID: "login"}, application.login)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword", DefaultStatus: http.StatusNoContent}, application.changePassword)
@@ -368,9 +368,11 @@ func (application *apiServer) register(api huma.API) {
 		},
 	}
 	configHandler.Register(api)
-	// The raw multipart upload route (NewHandler) reuses this handler's
-	// authentication seam.
+	// The raw multipart upload routes (NewHandler) reuse this handler's
+	// authentication seams; returning it keeps the mux wiring after the
+	// full registration completes.
 	application.investigationUpload = investigationHandler
+	return configHandler
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
