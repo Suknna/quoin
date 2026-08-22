@@ -125,7 +125,9 @@ test.describe('T16 业务系统配置上传与发布 @ticket-16', () => {
     await page.getByRole('button', { name: '确认发布' }).click()
     await expect(page.getByRole('heading', { name: '浏览器验收系统' })).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText('已发布').first()).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Disabled')).toBeVisible()
+    // Both the header status pill and the fact row show the projection; one
+    // assert each to stay strict-mode safe.
+    await expect(page.locator('.detail-header .status-pill', { hasText: 'Disabled' })).toBeVisible()
 
     // The system list row reflects the published state.
     await page.getByRole('button', { name: '返回列表' }).click()
