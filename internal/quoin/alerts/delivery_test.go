@@ -213,7 +213,7 @@ func TestResolvedFirstCreatesClosedOccurrence(t *testing.T) {
 		t.Fatalf("effect=%s err=%v", effect, err)
 	}
 	// The closed occurrence must not appear in the Firing snapshot.
-	snapshot, err := service.AlertSnapshot(ctx, "Firing")
+	snapshot, err := service.AlertSnapshot(ctx, "Firing", "")
 	if err != nil || len(snapshot.Items) != 0 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}

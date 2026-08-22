@@ -74,6 +74,21 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 		t.Fatal("first login must report passwordChangeRequired")
 	}
 
+	// Huma validates request structure before a handler executes. It must still
+	// serialize the project-wide frozen ErrorModel and must not echo submitted
+	// values (which may be secrets on other endpoints).
+	invalid := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"wrong","unexpected":true}`, http.StatusUnprocessableEntity)
+	if contentType := invalid.headers.Get("Content-Type"); !strings.HasPrefix(contentType, "application/problem+json") {
+		t.Fatalf("framework validation content type=%q, want application/problem+json", contentType)
+	}
+	assertFrozenProblem(t, invalid, "validation_failed")
+
+	malformed := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":`, http.StatusBadRequest)
+	assertFrozenProblem(t, malformed, "malformed_request")
+
+	unsupportedMedia := mustPost(t, server, merge(origin, map[string]string{"Content-Type": "text/plain"}), `/api/v1/auth/login`, `{"username":"admin","password":"irrelevant"}`, http.StatusUnsupportedMediaType)
+	assertFrozenProblem(t, unsupportedMedia, "unsupported_media")
+
 	me := mustRequest(t, server, map[string]string{"Cookie": splitCookie(cookie)}, `/api/v1/auth/me`, http.StatusOK)
 	t.Logf("me: %s", me)
 
@@ -91,6 +106,25 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	}
 	if updated.PasswordChangeRequired || updated.AuthRevision != 2 {
 		t.Fatalf("password change did not take effect: %s", after)
+	}
+}
+
+func assertFrozenProblem(t *testing.T, result httpResult, wantCode string) {
+	t.Helper()
+	var body struct {
+		Code        string `json:"code"`
+		Message     string `json:"message"`
+		Retryable   *bool  `json:"retryable"`
+		FieldErrors []struct {
+			Path   string `json:"path"`
+			Reason string `json:"reason"`
+		} `json:"fieldErrors"`
+	}
+	if err := json.Unmarshal([]byte(result.body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != wantCode || body.Message == "" || body.Retryable == nil || len(body.FieldErrors) == 0 || strings.Contains(result.body, `"value"`) {
+		t.Fatalf("framework validation must use frozen redacted ErrorModel (want code %q): %s", wantCode, result.body)
 	}
 }
 

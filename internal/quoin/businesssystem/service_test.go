@@ -284,8 +284,15 @@ func TestPublishConflictFences(t *testing.T) {
 	}
 	for rows.Next() {
 		var id, state string
-		_ = rows.Scan(&id, &state)
+		if err := rows.Scan(&id, &state); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
 		states[id] = state
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
 	}
 	rows.Close()
 	if states[first.ID] != "superseded" || states[second.ID] != "published" {
@@ -339,9 +346,9 @@ func TestUploadCommandReplay(t *testing.T) {
 func TestListAndGetProjections(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0050")
-	items, more, err := h.systems.ListSystems(context.Background(), nil, "", "", 50)
-	if err != nil || more || len(items) != 1 || items[0].Key != "payments" || items[0].ConfigVersionCount != 1 {
-		t.Fatalf("list wrong: %v %v %#v", err, more, items)
+	items, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 50)
+	if err != nil || nextCursor != "" || len(items) != 1 || items[0].Key != "payments" || items[0].ConfigVersionCount != 1 {
+		t.Fatalf("list wrong: %v %q %#v", err, nextCursor, items)
 	}
 	enabledOnly := true
 	if items, _, err := h.systems.ListSystems(context.Background(), &enabledOnly, "", "", 50); err != nil || len(items) != 0 {
@@ -360,6 +367,25 @@ func TestListAndGetProjections(t *testing.T) {
 	}
 	if _, err := h.systems.GetVersion(context.Background(), "payments", 999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing version must be NotFound: %v", err)
+	}
+}
+
+func TestListSystemsReturnsIDKeysetCursor(t *testing.T) {
+	h := newHarness(t)
+	h.mustUpload(t, validSystemYAML, 1, "cmd-list-cursor-001")
+	billingYAML := strings.ReplaceAll(strings.ReplaceAll(validSystemYAML, "payments", "billing"), "支付系统", "账单系统")
+	h.mustUpload(t, billingYAML, 1, "cmd-list-cursor-002")
+
+	firstPage, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 1)
+	if err != nil || len(firstPage) != 1 || nextCursor == "" {
+		t.Fatalf("first page must have an ID cursor: err=%v cursor=%q items=%#v", err, nextCursor, firstPage)
+	}
+	secondPage, finalCursor, err := h.systems.ListSystems(context.Background(), nil, "", nextCursor, 1)
+	if err != nil || len(secondPage) != 1 || finalCursor != "" {
+		t.Fatalf("second page wrong: err=%v cursor=%q items=%#v", err, finalCursor, secondPage)
+	}
+	if firstPage[0].Key == secondPage[0].Key {
+		t.Fatalf("keyset cursor replayed the first row: %q", firstPage[0].Key)
 	}
 }
 

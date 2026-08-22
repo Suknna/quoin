@@ -269,6 +269,7 @@ func (application *apiServer) newServers(config contract.QuoinConfig) (*servers,
 // NewHandler builds the same-origin public surface: the real Huma API plus the
 // embedded web shell, behind the frozen CSRF and security-header gates.
 func NewHandler(application *apiServer, publicOrigin string) (http.Handler, error) {
+	configureHumaErrorModel()
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Quoin v1 API", "1.0.0-draft")
 	apiConfig.OpenAPIPath = ""

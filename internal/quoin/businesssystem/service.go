@@ -29,7 +29,7 @@ var ErrCommandReused = errors.New("client command id reused with a different req
 
 // ConflictError carries the frozen publish conflict codes.
 type ConflictError struct {
-	Code           string // row_version_conflict | current_pointer_conflict
+	Code           string // row_version_conflict | current_pointer_conflict | active_conflict
 	Detail         string
 	SystemKey      string
 	ObjectID       int64
@@ -125,14 +125,12 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	commandDigest := auth.DigestCommand("business_system.config.upload", map[string]any{
 		"digest": digest, "labelContractVersion": input.TargetLabelContractVersion, "catalogDigest": catalogDigest,
 	})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
-		if record.RequestDigest != commandDigest {
-			return ConfigVersionDetail{}, ErrCommandReused
-		}
-		var replayed ConfigVersionDetail
-		if err := decodeStored(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
-			return replayed, nil
-		}
+	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
+	if err != nil {
+		return ConfigVersionDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayCommandResult(record, found, commandDigest, func(detail ConfigVersionDetail) bool { return detail.ID != "" }); alreadyCommitted || replayErr != nil {
+		return replayed, replayErr
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -148,6 +146,21 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	// The preflight lookup can become stale while this request waits for the
+	// SQLite writer. Recheck before creating a system or version.
+	record, found, err = auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
+	if err != nil {
+		return ConfigVersionDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayCommandResult(record, found, commandDigest, func(detail ConfigVersionDetail) bool { return detail.ID != "" }); replayErr != nil {
+		return ConfigVersionDetail{}, replayErr
+	} else if alreadyCommitted {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return ConfigVersionDetail{}, err
+		}
+		committed = true
+		return replayed, nil
+	}
 	// Re-verify the target contract inside the serialized transaction; a
 	// concurrent activation that retires it must fail this upload.
 	var currentState string
@@ -275,14 +288,12 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 	commandDigest := auth.DigestCommand("business_system.config.publish", map[string]any{
 		"systemKey": systemKey, "versionId": versionID, "expectedCurrent": idString(expectedCurrent),
 	})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
-		if record.RequestDigest != commandDigest {
-			return BusinessSystemDetail{}, ErrCommandReused
-		}
-		var replayed BusinessSystemDetail
-		if err := decodeStored(record.ResultPayload, &replayed); err == nil && replayed.Key != "" {
-			return replayed, nil
-		}
+	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
+	if err != nil {
+		return BusinessSystemDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayCommandResult(record, found, commandDigest, func(detail BusinessSystemDetail) bool { return detail.Key != "" }); alreadyCommitted || replayErr != nil {
+		return replayed, replayErr
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -298,6 +309,20 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	// Recheck through the writer connection before any pointer fence.
+	record, found, err = auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
+	if err != nil {
+		return BusinessSystemDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayCommandResult(record, found, commandDigest, func(detail BusinessSystemDetail) bool { return detail.Key != "" }); replayErr != nil {
+		return BusinessSystemDetail{}, replayErr
+	} else if alreadyCommitted {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return BusinessSystemDetail{}, err
+		}
+		committed = true
+		return replayed, nil
+	}
 	var systemID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -455,4 +480,25 @@ func decodeStored(payload string, target any) error {
 		return errors.New("empty stored result")
 	}
 	return json.Unmarshal([]byte(payload), target)
+}
+
+// replayCommandResult is the only route from a committed command ledger row
+// back to a command response. A malformed ledger row cannot fall through into
+// a second business execution.
+func replayCommandResult[T any](record auth.CommandRecord, found bool, digest string, valid func(T) bool) (T, bool, error) {
+	var zero T
+	if !found {
+		return zero, false, nil
+	}
+	if record.RequestDigest != digest {
+		return zero, true, ErrCommandReused
+	}
+	var replayed T
+	if err := decodeStored(record.ResultPayload, &replayed); err != nil {
+		return zero, true, fmt.Errorf("decode committed business-system command: %w", err)
+	}
+	if !valid(replayed) {
+		return zero, true, errors.New("committed business-system command has no result")
+	}
+	return replayed, true, nil
 }

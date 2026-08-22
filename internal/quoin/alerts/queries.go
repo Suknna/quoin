@@ -31,15 +31,32 @@ type AlertSnapshot struct {
 // AlertSnapshot returns the occurrence snapshot filtered by state (Firing
 // is the default current view; Resolved is the history view) plus the
 // current alert_change_log high-water (DATA-SSE-009 / HTTP-PAGE-006).
-func (service *Service) AlertSnapshot(ctx context.Context, state string) (AlertSnapshot, error) {
+// businessSystemKey filters to occurrences attributed to that system;
+// 未归属 occurrences only appear in the unfiltered view.
+func (service *Service) AlertSnapshot(ctx context.Context, state string, businessSystemKey string) (AlertSnapshot, error) {
 	if state != "Firing" && state != "Resolved" {
 		state = "Firing"
 	}
-	var seq int64
-	if err := service.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_change_log`).Scan(&seq); err != nil {
+	// seq and the member rows must come from one SQLite read transaction. If
+	// they came from separate statement snapshots, a delivery committed between
+	// them could be neither represented by the returned items nor replayed by
+	// SSE after=seq.
+	tx, err := service.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
 		return AlertSnapshot{}, err
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT id, state, row_version, first_seen_at, last_state_change_at, resolved_at, labels_canonical FROM alert_occurrences WHERE state=? ORDER BY last_state_change_at DESC, id DESC`, state)
+	defer tx.Rollback()
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_change_log`).Scan(&seq); err != nil {
+		return AlertSnapshot{}, err
+	}
+	conditions := `o.state=?`
+	args := []any{state}
+	if businessSystemKey != "" {
+		conditions += ` AND o.business_system_id=(SELECT id FROM business_systems WHERE key=?)`
+		args = append(args, businessSystemKey)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT o.id, o.state, o.row_version, bs.key, o.first_seen_at, o.last_state_change_at, o.resolved_at, o.labels_canonical FROM alert_occurrences o LEFT JOIN business_systems bs ON bs.id=o.business_system_id WHERE `+conditions+` ORDER BY o.last_state_change_at DESC, o.id DESC`, args...)
 	if err != nil {
 		return AlertSnapshot{}, err
 	}
@@ -48,12 +65,17 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string) (AlertS
 	for rows.Next() {
 		var summary OccurrenceSummary
 		var id int64
+		var businessKey sql.NullString
 		var resolvedAt sql.NullString
 		var labelsJSON string
-		if err := rows.Scan(&id, &summary.State, &summary.RowVersion, &summary.FirstSeenAt, &summary.LastStateChange, &resolvedAt, &labelsJSON); err != nil {
+		if err := rows.Scan(&id, &summary.State, &summary.RowVersion, &businessKey, &summary.FirstSeenAt, &summary.LastStateChange, &resolvedAt, &labelsJSON); err != nil {
 			return AlertSnapshot{}, err
 		}
 		summary.ID = strconv.FormatInt(id, 10)
+		if businessKey.Valid {
+			value := businessKey.String
+			summary.BusinessSystem = &value
+		}
 		if resolvedAt.Valid {
 			summary.ResolvedAt = &resolvedAt.String
 		}
@@ -65,21 +87,32 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string) (AlertS
 	if snapshot.Items == nil {
 		snapshot.Items = []OccurrenceSummary{}
 	}
-	return snapshot, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AlertSnapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AlertSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 // GetOccurrence returns the detail projection for one occurrence.
 func (service *Service) GetOccurrence(ctx context.Context, occurrenceID int64) (OccurrenceSummary, error) {
 	var summary OccurrenceSummary
 	var id int64
+	var businessKey sql.NullString
 	var resolvedAt sql.NullString
 	var labelsJSON string
-	err := service.db.QueryRowContext(ctx, `SELECT id, state, row_version, first_seen_at, last_state_change_at, resolved_at, labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).
-		Scan(&id, &summary.State, &summary.RowVersion, &summary.FirstSeenAt, &summary.LastStateChange, &resolvedAt, &labelsJSON)
+	err := service.db.QueryRowContext(ctx, `SELECT o.id, o.state, o.row_version, bs.key, o.first_seen_at, o.last_state_change_at, o.resolved_at, o.labels_canonical FROM alert_occurrences o LEFT JOIN business_systems bs ON bs.id=o.business_system_id WHERE o.id=?`, occurrenceID).
+		Scan(&id, &summary.State, &summary.RowVersion, &businessKey, &summary.FirstSeenAt, &summary.LastStateChange, &resolvedAt, &labelsJSON)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
 	summary.ID = strconv.FormatInt(id, 10)
+	if businessKey.Valid {
+		value := businessKey.String
+		summary.BusinessSystem = &value
+	}
 	if resolvedAt.Valid {
 		summary.ResolvedAt = &resolvedAt.String
 	}

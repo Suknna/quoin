@@ -39,9 +39,14 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config", OperationID: "listBusinessSystemConfigs"}, handler.listBusinessSystemConfigs)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}", OperationID: "getBusinessSystemConfig"}, handler.getBusinessSystemConfig)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/publish", OperationID: "publishBusinessSystemConfig"}, handler.publishBusinessSystemConfig)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "listConfigVerificationRuns"}, handler.listConfigVerificationRuns)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "runConfigVerificationRun"}, handler.runConfigVerificationRun)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", OperationID: "getConfigVerificationRun"}, handler.getConfigVerificationRun)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel", OperationID: "cancelConfigVerificationRun"}, handler.cancelConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts", OperationID: "listLabelContracts"}, handler.listLabelContracts)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}", OperationID: "getLabelContract"}, handler.getLabelContract)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/label-contracts/{contractVersion}/activate", OperationID: "activateLabelContract"}, handler.activateLabelContract)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}/readiness", OperationID: "getLabelContractActivationReadiness"}, handler.getLabelContractActivationReadiness)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/journey-catalog", OperationID: "getJourneyCatalog"}, handler.getJourneyCatalog)
 }
 
@@ -55,8 +60,9 @@ type problemError struct {
 	Conflict    map[string]any      `json:"conflict,omitempty"`
 }
 
-func (p *problemError) Error() string  { return p.Message }
-func (p *problemError) GetStatus() int { return p.status }
+func (p *problemError) Error() string             { return p.Message }
+func (p *problemError) GetStatus() int            { return p.status }
+func (p *problemError) ContentType(string) string { return "application/problem+json" }
 
 func problem(status int, code, message string) *problemError {
 	return &problemError{status: status, Code: code, Message: message, Retryable: status >= 500 || status == 429}

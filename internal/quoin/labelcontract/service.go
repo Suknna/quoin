@@ -94,6 +94,26 @@ func NewService(db *sql.DB) *Service {
 
 func (service *Service) nowText() string { return service.now().UTC().Format(time.RFC3339Nano) }
 
+// replayLabelContract turns one already-read ledger record into the original
+// command result. A malformed committed payload is an infrastructure fault,
+// never permission to execute the command again.
+func replayLabelContract(record auth.CommandRecord, found bool, digest string) (LabelContractDetail, bool, error) {
+	if !found {
+		return LabelContractDetail{}, false, nil
+	}
+	if record.RequestDigest != digest {
+		return LabelContractDetail{}, true, ErrCommandReused
+	}
+	var replayed LabelContractDetail
+	if err := decodeStoredResult(record.ResultPayload, &replayed); err != nil {
+		return LabelContractDetail{}, true, fmt.Errorf("decode committed label contract command: %w", err)
+	}
+	if replayed.ID == "" {
+		return LabelContractDetail{}, true, errors.New("committed label contract command has no result")
+	}
+	return replayed, true, nil
+}
+
 // CreateDraft parses the strict YAML once, persists the immutable draft row
 // with its typed projection and returns the detail (DATA-CONFIG-003). The
 // parse failure surfaces as *config.ValidationError for the 422 mapping.
@@ -111,14 +131,12 @@ func (service *Service) CreateDraft(ctx context.Context, principalID int64, clie
 	}
 	digest := document.Digest()
 	commandDigest := auth.DigestCommand("label_contract.create", map[string]any{"digest": digest})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
-		if record.RequestDigest != commandDigest {
-			return LabelContractDetail{}, ErrCommandReused
-		}
-		var replayed LabelContractDetail
-		if err := decodeStoredResult(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
-			return replayed, nil
-		}
+	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
+	if err != nil {
+		return LabelContractDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayLabelContract(record, found, commandDigest); alreadyCommitted || replayErr != nil {
+		return replayed, replayErr
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -134,6 +152,21 @@ func (service *Service) CreateDraft(ctx context.Context, principalID int64, clie
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	// The outer lookup may have raced a writer while this request waited for
+	// BEGIN IMMEDIATE. Recheck before allocating a version.
+	record, found, err = auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
+	if err != nil {
+		return LabelContractDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayLabelContract(record, found, commandDigest); replayErr != nil {
+		return LabelContractDetail{}, replayErr
+	} else if alreadyCommitted {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return LabelContractDetail{}, err
+		}
+		committed = true
+		return replayed, nil
+	}
 	now := service.nowText()
 	var version int64
 	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM label_contracts`).Scan(&version); err != nil {
@@ -179,14 +212,12 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 		"target":  input.ExpectedTargetRowVersion,
 		"items":   activationItemDigest(input.Items),
 	})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
-		if record.RequestDigest != commandDigest {
-			return LabelContractDetail{}, ErrCommandReused
-		}
-		var replayed LabelContractDetail
-		if err := decodeStoredResult(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
-			return replayed, nil
-		}
+	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
+	if err != nil {
+		return LabelContractDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayLabelContract(record, found, commandDigest); alreadyCommitted || replayErr != nil {
+		return replayed, replayErr
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -202,6 +233,21 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	// A same-key request can commit between the preflight lookup and writer
+	// acquisition. Recheck before any activation trigger or freshness fence.
+	record, found, err = auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
+	if err != nil {
+		return LabelContractDetail{}, err
+	}
+	if replayed, alreadyCommitted, replayErr := replayLabelContract(record, found, commandDigest); replayErr != nil {
+		return LabelContractDetail{}, replayErr
+	} else if alreadyCommitted {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return LabelContractDetail{}, err
+		}
+		committed = true
+		return replayed, nil
+	}
 	var contractID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM label_contracts WHERE version=?`, input.ContractVersion).Scan(&contractID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -262,7 +308,7 @@ func (service *Service) Current(ctx context.Context) (currentContractID *int64, 
 // LabelContractListing is the paginated contract list envelope.
 type LabelContractListing struct {
 	Items      []LabelContractDetail `json:"items"`
-	NextCursor string   `json:"nextCursor,omitempty"`
+	NextCursor string                `json:"nextCursor,omitempty"`
 }
 
 // List returns contract summaries newest-first with cursor pagination.

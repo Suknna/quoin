@@ -129,6 +129,14 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 		preparedItems = append(preparedItems, item)
 	}
 
+	// The active contract's business_system_label is loaded once per
+	// delivery transaction; every occurrence created below is attributed
+	// under it (T17, write-once at first observation).
+	attribution, err := loadAttribution(ctx, conn)
+	if err != nil {
+		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
+	}
+
 	processed := 0
 	occurrences := []OccurrenceRef{}
 	issues := []IntakeIssueRef{}
@@ -158,7 +166,7 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 			issues = append(issues, issueRef)
 			continue
 		}
-		occurrence, _, err := service.applyItem(ctx, conn, sourceID, *item, itemID, deliveryID, receivedAt, committedAt)
+		occurrence, _, err := service.applyItem(ctx, conn, sourceID, *item, itemID, deliveryID, receivedAt, committedAt, attribution)
 		if err != nil {
 			return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 		}
@@ -305,7 +313,7 @@ func (service *Service) classifyAndInsertItem(ctx context.Context, conn *sql.Con
 	return status, itemID, nil
 }
 
-func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID int64, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string) (*OccurrenceRef, string, error) {
+func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID int64, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, attribution attributionIndex) (*OccurrenceRef, string, error) {
 	var occurrenceID int64
 	var state string
 	var rowVersion int64
@@ -317,6 +325,13 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 			return nil, "", canonicalErr
 		}
 		digest := DigestLabels(labelsCanonical)
+		// Write-once attribution under the contract active at first
+		// observation (T17): missing/unknown label values stay 未归属
+		// (NULL business_system_id) and are never rewritten later.
+		businessSystemID, attrErr := attribution.attribute(ctx, conn, item.labels)
+		if attrErr != nil {
+			return nil, "", attrErr
+		}
 		// DATA-ALERT-006: a resolved-first delivery creates the occurrence
 		// already closed (state='Resolved', resolved_at set) with a
 		// resolved_first observation; the schema CHECK on alert_occurrences
@@ -329,8 +344,8 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 			initialState = "Resolved"
 			resolvedAt = committedAt
 		}
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?)`,
-			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, committedAt, committedAt, resolvedAt)
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, business_system_id, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?,?)`,
+			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, nullableID(businessSystemID), committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
 			return nil, "", insertErr
 		}

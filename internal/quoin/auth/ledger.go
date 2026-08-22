@@ -34,11 +34,29 @@ type CommandRecord struct {
 	ResultPayload    string
 }
 
-// LookupCommand reads the persisted outcome for a command key. ok=false means
-// the command is new (HTTP-COMMAND-003/007: key lookup precedes every field
-// check).
+// commandReader is the smallest SQLite read seam shared by *sql.DB and an
+// already-open *sql.Conn. A command writer must recheck its ledger key through
+// the same connection after BEGIN IMMEDIATE: another same-key request may have
+// committed while this request was waiting to become the writer.
+type commandReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// LookupCommand reads the persisted outcome for a command key before a command
+// opens its write transaction (HTTP-COMMAND-003/007).
 func LookupCommand(ctx context.Context, db *sql.DB, principalID int64, clientCommandID string) (CommandRecord, bool, error) {
-	row := db.QueryRowContext(ctx, `
+	return lookupCommand(ctx, db, principalID, clientCommandID)
+}
+
+// LookupCommandOn reads the same key through an open transaction connection.
+// Writers use it after BEGIN IMMEDIATE to make concurrent same-key replay
+// deterministic rather than relying on a stale pre-transaction lookup.
+func LookupCommandOn(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID string) (CommandRecord, bool, error) {
+	return lookupCommand(ctx, conn, principalID, clientCommandID)
+}
+
+func lookupCommand(ctx context.Context, reader commandReader, principalID int64, clientCommandID string) (CommandRecord, bool, error) {
+	row := reader.QueryRowContext(ctx, `
 		SELECT command_type, request_digest, outcome, result_object_type, COALESCE(result_object_id, 0), COALESCE(result_payload_json, '')
 		FROM client_commands
 		WHERE principal_type='user' AND principal_id=? AND client_command_id=?`, principalID, clientCommandID)

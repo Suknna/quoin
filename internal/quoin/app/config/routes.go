@@ -49,7 +49,7 @@ func (handler *Handler) listBusinessSystems(ctx context.Context, input *struct {
 	default:
 		return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "enabled 筛选必须是 true 或 false。")
 	}
-	items, more, err := handler.Systems.ListSystems(ctx, enabledFilter, input.Query, decodeCursor(input.Cursor), input.Limit)
+	items, nextCursor, err := handler.Systems.ListSystems(ctx, enabledFilter, input.Query, decodeCursor(input.Cursor), input.Limit)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -58,8 +58,8 @@ func (handler *Handler) listBusinessSystems(ctx context.Context, input *struct {
 		Body         businesssystem.SystemDetailListing `json:"body"`
 	}{CacheControl: noStore()}
 	response.Body.Items = items
-	if more && len(items) > 0 {
-		response.Body.NextCursor = encodeCursor(items[len(items)-1].Key)
+	if nextCursor != "" {
+		response.Body.NextCursor = encodeCursor(nextCursor)
 	}
 	return response, nil
 }
@@ -137,8 +137,8 @@ func (handler *Handler) getBusinessSystemConfig(ctx context.Context, input *stru
 }
 
 type publishBody struct {
-	ClientCommandID                   string  `json:"clientCommandId" maxLength:"128"`
-	ExpectedCurrentPublishedVersionID *string `json:"expectedCurrentPublishedVersionId"`
+	ClientCommandID                   string  `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	ExpectedCurrentPublishedVersionID *string `json:"expectedCurrentPublishedVersionId" pattern:"^[1-9][0-9]*$"`
 }
 
 func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *struct {
@@ -162,7 +162,7 @@ func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *
 		return nil, locatorProblem
 	}
 	var expected *int64
-	if input.Body.ExpectedCurrentPublishedVersionID != nil && *input.Body.ExpectedCurrentPublishedVersionID != "" {
+	if input.Body.ExpectedCurrentPublishedVersionID != nil {
 		parsed, parseErr := strconv.ParseInt(*input.Body.ExpectedCurrentPublishedVersionID, 10, 64)
 		if parseErr != nil || parsed <= 0 {
 			return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "expectedCurrentPublishedVersionId 必须是正整数或 null。")
@@ -228,18 +228,18 @@ func (handler *Handler) getLabelContract(ctx context.Context, input *struct {
 }
 
 type activationItemBody struct {
-	BusinessSystemKey                string  `json:"businessSystemKey"`
-	ConfigVersionID                  string  `json:"configVersionId"`
-	VerificationRunID                string  `json:"verificationRunId"`
-	ExpectedCurrentConfigVersionID   *string `json:"expectedCurrentConfigVersionId"`
-	ExpectedBusinessSystemRowVersion int64   `json:"expectedBusinessSystemRowVersion"`
+	BusinessSystemKey                string  `json:"businessSystemKey" minLength:"1" maxLength:"200"`
+	ConfigVersionID                  string  `json:"configVersionId" pattern:"^[1-9][0-9]*$"`
+	VerificationRunID                string  `json:"verificationRunId" pattern:"^[1-9][0-9]*$"`
+	ExpectedCurrentConfigVersionID   *string `json:"expectedCurrentConfigVersionId" pattern:"^[1-9][0-9]*$"`
+	ExpectedBusinessSystemRowVersion int64   `json:"expectedBusinessSystemRowVersion" minimum:"1"`
 }
 
 type activationBody struct {
-	ClientCommandID           string               `json:"clientCommandId"`
-	ExpectedStateRowVersion   int64                `json:"expectedStateRowVersion"`
-	ExpectedCurrentContractID *string              `json:"expectedCurrentContractVersionId"`
-	ExpectedTargetRowVersion  int64                `json:"expectedTargetRowVersion"`
+	ClientCommandID           string               `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	ExpectedStateRowVersion   int64                `json:"expectedStateRowVersion" minimum:"1"`
+	ExpectedCurrentContractID *string              `json:"expectedCurrentContractVersionId" pattern:"^[1-9][0-9]*$"`
+	ExpectedTargetRowVersion  int64                `json:"expectedTargetRowVersion" minimum:"1"`
 	CompatibleVersions        []activationItemBody `json:"compatibleVersions"`
 }
 
@@ -263,7 +263,7 @@ func (handler *Handler) activateLabelContract(ctx context.Context, input *struct
 		ExpectedStateRowVersion:  input.Body.ExpectedStateRowVersion,
 		ExpectedTargetRowVersion: input.Body.ExpectedTargetRowVersion,
 	}
-	if input.Body.ExpectedCurrentContractID != nil && *input.Body.ExpectedCurrentContractID != "" {
+	if input.Body.ExpectedCurrentContractID != nil {
 		parsed, parseErr := strconv.ParseInt(*input.Body.ExpectedCurrentContractID, 10, 64)
 		if parseErr != nil || parsed <= 0 {
 			return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "expectedCurrentContractVersionId 必须是正整数或 null。")
@@ -281,7 +281,7 @@ func (handler *Handler) activateLabelContract(ctx context.Context, input *struct
 		if entry.VerificationRunID, err = strconv.ParseInt(item.VerificationRunID, 10, 64); err != nil || entry.VerificationRunID <= 0 {
 			return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "compatibleVersions.verificationRunId 必须是正整数。")
 		}
-		if item.ExpectedCurrentConfigVersionID != nil && *item.ExpectedCurrentConfigVersionID != "" {
+		if item.ExpectedCurrentConfigVersionID != nil {
 			parsed, parseErr := strconv.ParseInt(*item.ExpectedCurrentConfigVersionID, 10, 64)
 			if parseErr != nil || parsed <= 0 {
 				return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "compatibleVersions.expectedCurrentConfigVersionId 必须是正整数或 null。")

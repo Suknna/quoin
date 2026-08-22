@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"strings"
 )
 
 // DiscoveryView is DiscoverySummary.
@@ -101,18 +102,20 @@ type ConfigVersionSummary struct {
 // SystemDetailListing is the paginated list envelope.
 type SystemDetailListing struct {
 	Items      []BusinessSystemDetail `json:"items"`
-	NextCursor string         `json:"nextCursor,omitempty"`
+	NextCursor string                 `json:"nextCursor,omitempty"`
 }
 
 // VersionSummaryListing is the paginated history envelope.
 type VersionSummaryListing struct {
 	Items      []ConfigVersionSummary `json:"items"`
-	NextCursor string           `json:"nextCursor,omitempty"`
+	NextCursor string                 `json:"nextCursor,omitempty"`
 }
 
 // ListSystems returns the business system summaries newest-created-first
-// with the enabled filter and display-name contains search (cursor on id).
-func (service *Service) ListSystems(ctx context.Context, enabled *bool, query string, cursor string, limit int) ([]BusinessSystemDetail, bool, error) {
+// with the enabled filter and display-name contains search. The returned
+// cursor is the final emitted row ID, so the HTTP adapter can safely encode it
+// for the next id-keyset page without exposing the internal row ID in items.
+func (service *Service) ListSystems(ctx context.Context, enabled *bool, query string, cursor string, limit int) ([]BusinessSystemDetail, string, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -137,7 +140,7 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 		FROM business_systems WHERE `+joinAnd(conditions)+` ORDER BY id DESC LIMIT ?`,
 		append(args, limit+1)...)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	ids := []int64{}
@@ -152,7 +155,7 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 			enabledFlag int64
 		)
 		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh); err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
 		detail.Enabled = enabledFlag == 1
 		detail.BrowserIdentityState = "none"
@@ -172,22 +175,22 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 		systems = append(systems, detail)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
-	more := false
+	nextCursor := ""
 	if len(systems) > limit {
+		nextCursor = strconv.FormatInt(ids[limit-1], 10)
 		systems = systems[:limit]
 		ids = ids[:limit]
-		more = true
 	}
 	for index, id := range ids {
 		count, err := service.countVersions(ctx, id)
 		if err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
 		systems[index].ConfigVersionCount = count
 	}
-	return systems, more, nil
+	return systems, nextCursor, nil
 }
 
 // GetSystem returns one system detail with its current version projections.
@@ -502,10 +505,4 @@ func scanVersionSummary(rows *sql.Rows) (ConfigVersionSummary, error) {
 	return summary, nil
 }
 
-func joinAnd(conditions []string) string {
-	result := conditions[0]
-	for _, condition := range conditions[1:] {
-		result += " AND " + condition
-	}
-	return result
-}
+func joinAnd(conditions []string) string { return strings.Join(conditions, " AND ") }
