@@ -8,6 +8,11 @@ import { IntakeIssuesList } from '../alerts/IntakeIssuesList'
 import { ConnectionsPanel } from '../admin/connections/ConnectionsPanel'
 import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
 import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
+import { BusinessSystemsList } from '../admin/business-systems/BusinessSystemsList'
+import { BusinessSystemDetailPage } from '../admin/business-systems/BusinessSystemDetail'
+import { ConfigVersionPage } from '../admin/business-systems/ConfigVersionDetail'
+import { UploadOverlay } from '../admin/business-systems/UploadOverlay'
+import '../admin/business-systems/business-systems.css'
 import { InvestigationChat } from '../investigation/InvestigationChat'
 import { InvestigationsList } from '../investigation/InvestigationsList'
 import { NewInvestigation, type InvestigationSourceRef } from '../investigation/NewInvestigation'
@@ -20,6 +25,16 @@ interface WorkbenchProps {
 type ModuleKey = 'alerts' | 'investigations' | 'inspections' | 'business-systems' | 'knowledge' | 'admin'
 
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
+
+type BusinessSystemView = { kind: 'list' } | { kind: 'system'; systemKey: string } | { kind: 'version'; systemKey: string; versionId: string }
+
+function businessSystemViewFromPath(): BusinessSystemView {
+  const versionMatch = window.location.pathname.match(/^\/business-systems\/([^/]+)\/configs\/(\d+)/)
+  if (versionMatch) return { kind: 'version', systemKey: decodeURIComponent(versionMatch[1]), versionId: versionMatch[2] }
+  const systemMatch = window.location.pathname.match(/^\/business-systems\/([^/]+)$/)
+  if (systemMatch) return { kind: 'system', systemKey: decodeURIComponent(systemMatch[1]) }
+  return { kind: 'list' }
+}
 
 function investigationViewFromPath(): InvestigationView {
   const match = window.location.pathname.match(/^\/investigations\/(\d+)/)
@@ -62,7 +77,9 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [openAnalysisId, setOpenAnalysisId] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
   const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
-  const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
+	const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
+	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
+	const [uploadOpen, setUploadOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
@@ -75,6 +92,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
       setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
       setInvestigationView(investigationViewFromPath())
+      setBusinessSystemView(businessSystemViewFromPath())
     }
     sync()
     window.addEventListener('popstate', sync)
@@ -116,6 +134,27 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   function backToInvestigations() {
     window.history.pushState({}, '', '/investigations')
     setInvestigationView({ kind: 'list' })
+  }
+
+  function openBusinessSystem(key: string) {
+    window.history.pushState({}, '', `/business-systems/${encodeURIComponent(key)}`)
+    setActive('business-systems')
+    setBusinessSystemView({ kind: 'system', systemKey: key })
+  }
+
+  function openBusinessSystemVersion(key: string, versionId: string) {
+    window.history.pushState({}, '', `/business-systems/${encodeURIComponent(key)}/configs/${versionId}`)
+    setBusinessSystemView({ kind: 'version', systemKey: key, versionId })
+  }
+
+  function backToBusinessSystem(key: string) {
+    window.history.pushState({}, '', `/business-systems/${encodeURIComponent(key)}`)
+    setBusinessSystemView({ kind: 'system', systemKey: key })
+  }
+
+  function backToBusinessSystems() {
+    window.history.pushState({}, '', '/business-systems')
+    setBusinessSystemView({ kind: 'list' })
   }
 
   async function logout() {
@@ -190,6 +229,13 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 				onNew={() => newInvestigation([])}
 			/>
 		)}
+		{active === 'business-systems' && (
+			<BusinessSystemsList
+				onOpen={openBusinessSystem}
+				onUpload={() => setUploadOpen(true)}
+				isAdmin={user.role === 'admin'}
+			/>
+		)}
       </aside>
       <main className="detail-pane" tabIndex={-1}>
         {active === 'admin' && user.role === 'admin' ? (
@@ -229,6 +275,28 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
               <button className="primary-button" onClick={() => newInvestigation([])}>新建调查</button>
             </div>
           </div>
+        ) : active === 'business-systems' && businessSystemView.kind === 'version' ? (
+          <ConfigVersionPage
+            systemKey={businessSystemView.systemKey}
+            versionId={businessSystemView.versionId}
+            isAdmin={user.role === 'admin'}
+            onBack={() => backToBusinessSystem(businessSystemView.systemKey)}
+            onPublished={() => backToBusinessSystem(businessSystemView.systemKey)}
+          />
+        ) : active === 'business-systems' && businessSystemView.kind === 'system' ? (
+          <BusinessSystemDetailPage
+            systemKey={businessSystemView.systemKey}
+            onBack={backToBusinessSystems}
+            onOpenVersion={openBusinessSystemVersion}
+          />
+        ) : active === 'business-systems' ? (
+          <div className="detail-content">
+            <div className="empty-state">
+              <ModuleIcon name="business-systems" large />
+              <h2>业务系统</h2>
+              <p>左侧选择业务系统查看当前配置、版本历史与发布状态。</p>
+            </div>
+          </div>
         ) : (
           <div className="empty-state">
             <ModuleIcon name={activeModule.key} large />
@@ -237,6 +305,15 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           </div>
         )}
       </main>
+      {uploadOpen && (
+        <UploadOverlay
+          onClose={() => setUploadOpen(false)}
+          onUploaded={(systemKey, versionId) => {
+            setUploadOpen(false)
+            openBusinessSystemVersion(systemKey, versionId)
+          }}
+        />
+      )}
     </div>
   )
 }
