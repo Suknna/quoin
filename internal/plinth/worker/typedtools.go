@@ -272,22 +272,35 @@ func (runner *Runner) commitTypedTool(ctx context.Context, writer *FrameWriter, 
 }
 
 // commitLocalTool uploads a spilled workspace output when present and
-// seals the tool call (ARCH-OUTPUT-001/005, ARCH-TOOL-003).
+// seals the tool call (ARCH-OUTPUT-001/005, ARCH-TOOL-003). Spilled bodies
+// carry the bounded tail preview plus the artifact locator in the
+// committed payload — the frozen wire oneof cannot inline both, so the
+// supervisor derives the preview from the file it uploads
+// (ARCH-OUTPUT-003: the model context gets the locator and bounded
+// facts, never the full body).
 func (runner *Runner) commitLocalTool(ctx context.Context, writer *FrameWriter, attemptID int64, local *workerv1.LocalToolCompleted) error {
 	var artifactID int64
+	preview := string(local.GetInlineOutput())
 	if local.GetWorkspaceOutputPath() != "" {
 		uploaded, err := runner.uploadWorkspaceFile(ctx, attemptID, local.GetToolCallId(), local.GetWorkspaceOutputPath())
 		if err != nil {
 			return err
 		}
 		artifactID = uploaded
+		if tail, tailErr := fileTail(local.GetWorkspaceOutputPath(), tailPreviewBytes); tailErr == nil {
+			preview = "…（完整输出已存入 Artifact）\n" + tail
+		}
 	}
 	payload := map[string]any{"success": local.GetSuccess()}
 	if local.GetSuccess() {
-		payload["output"] = string(local.GetInlineOutput())
+		payload["output"] = preview
 	} else {
 		payload["errorCode"] = local.GetErrorCode()
 		payload["errorDetail"] = local.GetErrorDetail()
+	}
+	if artifactID != 0 {
+		payload["truncated"] = true
+		payload["artifact"] = map[string]any{"id": fmt.Sprint(artifactID), "mediaType": local.GetMediaType()}
 	}
 	canonical, err := json.Marshal(payload)
 	if err != nil {
@@ -434,6 +447,35 @@ func (runner *Runner) uploadWorkspaceFileAs(ctx context.Context, attemptID, tool
 		return 0, fmt.Errorf("artifact upload rejected: %s", result.GetRejectReason())
 	}
 	return result.GetArtifactId(), nil
+}
+
+// tailPreviewBytes bounds the spilled-result preview tail.
+const tailPreviewBytes = 16 * 1024
+
+// fileTail reads the bounded tail of one file (best effort; the committed
+// payload falls back to the marker alone when the read fails).
+func fileTail(path string, limit int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	var offset int64
+	if info.Size() > limit {
+		offset = info.Size() - limit
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	body, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func parseLocator(value string) (int64, error) {

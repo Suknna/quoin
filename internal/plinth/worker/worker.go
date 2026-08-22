@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
@@ -104,7 +105,15 @@ func Run(ctx context.Context, config Config) error {
 		config.ExecutablePath = executable
 	}
 	// Fail-closed sandbox before any attempt input is processed
-	// (ARCH-WORKER-007/008).
+	// (ARCH-WORKER-007/008). Landlock and the seccomp filter restrict the
+	// CALLING THREAD only, and the Go runtime has already spawned extra
+	// threads (sysmon) that never receive the restriction; a goroutine
+	// migrating to one of them would fork unsandboxed children — observed
+	// as a nondeterministic /tmp write escape. Pinning the run loop to the
+	// thread that establishes the sandbox makes every child fork
+	// (bash/grep) deterministically inherit the restriction; the worker is
+	// a one-shot process, so the lock lives with it.
+	runtime.LockOSThread()
 	if err := Establish(Sandbox{
 		WorkspaceDir: config.WorkspaceDir, SupervisorPID: config.SupervisorPID,
 		ReadOnlyPaths: config.ReadOnlyPaths, ExecutablePath: config.ExecutablePath,

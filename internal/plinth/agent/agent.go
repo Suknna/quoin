@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -93,19 +94,30 @@ const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。�
 const InvestigationRendererVersion = "investigation-renderer-v1"
 
 // InvestigationInput is the worker's view of the frozen investigation_v1
-// snapshot: the active-branch messages, the provenance references and the
-// chat contract.
+// snapshot: the active-branch messages (user messages may carry their
+// ordered immutable attachment references), the provenance references and
+// the chat contract.
 type InvestigationInput struct {
 	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"messages"`
+		Role        string            `json:"role"`
+		Content     string            `json:"content"`
+		Attachments []InputAttachment `json:"attachments,omitempty"`
+	}
 	Sources       []json.RawMessage `json:"sources"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
 		MaxOutputTokens     int    `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+}
+
+// InputAttachment is the frozen locator projection of one message
+// attachment (locator facts only; the body is read through the granted
+// artifact_read/artifact_grep tools, never inlined).
+type InputAttachment struct {
+	Filename   string `json:"filename"`
+	ArtifactID string `json:"artifactId"`
+	SizeBytes  int64  `json:"sizeBytes"`
 }
 
 // ParseInvestigationInput decodes and validates the frozen
@@ -125,8 +137,11 @@ func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 }
 
 // BuildInvestigationMessages assembles the first request: the fixed system
-// contract, the provenance references (references only — never bodies) and
-// the active-branch messages in order.
+// contract, the provenance references (references only — never bodies), the
+// active-branch messages in order and, for user messages with attachments,
+// the frozen locator block that tells the model exactly which artifact the
+// granted artifact_read/artifact_grep tools can fetch (ARCH-WORKER-003:
+// the worker never materializes Quoin PV paths).
 func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
 	messages := []*schema.Message{schema.SystemMessage(InvestigationSystemPrompt)}
 	if len(input.Sources) > 0 {
@@ -139,7 +154,7 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 	for _, item := range input.Messages {
 		switch item.Role {
 		case "user":
-			messages = append(messages, schema.UserMessage(item.Content))
+			messages = append(messages, schema.UserMessage(renderUserTurn(item.Content, item.Attachments)))
 		case "assistant":
 			messages = append(messages, schema.AssistantMessage(item.Content, nil))
 		default:
@@ -147,6 +162,25 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 		}
 	}
 	return messages, nil
+}
+
+// renderUserTurn appends the deterministic attachment locator block to one
+// user turn (empty turns stay untouched; the locators are the only access
+// path the model has to attachment bodies).
+func renderUserTurn(content string, attachments []InputAttachment) string {
+	if len(attachments) == 0 {
+		return content
+	}
+	var builder strings.Builder
+	builder.WriteString(content)
+	if content != "" {
+		builder.WriteString("\n")
+	}
+	builder.WriteString("本条消息附带以下不可变文本附件（可用 artifact_read/artifact_grep 工具按 artifactId 读取）：\n")
+	for index, attachment := range attachments {
+		builder.WriteString(fmt.Sprintf("[附件 %d] %s（artifactId=%s，%d 字节）\n", index+1, attachment.Filename, attachment.ArtifactID, attachment.SizeBytes))
+	}
+	return builder.String()
 }
 
 // ToolResultMessage builds the Eino tool result message for one committed
