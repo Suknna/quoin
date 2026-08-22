@@ -143,6 +143,16 @@ func (document LabelContractDocument) Digest() string {
 	return digestOfParsed(document.canonicalValue())
 }
 
+// CanonicalJSON returns the deterministic (sorted-key) JSON encoding of the
+// parsed projection persisted as contract_json.
+func (document LabelContractDocument) CanonicalJSON() string {
+	encoded, err := json.Marshal(document.canonicalValue())
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
 func digestOfParsed(value any) string {
 	encoded, err := json.Marshal(value)
 	if err != nil {
