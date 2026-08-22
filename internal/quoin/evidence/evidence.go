@@ -80,7 +80,20 @@ func (service *Service) WriteForToolCall(ctx context.Context, conn *sql.Conn, at
 		attemptID).Scan(&attemptState, &scopeType, &scopeID); err != nil {
 		return nil, err
 	}
-	if attemptState != "Running" || scopeType != "analysis" {
+	// Agent attempt scopes whose tools may seal deterministic Evidence
+	// (the frozen trg_evidence_attempt_tool_closure is scope-agnostic: it
+	// binds a Running attempt to its running tool call; the scope maps onto
+	// the evidence target type).
+	var targetType string
+	switch scopeType {
+	case "analysis":
+		targetType = "initial_analysis"
+	case "investigation":
+		targetType = "investigation"
+	default:
+		return nil, fmt.Errorf("%w: attempt %d is %s/%s", ErrEvidenceDenied, attemptID, attemptState, scopeType)
+	}
+	if attemptState != "Running" {
 		return nil, fmt.Errorf("%w: attempt %d is %s/%s", ErrEvidenceDenied, attemptID, attemptState, scopeType)
 	}
 	var callAttempt int64
@@ -151,7 +164,7 @@ func (service *Service) WriteForToolCall(ctx context.Context, conn *sql.Conn, at
 		INSERT INTO evidence(attempt_id,tool_call_id,target_type,target_id,params_json,observed_at,
 			result_json,artifact_id,warnings_json,errors_json,integrity,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		attemptID, toolCallID, "initial_analysis", scopeID, string(projection.ParamsJSON), projection.ObservedAt,
+		attemptID, toolCallID, targetType, scopeID, string(projection.ParamsJSON), projection.ObservedAt,
 		resultJSON, evidenceArtifactID, warningsJSON, errorsJSON, projection.Integrity,
 		service.now().Format(time.RFC3339Nano))
 	if err != nil {

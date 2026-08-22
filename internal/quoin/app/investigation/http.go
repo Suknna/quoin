@@ -33,7 +33,7 @@ type Handler struct {
 	Dispatch func(ctx context.Context, attemptID int64) error
 }
 
-// Register mounts the T13 investigation routes.
+// Register mounts the investigation routes (T13 core + T14 attachments).
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations", OperationID: "listInvestigations"}, handler.listInvestigations)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations", OperationID: "createInvestigation", DefaultStatus: 201}, handler.createInvestigation)
@@ -43,6 +43,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/messages/{messageId}/stream", OperationID: "streamInvestigationMessage"}, handler.streamInvestigationMessage)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts", OperationID: "listInvestigationAttempts"}, handler.listInvestigationAttempts)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/tool-calls", OperationID: "listAttemptToolCalls"}, handler.listAttemptToolCalls)
+	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigation-attachments/{attachmentId}", OperationID: "getInvestigationAttachment"}, handler.getInvestigationAttachment)
 }
 
 func (handler *Handler) principal(ctx context.Context, cookie string) (int64, error) {
@@ -96,19 +97,20 @@ type messageBody struct {
 	Body messageOutput `json:"body"`
 }
 
-// messageOutput is the MessageSummary wire shape; attachments is always
-// present (empty until the attachment slice lands).
+// messageOutput is the MessageSummary wire shape; attachments lists the
+// message's ordered immutable attachment summaries (empty array on the
+// wire when the turn carried none).
 type messageOutput struct {
-	ID              string   `json:"id"`
-	Seq             int64    `json:"seq"`
-	Role            string   `json:"role"`
-	Status          string   `json:"status"`
-	Content         string   `json:"content"`
-	ParentMessageID string   `json:"parentMessageId,omitempty"`
-	Attachments     []any    `json:"attachments"`
-	AttemptID       string   `json:"attemptId,omitempty"`
-	EvidenceIDs     []string `json:"evidenceIds"`
-	CreatedAt       string   `json:"createdAt"`
+	ID              string                            `json:"id"`
+	Seq             int64                             `json:"seq"`
+	Role            string                            `json:"role"`
+	Status          string                            `json:"status"`
+	Content         string                            `json:"content"`
+	ParentMessageID string                            `json:"parentMessageId,omitempty"`
+	Attachments     []investigation.MessageAttachment `json:"attachments"`
+	AttemptID       string                            `json:"attemptId,omitempty"`
+	EvidenceIDs     []string                          `json:"evidenceIds"`
+	CreatedAt       string                            `json:"createdAt"`
 }
 
 type messageListBody struct {
@@ -164,8 +166,9 @@ func (handler *Handler) listInvestigations(ctx context.Context, input *struct {
 }
 
 // createInvestigation atomically creates the Investigation, its sources,
-// the first user message and the Execution Attempt (DATA-INVEST-001); no
-// empty Investigation is ever persisted.
+// the first user message (text and/or ordered attachments) and the
+// Execution Attempt (DATA-INVEST-001); no empty Investigation is ever
+// persisted.
 func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
@@ -179,14 +182,15 @@ func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, err
 	}
-	if len(input.Body.AttachmentIDs) > 0 {
-		return nil, problemUnprocessable("文本附件尚未接入，当前请直接输入正文。")
+	attachmentIDs, err := investigation.ParseAttachmentIDs(input.Body.AttachmentIDs)
+	if err != nil {
+		return nil, problemUnprocessable("附件引用无效，请重新选择附件后重试。")
 	}
 	sources, err := parseSources(input.Body.Sources)
 	if err != nil {
 		return nil, problemUnprocessable("来源引用无效，请返回告警或分析页面重新发起。")
 	}
-	result, err := handler.Service.Create(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, sources)
+	result, err := handler.Service.Create(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, attachmentIDs, sources)
 	if err != nil {
 		return nil, createSendError(err)
 	}
@@ -256,7 +260,7 @@ func (handler *Handler) listInvestigationMessages(ctx context.Context, input *st
 		output.Body.Items = append(output.Body.Items, messageOutput{
 			ID: item.ID, Seq: item.Seq, Role: item.Role, Status: item.Status,
 			Content: item.Content, ParentMessageID: item.ParentMessageID,
-			Attachments: []any{}, AttemptID: item.AttemptID,
+			Attachments: item.Attachments, AttemptID: item.AttemptID,
 			EvidenceIDs: item.EvidenceIDs, CreatedAt: item.CreatedAt,
 		})
 	}
@@ -286,8 +290,9 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 	if err != nil || investigationID <= 0 {
 		return nil, problem(404, "not_found", "调查不存在。")
 	}
-	if len(input.Body.AttachmentIDs) > 0 {
-		return nil, problemUnprocessable("文本附件尚未接入，当前请直接输入正文。")
+	attachmentIDs, err := investigation.ParseAttachmentIDs(input.Body.AttachmentIDs)
+	if err != nil {
+		return nil, problemUnprocessable("附件引用无效，请重新选择附件后重试。")
 	}
 	var expectedHead *int64
 	if input.Body.ExpectedHeadMessageID != nil {
@@ -297,7 +302,7 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 		}
 		expectedHead = &value
 	}
-	result, err := handler.Service.Send(ctx, principalID, input.Body.ClientCommandID, investigationID, expectedHead, input.Body.Content)
+	result, err := handler.Service.Send(ctx, principalID, input.Body.ClientCommandID, investigationID, expectedHead, input.Body.Content, attachmentIDs)
 	if err != nil {
 		return nil, sendError(err, investigationID)
 	}
@@ -313,7 +318,7 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 	return &messageBody{Body: messageOutput{
 		ID: item.ID, Seq: item.Seq, Role: item.Role, Status: item.Status,
 		Content: item.Content, ParentMessageID: item.ParentMessageID,
-		Attachments: []any{}, AttemptID: item.AttemptID,
+		Attachments: item.Attachments, AttemptID: item.AttemptID,
 		EvidenceIDs: item.EvidenceIDs, CreatedAt: item.CreatedAt,
 	}}, nil
 }
@@ -392,9 +397,11 @@ func createSendError(err error) error {
 		conflict.Conflict = map[string]any{"code": "command_id_reused"}
 		return conflict
 	case errors.Is(err, investigation.ErrMessageInvalid):
-		return problemUnprocessable("消息必须包含正文。")
-	case errors.Is(err, investigation.ErrAttachmentsNotSupported):
-		return problemUnprocessable("文本附件尚未接入，当前请直接输入正文。")
+		return problemUnprocessable("消息必须包含正文或至少一个附件。")
+	case errors.Is(err, investigation.ErrAttachmentInvalidRef):
+		return problemUnprocessable("附件引用无效，请重新选择附件后重试。")
+	case errors.Is(err, investigation.ErrAttachmentTooLarge):
+		return problem(413, "payload_too_large", "附件超过大小上限（默认 10 MiB，可与管理员确认部署边界）。")
 	case errors.Is(err, investigation.ErrInvalidSource), errors.Is(err, investigation.ErrSourceNotFound):
 		return problemUnprocessable("来源引用无效，请返回告警或分析页面重新发起。")
 	case errors.Is(err, investigation.ErrModelProviderMissing):
@@ -431,7 +438,11 @@ func sendError(err error, investigationID int64) error {
 		conflict.Conflict = map[string]any{"code": "command_id_reused"}
 		return conflict
 	case errors.Is(err, investigation.ErrMessageInvalid):
-		return problemUnprocessable("消息必须包含正文。")
+		return problemUnprocessable("消息必须包含正文或至少一个附件。")
+	case errors.Is(err, investigation.ErrAttachmentInvalidRef):
+		return problemUnprocessable("附件引用无效，请重新选择附件后重试。")
+	case errors.Is(err, investigation.ErrAttachmentTooLarge):
+		return problem(413, "payload_too_large", "附件超过大小上限（默认 10 MiB，可与管理员确认部署边界）。")
 	case errors.Is(err, investigation.ErrModelProviderMissing):
 		return problem(503, "unavailable", "模型供应商尚未启用并通过能力探测，请管理员完成设置后再试。")
 	default:

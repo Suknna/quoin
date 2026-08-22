@@ -56,12 +56,25 @@ type apiServer struct {
 	connections               *connections.Service
 	analyses                  *analysis.Service
 	investigations            *investigation.Service
+	investigationUpload       *appinvestigation.Handler
 	artifacts                 *artifact.Store
 	rootKey                   func() ([]byte, error)
 	probeDispatchFunc         func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
 	cancelDispatchFunc        func(ctx context.Context, attemptID int64) error
 	analysisDispatchFunc      func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc func(ctx context.Context, attemptID int64) error
+}
+
+// attachmentLimitBytes resolves the deployment message-level attachment
+// boundary (HTTP-FILE-002: default 10 MiB, deployment-tunable through
+// QUOIN_ATTACHMENT_LIMIT_BYTES).
+func attachmentLimitBytes() int64 {
+	if raw := os.Getenv("QUOIN_ATTACHMENT_LIMIT_BYTES"); raw != "" {
+		if value, err := strconv.ParseInt(raw, 10, 64); err == nil && value > 0 {
+			return value
+		}
+	}
+	return investigation.DefaultAttachmentLimitBytes
 }
 
 // NewAPIServer is the testable constructor for the Quoin public surface.
@@ -188,6 +201,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 	application.artifacts = artifactStore
+	// T14: investigation attachment staging streams through the same
+	// content-addressed store; the deployment boundary (default 10 MiB,
+	// HTTP-FILE-002) is environment-tunable.
+	application.investigations.SetAttachmentStore(artifactStore, attachmentLimitBytes())
 	// The attempt ledger seals a tool call before its tool_result read
 	// grant (the frozen grant closure requires the succeeded state); wire
 	// the grant write into CompleteToolCall's transaction.
@@ -260,6 +277,9 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
 	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
+	// The attachment upload streams multipart parts into staging without
+	// whole-body buffering (HTTP-FILE-001); it also owns its response head.
+	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -308,6 +328,9 @@ func (application *apiServer) register(api huma.API) {
 		},
 	}
 	investigationHandler.Register(api)
+	// The raw multipart upload route (NewHandler) reuses this handler's
+	// authentication seam.
+	application.investigationUpload = investigationHandler
 }
 
 func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
