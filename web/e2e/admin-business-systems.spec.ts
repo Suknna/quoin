@@ -97,14 +97,17 @@ test.describe('T16 业务系统配置上传与发布 @ticket-16', () => {
     await expect(overlay.getByText(/v1-empty/)).toBeVisible()
     await expect(overlay.locator('#upload-target-contract')).toContainText('v1 · 当前激活')
 
-    // The invalid file reports the exact unknown-field path and keeps the file.
+    // The invalid file reports the exact unknown-field path and keeps the
+    // chosen file for correction (UI-SYSTEM-004).
     await overlay.locator('input[type=file]').setInputFiles({
       name: 'bad.yaml',
       mimeType: 'application/yaml',
       buffer: Buffer.from(badSystemYAML),
     })
-    await expect(overlay.getByText(/unknown_top_field/)).toBeVisible()
+    await overlay.getByRole('button', { name: '上传并校验' }).click()
+    await expect(overlay.getByText(/unknown_top_field/)).toBeVisible({ timeout: 15_000 })
     await expect(overlay.getByText('bad.yaml')).toBeVisible()
+    await expect(overlay.getByRole('button', { name: '上传并校验' })).toBeEnabled()
 
     // Correcting the file in place succeeds and lands on the version detail.
     await overlay.locator('input[type=file]').setInputFiles({
