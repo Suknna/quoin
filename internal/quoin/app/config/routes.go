@@ -20,16 +20,12 @@ func base64Decode(value string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(value)
 }
 
-type authCookie struct {
-	Session string `cookie:"__Host-quoin-session"`
-}
-
 func noStore() string { return "no-store" }
 
 // --- Business Systems -----------------------------------------------------
 
 func (handler *Handler) listBusinessSystems(ctx context.Context, input *struct {
-	authCookie
+	Session string `cookie:"__Host-quoin-session"`
 	Enabled string `query:"enabled"`
 	Query   string `query:"q"`
 	Cursor  string `query:"cursor"`
@@ -69,10 +65,10 @@ func (handler *Handler) listBusinessSystems(ctx context.Context, input *struct {
 }
 
 func (handler *Handler) getBusinessSystem(ctx context.Context, input *struct {
-	authCookie
+	Session   string `cookie:"__Host-quoin-session"`
 	SystemKey string `path:"systemKey"`
 }) (*struct {
-	CacheControl string                      `header:"Cache-Control"`
+	CacheControl string                              `header:"Cache-Control"`
 	Body         businesssystem.BusinessSystemDetail `json:"body"`
 }, error) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
@@ -83,13 +79,13 @@ func (handler *Handler) getBusinessSystem(ctx context.Context, input *struct {
 		return nil, mapDomainError(err)
 	}
 	return &struct {
-		CacheControl string                      `header:"Cache-Control"`
+		CacheControl string                              `header:"Cache-Control"`
 		Body         businesssystem.BusinessSystemDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
 }
 
 func (handler *Handler) listBusinessSystemConfigs(ctx context.Context, input *struct {
-	authCookie
+	Session   string `cookie:"__Host-quoin-session"`
 	SystemKey string `path:"systemKey"`
 	Cursor    string `query:"cursor"`
 	Limit     int    `query:"limit"`
@@ -116,11 +112,11 @@ func (handler *Handler) listBusinessSystemConfigs(ctx context.Context, input *st
 }
 
 func (handler *Handler) getBusinessSystemConfig(ctx context.Context, input *struct {
-	authCookie
+	Session   string `cookie:"__Host-quoin-session"`
 	SystemKey string `path:"systemKey"`
 	VersionID string `path:"versionId"`
 }) (*struct {
-	CacheControl string                       `header:"Cache-Control"`
+	CacheControl string                             `header:"Cache-Control"`
 	Body         businesssystem.ConfigVersionDetail `json:"body"`
 }, error) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
@@ -135,7 +131,7 @@ func (handler *Handler) getBusinessSystemConfig(ctx context.Context, input *stru
 		return nil, mapDomainError(err)
 	}
 	return &struct {
-		CacheControl string                       `header:"Cache-Control"`
+		CacheControl string                             `header:"Cache-Control"`
 		Body         businesssystem.ConfigVersionDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
 }
@@ -149,12 +145,12 @@ func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *
 	// Flattened rather than embedded: huma v2.39.1 does not bind cookie
 	// parameters from embedded structs when the input also has a Body (same
 	// frozen workaround as passwordInput).
-	Session  string `cookie:"__Host-quoin-session"`
+	Session   string `cookie:"__Host-quoin-session"`
 	SystemKey string `path:"systemKey"`
 	VersionID string `path:"versionId"`
 	Body      publishBody
 }) (*struct {
-	CacheControl string                      `header:"Cache-Control"`
+	CacheControl string                              `header:"Cache-Control"`
 	Body         businesssystem.BusinessSystemDetail `json:"body"`
 }, error) {
 	principalID, err := handler.admin(ctx, input.Session)
@@ -178,7 +174,7 @@ func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *
 		return nil, mapDomainError(err)
 	}
 	return &struct {
-		CacheControl string                      `header:"Cache-Control"`
+		CacheControl string                              `header:"Cache-Control"`
 		Body         businesssystem.BusinessSystemDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
 }
@@ -186,11 +182,11 @@ func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *
 // --- Label Contracts ------------------------------------------------------
 
 func (handler *Handler) listLabelContracts(ctx context.Context, input *struct {
-	authCookie
-	Cursor string `query:"cursor"`
-	Limit  int    `query:"limit"`
+	Session string `cookie:"__Host-quoin-session"`
+	Cursor  string `query:"cursor"`
+	Limit   int    `query:"limit"`
 }) (*struct {
-	CacheControl string                        `header:"Cache-Control"`
+	CacheControl string                             `header:"Cache-Control"`
 	Body         labelcontract.LabelContractListing `json:"body"`
 }, error) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
@@ -201,7 +197,7 @@ func (handler *Handler) listLabelContracts(ctx context.Context, input *struct {
 		return nil, mapDomainError(err)
 	}
 	response := &struct {
-		CacheControl string                        `header:"Cache-Control"`
+		CacheControl string                             `header:"Cache-Control"`
 		Body         labelcontract.LabelContractListing `json:"body"`
 	}{CacheControl: noStore()}
 	response.Body.Items = items
@@ -212,10 +208,10 @@ func (handler *Handler) listLabelContracts(ctx context.Context, input *struct {
 }
 
 func (handler *Handler) getLabelContract(ctx context.Context, input *struct {
-	authCookie
-	ContractVersion int64 `path:"contractVersion"`
+	Session         string `cookie:"__Host-quoin-session"`
+	ContractVersion int64  `path:"contractVersion"`
 }) (*struct {
-	CacheControl string               `header:"Cache-Control"`
+	CacheControl string                            `header:"Cache-Control"`
 	Body         labelcontract.LabelContractDetail `json:"body"`
 }, error) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
@@ -226,7 +222,7 @@ func (handler *Handler) getLabelContract(ctx context.Context, input *struct {
 		return nil, mapDomainError(err)
 	}
 	return &struct {
-		CacheControl string               `header:"Cache-Control"`
+		CacheControl string                            `header:"Cache-Control"`
 		Body         labelcontract.LabelContractDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
 }
@@ -255,7 +251,7 @@ func (handler *Handler) activateLabelContract(ctx context.Context, input *struct
 	ContractVersion int64  `path:"contractVersion"`
 	Body            activationBody
 }) (*struct {
-	CacheControl string               `header:"Cache-Control"`
+	CacheControl string                            `header:"Cache-Control"`
 	Body         labelcontract.LabelContractDetail `json:"body"`
 }, error) {
 	principalID, err := handler.admin(ctx, input.Session)
@@ -299,14 +295,16 @@ func (handler *Handler) activateLabelContract(ctx context.Context, input *struct
 		return nil, mapDomainError(err)
 	}
 	return &struct {
-		CacheControl string               `header:"Cache-Control"`
+		CacheControl string                            `header:"Cache-Control"`
 		Body         labelcontract.LabelContractDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
 }
 
 // --- Journey Catalog ------------------------------------------------------
 
-func (handler *Handler) getJourneyCatalog(ctx context.Context, input *authCookie) (*struct {
+func (handler *Handler) getJourneyCatalog(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+}) (*struct {
 	CacheControl string         `header:"Cache-Control"`
 	Body         map[string]any `json:"body"`
 }, error) {
