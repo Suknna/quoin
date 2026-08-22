@@ -49,15 +49,29 @@ type InvestigationDetail struct {
 
 // InvestigationMessageItem is the listInvestigationMessages projection (MessageSummary).
 type InvestigationMessageItem struct {
-	ID              string   `json:"id"`
-	Seq             int64    `json:"seq"`
-	Role            string   `json:"role"`
-	Status          string   `json:"status"`
-	Content         string   `json:"content"`
-	ParentMessageID string   `json:"parentMessageId,omitempty"`
-	AttemptID       string   `json:"attemptId,omitempty"`
-	EvidenceIDs     []string `json:"evidenceIds"`
-	CreatedAt       string   `json:"createdAt"`
+	ID              string              `json:"id"`
+	Seq             int64               `json:"seq"`
+	Role            string              `json:"role"`
+	Status          string              `json:"status"`
+	Content         string              `json:"content"`
+	ParentMessageID string              `json:"parentMessageId,omitempty"`
+	Attachments     []MessageAttachment `json:"attachments"`
+	AttemptID       string              `json:"attemptId,omitempty"`
+	EvidenceIDs     []string            `json:"evidenceIds"`
+	CreatedAt       string              `json:"createdAt"`
+}
+
+// MessageAttachment is one ordered immutable attachment reference of a
+// message (the TextAttachmentSummary wire shape).
+type MessageAttachment struct {
+	ID               string `json:"id"`
+	ArtifactID       string `json:"artifactId"`
+	OriginalFilename string `json:"originalFilename"`
+	MediaType        string `json:"mediaType"`
+	SizeBytes        int64  `json:"sizeBytes"`
+	Digest           string `json:"digest"`
+	BodyExpired      bool   `json:"bodyExpired"`
+	CreatedAt        string `json:"createdAt"`
 }
 
 // InvestigationAttemptItem is the listInvestigationAttempts projection (AttemptSummary).

@@ -39,9 +39,10 @@ func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 func seedUser(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
+	testSeedCounter++
 	now := testNow()
 	insert, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(?,'Test Admin','admin',1,'x',1,?,?)`,
-		"test-admin-"+strings.Repeat("u", 8), now, now)
+		"test-admin-"+strings.Repeat("u", 8)+strings.TrimLeft(string(rune('a'+testSeedCounter%26)), " ")+now, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}

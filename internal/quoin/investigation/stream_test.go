@@ -16,7 +16,7 @@ func TestFeedDeliversOrderedDeltasAndTerminalOnce(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-feed-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-feed-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestFeedTerminalViewAndReplay(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-view-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-view-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ func TestCreateAtomicFirstTurn(t *testing.T) {
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
 
-	result, err := service.Create(ctx, principalID, "cmd-create-0001", "请分析这个告警", nil)
+	result, err := service.Create(ctx, principalID, "cmd-create-0001", "请分析这个告警", nil, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -83,13 +83,13 @@ func TestCreateReplayAndDigestConflict(t *testing.T) {
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
 
-	first, err := service.Create(ctx, principalID, "cmd-create-replay", "第一条消息", nil)
+	first, err := service.Create(ctx, principalID, "cmd-create-replay", "第一条消息", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Same command id + same digest replays the original result without
 	// creating a second investigation (HTTP-COMMAND-003).
-	replay, err := service.Create(ctx, principalID, "cmd-create-replay", "第一条消息", nil)
+	replay, err := service.Create(ctx, principalID, "cmd-create-replay", "第一条消息", nil, nil)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCreateReplayAndDigestConflict(t *testing.T) {
 		t.Fatalf("investigations=%d want 1", count)
 	}
 	// Same command id + different digest is a deterministic conflict.
-	if _, err := service.Create(ctx, principalID, "cmd-create-replay", "另一条消息", nil); !errors.Is(err, ErrCommandReused) {
+	if _, err := service.Create(ctx, principalID, "cmd-create-replay", "另一条消息", nil, nil); !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("digest conflict err=%v want ErrCommandReused", err)
 	}
 }
@@ -117,7 +117,7 @@ func TestCreateSourceValidation(t *testing.T) {
 	seedProviderChain(t, db)
 	occurrenceID := seedOccurrence(t, db, "T13Probe")
 
-	result, err := service.Create(ctx, principalID, "cmd-create-source", "结合告警排查", []SourceInput{{Type: "occurrence", SourceID: occurrenceID}})
+	result, err := service.Create(ctx, principalID, "cmd-create-source", "结合告警排查", nil, []SourceInput{{Type: "occurrence", SourceID: occurrenceID}})
 	if err != nil {
 		t.Fatalf("create with source: %v", err)
 	}
@@ -137,10 +137,10 @@ func TestCreateSourceValidation(t *testing.T) {
 		t.Fatalf("input lacks occurrence provenance: %s", canonical)
 	}
 	// Unknown sources fail deterministically (no partial investigation).
-	if _, err := service.Create(ctx, principalID, "cmd-create-bad-source", "x", []SourceInput{{Type: "occurrence", SourceID: 999999}}); !errors.Is(err, ErrSourceNotFound) {
+	if _, err := service.Create(ctx, principalID, "cmd-create-bad-source", "x", nil, []SourceInput{{Type: "occurrence", SourceID: 999999}}); !errors.Is(err, ErrSourceNotFound) {
 		t.Fatalf("unknown source err=%v want ErrSourceNotFound", err)
 	}
-	if _, err := service.Create(ctx, principalID, "cmd-create-bad-type", "x", []SourceInput{{Type: "nonsense", SourceID: 1}}); !errors.Is(err, ErrInvalidSource) {
+	if _, err := service.Create(ctx, principalID, "cmd-create-bad-type", "x", nil, []SourceInput{{Type: "nonsense", SourceID: 1}}); !errors.Is(err, ErrInvalidSource) {
 		t.Fatalf("bad type err=%v want ErrInvalidSource", err)
 	}
 	var after int
@@ -158,7 +158,7 @@ func TestCreateRequiresContent(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	if _, err := service.Create(ctx, principalID, "cmd-create-blank", "   ", nil); !errors.Is(err, ErrMessageInvalid) {
+	if _, err := service.Create(ctx, principalID, "cmd-create-blank", "   ", nil, nil); !errors.Is(err, ErrMessageInvalid) {
 		t.Fatalf("blank content err=%v want ErrMessageInvalid", err)
 	}
 	var count int
@@ -177,12 +177,12 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
 
-	first, err := service.Create(ctx, principalID, "cmd-send-1", "第一条", nil)
+	first, err := service.Create(ctx, principalID, "cmd-send-1", "第一条", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A stale head conflicts (DATA-INVEST-001).
-	_, err = service.Send(ctx, principalID, "cmd-send-2", first.InvestigationID, nil, "第二条")
+	_, err = service.Send(ctx, principalID, "cmd-send-2", first.InvestigationID, nil, "第二条", nil)
 	var headConflict *HeadConflictError
 	if !errors.As(err, &headConflict) {
 		t.Fatalf("stale head err=%v want HeadConflictError", err)
@@ -191,7 +191,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatalf("conflict carries head %v want %d", headConflict.CurrentHead, first.MessageID)
 	}
 	// The active attempt blocks concurrent sends (DATA-INVEST-003).
-	_, err = service.Send(ctx, principalID, "cmd-send-3", first.InvestigationID, int64Ptr(first.MessageID), "第二条")
+	_, err = service.Send(ctx, principalID, "cmd-send-3", first.InvestigationID, int64Ptr(first.MessageID), "第二条", nil)
 	if !errors.Is(err, ErrActiveAttempt) {
 		t.Fatalf("active attempt err=%v want ErrActiveAttempt", err)
 	}
@@ -201,7 +201,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectedHead := secondHead(t, db, first.InvestigationID)
-	second, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条")
+	second, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatalf("second lineage items=%d want 3", items)
 	}
 	// Replaying the same send returns the original message.
-	replay, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条")
+	replay, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil)
 	if err != nil {
 		t.Fatalf("send replay: %v", err)
 	}

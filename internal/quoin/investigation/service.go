@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
@@ -37,15 +38,14 @@ const AgentVersion = "investigation-v1"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
-	ErrNotFound                = errors.New("investigation not found")
-	ErrModelProviderMissing    = errors.New("no enabled qualified model provider")
-	ErrCommandReused           = errors.New("client command id reused with a different request")
-	ErrActiveAttempt           = errors.New("an active attempt already owns the investigation")
-	ErrLateResult              = errors.New("result lost the commit-order race")
-	ErrAttachmentsNotSupported = errors.New("text attachments are not available in this slice")
-	ErrSourceNotFound          = errors.New("investigation source not found")
-	ErrInvalidSource           = errors.New("investigation source invalid")
-	ErrMessageInvalid          = errors.New("message content invalid")
+	ErrNotFound             = errors.New("investigation not found")
+	ErrModelProviderMissing = errors.New("no enabled qualified model provider")
+	ErrCommandReused        = errors.New("client command id reused with a different request")
+	ErrActiveAttempt        = errors.New("an active attempt already owns the investigation")
+	ErrLateResult           = errors.New("result lost the commit-order race")
+	ErrSourceNotFound       = errors.New("investigation source not found")
+	ErrInvalidSource        = errors.New("investigation source invalid")
+	ErrMessageInvalid       = errors.New("message content invalid")
 )
 
 // HeadConflictError reports a stale expected_head_message_id fence miss
@@ -105,6 +105,14 @@ type Service struct {
 	// observer exists).
 	streamMu sync.Mutex
 	streams  map[int64]*feed
+	// attachmentMu guards the staging dependency and the message-level
+	// attachment boundary (wired once at startup by the app layer).
+	attachmentMu    sync.Mutex
+	attachments     *artifact.Store
+	attachmentLimit int64
+	// staged is the bounded in-process idempotency ledger for attachment
+	// staging commands ((principal, client_command_id) → attachment id).
+	staged map[string]stagedReplay
 }
 
 // NewService builds the investigation service and wires the deterministic
@@ -113,11 +121,13 @@ type Service struct {
 // shared attempt machine.
 func NewService(db *sql.DB) *Service {
 	service := &Service{
-		db:       db,
-		attempts: attempt.NewService(db),
-		now:      func() time.Time { return time.Now().UTC() },
-		replay:   map[string]replayEntry{},
-		streams:  map[int64]*feed{},
+		db:              db,
+		attempts:        attempt.NewService(db),
+		now:             func() time.Time { return time.Now().UTC() },
+		replay:          map[string]replayEntry{},
+		staged:          map[string]stagedReplay{},
+		streams:         map[int64]*feed{},
+		attachmentLimit: DefaultAttachmentLimitBytes,
 	}
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)

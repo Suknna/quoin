@@ -40,6 +40,7 @@ func (service *Service) ListMessages(ctx context.Context, investigationID int64,
 			continue
 		}
 		item.ID = strconv.FormatInt(id, 10)
+		item.Attachments = []MessageAttachment{}
 		if parentID.Valid {
 			item.ParentMessageID = strconv.FormatInt(parentID.Int64, 10)
 		}
@@ -54,7 +55,59 @@ func (service *Service) ListMessages(ctx context.Context, investigationID int64,
 	if err := service.attachEvidence(ctx, items); err != nil {
 		return nil, false, err
 	}
+	if err := service.attachAttachments(ctx, items); err != nil {
+		return nil, false, err
+	}
 	return items, hasMore, nil
+}
+
+// attachAttachments renders every message's ordered attachment summaries
+// (the send transaction owns the ordinal; this projection only reads).
+func (service *Service) attachAttachments(ctx context.Context, items []InvestigationMessageItem) error {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	arguments := make([]any, 0, len(ids))
+	for _, id := range ids {
+		arguments = append(arguments, id)
+	}
+	rows, err := service.db.QueryContext(ctx, `
+		SELECT a.message_id, t.id, t.artifact_id, t.original_filename, ar.media_type,
+		       t.size_bytes, t.digest, ar.body_expired, t.uploaded_at
+		FROM investigation_message_attachments a
+		JOIN text_attachments t ON t.id=a.attachment_id
+		JOIN artifacts ar ON ar.id=t.artifact_id
+		WHERE a.message_id IN (`+placeholders+`)
+		ORDER BY a.message_id, a.ordinal`, arguments...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := map[string]*InvestigationMessageItem{}
+	for index := range items {
+		byID[items[index].ID] = &items[index]
+	}
+	for rows.Next() {
+		var messageID, attachmentID, artifactID int64
+		var expired int
+		var attachment MessageAttachment
+		if err := rows.Scan(&messageID, &attachmentID, &artifactID, &attachment.OriginalFilename,
+			&attachment.MediaType, &attachment.SizeBytes, &attachment.Digest, &expired, &attachment.CreatedAt); err != nil {
+			return err
+		}
+		attachment.ID = strconv.FormatInt(attachmentID, 10)
+		attachment.ArtifactID = strconv.FormatInt(artifactID, 10)
+		attachment.BodyExpired = expired == 1
+		if item, ok := byID[strconv.FormatInt(messageID, 10)]; ok {
+			item.Attachments = append(item.Attachments, attachment)
+		}
+	}
+	return rows.Err()
 }
 
 func (service *Service) attachEvidence(ctx context.Context, items []InvestigationMessageItem) error {
@@ -193,13 +246,20 @@ func (service *Service) MessageFor(ctx context.Context, investigationID, message
 		return InvestigationMessageItem{}, err
 	}
 	item.ID = strconv.FormatInt(id, 10)
+	item.Attachments = []MessageAttachment{}
 	if parentID.Valid {
 		item.ParentMessageID = strconv.FormatInt(parentID.Int64, 10)
 	}
 	if attemptID.Valid {
 		item.AttemptID = strconv.FormatInt(attemptID.Int64, 10)
 	}
-	return item, nil
+	// attachAttachments mutates through the slice's map, so read the item
+	// back from the same slice it filled.
+	projection := []InvestigationMessageItem{item}
+	if err := service.attachAttachments(ctx, projection); err != nil {
+		return InvestigationMessageItem{}, err
+	}
+	return projection[0], nil
 }
 
 // MessageAttempt resolves the attempt bound to one user message

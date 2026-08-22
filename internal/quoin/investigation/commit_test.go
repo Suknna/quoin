@@ -20,7 +20,7 @@ func TestCommitResultSealsAssistantMessage(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-commit-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-commit-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestCommitResultLatePaths(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-late-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-late-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestCommitFailureAndReplay(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-fail-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-fail-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestCommitRejectsWrongSchemaKindAndDigest(t *testing.T) {
 	ctx := context.Background()
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
-	created, err := service.Create(ctx, principalID, "cmd-guard-1", "请回答", nil)
+	created, err := service.Create(ctx, principalID, "cmd-guard-1", "请回答", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

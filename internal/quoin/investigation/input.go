@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Input is the rendered investigation_v1 snapshot: the active-branch
@@ -27,10 +28,25 @@ type Input struct {
 	ModelContract ModelContract    `json:"modelContract"`
 }
 
-// MessageInput is one active-branch message of the turn.
+// MessageInput is one active-branch message of the turn; user messages
+// may carry their ordered immutable attachment references (locator facts
+// only — the bodies stay behind the granted artifact_read/grep tools).
 type MessageInput struct {
-	Role    string `json:"role"` // user | assistant
-	Content string `json:"content"`
+	Role        string            `json:"role"` // user | assistant
+	Content     string            `json:"content"`
+	Attachments []InputAttachment `json:"attachments,omitempty"`
+	// id is the durable locator used only while assembling the canonical
+	// projection; it never serializes (the frozen investigation_v1 shape
+	// carries role/content/attachments).
+	id int64 `json:"-"`
+}
+
+// InputAttachment is the model-facing locator projection of one message
+// attachment (the frozen artifact identity, never the body).
+type InputAttachment struct {
+	Filename   string `json:"filename"`
+	ArtifactID string `json:"artifactId"`
+	SizeBytes  int64  `json:"sizeBytes"`
 }
 
 // RenderedSource is one immutable provenance reference with its frozen
@@ -47,6 +63,47 @@ type ModelContract struct {
 	ModelID             string `json:"modelId"`
 	ContextBudgetTokens int    `json:"contextBudgetTokens"`
 	MaxOutputTokens     int    `json:"maxOutputTokens"`
+}
+
+// attachInputAttachments renders every message's ordered attachment
+// references onto the input projection (DATA-ATTACH-001: the send
+// transaction owns the ordinal; the projection only reads it back).
+func attachInputAttachments(ctx context.Context, queries queryer, messages []MessageInput, messageIDs []int64) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	placeholders := make([]string, 0, len(messageIDs))
+	arguments := make([]any, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		placeholders = append(placeholders, "?")
+		arguments = append(arguments, id)
+	}
+	rows, err := queries.QueryContext(ctx, `
+		SELECT a.message_id, t.original_filename, t.artifact_id, t.size_bytes
+		FROM investigation_message_attachments a
+		JOIN text_attachments t ON t.id=a.attachment_id
+		WHERE a.message_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY a.message_id, a.ordinal`, arguments...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := make(map[int64]*MessageInput, len(messages))
+	for index := range messages {
+		byID[messages[index].id] = &messages[index]
+	}
+	for rows.Next() {
+		var messageID, artifactID int64
+		var attachment InputAttachment
+		if err := rows.Scan(&messageID, &attachment.Filename, &artifactID, &attachment.SizeBytes); err != nil {
+			return err
+		}
+		attachment.ArtifactID = strconv.FormatInt(artifactID, 10)
+		if message, ok := byID[messageID]; ok {
+			message.Attachments = append(message.Attachments, attachment)
+		}
+	}
+	return rows.Err()
 }
 
 type occurrenceSourceContext struct {
@@ -117,19 +174,23 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 		return nil, fmt.Errorf("attempt %d user message missing: %w", attemptID, err)
 	}
 	rows, err := queries.QueryContext(ctx, `
-		SELECT role, content FROM investigation_messages
+		SELECT id, role, content FROM investigation_messages
 		WHERE investigation_id=? AND status='active' AND seq<=?
 		ORDER BY seq`, investigationID, userSeq)
 	if err != nil {
 		return nil, err
 	}
+	messageIDs := []int64{}
 	for rows.Next() {
+		var id int64
 		var message MessageInput
-		if err := rows.Scan(&message.Role, &message.Content); err != nil {
+		if err := rows.Scan(&id, &message.Role, &message.Content); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		message.id = id
 		input.Messages = append(input.Messages, message)
+		messageIDs = append(messageIDs, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -137,6 +198,9 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 	}
 	if len(input.Messages) == 0 {
 		return nil, errors.New("investigation input renders no active messages")
+	}
+	if err := attachInputAttachments(ctx, queries, input.Messages, messageIDs); err != nil {
+		return nil, err
 	}
 	sources, err := service.renderSources(ctx, queries, investigationID)
 	if err != nil {
