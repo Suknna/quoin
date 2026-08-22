@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -33,7 +34,7 @@ const activeAttemptStates = "('Queued','Assigned','Running','Cancelling')"
 // client command returns its original result; a reused command id with a
 // different request digest conflicts (HTTP-COMMAND-003).
 func (service *Service) Create(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput) (CreateResult, error) {
-	digest := commandDigest(content, nil, attachmentIDs, sources)
+	digest := commandDigest("create", content, nil, attachmentIDs, sources)
 	if entry, ok, err := service.replayLookup(principalID, clientCommandID, digest); err != nil {
 		return CreateResult{}, err
 	} else if ok {
@@ -113,7 +114,7 @@ func (service *Service) Create(ctx context.Context, principalID int64, clientCom
 // expected head fences concurrent writers; the one active attempt
 // invariant rejects sends while a model attempt runs (DATA-INVEST-003).
 func (service *Service) Send(ctx context.Context, principalID int64, clientCommandID string, investigationID int64, expectedHead *int64, content string, attachmentIDs []int64) (SendResult, error) {
-	digest := commandDigest(content, expectedHead, attachmentIDs, nil)
+	digest := commandDigest("send:"+strconv.FormatInt(investigationID, 10), content, expectedHead, attachmentIDs, nil)
 	if entry, ok, err := service.replayLookup(principalID, clientCommandID, digest); err != nil {
 		return SendResult{}, err
 	} else if ok {
@@ -207,10 +208,9 @@ func headMatches(current sql.NullInt64, expected *int64) bool {
 }
 
 // insertTurn appends one user turn inside the caller's transaction: the
-// attempt row, the frozen input snapshot and lineage items (messages plus
-// attachment artifacts), the input artifact read grants, the chat_model
-// grant, the user message with its ordered attachment references and the
-// head move (DATA-INVEST-001, DATA-ATTACH-001).
+// attempt row, the user message with its ordered attachment references
+// and the head move, then the frozen input snapshot and grants
+// (DATA-INVEST-001, DATA-ATTACH-001).
 func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investigationID, principalID int64, clientCommandID, content string, attachments []resolvedAttachment, selected provider, now string) (int64, int64, error) {
 	attemptInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
@@ -249,24 +249,46 @@ func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investig
 		UPDATE investigations SET current_head_message_id=? WHERE id=?`, messageID, investigationID); err != nil {
 		return 0, 0, err
 	}
-	canonical, err := service.rebuildFor(ctx, conn, investigationID, attemptID, selected.ProbeResultID)
-	if err != nil {
+	if err := service.freezeInputSnapshot(ctx, conn, investigationID, attemptID, messageID, attachments, selected, now); err != nil {
 		return 0, 0, err
+	}
+	return messageID, attemptID, nil
+}
+
+// freezeInputSnapshot persists the frozen input snapshot, the ordered
+// lineage items (one per active-branch message up to the turn's own user
+// message, then the turn's attachment artifacts), the input artifact
+// read grants and the chat_model grant. Send/create and retry share it:
+// the digest always freezes over the rebuildable lineage
+// (ARCH-CONTEXT-006) and the input-item trigger keeps withdrawn messages
+// out of new snapshots (DATA-INVEST-002). turnMessageID is the user
+// message this attempt answers — the newly created attempt of a retry
+// owns no message row of its own, so the cutoff cannot be derived from
+// the attempt at freeze time.
+func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn, investigationID, attemptID, turnMessageID int64, attachments []resolvedAttachment, selected provider, now string) error {
+	var cutoffSeq int64
+	if err := conn.QueryRowContext(ctx, `
+		SELECT seq FROM investigation_messages WHERE id=? AND investigation_id=?`, turnMessageID, investigationID).Scan(&cutoffSeq); err != nil {
+		return err
+	}
+	canonical, err := service.rebuildFor(ctx, conn, investigationID, cutoffSeq, selected.ProbeResultID)
+	if err != nil {
+		return err
 	}
 	digest := sha256.Sum256(canonical)
 	snapshotInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
 		VALUES(?,?,?,?,?)`, attemptID, SchemaKind, RendererVersion, hex.EncodeToString(digest[:]), now)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	snapshotID, err := snapshotInsert.LastInsertId()
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
-	itemCount, err := insertMessageLineage(ctx, conn, snapshotID, investigationID, attemptID)
+	itemCount, err := insertMessageLineage(ctx, conn, snapshotID, investigationID, cutoffSeq)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	// Attachment lineage: one item per referenced artifact continuing the
 	// message lineage's item_seq (the grant closure trigger requires the
@@ -277,35 +299,34 @@ func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investig
 		if _, err := conn.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id)
 			VALUES(?,?,?,?,?)`, snapshotID, itemCount+index+1, "attachment", hex.EncodeToString(itemDigest[:]), attachment.ArtifactID); err != nil {
-			return 0, 0, err
+			return err
 		}
 	}
 	for _, attachment := range attachments {
 		if _, err := conn.ExecContext(ctx, `
 			INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at)
 			VALUES(?,?,?,?,?)`, attemptID, attachment.ArtifactID, "input_snapshot", snapshotID, now); err != nil {
-			return 0, 0, err
+			return err
 		}
 	}
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?,?,?,?,?,?,?)`,
 		attemptID, "chat_model", selected.ConnectionID, selected.RevisionID, selected.CredentialGen, selected.ProbeResultID, now); err != nil {
-		return 0, 0, err
+		return err
 	}
-	return messageID, attemptID, nil
+	return nil
 }
 
 // insertMessageLineage persists one ordered input item per active-branch
-// message of the attempt (ARCH-CONTEXT-006: the digest covers the
+// message of the turn (ARCH-CONTEXT-006: the digest covers the
 // rebuildable lineage, not only the rendered bytes) and returns the number
 // of items written (attachment items continue the sequence).
-func insertMessageLineage(ctx context.Context, conn *sql.Conn, snapshotID, investigationID, attemptID int64) (int, error) {
+func insertMessageLineage(ctx context.Context, conn *sql.Conn, snapshotID, investigationID, cutoffSeq int64) (int, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, role FROM investigation_messages
-		WHERE investigation_id=? AND status='active' AND seq<=(
-			SELECT seq FROM investigation_messages WHERE attempt_id=?)
-		ORDER BY seq`, investigationID, attemptID)
+		WHERE investigation_id=? AND status='active' AND seq<=?
+		ORDER BY seq`, investigationID, cutoffSeq)
 	if err != nil {
 		return 0, err
 	}
@@ -424,11 +445,16 @@ func validateAttachmentIDs(ids []int64) error {
 }
 
 // commandDigest is the deterministic command fingerprint used by the
-// replay ledger (HTTP-COMMAND-003; the attachment references are semantic
-// request fields and must participate).
-func commandDigest(content string, expectedHead *int64, attachmentIDs []int64, sources []SourceInput) string {
+// replay ledger (HTTP-COMMAND-002/003). The target prefix carries the
+// scoped object (send/undo/stop/retry carry the investigation and, where
+// applicable, the attempt locator) so one command id can never silently
+// replay across targets; the attachment references are semantic request
+// fields and must participate.
+func commandDigest(target, content string, expectedHead *int64, attachmentIDs []int64, sources []SourceInput) string {
 	var builder strings.Builder
-	builder.WriteString("content:")
+	builder.WriteString("target:")
+	builder.WriteString(target)
+	builder.WriteString("\ncontent:")
 	builder.WriteString(content)
 	builder.WriteString("\nhead:")
 	if expectedHead == nil {

@@ -159,24 +159,53 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("attempt %d investigation binding missing: %w", attemptID, err)
 	}
-	return service.rebuildFor(ctx, service.db, investigationID, attemptID, probeResultID)
+	_, cutoffSeq, err := attemptUserMessage(ctx, service.db, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, probeResultID)
+}
+
+// attemptUserMessage resolves the user message an attempt answers. Send
+// and create attempts own their message row (attempt_id points back), so
+// the fast path reads it directly; a retry attempt deliberately reuses
+// the failed attempt's message (the frozen schema keeps one user message
+// per attempt), so the fallback resolves the cutoff through the frozen
+// input lineage instead (DATA-INVEST-002).
+func attemptUserMessage(ctx context.Context, queries queryer, attemptID int64) (int64, int64, error) {
+	var messageID, seq int64
+	err := queries.QueryRowContext(ctx, `
+		SELECT id, seq FROM investigation_messages WHERE attempt_id=? AND role='user'`, attemptID).
+		Scan(&messageID, &seq)
+	if err == nil {
+		return messageID, seq, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, err
+	}
+	err = queries.QueryRowContext(ctx, `
+		SELECT i.investigation_message_id, m.seq
+		FROM attempt_input_items i
+		JOIN attempt_input_snapshots s ON s.id=i.snapshot_id
+		JOIN investigation_messages m ON m.id=i.investigation_message_id
+		WHERE s.attempt_id=? AND i.item_role='user'
+		ORDER BY i.item_seq DESC LIMIT 1`, attemptID).Scan(&messageID, &seq)
+	if err != nil {
+		return 0, 0, fmt.Errorf("attempt %d user message missing: %w", attemptID, err)
+	}
+	return messageID, seq, nil
 }
 
 // rebuildFor renders the canonical input for one attempt from the
-// investigation's durable rows (used by create, send and dispatch rebuilds;
-// the message set freezes at the attempt's own user message).
-func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, attemptID, probeResultID int64) ([]byte, error) {
+// investigation's durable rows; the message set freezes at the turn's
+// cutoff seq (create/send/retry pass their own user message, dispatch
+// rebuilds resolve it through attemptUserMessage).
+func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq, probeResultID int64) ([]byte, error) {
 	var input Input
-	var userSeq int64
-	if err := queries.QueryRowContext(ctx, `
-		SELECT m.seq FROM investigation_messages m
-		WHERE m.attempt_id=? AND m.role='user'`, attemptID).Scan(&userSeq); err != nil {
-		return nil, fmt.Errorf("attempt %d user message missing: %w", attemptID, err)
-	}
 	rows, err := queries.QueryContext(ctx, `
 		SELECT id, role, content FROM investigation_messages
 		WHERE investigation_id=? AND status='active' AND seq<=?
-		ORDER BY seq`, investigationID, userSeq)
+		ORDER BY seq`, investigationID, cutoffSeq)
 	if err != nil {
 		return nil, err
 	}

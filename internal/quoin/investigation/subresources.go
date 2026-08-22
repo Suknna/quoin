@@ -179,6 +179,27 @@ func (service *Service) ListAttempts(ctx context.Context, investigationID int64,
 	return items, hasMore, rows.Err()
 }
 
+// AttemptView loads one attempt's authoritative summary for the
+// stop/retry command responses (the same projection as the list
+// subresource; scope mismatch is a not-found for the caller).
+func (service *Service) AttemptView(ctx context.Context, investigationID, attemptID int64) (InvestigationAttemptItem, error) {
+	var item InvestigationAttemptItem
+	var id int64
+	err := service.db.QueryRowContext(ctx, `
+		SELECT id, attempt_type, state, row_version, started_at, ended_at, termination_reason, created_at
+		FROM execution_attempts
+		WHERE id=? AND scope_type='investigation' AND scope_id=?`, attemptID, investigationID).
+		Scan(&id, &item.Type, &item.State, &item.RowVersion, &item.StartedAt, &item.EndedAt, &item.TerminationReason, &item.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return InvestigationAttemptItem{}, ErrNotFound
+	}
+	if err != nil {
+		return InvestigationAttemptItem{}, err
+	}
+	item.ID = strconv.FormatInt(id, 10)
+	return item, nil
+}
+
 // ListToolCalls pages one attempt's tool-call timeline in (call_seq,
 // tool_index) order (keyset on the insertion-ordered id).
 func (service *Service) ListToolCalls(ctx context.Context, attemptID int64, afterID int64, limit int) ([]InvestigationToolCallItem, bool, error) {
@@ -262,21 +283,37 @@ func (service *Service) MessageFor(ctx context.Context, investigationID, message
 	return projection[0], nil
 }
 
-// MessageAttempt resolves the attempt bound to one user message
-// (stream attachment; HTTP-STREAM-004).
+// MessageAttempt resolves the attempt one user-message stream attaches
+// to (HTTP-STREAM-004). A live attempt re-answering the message (an
+// explicit retry) wins over the message's own bound attempt — the stream
+// must observe the active execution, never a sealed one; otherwise the
+// message's own attempt replays its committed terminal state.
 func (service *Service) MessageAttempt(ctx context.Context, investigationID, messageID int64) (int64, error) {
-	var attemptID sql.NullInt64
+	var bound sql.NullInt64
+	var latestActiveUser sql.NullInt64
 	err := service.db.QueryRowContext(ctx, `
-		SELECT attempt_id FROM investigation_messages WHERE id=? AND investigation_id=? AND role='user'`,
-		messageID, investigationID).Scan(&attemptID)
+		SELECT m.attempt_id, (
+			SELECT n.id FROM investigation_messages n
+			WHERE n.investigation_id=m.investigation_id AND n.status='active' AND n.role='user'
+			ORDER BY n.seq DESC LIMIT 1)
+		FROM investigation_messages m
+		WHERE m.id=? AND m.investigation_id=? AND m.role='user'`, messageID, investigationID).
+		Scan(&bound, &latestActiveUser)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, err
 	}
-	if !attemptID.Valid {
+	if latestActiveUser.Valid && latestActiveUser.Int64 == messageID {
+		if active, err := service.attempts.ActiveAttempt(ctx, "investigation", investigationID); err != nil {
+			return 0, err
+		} else if active != 0 {
+			return active, nil
+		}
+	}
+	if !bound.Valid {
 		return 0, ErrNotFound
 	}
-	return attemptID.Int64, nil
+	return bound.Int64, nil
 }

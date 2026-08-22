@@ -262,9 +262,10 @@ func (service *Service) attemptBinding(ctx context.Context, conn *sql.Conn, resu
 	if state == "Running" && (bootID != result.BootID || epoch != int64(result.Epoch)) {
 		return state, investigationID, 0, ErrLateResult
 	}
-	var userMessageID int64
-	if err := conn.QueryRowContext(ctx, `
-		SELECT id FROM investigation_messages WHERE attempt_id=? AND role='user'`, result.AttemptID).Scan(&userMessageID); err != nil {
+	// A retry attempt owns no user message row: the binding resolves
+	// through the frozen input lineage instead (attemptUserMessage).
+	userMessageID, _, err := attemptUserMessage(ctx, conn, result.AttemptID)
+	if err != nil {
 		return state, investigationID, 0, err
 	}
 	return state, investigationID, userMessageID, nil
