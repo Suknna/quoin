@@ -14,12 +14,14 @@ import (
 )
 
 var projections = map[string]string{
-	"docs/specs/quoin-v1/contracts/sql/schema.sql":                         "internal/gen/contracts/schema.sql",
-	"docs/specs/quoin-v1/contracts/schemas/deployment-config.schema.json":  "internal/gen/contracts/deployment-config.schema.json",
-	"docs/specs/quoin-v1/contracts/schemas/readiness-response.schema.json": "internal/gen/contracts/readiness-response.schema.json",
-	"docs/specs/quoin-v1/contracts/metrics.yaml":                           "internal/gen/contracts/metrics.yaml",
-	"docs/specs/quoin-v1/contracts/connection-probes.yaml":                 "internal/gen/contracts/connection-probes.yaml",
-	"docs/specs/quoin-v1/contracts/plinth-worker-tools.yaml":               "internal/gen/contracts/plinth-worker-tools.yaml",
+	"docs/specs/quoin-v1/contracts/sql/schema.sql":                             "internal/gen/contracts/schema.sql",
+	"docs/specs/quoin-v1/contracts/schemas/business-system-config.schema.json": "internal/gen/contracts/business-system-config.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/label-contract.schema.json":         "internal/gen/contracts/label-contract.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/deployment-config.schema.json":      "internal/gen/contracts/deployment-config.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/readiness-response.schema.json":     "internal/gen/contracts/readiness-response.schema.json",
+	"docs/specs/quoin-v1/contracts/metrics.yaml":                               "internal/gen/contracts/metrics.yaml",
+	"docs/specs/quoin-v1/contracts/connection-probes.yaml":                     "internal/gen/contracts/connection-probes.yaml",
+	"docs/specs/quoin-v1/contracts/plinth-worker-tools.yaml":                   "internal/gen/contracts/plinth-worker-tools.yaml",
 }
 
 func main() {

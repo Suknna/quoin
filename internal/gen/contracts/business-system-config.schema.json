@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/business-system-config.schema.json",
+  "title": "Business System Configuration Document（解析后的文档形状）",
+  "description": "业务系统 YAML 的 parsed document shape。strict YAML 词法/解析限制（单文档、拒绝重复 key/anchor/alias/merge/自定义 tag/非字符串字段名/尾随内容、输入与深度上限）与 PromQL/Journey 语义校验见 docs/specs/quoin-v1/inspection-config.md（CFG-YAML-002、CFG-PROMQL-001/002、CFG-JOURNEY-003）；本 Schema 只描述文档结构。运行只使用上传时解析一次的类型化投影（DATA-CONFIG-003）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "system_key",
+    "display_name",
+    "enabled",
+    "timezone",
+    "resource_refresh_interval_seconds",
+    "resource_discoveries",
+    "inspection_plans"
+  ],
+  "properties": {
+    "system_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "稳定业务系统 key。首次上传不存在时同事务创建 Disabled Business System（DATA-CONFIG-001）；已存在时跨版本不可变。"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "发布时成为业务系统 enabled 投影（DATA-CONFIG-001）。"
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "description": "IANA 时区名（如 Asia/Shanghai）；上传时以系统时区数据库校验，非 IANA 名称拒绝（CFG-YAML-003）。"
+    },
+    "resource_refresh_interval_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "统一资源刷新周期（根节点提供；discovery 不再各自携带，DATA-CONFIG-004）。"
+    },
+    "resource_discoveries": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resourceDiscovery"
+      }
+    },
+    "inspection_plans": {
+      "type": "array",
+      "minItems": 0,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/inspectionPlan"
+      }
+    }
+  },
+  "$defs": {
+    "resourceDiscovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "display_name", "selector", "identity_labels"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "跨版本稳定 key（不可复用，DATA-CONFIG-004）。"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "description": "单个 instant vector selector 字面量；上传时经 Prometheus 官方 AST 校验：必须是单个 VectorSelector，禁止 offset/@ 修饰、聚合或 label_replace（CFG-PROMQL-002）。"
+        },
+        "identity_labels": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$",
+            "description": "Prometheus label 名；身份 tuple 按 label 名排序后编码（DATA-OBSERVED-001）；不得重复（CFG-YAML-003）。"
+          }
+        }
+      }
+    },
+    "inspectionPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "display_name", "checks"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cron": {
+          "type": "string",
+          "description": "标准五字段 cron；缺省表示仅人工运行。时区由根节点统一提供；字段范围与分隔符语法完全委托解析器校验（CFG-YAML-003），本 Schema 不设 pattern（避免假阴性拒绝合法空白分隔）。"
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 0,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/inspectionCheck"
+          }
+        }
+      }
+    },
+    "inspectionCheck": {
+      "description": "巡检项按 kind 封闭判别；promql 与 browser 字段互相排斥（DATA-CONFIG-003）。key 在所属 inspection plan 内唯一；不同 plan 可合法复用同一 check key（上传时校验，CFG-YAML-003）。",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "display_name", "analysis_question", "kind", "query"],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "analysis_question": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": { "const": "promql" },
+            "query": { "$ref": "#/$defs/promqlQuery" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "display_name", "analysis_question", "kind", "journey_id"],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "analysis_question": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": { "const": "browser" },
+            "journey_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Journey Catalog 中的稳定 ID；上传时校验存在于嵌入 catalog（CFG-JOURNEY-003）。"
+            },
+            "journey_params": {
+              "type": "object",
+              "description": "Journey 参数；上传时按嵌入 catalog 中该 journey 的封闭 params_schema 校验（封闭性由 catalog 生成持有，CFG-JOURNEY-003）。缺省时规范化为空对象后保存类型化投影。"
+            }
+          }
+        }
+      ]
+    },
+    "promqlQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "expression"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["instant", "range"]
+        },
+        "expression": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PromQL 字面量表达式；上传时经 Prometheus 官方 AST 校验：每个 VectorSelector 必须以目标 Label Contract 的业务系统 label 精确 '=' 当前 system key（CFG-PROMQL-002）。允许 offset/@ 修饰与子查询（仅 Discovery selector 受限，CFG-PROMQL-003）。"
+        },
+        "range_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "range 模式必填；instant 模式禁止（表 CHECK/本 Schema 组合约束）。"
+        },
+        "step_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "instant" },
+            "range_seconds": false,
+            "step_seconds": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["range_seconds", "step_seconds"],
+          "properties": {
+            "mode": { "const": "range" }
+          }
+        }
+      ]
+    }
+  }
+}

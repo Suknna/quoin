@@ -11,6 +11,12 @@ var (
 	//go:embed deployment-config.schema.json
 	DeploymentConfigSchema []byte
 
+	//go:embed business-system-config.schema.json
+	BusinessSystemConfigSchema []byte
+
+	//go:embed label-contract.schema.json
+	LabelContractSchema []byte
+
 	//go:embed readiness-response.schema.json
 	ReadinessResponseSchema []byte
 
