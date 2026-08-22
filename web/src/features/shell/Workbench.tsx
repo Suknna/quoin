@@ -231,6 +231,9 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 		)}
 		{active === 'business-systems' && (
 			<BusinessSystemsList
+				// Remount when returning from a sub-view so the list reflects
+				// systems created since it last fetched (UI-LIST-003).
+				key={businessSystemView.kind === 'list' ? 'fresh' : 'stale'}
 				onOpen={openBusinessSystem}
 				onUpload={() => setUploadOpen(true)}
 				isAdmin={user.role === 'admin'}
