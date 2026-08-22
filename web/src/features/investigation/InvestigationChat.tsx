@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, sourceLabel, type InvestigationDetail, type InvestigationMessage } from './api'
-import { ChatThread } from './ChatThread'
+import { withdrawnRevision, type AttemptFacts } from './chatControls'
+import { ChatThread, type TurnRestore } from './ChatThread'
 
 // InvestigationChat is the durable conversation page: it loads the
-// investigation detail and the message history, restores the thread from
-// the persisted active branch, and re-attaches the stream when the head
-// user message still owns an active attempt (HTTP-STREAM-003/006: leaving
-// the page never cancelled the task).
+// investigation detail, the message history and the attempt projection,
+// restores the thread from the persisted active branch, and re-attaches
+// the stream when the head user message still owns an active attempt
+// (HTTP-STREAM-003/006: leaving the page never cancelled the task).
+// T15: it also owns the Undo restore payload (the withdrawn turn returns
+// to the input area across the thread rebuild) and the rebuild counter
+// that drops local ghosts after failed/cancelled turns.
 
 interface InvestigationChatProps {
   investigationId: string
@@ -16,8 +20,10 @@ interface InvestigationChatProps {
 export function InvestigationChat({ investigationId, onBack }: InvestigationChatProps) {
   const [detail, setDetail] = useState<InvestigationDetail | null>(null)
   const [messages, setMessages] = useState<InvestigationMessage[]>([])
+  const [attemptStates, setAttemptStates] = useState<Record<string, AttemptFacts>>({})
   const [error, setError] = useState<string | null>(null)
-  const pollTimer = useRef<number | null>(null)
+  const [restore, setRestore] = useState<TurnRestore | null>(null)
+  const [undoError, setUndoError] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -32,8 +38,14 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
         all.push(...page.items)
         cursor = page.nextCursor
       }
+      const attempts = await api.listAttempts(investigationId)
+      const states: Record<string, AttemptFacts> = {}
+      for (const attempt of attempts.items) {
+        states[attempt.id] = { state: attempt.state, rowVersion: attempt.rowVersion }
+      }
       setDetail(nextDetail)
       setMessages(all)
+      setAttemptStates(states)
       setError(null)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '暂时无法读取调查，请重试。')
@@ -43,6 +55,26 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
   const onTurnFinished = useCallback(() => {
     void reload()
   }, [reload])
+
+  // Undo (DATA-INVEST-002): the server withdraws the turn and successors;
+  // the withdrawn text and attachment references return to the input area
+  // (UI-CHAT-005) and the thread rebuilds from the durable projection.
+  // The restore payload is set only AFTER the reload commits: the thread
+  // rebuild key derives from the withdrawn set, and setting it earlier
+  // would let the outgoing thread instance consume the payload before the
+  // rebuild mounts.
+  const onUndo = useCallback(async (message: InvestigationMessage) => {
+    if (!detail?.headMessageId) return
+    setUndoError(null)
+    try {
+      await api.undo(investigationId, detail.headMessageId)
+      await reload()
+      setRestore({ content: message.content, attachments: message.attachments })
+    } catch (reason) {
+      setUndoError(reason instanceof Error ? reason.message : '暂时无法撤回，请刷新后重试。')
+      await reload()
+    }
+  }, [investigationId, detail, reload])
 
   useEffect(() => {
     let cancelled = false
@@ -61,9 +93,9 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
   // converges even when the stream transport detached.
   useEffect(() => {
     if (!detail?.activeAttemptId) return
-    pollTimer.current = window.setInterval(() => void reload(), 2000)
+    const timer = window.setInterval(() => void reload(), 2000)
     return () => {
-      if (pollTimer.current !== null) window.clearInterval(pollTimer.current)
+      window.clearInterval(timer)
     }
   }, [detail?.activeAttemptId, reload])
 
@@ -107,18 +139,25 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
 			))}
         </div>
       )}
+      {undoError && (
+        <p className="chat-control-error" role="alert">{undoError}</p>
+      )}
       {attach && (
         <p className="inline-status" role="status">
           <span className="status-dot waiting" />回复正在生成中，页面会持续更新。
         </p>
       )}
       <ChatThread
-        key={investigationId}
+        key={`${investigationId}:w${withdrawnRevision(messages)}`}
         investigationId={investigationId}
         messages={messages}
         headMessageId={detail.headMessageId ?? null}
         attachMessageId={attach}
         activeAttemptId={detail.activeAttemptId}
+        attemptStates={attemptStates}
+        restore={restore}
+        onRestoreConsumed={() => setRestore(null)}
+        onUndo={(message) => void onUndo(message)}
         onTurnFinished={onTurnFinished}
       />
     </div>

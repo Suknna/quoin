@@ -398,3 +398,95 @@
 .evidence-chip {
   cursor: pointer;
 }
+
+/* ---- T15 turn controls: stop / retry / undo / withdrawn ---------------- */
+
+.chat-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 6px 14px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.chat-stop.stopping {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.chat-control-error {
+  color: #a33;
+  font-size: 0.85rem;
+  margin: 4px 2px;
+}
+
+.chat-message.withdrawn {
+  opacity: 0.62;
+}
+
+.chat-message.withdrawn .chat-text {
+  text-decoration: line-through solid transparent;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.withdrawn-badge {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--muted, #777);
+}
+
+.chat-message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.message-retry {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  margin-top: 2px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 50%;
+  background: var(--panel, #fff);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.message-undo {
+  margin-top: 6px;
+  border: none;
+  background: none;
+  color: var(--muted, #666);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 2px 0;
+  text-decoration: underline dotted;
+}
+
+.restored-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+.attachment-chip.restored {
+  border-style: dashed;
+}
+
+.attachment-chip-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--muted, #666);
+  font-size: 0.9rem;
+  padding: 0 2px;
+}

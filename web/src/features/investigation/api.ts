@@ -51,6 +51,21 @@ export interface Page<T> {
 	nextCursor?: string
 }
 
+export type AttemptState =
+	| 'Queued' | 'Assigned' | 'Running' | 'Cancelling'
+	| 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
+
+export interface InvestigationAttempt {
+	id: string
+	type: string
+	state: AttemptState
+	rowVersion: number
+	startedAt?: string
+	endedAt?: string
+	terminationReason?: string
+	createdAt: string
+}
+
 export interface StreamRequest {
 	protocol: 'ui-message-stream'
 }
@@ -114,8 +129,22 @@ export const api = {
     read<Page<InvestigationMessage>>(`/api/v1/investigations/${investigationId}/messages${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
   create: (content: string, sources: Array<{ type: string; sourceId: string }>, attachmentIds: string[]) =>
     send<InvestigationDetail>('/api/v1/investigations', { clientCommandId: commandId(), content, sources, attachmentIds }),
-	sendMessage: (investigationId: string, content: string, expectedHeadMessageId: string | null, attachmentIds: string[]) =>
+  sendMessage: (investigationId: string, content: string, expectedHeadMessageId: string | null, attachmentIds: string[]) =>
 		send<InvestigationMessage>(`/api/v1/investigations/${investigationId}/messages`, {
 			clientCommandId: commandId(), content, expectedHeadMessageId, attachmentIds,
+		}),
+	listAttempts: (investigationId: string, cursor?: string) =>
+		read<Page<InvestigationAttempt>>(`/api/v1/investigations/${investigationId}/attempts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+	undo: (investigationId: string, expectedHeadMessageId: string) =>
+		send<InvestigationDetail>(`/api/v1/investigations/${investigationId}/undo`, {
+			clientCommandId: commandId(), expectedHeadMessageId,
+		}),
+	cancelAttempt: (investigationId: string, attemptId: string, expectedRowVersion: number) =>
+		send<InvestigationAttempt>(`/api/v1/investigations/${investigationId}/attempts/${attemptId}/cancel`, {
+			clientCommandId: commandId(), expectedRowVersion,
+		}),
+	retryAttempt: (investigationId: string, attemptId: string) =>
+		send<InvestigationAttempt>(`/api/v1/investigations/${investigationId}/attempts/${attemptId}/retry`, {
+			clientCommandId: commandId(),
 		}),
 }
