@@ -42,8 +42,8 @@ type ConflictError struct {
 
 func (err *ConflictError) Error() string { return err.Detail }
 
-// Detail is the LabelContractDetail projection.
-type Detail struct {
+// LabelContractDetail is the LabelContractDetail projection.
+type LabelContractDetail struct {
 	ID            string         `json:"id"`
 	Version       int64          `json:"version"`
 	State         string         `json:"state"`
@@ -97,36 +97,36 @@ func (service *Service) nowText() string { return service.now().UTC().Format(tim
 // CreateDraft parses the strict YAML once, persists the immutable draft row
 // with its typed projection and returns the detail (DATA-CONFIG-003). The
 // parse failure surfaces as *config.ValidationError for the 422 mapping.
-func (service *Service) CreateDraft(ctx context.Context, principalID int64, clientCommandID string, body []byte, limits config.Limits) (Detail, error) {
+func (service *Service) CreateDraft(ctx context.Context, principalID int64, clientCommandID string, body []byte, limits config.Limits) (LabelContractDetail, error) {
 	value, fieldErrors := config.ParseStrictYAML(body, limits, "document")
 	if len(fieldErrors) != 0 {
-		return Detail{}, &config.ValidationError{Errors: fieldErrors}
+		return LabelContractDetail{}, &config.ValidationError{Errors: fieldErrors}
 	}
 	if fields := config.ValidateSchema(value, config.SchemaLabelContract); len(fields) != 0 {
-		return Detail{}, &config.ValidationError{Errors: fields}
+		return LabelContractDetail{}, &config.ValidationError{Errors: fields}
 	}
 	document, err := config.ExtractLabelContract(value)
 	if err != nil {
-		return Detail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "document", Reason: err.Error()}}}
+		return LabelContractDetail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "document", Reason: err.Error()}}}
 	}
 	digest := document.Digest()
 	commandDigest := auth.DigestCommand("label_contract.create", map[string]any{"digest": digest})
 	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
 		if record.RequestDigest != commandDigest {
-			return Detail{}, ErrCommandReused
+			return LabelContractDetail{}, ErrCommandReused
 		}
-		var replayed Detail
+		var replayed LabelContractDetail
 		if err := decodeStoredResult(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
 			return replayed, nil
 		}
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	committed := false
 	defer func() {
@@ -137,31 +137,31 @@ func (service *Service) CreateDraft(ctx context.Context, principalID int64, clie
 	now := service.nowText()
 	var version int64
 	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM label_contracts`).Scan(&version); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,row_version,created_at)
 		VALUES(?,?,?,?,?,?, 'draft', 1, ?)`,
 		version, string(body), document.CanonicalJSON(), digest, config.ParserVersion, config.SchemaVersion(config.SchemaLabelContract), now)
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	contractID, err := insert.LastInsertId()
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	if err := recordAudit(ctx, conn, principalID, "label_contract.create", contractID, now); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	detail, err := service.detailOn(ctx, conn, version)
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, "label_contract.create", commandDigest, "committed", "label_contract", contractID, marshalResult(detail)); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	committed = true
 	return detail, nil
@@ -171,7 +171,7 @@ func (service *Service) CreateDraft(ctx context.Context, principalID int64, clie
 // every precondition and atomically switches the contract pointer, the
 // enabled systems' config pointers and the derived states (DATA-CONFIG-002).
 // Any stale or invalid precondition aborts the whole statement.
-func (service *Service) Activate(ctx context.Context, principalID int64, clientCommandID string, input ActivateInput) (Detail, error) {
+func (service *Service) Activate(ctx context.Context, principalID int64, clientCommandID string, input ActivateInput) (LabelContractDetail, error) {
 	commandDigest := auth.DigestCommand("label_contract.activate", map[string]any{
 		"version": input.ContractVersion,
 		"state":   input.ExpectedStateRowVersion,
@@ -181,20 +181,20 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 	})
 	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
 		if record.RequestDigest != commandDigest {
-			return Detail{}, ErrCommandReused
+			return LabelContractDetail{}, ErrCommandReused
 		}
-		var replayed Detail
+		var replayed LabelContractDetail
 		if err := decodeStoredResult(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
 			return replayed, nil
 		}
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	committed := false
 	defer func() {
@@ -205,9 +205,9 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 	var contractID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM label_contracts WHERE version=?`, input.ContractVersion).Scan(&contractID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Detail{}, ErrNotFound
+			return LabelContractDetail{}, ErrNotFound
 		}
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	// Resolve each item's business system key inside the serialized
 	// transaction; unknown keys are deterministic request errors.
@@ -215,9 +215,9 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 		var systemID int64
 		if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, input.Items[index].BusinessSystemKey).Scan(&systemID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return Detail{}, &BadRequestError{Reason: "compatibleVersions 引用了不存在的业务系统: " + input.Items[index].BusinessSystemKey}
+				return LabelContractDetail{}, &BadRequestError{Reason: "compatibleVersions 引用了不存在的业务系统: " + input.Items[index].BusinessSystemKey}
 			}
-			return Detail{}, err
+			return LabelContractDetail{}, err
 		}
 		input.Items[index].businessSystemID = systemID
 	}
@@ -226,20 +226,20 @@ func (service *Service) Activate(ctx context.Context, principalID int64, clientC
 		INSERT INTO label_contract_activations(contract_id,expected_target_row_version,expected_state_row_version,expected_current_contract_id,items_json,created_at)
 		VALUES(?,?,?,?,?,?)`,
 		contractID, input.ExpectedTargetRowVersion, input.ExpectedStateRowVersion, nullableSQL(input.ExpectedCurrentContractID), itemsJSON, service.nowText()); err != nil {
-		return Detail{}, mapActivationAbort(err, input)
+		return LabelContractDetail{}, mapActivationAbort(err, input)
 	}
 	if err := recordAudit(ctx, conn, principalID, "label_contract.activate", contractID, service.nowText()); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	detail, err := service.detailOn(ctx, conn, input.ContractVersion)
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, "label_contract.activate", commandDigest, "committed", "label_contract", contractID, marshalResult(detail)); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	committed = true
 	return detail, nil
@@ -259,8 +259,14 @@ func (service *Service) Current(ctx context.Context) (currentContractID *int64, 
 	return currentContractID, stateRowVersion, nil
 }
 
+// LabelContractListing is the paginated contract list envelope.
+type LabelContractListing struct {
+	Items      []LabelContractDetail `json:"items"`
+	NextCursor string   `json:"nextCursor,omitempty"`
+}
+
 // List returns contract summaries newest-first with cursor pagination.
-func (service *Service) List(ctx context.Context, cursor string, limit int) ([]Detail, bool, error) {
+func (service *Service) List(ctx context.Context, cursor string, limit int) ([]LabelContractDetail, bool, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -279,7 +285,7 @@ func (service *Service) List(ctx context.Context, cursor string, limit int) ([]D
 		return nil, false, err
 	}
 	defer rows.Close()
-	items := []Detail{}
+	items := []LabelContractDetail{}
 	for rows.Next() {
 		detail, scanErr := scanSummary(rows)
 		if scanErr != nil {
@@ -299,16 +305,16 @@ func (service *Service) List(ctx context.Context, cursor string, limit int) ([]D
 }
 
 // GetByVersion returns the full detail of one contract version.
-func (service *Service) GetByVersion(ctx context.Context, version int64) (Detail, error) {
+func (service *Service) GetByVersion(ctx context.Context, version int64) (LabelContractDetail, error) {
 	return service.detailOn(ctx, nil, version)
 }
 
-func (service *Service) detailOn(ctx context.Context, conn *sql.Conn, version int64) (Detail, error) {
+func (service *Service) detailOn(ctx context.Context, conn *sql.Conn, version int64) (LabelContractDetail, error) {
 	query := `
 		SELECT id,version,state,row_version,parser_version,schema_version,created_at,activated_at,yaml_body,contract_json,digest
 		FROM label_contracts WHERE version=?`
 	var (
-		detail     Detail
+		detail     LabelContractDetail
 		id         int64
 		activated  sql.NullString
 		contractJS string
@@ -320,10 +326,10 @@ func (service *Service) detailOn(ctx context.Context, conn *sql.Conn, version in
 		err = service.db.QueryRowContext(ctx, query, version).Scan(&id, &detail.Version, &detail.State, &detail.RowVersion, &detail.ParserVersion, &detail.SchemaVersion, &detail.CreatedAt, &activated, &detail.YAMLBody, &contractJS, &detail.Digest)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return Detail{}, ErrNotFound
+		return LabelContractDetail{}, ErrNotFound
 	}
 	if err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	if activated.Valid {
@@ -332,7 +338,7 @@ func (service *Service) detailOn(ctx context.Context, conn *sql.Conn, version in
 	}
 	projection := map[string]any{}
 	if err := decodeStoredResult(contractJS, &projection); err != nil {
-		return Detail{}, fmt.Errorf("contract projection decode: %w", err)
+		return LabelContractDetail{}, fmt.Errorf("contract projection decode: %w", err)
 	}
 	detail.ContractJSON = projection
 	return detail, nil

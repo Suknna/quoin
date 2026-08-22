@@ -22,7 +22,7 @@ func canonicalJSON(value any) string {
 	return string(encoded)
 }
 
-func marshalResult(detail Detail) string { return canonicalJSON(detail) }
+func marshalResult(detail LabelContractDetail) string { return canonicalJSON(detail) }
 
 func decodeStoredResult(payload string, target any) error {
 	if payload == "" {
@@ -88,7 +88,7 @@ func mapActivationAbort(err error, input ActivateInput) error {
 	case strings.Contains(message, "activation items must be closed objects"):
 		return &BadRequestError{Reason: "compatibleVersions 项必须是封闭的 typed 字段且每个业务系统只出现一次"}
 	case strings.Contains(message, "activation target must be an unactivated draft"):
-		return &ConflictError{Code: "invalid_state", Detail: "目标契约不是未激活草稿", ObjectID: input.ContractVersion}
+		return &ConflictError{Code: "row_version_conflict", Detail: "目标契约不是未激活草稿（可能刚被激活），请刷新后重试", ObjectID: input.ContractVersion}
 	case strings.Contains(message, "activation target row_version mismatch"):
 		return &ConflictError{Code: "row_version_conflict", Detail: "目标契约行已被其他操作修改，请刷新后重试", ObjectID: input.ContractVersion}
 	case strings.Contains(message, "activation state pointer/row_version mismatch"):
@@ -103,14 +103,14 @@ func mapActivationAbort(err error, input ActivateInput) error {
 }
 
 // scanSummary reads the summary column set shared by List.
-func scanSummary(rows *sql.Rows) (Detail, error) {
+func scanSummary(rows *sql.Rows) (LabelContractDetail, error) {
 	var (
-		detail    Detail
+		detail    LabelContractDetail
 		id        int64
 		activated sql.NullString
 	)
 	if err := rows.Scan(&id, &detail.Version, &detail.State, &detail.RowVersion, &detail.ParserVersion, &detail.SchemaVersion, &detail.CreatedAt, &activated); err != nil {
-		return Detail{}, err
+		return LabelContractDetail{}, err
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	if activated.Valid {

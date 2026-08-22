@@ -91,12 +91,12 @@ func newHarness(t *testing.T) *harness {
 	return &harness{db: db, systems: NewService(db), contracts: contracts, principal: 1}
 }
 
-func (h *harness) upload(t *testing.T, body string, contractVersion int64, commandID string) (VersionDetail, error) {
+func (h *harness) upload(t *testing.T, body string, contractVersion int64, commandID string) (ConfigVersionDetail, error) {
 	t.Helper()
 	return h.systems.Upload(context.Background(), h.principal, commandID, UploadInput{YAMLBody: []byte(body), TargetLabelContractVersion: contractVersion}, config.Limits{})
 }
 
-func (h *harness) mustUpload(t *testing.T, body string, contractVersion int64, commandID string) VersionDetail {
+func (h *harness) mustUpload(t *testing.T, body string, contractVersion int64, commandID string) ConfigVersionDetail {
 	t.Helper()
 	detail, err := h.upload(t, body, contractVersion, commandID)
 	if err != nil {

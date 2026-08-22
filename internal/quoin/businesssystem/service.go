@@ -64,13 +64,13 @@ func (service *Service) nowText() string { return service.now().UTC().Format(tim
 // persists the immutable draft and its typed projections in one transaction.
 // A first upload of an unknown stable key creates the Disabled Business
 // System in the same transaction (HTTP-CONFIG-001, MUST NOT 404).
-func (service *Service) Upload(ctx context.Context, principalID int64, clientCommandID string, input UploadInput, limits config.Limits) (VersionDetail, error) {
+func (service *Service) Upload(ctx context.Context, principalID int64, clientCommandID string, input UploadInput, limits config.Limits) (ConfigVersionDetail, error) {
 	catalogDocument, catalogVersion, catalogDigest, err := config.JourneyCatalog()
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if input.JourneyCatalogDigest != "" && input.JourneyCatalogDigest != catalogDigest {
-		return VersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
 			Path:        "journeyCatalogDigest",
 			Reason:      "提供的 Journey Catalog digest 与 Quoin 嵌入版本不一致",
 			Remediation: "删除该字段以记录当前嵌入 digest，或刷新页面后使用当前 catalog digest",
@@ -86,17 +86,17 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	)
 	err = service.db.QueryRowContext(ctx, `SELECT id,state,contract_json FROM label_contracts WHERE version=?`, input.TargetLabelContractVersion).Scan(&contractID, &contractState, &contractJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return VersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
 			Path:        "targetLabelContractVersion",
 			Reason:      fmt.Sprintf("目标 Label Contract 版本不存在: %d", input.TargetLabelContractVersion),
 			Remediation: "选择一个已上传的契约版本",
 		}}}
 	}
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if contractState == "retired" {
-		return VersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
 			Path:        "targetLabelContractVersion",
 			Reason:      fmt.Sprintf("目标 Label Contract 版本已 retired，不能作为上传目标: %d", input.TargetLabelContractVersion),
 			Remediation: "选择一个 draft 或 active 契约版本",
@@ -104,21 +104,21 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	}
 	businessSystemLabel, err := labelOfContract(contractJSON)
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	value, fieldErrors := config.ParseStrictYAML(input.YAMLBody, limits, "document")
 	if len(fieldErrors) != 0 {
-		return VersionDetail{}, &config.ValidationError{Errors: fieldErrors}
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: fieldErrors}
 	}
 	if fields := config.ValidateSchema(value, config.SchemaBusinessSystemConfig); len(fields) != 0 {
-		return VersionDetail{}, &config.ValidationError{Errors: fields}
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: fields}
 	}
 	document, err := config.ExtractBusinessSystem(value)
 	if err != nil {
-		return VersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "document", Reason: err.Error()}}}
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "document", Reason: err.Error()}}}
 	}
 	if fields := config.SemanticChecks(document, businessSystemLabel); len(fields) != 0 {
-		return VersionDetail{}, &config.ValidationError{Errors: fields}
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: fields}
 	}
 	_ = catalogDocument
 	digest := document.Digest()
@@ -127,20 +127,20 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	})
 	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
 		if record.RequestDigest != commandDigest {
-			return VersionDetail{}, ErrCommandReused
+			return ConfigVersionDetail{}, ErrCommandReused
 		}
-		var replayed VersionDetail
+		var replayed ConfigVersionDetail
 		if err := decodeStored(record.ResultPayload, &replayed); err == nil && replayed.ID != "" {
 			return replayed, nil
 		}
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	committed := false
 	defer func() {
@@ -152,10 +152,10 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	// concurrent activation that retires it must fail this upload.
 	var currentState string
 	if err := conn.QueryRowContext(ctx, `SELECT state FROM label_contracts WHERE id=?`, contractID).Scan(&currentState); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if currentState != contractState {
-		return VersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
 			Path:        "targetLabelContractVersion",
 			Reason:      "目标 Label Contract 状态刚发生变化（" + currentState + "），请刷新后重试",
 			Remediation: "重新选择目标契约版本",
@@ -168,15 +168,15 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 			INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`,
 			document.SystemKey, document.DisplayName, now)
 		if insertErr != nil {
-			return VersionDetail{}, insertErr
+			return ConfigVersionDetail{}, insertErr
 		}
 		systemID, _ = insert.LastInsertId()
 	} else if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	var versionSeq int64
 	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_seq),0)+1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	versionInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO business_system_config_versions(
@@ -188,27 +188,27 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 		contractID, catalogDigest, catalogVersion, digest, principalID, now,
 		document.SystemKey, document.DisplayName, boolToInt(document.Enabled), document.Timezone, document.ResourceRefreshIntervalSeconds)
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	versionID, err := versionInsert.LastInsertId()
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if err := insertProjections(ctx, conn, versionID, document); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if err := service.audit(ctx, conn, principalID, "business_system.config.upload", systemID, now); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	detail, err := service.versionDetailOn(ctx, conn, systemID, versionID)
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, "business_system.config.upload", commandDigest, "committed", "business_system_config_version", versionID, encode(detail)); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	committed = true
 	return detail, nil
@@ -271,26 +271,26 @@ func insertProjections(ctx context.Context, conn *sql.Conn, versionID int64, doc
 // expectedCurrentPublishedVersionId (nil = first publish) and the frozen
 // triggers derive the published/superseded states and enforce the Label
 // Contract fence (DATA-CONFIG-001, HTTP-CONFIG-002).
-func (service *Service) Publish(ctx context.Context, principalID int64, clientCommandID, systemKey string, versionID int64, expectedCurrent *int64) (SystemDetail, error) {
+func (service *Service) Publish(ctx context.Context, principalID int64, clientCommandID, systemKey string, versionID int64, expectedCurrent *int64) (BusinessSystemDetail, error) {
 	commandDigest := auth.DigestCommand("business_system.config.publish", map[string]any{
 		"systemKey": systemKey, "versionId": versionID, "expectedCurrent": idString(expectedCurrent),
 	})
 	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, principalID, clientCommandID); lookupErr == nil && found {
 		if record.RequestDigest != commandDigest {
-			return SystemDetail{}, ErrCommandReused
+			return BusinessSystemDetail{}, ErrCommandReused
 		}
-		var replayed SystemDetail
+		var replayed BusinessSystemDetail
 		if err := decodeStored(record.ResultPayload, &replayed); err == nil && replayed.Key != "" {
 			return replayed, nil
 		}
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	committed := false
 	defer func() {
@@ -301,9 +301,9 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 	var systemID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemDetail{}, ErrNotFound
+			return BusinessSystemDetail{}, ErrNotFound
 		}
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	// The target must be an unpublished version of this system; published
 	// versions can never be re-published (trg_business_systems_config_owner_update).
@@ -319,15 +319,15 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 		FROM business_system_config_versions WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(
 		&projection.DisplayName, &projection.Enabled, &projection.Timezone, &projection.Refresh, &projection.PublishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return SystemDetail{}, ErrNotFound
+		return BusinessSystemDetail{}, ErrNotFound
 	}
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	if projection.PublishedAt.Valid {
 		var current sql.NullInt64
 		_ = conn.QueryRowContext(ctx, `SELECT current_config_version_id FROM business_systems WHERE id=?`, systemID).Scan(&current)
-		return SystemDetail{}, &ConflictError{
+		return BusinessSystemDetail{}, &ConflictError{
 			Code: "current_pointer_conflict", Detail: "该配置版本已被发布过，发布指针只能移动到未发布版本",
 			SystemKey: systemKey, ObjectID: versionID, CurrentVersion: nullInt64Ptr(current),
 		}
@@ -340,32 +340,32 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 		WHERE id=? AND current_config_version_id IS ?`,
 		versionID, projection.DisplayName, projection.Enabled, projection.Timezone, projection.Refresh, systemID, expectedCurrent)
 	if err != nil {
-		return SystemDetail{}, mapPublishAbort(err, systemKey, versionID)
+		return BusinessSystemDetail{}, mapPublishAbort(err, systemKey, versionID)
 	}
 	affected, err := update.RowsAffected()
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	if affected == 0 {
 		var current sql.NullInt64
 		_ = conn.QueryRowContext(ctx, `SELECT current_config_version_id FROM business_systems WHERE id=?`, systemID).Scan(&current)
-		return SystemDetail{}, &ConflictError{
+		return BusinessSystemDetail{}, &ConflictError{
 			Code: "current_pointer_conflict", Detail: "当前已发布版本与 expectedCurrentPublishedVersionId 不匹配，请刷新后重试",
 			SystemKey: systemKey, ObjectID: versionID, CurrentVersion: nullInt64Ptr(current),
 		}
 	}
 	if err := service.audit(ctx, conn, principalID, "business_system.config.publish", systemID, service.nowText()); err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	detail, err := service.systemDetailOn(ctx, conn, systemID)
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, "business_system.config.publish", commandDigest, "committed", "business_system", systemID, encode(detail)); err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	committed = true
 	return detail, nil

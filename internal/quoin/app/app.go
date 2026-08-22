@@ -26,13 +26,16 @@ import (
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
+	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
+	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
@@ -56,7 +59,10 @@ type apiServer struct {
 	connections               *connections.Service
 	analyses                  *analysis.Service
 	investigations            *investigation.Service
+	systems                   *businesssystem.Service
+	contracts                 *labelcontract.Service
 	investigationUpload       *appinvestigation.Handler
+	configHandler             *appconfig.Handler
 	artifacts                 *artifact.Store
 	rootKey                   func() ([]byte, error)
 	probeDispatchFunc         func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
@@ -90,6 +96,8 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		runtime:        qruntime.NewService(db),
 		analyses:       analysis.NewService(db),
 		investigations: investigation.NewService(db),
+		systems:        businesssystem.NewService(db),
+		contracts:      labelcontract.NewService(db),
 	}
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
@@ -280,6 +288,11 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	// The attachment upload streams multipart parts into staging without
 	// whole-body buffering (HTTP-FILE-001); it also owns its response head.
 	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
+	// The strict-YAML config uploads and the template download own their
+	// response heads the same way (T16).
+	mux.HandleFunc("POST /api/v1/business-systems", application.configHandler.ServeBusinessSystemUpload)
+	mux.HandleFunc("POST /api/v1/label-contracts", application.configHandler.ServeLabelContractUpload)
+	mux.HandleFunc("GET /api/v1/templates/business-system", application.configHandler.ServeBusinessSystemTemplate)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -336,6 +349,25 @@ func (application *apiServer) register(api huma.API) {
 		},
 	}
 	investigationHandler.Register(api)
+	configHandler := &appconfig.Handler{
+		Systems:   application.systems,
+		Contracts: application.contracts,
+		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateFull(ctx, cookie, "读取配置")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+		AuthenticateAdmin: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateAdmin(ctx, cookie, "管理配置")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+	}
+	configHandler.Register(api)
 	// The raw multipart upload route (NewHandler) reuses this handler's
 	// authentication seam.
 	application.investigationUpload = investigationHandler

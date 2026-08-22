@@ -41,9 +41,9 @@ type PlanView struct {
 	Checks      []CheckView `json:"checks"`
 }
 
-// SystemDetail is BusinessSystemDetail (browser identity arrives with the
+// BusinessSystemDetail is BusinessSystemDetail (browser identity arrives with the
 // Lintel stage and projects the frozen `none` state until then).
-type SystemDetail struct {
+type BusinessSystemDetail struct {
 	Key                            string          `json:"key"`
 	DisplayName                    string          `json:"displayName"`
 	Enabled                        bool            `json:"enabled"`
@@ -57,8 +57,8 @@ type SystemDetail struct {
 	Plans                          []PlanView      `json:"plans"`
 }
 
-// VersionDetail is ConfigVersionSummary + ConfigVersionDetail.
-type VersionDetail struct {
+// ConfigVersionDetail is ConfigVersionSummary + ConfigVersionDetail.
+type ConfigVersionDetail struct {
 	ID                             string          `json:"id"`
 	VersionSeq                     int64           `json:"versionSeq"`
 	State                          string          `json:"state"`
@@ -80,8 +80,8 @@ type VersionDetail struct {
 	Plans                          []PlanView      `json:"plans"`
 }
 
-// VersionSummary is ConfigVersionSummary for the history list.
-type VersionSummary struct {
+// ConfigVersionSummary is ConfigVersionSummary for the history list.
+type ConfigVersionSummary struct {
 	ID                     string  `json:"id"`
 	VersionSeq             int64   `json:"versionSeq"`
 	State                  string  `json:"state"`
@@ -98,9 +98,21 @@ type VersionSummary struct {
 	JourneyCatalogVersion  string  `json:"journeyCatalogVersion"`
 }
 
+// SystemDetailListing is the paginated list envelope.
+type SystemDetailListing struct {
+	Items      []BusinessSystemDetail `json:"items"`
+	NextCursor string         `json:"nextCursor,omitempty"`
+}
+
+// VersionSummaryListing is the paginated history envelope.
+type VersionSummaryListing struct {
+	Items      []ConfigVersionSummary `json:"items"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+}
+
 // ListSystems returns the business system summaries newest-created-first
 // with the enabled filter and display-name contains search (cursor on id).
-func (service *Service) ListSystems(ctx context.Context, enabled *bool, query string, cursor string, limit int) ([]SystemDetail, bool, error) {
+func (service *Service) ListSystems(ctx context.Context, enabled *bool, query string, cursor string, limit int) ([]BusinessSystemDetail, bool, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -129,14 +141,14 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 	}
 	defer rows.Close()
 	ids := []int64{}
-	systems := []SystemDetail{}
+	systems := []BusinessSystemDetail{}
 	for rows.Next() {
 		var (
 			id          int64
 			current     sql.NullInt64
 			timezone    sql.NullString
 			refresh     sql.NullInt64
-			detail      SystemDetail
+			detail      BusinessSystemDetail
 			enabledFlag int64
 		)
 		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh); err != nil {
@@ -179,19 +191,19 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 }
 
 // GetSystem returns one system detail with its current version projections.
-func (service *Service) GetSystem(ctx context.Context, key string) (SystemDetail, error) {
+func (service *Service) GetSystem(ctx context.Context, key string) (BusinessSystemDetail, error) {
 	var id int64
 	if err := service.db.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, key).Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemDetail{}, ErrNotFound
+			return BusinessSystemDetail{}, ErrNotFound
 		}
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	return service.systemDetailOn(ctx, nil, id)
 }
 
 // ListVersions returns the immutable version history newest-first.
-func (service *Service) ListVersions(ctx context.Context, systemKey string, cursor string, limit int) ([]VersionSummary, bool, error) {
+func (service *Service) ListVersions(ctx context.Context, systemKey string, cursor string, limit int) ([]ConfigVersionSummary, bool, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -213,7 +225,7 @@ func (service *Service) ListVersions(ctx context.Context, systemKey string, curs
 		return nil, false, err
 	}
 	defer rows.Close()
-	items := []VersionSummary{}
+	items := []ConfigVersionSummary{}
 	for rows.Next() {
 		summary, scanErr := scanVersionSummary(rows)
 		if scanErr != nil {
@@ -233,17 +245,17 @@ func (service *Service) ListVersions(ctx context.Context, systemKey string, curs
 }
 
 // GetVersion returns the full version detail with projections and YAML body.
-func (service *Service) GetVersion(ctx context.Context, systemKey string, versionID int64) (VersionDetail, error) {
+func (service *Service) GetVersion(ctx context.Context, systemKey string, versionID int64) (ConfigVersionDetail, error) {
 	var systemID int64
 	if err := service.db.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return VersionDetail{}, ErrNotFound
+			return ConfigVersionDetail{}, ErrNotFound
 		}
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	detail, err := service.versionDetailOn(ctx, nil, systemID, versionID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return VersionDetail{}, ErrNotFound
+		return ConfigVersionDetail{}, ErrNotFound
 	}
 	return detail, err
 }
@@ -256,7 +268,7 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 	return count, nil
 }
 
-func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (SystemDetail, error) {
+func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (BusinessSystemDetail, error) {
 	query := `
 		SELECT id,key,display_name,enabled,row_version,current_config_version_id,timezone,resource_refresh_interval_seconds
 		FROM business_systems WHERE id=?`
@@ -266,7 +278,7 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 		timezone    sql.NullString
 		refresh     sql.NullInt64
 		enabledFlag int64
-		detail      SystemDetail
+		detail      BusinessSystemDetail
 	)
 	var err error
 	if conn != nil {
@@ -275,7 +287,7 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh)
 	}
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	detail.Enabled = enabledFlag == 1
 	detail.BrowserIdentityState = "none"
@@ -294,10 +306,10 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 	var count int64
 	if conn != nil {
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&count); err != nil {
-			return SystemDetail{}, err
+			return BusinessSystemDetail{}, err
 		}
 	} else if err := service.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&count); err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	detail.ConfigVersionCount = count
 	if !current.Valid {
@@ -307,21 +319,21 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 	}
 	discoveries, plans, err := service.projectionsOn(ctx, conn, current.Int64)
 	if err != nil {
-		return SystemDetail{}, err
+		return BusinessSystemDetail{}, err
 	}
 	detail.Discoveries = discoveries
 	detail.Plans = plans
 	return detail, nil
 }
 
-func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, systemID, versionID int64) (VersionDetail, error) {
+func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, systemID, versionID int64) (ConfigVersionDetail, error) {
 	query := `
 		SELECT id,version_seq,state,created_at,published_at,digest,parser_version,schema_version,
 			system_key,display_name,enabled,label_contract_version_id,journey_catalog_digest,journey_catalog_version,
 			yaml_body,timezone,resource_refresh_interval_seconds
 		FROM business_system_config_versions WHERE id=? AND business_system_id=?`
 	var (
-		detail      VersionDetail
+		detail      ConfigVersionDetail
 		id          int64
 		contractID  int64
 		publishedAt sql.NullString
@@ -334,7 +346,7 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 		err = service.db.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.ResourceRefreshIntervalSeconds)
 	}
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	detail.Enabled = enabledFlag == 1
@@ -345,7 +357,7 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	}
 	discoveries, plans, err := service.projectionsOn(ctx, conn, versionID)
 	if err != nil {
-		return VersionDetail{}, err
+		return ConfigVersionDetail{}, err
 	}
 	detail.Discoveries = discoveries
 	detail.Plans = plans
@@ -469,16 +481,16 @@ func (service *Service) projectionsOn(ctx context.Context, conn *sql.Conn, versi
 	return discoveries, plans, nil
 }
 
-func scanVersionSummary(rows *sql.Rows) (VersionSummary, error) {
+func scanVersionSummary(rows *sql.Rows) (ConfigVersionSummary, error) {
 	var (
-		summary     VersionSummary
+		summary     ConfigVersionSummary
 		id          int64
 		contractID  int64
 		publishedAt sql.NullString
 		enabledFlag int64
 	)
 	if err := rows.Scan(&id, &summary.VersionSeq, &summary.State, &summary.CreatedAt, &publishedAt, &summary.Digest, &summary.ParserVersion, &summary.SchemaVersion, &summary.SystemKey, &summary.DisplayName, &enabledFlag, &contractID, &summary.JourneyCatalogDigest, &summary.JourneyCatalogVersion); err != nil {
-		return VersionSummary{}, err
+		return ConfigVersionSummary{}, err
 	}
 	summary.ID = strconv.FormatInt(id, 10)
 	summary.Enabled = enabledFlag == 1

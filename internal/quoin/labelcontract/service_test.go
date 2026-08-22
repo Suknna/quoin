@@ -40,7 +40,7 @@ func newTestDB(t *testing.T) *sql.DB {
 
 const validContractYAML = "label_contract:\n  business_system_label: business_system\n"
 
-func mustCreateDraft(t *testing.T, service *Service, body, commandID string) Detail {
+func mustCreateDraft(t *testing.T, service *Service, body, commandID string) LabelContractDetail {
 	t.Helper()
 	detail, err := service.CreateDraft(context.Background(), 1, commandID, []byte(body), config.Limits{})
 	if err != nil {
