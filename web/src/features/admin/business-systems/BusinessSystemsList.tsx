@@ -8,10 +8,11 @@ import { listBusinessSystems, type BusinessSystemSummary } from './api'
 interface BusinessSystemsListProps {
   onOpen: (systemKey: string) => void
   onUpload: () => void
+  onOpenContracts: () => void
   isAdmin: boolean
 }
 
-export function BusinessSystemsList({ onOpen, onUpload, isAdmin }: BusinessSystemsListProps) {
+export function BusinessSystemsList({ onOpen, onUpload, onOpenContracts, isAdmin }: BusinessSystemsListProps) {
   const [items, setItems] = useState<BusinessSystemSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -54,11 +55,16 @@ export function BusinessSystemsList({ onOpen, onUpload, isAdmin }: BusinessSyste
           还没有业务系统。
           {isAdmin ? '上传第一份配置 YAML 会创建一个 Disabled 业务系统。' : '等待管理员上传业务系统配置。'}
         </p>
-        {isAdmin && (
-          <button className="primary-button compact" onClick={onUpload}>
-            上传配置
+        <div className="list-actions">
+          {isAdmin && (
+            <button className="primary-button compact" onClick={onUpload}>
+              上传配置
+            </button>
+          )}
+          <button className="secondary-button compact" onClick={onOpenContracts}>
+            标签契约
           </button>
-        )}
+        </div>
       </div>
     )
   }
@@ -70,6 +76,9 @@ export function BusinessSystemsList({ onOpen, onUpload, isAdmin }: BusinessSyste
             上传配置
           </button>
         )}
+        <button className="secondary-button compact" onClick={onOpenContracts}>
+          标签契约
+        </button>
       </div>
       {items.map((item) => (
         <button key={item.key} className="business-system-item" onClick={() => onOpen(item.key)}>

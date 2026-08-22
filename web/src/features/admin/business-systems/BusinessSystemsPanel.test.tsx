@@ -56,7 +56,7 @@ describe('BusinessSystemsList', () => {
     fetchMock.mockImplementation(async () =>
       jsonResponse({ items: [{ key: 'payments', displayName: '支付系统', enabled: false, rowVersion: 1, browserIdentityState: 'none', timezone: null, resourceRefreshIntervalSeconds: null }] }),
     )
-    render(<BusinessSystemsList onOpen={() => undefined} onUpload={() => undefined} isAdmin={false} />)
+    render(<BusinessSystemsList onOpen={() => undefined} onUpload={() => undefined} onOpenContracts={() => undefined} isAdmin={false} />)
     expect(await screen.findByText('支付系统')).toBeInTheDocument()
     expect(screen.getByText('Disabled')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '上传配置' })).not.toBeInTheDocument()
@@ -64,7 +64,7 @@ describe('BusinessSystemsList', () => {
 
   it('shows the first-upload empty state with the admin entry', async () => {
     vi.mocked(fetch).mockImplementation(async () => jsonResponse({ items: [] }))
-    render(<BusinessSystemsList onOpen={() => undefined} onUpload={() => undefined} isAdmin />)
+    render(<BusinessSystemsList onOpen={() => undefined} onUpload={() => undefined} onOpenContracts={() => undefined} isAdmin />)
     expect(await screen.findByText(/上传第一份配置 YAML/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '上传配置' })).toBeInTheDocument()
   })
@@ -142,6 +142,28 @@ describe('UploadOverlay', () => {
 describe('ConfigVersionPage publish flow', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
   afterEach(cleanup)
+
+  it('loads every Config Verification Run history page', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/business-systems/payments/config/7') return jsonResponse(versionDetail)
+      if (path.startsWith('/api/v1/business-systems/payments/config/7/verifications?')) {
+        if (path.includes('cursor=run-1')) {
+          return jsonResponse({ items: [{ id: '2', state: 'Passed', rowVersion: 3, createdAt: '2026-08-22T02:00:00Z' }] })
+        }
+        return jsonResponse({
+          items: [{ id: '1', state: 'Cancelled', rowVersion: 2, createdAt: '2026-08-22T01:00:00Z' }],
+          nextCursor: 'run-1',
+        })
+      }
+      return jsonResponse({}, 404)
+    })
+    render(<ConfigVersionPage systemKey="payments" versionId="7" isAdmin onBack={() => undefined} onPublished={() => undefined} />)
+    expect(await screen.findByText('Run #1')).toBeInTheDocument()
+    expect(await screen.findByText('Run #2')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('cursor=run-1'))).toBe(true)
+  })
 
   it('publishes through the explicit confirm and reports conflict recovery', async () => {
     const fetchMock = vi.mocked(fetch)

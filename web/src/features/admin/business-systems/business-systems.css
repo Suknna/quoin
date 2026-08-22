@@ -312,3 +312,20 @@
     transition: none;
   }
 }
+
+/* T17 Config Verification Run history + Label Contract readiness view */
+.verify-block { display: grid; gap: 8px; margin: 18px 0; }
+.verify-run-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.verify-run-list li { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); }
+.verify-run-list time { color: var(--muted); }
+.label-contract-panel { max-width: 860px; margin: 0 auto; }
+.contract-picker { display: grid; gap: 6px; margin: 8px 0 16px; }
+.contract-option { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 13px; }
+.contract-option.selected { border-color: var(--accent, #2563eb); background: var(--surface-hover); }
+.readiness-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.readiness-system { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+.readiness-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.candidate-set { display: grid; gap: 6px; }
+.candidate-option { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 6px 8px; border-radius: 7px; }
+.candidate-option:hover { background: var(--surface-hover); }
+.blocker-box { display: grid; gap: 6px; }

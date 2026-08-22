@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useOccurrenceVersions } from '../../app/realtime/hooks'
 import { AnalysisDetail } from '../analysis/AnalysisDetail'
 import { AnalysisPanel } from '../analysis/AnalysisPanel'
@@ -12,6 +12,8 @@ export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCl
   const [observations, setObservations] = useState<ObservationSummary[]>([])
   const [error, setError] = useState('')
   const [reading, setReading] = useState<InitialAnalysisDetail | null>(null)
+  const [refreshRetry, setRefreshRetry] = useState(0)
+  const retryVersionRef = useRef<number | undefined>(undefined)
   const versions = useOccurrenceVersions()
   const liveVersion = versions.get(occurrenceId)
 
@@ -43,20 +45,38 @@ export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCl
 
   useEffect(() => {
     // The event stream only signals "version advanced"; the authoritative
-    // body is re-read here (HTTP-SSE-005). liveVersion changes identity only
-    // when a strictly newer rowVersion was observed for this occurrence.
+    // body is re-read here (HTTP-SSE-005). Keep the last known detail visible
+    // while a bounded retry heals a transient 503 rather than silently leaving
+    // a stale projection forever.
     if (liveVersion === undefined || occurrence === null) return
     if (liveVersion <= occurrence.rowVersion) return
+    const retryAttempt = retryVersionRef.current === liveVersion ? refreshRetry : 0
+    retryVersionRef.current = liveVersion
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     void Promise.all([fetchOccurrence(occurrenceId), fetchObservations(occurrenceId)])
       .then(([detail, observationPage]) => {
         if (cancelled) return
+        if (detail.rowVersion < liveVersion) {
+          throw new Error('告警详情尚未包含最新变更。')
+        }
         setOccurrence(detail)
         setObservations(observationPage.items ?? [])
+        setError('')
       })
-      .catch(() => undefined)
-    return () => { cancelled = true }
-  }, [liveVersion, occurrenceId, occurrence])
+      .catch(() => {
+        if (cancelled) return
+        if (retryAttempt < 2) {
+          retryTimer = setTimeout(() => setRefreshRetry(retryAttempt + 1), 250 * (retryAttempt + 1))
+          return
+        }
+        setError('无法读取最新告警详情，请返回列表后重试。')
+      })
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [liveVersion, occurrenceId, occurrence, refreshRetry])
 
   if (error) {
     return (
@@ -73,15 +93,21 @@ export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCl
   return (
     <div className="detail-content">
       <button className="text-button" onClick={onBack}>← 返回列表</button>
-      <header className="detail-header">
-        <p className="eyebrow">告警详情</p>
-        <h1>{String(occurrence.labels?.['alertname'] ?? '(无名称)')}</h1>
-        {occurrence.state === 'Resolved' && <span className="status-pill resolved">已恢复</span>}
-        {occurrence.state === 'Firing' && <span className="status-pill firing">Firing</span>}
-        {onStartInvestigation && (
-          <button className="secondary-button compact" onClick={onStartInvestigation}>发起调查</button>
-        )}
-      </header>
+            <header className="detail-header">
+              <p className="eyebrow">告警详情</p>
+              <h1>{String(occurrence.labels?.['alertname'] ?? '(无名称)')}</h1>
+              {occurrence.state === 'Resolved' && <span className="status-pill resolved">已恢复</span>}
+              {occurrence.state === 'Firing' && <span className="status-pill firing">Firing</span>}
+              {onStartInvestigation && (
+                <button className="secondary-button compact" onClick={onStartInvestigation}>发起调查</button>
+              )}
+            </header>
+            <section className="detail-section" aria-labelledby="attribution-title">
+              <h2 id="attribution-title">归属</h2>
+              <p className="detail-muted">
+                {occurrence.businessSystemKey ? `业务系统 ${occurrence.businessSystemKey}` : '未归属（没有匹配的业务系统）'}
+              </p>
+            </section>
       <section className="detail-section" aria-labelledby="labels-title">
         <h2 id="labels-title">标签</h2>
         {labels.length === 0 ? <p className="detail-muted">无标签</p> : (

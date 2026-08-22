@@ -11,6 +11,7 @@ import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
 import { BusinessSystemsList } from '../admin/business-systems/BusinessSystemsList'
 import { BusinessSystemDetailPage } from '../admin/business-systems/BusinessSystemDetail'
 import { ConfigVersionPage } from '../admin/business-systems/ConfigVersionDetail'
+import { LabelContractsPanel } from '../admin/business-systems/LabelContractsPanel'
 import { UploadOverlay } from '../admin/business-systems/UploadOverlay'
 import '../admin/business-systems/business-systems.css'
 import { InvestigationChat } from '../investigation/InvestigationChat'
@@ -23,6 +24,7 @@ interface WorkbenchProps {
 }
 
 type ModuleKey = 'alerts' | 'investigations' | 'inspections' | 'business-systems' | 'knowledge' | 'admin'
+type AlertSegment = 'current' | 'history' | 'intake'
 
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
 
@@ -67,6 +69,25 @@ function moduleFromPath(): ModuleKey {
   return match?.key ?? 'alerts'
 }
 
+function alertRouteFromPath(): { segment: AlertSegment; businessSystemKey: string } {
+  // Alert selection, view and filtering are one shareable route authority.
+  // Invalid/missing view values deliberately fall back to the common current
+  // view rather than leaving a local state that the URL cannot reproduce.
+  if (!window.location.pathname.startsWith('/alerts')) return { segment: 'current', businessSystemKey: '' }
+  const params = new URLSearchParams(window.location.search)
+  const view = params.get('view')
+  const segment: AlertSegment = view === 'history' || view === 'intake' ? view : 'current'
+  return { segment, businessSystemKey: params.get('businessSystemKey') ?? '' }
+}
+
+function alertPath(path: string, route: { segment: AlertSegment; businessSystemKey: string }): string {
+  const params = new URLSearchParams()
+  if (route.segment !== 'current') params.set('view', route.segment)
+  if (route.businessSystemKey) params.set('businessSystemKey', route.businessSystemKey)
+  const query = params.toString()
+  return query ? `${path}?${query}` : path
+}
+
 export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [active, setActive] = useState<ModuleKey>(moduleFromPath)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -75,41 +96,65 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [runtimeError, setRuntimeError] = useState(false)
   const [selectedOccurrence, setSelectedOccurrence] = useState<string | null>(null)
   const [openAnalysisId, setOpenAnalysisId] = useState<string | null>(null)
-  const [alertSegment, setAlertSegment] = useState<'current' | 'history' | 'intake'>('current')
+  const [alertSegment, setAlertSegment] = useState<AlertSegment>(() => alertRouteFromPath().segment)
+  const [alertSystemFilter, setAlertSystemFilter] = useState<string>(() => alertRouteFromPath().businessSystemKey)
   const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
 	const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
 	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
 	const [uploadOpen, setUploadOpen] = useState(false)
+	const [contractsOpen, setContractsOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
 
   useEffect(() => {
     void api.runtime().then(setRuntime).catch(() => setRuntimeError(true))
-    const sync = () => {
-      setActive(moduleFromPath())
-      const match = window.location.pathname.match(/^\/alerts\/(\d+)/)
-      setSelectedOccurrence(match ? match[1] : null)
-      const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
-      setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
-      setInvestigationView(investigationViewFromPath())
-      setBusinessSystemView(businessSystemViewFromPath())
-    }
+       const sync = () => {
+       setActive(moduleFromPath())
+       const match = window.location.pathname.match(/^\/alerts\/(\d+)/)
+       setSelectedOccurrence(match ? match[1] : null)
+       const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
+       setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
+       setInvestigationView(investigationViewFromPath())
+       setBusinessSystemView(businessSystemViewFromPath())
+       const alertRoute = alertRouteFromPath()
+       setAlertSegment(alertRoute.segment)
+       setAlertSystemFilter(alertRoute.businessSystemKey)
+     }
     sync()
     window.addEventListener('popstate', sync)
     return () => window.removeEventListener('popstate', sync)
   }, [])
 
-  function navigate(key: ModuleKey, path: string) {
-    window.history.pushState({}, '', path)
-    setActive(key)
-    setDrawerOpen(false)
-    setSelectedOccurrence(null)
-  }
+   function navigate(key: ModuleKey, path: string) {
+     window.history.pushState({}, '', path)
+     setActive(key)
+     setDrawerOpen(false)
+     setSelectedOccurrence(null)
+     setOpenAnalysisId(null)
+     if (key === 'alerts') {
+       const route = alertRouteFromPath()
+       setAlertSegment(route.segment)
+       setAlertSystemFilter(route.businessSystemKey)
+     }
+   }
 
-  function selectOccurrence(id: string) {
-    window.history.pushState({}, '', `/alerts/${id}`)
-    setSelectedOccurrence(id)
-  }
+   function alertsPath(path = '/alerts') {
+     return alertPath(path, { segment: alertSegment, businessSystemKey: alertSystemFilter })
+   }
+
+   function openAlertList(route: { segment: AlertSegment; businessSystemKey: string }) {
+     window.history.pushState({}, '', alertPath('/alerts', route))
+     setActive('alerts')
+     setAlertSegment(route.segment)
+     setAlertSystemFilter(route.businessSystemKey)
+     setSelectedOccurrence(null)
+     setOpenAnalysisId(null)
+   }
+
+   function selectOccurrence(id: string) {
+     window.history.pushState({}, '', alertsPath(`/alerts/${id}`))
+     setSelectedOccurrence(id)
+   }
 
 	function openInvestigation(investigationId: string) {
 		window.history.pushState({}, '', `/investigations/${investigationId}`)
@@ -135,6 +180,16 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
     window.history.pushState({}, '', '/investigations')
     setInvestigationView({ kind: 'list' })
   }
+
+   function selectAlertFilter(key: string) {
+     // A filter changes the list selection context. Navigate back to the list
+     // rather than leaving a detail pane whose URL no longer names its object.
+     openAlertList({ segment: alertSegment, businessSystemKey: key })
+   }
+
+   function selectAlertSegment(segment: AlertSegment) {
+     openAlertList({ segment, businessSystemKey: alertSystemFilter })
+   }
 
   function openBusinessSystem(key: string) {
     window.history.pushState({}, '', `/business-systems/${encodeURIComponent(key)}`)
@@ -191,11 +246,20 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         {active === 'alerts' && (
           <>
             <div className="segmented" aria-label="告警视图">
-              <button aria-pressed={alertSegment === 'current'} onClick={() => setAlertSegment('current')}>当前</button>
-              <button aria-pressed={alertSegment === 'history'} onClick={() => setAlertSegment('history')}>历史</button>
-              <button aria-pressed={alertSegment === 'intake'} onClick={() => setAlertSegment('intake')}>接入问题</button>
+               <button aria-pressed={alertSegment === 'current'} onClick={() => selectAlertSegment('current')}>当前</button>
+               <button aria-pressed={alertSegment === 'history'} onClick={() => selectAlertSegment('history')}>历史</button>
+               <button aria-pressed={alertSegment === 'intake'} onClick={() => selectAlertSegment('intake')}>接入问题</button>
             </div>
-            {alertSegment === 'intake' ? <IntakeIssuesList isAdmin={user.role === 'admin'} /> : <AlertsList view={alertSegment === 'history' ? 'Resolved' : 'Firing'} onSelect={selectOccurrence} />}
+            {alertSegment === 'intake' ? (
+              <IntakeIssuesList isAdmin={user.role === 'admin'} />
+            ) : (
+              <AlertsList
+                view={alertSegment === 'history' ? 'Resolved' : 'Firing'}
+                businessSystemKey={alertSystemFilter}
+                onFilter={selectAlertFilter}
+                onSelect={selectOccurrence}
+              />
+            )}
           </>
         )}
         {active !== 'alerts' && (
@@ -236,6 +300,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 				key={businessSystemView.kind === 'list' ? 'fresh' : 'stale'}
 				onOpen={openBusinessSystem}
 				onUpload={() => setUploadOpen(true)}
+				onOpenContracts={() => setContractsOpen(true)}
 				isAdmin={user.role === 'admin'}
 			/>
 		)}
@@ -247,10 +312,10 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           <AlertDetail
             occurrenceId={selectedOccurrence}
             openAnalysisId={openAnalysisId ?? undefined}
-            onOpenAnalysis={(analysisId) => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}/analyses/${analysisId}`); setOpenAnalysisId(analysisId) }}
-            onCloseAnalysis={() => { window.history.pushState({}, '', `/alerts/${selectedOccurrence}`); setOpenAnalysisId(null) }}
-            onStartInvestigation={() => newInvestigation([{ type: 'occurrence', sourceId: selectedOccurrence }])}
-            onBack={() => { window.history.pushState({}, '', '/alerts'); setSelectedOccurrence(null); setOpenAnalysisId(null) }}
+                  onOpenAnalysis={(analysisId) => { window.history.pushState({}, '', alertsPath(`/alerts/${selectedOccurrence}/analyses/${analysisId}`)); setOpenAnalysisId(analysisId) }}
+                  onCloseAnalysis={() => { window.history.pushState({}, '', alertsPath(`/alerts/${selectedOccurrence}`)); setOpenAnalysisId(null) }}
+                  onStartInvestigation={() => newInvestigation([{ type: 'occurrence', sourceId: selectedOccurrence }])}
+                  onBack={() => { window.history.pushState({}, '', alertsPath()); setSelectedOccurrence(null); setOpenAnalysisId(null) }}
           />
         ) : active === 'alerts' ? (
           <div className="detail-content">
@@ -314,6 +379,16 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
           onUploaded={(systemKey, versionId) => {
             setUploadOpen(false)
             openBusinessSystemVersion(systemKey, versionId)
+          }}
+        />
+      )}
+      {contractsOpen && (
+        <LabelContractsPanel
+          isAdmin={user.role === 'admin'}
+          onClose={() => setContractsOpen(false)}
+          onOpenSystem={(systemKey) => {
+            setContractsOpen(false)
+            openBusinessSystem(systemKey)
           }}
         />
       )}

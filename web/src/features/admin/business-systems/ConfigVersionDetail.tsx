@@ -1,10 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  cancelVerification,
   formatTime,
   getConfigVersion,
+  listVerificationRuns,
   publishBusinessSystemConfig,
+  runVerification,
+  verificationStateText,
   ConfigApiError,
   type ConfigVersionDetail,
+  type VerificationRunSummary,
 } from './api'
 import { DiscoveryTable, PlanTable } from './BusinessSystemDetail'
 
@@ -28,7 +33,30 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
   const [confirming, setConfirming] = useState(false)
   const [publishError, setPublishError] = useState<string | null>(null)
   const [showYAML, setShowYAML] = useState(false)
+  const [runs, setRuns] = useState<VerificationRunSummary[]>([])
+  const [runsError, setRunsError] = useState('')
+  const [running, setRunning] = useState(false)
+  const [cancellingRunID, setCancellingRunID] = useState<string | null>(null)
+  const [runError, setRunError] = useState('')
   const publishedNotified = useRef(false)
+  // A ref closes the interval before React can commit disabled button state,
+  // so rapid double-click/Space can never create a second cancel command.
+  const cancellingRunRef = useRef<string | null>(null)
+  const runsRequestRef = useRef(0)
+
+  const loadRuns = useCallback(() => {
+    const request = ++runsRequestRef.current
+    void listVerificationRuns(systemKey, versionId)
+      .then((items) => {
+        if (request !== runsRequestRef.current) return
+        setRuns(items)
+        setRunsError('')
+      })
+      .catch((reason: unknown) => {
+        if (request !== runsRequestRef.current) return
+        setRunsError(reason instanceof Error ? reason.message : '暂时无法读取验证历史。')
+      })
+  }, [systemKey, versionId])
 
   useEffect(() => {
     let cancelled = false
@@ -41,10 +69,14 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : '暂时无法读取配置版本。')
       })
+    loadRuns()
     return () => {
       cancelled = true
+      // A version switch/unmount invalidates its asynchronous run-history
+      // response so it cannot replace the next version's view.
+      runsRequestRef.current += 1
     }
-  }, [systemKey, versionId])
+  }, [systemKey, versionId, loadRuns])
 
   if (error) {
     return (
@@ -65,6 +97,35 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
         <p className="inline-status">正在加载配置版本…</p>
       </div>
     )
+  }
+
+  async function startRun() {
+    setRunning(true)
+    setRunError('')
+    try {
+      await runVerification(systemKey, versionId)
+      loadRuns()
+    } catch (reason) {
+      setRunError(reason instanceof Error ? reason.message : '创建验证 Run 失败。')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  async function cancelRun(run: VerificationRunSummary) {
+    if (cancellingRunRef.current !== null) return
+    cancellingRunRef.current = run.id
+    setCancellingRunID(run.id)
+    setRunError('')
+    try {
+      await cancelVerification(systemKey, versionId, run.id, run.rowVersion)
+    } catch (reason) {
+      setRunError(reason instanceof Error ? reason.message : '取消验证 Run 失败。')
+    } finally {
+      cancellingRunRef.current = null
+      setCancellingRunID(null)
+      loadRuns()
+    }
   }
 
   async function publish() {
@@ -151,6 +212,42 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
           </dd>
         </div>
       </dl>
+
+      {isAdmin && detail.state === 'draft' && (
+        <section aria-labelledby="cv-verify-title" className="verify-block">
+          <h3 id="cv-verify-title">Config Verification Run</h3>
+          <p className="detail-muted">
+            运行测试对这份草稿执行 prepublish 验证；只有 Passed 的 Run 才能作为 Label Contract 联合激活的证据。
+          </p>
+          <button className="secondary-button" disabled={running || runs.some((run) => run.state === 'Queued' || run.state === 'Running')} onClick={() => void startRun()}>
+            {running ? '正在创建…' : '运行测试'}
+          </button>
+          {runError && (
+            <p className="field-error" role="alert">
+              {runError}
+            </p>
+          )}
+          {runsError && <p className="field-error" role="alert">{runsError}</p>}
+          {runs.length > 0 && (
+            <ul className="verify-run-list">
+              {runs.map((run) => (
+                <li key={run.id}>
+                  <span className={`status-pill ${run.state === 'Passed' ? 'ok' : run.state === 'Queued' || run.state === 'Running' ? 'waiting' : 'muted'}`}>
+                    {verificationStateText[run.state]}
+                  </span>
+                  <span>Run #{run.id}</span>
+                  <time dateTime={run.createdAt}>{formatTime(run.createdAt)}</time>
+                  {(run.state === 'Queued' || run.state === 'Running') && (
+                    <button className="text-button" disabled={cancellingRunID !== null} onClick={() => void cancelRun(run)}>
+                      {cancellingRunID === run.id ? '正在取消…' : '取消'}
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {isAdmin && detail.state === 'draft' && (
         <div className="publish-block">

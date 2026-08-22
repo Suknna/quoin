@@ -12,18 +12,14 @@ export interface AlertChangeEventData {
 
 export type StreamPhase = 'idle' | 'connecting' | 'open' | 'recovering' | 'resync' | 'closed'
 
-type ChangeListener = (event: AlertChangeEventData) => void
+type ChangeListener = (event: AlertChangeEventData, sourceGeneration: number) => void
 type ResyncListener = () => void
 type PhaseListener = (phase: StreamPhase) => void
-
-const RETRY_BASE_MS = 1000
-const RETRY_MAX_MS = 8000
 
 export class AlertEventStream {
   private source: EventSource | null = null
   private after = 0
-  private retryTimer: number | null = null
-  private retryAttempt = 0
+  private sourceGeneration = 0
   private stopped = true
   private changeListeners = new Set<ChangeListener>()
   private resyncListeners = new Set<ResyncListener>()
@@ -34,17 +30,25 @@ export class AlertEventStream {
   start(after: number): void {
     this.stopped = false
     this.after = after
-    this.connect()
+    this.sourceGeneration += 1
+    this.connect(this.sourceGeneration)
+  }
+
+  /** Identifies the EventSource that belongs to the current snapshot. */
+  get generation(): number {
+    return this.sourceGeneration
   }
 
   stop(): void {
     this.stopped = true
     this.closeSource()
-    if (this.retryTimer !== null) {
-      window.clearTimeout(this.retryTimer)
-      this.retryTimer = null
-    }
     this.setPhase('idle')
+  }
+
+  /** Drops the current source and asks snapshot owners to rebuild projection. */
+  resync(): void {
+    if (this.stopped) return
+    this.requestResync()
   }
 
   onChange(listener: ChangeListener): () => void {
@@ -63,56 +67,49 @@ export class AlertEventStream {
     return () => this.phaseListeners.delete(listener)
   }
 
-  private connect(): void {
-    if (this.stopped) return
+  private connect(sourceGeneration: number): void {
+    if (this.stopped || sourceGeneration !== this.sourceGeneration) return
     this.closeSource()
-    this.setPhase(this.retryAttempt > 0 ? 'recovering' : 'connecting')
+    this.setPhase('connecting')
     const source = new EventSource(`/api/v1/alerts/events?after=${this.after}`)
     this.source = source
     source.addEventListener('open', () => {
-      this.retryAttempt = 0
+      if (!this.owns(source)) return
       this.setPhase('open')
     })
     source.addEventListener('change', (event) => {
+      if (!this.owns(source)) return
       const data = parseChangeEvent((event as MessageEvent<string>).data)
       if (!data) return
       this.after = Number(data.seq)
-      for (const listener of this.changeListeners) listener(data)
+      for (const listener of this.changeListeners) listener(data, sourceGeneration)
     })
     source.addEventListener('resync_required', () => {
-      // Cursor expired beyond the retention window: the list owner re-reads
-      // the full snapshot, then restarts the stream from its new cursor
-      // (UI-ERROR-001: silent recovery, no user-visible terminology).
-      this.closeSource()
-      this.setPhase('resync')
-      for (const listener of this.resyncListeners) listener()
+      if (!this.owns(source)) return
+      this.requestResync()
     })
     source.onerror = () => {
-      if (this.stopped) return
-      // Capture the state BEFORE closing: EventSource reports CONNECTING
-      // while the browser is auto-reconnecting (it re-sends Last-Event-ID
-      // on its own) and CLOSED after a fatal failure.
-      const wasConnecting = source.readyState === EventSource.CONNECTING
-      if (wasConnecting) {
+      if (!this.owns(source)) return
+      // CONNECTING means the browser retained the EventSource and is safely
+      // replaying from Last-Event-ID itself. A terminal failure has no usable
+      // status/body exposed to JavaScript (including HTTP 410), so it must
+      // take the same snapshot-resync path rather than retry a stale cursor.
+      if (source.readyState === EventSource.CONNECTING) {
         this.setPhase('recovering')
         return
       }
-      this.closeSource()
-      // Non-retryable failure (auth loss, hard 410 the browser gave up
-      // on, server down). Retry with backoff from the last seen seq; a
-      // dead session surfaces through the next snapshot read as 401.
-      this.scheduleRetry()
+      this.requestResync()
     }
   }
 
-  private scheduleRetry(): void {
-    this.setPhase(this.retryAttempt > 0 ? 'recovering' : 'connecting')
-    const delay = Math.min(RETRY_BASE_MS * 2 ** this.retryAttempt, RETRY_MAX_MS)
-    this.retryAttempt += 1
-    this.retryTimer = window.setTimeout(() => {
-      this.retryTimer = null
-      this.connect()
-    }, delay)
+  private requestResync(): void {
+    this.closeSource()
+    this.setPhase('resync')
+    for (const listener of this.resyncListeners) listener()
+  }
+
+  private owns(source: EventSource): boolean {
+    return !this.stopped && this.source === source
   }
 
   private closeSource(): void {

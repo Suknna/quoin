@@ -164,6 +164,7 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .object-row-meta em { font-style: normal; padding: 1px 6px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-ink); }
 .alert-state { color: var(--danger); font-size: 10px; }
 .alert-state.resolved { color: var(--ok); }
+.alert-state-text { min-width: 42px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .status-pill.firing { background: var(--danger-soft); color: var(--danger-ink); }
 .status-pill.resolved { background: var(--ok-soft); color: var(--ok-ink); }
 .intake-kind { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-ink); font-size: 12px; }
@@ -275,3 +276,19 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .analysis-output footer { margin-top: 1rem; font-size: 0.85rem; }
 @media (prefers-reduced-motion: reduce) { .reading-overlay { animation: none; } }
 @keyframes slide-in-right { from { transform: translateX(1.5rem); opacity: 0.6; } to { transform: none; opacity: 1; } }
+
+/* T17 alerts business-system filter (UI-ALERT-003) */
+.filter-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px 2px; }
+.system-combobox { position: relative; flex: 1 1 auto; min-width: 0; }
+.system-combobox input { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--surface); color: var(--ink); }
+.combobox-list { position: absolute; z-index: 12; top: calc(100% + 4px); left: 0; right: 0; margin: 0; padding: 4px; list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 22px rgba(0,0,0,.12); max-height: 260px; overflow-y: auto; }
+.combobox-list [role="option"] { padding: 8px 10px; border-radius: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.combobox-list [role="option"]:hover, .combobox-list [role="option"].active { background: var(--surface-hover); font-weight: 650; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* T17 Label Contract activation confirmation is a real modal inside the
+   readiness overlay: it makes the atomic operation and its escape path clear. */
+.confirm-layer { position: fixed; inset: 0; z-index: 2; display: grid; place-items: center; padding: 24px; background: rgba(13, 18, 15, .44); }
+.confirm-dialog { width: min(100%, 560px); padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: 0 18px 50px rgba(14, 18, 16, .28); }
+.confirm-dialog p { margin: 0; line-height: 1.55; }
+.dialog-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }

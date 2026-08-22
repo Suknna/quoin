@@ -67,8 +67,33 @@ export interface IntakeIssue {
   rowVersion: number
 }
 
-export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing'): Promise<AlertSnapshot> {
-  const response = await fetch(`/api/v1/alerts?state=${state}`, { credentials: 'include' })
+export interface BusinessSystemOption {
+  key: string
+  displayName: string
+}
+
+export async function fetchBusinessSystems(): Promise<BusinessSystemOption[]> {
+  const systems: BusinessSystemOption[] = []
+  let cursor = ''
+  do {
+    const params = new URLSearchParams({ limit: '200' })
+    if (cursor) params.set('cursor', cursor)
+    const response = await fetch(`/api/v1/business-systems?${params.toString()}`, { credentials: 'include' })
+    if (!response.ok) throw new Error('业务系统列表加载失败')
+    const page = (await response.json()) as {
+      items?: BusinessSystemOption[]
+      nextCursor?: string
+    }
+    systems.push(...(page.items ?? []))
+    cursor = page.nextCursor ?? ''
+  } while (cursor)
+  return systems
+}
+
+export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', businessSystemKey = ''): Promise<AlertSnapshot> {
+  const params = new URLSearchParams({ state })
+  if (businessSystemKey) params.set('businessSystemKey', businessSystemKey)
+  const response = await fetch(`/api/v1/alerts?${params.toString()}`, { credentials: 'include' })
   if (!response.ok) throw new Error('告警列表加载失败')
   return (await response.json()) as AlertSnapshot
 }
