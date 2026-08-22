@@ -40,6 +40,10 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
     }
   }, [investigationId])
 
+  const onTurnFinished = useCallback(() => {
+    void reload()
+  }, [reload])
+
   useEffect(() => {
     let cancelled = false
     // Deferred so the first load never sets state synchronously inside
@@ -114,7 +118,8 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
         messages={messages}
         headMessageId={detail.headMessageId ?? null}
         attachMessageId={attach}
-        onTurnFinished={() => void reload()}
+        activeAttemptId={detail.activeAttemptId}
+        onTurnFinished={onTurnFinished}
       />
     </div>
   )

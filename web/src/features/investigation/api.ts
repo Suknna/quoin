@@ -22,6 +22,17 @@ export interface InvestigationDetail extends InvestigationSummary {
   sources: InvestigationSourceSummary[]
 }
 
+export interface MessageAttachmentSummary {
+  id: string
+  artifactId: string
+  originalFilename: string
+  mediaType: string
+  sizeBytes: number
+  digest: string
+  bodyExpired: boolean
+  createdAt: string
+}
+
 export interface InvestigationMessage {
   id: string
   seq: number
@@ -29,9 +40,9 @@ export interface InvestigationMessage {
   status: 'active' | 'withdrawn'
   content: string
   parentMessageId?: string
-  attachments: unknown[]
+  attachments: MessageAttachmentSummary[]
   attemptId?: string
-  evidenceIds: string[]
+  evidenceIds: string[] | null
   createdAt: string
 }
 
@@ -101,10 +112,10 @@ export const api = {
   get: (investigationId: string) => read<InvestigationDetail>(`/api/v1/investigations/${investigationId}`),
   listMessages: (investigationId: string, cursor?: string) =>
     read<Page<InvestigationMessage>>(`/api/v1/investigations/${investigationId}/messages${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
-  create: (content: string, sources: Array<{ type: string; sourceId: string }>) =>
-    send<InvestigationDetail>('/api/v1/investigations', { clientCommandId: commandId(), content, sources }),
-	sendMessage: (investigationId: string, content: string, expectedHeadMessageId: string | null) =>
+  create: (content: string, sources: Array<{ type: string; sourceId: string }>, attachmentIds: string[]) =>
+    send<InvestigationDetail>('/api/v1/investigations', { clientCommandId: commandId(), content, sources, attachmentIds }),
+	sendMessage: (investigationId: string, content: string, expectedHeadMessageId: string | null, attachmentIds: string[]) =>
 		send<InvestigationMessage>(`/api/v1/investigations/${investigationId}/messages`, {
-			clientCommandId: commandId(), content, expectedHeadMessageId,
+			clientCommandId: commandId(), content, expectedHeadMessageId, attachmentIds,
 		}),
 }

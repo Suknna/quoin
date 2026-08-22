@@ -156,3 +156,245 @@
   gap: 10px;
   padding: 12px 14px;
 }
+
+/* ---- T14 attachments & tool timeline ---------------------------------- */
+
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.chat-composer-row .chat-composer-input {
+  flex: 1;
+}
+
+.attachment-pick {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 6px 12px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  background: var(--panel, #fff);
+}
+
+.attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+.attachment-strip.drag-over {
+  outline: 2px dashed var(--accent, #4a7dbe);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.attachment-hint {
+  color: var(--muted, #777);
+  font-size: 0.8rem;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 8px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: var(--panel, #fff);
+}
+
+.attachment-chip.error {
+  border-color: #d33;
+}
+
+.attachment-chip-icon {
+  font-size: 0.9rem;
+}
+
+.attachment-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip-size,
+.attachment-chip-status {
+  color: var(--muted, #777);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.attachment-chip-error {
+  color: #d33;
+  font-size: 0.72rem;
+}
+
+.attachment-chip-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 4px;
+  color: var(--muted, #777);
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.message-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  text-decoration: none;
+  color: inherit;
+  background: var(--panel, #fff);
+}
+
+.attachment-more {
+  border: none;
+  background: none;
+  color: var(--accent, #4a7dbe);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 3px 6px;
+}
+
+.tool-call-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.tool-call-card {
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  overflow: hidden;
+}
+
+.tool-call-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tool-call-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.tool-call-status {
+  font-size: 0.78rem;
+  color: var(--muted, #777);
+}
+
+.tool-call-card.succeeded .tool-call-status {
+  color: #2b7a3d;
+}
+
+.tool-call-card.failed .tool-call-status,
+.tool-call-card.cancelled .tool-call-status {
+  color: #d33;
+}
+
+.tool-call-duration {
+  font-size: 0.75rem;
+  color: var(--muted, #777);
+}
+
+.tool-call-preview {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+  color: var(--muted, #555);
+  overflow-wrap: anywhere;
+}
+
+.tool-call-details {
+  border-top: 1px solid var(--border, #e5e5e5);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-call-details h4 {
+  margin: 0 0 4px;
+  font-size: 0.78rem;
+  color: var(--muted, #777);
+}
+
+.tool-call-json {
+  margin: 0;
+  padding: 8px;
+  background: var(--code-bg, #f6f6f6);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.tool-evidence-toggle {
+  border: none;
+  background: none;
+  color: var(--accent, #4a7dbe);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 0;
+}
+
+.tool-evidence-detail {
+  font-size: 0.8rem;
+  color: var(--muted, #555);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.evidence-chip {
+  cursor: pointer;
+}
