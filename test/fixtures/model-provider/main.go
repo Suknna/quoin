@@ -153,6 +153,50 @@ func thanosArtifactID(body chatRequest) string {
 
 var thanosArtifactPattern = regexp.MustCompile(`"artifact"\s*:\s*\{"id"\s*:\s*"(\d+)"`)
 
+// attachmentLocatorPattern extracts the artifactId from the frozen
+// attachment locator block the investigation input renders for user
+// messages ([附件 N] name（artifactId=X，Y 字节）).
+var attachmentLocatorPattern = regexp.MustCompile(`artifactId=(\d+)`)
+
+// artifactReadTarget resolves the artifactId from the LAST user turn's
+// locator block (the current turn's attachments; earlier turns' blocks
+// stay in the conversation but are not re-read).
+func artifactReadTarget(body chatRequest) string {
+	for index := len(body.Messages) - 1; index >= 0; index-- {
+		message := body.Messages[index]
+		if message.Role != "user" {
+			continue
+		}
+		match := attachmentLocatorPattern.FindStringSubmatch(fmt.Sprint(message.Content))
+		if len(match) == 2 {
+			return match[1]
+		}
+		return ""
+	}
+	return ""
+}
+
+// attachmentEcho projects a bounded slice of the artifact_read tool
+// result the attachment branch itself drove (the committed output text).
+func attachmentEcho(body chatRequest) string {
+	for _, message := range body.Messages {
+		if message.Role != "tool" {
+			continue
+		}
+		match := artifactOutputPattern.FindStringSubmatch(fmt.Sprint(message.Content))
+		if len(match) == 2 {
+			content := match[1]
+			if len(content) > 24 {
+				content = content[:24]
+			}
+			return content
+		}
+	}
+	return "（未读到内容）"
+}
+
+var artifactOutputPattern = regexp.MustCompile(`"output"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
 // toolMessageCount counts the committed tool-result messages the agent
 // already carries (one per executed tool call).
 func toolMessageCount(body chatRequest) int {
@@ -168,12 +212,18 @@ func toolMessageCount(body chatRequest) int {
 // toolCallChunk renders one streaming tool-call delta chunk (an empty name
 // carries the trailing arguments fragment like the T10 fixture).
 func toolCallChunk(model, callID, toolName, arguments string) map[string]any {
+	return toolCallChunkIndexed(model, callID, 0, toolName, arguments)
+}
+
+// toolCallChunkIndexed renders one tool-call delta with its provider
+// index (parallel calls in one assistant turn carry distinct indices).
+func toolCallChunkIndexed(model, callID string, index int, toolName, arguments string) map[string]any {
 	return map[string]any{
 		"id": "chat-agent", "object": "chat.completion.chunk", "model": model,
 		"choices": []any{map[string]any{
 			"index": 0, "finish_reason": nil,
 			"delta": map[string]any{"tool_calls": []any{map[string]any{
-				"index": 0, "id": callID, "type": "function",
+				"index": index, "id": callID, "type": "function",
 				"function": map[string]any{"name": toolName, "arguments": arguments},
 			}}},
 		}},
@@ -202,6 +252,122 @@ func serveStream(writer http.ResponseWriter, body chatRequest) {
 	// partial-then-hangup branch that drives the attempt failure and the
 	// error frame.
 	if strings.Contains(prompt, "只读运维调查代理") {
+		// T14 attachment branch: the first turn sees the frozen attachment
+		// locator block; it reads the artifact body through the granted
+		// artifact_read tool and echoes a bounded slice in the final answer.
+		if strings.Contains(prompt, "T14Attach") || artifactReadTarget(body) != "" {
+			if artifactID := artifactReadTarget(body); artifactID != "" && !body.hasToolResult() {
+				log.Printf("investigation (T14Attach): streaming artifact_read on attachment %s", artifactID)
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t14-read", "artifact_read", fmt.Sprintf(`{"artifactId":"%s"}`, artifactID))))
+				time.Sleep(150 * time.Millisecond)
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t14-read", "", "")))
+				time.Sleep(150 * time.Millisecond)
+				chunk(mustJSONChunk(map[string]any{
+					"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+				}))
+				chunk("[DONE]")
+				return
+			}
+			if body.hasToolResult() {
+				log.Printf("investigation (T14Attach): streaming the attachment echo answer")
+				words := []string{"附件已读取：", attachmentEcho(body), "（attachment-proof-t14）", "内容完整可追溯。"}
+				for _, word := range words {
+					chunk(mustJSONChunk(map[string]any{
+						"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+						"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil}},
+					}))
+					time.Sleep(120 * time.Millisecond)
+				}
+				chunk(mustJSONChunk(map[string]any{
+					"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+				}))
+				chunk("[DONE]")
+				return
+			}
+		}
+		// T14 tool-chain branch: write + long bash output (spills into a
+		// tool_result Artifact) + thanos_query in one turn, then the final
+		// answer (the acceptance asserts the persisted tool-call timeline,
+		// the spilled artifact and the sealed evidence).
+		if strings.Contains(prompt, "T14Tools") && !body.hasToolResult() {
+			log.Printf("investigation (T14Tools): streaming write + long bash + thanos_query")
+			for index, call := range []struct{ id, name, args string }{
+				{"call-t14-write", "write", `{"path":"t14.txt","content":"T14-WRITE-PROOF\n"}`},
+				{"call-t14-bash", "bash", `{"command":"seq 1 30000"}`},
+				{"call-t14-thanos", "thanos_query", `{"query":"big"}`},
+			} {
+				chunk(mustJSONChunk(toolCallChunkIndexed(body.Model, call.id, index, call.name, call.args)))
+				time.Sleep(150 * time.Millisecond)
+				chunk(mustJSONChunk(toolCallChunkIndexed(body.Model, call.id, index, "", "")))
+				time.Sleep(150 * time.Millisecond)
+			}
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+			}))
+			chunk("[DONE]")
+			return
+		}
+		if strings.Contains(prompt, "T14Tools") && body.hasToolResult() {
+			log.Printf("investigation (T14Tools): streaming the tool-chain conclusion")
+			words := []string{"工具链执行完成（t14-tools-proof）：", "工作区写入/长输出产物", "与 Thanos 只读查询", "均已封存为证据。"}
+			for _, word := range words {
+				chunk(mustJSONChunk(map[string]any{
+					"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil}},
+				}))
+				time.Sleep(120 * time.Millisecond)
+			}
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+			}))
+			chunk("[DONE]")
+			return
+		}
+		// T14 sandbox adversarial branch: one turn of hostile bash probes
+		// (cross-process /proc, state paths, external network, write outside
+		// the workspace) plus a benign /proc read for contrast; the committed
+		// tool results carry the denial evidence the acceptance asserts.
+		if strings.Contains(prompt, "T14Sandbox") && !body.hasToolResult() {
+			log.Printf("investigation (T14Sandbox): streaming the adversarial bash suite")
+			for index, call := range []struct{ id, name, args string }{
+				{"call-t14-proc", "bash", `{"command":"cat /proc/1/environ"}`},
+				{"call-t14-self", "bash", `{"command":"head -3 /proc/self/status"}`},
+				{"call-t14-net", "bash", `{"command":"exec 3<>/dev/tcp/127.0.0.1/9090 && echo connected"}`},
+				{"call-t14-write", "bash", `{"command":"touch /tmp/t14-escape-proof && echo wrote"}`},
+			} {
+				chunk(mustJSONChunk(toolCallChunkIndexed(body.Model, call.id, index, call.name, call.args)))
+				time.Sleep(150 * time.Millisecond)
+				chunk(mustJSONChunk(toolCallChunkIndexed(body.Model, call.id, index, "", "")))
+				time.Sleep(150 * time.Millisecond)
+			}
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+			}))
+			chunk("[DONE]")
+			return
+		}
+		if strings.Contains(prompt, "T14Sandbox") && body.hasToolResult() {
+			log.Printf("investigation (T14Sandbox): streaming the adversarial conclusion")
+			words := []string{"沙箱对抗执行完成（t14-sandbox-proof）：", "跨进程/网络/越界写入", "均被拒绝并已留痕。"}
+			for _, word := range words {
+				chunk(mustJSONChunk(map[string]any{
+					"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": word}, "finish_reason": nil}},
+				}))
+				time.Sleep(120 * time.Millisecond)
+			}
+			chunk(mustJSONChunk(map[string]any{
+				"id": "chat-t14", "object": "chat.completion.chunk", "model": body.Model,
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+			}))
+			chunk("[DONE]")
+			return
+		}
 		if strings.Contains(prompt, "T13Broken") {
 			log.Printf("investigation (T13Broken): partial tokens then hang up")
 			for _, word := range []string{"开始", "分析"} {
