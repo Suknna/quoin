@@ -338,18 +338,32 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 	if attemptType == "connection_probe" {
 		return service.dispatchCancel(ctx, attemptID)
 	}
-	if attemptType != "initial_analysis" {
-		return fmt.Errorf("attempt %d type %s has no cancel dispatcher", attemptID, attemptType)
+	// T15: investigation attempts share the same plinth cancel frame as
+	// initial analysis; only the unbound local finalizer differs by scope.
+	finalizeUnbound := func() error { return fmt.Errorf("attempt %d type %s has no cancel dispatcher", attemptID, attemptType) }
+	switch attemptType {
+	case "initial_analysis":
+		if service.Analyses == nil {
+			return fmt.Errorf("analysis service not wired")
+		}
+		finalizeUnbound = func() error { return service.Analyses.CancelAck(ctx, attemptID) }
+	case "investigation":
+		if service.Investigations == nil {
+			return fmt.Errorf("investigation service not wired")
+		}
+		finalizeUnbound = func() error { return service.Investigations.CancelAck(ctx, attemptID) }
+	default:
+		return finalizeUnbound()
 	}
 	var boot sql.NullString
 	var epoch sql.NullInt64
-	row := service.Analyses.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
+	row := service.Connections.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
 	if err := row.Scan(&boot, &epoch); err != nil {
 		return err
 	}
 	if !boot.Valid || !epoch.Valid {
 		// Unbound attempts finalize locally.
-		return service.Analyses.CancelAck(ctx, attemptID)
+		return finalizeUnbound()
 	}
 	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
 	if err != nil {

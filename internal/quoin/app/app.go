@@ -326,6 +326,14 @@ func (application *apiServer) register(api huma.API) {
 			}
 			return application.investigationDispatchFunc(ctx, attemptID)
 		},
+		// The committed stop/undo fence travels the same routed cancel
+		// dispatcher as the analysis cancel (RUNTIME-CANCEL-001).
+		CancelDispatch: func(ctx context.Context, attemptID int64) error {
+			if application.cancelDispatchFunc == nil {
+				return errors.New("cancel dispatch not wired")
+			}
+			return application.cancelDispatchFunc(ctx, attemptID)
+		},
 	}
 	investigationHandler.Register(api)
 	// The raw multipart upload route (NewHandler) reuses this handler's

@@ -31,9 +31,14 @@ type Handler struct {
 	SessionValid func(ctx context.Context, cookie string) bool
 	// Dispatch delivers one Queued attempt to the live Plinth stream.
 	Dispatch func(ctx context.Context, attemptID int64) error
+	// CancelDispatch delivers one committed cancellation fence to the
+	// runtime that owns the attempt (RUNTIME-CANCEL-001; stop and undo
+	// share it).
+	CancelDispatch func(ctx context.Context, attemptID int64) error
 }
 
-// Register mounts the investigation routes (T13 core + T14 attachments).
+// Register mounts the investigation routes (T13 core + T14 attachments +
+// T15 head concurrency: undo, stop, retry).
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations", OperationID: "listInvestigations"}, handler.listInvestigations)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations", OperationID: "createInvestigation", DefaultStatus: 201}, handler.createInvestigation)
@@ -43,6 +48,9 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/messages/{messageId}/stream", OperationID: "streamInvestigationMessage"}, handler.streamInvestigationMessage)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts", OperationID: "listInvestigationAttempts"}, handler.listInvestigationAttempts)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/tool-calls", OperationID: "listAttemptToolCalls"}, handler.listAttemptToolCalls)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/undo", OperationID: "undoInvestigationMessage"}, handler.undoInvestigationMessage)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/cancel", OperationID: "cancelInvestigationAttempt"}, handler.cancelInvestigationAttempt)
+	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/retry", OperationID: "retryInvestigationAttempt", DefaultStatus: 202}, handler.retryInvestigationAttempt)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigation-attachments/{attachmentId}", OperationID: "getInvestigationAttachment"}, handler.getInvestigationAttachment)
 }
 
