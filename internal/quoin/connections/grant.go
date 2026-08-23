@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // GrantPayload is the typed fulfillment returned to the runtime over the
@@ -122,6 +124,14 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 	}
 	if revisionConfig.Valid && revisionConfig.String != "" {
 		payload.RevisionConfigJSON = json.RawMessage(revisionConfig.String)
+	}
+	// Config Verification freezes a grant for reproducibility, but must not
+	// execute a grant invalidated by a committed disable/rotation/rebind.
+	// Re-read its currentness in this same write transaction before decrypting.
+	if purpose == "config_thanos_query" {
+		if err := thanos.ValidateConfigGrantForExecution(ctx, conn, attemptID); err != nil {
+			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
+		}
 	}
 	// Decryption happens inside the same fenced transaction so a terminal
 	// commit racing this read is still ordered (SQLite single writer).

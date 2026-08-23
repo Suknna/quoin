@@ -47,11 +47,115 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	switch dispatch.GetAttemptType() {
 	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
 		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION:
+		switch dispatch.GetScopeType() {
+		case runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN:
+			supervisor.runConfigVerification(parent, sink, client, dispatch, binding, stopTask)
+		case runtimev1.ScopeType_SCOPE_TYPE_RESOURCE_REFRESH_RUN:
+			supervisor.runResourceRefresh(parent, sink, client, dispatch, binding, stopTask)
+		default:
+			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
+		}
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION:
 		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
 	}
+}
+
+func (supervisor *Supervisor) runConfigVerification(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
+	attemptID := dispatch.GetAttemptId()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	supervisor.Channel.RegisterTask(attemptID, cancel)
+	defer stopTask(attemptID)
+	if err := sink.Send(&runtimev1.ControlEnvelope{CorrelationId: uint64(attemptID), Msg: &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: attemptID}}}); err != nil {
+		return
+	}
+	var input struct {
+		SchemaKind        string `json:"schemaKind"`
+		AttemptID         int64  `json:"attemptId"`
+		VerificationRunID int64  `json:"verificationRunId"`
+		PlanKey           string `json:"planKey"`
+		CheckKey          string `json:"checkKey"`
+		GrantID           int64  `json:"grantId"`
+		Query             struct {
+			Mode         string `json:"mode"`
+			Expression   string `json:"expression"`
+			RangeSeconds *int64 `json:"rangeSeconds"`
+			StepSeconds  *int64 `json:"stepSeconds"`
+		} `json:"query"`
+	}
+	if dispatch.GetInput() == nil || json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &input) != nil || input.SchemaKind != "config_verification_execution_v1" || input.AttemptID != attemptID || input.VerificationRunID != dispatch.GetScopeId() || input.PlanKey == "" || input.CheckKey == "" || input.Query.Expression == "" {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
+		return
+	}
+	grant, ok := supervisor.primaryGrant(dispatch.GetInput(), "config_thanos_query")
+	if !ok || grant.GetGrantId() != input.GrantID {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
+		return
+	}
+	bearer, err := supervisor.Channel.BearerToken()
+	if err != nil {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
+		return
+	}
+	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
+	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	grantCancel()
+	if err != nil || payload.GetThanos() == nil {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
+		return
+	}
+	var config plinthconnections.ThanosConfig
+	if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
+		return
+	}
+	result, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword()}, input.Query.Mode, input.Query.Expression, input.Query.RangeSeconds, input.Query.StepSeconds)
+	if err != nil {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, []string{err.Error()}, "query_failed")
+		return
+	}
+	if len(warnings) != 0 {
+		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "gap", nil, warnings, "partial_response")
+		return
+	}
+	supervisor.proposeConfigVerification(sink, attemptID, binding, input, "success", result, nil, "")
+}
+
+func (supervisor *Supervisor) proposeConfigVerification(sink *runtime.FrameSink, attemptID int64, binding runtime.DispatchBinding, input struct {
+	SchemaKind        string `json:"schemaKind"`
+	AttemptID         int64  `json:"attemptId"`
+	VerificationRunID int64  `json:"verificationRunId"`
+	PlanKey           string `json:"planKey"`
+	CheckKey          string `json:"checkKey"`
+	GrantID           int64  `json:"grantId"`
+	Query             struct {
+		Mode         string `json:"mode"`
+		Expression   string `json:"expression"`
+		RangeSeconds *int64 `json:"rangeSeconds"`
+		StepSeconds  *int64 `json:"stepSeconds"`
+	} `json:"query"`
+}, outcome string, result json.RawMessage, messages []string, gapReason string) {
+	var gap any
+	if gapReason != "" {
+		gap = gapReason
+	}
+	if result == nil {
+		result = json.RawMessage("null")
+	}
+	canonical, err := json.Marshal(map[string]any{"schemaKind": "config_promql_result_v1", "attemptId": attemptID, "verificationRunId": input.VerificationRunID, "planKey": input.PlanKey, "checkKey": input.CheckKey, "outcome": outcome, "observedAt": time.Now().UTC().Format(time.RFC3339Nano), "result": result, "warnings": messages, "errors": func() []string {
+		if outcome == "error" {
+			return messages
+		}
+		return []string{}
+	}(), "gapReason": gap})
+	if err != nil {
+		return
+	}
+	digest := sha256.Sum256(canonical)
+	_ = sink.Send(&runtimev1.ControlEnvelope{CorrelationId: uint64(attemptID), Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch, Outcome: outcomeFor(map[string]string{"success": "passed", "gap": "failed", "error": "failed"}[outcome]), Payload: &runtimev1.ResultPayload{SchemaKind: "config_promql_result_v1", CanonicalJson: canonical, ContentDigest: digest[:]}}}})
 }
 
 // runAgent drives one initial-analysis or investigation attempt through a

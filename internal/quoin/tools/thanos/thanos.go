@@ -96,6 +96,70 @@ func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallI
 	}, nil
 }
 
+// ResolveConfigGrant freezes the one enabled deployment Thanos connection
+// for a deterministic Config Verification or Resource Refresh attempt. Unlike
+// tool grants, this grant has no model Tool Call owner; its `config_thanos_query`
+// purpose makes that distinction structurally visible in the schema.
+func ResolveConfigGrant(ctx context.Context, conn *sql.Conn, attemptID int64) (attempt.ToolGrant, error) {
+	var connectionID, revisionID, generationID, bindingRevision, rootBinding int64
+	if err := conn.QueryRowContext(ctx, `
+		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
+		       g.key_binding_revision, s.binding_revision
+		FROM connections c
+		JOIN credential_generations g ON g.id = c.current_credential_generation_id
+		CROSS JOIN root_key_state s
+		WHERE c.type = 'thanos' AND c.enabled = 1 AND c.revalidation_required = 0
+		LIMIT 1`).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return attempt.ToolGrant{}, fmt.Errorf("%w: create or enable a thanos connection first", ErrThanosUnavailable)
+		}
+		return attempt.ToolGrant{}, err
+	}
+	if bindingRevision != rootBinding {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: credential root binding %d does not match %d", ErrGrantNotCurrent, bindingRevision, rootBinding)
+	}
+	insert, err := conn.ExecContext(ctx, `
+		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at)
+		VALUES(?,?,?,?,?,?)`, attemptID, "config_thanos_query", connectionID, revisionID, generationID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return attempt.ToolGrant{}, err
+	}
+	grantID, err := insert.LastInsertId()
+	if err != nil {
+		return attempt.ToolGrant{}, err
+	}
+	return attempt.ToolGrant{GrantID: grantID, ConnectionRevisionID: revisionID, CredentialGenerationID: generationID, Purpose: "config_thanos_query"}, nil
+}
+
+// ValidateConfigGrantForExecution re-checks the frozen config execution
+// grant just before the supervisor starts the query. A connection disable,
+// rotation or root-key rebind committed first wins the race.
+func ValidateConfigGrantForExecution(ctx context.Context, conn *sql.Conn, attemptID int64) error {
+	var grantRevisionID, grantGenerationID, enabled, revalidation, bindingRevision, rootBinding int64
+	var currentRevisionID, currentGenID sql.NullInt64
+	err := conn.QueryRowContext(ctx, `
+		SELECT ag.connection_revision_id, ag.credential_generation_id,
+		       c.enabled, c.revalidation_required, c.current_revision_id, c.current_credential_generation_id,
+		       g.key_binding_revision, s.binding_revision
+		FROM attempt_connection_grants ag
+		JOIN connections c ON c.id = ag.connection_id
+		JOIN credential_generations g ON g.id = ag.credential_generation_id
+		CROSS JOIN root_key_state s
+		WHERE ag.attempt_id=? AND ag.purpose='config_thanos_query'`, attemptID).
+		Scan(&grantRevisionID, &grantGenerationID, &enabled, &revalidation, &currentRevisionID, &currentGenID, &bindingRevision, &rootBinding)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: config grant binding missing", ErrGrantNotCurrent)
+	}
+	if err != nil {
+		return err
+	}
+	if enabled != 1 || revalidation != 0 || !currentRevisionID.Valid || !currentGenID.Valid ||
+		currentRevisionID.Int64 != grantRevisionID || currentGenID.Int64 != grantGenerationID || bindingRevision != rootBinding {
+		return ErrGrantNotCurrent
+	}
+	return nil
+}
+
 // ValidateGrantForExecution re-checks the frozen binding before a pending
 // thanos_query tool call may begin executing (DATA-CONN-002: the execution
 // authorization transaction re-reads the connection state; a disable,

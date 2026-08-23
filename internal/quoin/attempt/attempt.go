@@ -207,11 +207,48 @@ func (service *Service) CommitResult(ctx context.Context, attemptID int64, bootI
 	if succeeded {
 		state = "Succeeded"
 	}
+	var nullableTermination any
+	if terminationReason != "" {
+		nullableTermination = terminationReason
+	}
 	result, err := service.db.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state=?, ended_at=?, termination_reason=?, row_version=row_version+1
 		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`,
-		state, service.nowText(), terminationReason, attemptID, bootID, epoch)
+		state, service.nowText(), nullableTermination, attemptID, bootID, epoch)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return ErrLateResult
+	}
+	return nil
+}
+
+// CommitResultOn is CommitResult's transaction-composable form. Scope
+// services use it when their typed result, Evidence and parent lifecycle must
+// commit atomically with the fenced Attempt terminal transition.
+func (service *Service) CommitResultOn(ctx context.Context, conn *sql.Conn, attemptID int64, bootID string, epoch uint64, succeeded bool, terminationReason string) error {
+	if succeeded {
+		terminationReason = ""
+	}
+	if !succeeded && terminationReason == "" {
+		terminationReason = "worker_protocol_error"
+	}
+	state := "Failed"
+	if succeeded {
+		state = "Succeeded"
+	}
+	var nullableTermination any
+	if terminationReason != "" {
+		nullableTermination = terminationReason
+	}
+	result, err := conn.ExecContext(ctx, `
+		UPDATE execution_attempts
+		SET state=?, ended_at=?, termination_reason=?, row_version=row_version+1
+		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`,
+		state, service.nowText(), nullableTermination, attemptID, bootID, epoch)
 	if err != nil {
 		return err
 	}
@@ -395,13 +432,19 @@ type DispatchInput struct {
 func (service *Service) DispatchInputFor(ctx context.Context, attemptID int64) (DispatchInput, error) {
 	var input DispatchInput
 	var contentDigest string
+	var agentVersion sql.NullString
 	err := service.db.QueryRowContext(ctx, `
 		SELECT s.schema_kind, s.content_digest, a.agent_version
 		FROM attempt_input_snapshots s
 		JOIN execution_attempts a ON a.id=s.attempt_id
-		WHERE s.attempt_id=?`, attemptID).Scan(&input.SchemaKind, &contentDigest, &input.AgentVersion)
+		WHERE s.attempt_id=?`, attemptID).Scan(&input.SchemaKind, &contentDigest, &agentVersion)
 	if err != nil {
 		return DispatchInput{}, err
+	}
+	// Supervisor-only collection attempts (Config Verification / Resource
+	// Refresh) carry no agent; NULL agent_version is their normal shape.
+	if agentVersion.Valid {
+		input.AgentVersion = agentVersion.String
 	}
 	if service.SnapshotRebuilder == nil {
 		return DispatchInput{}, fmt.Errorf("attempt %d has no snapshot rebuilder wired", attemptID)
