@@ -118,6 +118,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		return
 	}
 	switch attemptType {
+	case "inspection_collection":
+		if service.BusinessSystems != nil {
+			if err := service.BusinessSystems.VerificationAttempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "config_verification.accept_failed", err.Error())
+			}
+		}
 	case "initial_analysis":
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())
@@ -157,6 +163,14 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 			service.InvestigationRuntime.HandleResultProposal(ctx, envelope, proposal)
 		} else {
 			sharedops.LogEvent("quoin", "info", "result.investigation_unwired", "")
+		}
+		return
+	}
+	if attemptType == "inspection_collection" {
+		if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "resource_discovery_result_v1" {
+			service.handleResourceRefreshResultProposal(ctx, envelope, proposal)
+		} else {
+			service.handleVerificationResultProposal(ctx, envelope, proposal)
 		}
 		return
 	}
@@ -218,6 +232,17 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *r
 		return
 	}
 	switch attemptType {
+	case "inspection_collection":
+		if service.BusinessSystems != nil {
+			if err := service.BusinessSystems.VerificationAttempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "config_verification.cancel_ack", err.Error())
+			}
+			// Resource-refresh children converge their parent Run here; config
+			// verification parents converge through their own result path.
+			if err := service.BusinessSystems.ConvergeResourceRefreshCancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", err.Error())
+			}
+		}
 	case "initial_analysis":
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.cancel_ack", err.Error())

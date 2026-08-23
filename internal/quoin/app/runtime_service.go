@@ -16,6 +16,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
@@ -34,6 +35,8 @@ type RuntimeService struct {
 	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
 	// not exercise the task slice.
 	Connections *connections.Service
+	// BusinessSystems owns Config Verification PromQL collection attempts.
+	BusinessSystems *businesssystem.Service
 	// Analyses owns initial-analysis attempts (T10); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Analyses *analysis.Service
@@ -202,6 +205,8 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		// disconnected bind to this live stream and dispatch immediately.
 		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
 		go service.dispatchQueuedProbes(context.Background())
+		go service.dispatchQueuedVerificationAttempts(context.Background())
+		go service.dispatchQueuedResourceRefreshAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedInvestigations(context.Background())
 	}

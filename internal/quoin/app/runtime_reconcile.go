@@ -122,6 +122,18 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
 		return
 	}
+	if view.AttemptType == "inspection_collection" && service.BusinessSystems != nil {
+		var err error
+		switch view.ScopeType {
+		case "config_verification_run":
+			err = service.BusinessSystems.RecordVerificationTechnicalGap(ctx, view.ID, reason)
+		case "resource_refresh_run":
+			err = service.BusinessSystems.RecordResourceRefreshTechnicalGap(ctx, view.ID, reason)
+		}
+		if err != nil {
+			sharedops.LogEvent("quoin", "error", "inspection_collection.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+		}
+	}
 	if view.AttemptType == "investigation" && service.Investigations != nil {
 		// Close the attached stream with the interruption terminal view
 		// (HTTP-STREAM-006: detach/loss never leaves the observer hanging).
@@ -133,6 +145,19 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 // scope aggregate (the runtime confirmed the stop, or the stream ended /
 // the attempt was lost with the fence already committed).
 func (service *RuntimeService) finalizeCancellation(ctx context.Context, attemptID int64, attemptType string) {
+	if attemptType == "inspection_collection" && service.BusinessSystems != nil {
+		view, err := service.attemptsService().Get(ctx, attemptID)
+		if err == nil && view.ScopeType == "resource_refresh_run" {
+			if err := service.attemptsService().CancelAck(ctx, attemptID); err != nil {
+				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", fmt.Sprintf("attempt=%d %v", attemptID, err))
+				return
+			}
+			if err := service.BusinessSystems.RecordResourceRefreshTechnicalGap(ctx, attemptID, "cancelled"); err != nil {
+				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+			}
+			return
+		}
+	}
 	switch attemptType {
 	case "initial_analysis":
 		if service.Analyses != nil {
@@ -218,13 +243,26 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
+			if view.State == "Assigned" && view.AttemptType == "inspection_collection" && service.BusinessSystems != nil {
+				if err := service.BusinessSystems.VerificationAttempts().Accept(ctx, view.ID, bootID, 0); err != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
+				}
+			}
 			continue
 		}
 		switch view.State {
 		case "Assigned":
 			// Never accepted by the runtime: idempotent re-dispatch with
 			// the frozen binding (RUNTIME-TASK-005).
-			if err := service.reDispatchAgentAttempt(ctx, view); err != nil {
+			var err error
+			if view.AttemptType == "inspection_collection" && view.ScopeType == "config_verification_run" {
+				err = service.dispatchVerificationAttempt(ctx, view.ID)
+			} else if view.AttemptType == "inspection_collection" && view.ScopeType == "resource_refresh_run" {
+				err = service.dispatchResourceRefreshAttempt(ctx, view.ID)
+			} else {
+				err = service.reDispatchAgentAttempt(ctx, view)
+			}
+			if err != nil {
 				sharedops.LogEvent("quoin", "error", "reconcile.redispatch", fmt.Sprintf("attempt=%d %v", view.ID, err))
 			} else {
 				sharedops.LogEvent("quoin", "info", "reconcile.redispatched", fmt.Sprintf("attempt=%d", view.ID))
@@ -378,6 +416,21 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 						// The sweep converged the attempt row; close any
 						// attached stream with the interruption terminal view.
 						service.Investigations.NotifyTerminal(ctx, item.AttemptID)
+					}
+				case "inspection_collection":
+					if service.BusinessSystems != nil {
+						var closeErr error
+						switch item.ScopeType {
+						case "config_verification_run":
+							closeErr = service.BusinessSystems.RecordVerificationTechnicalGap(ctx, item.AttemptID, "interrupted")
+						case "resource_refresh_run":
+							closeErr = service.BusinessSystems.RecordResourceRefreshTechnicalGap(ctx, item.AttemptID, "interrupted")
+						default:
+							sharedops.LogEvent("quoin", "info", "reconcile.sweep_scope_unhandled", fmt.Sprintf("attempt=%d scope=%s", item.AttemptID, item.ScopeType))
+						}
+						if closeErr != nil {
+							sharedops.LogEvent("quoin", "error", "inspection_collection.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, closeErr))
+						}
 					}
 				}
 			}

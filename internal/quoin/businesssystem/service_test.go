@@ -80,6 +80,8 @@ func newHarness(t *testing.T) *harness {
 	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
+	seedThanosExecutionPath(t, db, now)
+	seedPlinthRuntime(t, db, now)
 	contracts := labelcontract.NewService(db)
 	// Contract v1 active through the real zero-system activation command.
 	if _, err := contracts.CreateDraft(context.Background(), 1, "seed-contract-0001", []byte(activeContractYAML), config.Limits{}); err != nil {
@@ -89,6 +91,50 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	return &harness{db: db, systems: NewService(db), contracts: contracts, principal: 1}
+}
+
+// seedThanosExecutionPath supplies only the non-secret frozen database facts
+// consumed by Config Verification creation. Runtime grant fulfillment has its
+// own encryption integration tests; this harness verifies that Quoin never
+// needs to decrypt those bytes to create an execution Attempt.
+func seedThanosExecutionPath(t *testing.T, db *sql.DB, now string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := db.Exec(`INSERT INTO connections(name,type,enabled,row_version,revalidation_required,created_at) VALUES('main-thanos','thanos',1,1,0,?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectionID, _ := connection.LastInsertId()
+	revision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,1,'{}',1,?)`, connectionID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, _ := revision.LastInsertId()
+	generation, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_by,created_at) VALUES(?,1,1,1,?,?,1,?)`, connectionID, make([]byte, 12), make([]byte, 16), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generationID, _ := generation.LastInsertId()
+	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=2 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedPlinthRuntime(t *testing.T, db *sql.DB, now string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('plinth',1,?,?,?,1)`, make([]byte, 32), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID, _ := credential.LastInsertId()
+	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='plinth'`, credentialID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (h *harness) upload(t *testing.T, body string, contractVersion int64, commandID string) (ConfigVersionDetail, error) {

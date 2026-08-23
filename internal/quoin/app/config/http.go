@@ -15,6 +15,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -28,6 +29,14 @@ type Handler struct {
 	// AuthenticateAdmin additionally enforces the Admin role for the frozen
 	// write commands (HTTP-CONFIG-001/002/004).
 	AuthenticateAdmin func(ctx context.Context, cookie string) (int64, error)
+	// CancelDispatch sends a committed, bound cancellation fence to Plinth.
+	// The domain service commits the fence before this best-effort delivery.
+	CancelDispatch func(ctx context.Context, attemptID int64) error
+	// DispatchResourceRefresh scans and dispatches committed queued resource attempts.
+	DispatchResourceRefresh func(ctx context.Context)
+	// DispatchConfigVerification scans and dispatches committed queued
+	// PromQL verification attempts (created while Plinth is already connected).
+	DispatchConfigVerification func(ctx context.Context)
 }
 
 // Register mounts the huma-owned routes; the two multipart uploads and the
@@ -43,6 +52,10 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "runConfigVerificationRun"}, handler.runConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", OperationID: "getConfigVerificationRun"}, handler.getConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel", OperationID: "cancelConfigVerificationRun"}, handler.cancelConfigVerificationRun)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/resources:refresh", OperationID: "startResourceRefresh"}, handler.startResourceRefresh)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts", OperationID: "listLabelContracts"}, handler.listLabelContracts)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}", OperationID: "getLabelContract"}, handler.getLabelContract)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/label-contracts/{contractVersion}/activate", OperationID: "activateLabelContract"}, handler.activateLabelContract)
@@ -89,6 +102,10 @@ func mapDomainError(err error) error {
 		return conflict
 	case errors.Is(err, businesssystem.ErrNotFound), errors.Is(err, labelcontract.ErrNotFound):
 		return problem(http.StatusNotFound, "not_found", "目标对象不存在，可能刚被删除或路径不正确。")
+	case errors.Is(err, businesssystem.ErrBrowserVerificationUnavailable):
+		return problem(http.StatusServiceUnavailable, "external_dependency_unavailable", "该配置包含浏览器检查，当前版本暂不支持执行浏览器验证。")
+	case errors.Is(err, thanos.ErrThanosUnavailable):
+		return problem(http.StatusServiceUnavailable, "external_dependency_unavailable", "尚未配置可用的 Thanos 连接，暂时无法执行配置验证或资源刷新。")
 	}
 	var systemsConflict *businesssystem.ConflictError
 	if errors.As(err, &systemsConflict) {

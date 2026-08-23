@@ -103,6 +103,9 @@ func (handler *Handler) runConfigVerificationRun(ctx context.Context, input *str
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
+	if handler.DispatchConfigVerification != nil {
+		go handler.DispatchConfigVerification(context.Background())
+	}
 	return &struct {
 		Status       int                                  `header:"-"`
 		CacheControl string                               `header:"Cache-Control"`
@@ -171,6 +174,16 @@ func (handler *Handler) cancelConfigVerificationRun(ctx context.Context, input *
 	detail, err := handler.Systems.CancelVerification(ctx, principalID, input.Body.ClientCommandID, input.SystemKey, versionID, runID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, mapDomainError(err)
+	}
+	// The cancellation state fence is committed before delivery; querying the
+	// child IDs afterwards is safe because every surviving bound child is now
+	// Cancelling and a late ResultProposal is rejected by the Attempt authority.
+	if handler.CancelDispatch != nil {
+		for _, attemptID := range detail.CancellingAttemptIDs {
+			if err := handler.CancelDispatch(ctx, attemptID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return &struct {
 		CacheControl string                               `header:"Cache-Control"`

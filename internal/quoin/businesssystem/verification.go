@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 )
 
@@ -44,14 +45,17 @@ type VerificationCheckResult struct {
 // terminal states carry resultDetail (schema CHECK).
 type VerificationRunDetail struct {
 	VerificationRunSummary
-	CheckResults []VerificationCheckResult `json:"checkResults"`
-	ResultDetail *string                   `json:"resultDetail,omitempty"`
+	CheckResults         []VerificationCheckResult `json:"checkResults"`
+	ResultDetail         *string                   `json:"resultDetail,omitempty"`
+	CancellingAttemptIDs []int64                   `json:"-"`
 }
 
 // RunVerification creates the prepublish run for one unpublished draft and
 // executes it as far as this build's deterministic executor reaches: zero
-// check configs run to Passed inside the same transaction, check-bearing
-// drafts stay Queued for the later executor tickets (CFG-VERIFYRUN-001/002).
+// check configs run to Passed inside the same transaction, PromQL checks
+// dispatch through the Plinth supervisor, and drafts carrying browser checks
+// are deterministically rejected until the Lintel executor lands
+// (CFG-VERIFYRUN-001/002).
 func (service *Service) RunVerification(ctx context.Context, principalID int64, clientCommandID, systemKey string, versionID int64) (VerificationRunDetail, error) {
 	commandDigest := commandDigestOf("config_verification.run", map[string]any{
 		"systemKey": systemKey, "versionId": versionID,
@@ -91,6 +95,18 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 		}
 		return VerificationRunDetail{}, err
 	}
+	// Browser checks have no executor in this build: a run that could never
+	// converge would hold the active-run fence against the draft forever, so
+	// the command fails deterministically instead of creating it.
+	var browserCount int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
+		WHERE p.config_version_id=? AND c.kind='browser'`, versionID).Scan(&browserCount); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	if browserCount > 0 {
+		return VerificationRunDetail{}, ErrBrowserVerificationUnavailable
+	}
 	now := service.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO config_verification_runs(purpose,business_system_id,config_version_id,label_contract_version_id,state,row_version,created_by,created_at)
@@ -125,7 +141,23 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=?`, versionID).Scan(&checkCount); err != nil {
 		return VerificationRunDetail{}, err
 	}
-	if checkCount == 0 {
+	var promQLCount int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
+		WHERE p.config_version_id=? AND c.kind='promql'`, versionID).Scan(&promQLCount); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	if promQLCount > 0 {
+		// The scope trigger only permits child work beneath an active Run.
+		// This parent transition and every child/grant insert still share the
+		// creation transaction, so an unavailable connection rolls all of it back.
+		if _, err := conn.ExecContext(ctx, `UPDATE config_verification_runs SET state='Running', evidence_at=?, row_version=2 WHERE id=? AND state='Queued'`, now, runID); err != nil {
+			return VerificationRunDetail{}, mapVerificationAbort(err)
+		}
+		if _, err := createPromQLVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
+			return VerificationRunDetail{}, err
+		}
+	} else if checkCount == 0 {
 		// The deterministic completion path: with no check to execute, the
 		// run traverses Running (evidence_at sealed) to Passed; the frozen
 		// Passed trigger accepts a fully-covered (empty) check set.
@@ -202,6 +234,36 @@ func (service *Service) CancelVerification(ctx context.Context, principalID int6
 		}
 		return VerificationRunDetail{}, err
 	}
+	// Cancellation is fenced at the parent, but child Attempts remain the
+	// attempt authority. Queued children close atomically here; assigned or
+	// running children move to Cancelling and keep the parent non-terminal
+	// until the supervisor's CancelAck arrives.
+	rows, err := conn.QueryContext(ctx, `SELECT id,state FROM execution_attempts WHERE scope_type='config_verification_run' AND scope_id=? AND state IN ('Queued','Assigned','Running','Cancelling')`, runID)
+	if err != nil {
+		return VerificationRunDetail{}, err
+	}
+	var childIDs, dispatchIDs []int64
+	for rows.Next() {
+		var childID int64
+		var childState string
+		if err := rows.Scan(&childID, &childState); err != nil {
+			rows.Close()
+			return VerificationRunDetail{}, err
+		}
+		childIDs = append(childIDs, childID)
+		if childState == "Assigned" || childState == "Running" {
+			dispatchIDs = append(dispatchIDs, childID)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	attemptService := attempt.NewService(service.db)
+	for _, childID := range childIDs {
+		if _, err := attemptService.CancelFenceOn(ctx, conn, childID); err != nil {
+			return VerificationRunDetail{}, err
+		}
+	}
 	update, err := conn.ExecContext(ctx, `
 		UPDATE config_verification_runs SET state='Cancelled', result_detail='已由管理员取消', row_version=row_version+1
 		WHERE id=? AND business_system_id=? AND config_version_id=? AND row_version=? AND state IN ('Queued','Running')`,
@@ -237,6 +299,7 @@ func (service *Service) CancelVerification(ctx context.Context, principalID int6
 		return VerificationRunDetail{}, err
 	}
 	committed = true
+	detail.CancellingAttemptIDs = dispatchIDs
 	return detail, nil
 }
 

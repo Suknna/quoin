@@ -50,25 +50,27 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth                      *auth.Service
-	db                        *sql.DB
-	alerts                    *alerts.Service
-	reveals                   *secrets.Store
-	commands                  *commandReplay
-	runtime                   *qruntime.Service
-	connections               *connections.Service
-	analyses                  *analysis.Service
-	investigations            *investigation.Service
-	systems                   *businesssystem.Service
-	contracts                 *labelcontract.Service
-	investigationUpload       *appinvestigation.Handler
-	configHandler             *appconfig.Handler
-	artifacts                 *artifact.Store
-	rootKey                   func() ([]byte, error)
-	probeDispatchFunc         func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc        func(ctx context.Context, attemptID int64) error
-	analysisDispatchFunc      func(ctx context.Context, attemptID int64) error
-	investigationDispatchFunc func(ctx context.Context, attemptID int64) error
+	auth                        *auth.Service
+	db                          *sql.DB
+	alerts                      *alerts.Service
+	reveals                     *secrets.Store
+	commands                    *commandReplay
+	runtime                     *qruntime.Service
+	connections                 *connections.Service
+	analyses                    *analysis.Service
+	investigations              *investigation.Service
+	systems                     *businesssystem.Service
+	contracts                   *labelcontract.Service
+	investigationUpload         *appinvestigation.Handler
+	configHandler               *appconfig.Handler
+	artifacts                   *artifact.Store
+	rootKey                     func() ([]byte, error)
+	probeDispatchFunc           func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc          func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc        func(ctx context.Context, attemptID int64) error
+	investigationDispatchFunc   func(ctx context.Context, attemptID int64) error
+	resourceRefreshDispatchFunc func(ctx context.Context)
+	verificationDispatchFunc    func(ctx context.Context)
 }
 
 // attachmentLimitBytes resolves the deployment message-level attachment
@@ -219,6 +221,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest(), application.connections)
+	controlService.BusinessSystems = application.systems
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations
 	controlService.Artifacts = artifactStore
@@ -246,11 +249,14 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
+	application.resourceRefreshDispatchFunc = controlService.dispatchQueuedResourceRefreshAttempts
+	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	// T12: the periodic lease sweeper converges attempts whose runtime
 	// disappeared without reconnecting (RUNTIME-TASK-006).
 	go controlService.RunLeaseSweeper(ctx)
+	go controlService.RunResourceRefreshScheduler(ctx)
 	return serverSet.run(ctx, config)
 }
 
@@ -366,6 +372,22 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 				return 0, err
 			}
 			return session.User.ID, nil
+		},
+		CancelDispatch: func(ctx context.Context, attemptID int64) error {
+			if application.cancelDispatchFunc == nil {
+				return errors.New("cancel dispatch not wired")
+			}
+			return application.cancelDispatchFunc(ctx, attemptID)
+		},
+		DispatchResourceRefresh: func(ctx context.Context) {
+			if application.resourceRefreshDispatchFunc != nil {
+				application.resourceRefreshDispatchFunc(ctx)
+			}
+		},
+		DispatchConfigVerification: func(ctx context.Context) {
+			if application.verificationDispatchFunc != nil {
+				application.verificationDispatchFunc(ctx)
+			}
 		},
 	}
 	configHandler.Register(api)

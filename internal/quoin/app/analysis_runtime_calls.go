@@ -352,6 +352,11 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 			return fmt.Errorf("investigation service not wired")
 		}
 		finalizeUnbound = func() error { return service.Investigations.CancelAck(ctx, attemptID) }
+	case "inspection_collection":
+		if service.BusinessSystems == nil {
+			return fmt.Errorf("business systems not wired")
+		}
+		finalizeUnbound = func() error { return service.BusinessSystems.VerificationAttempts().CancelAck(ctx, attemptID) }
 	default:
 		return finalizeUnbound()
 	}

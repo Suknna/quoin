@@ -27,6 +27,10 @@ var ErrNotFound = errors.New("business system or config version not found")
 // request digest (HTTP-COMMAND-003).
 var ErrCommandReused = errors.New("client command id reused with a different request")
 
+// ErrBrowserVerificationUnavailable reports a draft whose browser checks
+// have no executor in this build (HTTP-CONFIG-003: deterministic 503).
+var ErrBrowserVerificationUnavailable = errors.New("browser checks cannot be executed in this build")
+
 // ConflictError carries the frozen publish conflict codes.
 type ConflictError struct {
 	Code           string // row_version_conflict | current_pointer_conflict | active_conflict
@@ -56,6 +60,10 @@ type Service struct {
 func NewService(db *sql.DB) *Service {
 	return &Service{db: db, now: time.Now}
 }
+
+// DB exposes the product database to the runtime dispatcher for read-only
+// attempt routing. Domain mutations remain on Service methods.
+func (service *Service) DB() *sql.DB { return service.db }
 
 func (service *Service) nowText() string { return service.now().UTC().Format(time.RFC3339Nano) }
 
