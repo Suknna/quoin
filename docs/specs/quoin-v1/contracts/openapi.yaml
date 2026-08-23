@@ -2894,6 +2894,67 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/business-systems/{systemKey}/resources:refresh:
+    post:
+      tags: [config]
+      operationId: startResourceRefresh
+      x-external-dependency: true
+      summary: 立即按当前已发布配置刷新 Observed Resources
+      description: 创建唯一的 manual Resource Refresh Run；配置、Label Contract、discovery 与 Thanos grant 均在受理事务冻结（DATA-OBSERVED-004）。
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceRefreshRunRequest'
+      responses:
+        '202':
+          description: Resource Refresh Run 已受理。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceRefreshRunDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}:
+    get:
+      tags: [config]
+      operationId: getResourceRefreshRun
+      summary: Resource Refresh Run 权威详情
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - name: resourceRefreshRunId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/LocatorId'
+      responses:
+        '200':
+          description: Resource Refresh Run 详情。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceRefreshRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/business-systems/{systemKey}/resources:
     get:
       tags: [config]
@@ -7113,6 +7174,37 @@ components:
             expectedCurrentPublishedVersionId:
               $ref: '#/components/schemas/NullableLocatorId'
               description: 并发前提；null 表示当前无已发布版本（首次发布），其余情况必须为当前已发布版本 ID；不匹配返回 409（DATA-CONFIG-001）。
+    ResourceRefreshRunRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandBase'
+    ResourceRefreshRunDetail:
+      type: object
+      additionalProperties: false
+      required: [id, businessSystemId, configVersionId, labelContractVersionId, triggerKind, state, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        businessSystemId:
+          $ref: '#/components/schemas/LocatorId'
+        configVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        labelContractVersionId:
+          $ref: '#/components/schemas/LocatorId'
+        triggerKind:
+          enum: [manual, schedule]
+        scheduledFor:
+          $ref: '#/components/schemas/Timestamp'
+        state:
+          enum: [Queued, Running, Completed, CompletedWithWarnings, Failed, Cancelled, Interrupted]
+        rowVersion:
+          type: integer
+          minimum: 1
+        evidenceAt:
+          $ref: '#/components/schemas/Timestamp'
+        resultDetail:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
     ObservedResourceSummary:
       type: object
       required: [id, discoveryKey, identityLabels, current]

@@ -15,7 +15,7 @@ package quoin.plinth.worker.v1;
 
 import "runtime.proto";
 
-option go_package = "github.com/Suknna/quoin/gen/plinth/worker/v1;workerv1";
+option go_package = "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1;workerv1";
 
 // supervisor 已持久化的固定 Agent 工作模式。Embedding 与 Model Provider probe 是 supervisor
 // 的机械 Model Call 工作，不创建 Agent worker，因此不在本枚举中。

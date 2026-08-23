@@ -23,7 +23,7 @@ package quoin.runtime.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/Suknna/quoin/gen/runtime/v1;runtimev1";
+option go_package = "github.com/Suknna/quoin/internal/gen/proto/runtime/v1;runtimev1";
 
 // ============================================================================
 // 服务
@@ -114,6 +114,7 @@ enum ScopeType {
   SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH = 6;
   SCOPE_TYPE_EMBEDDING_GENERATION = 7;
   SCOPE_TYPE_CONNECTION = 8;
+  SCOPE_TYPE_RESOURCE_REFRESH_RUN = 9; // 已发布配置的资源发现子 Attempt（DATA-OBSERVED-004）
 }
 
 // execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。
@@ -382,6 +383,7 @@ message DispatchAttempt {
   AttemptInputSnapshot input = 7;  // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
   int64 requested_by_tool_call_id = 8; // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
   string plan_key = 9;             // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
+  string discovery_key = 10;       // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
 }
 
 // 任务执行输入快照：Quoin 在派发事务中冻结的规范结构化输入（非秘密），对端按

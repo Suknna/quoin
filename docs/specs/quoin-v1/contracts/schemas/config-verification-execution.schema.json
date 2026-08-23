@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/config-verification-execution.schema.json",
+  "title": "Quoin Config Verification PromQL Execution Contracts",
+  "description": "Config Verification Run 的 Plinth supervisor PromQL 采集输入与结果。唯一凭据路径为 config_thanos_query Attempt grant；worker 与模型永不参与。",
+  "oneOf": [
+    { "$ref": "#/$defs/input" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "locatorId": { "type": "integer", "minimum": 1 },
+    "dateTime": { "type": "string", "format": "date-time", "minLength": 1, "maxLength": 100 },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "attemptId", "verificationRunId", "planKey", "checkKey", "query", "grantId"],
+      "properties": {
+        "schemaKind": { "const": "config_verification_execution_v1" },
+        "attemptId": { "$ref": "#/$defs/locatorId" },
+        "verificationRunId": { "$ref": "#/$defs/locatorId" },
+        "planKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "checkKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "query": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "expression", "rangeSeconds", "stepSeconds"],
+          "properties": {
+            "mode": { "enum": ["instant", "range"] },
+            "expression": { "type": "string", "minLength": 1, "maxLength": 100000 },
+            "rangeSeconds": { "type": ["integer", "null"], "minimum": 1 },
+            "stepSeconds": { "type": ["integer", "null"], "minimum": 1 }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "mode": { "const": "instant" } }, "required": ["mode"] },
+              "then": { "properties": { "rangeSeconds": { "type": "null" }, "stepSeconds": { "type": "null" } } },
+              "else": { "required": ["rangeSeconds", "stepSeconds"], "properties": { "rangeSeconds": { "type": "integer", "minimum": 1 }, "stepSeconds": { "type": "integer", "minimum": 1 } } }
+            }
+          ]
+        },
+        "grantId": { "$ref": "#/$defs/locatorId" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "attemptId", "verificationRunId", "planKey", "checkKey", "outcome", "observedAt", "result", "warnings", "errors", "gapReason"],
+      "properties": {
+        "schemaKind": { "const": "config_promql_result_v1" },
+        "attemptId": { "$ref": "#/$defs/locatorId" },
+        "verificationRunId": { "$ref": "#/$defs/locatorId" },
+        "planKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "checkKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "outcome": { "enum": ["success", "error", "gap"] },
+        "observedAt": { "$ref": "#/$defs/dateTime" },
+        "result": { "oneOf": [{ "type": "object" }, { "type": "null" }] },
+        "warnings": { "type": "array", "maxItems": 1000, "items": { "type": "string", "maxLength": 10000 } },
+        "errors": { "type": "array", "maxItems": 1000, "items": { "type": "string", "maxLength": 10000 } },
+        "gapReason": { "oneOf": [{ "enum": ["query_failed", "partial_response", "no_data", "cancelled", "interrupted"] }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "success" } }, "required": ["outcome"] },
+          "then": { "properties": { "result": { "type": "object" }, "errors": { "maxItems": 0 }, "gapReason": { "type": "null" } } },
+          "else": { "properties": { "result": { "type": "null" }, "gapReason": { "type": "string" } } }
+        }
+      ]
+    }
+  }
+}

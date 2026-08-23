@@ -138,6 +138,7 @@
 - **UI-SYSTEM-008 —** Browser Identity section 显示状态、revision、profile generation、最近 probe 和占用。Admin“配置身份”只填写显示名、起始 URL、认证 probe 与类型化参数并创建新 revision；Operator 只见“重新登录”。不得编辑 Cookie/profile 文件。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-009 —** `/business-systems/:systemKey/browser-login` 的 noVNC 铺满工作台；顶部窄工具条显示系统、真实 operation 状态、连接恢复提示、发布登录状态和取消。发布成功自动关闭远程桌面并返回来源详情；关闭浏览器页面不等于取消。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-010 —** 不提供独立 enable/disable 开关。Admin 通过 YAML 根 `enabled` 的新不可变版本发布；确认说明对定时巡检、资源刷新和告警展示的影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-SYSTEM-011 —** 系统详情必须提供“立即刷新”（Admin only）入口：提交后立即显示已受理状态（202 的 Run 投影）并以轮询展示进行中/完成结果，等待期间允许离开与返回；刷新结果直接投影为 Observed Resource 当前/陈旧列表（UI-SYSTEM-007），不提供与 `resource_refresh_runs` 竞争的本地状态或伪造进度百分比。Operator 只读可见列表与陈旧标记，不显示刷新入口。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、Issue #41）
 
 ## 11. Admin 管理工作区
 
