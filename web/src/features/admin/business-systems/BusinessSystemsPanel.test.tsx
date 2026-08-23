@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UploadOverlay } from './UploadOverlay'
 import { ConfigVersionPage } from './ConfigVersionDetail'
 import { BusinessSystemsList } from './BusinessSystemsList'
+import { BusinessSystemDetailPage } from './BusinessSystemDetail'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -67,6 +68,38 @@ describe('BusinessSystemsList', () => {
     render(<BusinessSystemsList onOpen={() => undefined} onUpload={() => undefined} onOpenContracts={() => undefined} isAdmin />)
     expect(await screen.findByText(/上传第一份配置 YAML/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '上传配置' })).toBeInTheDocument()
+  })
+})
+
+describe('BusinessSystemDetailPage resources', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
+  afterEach(cleanup)
+
+  it('shows current resources and lets an Admin start one refresh', async () => {
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('resources:refresh')) return jsonResponse({ id: '11', state: 'Running' })
+      if (path.includes('/resources')) return jsonResponse({ items: [{ id: '5', discoveryKey: 'web', identityLabels: { job: 'web' }, observedAt: '2026-08-22T01:00:00Z', current: true, stale: false }] })
+      if (path.includes('/config')) return jsonResponse({ items: [] })
+      return jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, browserIdentityState: 'none', timezone: 'Asia/Shanghai', resourceRefreshIntervalSeconds: 300, configVersionCount: 1, currentConfigVersionId: '7', discoveries: [], plans: [] })
+    })
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin onBack={() => undefined} onOpenVersion={() => undefined} />)
+    expect(await screen.findByText('job=web')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '立即刷新' }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringContaining('resources:refresh'), expect.objectContaining({ method: 'POST' })))
+    expect(await screen.findByText(/资源刷新已开始/)).toBeInTheDocument()
+  })
+
+  it('keeps the refresh entry admin-only while resources stay readable', async () => {
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('/resources')) return jsonResponse({ items: [] })
+      if (path.includes('/config')) return jsonResponse({ items: [] })
+      return jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, browserIdentityState: 'none', timezone: 'Asia/Shanghai', resourceRefreshIntervalSeconds: 300, configVersionCount: 1, currentConfigVersionId: '7', discoveries: [], plans: [] })
+    })
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin={false} onBack={() => undefined} onOpenVersion={() => undefined} />)
+    expect(await screen.findByText('已观测资源')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '立即刷新' })).not.toBeInTheDocument()
   })
 })
 

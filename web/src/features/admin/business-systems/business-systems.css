@@ -329,3 +329,12 @@
 .candidate-option { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 6px 8px; border-radius: 7px; }
 .candidate-option:hover { background: var(--surface-hover); }
 .blocker-box { display: grid; gap: 6px; }
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.section-heading h4 { margin: 0.8rem 0 0.45rem; }

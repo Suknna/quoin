@@ -92,6 +92,29 @@ export interface BusinessSystemDetail extends BusinessSystemSummary {
   plans: PlanView[]
 }
 
+export type ResourceRefreshState = 'Queued' | 'Running' | 'Completed' | 'CompletedWithWarnings' | 'Failed' | 'Cancelled' | 'Interrupted'
+export interface ResourceRefreshRunDetail {
+  id: string
+  businessSystemId: string
+  configVersionId: string
+  labelContractVersionId: string
+  triggerKind: 'manual' | 'schedule'
+  state: ResourceRefreshState
+  rowVersion: number
+  evidenceAt?: string
+  resultDetail?: string
+  createdAt: string
+}
+export interface ObservedResourceSummary {
+  id: string
+  discoveryKey: string
+  identityLabels: Record<string, string>
+  observedAt?: string
+  current: boolean
+  stale: boolean
+  lastSuccessfulRefreshAt?: string
+}
+
 export interface ConfigVersionSummary {
   id: string
   versionSeq: number
@@ -145,6 +168,24 @@ export async function getBusinessSystem(key: string): Promise<BusinessSystemDeta
   const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}`, { credentials: 'include' })
   if (!response.ok) throw await problem(response)
   return (await response.json()) as BusinessSystemDetail
+}
+
+export async function listObservedResources(key: string): Promise<ObservedResourceSummary[]> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/resources?current=true&limit=100`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  return ((await response.json()) as { items?: ObservedResourceSummary[] }).items ?? []
+}
+
+export async function getResourceRefreshRun(key: string, runId: string): Promise<ResourceRefreshRunDetail> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/resource-refresh-runs/${encodeURIComponent(runId)}`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as ResourceRefreshRunDetail
+}
+
+export async function startResourceRefresh(key: string): Promise<ResourceRefreshRunDetail> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/resources:refresh`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: newClientCommandId() }) })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as ResourceRefreshRunDetail
 }
 
 export async function listConfigVersions(key: string): Promise<ConfigVersionSummary[]> {

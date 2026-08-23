@@ -2,9 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   formatTime,
   getBusinessSystem,
+  getResourceRefreshRun,
   listConfigVersions,
+  listObservedResources,
+  startResourceRefresh,
   type BusinessSystemDetail,
   type ConfigVersionSummary,
+  type ObservedResourceSummary,
+  type ResourceRefreshRunDetail,
 } from './api'
 
 // The system detail is a continuous page (UI-SYSTEM-003): current state,
@@ -14,14 +19,19 @@ import {
 
 interface BusinessSystemDetailPageProps {
   systemKey: string
+  isAdmin: boolean
   onBack: () => void
   onOpenVersion: (systemKey: string, versionId: string) => void
 }
 
-export function BusinessSystemDetailPage({ systemKey, onBack, onOpenVersion }: BusinessSystemDetailPageProps) {
+export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVersion }: BusinessSystemDetailPageProps) {
   const [detail, setDetail] = useState<BusinessSystemDetail | null>(null)
   const [versions, setVersions] = useState<ConfigVersionSummary[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [resources, setResources] = useState<ObservedResourceSummary[]>([])
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshRun, setRefreshRun] = useState<ResourceRefreshRunDetail | null>(null)
 
   const reload = useCallback(() => {
     let cancelled = false
@@ -32,6 +42,9 @@ export function BusinessSystemDetailPage({ systemKey, onBack, onOpenVersion }: B
       .catch((reason: unknown) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : '暂时无法读取业务系统详情。')
       })
+    void listObservedResources(systemKey)
+      .then((items) => { if (!cancelled) setResources(items) })
+      .catch(() => undefined)
     void listConfigVersions(systemKey)
       .then((items) => {
         if (!cancelled) setVersions(items)
@@ -43,6 +56,34 @@ export function BusinessSystemDetailPage({ systemKey, onBack, onOpenVersion }: B
   }, [systemKey])
 
   useEffect(reload, [reload])
+
+  useEffect(() => {
+    if (!refreshRun || !['Queued', 'Running'].includes(refreshRun.state)) return
+    const timer = window.setTimeout(() => {
+      void getResourceRefreshRun(systemKey, refreshRun.id)
+        .then(async (run) => {
+          setRefreshRun(run)
+          setRefreshMessage(run.state === 'Running' || run.state === 'Queued' ? '资源刷新仍在进行；可离开此页，稍后返回查看结果。' : `资源刷新已${run.state}。`)
+          if (!['Queued', 'Running'].includes(run.state)) setResources(await listObservedResources(systemKey))
+        })
+        .catch((reason: unknown) => setRefreshMessage(reason instanceof Error ? reason.message : '暂时无法读取资源刷新状态。'))
+    }, 1000)
+    return () => window.clearTimeout(timer)
+  }, [systemKey, refreshRun])
+
+  async function refreshResources() {
+    setRefreshing(true)
+    setRefreshMessage('正在提交资源刷新…')
+    try {
+      const run = await startResourceRefresh(systemKey)
+      setRefreshRun(run)
+      setRefreshMessage(run.state === 'Running' ? '资源刷新已开始；正在等待结果。' : `资源刷新：${run.state}`)
+      const items = await listObservedResources(systemKey)
+      setResources(items)
+    } catch (reason) {
+      setRefreshMessage(reason instanceof Error ? reason.message : '暂时无法开始资源刷新。')
+    } finally { setRefreshing(false) }
+  }
 
   if (error) {
     return (
@@ -125,6 +166,11 @@ export function BusinessSystemDetailPage({ systemKey, onBack, onOpenVersion }: B
         {detail.currentConfigVersionId ? (
           <>
             <DiscoveryTable discoveries={detail.discoveries} />
+            <section aria-labelledby="observed-resources-title">
+              <div className="section-heading"><h4 id="observed-resources-title">已观测资源</h4>{isAdmin && <button className="secondary-button compact" onClick={() => void refreshResources()} disabled={refreshing}>{refreshing ? '正在提交…' : '立即刷新'}</button>}</div>
+              {refreshMessage && <p className="inline-status" role="status">{refreshMessage}</p>}
+              <ObservedResourceTable resources={resources} />
+            </section>
             <PlanTable plans={detail.plans} />
           </>
         ) : (
@@ -200,4 +246,9 @@ export function PlanTable({ plans }: { plans: BusinessSystemDetail['plans'] }) {
       ))}
     </div>
   )
+}
+
+function ObservedResourceTable({ resources }: { resources: ObservedResourceSummary[] }) {
+  if (resources.length === 0) return <p className="inline-status">尚未观测到资源。首次刷新完成后会显示在这里。</p>
+  return <div className="table-wrap"><table className="fact-table"><caption className="visually-hidden">当前已观测资源</caption><thead><tr><th scope="col">发现项</th><th scope="col">身份</th><th scope="col">最后观测</th><th scope="col">新鲜度</th></tr></thead><tbody>{resources.map((resource) => <tr key={resource.id}><td>{resource.discoveryKey}</td><td>{Object.entries(resource.identityLabels).map(([name, value]) => `${name}=${value}`).join(', ')}</td><td>{resource.observedAt ? formatTime(resource.observedAt) : '—'}</td><td><span className={`status-pill ${resource.stale ? 'waiting' : 'ok'}`}>{resource.stale ? '已过期' : '当前'}</span></td></tr>)}</tbody></table></div>
 }

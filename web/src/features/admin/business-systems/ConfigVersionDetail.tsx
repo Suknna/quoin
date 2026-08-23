@@ -78,6 +78,14 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
     }
   }, [systemKey, versionId, loadRuns])
 
+  // While a run is active the UI keeps polling its authoritative state so
+  // the operator sees the real terminal outcome without a manual refresh.
+  useEffect(() => {
+    if (!runs.some((run) => run.state === 'Queued' || run.state === 'Running')) return
+    const timer = window.setTimeout(loadRuns, 2000)
+    return () => window.clearTimeout(timer)
+  }, [runs, loadRuns])
+
   if (error) {
     return (
       <div className="detail-content">

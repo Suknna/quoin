@@ -354,6 +354,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         ) : active === 'business-systems' && businessSystemView.kind === 'system' ? (
           <BusinessSystemDetailPage
             systemKey={businessSystemView.systemKey}
+            isAdmin={user.role === 'admin'}
             onBack={backToBusinessSystems}
             onOpenVersion={openBusinessSystemVersion}
           />
