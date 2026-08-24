@@ -338,3 +338,50 @@ func TestSupersededStreamCannotDetachSuccessor(t *testing.T) {
 		t.Fatal("successor sender was not retained")
 	}
 }
+
+func TestTicket21LintelCapacityIsBoundToTheLiveHello(t *testing.T) {
+	service := newService(t)
+	service.AttachStreamWithSender("lintel", "boot-a", 7, func(any) error { return nil })
+	if err := service.SetBrowserCapacity("lintel", "boot-a", 7, 1); err != nil {
+		t.Fatalf("bind Hello capacity: %v", err)
+	}
+	capacity, err := service.BrowserCapacity("lintel", "boot-a", 7)
+	if err != nil || capacity != 1 {
+		t.Fatalf("unexpected frozen browser capacity: capacity=%d err=%v", capacity, err)
+	}
+	service.AttachStreamWithSender("lintel", "boot-a", 8, func(any) error { return nil })
+	if _, err := service.BrowserCapacity("lintel", "boot-a", 7); !errors.Is(err, qruntime.ErrNotConnected) {
+		t.Fatalf("superseded stream retained capacity authority: %v", err)
+	}
+}
+
+func TestTicket21SendToFencedRejectsSuccessorStream(t *testing.T) {
+	service := newService(t)
+	oldSent, successorSent := false, false
+	service.AttachStreamWithSender("lintel", "boot-a", 7, func(any) error {
+		oldSent = true
+		return nil
+	})
+	service.AttachStreamWithSender("lintel", "boot-b", 1, func(any) error {
+		successorSent = true
+		return nil
+	})
+	if err := service.SendToFenced("lintel", "boot-a", 7, func(_ uint64, sender qruntime.StreamSender) error {
+		return sender("stale-browser-start")
+	}); !errors.Is(err, qruntime.ErrNotConnected) {
+		t.Fatalf("stale boot must not be forwarded through successor: %v", err)
+	}
+	if oldSent || successorSent {
+		t.Fatalf("stale envelope reached a sender: old=%v successor=%v", oldSent, successorSent)
+	}
+	var messageID uint64
+	if err := service.SendToFenced("lintel", "boot-b", 1, func(id uint64, sender qruntime.StreamSender) error {
+		messageID = id
+		return sender("current-browser-start")
+	}); err != nil {
+		t.Fatalf("current stream fenced send: %v", err)
+	}
+	if !successorSent || messageID != 1 {
+		t.Fatalf("current stream did not receive its first fenced message: sent=%v id=%d", successorSent, messageID)
+	}
+}

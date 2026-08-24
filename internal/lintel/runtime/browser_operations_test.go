@@ -219,3 +219,23 @@ func TestPublishProbeUnavailableIsIndeterminateAndDoesNotInstallProfile(t *testi
 	}
 	_ = manager.Stop(8)
 }
+
+func TestTicket21ControlEnvelopeFencesStaleAndDuplicateFrames(t *testing.T) {
+	seen := map[uint64]struct{}{}
+	current := &runtimev1.ControlEnvelope{BootId: "boot-b", ConnectionEpoch: 1, MessageId: 1}
+	if !isCurrentControlEnvelope(current, "boot-b", 1, seen) {
+		t.Fatal("current control frame must be admitted exactly once")
+	}
+	if isCurrentControlEnvelope(current, "boot-b", 1, seen) {
+		t.Fatal("physical duplicate must not execute a second time")
+	}
+	for _, stale := range []*runtimev1.ControlEnvelope{
+		{BootId: "boot-a", ConnectionEpoch: 7, MessageId: 2},
+		{BootId: "boot-b", ConnectionEpoch: 2, MessageId: 3},
+		{BootId: "boot-b", ConnectionEpoch: 1, MessageId: 0},
+	} {
+		if isCurrentControlEnvelope(stale, "boot-b", 1, seen) {
+			t.Fatalf("stale control frame bypassed the active stream fence: %#v", stale)
+		}
+	}
+}

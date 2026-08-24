@@ -376,3 +376,112 @@ func TestManualLoginReconnectGraceTransitionsAndExpires(t *testing.T) {
 		t.Fatalf("grace expiry did not terminalize operation: %#v err=%v", terminal, err)
 	}
 }
+
+func TestTicket21PrepareDispatchWaitsAtGlobalCapacity(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	firstIdentity, _, err := service.Configure(context.Background(), 1, ConfigureInput{SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login", Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO business_systems(id,key,display_name,enabled,created_at) VALUES(2,'orders','Orders',0,'2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	secondIdentity, _, err := service.Configure(context.Background(), 1, ConfigureInput{SystemKey: "orders", Name: "Orders", StartURL: "https://orders.example.test/login", Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://orders.example.test/app"}`)}, ClientCommandID: "configure-identity-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	first, err := service.StartManualLogin(context.Background(), "payments", 1, 1, firstIdentity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.StartManualLogin(context.Background(), "orders", 1, 1, secondIdentity.RowVersion, "start-login-0002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrepareDispatchWithCapacity(context.Background(), first.ID, "lintel-boot", 7, 1); err != nil {
+		t.Fatalf("dispatch first operation: %v", err)
+	}
+	if err := service.HandleStartAck(context.Background(), first.ID, "lintel-boot", 7, true, "", time.Now()); err != nil {
+		t.Fatalf("ack first operation: %v", err)
+	}
+	if _, err := service.PrepareDispatchWithCapacity(context.Background(), second.ID, "lintel-boot", 7, 1); !errors.Is(err, ErrCapacityUnavailable) {
+		t.Fatalf("second operation must wait for Quoin's global capacity decision, got %v", err)
+	}
+	waiting, err := service.GetOperation(context.Background(), "orders", second.ID)
+	if err != nil || waiting.State != "WaitingForCapacity" || waiting.StartDispatchedAt != nil {
+		t.Fatalf("capacity wait must be durable without a Start side effect: %#v err=%v", waiting, err)
+	}
+}
+
+func TestTicket21StartAckReplayUsesOriginalSameBootFence(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	identity, _, err := service.Configure(context.Background(), 1, ConfigureInput{SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login", Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	op, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.PrepareDispatchWithCapacity(context.Background(), op.ID, "lintel-boot", 7, 1)
+	if err != nil || first.OperationID != op.ID {
+		t.Fatalf("first dispatch: input=%#v err=%v", first, err)
+	}
+	replayed, err := service.PrepareDispatchWithCapacity(context.Background(), op.ID, "lintel-boot", 8, 1)
+	if err != nil || replayed.BootID != "lintel-boot" || replayed.Epoch != 8 {
+		t.Fatalf("same-boot Start replay must target the new stream: %#v err=%v", replayed, err)
+	}
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := service.HandleStartAck(context.Background(), op.ID, "lintel-boot", 8, true, "", started); err != nil {
+		t.Fatalf("replayed ack: %v", err)
+	}
+	if err := service.HandleStartAck(context.Background(), op.ID, "lintel-boot", 8, true, "", started); err != nil {
+		t.Fatalf("duplicate ack must be idempotent: %v", err)
+	}
+	if err := service.HandleStartAck(context.Background(), op.ID, "other-boot", 8, true, "", started); !errors.Is(err, ErrConflict) {
+		t.Fatalf("new boot ack bypassed original fence: %v", err)
+	}
+	if err := service.HandleStartAck(context.Background(), op.ID, "lintel-boot", 6, true, "", started); !errors.Is(err, ErrConflict) {
+		t.Fatalf("older epoch ack bypassed original fence: %v", err)
+	}
+}
+
+func TestTicket21CapacityRetryRebindsAfterNewBoot(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	identity, _, err := service.Configure(context.Background(), 1, ConfigureInput{SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login", Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	op, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrepareDispatchWithCapacity(context.Background(), op.ID, "boot-a", 7, 1); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	if err := service.HandleStartAck(context.Background(), op.ID, "boot-a", 7, false, "no_capacity", time.Time{}); err != nil {
+		t.Fatalf("no-capacity acknowledgement: %v", err)
+	}
+	waiting, err := service.GetOperation(context.Background(), "payments", op.ID)
+	if err != nil || waiting.State != "WaitingForCapacity" {
+		t.Fatalf("no-capacity acknowledgement must durably wait: %#v err=%v", waiting, err)
+	}
+	retry, err := service.PrepareDispatchWithCapacity(context.Background(), op.ID, "boot-b", 1, 1)
+	if err != nil || retry.BootID != "boot-b" || retry.Epoch != 1 {
+		t.Fatalf("new boot must rebind an unstarted capacity retry: %#v err=%v", retry, err)
+	}
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := service.HandleStartAck(context.Background(), op.ID, "boot-b", 1, true, "", started); err != nil {
+		t.Fatalf("new boot acknowledgement must pass its replacement fence: %v", err)
+	}
+	got, err := service.GetOperation(context.Background(), "payments", op.ID)
+	if err != nil || got.State != "Running" {
+		t.Fatalf("new boot capacity retry must reach Running: %#v err=%v", got, err)
+	}
+}
