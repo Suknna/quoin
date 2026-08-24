@@ -22,7 +22,7 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	generatedweb "github.com/Suknna/quoin/internal/gen/web"
-	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
+	"github.com/Suknna/quoin/internal/lintel/catalog"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
@@ -32,6 +32,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
@@ -61,6 +62,7 @@ type apiServer struct {
 	investigations              *investigation.Service
 	systems                     *businesssystem.Service
 	contracts                   *labelcontract.Service
+	browsers                    *browser.Service
 	investigationUpload         *appinvestigation.Handler
 	configHandler               *appconfig.Handler
 	artifacts                   *artifact.Store
@@ -71,6 +73,9 @@ type apiServer struct {
 	investigationDispatchFunc   func(ctx context.Context, attemptID int64) error
 	resourceRefreshDispatchFunc func(ctx context.Context)
 	verificationDispatchFunc    func(ctx context.Context)
+	browserPublishDispatchFunc  func(ctx context.Context, request browser.PublishRequest) error
+	browserStopDispatchFunc     func(ctx context.Context, operationID int64) error
+	browserTunnels              *browserTunnelHub
 }
 
 // attachmentLimitBytes resolves the deployment message-level attachment
@@ -100,6 +105,8 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		investigations: investigation.NewService(db),
 		systems:        businesssystem.NewService(db),
 		contracts:      labelcontract.NewService(db),
+		browsers:       browser.NewService(db),
+		browserTunnels: newBrowserTunnelHub(),
 	}
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
@@ -220,11 +227,15 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// the grant write into CompleteToolCall's transaction.
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
-	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, lintelruntime.EmptyCatalogDigest(), application.connections)
+	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
 	controlService.BusinessSystems = application.systems
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations
 	controlService.Artifacts = artifactStore
+	controlService.Browsers = application.browsers
+	application.browsers.Dispatch = controlService.dispatchBrowserOperation
+	application.browserPublishDispatchFunc = controlService.dispatchBrowserPublish
+	application.browserStopDispatchFunc = controlService.dispatchBrowserStop
 	application.probeDispatchFunc = controlService.dispatchAttempt
 	application.cancelDispatchFunc = controlService.dispatchCancelRouted
 	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
@@ -252,6 +263,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.resourceRefreshDispatchFunc = controlService.dispatchQueuedResourceRefreshAttempts
 	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
 	RegisterRuntimeControl(serverSet.relay, controlService)
+	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
+	// disconnect is what enters AwaitingReconnect; a tunnel reconnect must not
+	// terminate an otherwise active manual-login operation.
+	runtimev1.RegisterBrowserTunnelServer(serverSet.relay, &BrowserTunnelService{Slots: application.runtime, Browsers: application.browsers, Hub: application.browserTunnels})
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	// T12: the periodic lease sweeper converges attempts whose runtime
 	// disappeared without reconnecting (RUNTIME-TASK-006).
@@ -289,6 +304,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	configHandler := application.register(api)
 	application.registerAlertStream(mux)
 	application.registerTaskStream(mux)
+	application.registerBrowserWebSocket(mux, publicOrigin)
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
 	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
@@ -319,6 +335,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	application.registerAdminUserRoutes(api)
 	application.registerRuntimeRoutes(api)
 	application.registerConnectionRoutes(api)
+	application.registerBrowserRoutes(api)
 	application.registerAnalysisRoutes(api)
 	application.registerTaskSnapshot(api)
 	application.registerEvidenceRoutes(api)
@@ -439,6 +456,9 @@ func (application *apiServer) changePassword(ctx context.Context, input *passwor
 		// faults and must not surface raw internal error text to clients.
 		return nil, huma.Error500InternalServerError("暂时无法保存新密码，请重试。", err)
 	}
+	// Changing a password revokes every other Session. Converge their attached
+	// browser transports before returning so revoked RFB input cannot continue.
+	application.closeBrowserSessions(ctx)
 	return &noContentOutput{CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
@@ -449,8 +469,19 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 	}
 	application.reveals.InvalidateSession(secrets.SessionDigest(input.Session))
 	application.runtime.InvalidateSession(secrets.SessionDigest(input.Session))
+	// Commit session revocation before converging Browser Operations. The Start
+	// transaction rechecks this row under BEGIN IMMEDIATE, so the SQLite commit
+	// order now decides the race without a window that can launch Chromium.
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
+	}
+	if operationIDs, revokeErr := application.browsers.RevokeSession(ctx, session.ID); revokeErr == nil {
+		for _, operationID := range operationIDs {
+			application.browserTunnels.closeOperation(operationID)
+			if application.browserStopDispatchFunc != nil {
+				_ = application.browserStopDispatchFunc(ctx, operationID)
+			}
+		}
 	}
 	return &noContentOutput{SetCookie: sessionCookie("", -time.Hour), ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }

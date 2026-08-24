@@ -7,13 +7,15 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
-	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
+	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
@@ -106,7 +108,7 @@ func TestHandshakeRejectionMatrix(t *testing.T) {
 	service := newService(t)
 	ctx := context.Background()
 	var session [32]byte
-	digest := lintelruntime.EmptyCatalogDigest()
+	digest := catalog.Digest()
 	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
 	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", release, release)
 	if err != nil {
@@ -178,13 +180,13 @@ func TestCatalogDigestAgreement(t *testing.T) {
 	service := newService(t)
 	ctx := context.Background()
 	var session [32]byte
-	digest := lintelruntime.EmptyCatalogDigest()
+	digest := catalog.Digest()
 	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
 	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", release, release)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-c", 1, release, release, digest, lintelruntime.EmptyCatalogDigest()); err != nil || !decision.Accepted {
+	if decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-c", 1, release, release, digest, catalog.Digest()); err != nil || !decision.Accepted {
 		t.Fatalf("lintel-embedded digest must be accepted: err=%v accepted=%v reason=%s", err, decision.Accepted, decision.Reason)
 	}
 	if decision, _ := service.Adjudicate(ctx, longTerm, "lintel", "boot-c2", 1, release, release, digest, digest+"00"); decision.Accepted {
@@ -265,5 +267,74 @@ func TestConcurrentRegisterSingleWinner(t *testing.T) {
 	}
 	if winners != 1 {
 		t.Fatalf("exactly one concurrent register must win, got %d", winners)
+	}
+}
+
+func TestWithCurrentRejectsSupersededStream(t *testing.T) {
+	service := newService(t)
+	service.AttachStream("lintel", "boot-a", 1)
+	if err := service.WithCurrent("lintel", "boot-a", 1, func() error { return nil }); err != nil {
+		t.Fatalf("current stream rejected: %v", err)
+	}
+	service.AttachStream("lintel", "boot-a", 2)
+	called := false
+	if err := service.WithCurrent("lintel", "boot-a", 1, func() error { called = true; return nil }); !errors.Is(err, qruntime.ErrNotConnected) || called {
+		t.Fatalf("superseded stream retained authority: err=%v called=%v", err, called)
+	}
+}
+
+func TestWithCurrentClosingFencesSupersededOwner(t *testing.T) {
+	service := newService(t)
+	oldDone := service.AttachStream("lintel", "boot-a", 1)
+	var closing <-chan struct{}
+	if err := service.WithCurrentClosing("lintel", "boot-a", 1, func(fence <-chan struct{}) error {
+		closing = fence
+		return nil
+	}); err != nil {
+		t.Fatalf("capture current owner fence: %v", err)
+	}
+	service.AttachStream("lintel", "boot-a", 2)
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("superseding control stream did not close old owner fence")
+	}
+	select {
+	case <-closing:
+	case <-time.After(time.Second):
+		t.Fatal("captured data-plane owner fence was not closed")
+	}
+}
+
+func TestDetachedStreamClosesDataPlaneOwnerFence(t *testing.T) {
+	service := newService(t)
+	service.AttachStream("lintel", "boot-a", 1)
+	var closing <-chan struct{}
+	if err := service.WithCurrentClosing("lintel", "boot-a", 1, func(fence <-chan struct{}) error {
+		closing = fence
+		return nil
+	}); err != nil {
+		t.Fatalf("capture current owner fence: %v", err)
+	}
+	service.DetachStream("lintel", "boot-a", 1)
+	select {
+	case <-closing:
+	case <-time.After(time.Second):
+		t.Fatal("detaching control stream did not close data-plane owner fence")
+	}
+}
+
+func TestSupersededStreamCannotDetachSuccessor(t *testing.T) {
+	service := newService(t)
+	oldDone := service.AttachStreamWithSender("lintel", "boot-a", 1, func(any) error { return nil })
+	called := false
+	service.AttachStreamWithSender("lintel", "boot-a", 2, func(any) error { called = true; return nil })
+	<-oldDone
+	service.DetachStream("lintel", "boot-a", 1)
+	if err := service.SendTo("lintel", "probe"); err != nil {
+		t.Fatalf("superseded stream removed successor: %v", err)
+	}
+	if !called {
+		t.Fatal("successor sender was not retained")
 	}
 }

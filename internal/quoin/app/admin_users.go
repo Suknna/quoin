@@ -240,6 +240,7 @@ func (application *apiServer) updateUser(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, commandUserError(err)
 	}
+	application.closeBrowserSessions(ctx)
 	return &struct {
 		Body auth.User
 	}{Body: *result.User}, nil
@@ -288,6 +289,7 @@ func (application *apiServer) resetUserPassword(ctx context.Context, input *stru
 	}{}
 	output.Body.User = *result.User
 	output.Body.RevokedSessionCount = *result.RevokedSessionCount
+	application.closeBrowserSessions(ctx)
 	return output, nil
 }
 
@@ -317,6 +319,7 @@ func (application *apiServer) revokeUserSessions(ctx context.Context, input *str
 	if err != nil {
 		return nil, commandUserError(err)
 	}
+	application.closeBrowserSessions(ctx)
 	return &struct {
 		Body struct {
 			RevokedSessionCount int64 `json:"revokedSessionCount"`
@@ -381,6 +384,7 @@ func (application *apiServer) revokeOwnSession(ctx context.Context, input *struc
 	}); err != nil {
 		return nil, commandUserError(err)
 	}
+	application.closeBrowserSessions(ctx)
 	return &noContentOutput{CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 

@@ -260,6 +260,29 @@ func (service *Service) AttachStream(slotName, bootID string, epoch uint64) <-ch
 
 // Touch updates the transient lastSeen projection (Heartbeat) without any
 // persistent write (RUNTIME-CTRL-005).
+// WithCurrent serializes a stateful inbound message with control-stream
+// replacement. The callback may commit durable state only while this exact
+// boot/epoch remains the slot authority; a replacement either happens before
+// the callback (and it is rejected) or after its transaction commits.
+func (service *Service) WithCurrent(slotName, bootID string, epoch uint64, apply func() error) error {
+	return service.WithCurrentClosing(slotName, bootID, epoch, func(_ <-chan struct{}) error {
+		return apply()
+	})
+}
+
+// WithCurrentClosing is the data-plane counterpart of WithCurrent. The
+// callback can atomically bind transient state to the exact control owner;
+// its returned fence closes when that owner is replaced or detached.
+func (service *Service) WithCurrentClosing(slotName, bootID string, epoch uint64, apply func(closing <-chan struct{}) error) error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	conn, live := service.conns[slotName]
+	if !live || conn.bootID != bootID || conn.epoch != epoch {
+		return ErrNotConnected
+	}
+	return apply(conn.closing)
+}
+
 func (service *Service) Touch(slotName string) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -268,11 +291,15 @@ func (service *Service) Touch(slotName string) {
 	}
 }
 
-// DetachStream removes the connection projection when a stream ends.
-func (service *Service) DetachStream(slotName string) {
+// DetachStream removes the projection only when the ending handler still owns
+// it. A superseded stream must never erase its successor's live authority.
+func (service *Service) DetachStream(slotName, bootID string, epoch uint64) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	delete(service.conns, slotName)
+	if conn, live := service.conns[slotName]; live && conn.bootID == bootID && conn.epoch == epoch {
+		conn.close()
+		delete(service.conns, slotName)
+	}
 }
 
 // CloseSlot signals the slot's live control stream to end (replacement/
