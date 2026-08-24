@@ -33,10 +33,26 @@ type PublishRequest struct {
 	AlreadyPublished                    bool
 }
 
-// PrepareDispatch atomically claims only the global FIFO head for the current
-// Lintel binding. start_dispatched_at is a durable unknown-outcome fence: a
-// send failure must not turn a possibly delivered Start back into Queued.
+// PrepareDispatch preserves the legacy unlimited-capacity seam for focused
+// durable-state tests. Production dispatch always calls
+// PrepareDispatchWithCapacity with Lintel's Hello-frozen slot total.
 func (service *Service) PrepareDispatch(ctx context.Context, operationID int64, bootID string, epoch uint64) (DispatchInput, error) {
+	return service.prepareDispatch(ctx, operationID, bootID, epoch, ^uint32(0))
+}
+
+// PrepareDispatchWithCapacity atomically claims the global FIFO head only when
+// Quoin's current Lintel capacity projection has a free physical slot.
+func (service *Service) PrepareDispatchWithCapacity(ctx context.Context, operationID int64, bootID string, epoch uint64, capacity uint32) (DispatchInput, error) {
+	if capacity == 0 {
+		return DispatchInput{}, ErrRuntimeOffline
+	}
+	return service.prepareDispatch(ctx, operationID, bootID, epoch, capacity)
+}
+
+// prepareDispatch is the shared durable-fence implementation. start_dispatched_at
+// is an unknown-outcome fence: a send failure must not turn a possibly delivered
+// Start back into Queued.
+func (service *Service) prepareDispatch(ctx context.Context, operationID int64, bootID string, epoch uint64, capacity uint32) (DispatchInput, error) {
 	if operationID < 1 || bootID == "" || epoch == 0 {
 		return DispatchInput{}, ErrInvalid
 	}
@@ -94,10 +110,42 @@ func (service *Service) PrepareDispatch(ctx context.Context, operationID int64, 
 		if earlier != 0 {
 			return DispatchInput{}, ErrConflict
 		}
+		// Starting, live, reconnecting and terminal-but-unconfirmed operations
+		// occupy a physical slot. WaitingForCapacity does not: an explicit
+		// NO_CAPACITY acknowledgement proves no process was created.
+		var occupied uint64
+		if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE id<>? AND (state IN ('Starting','Running','AwaitingReconnect') OR (state IN ('Succeeded','Failed','Cancelled','Interrupted') AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL))`, operationID).Scan(&occupied); err != nil {
+			return DispatchInput{}, err
+		}
+		if occupied >= uint64(capacity) {
+			if state == "Queued" {
+				if _, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='WaitingForCapacity',row_version=row_version+1 WHERE id=? AND state='Queued'`, operationID); err != nil {
+					return DispatchInput{}, err
+				}
+			}
+			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+				return DispatchInput{}, err
+			}
+			committed = true
+			return DispatchInput{}, ErrCapacityUnavailable
+		}
 		now := service.now().UTC().Format(time.RFC3339Nano)
-		result, updateErr := conn.ExecContext(ctx, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id=?,lintel_connection_epoch=?,row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity')`, now, bootID, epoch, operationID)
-		if updateErr != nil {
-			return DispatchInput{}, updateErr
+		var result sql.Result
+		if state == "WaitingForCapacity" && dispatchedBoot == bootID {
+			// Preserve the first Start's audit binding after Lintel explicitly
+			// reported NO_CAPACITY. The resend travels on a later epoch of this
+			// same boot, which HandleStartAck permits.
+			result, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Starting',row_version=row_version+1 WHERE id=? AND state='WaitingForCapacity'`, operationID)
+		} else if state == "WaitingForCapacity" && dispatchedBoot != "" {
+			// NO_CAPACITY proves that the old boot created no process. A successor
+			// boot may therefore take over this still-unstarted physical attempt;
+			// keep the original dispatch timestamp but replace its stale fence.
+			result, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Starting',lintel_boot_id=?,lintel_connection_epoch=?,row_version=row_version+1 WHERE id=? AND state='WaitingForCapacity'`, bootID, epoch, operationID)
+		} else {
+			result, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id=?,lintel_connection_epoch=?,row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity')`, now, bootID, epoch, operationID)
+		}
+		if err != nil {
+			return DispatchInput{}, err
 		}
 		if rows, _ := result.RowsAffected(); rows != 1 {
 			return DispatchInput{}, ErrConflict

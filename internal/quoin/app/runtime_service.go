@@ -147,6 +147,9 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if slot == "" {
 		return status.Error(codes.InvalidArgument, "slot must be plinth or lintel")
 	}
+	if slot == qruntime.SlotLintel && hello.GetBrowserCapacitySlots() == 0 {
+		return status.Error(codes.InvalidArgument, "lintel browser capacity must be positive")
+	}
 	decision, err := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion(), service.ReleaseVersion, service.CatalogDigest, hello.GetJourneyCatalogDigest())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "runtime.hello_failed", err.Error())
@@ -181,6 +184,11 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		return stream.Send(proto)
 	}
 	closing := service.Slots.AttachStreamWithSender(slot, hello.GetBootId(), hello.GetConnectionEpoch(), sender)
+	if slot == qruntime.SlotLintel {
+		if err := service.Slots.SetBrowserCapacity(slot, hello.GetBootId(), hello.GetConnectionEpoch(), uint64(hello.GetBrowserCapacitySlots())); err != nil {
+			return status.Error(codes.Internal, "bind lintel browser capacity")
+		}
+	}
 	// Reserve the HelloAck sequence number before concurrent dispatchers use this stream.
 	helloAckID, err := service.Slots.NextMessageID(slot)
 	if err != nil {

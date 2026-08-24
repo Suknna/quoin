@@ -913,7 +913,7 @@ CREATE TABLE browser_operations (
   probe_phase                TEXT CHECK (probe_phase IS NULL OR probe_phase IN ('revision_change','admission','completion','publish','mid_operation')),
   requested_at               TEXT NOT NULL,
   start_dispatched_at        TEXT,                   -- StartBrowserOperation 已写入控制流的持久 fence；Ack 丢失时仍证明物理启动结果未知
-  lintel_boot_id             TEXT,                   -- Start 派发时冻结的 Lintel boot；是 operation 分配事实，不是在线状态投影
+  lintel_boot_id             TEXT,                   -- Start 派发时冻结的 Lintel boot；NO_CAPACITY 已证明未创建进程时，允许 successor boot 重绑一次重试；不是在线状态投影
   lintel_connection_epoch    INTEGER CHECK (lintel_connection_epoch IS NULL OR lintel_connection_epoch >= 1),
   started_at                 TEXT,
   reconnect_deadline         TEXT,
@@ -3515,11 +3515,20 @@ WHEN NOT (OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NUL
   AND OLD.state IN ('Queued','WaitingForCapacity') AND NEW.state = 'Starting')
 BEGIN SELECT RAISE(ABORT, 'browser operation Start dispatch fence is write-once and must accompany entry to Starting'); END;
 CREATE TRIGGER trg_browser_operations_start_binding_once BEFORE UPDATE OF lintel_boot_id, lintel_connection_epoch ON browser_operations
-WHEN NOT (OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NULL
+WHEN NOT ((OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NULL
   AND OLD.lintel_boot_id IS NULL AND NEW.lintel_boot_id IS NOT NULL
   AND OLD.lintel_connection_epoch IS NULL AND NEW.lintel_connection_epoch IS NOT NULL
   AND OLD.state IN ('Queued','WaitingForCapacity') AND NEW.state = 'Starting')
-BEGIN SELECT RAISE(ABORT, 'browser operation Lintel boot/epoch binding is immutable and must accompany Start dispatch'); END;
+  -- NO_CAPACITY is an explicit proof that no Chromium was created. Its queued
+  -- retry can adopt a successor boot; every actual Start remains fenced.
+  OR (OLD.state = 'WaitingForCapacity' AND NEW.state = 'Starting'
+    AND OLD.start_dispatched_at IS NOT NULL AND NEW.start_dispatched_at = OLD.start_dispatched_at
+    AND OLD.started_at IS NULL AND NEW.started_at IS NULL
+    AND OLD.stop_confirmed_at IS NULL AND NEW.stop_confirmed_at IS NULL
+    AND OLD.lintel_boot_id IS NOT NULL AND NEW.lintel_boot_id IS NOT NULL
+    AND NEW.lintel_boot_id <> OLD.lintel_boot_id
+    AND OLD.lintel_connection_epoch IS NOT NULL AND NEW.lintel_connection_epoch IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'browser operation Lintel boot/epoch binding must accompany Start dispatch or a proven-no-capacity retry'); END;
 CREATE TRIGGER trg_browser_operations_start_ack_once BEFORE UPDATE OF started_at ON browser_operations
 WHEN NOT (OLD.started_at IS NULL AND NEW.started_at IS NOT NULL AND OLD.state = 'Starting' AND NEW.state = 'Running')
 BEGIN SELECT RAISE(ABORT, 'browser operation started_at is write-once and must accompany an accepted Start Ack'); END;

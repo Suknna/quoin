@@ -270,6 +270,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			}
 		}
 	}()
+	seenMessageIDs := map[uint64]struct{}{}
 	for {
 		envelope, err := stream.Recv()
 		if err != nil {
@@ -277,6 +278,9 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 				readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
 			}
 			return fmt.Errorf("控制流结束: %w", err)
+		}
+		if !isCurrentControlEnvelope(envelope, channel.bootID, epoch, seenMessageIDs) {
+			continue
 		}
 		if ack := envelope.GetCompleteBrowserOperationAck(); ack != nil {
 			channel.acknowledgeCompletion(ack)
@@ -320,6 +324,19 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			continue
 		}
 	}
+}
+
+// isCurrentControlEnvelope fences buffered frames from a superseded stream
+// before any operation handler can produce a browser or profile side effect.
+func isCurrentControlEnvelope(envelope *runtimev1.ControlEnvelope, bootID string, epoch uint64, seen map[uint64]struct{}) bool {
+	if envelope.GetBootId() != bootID || envelope.GetConnectionEpoch() != epoch || envelope.GetMessageId() == 0 {
+		return false
+	}
+	if _, duplicate := seen[envelope.GetMessageId()]; duplicate {
+		return false
+	}
+	seen[envelope.GetMessageId()] = struct{}{}
+	return true
 }
 
 func (channel *Channel) nextMessageID() uint64 {

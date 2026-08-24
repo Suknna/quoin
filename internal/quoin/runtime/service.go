@@ -82,13 +82,14 @@ type registrationToken struct {
 // closing carries the stop signal for the handler loop: cancelling the
 // stream context makes gRPC terminate the RPC on both ends.
 type connection struct {
-	bootID   string
-	epoch    uint64
-	updated  time.Time
-	closing  chan struct{}
-	once     sync.Once
-	sender   StreamSender
-	outbound uint64
+	bootID               string
+	epoch                uint64
+	updated              time.Time
+	closing              chan struct{}
+	once                 sync.Once
+	sender               StreamSender
+	outbound             uint64
+	browserCapacitySlots uint32
 }
 
 func (connection *connection) close() {

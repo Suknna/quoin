@@ -21,12 +21,13 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("browser identity or operation not found")
-	ErrConflict       = errors.New("browser lifecycle conflict")
-	ErrRowVersion     = errors.New("expected row version does not match")
-	ErrInvalid        = errors.New("invalid browser identity input")
-	ErrRuntimeOffline = errors.New("lintel runtime unavailable")
-	ErrSessionRevoked = errors.New("manual-login session is no longer valid")
+	ErrNotFound            = errors.New("browser identity or operation not found")
+	ErrConflict            = errors.New("browser lifecycle conflict")
+	ErrRowVersion          = errors.New("expected row version does not match")
+	ErrInvalid             = errors.New("invalid browser identity input")
+	ErrRuntimeOffline      = errors.New("lintel runtime unavailable")
+	ErrSessionRevoked      = errors.New("manual-login session is no longer valid")
+	ErrCapacityUnavailable = errors.New("global browser capacity is exhausted")
 )
 
 type RowVersionError struct{ Current int64 }
@@ -358,12 +359,14 @@ func (service *Service) StartManualLogin(ctx context.Context, systemKey string, 
 	if err != nil {
 		return Operation{}, err
 	}
-	// A disconnected Lintel is not a failed user command: the durable FIFO
-	// record is the authority and a later stream attach dispatches it. A send
-	// failure likewise leaves it queued for the dispatcher to retry.
-	if service.Dispatch == nil || service.Dispatch(ctx, id) != nil {
+	// A disconnected Lintel and a send failure do not fail the user command:
+	// the durable FIFO record is the authority. Re-read it after every best-
+	// effort dispatch so the response faithfully projects WaitingForCapacity or
+	// the persisted Starting unknown-outcome fence rather than stale Queued.
+	if service.Dispatch == nil {
 		return op, nil
 	}
+	_ = service.Dispatch(ctx, id)
 	return service.operationOn(ctx, service.db, id)
 }
 

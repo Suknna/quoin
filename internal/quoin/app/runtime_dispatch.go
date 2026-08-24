@@ -28,18 +28,17 @@ import (
 // The dispatch lease window is attempt.DispatchLease (single frozen
 // authority, RUNTIME-SCOPE-004).
 
-// sendEnvelope stamps per-direction ids and forwards to the slot's live
-// stream; a failed send is audited and retried by the queued dispatcher.
+// sendEnvelope stamps per-direction ids and forwards only through the exact
+// boot/epoch stream embedded in the message. A stale dispatch must fail rather
+// than reach a successor Lintel stream.
 func (service *RuntimeService) sendEnvelope(slot string, envelope *runtimev1.ControlEnvelope) error {
 	if service.sendEnvelopeForTest != nil {
 		return service.sendEnvelopeForTest(slot, envelope)
 	}
-	id, err := service.Slots.NextMessageID(slot)
-	if err != nil {
-		return err
-	}
-	envelope.MessageId = id
-	return service.Slots.SendTo(slot, envelope)
+	return service.Slots.SendToFenced(slot, envelope.GetBootId(), envelope.GetConnectionEpoch(), func(messageID uint64, sender qruntime.StreamSender) error {
+		envelope.MessageId = messageID
+		return sender(envelope)
+	})
 }
 
 // dispatchAttempt sends the DispatchAttempt frame for one already-Assigned

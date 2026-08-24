@@ -23,7 +23,11 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		return qruntime.ErrNotConnected
 	}
-	input, err := service.Browsers.PrepareDispatch(ctx, operationID, view.BootID, *view.ConnectionEpoch)
+	capacity, err := service.Slots.BrowserCapacity(qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch)
+	if err != nil {
+		return err
+	}
+	input, err := service.Browsers.PrepareDispatchWithCapacity(ctx, operationID, view.BootID, *view.ConnectionEpoch, capacity)
 	if err != nil {
 		return err
 	}
