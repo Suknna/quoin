@@ -20,6 +20,9 @@ var (
 	//go:embed readiness-response.schema.json
 	ReadinessResponseSchema []byte
 
+	//go:embed browser-execution.schema.json
+	BrowserExecutionSchema []byte
+
 	//go:embed metrics.yaml
 	MetricsYAML []byte
 

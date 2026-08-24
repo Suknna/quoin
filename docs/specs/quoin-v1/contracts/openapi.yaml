@@ -3255,12 +3255,12 @@ paths:
             schema:
               $ref: '#/components/schemas/PublishBrowserProfileRequest'
       responses:
-        '200':
-          description: generation 已发布。
+        '202':
+          description: 发布命令已持久化并派发；以 operation 查询其最终 published profile generation。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/BrowserProfilePublishResponse'
+                $ref: '#/components/schemas/BrowserOperationSummary'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

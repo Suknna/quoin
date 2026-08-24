@@ -2,25 +2,22 @@ package config
 
 // Embedded Journey Catalog static validation (CFG-JOURNEY-003,
 // DATA-CONFIG-008): Quoin validates browser-check references offline against
-// its own build-time embedded catalog. Until the full generator arrives with
-// the Lintel browser stage, the catalog is the minimal empty-journeys
-// document both components embed; the JCS bytes and digest therefore stay
-// owned by the single lintel runtime definition and are referenced here
-// rather than duplicated. Every journey_id is consequently rejected today —
-// the structurally honest answer for a catalog with no journeys.
+// its own build-time embedded catalog. The canonical JCS bytes remain owned
+// by internal/lintel/catalog; Quoin consumes them directly rather than
+// maintaining a second serialization or rebuilding them from maps.
 
 import (
 	"encoding/json"
 
-	lintelruntime "github.com/Suknna/quoin/internal/lintel/runtime"
+	"github.com/Suknna/quoin/internal/lintel/catalog"
 )
 
 // JourneyCatalog returns the embedded catalog document (parsed), its version
 // and the raw-bytes digest (DATA-CONFIG-008).
 func JourneyCatalog() (document map[string]any, version, digest string, err error) {
-	digest = lintelruntime.EmptyCatalogDigest()
-	version = lintelruntime.EmptyCatalogVersion
-	if parseErr := json.Unmarshal([]byte(lintelruntime.EmptyCatalogJCS), &document); parseErr != nil {
+	digest = catalog.Digest()
+	version = catalog.Version
+	if parseErr := json.Unmarshal(catalog.Bytes(), &document); parseErr != nil {
 		return nil, "", "", parseErr
 	}
 	return document, version, digest, nil
@@ -30,6 +27,13 @@ func JourneyCatalog() (document map[string]any, version, digest string, err erro
 // embedded catalog: the stable journey_id must exist and the (normalized)
 // params must satisfy that entry's closed params_schema.
 func ValidateJourneyReference(journeyID string, params map[string]any, path string) []FieldError {
+	return ValidateJourneyReferenceVersion(journeyID, 0, "", params, path)
+}
+
+// ValidateJourneyReferenceVersion additionally binds a reference to the
+// immutable catalog entry's version and purpose when those facts are present
+// in the caller's protocol.
+func ValidateJourneyReferenceVersion(journeyID string, journeyVersion int64, purpose string, params map[string]any, path string) []FieldError {
 	document, _, _, err := JourneyCatalog()
 	if err != nil {
 		return []FieldError{{Path: path, Reason: "嵌入 Journey Catalog 无法加载: " + err.Error()}}
@@ -44,6 +48,14 @@ func ValidateJourneyReference(journeyID string, params map[string]any, path stri
 		}}
 	}
 	detail, _ := entry.(map[string]any)
+	version, versionOK := detail["version"].(float64)
+	if journeyVersion != 0 && (!versionOK || int64(version) != journeyVersion) {
+		return []FieldError{{Path: path + ".journey_version", Reason: "journey_version 与嵌入 Journey Catalog 不匹配"}}
+	}
+	catalogPurpose, purposeOK := detail["purpose"].(string)
+	if purpose != "" && (!purposeOK || catalogPurpose != purpose) {
+		return []FieldError{{Path: path + ".purpose", Reason: "Journey purpose 与嵌入 Journey Catalog 不匹配"}}
+	}
 	rawSchema, hasSchema := detail["params_schema"]
 	if !hasSchema {
 		// Catalog entries always declare a closed params_schema; a missing

@@ -943,7 +943,7 @@ CREATE TABLE browser_operations (
     OR (state IN ('Failed','Cancelled','Interrupted') AND ended_at IS NOT NULL AND terminal_reason IS NOT NULL)
   ),
   CHECK (
-    (kind = 'manual_login' AND actor_user_id IS NOT NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL)
+    (kind = 'manual_login' AND actor_user_id IS NOT NULL AND actor_session_id IS NOT NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL)
     OR (kind = 'authentication_probe' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase = 'revision_change' AND profile_generation_id IS NOT NULL)
     OR (kind = 'journey' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NOT NULL AND journey_version IS NOT NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
     OR (kind = 'exploration' AND actor_user_id IS NULL AND actor_session_id IS NULL AND verification_manifest_item_id IS NULL AND clone_identity IS NULL AND owner_attempt_id IS NOT NULL AND journey_id IS NULL AND journey_version IS NULL AND probe_phase IS NULL AND profile_generation_id IS NOT NULL)
