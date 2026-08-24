@@ -4,15 +4,20 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
+	"github.com/Suknna/quoin/internal/lintel/browser"
 	"github.com/Suknna/quoin/internal/lintel/runtime"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"golang.org/x/sys/unix"
 )
 
 func Run(ctx context.Context, configPath string) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var config contract.LintelConfig
 	if err := contract.DecodeFile(configPath, &config); err != nil {
 		return err
@@ -35,15 +40,22 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
+	browserManager, err := browser.NewManager(browser.Config{StateDirectory: config.StateDirectory, Capacity: uint32(config.BrowserSlots)})
+	if err != nil {
+		return err
+	}
+	revision, err := chromiumRevision(runCtx)
+	if err != nil {
+		return err
+	}
 	channel, err := runtime.NewChannel(runtime.ChannelConfig{
 		Slot:               "lintel",
 		QuoinEndpoint:      config.QuoinRuntimeEndpoint,
 		QuoinRuntimeCAFile: config.QuoinRuntimeCAFile,
 		StateDirectory:     config.StateDirectory,
 		BrowserSlots:       uint32(config.BrowserSlots),
-		// No Chromium runtime ships in this stage; the browser runtime
-		// release that owns the real revision fills this in later.
-		ChromiumRevision: "",
+		ChromiumRevision:   revision,
+		Browser:            browserManager,
 	})
 	if err != nil {
 		return err
@@ -51,21 +63,27 @@ func Run(ctx context.Context, configPath string) error {
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			default:
 			}
-			if err := channel.RunConnect(ctx, server); err != nil {
+			if err := channel.RunConnect(runCtx, server); err != nil {
 				sharedops.LogEvent("lintel", "info", "runtime.reconnect", err.Error())
 			}
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-time.After(2 * time.Second):
 			}
 		}
 	}()
-	return server.Run(ctx)
+	runErr := server.Run(runCtx)
+	cancel()
+	cleanupErr := browserManager.Close()
+	if runErr != nil {
+		return runErr
+	}
+	return cleanupErr
 }
 
 // RunRegister performs the one-time attached-stdin registration for the
@@ -88,12 +106,24 @@ func RunRegister(ctx context.Context, configPath string) error {
 		QuoinRuntimeCAFile: config.QuoinRuntimeCAFile,
 		StateDirectory:     config.StateDirectory,
 		BrowserSlots:       uint32(config.BrowserSlots),
-		ChromiumRevision:   "",
+		Browser:            &browser.Manager{}, // registration does not start a browser
 	})
 	if err != nil {
 		return err
 	}
 	return channel.RunRegister(ctx)
+}
+
+func chromiumRevision(ctx context.Context) (string, error) {
+	output, err := exec.CommandContext(ctx, "chromium", "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("detect Chromium revision: %w", err)
+	}
+	revision := strings.TrimSpace(string(output))
+	if revision == "" {
+		return "", fmt.Errorf("detect Chromium revision: empty output")
+	}
+	return revision, nil
 }
 
 func verifySharedMemory(minimum int64) error {

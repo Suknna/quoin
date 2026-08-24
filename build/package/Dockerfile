@@ -41,9 +41,14 @@ COPY --from=build /out/plinth /plinth
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/plinth"]
 
-FROM scratch AS lintel
+FROM debian:13-slim AS lintel
+# Chromium's dependency set is large; tolerate bounded transient mirror resets
+# without accepting missing packages or weakening APT signature verification.
+RUN apt-get -o Acquire::Retries=3 update && \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+      chromium xvfb tigervnc-scraping-server ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 USER 65532:65532
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/lintel /lintel
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/lintel"]

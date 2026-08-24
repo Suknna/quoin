@@ -10,40 +10,29 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	"github.com/Suknna/quoin/internal/lintel/browser"
+	"github.com/Suknna/quoin/internal/lintel/catalog"
+	"github.com/Suknna/quoin/internal/lintel/profile"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
-
-// EmptyCatalogJCS is the RFC 8785 JCS serialization of the minimal v1
-// catalog (no journeys). Quoin computes the digest of the same bytes, so
-// both sides agree without either re-serializing (DATA-CONFIG-008).
-const EmptyCatalogJCS = `{"catalog_version":"v1-empty","journeys":{}}`
-
-// EmptyCatalogDigest is SHA-256(EmptyCatalogJCS), hex.
-func EmptyCatalogDigest() string {
-	sum := sha256.Sum256([]byte(EmptyCatalogJCS))
-	return hex.EncodeToString(sum[:])
-}
-
-// EmptyCatalogVersion identifies the embedded catalog version.
-const EmptyCatalogVersion = "v1-empty"
 
 type stateFile struct {
 	Slot          string `json:"slot"`
@@ -52,9 +41,26 @@ type stateFile struct {
 }
 
 type Channel struct {
-	Config ChannelConfig
-	bootID string
-	epoch  uint64 // per-boot connection counter (RUNTIME-CTRL-004)
+	Config            ChannelConfig
+	bootID            string
+	epoch             uint64 // per-boot connection counter (RUNTIME-CTRL-004)
+	browser           *browser.Manager
+	profiles          *profile.Store
+	operationMu       sync.Mutex
+	started           map[int64]*runtimev1.StartBrowserOperation
+	startAcks         map[int64]*runtimev1.StartBrowserOperationAck
+	completed         map[int64]*runtimev1.CompleteBrowserOperation
+	completing        map[int64]bool
+	stopAcks          map[int64]*runtimev1.StopBrowserOperationAck
+	published         map[int64]*runtimev1.PublishBrowserProfileResult
+	tunnelMu          sync.Mutex
+	tunnelCancels     map[int64]context.CancelFunc
+	tunnelGenerations map[int64]uint64
+	outbound          uint64
+	tunnelClient      runtimev1.BrowserTunnelClient
+	tunnelContext     context.Context
+	controlMu         sync.Mutex
+	controlSend       func(*runtimev1.ControlEnvelope) error
 }
 
 type ChannelConfig struct {
@@ -64,6 +70,7 @@ type ChannelConfig struct {
 	StateDirectory     string
 	BrowserSlots       uint32
 	ChromiumRevision   string
+	Browser            *browser.Manager
 }
 
 func NewChannel(config ChannelConfig) (*Channel, error) {
@@ -71,7 +78,12 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	if _, err := rand.Read(bootRaw); err != nil {
 		return nil, err
 	}
-	return &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw)}, nil
+	if config.Browser == nil {
+		return nil, errors.New("browser manager is required")
+	}
+	channel := &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw), browser: config.Browser, profiles: profile.NewStore(config.StateDirectory), started: make(map[int64]*runtimev1.StartBrowserOperation), startAcks: make(map[int64]*runtimev1.StartBrowserOperationAck), completed: make(map[int64]*runtimev1.CompleteBrowserOperation), completing: make(map[int64]bool), stopAcks: make(map[int64]*runtimev1.StopBrowserOperationAck), published: make(map[int64]*runtimev1.PublishBrowserProfileResult), tunnelCancels: make(map[int64]context.CancelFunc), tunnelGenerations: make(map[int64]uint64)}
+	config.Browser.OnCrash = channel.browserCrashed
+	return channel, nil
 }
 
 func (channel *Channel) tokenPath() string {
@@ -183,18 +195,21 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	defer connection.Close()
 	client := runtimev1.NewRuntimeControlClient(connection)
 	streamCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+state.LongTermToken))
+	channel.tunnelClient = runtimev1.NewBrowserTunnelClient(connection)
+	channel.tunnelContext = streamCtx
 	stream, err := client.Connect(streamCtx)
 	if err != nil {
 		return err
 	}
 	channel.epoch++
+	atomic.StoreUint64(&channel.outbound, 1) // Hello consumes the first outbound ID.
 	hello := &runtimev1.Hello{
 		Slot:                  runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
 		BootId:                channel.bootID,
 		ConnectionEpoch:       channel.epoch,
 		ReleaseVersion:        buildinfo.Release,
-		JourneyCatalogDigest:  EmptyCatalogDigest(),
-		JourneyCatalogVersion: EmptyCatalogVersion,
+		JourneyCatalogDigest:  catalog.Digest(),
+		JourneyCatalogVersion: catalog.Version,
 		BrowserCapacitySlots:  channel.Config.BrowserSlots,
 		ChromiumRevision:      channel.Config.ChromiumRevision,
 	}
@@ -213,22 +228,41 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		return fmt.Errorf("握手被拒绝: %s", helloAck.GetRejectReason())
 	}
 	if readiness != nil {
-		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
+		// A new Lintel boot remains fenced until Quoin accepts its complete
+		// profile inventory. No browser work is considered ready before then.
+		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: !helloAck.GetProfileReconcileRequired(), Reason: sharedops.Ready})
 	}
 	sharedops.LogEvent("lintel", "info", "runtime.connected", "quoin="+channel.Config.QuoinEndpoint)
+	var outbound sync.Mutex
+	send := func(envelope *runtimev1.ControlEnvelope) error {
+		outbound.Lock()
+		defer outbound.Unlock()
+		return stream.Send(envelope)
+	}
+	channel.controlMu.Lock()
+	channel.controlSend = send
+	channel.controlMu.Unlock()
+	defer func() {
+		channel.controlMu.Lock()
+		channel.controlSend = nil
+		channel.controlMu.Unlock()
+	}()
+	// Completion is an unknown-outcome message until Quoin returns a matching
+	// acknowledgement. Replay it after every same-boot reconnect.
+	channel.resendPendingCompletions()
+	channel.reopenRunningBrowserTunnels()
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 	go func() {
-		seq := uint64(0)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-heartbeat.C:
-				seq++
-				if err := stream.Send(&runtimev1.ControlEnvelope{
-					MessageId: 2 + seq, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
-					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: seq}},
+				messageID := channel.nextMessageID()
+				if err := send(&runtimev1.ControlEnvelope{
+					MessageId: messageID, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: messageID}},
 				}); err != nil {
 					return
 				}
@@ -243,25 +277,52 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			}
 			return fmt.Errorf("控制流结束: %w", err)
 		}
+		if ack := envelope.GetCompleteBrowserOperationAck(); ack != nil {
+			channel.acknowledgeCompletion(ack)
+			continue
+		}
 		if request := envelope.GetProfileInventoryRequest(); request != nil {
-			// v1 empty-profile inventory: a single complete empty report
-			// (RUNTIME-BROWSER-002; identity catalog arrives with later
-			// tickets and no profiles exist yet).
-			if err := stream.Send(&runtimev1.ControlEnvelope{
-				MessageId: envelope.MessageId + 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
-				CorrelationId: envelope.MessageId,
-				Msg: &runtimev1.ControlEnvelope_ProfileInventoryReport{
-					ProfileInventoryReport: &runtimev1.ProfileInventoryReport{
-						InventoryId: request.GetInventoryId(),
-						Profiles:    nil,
-						Complete:    true,
-					},
-				},
-			}); err != nil {
+			if err := send(channel.inventoryResponse(envelope, request)); err != nil {
 				return err
 			}
+			if readiness != nil {
+				readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
+			}
+			continue
+		}
+		if request := envelope.GetStartBrowserOperation(); request != nil {
+			response := channel.startResponse(envelope, request)
+			if err := send(response); err != nil {
+				return err
+			}
+			if response.GetStartBrowserOperationAck().GetAccepted() {
+				// Quoin commits Running from the durable Ack before Lintel executes
+				// the follow-up operation work.
+				if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN {
+					go channel.openBrowserTunnel(request)
+				} else if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE {
+					go channel.completeRevisionProbe(request)
+				}
+			}
+			continue
+		}
+		if request := envelope.GetPublishBrowserProfile(); request != nil {
+			if err := send(channel.publishResponse(envelope, request)); err != nil {
+				return err
+			}
+			continue
+		}
+		if request := envelope.GetStopBrowserOperation(); request != nil {
+			if err := send(channel.stopResponse(envelope, request)); err != nil {
+				return err
+			}
+			continue
 		}
 	}
+}
+
+func (channel *Channel) nextMessageID() uint64 {
+	return atomic.AddUint64(&channel.outbound, 1)
 }
 
 func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
