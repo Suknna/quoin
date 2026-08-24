@@ -130,7 +130,7 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
   async function addKubernetesMapping() {
     if (!selectedConnection) return
     setMappingMessage('正在绑定 Kubernetes 连接…')
-    try { setKubernetesMappings(await listKubernetesConnectionMappings(systemKey).then(async () => { await createKubernetesConnectionMapping(systemKey, selectedConnection); return listKubernetesConnectionMappings(systemKey) })); setSelectedConnection(''); setMappingMessage('Kubernetes 连接已绑定。') }
+    try { await createKubernetesConnectionMapping(systemKey, selectedConnection); setKubernetesMappings(await listKubernetesConnectionMappings(systemKey)); setSelectedConnection(''); setMappingMessage('Kubernetes 连接已绑定。') }
     catch (reason) { setMappingMessage(reason instanceof Error ? reason.message : '暂时无法绑定 Kubernetes 连接。') }
   }
 

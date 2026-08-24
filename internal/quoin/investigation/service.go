@@ -133,6 +133,7 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
 	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
+	service.evidence.RegisterProjector(kubernetes.ReadToolName, kubernetes.EvidenceFor)
 	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
 		switch tool.Name {
 		case thanos.QueryToolName:

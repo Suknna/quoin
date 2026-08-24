@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
@@ -300,6 +301,31 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 	if err := attempt.ValidateToolResultPayload(expectedSchema, payload.GetCanonicalJson()); err != nil {
 		reject("tool result payload violates the fixed schema: " + err.Error())
 		return
+	}
+	if expectedSchema == "kubernetes_read_result_v1" {
+		var result struct {
+			Success   bool   `json:"success"`
+			Operation string `json:"operation"`
+			ErrorCode string `json:"errorCode"`
+		}
+		if err := json.Unmarshal(payload.GetCanonicalJson(), &result); err != nil {
+			reject("tool result outcome conflicts with kubernetes payload success")
+			return
+		}
+		partialArtifact := outcome == "succeeded" && !result.Success && result.ErrorCode == "partial_failure" && complete.GetArtifactId() != 0
+		if result.Success != (outcome == "succeeded") && !partialArtifact {
+			reject("tool result outcome conflicts with kubernetes payload success")
+			return
+		}
+		// Preflight failures intentionally have no operation. Any actual read
+		// result must repeat the operation frozen in the persisted proposal.
+		if result.Operation != "" {
+			expectedOperation, err := attempts.ExpectedKubernetesOperation(ctx, complete.GetToolCallId())
+			if err != nil || result.Operation != expectedOperation {
+				reject("kubernetes result operation does not match the fixed tool arguments")
+				return
+			}
+		}
 	}
 	var resultJSON string
 	if len(payload.GetCanonicalJson()) > 0 {

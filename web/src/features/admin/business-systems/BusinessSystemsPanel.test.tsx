@@ -279,3 +279,64 @@ describe('BusinessSystemDetailPage Kubernetes mapping state', () => {
     await waitFor(() => expect(mappingReads).toBeGreaterThan(1))
   })
 })
+
+
+describe('BusinessSystemDetailPage Kubernetes mapping creation', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
+  afterEach(cleanup)
+
+  it('paginates options and creates before exactly one mapping refresh', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/connections?limit=100') return jsonResponse({ items: [{ id: '9007199254740993', name: 'first-k8s', type: 'kubernetes', enabled: true }], nextCursor: 'next-page' })
+      if (path === '/api/v1/connections?limit=100&cursor=next-page') return jsonResponse({ items: [{ id: '9007199254740994', name: 'second-k8s', type: 'kubernetes', enabled: true }] })
+      if (path.includes('/kubernetes-connections') && init?.method === 'POST') return jsonResponse({ id: '1', connectionId: '9007199254740993', connectionName: 'first-k8s', state: 'Active', rowVersion: 1, createdBy: '1', createdAt: '2026-08-24T00:00:00Z', retiredBy: null })
+      if (path.includes('/kubernetes-connections')) return jsonResponse([])
+      if (path.includes('/resources')) return jsonResponse({ items: [] })
+      if (path.includes('/config')) return jsonResponse({ items: [] })
+      return jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, browserIdentityState: 'none', timezone: 'Asia/Shanghai', resourceRefreshIntervalSeconds: 300, configVersionCount: 1, currentConfigVersionId: '7', discoveries: [], plans: [] })
+    })
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin onBack={() => undefined} onOpenVersion={() => undefined} />)
+    expect(await screen.findByRole('option', { name: 'second-k8s' })).toBeInTheDocument()
+    const beforeCreate = fetchMock.mock.calls.length
+    fireEvent.change(screen.getByRole('combobox', { name: '选择 Kubernetes 连接' }), { target: { value: '9007199254740993' } })
+    fireEvent.click(screen.getByRole('button', { name: '绑定' }))
+    await screen.findByText('Kubernetes 连接已绑定。')
+    const afterCreate = fetchMock.mock.calls.slice(beforeCreate)
+    expect(afterCreate).toHaveLength(2)
+    expect(String(afterCreate[0][0])).toContain('/kubernetes-connections')
+    expect(afterCreate[0][1]).toEqual(expect.objectContaining({ method: 'POST' }))
+    expect(String(afterCreate[1][0])).toContain('/kubernetes-connections')
+    expect(afterCreate[1][1]?.method).toBeUndefined()
+  })
+})
+
+
+describe('BusinessSystemDetailPage Kubernetes connection option state', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
+  afterEach(cleanup)
+
+  it('distinguishes option loading from a successfully empty option list', async () => {
+    let resolveOptions!: (response: Response) => void
+    const options = new Promise<Response>((resolve) => { resolveOptions = resolve })
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/business-systems/payments') return Promise.resolve(jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, currentConfigVersionId: null, browserIdentityState: 'none', configVersionCount: 0, discoveries: [], plans: [] }))
+      if (path === '/api/v1/business-systems/payments/kubernetes-connections') return Promise.resolve(jsonResponse([]))
+      if (path === '/api/v1/connections?limit=100') return options
+      if (path.includes('/resources') || path.includes('/config')) return Promise.resolve(jsonResponse({ items: [] }))
+      return Promise.resolve(jsonResponse({}, 404))
+    })
+
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin onBack={() => undefined} onOpenVersion={() => undefined} />)
+    const select = await screen.findByRole('combobox', { name: '选择 Kubernetes 连接' })
+    expect(select).toBeDisabled()
+    expect(screen.getByRole('option', { name: '正在读取 Kubernetes 连接…' })).toBeInTheDocument()
+
+    resolveOptions(jsonResponse({ items: [] }))
+    expect(await screen.findByRole('option', { name: '没有可绑定的 Kubernetes 连接' })).toBeInTheDocument()
+    expect(select).not.toBeDisabled()
+  })
+})

@@ -87,26 +87,21 @@ func ResolveRead(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int6
 		if err := mappingRows.Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
 			return attempt.ToolResolution{}, err
 		}
-		if bindingRevision != rootBinding {
-			return attempt.ToolResolution{}, fmt.Errorf("kubernetes connection %d root binding is stale", connectionID)
-		}
-		var enabled, revalidation int
-		if err := conn.QueryRowContext(ctx, `SELECT enabled,revalidation_required FROM connections WHERE id=?`, connectionID).Scan(&enabled, &revalidation); err != nil {
-			return attempt.ToolResolution{}, err
-		}
-		if enabled != 1 || revalidation != 0 {
-			return attempt.ToolResolution{}, fmt.Errorf("kubernetes connection %d is unavailable", connectionID)
-		}
+		// Availability is deliberately not a routing prerequisite. Every active
+		// mapping gets its own frozen grant, then FulfillGrant fences that grant
+		// independently so one stale sibling becomes a model-visible partial
+		// failure rather than preventing healthy mappings from executing.
+		_ = bindingRevision
+		_ = rootBinding
 		// attempt_connection_grants deliberately has one frozen binding per
 		// (attempt, purpose, connection). A later Tool Call reuses that exact
 		// snapshot and records its own association; it must never overwrite or
 		// silently upgrade the earlier security decision.
-		var grantID int64
+		var grantID, frozenRevisionID, frozenGenerationID int64
 		err = conn.QueryRowContext(ctx, `
-			SELECT id FROM attempt_connection_grants
-			WHERE attempt_id=? AND purpose=? AND business_system_id=? AND connection_id=?
-				AND connection_revision_id=? AND credential_generation_id=?`,
-			attemptID, ReadPurpose, systemID, connectionID, revisionID, generationID).Scan(&grantID)
+			SELECT id,connection_revision_id,credential_generation_id FROM attempt_connection_grants
+			WHERE attempt_id=? AND purpose=? AND business_system_id=? AND connection_id=?`,
+			attemptID, ReadPurpose, systemID, connectionID).Scan(&grantID, &frozenRevisionID, &frozenGenerationID)
 		if errors.Is(err, sql.ErrNoRows) {
 			insert, insertErr := conn.ExecContext(ctx, `
 				INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,credential_generation_id,created_by_tool_call_id,created_at)
@@ -120,6 +115,8 @@ func ResolveRead(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int6
 			}
 		} else if err != nil {
 			return attempt.ToolResolution{}, err
+		} else {
+			revisionID, generationID = frozenRevisionID, frozenGenerationID
 		}
 		ordinal := len(grants)
 		if _, err := conn.ExecContext(ctx, `INSERT INTO tool_call_connection_grants(tool_call_id,connection_grant_id,ordinal) VALUES(?,?,?)`, toolCallID, grantID, ordinal); err != nil {
@@ -158,7 +155,7 @@ func ValidateGrantForFulfillment(ctx context.Context, conn *sql.Conn, attemptID,
 		JOIN connections c ON c.id=ag.connection_id
 		JOIN credential_generations g ON g.id=ag.credential_generation_id
 		CROSS JOIN root_key_state s
-		WHERE ag.id=? AND ag.attempt_id=? AND ag.purpose=? AND ag.created_by_tool_call_id=tcg.tool_call_id`,
+		WHERE ag.id=? AND ag.attempt_id=? AND ag.purpose=?`,
 		grantID, attemptID, ReadPurpose).
 		Scan(&connectionID, &revisionID, &generationID, &enabled, &revalidation, &currentRevision, &currentGeneration, &bindingRevision, &rootBinding)
 	if errors.Is(err, sql.ErrNoRows) {

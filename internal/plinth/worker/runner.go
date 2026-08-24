@@ -59,6 +59,9 @@ type Runner struct {
 	// toolCalls is test-only injectable transport for the typed-tool path.
 	// Production leaves it nil and uses the outbound runtime Channel.
 	toolCalls toolCallChannel
+	// uploadWorkspaceFileForTest captures a spilled body in typed-tool tests.
+	// Production leaves it nil and always streams through ArtifactService.
+	uploadWorkspaceFileForTest func(context.Context, int64, int64, string, string) (int64, error)
 }
 
 type toolMeta struct {

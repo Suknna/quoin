@@ -50,7 +50,7 @@ func TestKubernetesReadIsInvestigationOnly(t *testing.T) {
 }
 
 func TestKubernetesReadResultClosure(t *testing.T) {
-	valid := []byte(`{"success":true,"operation":"pod_list","results":[{"success":true,"output":"{}","truncated":false}]}`)
+	valid := []byte(`{"success":true,"operation":"pod_list","observedAt":"2026-01-01T00:00:00Z","totalBytes":2,"totalLines":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","results":[{"success":true,"output":"{}","truncated":false}]}`)
 	if err := ValidateToolResultPayload("kubernetes_read_result_v1", valid); err != nil {
 		t.Fatalf("valid result rejected: %v", err)
 	}

@@ -159,7 +159,7 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 			estimated_input_tokens,evicted_turn_count,status,started_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'running', ?)`,
 		begin.AttemptID, begin.CallSeq, begin.RetrySeq, "chat", begin.ModelID, grantID,
-		agentVersion, agentVersion, begin.PromptDigest, toolSchemaVersionFor(agentVersion), begin.ToolSchemaDigest,
+		promptRendererVersionFor(agentVersion), agentVersion, begin.PromptDigest, toolSchemaVersionFor(agentVersion), begin.ToolSchemaDigest,
 		begin.InputDigest, begin.RenderedDigest, begin.ContextBudget, begin.MaxOutput,
 		begin.EstimatedInput, begin.EvictedTurns, now)
 	if err != nil {
@@ -605,6 +605,26 @@ func (service *Service) ExpectedToolResultSchema(ctx context.Context, toolCallID
 	return definition.ResultSchemaKind, nil
 }
 
+// ExpectedKubernetesOperation returns the fixed operation proposed in the
+// persisted tool arguments. The runtime uses it to prevent a supervisor from
+// relabelling a pod read as a broader discovery result.
+func (service *Service) ExpectedKubernetesOperation(ctx context.Context, toolCallID int64) (string, error) {
+	var arguments string
+	if err := service.db.QueryRowContext(ctx, `SELECT arguments_json FROM tool_calls WHERE id=? AND tool_name='kubernetes_read'`, toolCallID).Scan(&arguments); err != nil {
+		return "", err
+	}
+	var parsed struct {
+		Operation string `json:"operation"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &parsed); err != nil || parsed.Operation == "" {
+		if err != nil {
+			return "", fmt.Errorf("decode kubernetes tool arguments: %w", err)
+		}
+		return "", fmt.Errorf("kubernetes tool arguments have no operation")
+	}
+	return parsed.Operation, nil
+}
+
 // ToolResult is the sealed outcome of one tool execution.
 type ToolResult struct {
 	AttemptID   int64
@@ -789,4 +809,13 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 		SELECT COUNT(*) FROM model_calls WHERE attempt_id=? AND call_seq=? AND status='succeeded'`,
 		attemptID, callSeq).Scan(&count)
 	return count > 0, err
+}
+
+// promptRendererVersionFor records the immutable input renderer independently
+// from the executor generation carried by the attempt.
+func promptRendererVersionFor(agentVersion string) string {
+	if agentVersion == "investigation-v1" {
+		return "investigation-renderer-v1"
+	}
+	return "initial-analysis-renderer-v1"
 }

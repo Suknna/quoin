@@ -244,15 +244,32 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
+	var firstGrant, firstRevision, firstGeneration int64
 	for _, callID := range []int64{1, 2} {
+		if callID == 2 {
+			if _, err := db.Exec(`INSERT INTO credential_generations VALUES(14,2)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE connections SET current_revision_id=12,current_credential_generation_id=14 WHERE id=5`); err != nil {
+				t.Fatal(err)
+			}
+		}
 		conn, err := db.Conn(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = ResolveRead(ctx, conn, 77, callID)
+		resolution, err := ResolveRead(ctx, conn, 77, callID)
 		conn.Close()
 		if err != nil {
 			t.Fatalf("call %d: %v", callID, err)
+		}
+		if len(resolution.Grants) != 1 {
+			t.Fatalf("call %d grants=%+v", callID, resolution.Grants)
+		}
+		if callID == 1 {
+			firstGrant, firstRevision, firstGeneration = resolution.Grants[0].GrantID, resolution.Grants[0].ConnectionRevisionID, resolution.Grants[0].CredentialGenerationID
+		} else if grant := resolution.Grants[0]; grant.GrantID != firstGrant || grant.ConnectionRevisionID != firstRevision || grant.CredentialGenerationID != firstGeneration {
+			t.Fatalf("second call changed frozen grant: first=%d/%d/%d second=%+v", firstGrant, firstRevision, firstGeneration, grant)
 		}
 	}
 	var grants, joins int
@@ -261,5 +278,20 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants`).Scan(&joins); err != nil || joins != 2 {
 		t.Fatalf("joins=%d err=%v", joins, err)
+	}
+}
+
+func TestEvidenceForArtifactBackedPartialFailure(t *testing.T) {
+	payload := []byte(`{"success":false,"operation":"discovery","observedAt":"2026-08-24T00:00:00Z","errorCode":"partial_failure","errorDetail":"one mapping failed","results":[{"success":false,"errorCode":"grant_missing","errorDetail":"denied"},{"success":true,"output":"{}","truncated":false}]}`)
+	projection, err := EvidenceFor([]byte(`{"businessSystem":"payments","operation":"discovery"}`), payload, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ArtifactID != 99 || projection.Integrity != "incomplete" || len(projection.ErrorsJSON) == 0 || len(projection.ResultJSON) != 0 {
+		t.Fatalf("projection=%+v", projection)
+	}
+	allFailure := []byte(`{"success":false,"operation":"discovery","observedAt":"2026-08-24T00:00:00Z","errorCode":"partial_failure","errorDetail":"all failed","results":[{"success":false,"errorCode":"grant_missing","errorDetail":"denied"}]}`)
+	if _, err := EvidenceFor([]byte(`{}`), allFailure, 99); err == nil {
+		t.Fatal("all-failure result unexpectedly produced Evidence")
 	}
 }

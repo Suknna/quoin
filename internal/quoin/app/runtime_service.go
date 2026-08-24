@@ -56,6 +56,9 @@ type RuntimeService struct {
 	// reconcile carries the pending same-boot ReconcileReport waiter
 	// (T12, RUNTIME-TASK-005).
 	reconcile reconcileState
+	// sendEnvelopeForTest captures outbound control replies in package tests.
+	// Production leaves it nil and always routes through the live slot.
+	sendEnvelopeForTest func(slot string, envelope *runtimev1.ControlEnvelope) error
 }
 
 func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {

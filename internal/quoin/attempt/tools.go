@@ -296,7 +296,7 @@ func ValidateToolResultPayload(schemaKind string, canonical []byte) error {
 	if err := json.Unmarshal(canonical, &body); err != nil {
 		return fmt.Errorf("kubernetes result must be JSON: %w", err)
 	}
-	allowed := map[string]bool{"success": true, "operation": true, "results": true, "errorCode": true, "errorDetail": true, "artifact": true}
+	allowed := map[string]bool{"success": true, "operation": true, "observedAt": true, "results": true, "resultsTruncated": true, "errorCode": true, "errorDetail": true, "artifact": true, "totalBytes": true, "totalLines": true, "sha256": true}
 	for key := range body {
 		if !allowed[key] {
 			return fmt.Errorf("kubernetes result field %q is not allowed", key)
@@ -306,13 +306,35 @@ func ValidateToolResultPayload(schemaKind string, canonical []byte) error {
 	if raw, ok := body["success"]; !ok || json.Unmarshal(raw, &success) != nil {
 		return fmt.Errorf("kubernetes result requires boolean success")
 	}
-	// Routing preflight failures have no operation or result list.
+	// Routing preflight failures have no operation or result list and must
+	// be failures; otherwise a succeeded ledger row could carry an error.
 	if _, hasOperation := body["operation"]; !hasOperation {
+		if success {
+			return fmt.Errorf("kubernetes preflight failure must have success=false")
+		}
+		if _, hasResults := body["results"]; hasResults {
+			return fmt.Errorf("kubernetes preflight failure cannot carry results")
+		}
+		if _, hasArtifact := body["artifact"]; hasArtifact {
+			return fmt.Errorf("kubernetes preflight failure cannot carry artifact")
+		}
 		return validateKubernetesFailure(body)
 	}
 	var operation string
 	if err := json.Unmarshal(body["operation"], &operation); err != nil || operation == "" {
 		return fmt.Errorf("kubernetes result requires operation")
+	}
+	if operation != "discovery" && operation != "pod_get" && operation != "pod_list" && operation != "events_list" && operation != "pod_logs" {
+		return fmt.Errorf("kubernetes result has unknown operation %q", operation)
+	}
+	var observedAt string
+	if raw, ok := body["observedAt"]; !ok || json.Unmarshal(raw, &observedAt) != nil || observedAt == "" {
+		return fmt.Errorf("kubernetes result requires observedAt")
+	}
+	var totalBytes, totalLines int
+	var payloadHash string
+	if json.Unmarshal(body["totalBytes"], &totalBytes) != nil || totalBytes < 0 || json.Unmarshal(body["totalLines"], &totalLines) != nil || totalLines < 1 || json.Unmarshal(body["sha256"], &payloadHash) != nil || len(payloadHash) != 64 {
+		return fmt.Errorf("kubernetes result requires aggregate size, line count and sha256")
 	}
 	var results []json.RawMessage
 	if raw, ok := body["results"]; !ok || json.Unmarshal(raw, &results) != nil || len(results) == 0 {
@@ -329,6 +351,12 @@ func ValidateToolResultPayload(schemaKind string, canonical []byte) error {
 		}
 	} else if err := validateKubernetesFailure(body); err != nil {
 		return err
+	}
+	if raw, exists := body["resultsTruncated"]; exists {
+		var truncated bool
+		if json.Unmarshal(raw, &truncated) != nil || !truncated {
+			return fmt.Errorf("kubernetes resultsTruncated must be true when present")
+		}
 	}
 	if raw, exists := body["artifact"]; exists {
 		var artifact map[string]json.RawMessage

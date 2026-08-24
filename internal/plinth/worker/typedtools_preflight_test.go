@@ -3,15 +3,19 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"google.golang.org/grpc"
 )
 
@@ -108,8 +112,9 @@ func TestKubernetesReadFetchesUsingFrozenDispatchBinding(t *testing.T) {
 	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: []*runtimev1.ConnectionGrant{{GrantId: 71}}}
 	runner := &Runner{
 		Client: client, toolCalls: control,
-		Binding: plinthruntime.DispatchBinding{BootID: "frozen-boot", Epoch: 7},
-		tools:   map[int64]toolMeta{73: meta},
+		Binding:                    plinthruntime.DispatchBinding{BootID: "frozen-boot", Epoch: 7},
+		tools:                      map[int64]toolMeta{73: meta},
+		uploadWorkspaceFileForTest: func(context.Context, int64, int64, string, string) (int64, error) { return 1, nil },
 	}
 	var frames bytes.Buffer
 	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
@@ -194,6 +199,60 @@ func TestKubernetesReadPreflightIsModelVisibleAndCannotReachCredentialsOrAPI(t *
 	}
 }
 
+func TestKubernetesReadSpillsAggregateArtifact(t *testing.T) {
+	large := `{"versions":["v1"]}` + strings.Repeat("\n", 2100) + strings.Repeat("x", 52*1024)
+	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api" {
+			t.Fatalf("path=%s", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(large))
+	}))
+	defer api.Close()
+	control := &fakeToolCallChannel{}
+	client := &fetchCountingRuntimeClient{endpoint: api.URL}
+	var uploaded []byte
+	grants := make([]*runtimev1.ConnectionGrant, 65)
+	for index := range grants {
+		grants[index] = &runtimev1.ConnectionGrant{GrantId: int64(index + 1)}
+	}
+	runner := &Runner{Client: client, toolCalls: control, Binding: plinthruntime.DispatchBinding{BootID: "frozen", Epoch: 4}, Config: RunnerConfig{WorkspaceRoot: t.TempDir()}, tools: map[int64]toolMeta{73: {name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: grants}}, uploadWorkspaceFileForTest: func(_ context.Context, attemptID, toolCallID int64, path, media string) (int64, error) {
+		if attemptID != 41 || toolCallID != 73 || media != "application/json" {
+			t.Fatalf("upload=%d/%d %s", attemptID, toolCallID, media)
+		}
+		var err error
+		uploaded, err = os.ReadFile(path)
+		return 99, err
+	}}
+	meta := runner.tools[73]
+	var frames bytes.Buffer
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(uploaded) == 0 || len(control.completes) != 1 {
+		t.Fatalf("uploaded=%d completes=%d", len(uploaded), len(control.completes))
+	}
+	var raw, payload struct {
+		Results []struct {
+			Output string `json:"output"`
+		} `json:"results"`
+		ResultsTruncated bool              `json:"resultsTruncated"`
+		TotalBytes       int               `json:"totalBytes"`
+		TotalLines       int               `json:"totalLines"`
+		SHA256           string            `json:"sha256"`
+		Artifact         map[string]string `json:"artifact"`
+	}
+	if err := json.Unmarshal(uploaded, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(control.completes[0].GetPayload().GetCanonicalJson(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(uploaded)
+	if payload.TotalBytes != len(uploaded) || payload.TotalLines != bytes.Count(uploaded, []byte("\n"))+1 || payload.SHA256 != fmt.Sprintf("%x", sum[:]) || payload.Artifact["id"] != "99" || !payload.ResultsTruncated || len(payload.Results) != 64 || len(payload.Results[0].Output)+len(payload.Results[1].Output) > 4096 {
+		t.Fatalf("payload=%s", control.completes[0].GetPayload().GetCanonicalJson())
+	}
+}
+
 func TestKubernetesReadContinuesAfterOneGrantFails(t *testing.T) {
 	var requests atomic.Int64
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -204,7 +263,7 @@ func TestKubernetesReadContinuesAfterOneGrantFails(t *testing.T) {
 	control := &fakeToolCallChannel{}
 	client := &fetchCountingRuntimeClient{endpoint: api.URL, denyGrantID: 1}
 	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: []*runtimev1.ConnectionGrant{{GrantId: 1}, {GrantId: 2}}}
-	runner := &Runner{Client: client, toolCalls: control, Binding: plinthruntime.DispatchBinding{BootID: "frozen", Epoch: 4}, tools: map[int64]toolMeta{73: meta}}
+	runner := &Runner{Client: client, toolCalls: control, Binding: plinthruntime.DispatchBinding{BootID: "frozen", Epoch: 4}, tools: map[int64]toolMeta{73: meta}, uploadWorkspaceFileForTest: func(context.Context, int64, int64, string, string) (int64, error) { return 1, nil }}
 	var frames bytes.Buffer
 	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
 		t.Fatal(err)
@@ -225,7 +284,11 @@ func TestKubernetesReadContinuesAfterOneGrantFails(t *testing.T) {
 	if err := json.Unmarshal(control.completes[0].GetPayload().GetCanonicalJson(), &payload); err != nil {
 		t.Fatal(err)
 	}
+	canonical := control.completes[0].GetPayload().GetCanonicalJson()
 	if payload.Success || payload.ErrorCode != "partial_failure" || len(payload.Results) != 2 || payload.Results[0].Success || !payload.Results[1].Success {
-		t.Fatalf("payload=%s", control.completes[0].GetPayload().GetCanonicalJson())
+		t.Fatalf("payload=%s", canonical)
+	}
+	if err := attempt.ValidateToolResultPayload("kubernetes_read_result_v1", canonical); err != nil {
+		t.Fatalf("runner partial payload violates Quoin ingress schema: %v; payload=%s", err, canonical)
 	}
 }

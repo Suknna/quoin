@@ -31,6 +31,9 @@ import (
 // sendEnvelope stamps per-direction ids and forwards to the slot's live
 // stream; a failed send is audited and retried by the queued dispatcher.
 func (service *RuntimeService) sendEnvelope(slot string, envelope *runtimev1.ControlEnvelope) error {
+	if service.sendEnvelopeForTest != nil {
+		return service.sendEnvelopeForTest(slot, envelope)
+	}
 	id, err := service.Slots.NextMessageID(slot)
 	if err != nil {
 		return err

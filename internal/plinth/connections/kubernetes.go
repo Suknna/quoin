@@ -275,10 +275,18 @@ func kubernetesGet(ctx context.Context, client *kubernetesClient, path string) (
 		return nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
+	// Keep a hard response ceiling without io.ReadAll: the fixed read tools
+	// must not turn an unbounded peer body into an unbounded allocation.
+	const maxKubernetesReadBytes = 4 << 20
+	var bodyBuffer bytes.Buffer
+	copied, err := io.CopyN(&bodyBuffer, response.Body, maxKubernetesReadBytes+1)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
+	if copied > maxKubernetesReadBytes {
+		return nil, fmt.Errorf("Kubernetes API 响应超过读取上限")
+	}
+	body := bodyBuffer.Bytes()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
@@ -298,10 +306,10 @@ type KubernetesReadRequest struct {
 // RunKubernetesRead reuses the probe's kubeconfig/TLS/auth primitive to run
 // one fixed GET request. The caller executes it independently for each frozen
 // grant, so one bound cluster can fail without hiding another's observation.
-func RunKubernetesRead(ctx context.Context, config KubernetesConfig, secret KubernetesSecret, request KubernetesReadRequest) ([]byte, error) {
+func RunKubernetesRead(ctx context.Context, config KubernetesConfig, secret KubernetesSecret, request KubernetesReadRequest, output io.Writer) error {
 	client, _, err := resolveKubernetes(config, secret.Kubeconfig)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	path := ""
 	switch request.Operation {
@@ -316,9 +324,41 @@ func RunKubernetesRead(ctx context.Context, config KubernetesConfig, secret Kube
 	case "pod_logs":
 		path = "/api/v1/namespaces/" + url.PathEscape(request.Namespace) + "/pods/" + url.PathEscape(request.Name) + "/log?container=" + url.QueryEscape(request.Container)
 	default:
-		return nil, fmt.Errorf("unsupported Kubernetes read operation %q", request.Operation)
+		return fmt.Errorf("unsupported Kubernetes read operation %q", request.Operation)
 	}
-	return kubernetesGet(ctx, client, path)
+	return kubernetesGetTo(ctx, client, path, output)
+}
+
+// kubernetesGetTo streams a successful bounded body directly to output. It
+// intentionally never materializes an observation response in memory.
+func kubernetesGetTo(ctx context.Context, client *kubernetesClient, path string, output io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, client.server+path, nil)
+	if err != nil {
+		return err
+	}
+	if client.auth != nil {
+		client.auth(request)
+	}
+	request.Header.Set("Accept", "application/json")
+	response, err := client.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	const maxKubernetesReadBytes = 4 << 20
+	written, err := io.Copy(output, io.LimitReader(response.Body, maxKubernetesReadBytes+1))
+	if err != nil {
+		return err
+	}
+	if written > maxKubernetesReadBytes {
+		return fmt.Errorf("Kubernetes API 响应超过读取上限")
+	}
+	return nil
 }
 
 func selfSubjectAccessReview(ctx context.Context, client *kubernetesClient, namespace, verb, resource, subresource string) (bool, error) {

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
@@ -214,92 +215,195 @@ func (runner *Runner) executeThanosQuery(ctx context.Context, writer *FrameWrite
 	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryResultSchemaKind, payload, artifactID)
 }
 
-// executeKubernetesRead executes the fixed action once per Quoin-frozen
-// connection grant. Individual failures are returned in-order, never retried
-// or silently collapsed, and credentials stay in this supervisor method.
+type countingWriter struct {
+	bytes    int64
+	newlines int64
+}
+
+func (writer *countingWriter) Write(data []byte) (int, error) {
+	writer.bytes += int64(len(data))
+	writer.newlines += int64(strings.Count(string(data), "\n"))
+	return len(data), nil
+}
+func (writer *countingWriter) lines() int64 { return writer.newlines + 1 }
+
+type jsonStringWriter struct{ writer io.Writer }
+
+func (writer *jsonStringWriter) Write(data []byte) (int, error) {
+	for _, value := range data {
+		var escaped string
+		switch value {
+		case '\\':
+			escaped = `\\`
+		case '"':
+			escaped = `\"`
+		case '\n':
+			escaped = `\n`
+		case '\r':
+			escaped = `\r`
+		case '\t':
+			escaped = `\t`
+		default:
+			if value < 0x20 {
+				escaped = fmt.Sprintf(`\u%04x`, value)
+			} else {
+				escaped = string(value)
+			}
+		}
+		if _, err := io.WriteString(writer.writer, escaped); err != nil {
+			return 0, err
+		}
+	}
+	return len(data), nil
+}
+func stringArg(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return value
+}
+
 func (runner *Runner) executeKubernetesRead(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, args map[string]any) error {
 	meta, ok := runner.tools[toolCallID]
 	if !ok || len(meta.grants) == 0 {
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read", "grant_missing", "该工具调用没有冻结的 Kubernetes 连接 grant")
 	}
 	operation, _ := args["operation"].(string)
-	namespace, _ := args["namespace"].(string)
-	name, _ := args["name"].(string)
-	container, _ := args["container"].(string)
-	request := plinthconnections.KubernetesReadRequest{Operation: operation, Namespace: namespace, Name: name, Container: container}
+	request := plinthconnections.KubernetesReadRequest{Operation: operation, Namespace: stringArg(args, "namespace"), Name: stringArg(args, "name"), Container: stringArg(args, "container")}
 	bearer, err := runner.toolCallChannel().BearerToken()
 	if err != nil {
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read", "grant_missing", "读取状态卷 token 失败")
 	}
-	results := make([]map[string]any, 0, len(meta.grants))
+	workspace := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(workspace, fmt.Sprintf("kubernetes-read-%d.json", toolCallID))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	count := &countingWriter{}
+	out := io.MultiWriter(file, count)
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := fmt.Fprintf(out, `{"success":`); err != nil {
+		file.Close()
+		return err
+	}
+	results := make([]map[string]any, 0, min(len(meta.grants), 64))
 	allOK := true
-	for _, grant := range meta.grants {
+	// Reserve five bytes for the final aggregate success value. A partial
+	// result is only known after every frozen grant has been observed.
+	if _, err := fmt.Fprint(out, "false"); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := fmt.Fprintf(out, `,"operation":%q,"observedAt":%q,"results":[`, operation, observedAt); err != nil {
+		file.Close()
+		return err
+	}
+	for index, grant := range meta.grants {
+		if index > 0 {
+			if _, err := fmt.Fprint(out, ","); err != nil {
+				file.Close()
+				return err
+			}
+		}
 		grantCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		payload, fetchErr := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch})
 		cancel()
 		if fetchErr != nil || payload.GetKubernetes() == nil {
 			allOK = false
-			results = append(results, map[string]any{"success": false, "errorCode": "grant_missing", "errorDetail": "获取 Kubernetes 凭据 grant 失败"})
+			_, err = fmt.Fprint(out, `{"success":false,"errorCode":"grant_missing","errorDetail":"获取 Kubernetes 凭据 grant 失败"}`)
+			if err != nil {
+				file.Close()
+				return err
+			}
+			if len(results) < 64 {
+				results = append(results, map[string]any{"success": false, "errorCode": "grant_missing", "errorDetail": "获取 Kubernetes 凭据 grant 失败"})
+			}
 			continue
 		}
 		var config plinthconnections.KubernetesConfig
-		if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil {
+		if json.Unmarshal(payload.GetRevisionConfigJson(), &config) != nil {
 			allOK = false
-			results = append(results, map[string]any{"success": false, "errorCode": "invalid_connection_config", "errorDetail": "Kubernetes 连接配置无法解析"})
+			_, err = fmt.Fprint(out, `{"success":false,"errorCode":"invalid_connection_config","errorDetail":"Kubernetes 连接配置无法解析"}`)
+			if err != nil {
+				file.Close()
+				return err
+			}
+			if len(results) < 64 {
+				results = append(results, map[string]any{"success": false, "errorCode": "invalid_connection_config", "errorDetail": "Kubernetes 连接配置无法解析"})
+			}
 			continue
 		}
-		body, readErr := plinthconnections.RunKubernetesRead(ctx, config, plinthconnections.KubernetesSecret{Kubeconfig: payload.GetKubernetes().GetKubeconfig()}, request)
+		if _, err := fmt.Fprint(out, `{"success":true,"output":"`); err != nil {
+			file.Close()
+			return err
+		}
+		escaper := &jsonStringWriter{writer: out}
+		readErr := plinthconnections.RunKubernetesRead(ctx, config, plinthconnections.KubernetesSecret{Kubeconfig: payload.GetKubernetes().GetKubeconfig()}, request, escaper)
 		if readErr != nil {
 			allOK = false
-			// The primitive may include the remote URL in transport errors. That
-			// diagnostic never crosses the model boundary.
-			results = append(results, map[string]any{"success": false, "errorCode": "kubernetes_execution_failed", "errorDetail": "Kubernetes API 读取失败"})
+			// The streamed object cannot be rolled back; record a safe failure
+			// marker in the model preview and leave the raw artifact as diagnostic.
+			if _, err := fmt.Fprint(out, `","truncated":true,"errorCode":"kubernetes_execution_failed"}`); err != nil {
+				file.Close()
+				return err
+			}
+			if len(results) < 64 {
+				results = append(results, map[string]any{"success": false, "errorCode": "kubernetes_execution_failed", "errorDetail": "Kubernetes API 读取失败"})
+			}
 			continue
 		}
-		results = append(results, map[string]any{"success": true, "output": string(body), "truncated": false})
+		if _, err := fmt.Fprint(out, `","truncated":false}`); err != nil {
+			file.Close()
+			return err
+		}
+		if len(results) < 64 {
+			results = append(results, map[string]any{"success": true, "output": "（完整输出已存入 Artifact）", "truncated": true})
+		}
 	}
-	fullPayload := map[string]any{"success": allOK, "operation": operation, "results": results}
-	if !allOK {
-		fullPayload["errorCode"] = "partial_failure"
-		fullPayload["errorDetail"] = "一个或多个已绑定 Kubernetes 连接未能完成读取"
+	if _, err := fmt.Fprint(out, `]}`); err != nil {
+		file.Close()
+		return err
 	}
-	canonical, err := json.Marshal(fullPayload)
+	if allOK {
+		// "true " retains the reserved five-byte width and is valid JSON whitespace.
+		if _, err := file.Seek(int64(len(`{"success":`)), io.SeekStart); err != nil {
+			file.Close()
+			return err
+		}
+		if _, err := file.WriteString("true "); err != nil {
+			file.Close()
+			return err
+		}
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	raw, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	var artifactID int64
-	payload := fullPayload
-	if len(canonical) > 64*1024 {
-		workspace := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
-		if err := os.MkdirAll(workspace, 0o700); err != nil {
-			return err
-		}
-		path := filepath.Join(workspace, fmt.Sprintf("kubernetes-read-%d.json", toolCallID))
-		if err := os.WriteFile(path, canonical, 0o600); err != nil {
-			return err
-		}
-		defer os.Remove(path)
-		artifactID, err = runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, "application/json")
-		if err != nil {
-			return err
-		}
-		previewResults := make([]map[string]any, 0, len(results))
-		for _, result := range results {
-			preview := make(map[string]any, len(result))
-			for key, value := range result {
-				preview[key] = value
-			}
-			if output, ok := preview["output"].(string); ok && len(output) > 4096 {
-				preview["output"] = output[:4096]
-				preview["truncated"] = true
-			}
-			previewResults = append(previewResults, preview)
-		}
-		payload = map[string]any{"success": allOK, "operation": operation, "results": previewResults, "artifact": map[string]any{"id": fmt.Sprint(artifactID), "mediaType": "application/json"}}
-		if !allOK {
-			payload["errorCode"] = "partial_failure"
-			payload["errorDetail"] = "一个或多个已绑定 Kubernetes 连接未能完成读取"
-		}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, raw); err != nil {
+		raw.Close()
+		return err
+	}
+	if err := raw.Close(); err != nil {
+		return err
+	}
+	artifactID, err := runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, "application/json")
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"success": allOK, "operation": operation, "observedAt": observedAt, "results": results, "totalBytes": count.bytes, "totalLines": count.lines(), "sha256": fmt.Sprintf("%x", hash.Sum(nil)), "artifact": map[string]any{"id": fmt.Sprint(artifactID), "mediaType": "application/json"}}
+	if len(meta.grants) > len(results) {
+		payload["resultsTruncated"] = true
+	}
+	if !allOK {
+		payload["errorCode"] = "partial_failure"
+		payload["errorDetail"] = "一个或多个已绑定 Kubernetes 连接未能完成读取"
 	}
 	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read_result_v1", payload, artifactID)
 }
@@ -331,7 +435,7 @@ func (runner *Runner) commitTypedTool(ctx context.Context, writer *FrameWriter, 
 	}
 	digest := sha256.Sum256(canonical)
 	outcome := runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED
-	if success, _ := payload["success"].(bool); !success {
+	if success, _ := payload["success"].(bool); !success && artifactID == 0 {
 		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
 	}
 	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
@@ -467,6 +571,9 @@ func (runner *Runner) artifactContext(ctx context.Context) (context.Context, err
 // uploadWorkspaceFileAs streams one spilled workspace output with the
 // caller's media type (the thanos spill is application/json).
 func (runner *Runner) uploadWorkspaceFileAs(ctx context.Context, attemptID, toolCallID int64, path, mediaType string) (int64, error) {
+	if runner.uploadWorkspaceFileForTest != nil {
+		return runner.uploadWorkspaceFileForTest(ctx, attemptID, toolCallID, path, mediaType)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
