@@ -7,11 +7,50 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
+ticket="${QUOIN_TICKET:-}"
 stack="$repo_root/.artifacts/e2e-stack"
+compose_project="${QUOIN_COMPOSE_PROJECT:-quoin}"
+if [ "$ticket" = "T20" ]; then
+  stack="$repo_root/.artifacts/e2e-stack-t20"
+  compose_project=quoin-t20
+  export QUOIN_IMAGE_NAMESPACE=quoin-t20
+fi
+export QUOIN_COMPOSE_PROJECT="$compose_project"
+if [ "$ticket" = "T20" ]; then
+  # Playwright only runs its global teardown after the webServer became ready.
+  # A bootstrap failure happens before then, so it must synchronously clean the
+  # isolated project, temporary credentials, private images and host helpers.
+  cleanup_failed_t20_bootstrap() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+      if ! QUOIN_TICKET=T20 QUOIN_EVIDENCE_DIR="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T20}" node test/e2e/compose/teardown.mjs; then
+        echo 'FATAL: T20 bootstrap cleanup failed; inspect cleanup.json before retrying.' >&2
+        exit 70
+      fi
+    fi
+    exit "$status"
+  }
+  trap cleanup_failed_t20_bootstrap EXIT
+fi
 # A failed prior webServer leaves owned fixtures behind (teardown.mjs only
-# runs on successful startup); clear them before recreating.
-docker rm -f e2e-fwd e2e-am quoin-t07-thanos >/dev/null 2>&1 || true
-docker compose --project-name quoin down --remove-orphans >/dev/null 2>&1 || true
+# runs on successful startup); clear only this test's project. T20 deliberately
+# does not remove shared T03/T07 fixtures from another acceptance run.
+if [ "$ticket" != "T20" ]; then
+  docker rm -f e2e-fwd e2e-am quoin-t07-thanos >/dev/null 2>&1 || true
+else
+  docker rm -f quoin-t20-auth-fixture >/dev/null 2>&1 || true
+  previous_compose="$stack/state/quoin/compose/generated/compose.yaml"
+  if [ -f "$previous_compose" ]; then
+    docker compose --project-name "$compose_project" --file "$previous_compose" down --volumes --remove-orphans >/dev/null
+  fi
+fi
+if [ "$ticket" != "T20" ]; then
+  docker compose --project-name "$compose_project" down --remove-orphans >/dev/null 2>&1 || true
+fi
+# The TLS proxy is a host-side test process, so it is not owned by Compose.
+# Only terminate the process launched from this fixed test-stack path.
+pkill -f "$stack/tls-proxy.mjs" >/dev/null 2>&1 || true
 evidence="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T03}"
 rm -rf "$stack"
 mkdir -p "$stack" "$evidence"
@@ -29,7 +68,7 @@ password="e2e-$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)-2026"
 printf '%s' "$password" > "$stack/admin-temp-password"
 chmod 600 "$stack/admin-temp-password"
 
-sed "s|REPLACE_WITH_STACK_DIR|$stack|" test/e2e/compose/compose-install.yaml > "$stack/install.yaml"
+sed -e "s|REPLACE_WITH_STACK_DIR|$stack|" -e 's|https://quoin.example.com|https://127.0.0.1:18480|' test/e2e/compose/compose-install.yaml > "$stack/install.yaml"
 
 printf 'admin\nE2E Admin\n%s\n%s\n' "$password" "$password" | \
   XDG_STATE_HOME="$stack/state" "$stack/quoin-deploy" compose install --config "$stack/install.yaml" \
@@ -41,7 +80,42 @@ exec 2>>"$evidence/playwright-server.log"
 # No tracing: the admin/new passwords and the revealed bearer must never
 # reach the evidence log (they only travel as curl -d bodies / env vars).
 BASE=http://127.0.0.1:18080
-ORIGIN='Origin: https://quoin.example.com'
+ORIGIN='Origin: https://127.0.0.1:18480'
+# The public-origin contract is HTTPS and noVNC verifies WebSocket Origin.
+# Terminate an ephemeral self-signed TLS edge for the browser E2E rather than
+# weakening the production Origin check to accommodate plain-loopback tests.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=127.0.0.1' \
+  -addext 'subjectAltName=IP:127.0.0.1' -keyout "$stack/tls.key" -out "$stack/tls.crt" >/dev/null 2>&1
+cat > "$stack/tls-proxy.mjs" <<'EOF'
+import fs from 'node:fs'
+import http from 'node:http'
+import https from 'node:https'
+import net from 'node:net'
+const options = { key: fs.readFileSync(process.env.TLS_KEY), cert: fs.readFileSync(process.env.TLS_CERT) }
+const target = { host: '127.0.0.1', port: 18080 }
+const proxy = https.createServer(options, (request, response) => {
+  const upstream = http.request({ ...target, method: request.method, path: request.url, headers: { ...request.headers, host: request.headers.host } }, (upstreamResponse) => {
+    response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers)
+    upstreamResponse.pipe(response)
+  })
+  upstream.on('error', () => response.writeHead(502).end())
+  request.pipe(upstream)
+})
+proxy.on('upgrade', (request, socket, head) => {
+  const upstream = net.connect(target.port, target.host, () => {
+    upstream.write(`${request.method} ${request.url} HTTP/${request.httpVersion}\r\n`)
+    for (const [name, value] of Object.entries(request.headers)) upstream.write(`${name}: ${value}\r\n`)
+    upstream.write('\r\n')
+    if (head.length) upstream.write(head)
+    socket.pipe(upstream).pipe(socket)
+  })
+  upstream.on('error', () => socket.destroy())
+})
+proxy.listen(18480, '127.0.0.1')
+EOF
+TLS_KEY="$stack/tls.key" TLS_CERT="$stack/tls.crt" node "$stack/tls-proxy.mjs" >>"$evidence/playwright-server.log" 2>&1 &
+tls_proxy_pid=$!
+printf '%s' "$tls_proxy_pid" > "$stack/tls-proxy.pid"
 # __Host-quoin-session is Secure; curl will not attach it over plain http, so
 # carry the Set-Cookie value manually for the whole session.
 LOGIN_HEADERS=$(mktemp)
@@ -52,10 +126,120 @@ SESSION_COOKIE=$(awk 'tolower($1)=="set-cookie:" {print $2}' "$LOGIN_HEADERS" | 
 echo "$SESSION_COOKIE" > "$stack/session-cookie"
 CJ="Cookie: $SESSION_COOKIE"
 newpass="e2e-$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)-2027"
+start_ready_server() {
+  printf '%s' "$newpass" > "$stack/admin-new-password"
+  chmod 600 "$stack/admin-new-password"
+  cat > "$stack/ready.py" <<PYEOF
+import http.server, os
+class S(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if os.path.exists('$stack/admin-new-password'):
+            self.send_response(200); self.end_headers()
+        else:
+            self.send_response(503); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('0.0.0.0', 18083), S).serve_forever()
+PYEOF
+  python3 "$stack/ready.py" &
+  printf '%s' "$!" > "$stack/ready.pid"
+}
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X PUT \
   -d "{\"currentPassword\":\"$password\",\"newPassword\":\"$newpass\"}" "$BASE/api/v1/auth/password" \
   -o "$stack/put.json" -w 'change-password-http=%{http_code}\n' 2>&1 | tee -a "$evidence/playwright-server.log"
 cat "$stack/put.json" >> "$evidence/playwright-server.log" 2>/dev/null || true
+
+# Ticket 20 intentionally provisions only its Quoin/Lintel browser path. It
+# must leave alert/model/Thanos fixtures owned by other ticket suites alone.
+if [ "$ticket" = "T20" ]; then
+  cat > "$stack/t20-auth-fixture.py" <<'PYEOF'
+import http.server
+
+def increment(name):
+    path = '/state/' + name
+    try:
+        value = int(open(path).read())
+    except (FileNotFoundError, ValueError):
+        value = 0
+    open(path, 'w').write(str(value + 1) + '\n')
+
+class S(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/healthz':
+            self.send_response(204); self.end_headers()
+        elif self.path == '/authenticated' and 't20_auth=1' in self.headers.get('Cookie', ''):
+            open('/state/authenticated-page', 'w').write('authenticated-page\n')
+            self.send_response(200); self.end_headers(); self.wfile.write(b'authenticated')
+        elif self.path.startswith('/ready'):
+            increment('ready-seq')
+            self.send_response(204); self.end_headers()
+        elif self.path == '/complete':
+            increment('submit-seq')
+            open('/state/authenticated', 'w').write('authenticated\n')
+            self.send_response(303); self.send_header('Set-Cookie', 't20_auth=1; Path=/'); self.send_header('Location', '/authenticated'); self.end_headers()
+        else:
+            increment('login-get-seq')
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
+            # This fixture records only event kinds/counts. It never records an
+            # input value, key, pointer coordinate, cookie, or page content.
+            self.wfile.write(b'<style>html,body,button{width:100%;height:100%;margin:0;border:0}button{font:32px sans-serif}</style><button type="button" autofocus>Press Enter to sign in</button><script>document.addEventListener("pointerdown",()=>navigator.sendBeacon("/input/pointer"));document.addEventListener("keydown",()=>{navigator.sendBeacon("/input/key");location.assign("/complete")});fetch("/ready?"+Date.now(),{cache:"no-store"});</script>')
+    def do_POST(self):
+        if self.path == '/input/pointer':
+            increment('pointerdown-seq'); self.send_response(204); self.end_headers(); return
+        if self.path == '/input/key':
+            increment('keydown-seq'); self.send_response(204); self.end_headers(); return
+        self.send_response(404); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('0.0.0.0', 8081), S).serve_forever()
+PYEOF
+  NET=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep '_internal$' | head -1)
+  mkdir -p "$stack/t20-auth-fixture-state"
+  docker run -d --name quoin-t20-auth-fixture --network "$NET" --network-alias t20-auth-fixture -v "$stack/t20-auth-fixture.py:/app.py:ro" -v "$stack/t20-auth-fixture-state:/state" python:3.12-slim python /app.py >>"$evidence/playwright-server.log" 2>&1
+  fixture_ready=0
+  for _ in $(seq 1 30); do
+    if docker exec quoin-t20-auth-fixture python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=1)' >/dev/null 2>&1; then fixture_ready=1; break; fi
+    sleep 1
+  done
+  if [ "$fixture_ready" != "1" ]; then
+    echo 'FATAL: T20 authentication fixture did not become ready' | tee -a "$evidence/playwright-server.log" >&2
+    exit 1
+  fi
+  LINTEL_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["lintel"]["rowVersion"]))')
+  PREP=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t20-prepare-$RANDOM\",\"expectedRowVersion\":$LINTEL_ROW}" "$BASE/api/v1/runtime-slots/lintel/registration/prepare")
+  HANDLE=$(printf '%s' "$PREP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["registrationTokenHandle"])')
+  REVEAL=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"registrationTokenHandle\":\"$HANDLE\"}" "$BASE/api/v1/runtime-slots/registration-token/reveal")
+  printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T lintel register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
+  lintel_connected=0
+  for _ in $(seq 1 45); do
+    if docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs lintel 2>&1 | grep -q 'runtime.connected'; then lintel_connected=1; break; fi
+    sleep 1
+  done
+  if [ "$lintel_connected" != "1" ]; then
+    docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs lintel >>"$evidence/playwright-server.log" 2>&1 || true
+    echo 'FATAL: Lintel did not establish its Runtime control stream after registration' | tee -a "$evidence/playwright-server.log" >&2
+    exit 1
+  fi
+  {
+    echo 'lintel-image:'
+    docker image inspect "${QUOIN_IMAGE_NAMESPACE:-quoin}/lintel:v0.1.0-dev" --format '{{.Id}}'
+    echo 'chromium:'
+    docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel chromium --version
+    echo 'tigervnc-scraping-server:'
+    docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' tigervnc-scraping-server
+    echo 'xvfb:'
+    docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' xvfb
+  } >"$evidence/t20-components.log" 2>&1
+  start_ready_server
+  if [ "${QUOIN_T20_TEST_BOOTSTRAP_FAILURE:-}" = "1" ]; then
+    if [ "${QUOIN_T20_TEST_FAILURE_ARTIFACT:-}" = "1" ]; then
+      mkdir -p "$stack/playwright-output"
+      printf 'synthetic failure artifact for teardown verification\n' >"$stack/playwright-output/error-context.md"
+    fi
+    echo 'intentional T20 bootstrap failure after owned resources were created' >&2
+    exit 97
+  fi
+  exec docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele 2>&1 | tee -a "$evidence/runtime-process.log"
+fi
+
 META=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"key":"e2e-am","protocol":"alertmanager","clientCommandId":"e2e-cmd-0001"}' "$BASE/api/v1/alert-sources")
 HANDLE=$(printf '%s' "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['revealHandle'])")
@@ -135,7 +319,7 @@ fi
 pkill -f "fixtures/model-provider" >/dev/null 2>&1 || true
 go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
 ("$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &)
-GW2=$(docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
+GW2=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t08-create-1","name":"main-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW2"':18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
   "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
@@ -145,7 +329,7 @@ curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
 
 # --- T07 fixtures: a real Thanos target and a registered Plinth ----------
 docker rm -f quoin-t07-thanos >/dev/null 2>&1 || true
-NET=$(docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1)
+NET=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1)
 docker run -d --name quoin-t07-thanos --network "$NET" thanosio/thanos:v0.36.0 query --http-address=0.0.0.0:9090 --log.level=warn >>"$evidence/playwright-server.log" 2>&1
 # Register plinth so supervisor probes dispatch live (attached stdin keeps
 # the token out of argv and logs).
@@ -153,7 +337,8 @@ PLINTH_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c '
 PREP=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t07-prepare-$RANDOM\",\"expectedRowVersion\":$PLINTH_ROW}" "$BASE/api/v1/runtime-slots/plinth/registration/prepare")
 HANDLE=$(printf '%s' "$PREP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["registrationTokenHandle"])')
 REVEAL=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"registrationTokenHandle\":\"$HANDLE\"}" "$BASE/api/v1/runtime-slots/registration-token/reveal")
-printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T plinth register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
+printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T plinth register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
+
 # Create the UI-visible connection (one-time secret in the request body only).
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t07-create-1","name":"main-thanos","connection":{"type":"thanos","baseUrl":"http://quoin-t07-thanos:9090","password":"e2e-thanos-secret"}}' \
@@ -285,22 +470,6 @@ fi
 
 # The fixture doubles as the ready marker: tests only run once every step
 # (login/change/source/reveal/AM alert) has completed.
-printf '%s' "$newpass" > "$stack/admin-new-password"
-chmod 600 "$stack/admin-new-password"
-
 set +x
-# Readiness endpoint for Playwright's webServer probe: 200 only after every
-# step (incl. the AM alert) is done.
-cat > "$stack/ready.py" <<PYEOF
-import http.server, os
-class S(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if os.path.exists('$stack/admin-new-password'):
-            self.send_response(200); self.end_headers()
-        else:
-            self.send_response(503); self.end_headers()
-    def log_message(self, *a): pass
-http.server.HTTPServer(('0.0.0.0', 18083), S).serve_forever()
-PYEOF
-python3 "$stack/ready.py" &
-exec docker compose --project-name quoin --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele
+start_ready_server
+exec docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele 2>&1 | tee -a "$evidence/runtime-process.log"

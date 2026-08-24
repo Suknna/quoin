@@ -45,7 +45,11 @@ func RunAdminBootstrapScripted(composeFile string, answers AdminAnswers) (string
 	if answers.Password != answers.Confirmation {
 		return "", fmt.Errorf("the two typed temporary passwords do not match")
 	}
-	command := exec.Command("docker", "compose", "--project-name", "quoin", "--file", composeFile, "run", "--rm", "admin-bootstrap")
+	composeProject := os.Getenv("QUOIN_COMPOSE_PROJECT")
+	if composeProject == "" {
+		composeProject = "quoin"
+	}
+	command := exec.Command("docker", "compose", "--project-name", composeProject, "--file", composeFile, "run", "--rm", "admin-bootstrap")
 	command.Env = append(os.Environ(), "DOCKER_CLI_HINTS=false")
 	master, err := pty.Start(command)
 	if err != nil {

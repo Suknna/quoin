@@ -1,7 +1,7 @@
-name: quoin
+name: ${QUOIN_COMPOSE_PROJECT:-quoin}
 services:
   secret-bootstrap:
-    image: quoin/quoin:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/quoin:v0.1.0-dev
     command: ["secrets", "bootstrap", "--config", "/etc/quoin/component.yaml"]
     user: "{{.UID}}:{{.GID}}"
     read_only: true
@@ -14,7 +14,7 @@ services:
     tmpfs: [/tmp]
     restart: "no"
   admin-bootstrap:
-    image: quoin/quoin:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/quoin:v0.1.0-dev
     command: ["admin", "create", "--config", "/etc/quoin/component.yaml"]
     user: "{{.UID}}:{{.GID}}"
     read_only: true
@@ -33,7 +33,7 @@ services:
     tmpfs: [/tmp]
     restart: "no"
   quoin:
-    image: quoin/quoin:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/quoin:v0.1.0-dev
     command: ["serve", "--config", "/etc/quoin/component.yaml"]
     user: "{{.UID}}:{{.GID}}"
     read_only: true
@@ -70,7 +70,7 @@ services:
       start_period: 20s
     restart: unless-stopped
   plinth:
-    image: quoin/plinth:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/plinth:v0.1.0-dev
     user: "{{.UID}}:{{.GID}}"
     read_only: true
     init: true
@@ -96,7 +96,7 @@ services:
     networks: [internal]
     restart: unless-stopped
   lintel:
-    image: quoin/lintel:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/lintel:v0.1.0-dev
     user: "{{.UID}}:{{.GID}}"
     read_only: true
     init: true
@@ -122,7 +122,7 @@ services:
     networks: [internal]
     restart: unless-stopped
   stele:
-    image: quoin/stele:v0.1.0-dev
+    image: ${QUOIN_IMAGE_NAMESPACE:-quoin}/stele:v0.1.0-dev
     user: "{{.UID}}:{{.GID}}"
     read_only: true
     init: true

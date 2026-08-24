@@ -53,7 +53,11 @@ func main() {
 		}
 		scripted = &answers
 	}
-	composeArguments := []string{"compose", "--project-name", "quoin", "--file", projection.ComposeFile}
+	composeProject := os.Getenv("QUOIN_COMPOSE_PROJECT")
+	if composeProject == "" {
+		composeProject = "quoin"
+	}
+	composeArguments := []string{"compose", "--project-name", composeProject, "--file", projection.ComposeFile}
 	fmt.Println("[1/4] Verifying Docker Compose and the generated projection")
 	if err := run("docker", append(composeArguments, "version")...); err != nil {
 		fail(fmt.Sprintf("Docker Compose is unavailable: %v", err))
@@ -61,7 +65,7 @@ func main() {
 	if err := run("docker", append(composeArguments, "config", "--quiet")...); err != nil {
 		fail(fmt.Sprintf("generated Compose projection is invalid: %v", err))
 	}
-	if running(projection.ComposeFile) {
+	if running(projection.ComposeFile, composeProject) {
 		fmt.Println("[2/4] Existing Quoin is running; bootstrap state is already active")
 		fmt.Println("[3/4] Preserving the existing administrator and persistent data")
 	} else {
@@ -137,8 +141,8 @@ func deploymentStateDirectory() (string, error) {
 // running reports whether the EXACT projected compose file already has a live
 // Quoin. Containers from a different config file (stale stack from another
 // state dir) must not count: they are cleaned up before a fresh install.
-func running(composeFile string) bool {
-	command := exec.Command("docker", "compose", "--project-name", "quoin", "--file", composeFile, "ps", "--status", "running", "--quiet", "quoin")
+func running(composeFile, composeProject string) bool {
+	command := exec.Command("docker", "compose", "--project-name", composeProject, "--file", composeFile, "ps", "--status", "running", "--quiet", "quoin")
 	output, err := command.Output()
 	if err != nil || len(output) == 0 {
 		return false
