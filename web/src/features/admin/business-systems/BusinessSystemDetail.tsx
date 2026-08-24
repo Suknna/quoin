@@ -28,9 +28,10 @@ interface BusinessSystemDetailPageProps {
   isAdmin: boolean
   onBack: () => void
   onOpenVersion: (systemKey: string, versionId: string) => void
+  onOpenBrowserLogin?: (systemKey: string) => void
 }
 
-export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVersion }: BusinessSystemDetailPageProps) {
+export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVersion, onOpenBrowserLogin }: BusinessSystemDetailPageProps) {
   const [detail, setDetail] = useState<BusinessSystemDetail | null>(null)
   const [versions, setVersions] = useState<ConfigVersionSummary[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -189,6 +190,17 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
           <dd>{detail.configVersionCount}</dd>
         </div>
       </dl>
+
+      {detail.browserIdentityState !== 'none' && onOpenBrowserLogin && (
+        <section aria-labelledby="browser-login-entry-title">
+          <div className="section-heading">
+            <h2 id="browser-login-entry-title">浏览器身份</h2>
+            <span className={detail.browserIdentityState === 'Ready' ? 'status-pill healthy' : 'status-pill waiting'}>{detail.browserIdentityState === 'Ready' ? '可用' : '需要登录'}</span>
+          </div>
+          <p className="inline-status">需要人工登录或重新登录时，在独立窗口中连接；登录输入和页面内容不会被 Quoin 记录。</p>
+          <button className="secondary-button" onClick={() => onOpenBrowserLogin(systemKey)}>打开浏览器登录</button>
+        </section>
+      )}
 
       {isAdmin && <section aria-labelledby="bs-kubernetes-title">
         <h3 id="bs-kubernetes-title">Kubernetes 连接</h3>

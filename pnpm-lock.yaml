@@ -20,6 +20,9 @@ importers:
       '@assistant-ui/react-data-stream':
         specifier: 0.12.26
         version: 0.12.26(@assistant-ui/store@0.3.10(@assistant-ui/tap@0.9.14(@types/react@19.2.14)(react@19.2.8))(@types/react@19.2.14)(react@19.2.8))(@assistant-ui/tap@0.9.14(@types/react@19.2.14)(react@19.2.8))(@types/react@19.2.14)(react@19.2.8)(zustand@5.0.15(@types/react@19.2.14)(react@19.2.8))
+      '@novnc/novnc':
+        specifier: 1.7.0
+        version: 1.7.0
       '@vitejs/plugin-react':
         specifier: 6.0.5
         version: 6.0.5(vite@8.2.1(@types/node@25.5.0))
@@ -378,6 +381,9 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@novnc/novnc@1.7.0':
+    resolution: {integrity: sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==}
 
   '@oxc-project/types@0.144.0':
     resolution: {integrity: sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg==}
@@ -2664,6 +2670,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@novnc/novnc@1.7.0': {}
 
   '@oxc-project/types@0.144.0': {}
 

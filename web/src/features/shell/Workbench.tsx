@@ -13,6 +13,7 @@ import { BusinessSystemDetailPage } from '../admin/business-systems/BusinessSyst
 import { ConfigVersionPage } from '../admin/business-systems/ConfigVersionDetail'
 import { LabelContractsPanel } from '../admin/business-systems/LabelContractsPanel'
 import { UploadOverlay } from '../admin/business-systems/UploadOverlay'
+import { BrowserLogin } from '../browser-login/BrowserLogin'
 import '../admin/business-systems/business-systems.css'
 import { InvestigationChat } from '../investigation/InvestigationChat'
 import { InvestigationsList } from '../investigation/InvestigationsList'
@@ -28,11 +29,13 @@ type AlertSegment = 'current' | 'history' | 'intake'
 
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
 
-type BusinessSystemView = { kind: 'list' } | { kind: 'system'; systemKey: string } | { kind: 'version'; systemKey: string; versionId: string }
+type BusinessSystemView = { kind: 'list' } | { kind: 'system'; systemKey: string } | { kind: 'browser-login'; systemKey: string } | { kind: 'version'; systemKey: string; versionId: string }
 
 function businessSystemViewFromPath(): BusinessSystemView {
   const versionMatch = window.location.pathname.match(/^\/business-systems\/([^/]+)\/configs\/(\d+)/)
   if (versionMatch) return { kind: 'version', systemKey: decodeURIComponent(versionMatch[1]), versionId: versionMatch[2] }
+  const browserLoginMatch = window.location.pathname.match(/^\/business-systems\/([^/]+)\/browser-login$/)
+  if (browserLoginMatch) return { kind: 'browser-login', systemKey: decodeURIComponent(browserLoginMatch[1]) }
   const systemMatch = window.location.pathname.match(/^\/business-systems\/([^/]+)$/)
   if (systemMatch) return { kind: 'system', systemKey: decodeURIComponent(systemMatch[1]) }
   return { kind: 'list' }
@@ -207,6 +210,12 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
     setBusinessSystemView({ kind: 'system', systemKey: key })
   }
 
+  function openBrowserLogin(key: string) {
+    window.history.pushState({}, '', `/business-systems/${encodeURIComponent(key)}/browser-login`)
+    setActive('business-systems')
+    setBusinessSystemView({ kind: 'browser-login', systemKey: key })
+  }
+
   function backToBusinessSystems() {
     window.history.pushState({}, '', '/business-systems')
     setBusinessSystemView({ kind: 'list' })
@@ -351,12 +360,18 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             onBack={() => backToBusinessSystem(businessSystemView.systemKey)}
             onPublished={() => backToBusinessSystem(businessSystemView.systemKey)}
           />
+        ) : active === 'business-systems' && businessSystemView.kind === 'browser-login' ? (
+          <div className="detail-content">
+            <button className="back-button" onClick={() => backToBusinessSystem(businessSystemView.systemKey)}>返回业务系统</button>
+            <BrowserLogin systemKey={businessSystemView.systemKey} onPublished={() => backToBusinessSystem(businessSystemView.systemKey)} />
+          </div>
         ) : active === 'business-systems' && businessSystemView.kind === 'system' ? (
           <BusinessSystemDetailPage
             systemKey={businessSystemView.systemKey}
             isAdmin={user.role === 'admin'}
             onBack={backToBusinessSystems}
             onOpenVersion={openBusinessSystemVersion}
+            onOpenBrowserLogin={openBrowserLogin}
           />
         ) : active === 'business-systems' ? (
           <div className="detail-content">

@@ -448,6 +448,78 @@ export async function getJourneyCatalog(): Promise<JourneyCatalogView> {
   return (await response.json()) as JourneyCatalogView
 }
 
+export interface BrowserProbeResult {
+  phase: string
+  result: 'Authenticated' | 'Unauthenticated' | 'Indeterminate'
+  journeyId: string
+  journeyVersion: number
+  reasonCode?: string
+  observedAt: string
+}
+
+export interface BrowserIdentity {
+  id: string
+  state: 'Ready' | 'AuthenticationRequired'
+  rowVersion: number
+  currentRevision: { id: string; revision: number; name: string; startUrl: string; authenticationProbe: { journeyId: string; journeyVersion: number; params: Record<string, unknown> }; catalogDigest: string; catalogVersion: string; createdAt: string }
+  currentProfile: { id: string; generation: number; chromiumRevision: string; publishedAt: string } | null
+  lastProbe: BrowserProbeResult | null
+  currentOperation: BrowserOperation | null
+}
+
+export interface BrowserOperation {
+  id: string
+  identityId: string
+  identityRevisionId: string
+  kind: string
+  state: 'Queued' | 'WaitingForCapacity' | 'Starting' | 'Running' | 'AwaitingReconnect' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
+  rowVersion: number
+  requestedAt: string
+  reconnectDeadline?: string
+  terminalReason?: string
+  canAttach: boolean
+  canPublish: boolean
+  canCancel: boolean
+}
+
+export async function getBrowserIdentity(systemKey: string): Promise<BrowserIdentity> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(systemKey)}/browser-identity`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as BrowserIdentity
+}
+
+export async function startBrowserManualLogin(systemKey: string, expectedRowVersion: number): Promise<BrowserOperation> {
+  const response = await fetch(`/api/v1/browser-login/${encodeURIComponent(systemKey)}/operations`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
+  })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as BrowserOperation
+}
+
+export async function getBrowserOperation(systemKey: string, operationID: string): Promise<BrowserOperation> {
+  const response = await fetch(`/api/v1/browser-login/${encodeURIComponent(systemKey)}/operations/${encodeURIComponent(operationID)}`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as BrowserOperation
+}
+
+async function commandBrowserOperation(systemKey: string, operation: BrowserOperation, action: 'publish' | 'cancel'): Promise<BrowserOperation> {
+  const response = await fetch(`/api/v1/browser-login/${encodeURIComponent(systemKey)}/operations/${encodeURIComponent(operation.id)}/${action}`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedOperationRowVersion: operation.rowVersion }),
+  })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as BrowserOperation
+}
+
+export function publishBrowserProfile(systemKey: string, operation: BrowserOperation): Promise<BrowserOperation> {
+  return commandBrowserOperation(systemKey, operation, 'publish')
+}
+
+export function cancelBrowserOperation(systemKey: string, operation: BrowserOperation): Promise<BrowserOperation> {
+  return commandBrowserOperation(systemKey, operation, 'cancel')
+}
+
 export function formatTime(timestamp: string): string {
   const date = new Date(timestamp)
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString()
