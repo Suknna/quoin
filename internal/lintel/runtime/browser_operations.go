@@ -12,6 +12,7 @@ import (
 	"github.com/Suknna/quoin/internal/lintel/browser"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/lintel/profile"
+	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -114,6 +115,7 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		return channel.startAckReply(envelope, ack)
 	}
 	if err != nil {
+		sharedops.LogEvent("lintel", "warn", "browser.start_failed", err.Error())
 		if errors.Is(err, browser.ErrBusy) {
 			ack.RejectReason = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY
 		} else {
@@ -135,6 +137,12 @@ func (channel *Channel) startAckReply(envelope *runtimev1.ControlEnvelope, ack *
 }
 
 func (channel *Channel) publishResponse(envelope *runtimev1.ControlEnvelope, request *runtimev1.PublishBrowserProfile) *runtimev1.ControlEnvelope {
+	// Publishing owns the operation-state transition until DetachProfile has
+	// resolved any concurrent child-process exit. Crash completion and Stop use
+	// this same mutex, so they cannot observe or mutate these maps halfway
+	// through profile adoption.
+	channel.operationMu.Lock()
+	defer channel.operationMu.Unlock()
 	result := &runtimev1.PublishBrowserProfileResult{OperationId: request.GetOperationId(), Generation: request.GetNewGeneration(), CommandId: request.GetCommandId()}
 	reply := func() *runtimev1.ControlEnvelope {
 		out := channel.reply(envelope)
@@ -186,17 +194,26 @@ func (channel *Channel) publishResponse(envelope *runtimev1.ControlEnvelope, req
 		result.ProbeResult, result.RejectReason, result.Detail = probe, runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED, "authentication probe did not observe the authenticated URL"
 		return reply()
 	}
+	// Quiesce the only RFB relay before terminating Chromium. Otherwise an active
+	// x0vncserver client can defer its process exit while DetachProfile waits,
+	// leaving the publish reply permanently pending and allowing a live relay to
+	// write into a profile generation being adopted.
+	channel.tunnelMu.Lock()
+	cancel := channel.tunnelCancels[request.GetOperationId()]
+	done := channel.tunnelDones[request.GetOperationId()]
+	if cancel != nil {
+		cancel()
+	}
+	channel.tunnelMu.Unlock()
+	if done != nil {
+		<-done
+	}
 	profilePath, err := channel.browser.DetachProfile(request.GetOperationId())
 	if err != nil {
 		probe.Result, probe.ReasonCode = runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_INDETERMINATE, "browser_detach_failed"
 		result.ProbeResult, result.RejectReason, result.Detail = probe, runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE, "cannot safely publish browser profile"
 		return reply()
 	}
-	channel.tunnelMu.Lock()
-	if cancel := channel.tunnelCancels[request.GetOperationId()]; cancel != nil {
-		cancel()
-	}
-	channel.tunnelMu.Unlock()
 	digest, err := channel.profiles.Install(profilePath, profile.Manifest{IdentityID: request.GetIdentityId(), Generation: request.GetNewGeneration(), IdentityRevision: request.GetIdentityRevisionId(), ChromiumRevision: channel.Config.ChromiumRevision})
 	if err != nil {
 		// The browser has stopped and its temporary profile was detached. Do not
@@ -220,16 +237,21 @@ func (channel *Channel) stopResponse(envelope *runtimev1.ControlEnvelope, reques
 		reply.Msg = &runtimev1.ControlEnvelope_StopBrowserOperationAck{StopBrowserOperationAck: previous}
 		return reply
 	}
+	// Retire the request before cancelling the relay: a delayed reconnect from
+	// a prior RFB close can no longer create a new tunnel during this Stop.
+	delete(channel.started, request.GetOperationId())
 	channel.operationMu.Unlock()
 	channel.tunnelMu.Lock()
-	if cancel := channel.tunnelCancels[request.GetOperationId()]; cancel != nil {
+	cancel := channel.tunnelCancels[request.GetOperationId()]
+	done := channel.tunnelDones[request.GetOperationId()]
+	if cancel != nil {
 		cancel()
 	}
 	channel.tunnelMu.Unlock()
+	if done != nil {
+		<-done
+	}
 	err := channel.browser.Stop(request.GetOperationId())
-	channel.operationMu.Lock()
-	delete(channel.started, request.GetOperationId())
-	channel.operationMu.Unlock()
 	outcome := runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED
 	failure := runtimev1.BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED
 	if err != nil {

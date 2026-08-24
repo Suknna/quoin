@@ -18,17 +18,22 @@ func Bridge(ctx context.Context, tunnel io.ReadWriteCloser, vncAddress string) e
 	if err != nil {
 		return err
 	}
-	defer vnc.Close()
-	defer tunnel.Close()
 	done := make(chan error, 2)
 	go func() { _, err := io.Copy(vnc, tunnel); done <- err }()
 	go func() { _, err := io.Copy(tunnel, vnc); done <- err }()
+	var result error
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		return err
+		result = ctx.Err()
+	case result = <-done:
 	}
+	// Unblock the opposite copy before returning. An RFB EOF in either
+	// direction must not leave a goroutine reading a live peer while the next
+	// attachment generation is opened.
+	_ = vnc.Close()
+	_ = tunnel.Close()
+	<-done
+	return result
 }
 
 // dialVNC tolerates the short interval between a successful x0vncserver exec

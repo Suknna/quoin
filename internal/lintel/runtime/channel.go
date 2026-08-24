@@ -55,10 +55,10 @@ type Channel struct {
 	published         map[int64]*runtimev1.PublishBrowserProfileResult
 	tunnelMu          sync.Mutex
 	tunnelCancels     map[int64]context.CancelFunc
+	tunnelDones       map[int64]chan struct{}
 	tunnelGenerations map[int64]uint64
+	tunnelBinding     *browserTunnelBinding // guarded by tunnelMu; immutable per control epoch
 	outbound          uint64
-	tunnelClient      runtimev1.BrowserTunnelClient
-	tunnelContext     context.Context
 	controlMu         sync.Mutex
 	controlSend       func(*runtimev1.ControlEnvelope) error
 }
@@ -81,7 +81,7 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	if config.Browser == nil {
 		return nil, errors.New("browser manager is required")
 	}
-	channel := &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw), browser: config.Browser, profiles: profile.NewStore(config.StateDirectory), started: make(map[int64]*runtimev1.StartBrowserOperation), startAcks: make(map[int64]*runtimev1.StartBrowserOperationAck), completed: make(map[int64]*runtimev1.CompleteBrowserOperation), completing: make(map[int64]bool), stopAcks: make(map[int64]*runtimev1.StopBrowserOperationAck), published: make(map[int64]*runtimev1.PublishBrowserProfileResult), tunnelCancels: make(map[int64]context.CancelFunc), tunnelGenerations: make(map[int64]uint64)}
+	channel := &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw), browser: config.Browser, profiles: profile.NewStore(config.StateDirectory), started: make(map[int64]*runtimev1.StartBrowserOperation), startAcks: make(map[int64]*runtimev1.StartBrowserOperationAck), completed: make(map[int64]*runtimev1.CompleteBrowserOperation), completing: make(map[int64]bool), stopAcks: make(map[int64]*runtimev1.StopBrowserOperationAck), published: make(map[int64]*runtimev1.PublishBrowserProfileResult), tunnelCancels: make(map[int64]context.CancelFunc), tunnelDones: make(map[int64]chan struct{}), tunnelGenerations: make(map[int64]uint64)}
 	config.Browser.OnCrash = channel.browserCrashed
 	return channel, nil
 }
@@ -195,25 +195,24 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	defer connection.Close()
 	client := runtimev1.NewRuntimeControlClient(connection)
 	streamCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+state.LongTermToken))
-	channel.tunnelClient = runtimev1.NewBrowserTunnelClient(connection)
-	channel.tunnelContext = streamCtx
 	stream, err := client.Connect(streamCtx)
 	if err != nil {
 		return err
 	}
-	channel.epoch++
+	epoch := channel.epoch + 1
+	channel.epoch = epoch
 	atomic.StoreUint64(&channel.outbound, 1) // Hello consumes the first outbound ID.
 	hello := &runtimev1.Hello{
 		Slot:                  runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
 		BootId:                channel.bootID,
-		ConnectionEpoch:       channel.epoch,
+		ConnectionEpoch:       epoch,
 		ReleaseVersion:        buildinfo.Release,
 		JourneyCatalogDigest:  catalog.Digest(),
 		JourneyCatalogVersion: catalog.Version,
 		BrowserCapacitySlots:  channel.Config.BrowserSlots,
 		ChromiumRevision:      channel.Config.ChromiumRevision,
 	}
-	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: channel.epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
+	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
 		return err
 	}
 	ack, err := stream.Recv()
@@ -232,6 +231,8 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		// profile inventory. No browser work is considered ready before then.
 		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: !helloAck.GetProfileReconcileRequired(), Reason: sharedops.Ready})
 	}
+	channel.installBrowserTunnelBinding(browserTunnelBinding{client: runtimev1.NewBrowserTunnelClient(connection), context: streamCtx, epoch: epoch})
+	defer channel.removeBrowserTunnelBinding(epoch)
 	sharedops.LogEvent("lintel", "info", "runtime.connected", "quoin="+channel.Config.QuoinEndpoint)
 	var outbound sync.Mutex
 	send := func(envelope *runtimev1.ControlEnvelope) error {
@@ -261,7 +262,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			case <-heartbeat.C:
 				messageID := channel.nextMessageID()
 				if err := send(&runtimev1.ControlEnvelope{
-					MessageId: messageID, ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+					MessageId: messageID, ConnectionEpoch: epoch, BootId: channel.bootID,
 					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: messageID}},
 				}); err != nil {
 					return
@@ -337,7 +338,15 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if !pool.AppendCertsFromPEM(caBody) {
 		return nil, errors.New("Quoin Runtime CA 证书无法解析")
 	}
-	return grpc.NewClient(endpoint,
+	connection, err := grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})),
 	)
+	if err != nil {
+		return nil, err
+	}
+	// grpc.NewClient is intentionally lazy. Explicitly start resolution and the
+	// HTTP/2 transport so a short-lived BrowserTunnel is not left idle behind
+	// the long-lived control stream.
+	connection.Connect()
+	return connection, nil
 }
