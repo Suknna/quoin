@@ -87,15 +87,15 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
 	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
-	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) ([]attempt.ToolGrant, error) {
+	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
 		if tool.Name != thanos.QueryToolName {
-			return nil, fmt.Errorf("tool %s has no grant resolver", tool.Name)
+			return attempt.ToolResolution{}, fmt.Errorf("tool %s has no grant resolver", tool.Name)
 		}
 		grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
 		if err != nil {
-			return nil, err
+			return attempt.ToolResolution{}, err
 		}
-		return []attempt.ToolGrant{grant}, nil
+		return attempt.ToolResolution{Grants: []attempt.ToolGrant{grant}}, nil
 	}
 	service.attempts.ToolGrantValidator = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) error {
 		if tool.Name != thanos.QueryToolName {

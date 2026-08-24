@@ -119,6 +119,7 @@ func connectionError(err error) error {
 }
 
 type connectionSummaryJSON struct {
+	ID                   string          `json:"id"`
 	Name                 string          `json:"name"`
 	Type                 string          `json:"type"`
 	Enabled              bool            `json:"enabled"`
@@ -131,7 +132,7 @@ type connectionSummaryJSON struct {
 
 func renderConnection(summary connections.Summary) connectionSummaryJSON {
 	rendered := connectionSummaryJSON{
-		Name: summary.Name, Type: summary.Type, Enabled: summary.Enabled,
+		ID: strconv.FormatInt(summary.ID, 10), Name: summary.Name, Type: summary.Type, Enabled: summary.Enabled,
 		RevalidationRequired: summary.RevalidationRequired,
 		RowVersion:           summary.RowVersion, Config: summary.Config,
 	}

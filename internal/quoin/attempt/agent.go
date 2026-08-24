@@ -65,8 +65,8 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	var state string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, begin.AttemptID).Scan(&state); err != nil {
+	var state, agentVersion string
+	if err := conn.QueryRowContext(ctx, `SELECT state,agent_version FROM execution_attempts WHERE id=?`, begin.AttemptID).Scan(&state, &agentVersion); err != nil {
 		return 0, err
 	}
 	if state != "Running" {
@@ -87,7 +87,7 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 	if begin.ContextBudget != contextBudget || begin.MaxOutput != maxOutput {
 		return 0, fmt.Errorf("%w: budget override refused (contract %d/%d, request %d/%d)", ErrLedgerDenied, contextBudget, maxOutput, begin.ContextBudget, begin.MaxOutput)
 	}
-	wantToolDigest, err := CanonicalToolsDigest()
+	wantToolDigest, err := CanonicalToolsDigest(agentVersion)
 	if err != nil {
 		return 0, err
 	}
@@ -159,7 +159,7 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 			estimated_input_tokens,evicted_turn_count,status,started_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'running', ?)`,
 		begin.AttemptID, begin.CallSeq, begin.RetrySeq, "chat", begin.ModelID, grantID,
-		AgentVersion, AgentVersion, begin.PromptDigest, ToolSchemaVersion, begin.ToolSchemaDigest,
+		agentVersion, agentVersion, begin.PromptDigest, toolSchemaVersionFor(agentVersion), begin.ToolSchemaDigest,
 		begin.InputDigest, begin.RenderedDigest, begin.ContextBudget, begin.MaxOutput,
 		begin.EstimatedInput, begin.EvictedTurns, now)
 	if err != nil {
@@ -273,6 +273,8 @@ type ToolAuthorization struct {
 	ProviderToolCallID string
 	FailureMode        string
 	Grants             []ToolGrant
+	PreflightCode      string
+	PreflightDetail    string
 }
 
 // CompleteCall seals one model call and creates the pending tool_calls rows
@@ -351,9 +353,9 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 		}
 	}()
 	var callAttempt int64
-	var status string
+	var status, agentVersion string
 	var callSeq int
-	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,status,call_seq FROM model_calls WHERE id=?`, completion.CallID).Scan(&callAttempt, &status, &callSeq); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT m.attempt_id,m.status,m.call_seq,a.agent_version FROM model_calls m JOIN execution_attempts a ON a.id=m.attempt_id WHERE m.id=?`, completion.CallID).Scan(&callAttempt, &status, &callSeq, &agentVersion); err != nil {
 		return nil, err
 	}
 	if callAttempt != completion.AttemptID {
@@ -391,7 +393,7 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 		}
 		validated := make([]validatedTool, 0, len(completion.ProposedTools))
 		for _, tool := range completion.ProposedTools {
-			def, known := LookupTool(tool.ToolName)
+			def, known := LookupToolForAgentVersion(agentVersion, tool.ToolName)
 			if !known {
 				return nil, fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, tool.ToolName)
 			}
@@ -457,11 +459,21 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 				if service.ToolGrantResolver == nil {
 					return nil, fmt.Errorf("%w: tool %s needs a grant resolver", ErrLedgerDenied, item.definition.Name)
 				}
-				grants, err := service.ToolGrantResolver(ctx, conn, completion.AttemptID, toolCallID, item.definition)
+				resolution, err := service.ToolGrantResolver(ctx, conn, completion.AttemptID, toolCallID, item.definition)
 				if err != nil {
 					return nil, err
 				}
-				authorization.Grants = grants
+				if resolution.PreflightCode != "" && len(resolution.Grants) != 0 {
+					return nil, fmt.Errorf("%w: tool %s resolution mixes preflight and grants", ErrLedgerDenied, item.definition.Name)
+				}
+				if resolution.PreflightCode != "" {
+					if _, err := conn.ExecContext(ctx, `UPDATE tool_calls SET preflight_error_code=?,preflight_error_detail=?,row_version=row_version+1 WHERE id=? AND status='pending'`, resolution.PreflightCode, resolution.PreflightDetail, toolCallID); err != nil {
+						return nil, err
+					}
+				}
+				authorization.Grants = resolution.Grants
+				authorization.PreflightCode = resolution.PreflightCode
+				authorization.PreflightDetail = resolution.PreflightDetail
 			}
 			authorizations = append(authorizations, authorization)
 		}
@@ -518,8 +530,8 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	var state string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+	var state, agentVersion string
+	if err := conn.QueryRowContext(ctx, `SELECT state,agent_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &agentVersion); err != nil {
 		return err
 	}
 	if state != "Running" {
@@ -536,16 +548,26 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 	if status != "pending" {
 		return fmt.Errorf("%w: tool call %d is %s", ErrLedgerDenied, toolCallID, status)
 	}
-	definition, known := LookupTool(toolName)
+	definition, known := LookupToolForAgentVersion(agentVersion, toolName)
 	if !known {
 		return fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
 	}
 	if needsConnectionGrant(definition) {
-		if service.ToolGrantValidator == nil {
-			return fmt.Errorf("%w: tool %s has no grant validator wired", ErrLedgerDenied, toolName)
+		var grantCount int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM tool_call_connection_grants WHERE tool_call_id=?`, toolCallID).Scan(&grantCount); err != nil {
+			return err
 		}
-		if err := service.ToolGrantValidator(ctx, conn, attemptID, toolCallID, definition); err != nil {
-			return fmt.Errorf("%w: grant validation: %v", ErrLedgerDenied, err)
+		// A zero-grant typed observation is the resolver's accepted routing
+		// preflight. It must reach the model without credential validation.
+		// Kubernetes grants are fenced independently at FetchCredentialGrant.
+		// Valid sibling mappings must still execute if another mapping is stale.
+		if grantCount != 0 && definition.Name != "kubernetes_read" {
+			if service.ToolGrantValidator == nil {
+				return fmt.Errorf("%w: tool %s has no grant validator wired", ErrLedgerDenied, toolName)
+			}
+			if err := service.ToolGrantValidator(ctx, conn, attemptID, toolCallID, definition); err != nil {
+				return fmt.Errorf("%w: grant validation: %v", ErrLedgerDenied, err)
+			}
 		}
 	}
 	result, err := conn.ExecContext(ctx, `
@@ -562,6 +584,25 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 	}
 	committed = true
 	return nil
+}
+
+// ExpectedToolResultSchema resolves the sole ResultPayload schema accepted for
+// one persisted Tool Call. Runtime ingress calls this before any result write,
+// so a compromised or buggy supervisor cannot relabel one fixed tool result as
+// another contract.
+func (service *Service) ExpectedToolResultSchema(ctx context.Context, toolCallID int64) (string, error) {
+	var toolName, agentVersion string
+	if err := service.db.QueryRowContext(ctx, `
+		SELECT t.tool_name,a.agent_version
+		FROM tool_calls t JOIN execution_attempts a ON a.id=t.attempt_id
+		WHERE t.id=?`, toolCallID).Scan(&toolName, &agentVersion); err != nil {
+		return "", err
+	}
+	definition, known := LookupToolForAgentVersion(agentVersion, toolName)
+	if !known || definition.ResultSchemaKind == "" {
+		return "", fmt.Errorf("%w: tool %q has no fixed result schema", ErrLedgerDenied, toolName)
+	}
+	return definition.ResultSchemaKind, nil
 }
 
 // ToolResult is the sealed outcome of one tool execution.
@@ -596,8 +637,8 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 		}
 	}()
 	var callAttempt int64
-	var status, failureMode, toolName string
-	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,status,failure_mode,tool_name FROM tool_calls WHERE id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode, &toolName); err != nil {
+	var status, failureMode, toolName, agentVersion string
+	if err := conn.QueryRowContext(ctx, `SELECT t.attempt_id,t.status,t.failure_mode,t.tool_name,a.agent_version FROM tool_calls t JOIN execution_attempts a ON a.id=t.attempt_id WHERE t.id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode, &toolName, &agentVersion); err != nil {
 		return nil, err
 	}
 	if callAttempt != result.AttemptID {
@@ -656,7 +697,7 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 	// running at the Evidence INSERT), all in the same transaction.
 	var evidenceIDs []int64
 	if result.Outcome == "succeeded" && service.EvidenceWriter != nil {
-		definition, known := LookupTool(toolName)
+		definition, known := LookupToolForAgentVersion(agentVersion, toolName)
 		if !known {
 			return nil, fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
 		}
@@ -695,7 +736,8 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 // (ARCH-INPUT-003): supervisor_typed observation tools resolve their
 // deployment connection per tool call; the model never selects it.
 func needsConnectionGrant(definition ToolDef) bool {
-	return definition.ExecutionMode == "supervisor_typed" && definition.ProducesEvidence
+	// Artifact tools are supervisor typed but do not carry external secrets.
+	return definition.Name == "thanos_query" || definition.Name == "kubernetes_read"
 }
 
 // ToolCallView is the read projection of one tool call (used by the tool

@@ -179,6 +179,87 @@ func (handler *Handler) publishBusinessSystemConfig(ctx context.Context, input *
 	}{CacheControl: noStore(), Body: detail}, nil
 }
 
+// --- Business System Kubernetes connections -----------------------------
+
+type kubernetesMappingCreateBody struct {
+	ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	ConnectionID    int64  `json:"connectionId,string" minimum:"1"`
+}
+
+func (handler *Handler) listKubernetesConnections(ctx context.Context, input *struct {
+	Session   string `cookie:"__Host-quoin-session"`
+	SystemKey string `path:"systemKey"`
+}) (*struct {
+	CacheControl string                                       `header:"Cache-Control"`
+	Body         []businesssystem.KubernetesConnectionMapping `json:"body"`
+}, error) {
+	if _, err := handler.reader(ctx, input.Session); err != nil {
+		return nil, err
+	}
+	mappings, err := handler.Systems.ListKubernetesConnectionMappings(ctx, input.SystemKey)
+	if err != nil {
+		return nil, mapDomainError(err)
+	}
+	return &struct {
+		CacheControl string                                       `header:"Cache-Control"`
+		Body         []businesssystem.KubernetesConnectionMapping `json:"body"`
+	}{CacheControl: noStore(), Body: mappings}, nil
+}
+
+func (handler *Handler) createKubernetesConnection(ctx context.Context, input *struct {
+	Session   string `cookie:"__Host-quoin-session"`
+	SystemKey string `path:"systemKey"`
+	Body      kubernetesMappingCreateBody
+}) (*struct {
+	CacheControl string                                     `header:"Cache-Control"`
+	Body         businesssystem.KubernetesConnectionMapping `json:"body"`
+}, error) {
+	principal, err := handler.admin(ctx, input.Session)
+	if err != nil {
+		return nil, err
+	}
+	mapping, err := handler.Systems.CreateKubernetesConnectionMapping(ctx, principal, input.Body.ClientCommandID, input.SystemKey, input.Body.ConnectionID)
+	if err != nil {
+		return nil, mapDomainError(err)
+	}
+	return &struct {
+		CacheControl string                                     `header:"Cache-Control"`
+		Body         businesssystem.KubernetesConnectionMapping `json:"body"`
+	}{CacheControl: noStore(), Body: mapping}, nil
+}
+
+type kubernetesMappingRetireBody struct {
+	ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
+}
+
+func (handler *Handler) retireKubernetesConnection(ctx context.Context, input *struct {
+	Session   string `cookie:"__Host-quoin-session"`
+	SystemKey string `path:"systemKey"`
+	MappingID string `path:"mappingId" pattern:"^[1-9][0-9]*$"`
+	Body      kubernetesMappingRetireBody
+}) (*struct {
+	CacheControl string                                     `header:"Cache-Control"`
+	Body         businesssystem.KubernetesConnectionMapping `json:"body"`
+}, error) {
+	principal, err := handler.admin(ctx, input.Session)
+	if err != nil {
+		return nil, err
+	}
+	mappingID, locatorProblem := parseLocator(input.MappingID)
+	if locatorProblem != nil {
+		return nil, locatorProblem
+	}
+	mapping, err := handler.Systems.RetireKubernetesConnectionMapping(ctx, principal, input.Body.ClientCommandID, input.SystemKey, mappingID, input.Body.ExpectedRowVersion)
+	if err != nil {
+		return nil, mapDomainError(err)
+	}
+	return &struct {
+		CacheControl string                                     `header:"Cache-Control"`
+		Body         businesssystem.KubernetesConnectionMapping `json:"body"`
+	}{CacheControl: noStore(), Body: mapping}, nil
+}
+
 // --- Label Contracts ------------------------------------------------------
 
 func (handler *Handler) listLabelContracts(ctx context.Context, input *struct {

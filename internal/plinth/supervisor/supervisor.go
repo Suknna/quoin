@@ -16,6 +16,7 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	plinthagent "github.com/Suknna/quoin/internal/plinth/agent"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/model"
 	"github.com/Suknna/quoin/internal/plinth/modelprovider"
@@ -173,8 +174,10 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		return
 	}
 	failureSchema := "initial_analysis_output_v1"
+	systemPrompt := plinthagent.SystemPrompt
 	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
 		failureSchema = "investigation_output_v1"
+		systemPrompt = plinthagent.InvestigationSystemPrompt
 	}
 	// The frozen input snapshot carries the model contract (model id and
 	// budgets, ARCH-AGENT-003); the supervisor resolves the base URL and
@@ -221,6 +224,7 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 				ContextBudget: contract.ModelContract.ContextBudgetTokens,
 				MaxOutput:     contract.ModelContract.MaxOutputTokens,
 				Streaming:     true,
+				SystemPrompt:  systemPrompt,
 			},
 		},
 	}

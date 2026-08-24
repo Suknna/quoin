@@ -42,7 +42,11 @@ const (
 // initial-analysis tool set. The bytes and digest must match the Quoin-side
 // attempt.CanonicalToolsJSON exactly (pinned by tools_test.go and enforced
 // at BeginModelCall through the tool schema digest).
-func ProviderToolsJSON() ([]byte, error) {
+func ProviderToolsJSON(agentVersions ...string) ([]byte, error) {
+	agentVersion := WorkerAgentVersion
+	if len(agentVersions) == 1 {
+		agentVersion = agentVersions[0]
+	}
 	tools := []map[string]any{
 		toolSchema("bash", "在当前一次性工作区执行一条 bash 命令（/bin/bash --noprofile --norc -c）。无网络、无凭据，只可访问工作区与只读系统路径。", map[string]any{
 			"command": map[string]any{"type": "string"},
@@ -66,6 +70,12 @@ func ProviderToolsJSON() ([]byte, error) {
 			"query": map[string]any{"type": "string"},
 		}, []string{"query"}),
 	}
+	if agentVersion == WorkerInvestigationAgentVersion {
+		tools = append(tools, toolSchema("kubernetes_read", "对指定业务系统已绑定的 Kubernetes 连接执行固定只读操作。businessSystem 只接受业务系统 key 或名称；operation 只能为 discovery、pod_get、pod_list、events_list、pod_logs，绝不接受连接或凭据。", map[string]any{
+			"businessSystem": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string"},
+			"namespace": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "container": map[string]any{"type": "string"},
+		}, []string{"businessSystem", "operation"}))
+	}
 	wrapped := make([]any, 0, len(tools))
 	for _, tool := range tools {
 		wrapped = append(wrapped, map[string]any{"type": "function", "function": tool})
@@ -84,8 +94,8 @@ func toolSchema(name, description string, properties map[string]any, required []
 }
 
 // ProviderToolsDigest is the SHA-256 of ProviderToolsJSON as hex text.
-func ProviderToolsDigest() (string, error) {
-	body, err := ProviderToolsJSON()
+func ProviderToolsDigest(agentVersions ...string) (string, error) {
+	body, err := ProviderToolsJSON(agentVersions...)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +134,7 @@ func runtimeGOARCH() string {
 // (mirrors the Quoin-side catalog; pinned equal by tools_test.go).
 func ExecutionModeFor(name string) string {
 	switch name {
-	case "artifact_read", "artifact_grep", "thanos_query":
+	case "artifact_read", "artifact_grep", "thanos_query", "kubernetes_read":
 		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
 	default:
 		return "TOOL_EXECUTION_MODE_WORKER_LOCAL"

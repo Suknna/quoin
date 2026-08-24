@@ -103,6 +103,33 @@ describe('BusinessSystemDetailPage resources', () => {
   })
 })
 
+describe('BusinessSystemDetailPage Kubernetes mappings', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
+  afterEach(cleanup)
+
+  it('retries connection options independently when mappings are already available', async () => {
+    let optionRequests = 0
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('/kubernetes-connections')) return jsonResponse([])
+      if (path === '/api/v1/connections?limit=100') {
+        optionRequests += 1
+        if (optionRequests === 1) return jsonResponse({ code: 'unavailable', message: 'temporary' }, 503)
+        return jsonResponse({ items: [{ id: '9007199254740993', name: 'production-k8s', type: 'kubernetes', enabled: true }] })
+      }
+      if (path.includes('/resources')) return jsonResponse({ items: [] })
+      if (path.includes('/config')) return jsonResponse({ items: [] })
+      return jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, browserIdentityState: 'none', timezone: 'Asia/Shanghai', resourceRefreshIntervalSeconds: 300, configVersionCount: 1, currentConfigVersionId: '7', discoveries: [], plans: [] })
+    })
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin onBack={() => undefined} onOpenVersion={() => undefined} />)
+    expect(await screen.findByText(/无法读取可绑定的 Kubernetes 连接/)).toBeInTheDocument()
+    expect(screen.getByText('尚未绑定 Kubernetes 连接。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    expect(await screen.findByRole('option', { name: 'production-k8s' })).toBeInTheDocument()
+    expect(screen.getByText('尚未绑定 Kubernetes 连接。')).toBeInTheDocument()
+  })
+})
+
 describe('UploadOverlay', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
   afterEach(cleanup)
@@ -221,5 +248,34 @@ describe('ConfigVersionPage publish flow', () => {
     expect(onPublished).not.toHaveBeenCalled()
     // The confirm stays available: recovery is a re-read away, not a dead end.
     expect(screen.getByRole('button', { name: '确认发布' })).toBeInTheDocument()
+  })
+})
+
+
+describe('BusinessSystemDetailPage Kubernetes mapping state', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()))
+  afterEach(cleanup)
+
+  it('does not present a failed mapping read as an empty mapping state and offers retry', async () => {
+    const fetchMock = vi.mocked(fetch)
+    let mappingReads = 0
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/business-systems/payments') return jsonResponse({ key: 'payments', displayName: '支付系统', enabled: true, rowVersion: 1, currentConfigVersionId: null, browserIdentityState: 'none', configVersionCount: 0, discoveries: [], plans: [] })
+      if (path === '/api/v1/business-systems/payments/kubernetes-connections') {
+        mappingReads++
+        return jsonResponse({ message: 'mapping API unavailable' }, 503)
+      }
+      if (path === '/api/v1/connections?limit=100') return jsonResponse({ items: [] })
+      if (path === '/api/v1/business-systems/payments/resources') return jsonResponse({ items: [] })
+      if (path === '/api/v1/business-systems/payments/config') return jsonResponse({ items: [] })
+      return jsonResponse({}, 404)
+    })
+
+    render(<BusinessSystemDetailPage systemKey="payments" isAdmin onBack={() => undefined} onOpenVersion={() => undefined} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/无法读取 Kubernetes 连接绑定/)
+    expect(screen.queryByText('尚未绑定 Kubernetes 连接。')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(mappingReads).toBeGreaterThan(1))
   })
 })

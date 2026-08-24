@@ -186,6 +186,7 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		wire := &runtimev1.ToolCallAuthorization{
 			ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
 			ProviderToolCallId: authorization.ProviderToolCallID, FailureMode: failureModeOf(authorization.FailureMode),
+			PreflightErrorCode: authorization.PreflightCode, PreflightErrorDetail: authorization.PreflightDetail,
 		}
 		// Observation tools travel with their frozen non-secret connection
 		// binding (ARCH-INPUT-003); the supervisor fetches the credential
@@ -283,8 +284,25 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		return
 	}
 	payload := complete.GetPayload()
+	if payload == nil || payload.GetSchemaKind() == "" {
+		reject("tool result payload schema kind is required")
+		return
+	}
+	expectedSchema, err := attempts.ExpectedToolResultSchema(ctx, complete.GetToolCallId())
+	if err != nil {
+		reject("tool result schema lookup failed: " + err.Error())
+		return
+	}
+	if payload.GetSchemaKind() != expectedSchema {
+		reject("tool result schema kind does not match the fixed tool definition")
+		return
+	}
+	if err := attempt.ValidateToolResultPayload(expectedSchema, payload.GetCanonicalJson()); err != nil {
+		reject("tool result payload violates the fixed schema: " + err.Error())
+		return
+	}
 	var resultJSON string
-	if payload != nil && len(payload.GetCanonicalJson()) > 0 {
+	if len(payload.GetCanonicalJson()) > 0 {
 		digest := sha256.Sum256(payload.GetCanonicalJson())
 		if hex.EncodeToString(digest[:]) != hex.EncodeToString(payload.GetContentDigest()) {
 			reject("result payload digest mismatch")

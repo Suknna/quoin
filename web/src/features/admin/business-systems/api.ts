@@ -115,6 +115,53 @@ export interface ObservedResourceSummary {
   lastSuccessfulRefreshAt?: string
 }
 
+export interface KubernetesConnectionMapping {
+  id: string
+  connectionId: string
+  connectionName: string
+  state: 'Active' | 'Retired'
+  rowVersion: number
+  createdBy: string
+  createdAt: string
+  retiredBy: string | null
+  retiredAt?: string
+}
+
+export interface ConnectionOption { id: string; name: string; type: string; enabled: boolean }
+
+export async function listKubernetesConnectionMappings(key: string): Promise<KubernetesConnectionMapping[]> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/kubernetes-connections`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as KubernetesConnectionMapping[]
+}
+
+export async function listKubernetesConnectionOptions(): Promise<ConnectionOption[]> {
+  const options: ConnectionOption[] = []
+  let cursor: string | undefined
+  do {
+    const query = new URLSearchParams({ limit: '100' })
+    if (cursor) query.set('cursor', cursor)
+    const response = await fetch(`/api/v1/connections?${query}`, { credentials: 'include' })
+    if (!response.ok) throw await problem(response)
+    const page = (await response.json()) as { items?: ConnectionOption[]; nextCursor?: string }
+    options.push(...(page.items?.filter((item) => item.type === 'kubernetes') ?? []))
+    cursor = page.nextCursor
+  } while (cursor)
+  return options
+}
+
+export async function createKubernetesConnectionMapping(key: string, connectionId: string): Promise<KubernetesConnectionMapping> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/kubernetes-connections`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: newClientCommandId(), connectionId }) })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as KubernetesConnectionMapping
+}
+
+export async function retireKubernetesConnectionMapping(key: string, mapping: KubernetesConnectionMapping): Promise<KubernetesConnectionMapping> {
+  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(key)}/kubernetes-connections/${mapping.id}/retire`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion: mapping.rowVersion }) })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as KubernetesConnectionMapping
+}
+
 export interface ConfigVersionSummary {
   id: string
   versionSeq: number

@@ -17,6 +17,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
+	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -132,21 +133,33 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
 	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
-	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) ([]attempt.ToolGrant, error) {
-		if tool.Name != thanos.QueryToolName {
-			return nil, errors.New("tool " + tool.Name + " has no grant resolver")
+	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
+		switch tool.Name {
+		case thanos.QueryToolName:
+			grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
+			if err != nil {
+				return attempt.ToolResolution{}, err
+			}
+			return attempt.ToolResolution{Grants: []attempt.ToolGrant{grant}}, nil
+		case kubernetes.ReadToolName:
+			return kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
+		default:
+			return attempt.ToolResolution{}, errors.New("tool " + tool.Name + " has no grant resolver")
 		}
-		grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-		if err != nil {
-			return nil, err
-		}
-		return []attempt.ToolGrant{grant}, nil
 	}
 	service.attempts.ToolGrantValidator = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) error {
-		if tool.Name != thanos.QueryToolName {
+		switch tool.Name {
+		case thanos.QueryToolName:
+			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
+		case kubernetes.ReadToolName:
+			// Each mapping is fenced by ValidateGrantForFulfillment inside the
+			// credential transaction. Checking every mapping here would make one
+			// invalid connection reject a valid sibling before partial results can
+			// be returned to the model.
+			return nil
+		default:
 			return errors.New("tool " + tool.Name + " has no grant validator")
 		}
-		return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
 	}
 	service.attempts.EvidenceWriter = service.evidence.WriteForToolCall
 	return service

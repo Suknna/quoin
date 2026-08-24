@@ -64,12 +64,11 @@ type Service struct {
 	// frozen closure requires the tool call to be succeeded first). Nil
 	// skips the grant (probes never produce artifacts).
 	ToolResultGrants func(ctx context.Context, conn *sql.Conn, attemptID, artifactID, toolCallID int64) error
-	// ToolGrantResolver freezes the connection binding of one observation
-	// tool inside CompleteModelCall's transaction, right after the pending
-	// tool_calls row exists (ARCH-INPUT-003). A resolution failure fails
-	// the whole model call (RUNTIME-AGENT-005: an unresolvable tool route
-	// is invalid_response). Nil refuses tools that need a grant.
-	ToolGrantResolver func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) ([]ToolGrant, error)
+	// ToolGrantResolver freezes connection bindings inside CompleteModelCall's
+	// transaction. A deterministic domain-routing miss is returned as a
+	// preflight result, not an infrastructure failure, so the model can ask a
+	// human clarification without any credential ever leaving Quoin.
+	ToolGrantResolver func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error)
 	// ToolGrantValidator re-checks the frozen binding before a pending
 	// observation tool may begin executing (DATA-CONN-002). Nil skips the
 	// check (tools without grants).
@@ -412,6 +411,15 @@ type ToolGrant struct {
 	ConnectionRevisionID   int64
 	CredentialGenerationID int64
 	Purpose                string
+}
+
+// ToolResolution is the authorization result for one persisted Tool Call.
+// PreflightCode is a closed, model-visible routing outcome and is mutually
+// exclusive with Grants; the supervisor closes it without external I/O.
+type ToolResolution struct {
+	Grants          []ToolGrant
+	PreflightCode   string
+	PreflightDetail string
 }
 
 // DispatchInput is everything DispatchAttempt.input carries (RUNTIME-TASK-011).

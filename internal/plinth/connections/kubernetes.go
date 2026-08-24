@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -282,6 +283,42 @@ func kubernetesGet(ctx context.Context, client *kubernetesClient, path string) (
 		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	return body, nil
+}
+
+// KubernetesReadRequest is the closed read-only action set exposed to the
+// investigation supervisor. It deliberately contains no URL, method, header,
+// selector, exec or connection locator supplied by the model.
+type KubernetesReadRequest struct {
+	Operation string
+	Namespace string
+	Name      string
+	Container string
+}
+
+// RunKubernetesRead reuses the probe's kubeconfig/TLS/auth primitive to run
+// one fixed GET request. The caller executes it independently for each frozen
+// grant, so one bound cluster can fail without hiding another's observation.
+func RunKubernetesRead(ctx context.Context, config KubernetesConfig, secret KubernetesSecret, request KubernetesReadRequest) ([]byte, error) {
+	client, _, err := resolveKubernetes(config, secret.Kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	path := ""
+	switch request.Operation {
+	case "discovery":
+		path = "/api"
+	case "pod_list":
+		path = "/api/v1/namespaces/" + url.PathEscape(request.Namespace) + "/pods"
+	case "pod_get":
+		path = "/api/v1/namespaces/" + url.PathEscape(request.Namespace) + "/pods/" + url.PathEscape(request.Name)
+	case "events_list":
+		path = "/api/v1/namespaces/" + url.PathEscape(request.Namespace) + "/events"
+	case "pod_logs":
+		path = "/api/v1/namespaces/" + url.PathEscape(request.Namespace) + "/pods/" + url.PathEscape(request.Name) + "/log?container=" + url.QueryEscape(request.Container)
+	default:
+		return nil, fmt.Errorf("unsupported Kubernetes read operation %q", request.Operation)
+	}
+	return kubernetesGet(ctx, client, path)
 }
 
 func selfSubjectAccessReview(ctx context.Context, client *kubernetesClient, namespace, verb, resource, subresource string) (bool, error) {

@@ -54,7 +54,7 @@ func (service *Service) replayCompleteModelCall(ctx context.Context, conn *sql.C
 		}
 		grantRows.Close()
 		toolRows, err := conn.QueryContext(ctx, `
-			SELECT tool_index, id, provider_tool_call_id, failure_mode FROM tool_calls WHERE model_call_id=? ORDER BY tool_index`, completion.CallID)
+			SELECT tool_index, id, provider_tool_call_id, failure_mode, COALESCE(preflight_error_code,''), COALESCE(preflight_error_detail,'') FROM tool_calls WHERE model_call_id=? ORDER BY tool_index`, completion.CallID)
 		if err != nil {
 			return nil, err
 		}
@@ -62,7 +62,7 @@ func (service *Service) replayCompleteModelCall(ctx context.Context, conn *sql.C
 		for toolRows.Next() {
 			var index int64
 			authorization := ToolAuthorization{}
-			if err := toolRows.Scan(&index, &authorization.ToolCallID, &authorization.ProviderToolCallID, &authorization.FailureMode); err != nil {
+			if err := toolRows.Scan(&index, &authorization.ToolCallID, &authorization.ProviderToolCallID, &authorization.FailureMode, &authorization.PreflightCode, &authorization.PreflightDetail); err != nil {
 				toolRows.Close()
 				return nil, err
 			}

@@ -826,7 +826,7 @@ CREATE TABLE business_system_kubernetes_connections (
   connection_id      INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   state              TEXT NOT NULL CHECK (state IN ('Active','Retired')),
   row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  created_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_by         INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at         TEXT NOT NULL,
   retired_by         INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   retired_at         TEXT,
@@ -1670,9 +1670,13 @@ CREATE TABLE tool_calls (
   result_json           TEXT CHECK (result_json IS NULL OR json_valid(result_json)), -- 有界模型可见预览/结构化结果
   result_artifact_id    INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   error_detail          TEXT,
+  preflight_error_code  TEXT CHECK (preflight_error_code IS NULL OR preflight_error_code IN ('target_not_found','target_ambiguous','no_mapping')),
+  preflight_error_detail TEXT,
   created_at            TEXT NOT NULL,
   started_at            TEXT,
   ended_at              TEXT,
+  CHECK ((preflight_error_code IS NULL AND preflight_error_detail IS NULL)
+      OR (preflight_error_code IS NOT NULL AND preflight_error_detail IS NOT NULL AND length(preflight_error_detail) BETWEEN 1 AND 1024)),
   UNIQUE (attempt_id, call_seq, tool_index),
   UNIQUE (model_call_id, provider_tool_call_id),
   UNIQUE (model_call_id, tool_index),
@@ -2823,6 +2827,14 @@ CREATE TRIGGER trg_tool_calls_no_origin_update BEFORE UPDATE OF
   attempt_id, model_call_id, call_seq, tool_index, provider_tool_call_id, tool_name,
   tool_version, arguments_json, arguments_digest, execution_mode, failure_mode, created_at ON tool_calls
 BEGIN SELECT RAISE(ABORT, 'tool_call origin is immutable'); END;
+-- Preflight routing is an accepted Tool Call fact, not mutable attempt state:
+-- only one pending NULL -> paired known outcome transition is possible.
+CREATE TRIGGER trg_tool_calls_preflight_immutable BEFORE UPDATE OF
+  preflight_error_code, preflight_error_detail ON tool_calls
+WHEN NOT (OLD.status = 'pending' AND NEW.status = 'pending'
+  AND OLD.preflight_error_code IS NULL AND OLD.preflight_error_detail IS NULL
+  AND NEW.preflight_error_code IS NOT NULL AND NEW.preflight_error_detail IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'tool_call preflight outcome is immutable'); END;
 
 -- 12.15 用户：auth_revision 必须严格递增（账号变更裁决依据）
 CREATE TRIGGER trg_users_auth_revision_monotonic BEFORE UPDATE OF auth_revision ON users
@@ -4888,6 +4900,13 @@ WHEN EXISTS (SELECT 1 FROM model_calls m WHERE m.id = NEW.model_call_id) AND (
 BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attempt and valid history state'); END;
 
 -- Tool Call 在执行前以 pending 行落库；model_call、Attempt、provider ID、ordinal 与 grant 均不可混淆。
+-- The durable ledger is also a contract boundary: a direct SQL writer cannot
+-- resurrect the four pre-T19 Kubernetes verbs after the single fixed
+-- kubernetes_read capability replaced them. Per-agent catalog membership is
+-- enforced by Quoin before this insert; this trigger seals the global name set.
+CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
+WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','thanos_query','kubernetes_read')
+BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
   SELECT 1 FROM model_calls m JOIN execution_attempts a ON a.id = m.attempt_id
@@ -4914,7 +4933,7 @@ WHEN NOT EXISTS (
   SELECT 1 FROM tool_calls t JOIN attempt_connection_grants g ON g.id = NEW.connection_grant_id
   WHERE t.id = NEW.tool_call_id AND g.attempt_id = t.attempt_id
     AND ((t.tool_name = 'thanos_query' AND g.purpose = 'thanos_query')
-      OR (t.tool_name IN ('kubernetes_get','kubernetes_list','kubernetes_logs','kubernetes_events') AND g.purpose = 'kubernetes_read'))
+      OR (t.tool_name = 'kubernetes_read' AND g.purpose = 'kubernetes_read'))
 )
 BEGIN SELECT RAISE(ABORT, 'tool call connection grant must match the same Attempt and typed external tool'); END;
 

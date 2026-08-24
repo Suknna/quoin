@@ -45,6 +45,9 @@ type Handler struct {
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems", OperationID: "listBusinessSystems"}, handler.listBusinessSystems)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}", OperationID: "getBusinessSystem"}, handler.getBusinessSystem)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections", OperationID: "listBusinessSystemKubernetesConnections"}, handler.listKubernetesConnections)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections", OperationID: "createBusinessSystemKubernetesConnection"}, handler.createKubernetesConnection)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections/{mappingId}/retire", OperationID: "retireBusinessSystemKubernetesConnection"}, handler.retireKubernetesConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config", OperationID: "listBusinessSystemConfigs"}, handler.listBusinessSystemConfigs)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}", OperationID: "getBusinessSystemConfig"}, handler.getBusinessSystemConfig)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/publish", OperationID: "publishBusinessSystemConfig"}, handler.publishBusinessSystemConfig)

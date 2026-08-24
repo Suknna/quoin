@@ -671,6 +671,11 @@ message ToolCallAuthorization {
   string provider_tool_call_id = 3;
   ToolFailureMode failure_mode = 4; // 由固定 Tool 定义决定，模型不得覆盖
   repeated ConnectionGrant connection_grants = 5; // Kubernetes 可绑定多个；无外部连接的 Tool 为空
+  // Deterministic Business System routing preflight. When non-empty it is
+  // mutually exclusive with grants; Plinth closes the existing Tool Call as a
+  // return_to_model result and must not fetch a credential or contact a target.
+  string preflight_error_code = 6; // target_not_found|target_ambiguous|no_mapping
+  string preflight_error_detail = 7; // bounded non-secret user-facing detail
 }
 
 message CompleteModelCallAck {

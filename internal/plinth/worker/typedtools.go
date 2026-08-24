@@ -29,7 +29,7 @@ import (
 // execute on the supervisor through the Attempt-scoped ArtifactService and
 // converge on ToolResult directly (ARCH-OUTPUT-004).
 func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, meta toolMeta) error {
-	reply, err := runner.Channel.Request(ctx, &runtimev1.ControlEnvelope{
+	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
 		CorrelationId: uint64(attemptID),
 		Msg: &runtimev1.ControlEnvelope_BeginToolCall{BeginToolCall: &runtimev1.BeginToolCall{
 			AttemptId: attemptID, ToolCallId: toolCallID,
@@ -50,6 +50,12 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 	}
 	if meta.mode != "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED" {
 		return nil
+	}
+	// A Quoin routing preflight is a normal, model-visible Tool Result. It
+	// runs through the existing completion channel but cannot fetch a grant
+	// or reach Kubernetes because it returns before typed dispatch.
+	if meta.preflightCode != "" {
+		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, meta.name, meta.preflightCode, meta.preflightDetail)
 	}
 	return runner.executeTypedTool(ctx, writer, attemptID, toolCallID, meta.name)
 }
@@ -141,6 +147,8 @@ func (runner *Runner) executeTypedTool(ctx context.Context, writer *FrameWriter,
 		}
 	case "thanos_query":
 		return runner.executeThanosQuery(ctx, writer, attemptID, toolCallID, args)
+	case "kubernetes_read":
+		return runner.executeKubernetesRead(ctx, writer, attemptID, toolCallID, args)
 	default:
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "unknown_tool", "supervisor tool "+toolName+" is not in the fixed catalog")
 	}
@@ -162,13 +170,13 @@ func (runner *Runner) executeThanosQuery(ctx context.Context, writer *FrameWrite
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "该工具调用没有冻结的连接 grant")
 	}
 	grant := meta.grants[0]
-	bearer, err := runner.Channel.BearerToken()
+	bearer, err := runner.toolCallChannel().BearerToken()
 	if err != nil {
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "读取状态卷 token 失败")
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
 	grantPayload, err := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
-		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Sink.BootID(), ConnectionEpoch: runner.Sink.Epoch(),
+		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch,
 	})
 	grantCancel()
 	if err != nil {
@@ -206,6 +214,96 @@ func (runner *Runner) executeThanosQuery(ctx context.Context, writer *FrameWrite
 	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryResultSchemaKind, payload, artifactID)
 }
 
+// executeKubernetesRead executes the fixed action once per Quoin-frozen
+// connection grant. Individual failures are returned in-order, never retried
+// or silently collapsed, and credentials stay in this supervisor method.
+func (runner *Runner) executeKubernetesRead(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, args map[string]any) error {
+	meta, ok := runner.tools[toolCallID]
+	if !ok || len(meta.grants) == 0 {
+		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read", "grant_missing", "该工具调用没有冻结的 Kubernetes 连接 grant")
+	}
+	operation, _ := args["operation"].(string)
+	namespace, _ := args["namespace"].(string)
+	name, _ := args["name"].(string)
+	container, _ := args["container"].(string)
+	request := plinthconnections.KubernetesReadRequest{Operation: operation, Namespace: namespace, Name: name, Container: container}
+	bearer, err := runner.toolCallChannel().BearerToken()
+	if err != nil {
+		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read", "grant_missing", "读取状态卷 token 失败")
+	}
+	results := make([]map[string]any, 0, len(meta.grants))
+	allOK := true
+	for _, grant := range meta.grants {
+		grantCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		payload, fetchErr := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch})
+		cancel()
+		if fetchErr != nil || payload.GetKubernetes() == nil {
+			allOK = false
+			results = append(results, map[string]any{"success": false, "errorCode": "grant_missing", "errorDetail": "获取 Kubernetes 凭据 grant 失败"})
+			continue
+		}
+		var config plinthconnections.KubernetesConfig
+		if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil {
+			allOK = false
+			results = append(results, map[string]any{"success": false, "errorCode": "invalid_connection_config", "errorDetail": "Kubernetes 连接配置无法解析"})
+			continue
+		}
+		body, readErr := plinthconnections.RunKubernetesRead(ctx, config, plinthconnections.KubernetesSecret{Kubeconfig: payload.GetKubernetes().GetKubeconfig()}, request)
+		if readErr != nil {
+			allOK = false
+			// The primitive may include the remote URL in transport errors. That
+			// diagnostic never crosses the model boundary.
+			results = append(results, map[string]any{"success": false, "errorCode": "kubernetes_execution_failed", "errorDetail": "Kubernetes API 读取失败"})
+			continue
+		}
+		results = append(results, map[string]any{"success": true, "output": string(body), "truncated": false})
+	}
+	fullPayload := map[string]any{"success": allOK, "operation": operation, "results": results}
+	if !allOK {
+		fullPayload["errorCode"] = "partial_failure"
+		fullPayload["errorDetail"] = "一个或多个已绑定 Kubernetes 连接未能完成读取"
+	}
+	canonical, err := json.Marshal(fullPayload)
+	if err != nil {
+		return err
+	}
+	var artifactID int64
+	payload := fullPayload
+	if len(canonical) > 64*1024 {
+		workspace := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
+		if err := os.MkdirAll(workspace, 0o700); err != nil {
+			return err
+		}
+		path := filepath.Join(workspace, fmt.Sprintf("kubernetes-read-%d.json", toolCallID))
+		if err := os.WriteFile(path, canonical, 0o600); err != nil {
+			return err
+		}
+		defer os.Remove(path)
+		artifactID, err = runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, "application/json")
+		if err != nil {
+			return err
+		}
+		previewResults := make([]map[string]any, 0, len(results))
+		for _, result := range results {
+			preview := make(map[string]any, len(result))
+			for key, value := range result {
+				preview[key] = value
+			}
+			if output, ok := preview["output"].(string); ok && len(output) > 4096 {
+				preview["output"] = output[:4096]
+				preview["truncated"] = true
+			}
+			previewResults = append(previewResults, preview)
+		}
+		payload = map[string]any{"success": allOK, "operation": operation, "results": previewResults, "artifact": map[string]any{"id": fmt.Sprint(artifactID), "mediaType": "application/json"}}
+		if !allOK {
+			payload["errorCode"] = "partial_failure"
+			payload["errorDetail"] = "一个或多个已绑定 Kubernetes 连接未能完成读取"
+		}
+	}
+	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, "kubernetes_read_result_v1", payload, artifactID)
+}
+
 // failTypedTool seals a failed supervisor_typed tool with the
 // return_to_model failure shape and relays the committed result.
 func (runner *Runner) failTypedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, toolName, errorCode, errorDetail string) error {
@@ -236,7 +334,7 @@ func (runner *Runner) commitTypedTool(ctx context.Context, writer *FrameWriter, 
 	if success, _ := payload["success"].(bool); !success {
 		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
 	}
-	reply, err := runner.Channel.Request(ctx, &runtimev1.ControlEnvelope{
+	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
 		CorrelationId: uint64(attemptID),
 		Msg: &runtimev1.ControlEnvelope_CompleteToolCall{CompleteToolCall: &runtimev1.CompleteToolCall{
 			AttemptId: attemptID, ToolCallId: toolCallID, Outcome: outcome,
@@ -311,7 +409,7 @@ func (runner *Runner) commitLocalTool(ctx context.Context, writer *FrameWriter, 
 	if !local.GetSuccess() {
 		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
 	}
-	reply, err := runner.Channel.Request(ctx, &runtimev1.ControlEnvelope{
+	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
 		CorrelationId: uint64(attemptID),
 		Msg: &runtimev1.ControlEnvelope_CompleteToolCall{CompleteToolCall: &runtimev1.CompleteToolCall{
 			AttemptId: attemptID, ToolCallId: local.GetToolCallId(), Outcome: outcome,
@@ -359,7 +457,7 @@ func (runner *Runner) uploadWorkspaceFile(ctx context.Context, attemptID, toolCa
 // Upload/ReadText/GrepText call must present it or the server's upload
 // fence refuses the stream (RUNTIME-GRANT-001).
 func (runner *Runner) artifactContext(ctx context.Context) (context.Context, error) {
-	bearer, err := runner.Channel.BearerToken()
+	bearer, err := runner.toolCallChannel().BearerToken()
 	if err != nil {
 		return nil, err
 	}

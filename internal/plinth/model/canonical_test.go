@@ -8,6 +8,7 @@ package model
 import (
 	"testing"
 
+	"github.com/Suknna/quoin/internal/plinth/agent"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
@@ -45,5 +46,16 @@ func TestCanonicalResponseEmptyTools(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("empty-tool canonical drift: model=%s attempt=%s", got, want)
+	}
+}
+
+func TestPromptDigestUsesModeSelectedPrompt(t *testing.T) {
+	initial := promptDigestFor(Contract{SystemPrompt: agent.SystemPrompt})
+	investigation := promptDigestFor(Contract{SystemPrompt: agent.InvestigationSystemPrompt})
+	if initial == investigation {
+		t.Fatal("initial-analysis and investigation prompts must have distinct persisted digests")
+	}
+	if got := promptDigestFor(Contract{}); got != initial {
+		t.Fatal("empty legacy contract must retain the initial-analysis prompt digest")
 	}
 }

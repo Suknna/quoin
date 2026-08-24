@@ -3,6 +3,10 @@ import {
   formatTime,
   getBusinessSystem,
   getResourceRefreshRun,
+  listKubernetesConnectionMappings,
+  listKubernetesConnectionOptions,
+  createKubernetesConnectionMapping,
+  retireKubernetesConnectionMapping,
   listConfigVersions,
   listObservedResources,
   startResourceRefresh,
@@ -10,6 +14,8 @@ import {
   type ConfigVersionSummary,
   type ObservedResourceSummary,
   type ResourceRefreshRunDetail,
+  type KubernetesConnectionMapping,
+  type ConnectionOption,
 } from './api'
 
 // The system detail is a continuous page (UI-SYSTEM-003): current state,
@@ -32,6 +38,14 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState('')
   const [refreshRun, setRefreshRun] = useState<ResourceRefreshRunDetail | null>(null)
+  const [kubernetesMappings, setKubernetesMappings] = useState<KubernetesConnectionMapping[]>([])
+  const [kubernetesMappingsState, setKubernetesMappingsState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [kubernetesMappingsError, setKubernetesMappingsError] = useState('')
+  const [kubernetesConnections, setKubernetesConnections] = useState<ConnectionOption[]>([])
+  const [kubernetesConnectionsState, setKubernetesConnectionsState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [kubernetesConnectionsError, setKubernetesConnectionsError] = useState('')
+  const [selectedConnection, setSelectedConnection] = useState('')
+  const [mappingMessage, setMappingMessage] = useState('')
 
   const reload = useCallback(() => {
     let cancelled = false
@@ -50,10 +64,38 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
         if (!cancelled) setVersions(items)
       })
       .catch(() => undefined)
+    if (isAdmin) {
+      setKubernetesMappingsState('loading')
+      setKubernetesMappingsError('')
+      void listKubernetesConnectionMappings(systemKey)
+        .then((items) => {
+          if (cancelled) return
+          setKubernetesMappings(items)
+          setKubernetesMappingsState('ready')
+        })
+        .catch((reason: unknown) => {
+          if (cancelled) return
+          setKubernetesMappingsState('error')
+          setKubernetesMappingsError(reason instanceof Error ? reason.message : '暂时无法读取 Kubernetes 连接绑定。')
+        })
+      setKubernetesConnectionsState('loading')
+      setKubernetesConnectionsError('')
+      void listKubernetesConnectionOptions()
+        .then((items) => {
+          if (cancelled) return
+          setKubernetesConnections(items)
+          setKubernetesConnectionsState('ready')
+        })
+        .catch((reason: unknown) => {
+          if (cancelled) return
+          setKubernetesConnectionsState('error')
+          setKubernetesConnectionsError(reason instanceof Error ? reason.message : '暂时无法读取可绑定的 Kubernetes 连接。')
+        })
+    }
     return () => {
       cancelled = true
     }
-  }, [systemKey])
+  }, [systemKey, isAdmin])
 
   useEffect(reload, [reload])
 
@@ -83,6 +125,19 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
     } catch (reason) {
       setRefreshMessage(reason instanceof Error ? reason.message : '暂时无法开始资源刷新。')
     } finally { setRefreshing(false) }
+  }
+
+  async function addKubernetesMapping() {
+    if (!selectedConnection) return
+    setMappingMessage('正在绑定 Kubernetes 连接…')
+    try { setKubernetesMappings(await listKubernetesConnectionMappings(systemKey).then(async () => { await createKubernetesConnectionMapping(systemKey, selectedConnection); return listKubernetesConnectionMappings(systemKey) })); setSelectedConnection(''); setMappingMessage('Kubernetes 连接已绑定。') }
+    catch (reason) { setMappingMessage(reason instanceof Error ? reason.message : '暂时无法绑定 Kubernetes 连接。') }
+  }
+
+  async function retireKubernetesMapping(mapping: KubernetesConnectionMapping) {
+    setMappingMessage('正在解除 Kubernetes 连接…')
+    try { await retireKubernetesConnectionMapping(systemKey, mapping); setKubernetesMappings(await listKubernetesConnectionMappings(systemKey)); setMappingMessage('Kubernetes 连接已解除；历史记录已保留。') }
+    catch (reason) { setMappingMessage(reason instanceof Error ? reason.message : '暂时无法解除 Kubernetes 连接。') }
   }
 
   if (error) {
@@ -134,6 +189,25 @@ export function BusinessSystemDetailPage({ systemKey, isAdmin, onBack, onOpenVer
           <dd>{detail.configVersionCount}</dd>
         </div>
       </dl>
+
+      {isAdmin && <section aria-labelledby="bs-kubernetes-title">
+        <h3 id="bs-kubernetes-title">Kubernetes 连接</h3>
+        <p className="inline-status">为此业务系统绑定只读 Kubernetes 连接。调查时系统会自动使用所有当前绑定；不会向模型显示连接选择。</p>
+          <div className="section-heading">
+            <select aria-label="选择 Kubernetes 连接" value={selectedConnection} onChange={(event) => setSelectedConnection(event.target.value)} disabled={kubernetesConnectionsState !== 'ready'}>
+              <option value="">{kubernetesConnectionsState === 'loading' ? '正在读取 Kubernetes 连接…' : kubernetesConnectionsState === 'ready' && kubernetesConnections.filter((connection) => connection.enabled).length === 0 ? '没有可绑定的 Kubernetes 连接' : '选择一个 Kubernetes 连接'}</option>
+              {kubernetesConnections.filter((connection) => connection.enabled).map((connection) => <option key={connection.id} value={connection.id}>{connection.name}</option>)}
+            </select>
+            <button className="secondary-button compact" onClick={() => void addKubernetesMapping()} disabled={!selectedConnection || kubernetesConnectionsState !== 'ready'}>绑定</button>
+          </div>
+        {mappingMessage && <p className="inline-status" role="status">{mappingMessage}</p>}
+        {kubernetesConnectionsState === 'error' && <div className="error-summary" role="alert"><span>无法读取可绑定的 Kubernetes 连接：{kubernetesConnectionsError}</span><button className="secondary-button compact" onClick={reload}>重试</button></div>}
+        {kubernetesConnectionsState === 'ready' && kubernetesConnections.filter((connection) => connection.enabled).length === 0 && <p className="inline-status" role="status">当前没有启用的 Kubernetes 连接可绑定；请先创建并验证连接。</p>}
+        {kubernetesMappingsState === 'loading' && <p className="inline-status" role="status">正在读取 Kubernetes 连接绑定…</p>}
+        {kubernetesMappingsState === 'error' && <div className="error-summary" role="alert"><span>无法读取 Kubernetes 连接绑定：{kubernetesMappingsError}</span><button className="secondary-button compact" onClick={reload}>重试</button></div>}
+        {kubernetesMappingsState === 'ready' && kubernetesMappings.length === 0 && <p className="inline-status">尚未绑定 Kubernetes 连接。</p>}
+        {kubernetesMappings.length > 0 && <ul className="version-history">{kubernetesMappings.map((mapping) => <li key={mapping.id}><span className="version-main"><strong>{mapping.connectionName}</strong><span className={`status-pill ${mapping.state === 'Active' ? 'ok' : 'muted'}`}>{mapping.state === 'Active' ? '当前绑定' : '已解除'}</span></span>{mapping.state === 'Active' && <button className="secondary-button compact" onClick={() => void retireKubernetesMapping(mapping)}>解除</button>}</li>)}</ul>}
+      </section>}
 
       <section aria-labelledby="bs-versions-title">
         <h3 id="bs-versions-title">配置版本</h3>

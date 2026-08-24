@@ -175,7 +175,7 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 		fmt.Fprintf(config.Stderr, "input_rejected: %v\n", err)
 		return err
 	}
-	toolsJSON, err := ProviderToolsJSON()
+	toolsJSON, err := ProviderToolsJSON(start.GetAgentVersion())
 	if err != nil {
 		return err
 	}

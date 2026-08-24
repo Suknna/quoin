@@ -36,6 +36,9 @@ type Contract struct {
 	ContextBudget int
 	MaxOutput     int
 	Streaming     bool
+	// SystemPrompt is the exact fixed prompt whose digest is persisted in the
+	// model-call ledger. It is mode-specific (initial analysis vs investigation).
+	SystemPrompt string
 }
 
 // ProposedTool is one provider tool call to seal (mirrors the Quoin-side
@@ -82,11 +85,24 @@ type Failure struct {
 // tools (ARCH-INPUT-003); the supervisor fetches the credential through
 // exactly these grants before executing the tool.
 type Authorization struct {
-	ToolCallID         int64
-	ProviderIndex      uint32
-	ProviderToolCallID string
-	FailureMode        string
-	ConnectionGrants   []*runtimev1.ConnectionGrant
+	ToolCallID           int64
+	ProviderIndex        uint32
+	ProviderToolCallID   string
+	FailureMode          string
+	ConnectionGrants     []*runtimev1.ConnectionGrant
+	PreflightErrorCode   string
+	PreflightErrorDetail string
+}
+
+// promptDigestFor uses the mode-selected prompt carried by the supervisor.
+// The empty fallback preserves the frozen initial-analysis contract for legacy
+// callers; Investigation always supplies its distinct prompt explicitly.
+func promptDigestFor(contract Contract) [sha256.Size]byte {
+	systemPrompt := contract.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = agent.SystemPrompt
+	}
+	return sha256.Sum256([]byte(systemPrompt))
 }
 
 // Execute runs one logical chat call: BeginModelCall → provider stream →
@@ -98,7 +114,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 	// All control-stream digests travel as RAW 32-byte SHA-256 values for
 	// agent attempts (the Quoin side hex-encodes once; the probe slice's
 	// hex-ASCII convention never reaches this path).
-	promptDigest := sha256.Sum256([]byte(agent.SystemPrompt))
+	promptDigest := promptDigestFor(contract)
 	toolDigest := sha256.Sum256(toolsJSON)
 	inputDigest := inputItemsDigest(items)
 	renderedRaw, err := renderedDigestRaw(messagesJSON, toolsJSON, contract)
@@ -220,7 +236,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 		authorizations = append(authorizations, Authorization{
 			ToolCallID: wire.GetToolCallId(), ProviderIndex: wire.GetProviderIndex(),
 			ProviderToolCallID: wire.GetProviderToolCallId(), FailureMode: wire.GetFailureMode().String(),
-			ConnectionGrants: wire.GetConnectionGrants(),
+			ConnectionGrants: wire.GetConnectionGrants(), PreflightErrorCode: wire.GetPreflightErrorCode(), PreflightErrorDetail: wire.GetPreflightErrorDetail(),
 		})
 	}
 	return callID, assistantText, proposed, authorizations, responseDigestRaw, nil, nil

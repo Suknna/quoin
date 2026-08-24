@@ -56,13 +56,34 @@ type Runner struct {
 	// schema (proposeFailure must not stamp an analysis schema onto an
 	// investigation attempt).
 	failureSchemaKind string
+	// toolCalls is test-only injectable transport for the typed-tool path.
+	// Production leaves it nil and uses the outbound runtime Channel.
+	toolCalls toolCallChannel
 }
 
 type toolMeta struct {
-	name      string
-	mode      string
-	arguments map[string]any
-	grants    []*runtimev1.ConnectionGrant
+	name            string
+	mode            string
+	arguments       map[string]any
+	grants          []*runtimev1.ConnectionGrant
+	preflightCode   string
+	preflightDetail string
+}
+
+// toolCallChannel is the narrow supervisor transport used only for typed
+// tools. Keeping this seam separate from the full task Channel makes the
+// preflight no-side-effect guarantee directly testable without changing the
+// production control-stream path.
+type toolCallChannel interface {
+	Request(context.Context, *runtimev1.ControlEnvelope) (*runtimev1.ControlEnvelope, error)
+	BearerToken() (string, error)
+}
+
+func (runner *Runner) toolCallChannel() toolCallChannel {
+	if runner.toolCalls != nil {
+		return runner.toolCalls
+	}
+	return runner.Channel
 }
 
 // retrySeqOf returns the current physical retry index of one logical call.
@@ -171,7 +192,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 			SizeBytes: ref.GetSizeBytes(), Sha256: ref.GetSha256(), BodyExpired: ref.GetBodyExpired(),
 		})
 	}
-	toolsDigest, err := ProviderToolsDigest()
+	toolsDigest, err := ProviderToolsDigest(input.GetAgentVersion())
 	if err != nil {
 		process.Process.Kill()
 		return err
@@ -310,7 +331,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 				}
 				var arguments map[string]any
 				_ = json.Unmarshal(matched.ArgumentsJSON, &arguments)
-				runner.tools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode, arguments: arguments, grants: authorization.ConnectionGrants}
+				runner.tools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode, arguments: arguments, grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode, preflightDetail: authorization.PreflightErrorDetail}
 				completed.ToolCalls = append(completed.ToolCalls, &workerv1.PreparedToolCall{
 					ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
 					ProviderToolCallId: matched.ProviderToolCallID,

@@ -15,27 +15,29 @@ import (
 )
 
 func TestToolSchemaMatchesQuoinCatalog(t *testing.T) {
-	workerJSON, err := ProviderToolsJSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	quoinJSON, err := attempt.CanonicalToolsJSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(workerJSON, quoinJSON) {
-		t.Fatalf("tool schema drift:\nworker=%s\nquoin =%s", workerJSON, quoinJSON)
-	}
-	workerDigest, err := ProviderToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	quoinDigest, err := attempt.CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if workerDigest != quoinDigest {
-		t.Fatalf("tool schema digest drift: worker=%s quoin=%s", workerDigest, quoinDigest)
+	for _, agentVersion := range []string{WorkerAgentVersion, WorkerInvestigationAgentVersion} {
+		workerJSON, err := ProviderToolsJSON(agentVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		quoinJSON, err := attempt.CanonicalToolsJSON(agentVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(workerJSON, quoinJSON) {
+			t.Fatalf("%s tool schema drift:\nworker=%s\nquoin =%s", agentVersion, workerJSON, quoinJSON)
+		}
+		workerDigest, err := ProviderToolsDigest(agentVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		quoinDigest, err := attempt.CanonicalToolsDigest(agentVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if workerDigest != quoinDigest {
+			t.Fatalf("%s tool schema digest drift: worker=%s quoin=%s", agentVersion, workerDigest, quoinDigest)
+		}
 	}
 }
 

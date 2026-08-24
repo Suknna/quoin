@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -130,6 +131,11 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 	// Re-read its currentness in this same write transaction before decrypting.
 	if purpose == "config_thanos_query" {
 		if err := thanos.ValidateConfigGrantForExecution(ctx, conn, attemptID); err != nil {
+			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
+		}
+	}
+	if purpose == kubernetes.ReadPurpose {
+		if err := kubernetes.ValidateGrantForFulfillment(ctx, conn, attemptID, grantID); err != nil {
 			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
 		}
 	}

@@ -2671,6 +2671,89 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/business-systems/{systemKey}/kubernetes-connections:
+    get:
+      tags: [config]
+      operationId: listBusinessSystemKubernetesConnections
+      summary: 读取业务系统 Kubernetes 连接绑定历史
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      responses:
+        '200':
+          description: 绑定历史（包含已解除记录）。
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KubernetesConnectionMapping'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [config]
+      operationId: createBusinessSystemKubernetesConnection
+      summary: 为业务系统追加 Kubernetes 连接绑定
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubernetesConnectionMappingCreate'
+      responses:
+        '200':
+          description: 已追加当前绑定。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesConnectionMapping'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/business-systems/{systemKey}/kubernetes-connections/{mappingId}/retire:
+    post:
+      tags: [config]
+      operationId: retireBusinessSystemKubernetesConnection
+      summary: 单向解除业务系统 Kubernetes 连接绑定
+      parameters:
+        - $ref: '#/components/parameters/SystemKey'
+        - name: mappingId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/LocatorId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubernetesConnectionMappingRetire'
+      responses:
+        '200':
+          description: 已解除；历史保留。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesConnectionMapping'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
   /api/v1/business-systems/{systemKey}/config:
     get:
       tags: [config]
@@ -6935,6 +7018,42 @@ components:
           type: integer
           minimum: 1
           description: 快照时该对象的权威 row_version；客户端按 rowVersion 幂等应用事件（HTTP-SSE-003）。
+    KubernetesConnectionMapping:
+      type: object
+      required: [id, connectionId, connectionName, state, rowVersion, createdBy, createdAt, retiredBy]
+      properties:
+        id: { $ref: '#/components/schemas/LocatorId' }
+        connectionId: { $ref: '#/components/schemas/LocatorId' }
+        connectionName: { type: string }
+        state: { type: string, enum: [Active, Retired] }
+        rowVersion: { type: integer, minimum: 1 }
+        createdBy: { $ref: '#/components/schemas/LocatorId' }
+        createdAt: { type: string, format: date-time }
+        retiredBy:
+          anyOf:
+            - $ref: '#/components/schemas/LocatorId'
+            - type: 'null'
+        retiredAt: { type: string, format: date-time }
+    KubernetesConnectionMappingCreate:
+      type: object
+      required: [clientCommandId, connectionId]
+      properties:
+        clientCommandId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_-]+$'
+        connectionId: { $ref: '#/components/schemas/LocatorId' }
+    KubernetesConnectionMappingRetire:
+      type: object
+      required: [clientCommandId, expectedRowVersion]
+      properties:
+        clientCommandId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_-]+$'
+        expectedRowVersion: { type: integer, minimum: 1 }
     BusinessSystemSummary:
       type: object
       required: [key, displayName, enabled, rowVersion]
