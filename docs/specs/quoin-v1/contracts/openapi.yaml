@@ -3210,6 +3210,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
   /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/ws:
     get:
       tags: [config]
@@ -3236,6 +3238,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/publish:
@@ -7492,8 +7496,6 @@ components:
         kind:
           type: string
           enum: [manual_login, authentication_probe, journey, exploration, deployment_verification]
-        actorSessionId:
-          $ref: '#/components/schemas/LocatorId'
         verificationManifestItemId:
           $ref: '#/components/schemas/LocatorId'
         cloneIdentity:
@@ -7701,10 +7703,8 @@ components:
             properties: {kind: {const: deployment_verification}}
             required: [kind]
           then:
-            required: [profileGenerationId, actorSessionId, verificationManifestItemId, cloneIdentity]
+            required: [profileGenerationId, verificationManifestItemId, cloneIdentity]
             properties:
-              actorSessionId:
-                $ref: '#/components/schemas/LocatorId'
               verificationManifestItemId:
                 $ref: '#/components/schemas/LocatorId'
               cloneIdentity:
@@ -7716,7 +7716,6 @@ components:
                 enum: [not_dispatched, start_rejected, same_boot_cleanup_ack, new_boot_cleanup_confirmed, externally_fenced_storage_retired]
           else:
             properties:
-              actorSessionId: false
               verificationManifestItemId: false
               cloneIdentity: false
         - if:

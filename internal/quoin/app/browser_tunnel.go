@@ -19,10 +19,13 @@ import (
 type browserTunnelHub struct {
 	mu             sync.Mutex
 	tunnels        map[int64]*browserTunnel
+	reservations   map[int64]*browserAttachmentReservation
 	lastAttachment map[int64]uint64
 }
 
 var errBrowserTunnelUnavailable = errors.New("browser tunnel unavailable")
+
+type browserAttachmentReservation struct{}
 
 type browserTunnel struct {
 	operationID  int64
@@ -35,7 +38,7 @@ type browserTunnel struct {
 }
 
 func newBrowserTunnelHub() *browserTunnelHub {
-	return &browserTunnelHub{tunnels: map[int64]*browserTunnel{}, lastAttachment: map[int64]uint64{}}
+	return &browserTunnelHub{tunnels: map[int64]*browserTunnel{}, reservations: map[int64]*browserAttachmentReservation{}, lastAttachment: map[int64]uint64{}}
 }
 func (tunnel *browserTunnel) close() { tunnel.once.Do(func() { close(tunnel.closed) }) }
 
@@ -66,9 +69,34 @@ func (hub *browserTunnelHub) remove(id int64, tunnel *browserTunnel) {
 	hub.mu.Unlock()
 	tunnel.close()
 }
-func (hub *browserTunnelHub) attach(id int64) (*browserTunnel, error) {
+func (hub *browserTunnelHub) reserveAttachment(id int64) (*browserAttachmentReservation, error) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
+	if hub.reservations[id] != nil {
+		return nil, errors.New("browser tunnel already attached")
+	}
+	if tunnel := hub.tunnels[id]; tunnel != nil && tunnel.attached {
+		return nil, errors.New("browser tunnel already attached")
+	}
+	reservation := &browserAttachmentReservation{}
+	hub.reservations[id] = reservation
+	return reservation, nil
+}
+
+func (hub *browserTunnelHub) releaseReservation(id int64, reservation *browserAttachmentReservation) {
+	hub.mu.Lock()
+	if hub.reservations[id] == reservation {
+		delete(hub.reservations, id)
+	}
+	hub.mu.Unlock()
+}
+
+func (hub *browserTunnelHub) attach(id int64, reservation *browserAttachmentReservation) (*browserTunnel, error) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if hub.reservations[id] != reservation {
+		return nil, errors.New("browser tunnel attachment reservation is no longer current")
+	}
 	tunnel := hub.tunnels[id]
 	if tunnel == nil {
 		return nil, errBrowserTunnelUnavailable
@@ -87,17 +115,22 @@ func (hub *browserTunnelHub) attach(id int64) (*browserTunnel, error) {
 		return nil, errors.New("browser tunnel already attached")
 	}
 	tunnel.attached = true
+	delete(hub.reservations, id)
 	return tunnel, nil
 }
 
 // attachAwait lets a browser reconnect ride out Lintel's short replacement of
 // the previous RFB generation after a WebSocket disconnect. It never waits
 // behind another WebSocket: that is a deterministic conflict, not a queue.
-func (hub *browserTunnelHub) attachAwait(ctx context.Context, id int64) (*browserTunnel, error) {
-	deadline := time.NewTimer(5 * time.Second)
+func (hub *browserTunnelHub) attachAwait(ctx context.Context, id int64, reservation *browserAttachmentReservation) (*browserTunnel, error) {
+	return hub.attachAwaitFor(ctx, id, reservation, 5*time.Second)
+}
+
+func (hub *browserTunnelHub) attachAwaitFor(ctx context.Context, id int64, reservation *browserAttachmentReservation, timeout time.Duration) (*browserTunnel, error) {
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for {
-		tunnel, err := hub.attach(id)
+		tunnel, err := hub.attach(id, reservation)
 		if err == nil || !errors.Is(err, errBrowserTunnelUnavailable) {
 			return tunnel, err
 		}

@@ -136,8 +136,9 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 		}
 	}
 	rows, err := service.db.QueryContext(ctx, `
-		SELECT id,key,display_name,enabled,row_version,current_config_version_id,timezone,resource_refresh_interval_seconds
-		FROM business_systems WHERE `+joinAnd(conditions)+` ORDER BY id DESC LIMIT ?`,
+		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,systems.resource_refresh_interval_seconds,
+		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
+		FROM business_systems AS systems WHERE `+joinAnd(conditions)+` ORDER BY systems.id DESC LIMIT ?`,
 		append(args, limit+1)...)
 	if err != nil {
 		return nil, "", err
@@ -147,18 +148,19 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 	systems := []BusinessSystemDetail{}
 	for rows.Next() {
 		var (
-			id          int64
-			current     sql.NullInt64
-			timezone    sql.NullString
-			refresh     sql.NullInt64
-			detail      BusinessSystemDetail
-			enabledFlag int64
+			id           int64
+			current      sql.NullInt64
+			timezone     sql.NullString
+			refresh      sql.NullInt64
+			browserState string
+			detail       BusinessSystemDetail
+			enabledFlag  int64
 		)
-		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh); err != nil {
+		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState); err != nil {
 			return nil, "", err
 		}
 		detail.Enabled = enabledFlag == 1
-		detail.BrowserIdentityState = "none"
+		detail.BrowserIdentityState = browserState
 		if current.Valid {
 			value := strconv.FormatInt(current.Int64, 10)
 			detail.CurrentConfigVersionID = &value
@@ -273,27 +275,29 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 
 func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (BusinessSystemDetail, error) {
 	query := `
-		SELECT id,key,display_name,enabled,row_version,current_config_version_id,timezone,resource_refresh_interval_seconds
-		FROM business_systems WHERE id=?`
+		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,systems.resource_refresh_interval_seconds,
+		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
+		FROM business_systems AS systems WHERE systems.id=?`
 	var (
-		id          int64
-		current     sql.NullInt64
-		timezone    sql.NullString
-		refresh     sql.NullInt64
-		enabledFlag int64
-		detail      BusinessSystemDetail
+		id           int64
+		current      sql.NullInt64
+		timezone     sql.NullString
+		refresh      sql.NullInt64
+		browserState string
+		enabledFlag  int64
+		detail       BusinessSystemDetail
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh)
+		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh)
+		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState)
 	}
 	if err != nil {
 		return BusinessSystemDetail{}, err
 	}
 	detail.Enabled = enabledFlag == 1
-	detail.BrowserIdentityState = "none"
+	detail.BrowserIdentityState = browserState
 	if current.Valid {
 		value := strconv.FormatInt(current.Int64, 10)
 		detail.CurrentConfigVersionID = &value

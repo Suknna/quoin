@@ -96,7 +96,7 @@ type Operation struct {
 	CatalogDigest         string        `json:"-"`
 	CatalogVersion        string        `json:"-"`
 	ActorUserID           *int64        `json:"-"`
-	ActorSessionID        *int64        `json:"actorSessionId,omitempty,string"`
+	ActorSessionID        *int64        `json:"-"`
 	StartedAt             *string       `json:"startedAt,omitempty"`
 	StartDispatchedAt     *string       `json:"startDispatchedAt,omitempty"`
 	ReconnectDeadline     *string       `json:"reconnectDeadline,omitempty"`

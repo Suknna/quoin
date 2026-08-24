@@ -29,7 +29,8 @@ func (service *Service) ListObservedResources(ctx context.Context, systemKey str
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	var systemID, interval int64
+	var systemID int64
+	var interval sql.NullInt64
 	if err := service.db.QueryRowContext(ctx, `SELECT id,resource_refresh_interval_seconds FROM business_systems WHERE key=?`, systemKey).Scan(&systemID, &interval); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, 0, ErrNotFound
@@ -71,7 +72,9 @@ func (service *Service) ListObservedResources(ctx context.Context, systemKey str
 		item := ObservedResourceSummary{ID: fmt.Sprint(id), DiscoveryKey: discovery, IdentityLabels: identity, ObservedAt: observed, Current: currentInt == 1}
 		if last.Valid {
 			item.LastSuccessfulRefreshAt = &last.String
-			item.Stale = resourceStale(last.String, interval, service.now())
+			if interval.Valid {
+				item.Stale = resourceStale(last.String, interval.Int64, service.now())
+			}
 		}
 		items = append(items, item)
 	}
