@@ -41,11 +41,70 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN
 	case "authentication_probe":
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE
+	case "exploration":
+		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION
 	default:
 		return browser.ErrInvalid
 	}
 	digest := sha256.Sum256(input.CanonicalJSON)
-	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: input.BootID, ConnectionEpoch: input.Epoch, CorrelationId: uint64(input.OperationID), Msg: &runtimev1.ControlEnvelope_StartBrowserOperation{StartBrowserOperation: &runtimev1.StartBrowserOperation{OperationId: input.OperationID, Kind: kind, IdentityId: input.IdentityID, IdentityRevisionId: input.RevisionID, ProfileGenerationId: input.ProfileGenerationID, Input: &runtimev1.BrowserOperationInput{SchemaKind: map[bool]string{true: "manual_login_v1", false: "authentication_probe_v1"}[input.Kind == "manual_login"], CanonicalJson: input.CanonicalJSON, ContentDigest: digest[:]}, RequestedAt: timestamppb.New(requested), JourneyCatalogDigest: input.CatalogDigest, JourneyCatalogVersion: input.CatalogVersion}}})
+	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: input.BootID, ConnectionEpoch: input.Epoch, CorrelationId: uint64(input.OperationID), Msg: &runtimev1.ControlEnvelope_StartBrowserOperation{StartBrowserOperation: &runtimev1.StartBrowserOperation{OperationId: input.OperationID, Kind: kind, IdentityId: input.IdentityID, IdentityRevisionId: input.RevisionID, ProfileGenerationId: input.ProfileGenerationID, Input: &runtimev1.BrowserOperationInput{SchemaKind: browserOperationSchemaKind(input.Kind), CanonicalJson: input.CanonicalJSON, ContentDigest: digest[:]}, RequestedAt: timestamppb.New(requested), JourneyCatalogDigest: input.CatalogDigest, JourneyCatalogVersion: input.CatalogVersion}}})
+}
+
+// reconcileLintelPhysicalOperations compares Lintel's boot-scoped physical
+// snapshot with durable operation ownership. A reported operation that Quoin has
+// already terminalized must receive Stop again; a missing durable active entry is
+// not guessed terminal because a Start frame may still be in flight. This keeps
+// the unknown-outcome Start fence intact while ensuring capacity reports cannot
+// resurrect an ownerless Chromium process.
+func (service *RuntimeService) reconcileLintelPhysicalOperations(ctx context.Context, bootID string, epoch uint64, reported []int64) {
+	if service.Browsers == nil || bootID == "" || epoch == 0 {
+		return
+	}
+	seen := make(map[int64]struct{}, len(reported))
+	for _, id := range reported {
+		if id > 0 {
+			seen[id] = struct{}{}
+		}
+	}
+	for id := range seen {
+		var state string
+		var storedBoot string
+		var storedEpoch uint64
+		err := service.Browsers.DB().QueryRowContext(ctx, `SELECT state,COALESCE(lintel_boot_id,''),COALESCE(lintel_connection_epoch,0) FROM browser_operations WHERE id=?`, id).Scan(&state, &storedBoot, &storedEpoch)
+		if err != nil || storedBoot != bootID || storedEpoch > epoch {
+			// A runtime-only process has no durable owner. The typed Stop tombstone
+			// is idempotent and is the only safe reconciliation action.
+			_ = service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: bootID, ConnectionEpoch: epoch, CorrelationId: uint64(id), Msg: &runtimev1.ControlEnvelope_StopBrowserOperation{StopBrowserOperation: &runtimev1.StopBrowserOperation{OperationId: id, Reason: runtimev1.BrowserCloseReason_BROWSER_CLOSE_REASON_OPERATION_TERMINAL, CommittedAt: timestamppb.Now()}}})
+			continue
+		}
+		if state == "Succeeded" || state == "Failed" || state == "Cancelled" || state == "Interrupted" {
+			_ = service.dispatchBrowserStop(ctx, id)
+		}
+	}
+	// A Hello/Heartbeat is a complete physical snapshot in both directions.
+	// Converge durable active work missing from Lintel before using the same
+	// capacity projection to refill FIFO; otherwise stale Running rows consume
+	// slots forever and leave both identities and pending parent terminals stuck.
+	if missing, err := service.Browsers.InterruptMissingPhysicalOperations(ctx, bootID, epoch, reported); err == nil && len(missing) != 0 {
+		service.replayUndeliveredBrowserToolResults(ctx)
+		service.reconcilePendingAttemptTerminals(ctx)
+	}
+	// Only Quoin dispatches work. The full snapshot merely frees capacity that a
+	// physical process-loss closure released; it never lets Lintel select work.
+	service.dispatchQueuedBrowserOperations(ctx)
+}
+
+func browserOperationSchemaKind(kind string) string {
+	switch kind {
+	case "manual_login":
+		return "manual_login_v1"
+	case "authentication_probe":
+		return "authentication_probe_v1"
+	case "exploration":
+		return "exploration_v1"
+	default:
+		return ""
+	}
 }
 
 func startRejectReason(reason runtimev1.BrowserOperationStartRejectReason) string {
@@ -64,6 +123,8 @@ func startRejectReason(reason runtimev1.BrowserOperationStartRejectReason) strin
 		return "reconcile_required"
 	case runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM:
 		return "stale_stream"
+	case runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED:
+		return "download_blocked"
 	default:
 		return "internal"
 	}
@@ -100,12 +161,34 @@ func (service *RuntimeService) handleBrowserStopAck(ctx context.Context, envelop
 	if service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
 		return service.Browsers.HandleStopAck(ctx, ack.GetOperationId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), clean, ack.GetStoppedAt().AsTime(), ack.GetCleanupStateHash())
 	}) == nil {
+		// A parent cancellation waits through terminal cleanup so a delayed Start
+		// never outlives its only owner. A successful normal close is already
+		// terminally committed and must not invoke cancellation convergence: doing
+		// so produces a spurious "attempt is not Cancelling" error after a valid
+		// close. Re-read the parent state in this StopAck transaction boundary.
+		var parentID int64
+		var parentState string
+		if service.Browsers.DB().QueryRowContext(ctx, `SELECT parent.id,parent.state
+			FROM browser_operations operation
+			JOIN execution_attempts parent ON parent.id=operation.owner_attempt_id
+			WHERE operation.id=? AND operation.kind='exploration'`, ack.GetOperationId()).Scan(&parentID, &parentState) == nil && parentID > 0 && parentState == "Cancelling" {
+			go service.finalizeCancellation(context.Background(), parentID, "investigation")
+		}
+		go service.reconcilePendingAttemptTerminals(context.Background())
 		go service.dispatchQueuedBrowserOperations(context.Background())
 	}
 }
 
 func (service *RuntimeService) handleBrowserCompletion(ctx context.Context, envelope *runtimev1.ControlEnvelope, result *runtimev1.CompleteBrowserOperation) {
 	if service.Browsers == nil || result == nil || result.GetEndedAt() == nil || !result.GetEndedAt().IsValid() {
+		return
+	}
+	// Exploration actions use CompleteBrowserOperation only for a terminal
+	// Runtime-side event (not the normal ActionResult close path). They need to
+	// close their parent Tool Call atomically so the frozen trigger closes the
+	// child Attempt; Browser.Service handles the other operation kinds.
+	if service.isExplorationOperation(ctx, result.GetOperationId()) {
+		service.handleExplorationCompletion(ctx, envelope, result)
 		return
 	}
 	probes := make([]browser.ProbeResult, 0, len(result.GetProbeResults()))
@@ -216,12 +299,50 @@ func (service *RuntimeService) handleBrowserStartAck(ctx context.Context, envelo
 	if ack.GetStartedAt() != nil && ack.GetStartedAt().IsValid() {
 		started = ack.GetStartedAt().AsTime()
 	}
-	_ = service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
-		return service.Browsers.HandleStartAck(ctx, ack.GetOperationId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), ack.GetAccepted(), startRejectReason(ack.GetRejectReason()), started)
+	rejectReason := startRejectReason(ack.GetRejectReason())
+	err := service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
+		return service.Browsers.HandleStartAck(ctx, ack.GetOperationId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), ack.GetAccepted(), rejectReason, started)
 	})
-	// NO_CAPACITY keeps its original FIFO position. It is retried only after a
-	// later physical-stop acknowledgement (or the next Lintel attachment), not
-	// recursively from this stale capacity response.
+	if err == nil && ack.GetAccepted() {
+		go service.dispatchPendingExplorationAction(context.Background(), ack.GetOperationId())
+	} else if err == nil && rejectReason != "no_capacity" {
+		// NO_CAPACITY is an explicit non-start: Browser.Service keeps the Operation
+		// in WaitingForCapacity at its original FIFO position. It is not a model
+		// result and must not close the queued browser child.
+		// Start rejection is a terminal physical admission observation. For an
+		// Exploration its queued browser child must be closed through the parent
+		// Tool Call, otherwise the model waits forever for an action that Lintel
+		// never accepted. This is deliberately a schema-valid Tool result, not a
+		// transport rejection that loses the model continuation.
+		go service.closeRejectedExplorationStart(context.Background(), ack.GetOperationId(), rejectReason, ack.GetDetail())
+	}
+	if err == nil {
+		// A StartAck is a durable physical-admission observation. It can be the
+		// missing edge after a natural terminal/cancel won while Start was in
+		// flight, including NO_CAPACITY which proves no process exists.
+		go service.reconcileTerminalParentExplorations(context.Background())
+		go service.reconcilePendingAttemptTerminals(context.Background())
+		go service.dispatchAllCancellingBrowserExplorations(context.Background())
+	}
+	// NO_CAPACITY keeps its original FIFO position unless its parent already
+	// terminalized; reconciliation above then closes it with the no_capacity
+	// cleanup basis rather than leaving a pending parent indefinitely.
+}
+
+// dispatchPendingExplorationAction finds the first queued child of a Running
+// Exploration after the Start ack made the operation eligible for an action.
+func (service *RuntimeService) dispatchPendingExplorationAction(ctx context.Context, operationID int64) {
+	if service.Analyses == nil {
+		return
+	}
+	var childID int64
+	err := service.Analyses.DB().QueryRowContext(ctx, `SELECT b.child_attempt_id FROM browser_exploration_child_bindings b
+		JOIN execution_attempts c ON c.id=b.child_attempt_id
+		JOIN browser_operations o ON o.id=b.operation_id
+		WHERE b.operation_id=? AND o.kind='exploration' AND o.state='Running' AND c.state='Queued' ORDER BY c.id LIMIT 1`, operationID).Scan(&childID)
+	if err == nil {
+		_ = service.dispatchBrowserExplorationAction(ctx, childID)
+	}
 }
 
 func (service *RuntimeService) dispatchPendingBrowserStops(ctx context.Context) {
@@ -240,12 +361,24 @@ func (service *RuntimeService) dispatchQueuedBrowserOperations(ctx context.Conte
 	if service.Browsers == nil {
 		return
 	}
-	// Start acknowledgement is asynchronous. Dispatch one FIFO head only, so a
-	// stale capacity projection cannot turn an entire queue into an unbounded
-	// burst of Starting operations before Lintel has accepted any of them.
-	var id int64
-	if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Starting','Queued','WaitingForCapacity') ORDER BY CASE state WHEN 'Starting' THEN 0 ELSE 1 END,id LIMIT 1`).Scan(&id); err != nil {
-		return
+	// A durable Starting row already owns an unknown-outcome Start fence. Replay
+	// at most that one first; then atomically claim every FIFO head for which the
+	// browser service still observes physical capacity. PrepareDispatch's
+	// transaction counts each newly Starting row, so this fills capacity without
+	// an unbounded stale-projection burst.
+	var starting int64
+	if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state='Starting' ORDER BY id LIMIT 1`).Scan(&starting); err == nil {
+		_ = service.dispatchBrowserOperation(ctx, starting)
 	}
-	_ = service.dispatchBrowserOperation(ctx, id)
+	for {
+		var id int64
+		if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Queued','WaitingForCapacity') ORDER BY id LIMIT 1`).Scan(&id); err != nil {
+			return
+		}
+		if err := service.dispatchBrowserOperation(ctx, id); err != nil {
+			// ErrCapacityUnavailable leaves the head durable in WaitingForCapacity;
+			// any other rejection is likewise handled by its existing state machine.
+			return
+		}
+	}
 }

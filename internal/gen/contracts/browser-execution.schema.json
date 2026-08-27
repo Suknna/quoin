@@ -6,6 +6,7 @@
   "oneOf": [
     { "$ref": "#/$defs/manualLoginInput" },
     { "$ref": "#/$defs/authenticationProbeInput" },
+    { "$ref": "#/$defs/explorationInput" },
     { "$ref": "#/$defs/deploymentVerificationInput" },
     { "$ref": "#/$defs/inspectionCollectionInput" },
     { "$ref": "#/$defs/browserJourneyResult" }
@@ -47,6 +48,7 @@
             { "type": "null" }
           ]
         },
+        "profileGeneration": { "type": "integer", "minimum": 1 },
         "startUrl": { "$ref": "#/$defs/url" }
       }
     },
@@ -84,6 +86,26 @@
           }
         },
         "probe": { "$ref": "#/$defs/journeyBinding" }
+      }
+    },
+    "explorationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaKind", "operationId", "identity", "authenticationProbe"],
+      "properties": {
+        "schemaKind": { "const": "exploration_v1" },
+        "operationId": { "$ref": "#/$defs/locatorId" },
+        "identity": {
+          "allOf": [
+            { "$ref": "#/$defs/identityBinding" },
+            {
+              "type": "object",
+              "properties": { "profileGenerationId": { "$ref": "#/$defs/locatorId" } },
+              "required": ["profileGenerationId"]
+            }
+          ]
+        },
+        "authenticationProbe": { "$ref": "#/$defs/journeyBinding" }
       }
     },
     "deploymentVerificationInput": {

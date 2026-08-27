@@ -23,6 +23,9 @@ var (
 	//go:embed browser-execution.schema.json
 	BrowserExecutionSchema []byte
 
+	//go:embed browser-tool.schema.json
+	BrowserToolSchema []byte
+
 	//go:embed metrics.yaml
 	MetricsYAML []byte
 

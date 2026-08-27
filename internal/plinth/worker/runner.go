@@ -68,6 +68,8 @@ type toolMeta struct {
 	name            string
 	mode            string
 	arguments       map[string]any
+	argumentsJSON   []byte
+	argumentsDigest []byte
 	grants          []*runtimev1.ConnectionGrant
 	preflightCode   string
 	preflightDetail string
@@ -111,6 +113,7 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	runner.Channel.RegisterTask(attemptID, cancel)
+	defer runner.Channel.FinishTask(attemptID)
 	// The frozen attempt-type map picks the work mode and the failure
 	// payload schema (RUNTIME-TASK-003: agent attempts dispatch to plinth).
 	workMode := workerv1.WorkMode_WORK_MODE_INITIAL_ANALYSIS
@@ -334,7 +337,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 				}
 				var arguments map[string]any
 				_ = json.Unmarshal(matched.ArgumentsJSON, &arguments)
-				runner.tools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode, arguments: arguments, grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode, preflightDetail: authorization.PreflightErrorDetail}
+				runner.tools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode, arguments: arguments, argumentsJSON: append([]byte(nil), matched.ArgumentsJSON...), argumentsDigest: append([]byte(nil), matched.ArgumentsDigest...), grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode, preflightDetail: authorization.PreflightErrorDetail}
 				completed.ToolCalls = append(completed.ToolCalls, &workerv1.PreparedToolCall{
 					ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
 					ProviderToolCallId: matched.ProviderToolCallID,

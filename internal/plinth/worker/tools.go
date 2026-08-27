@@ -16,10 +16,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,59 +38,15 @@ const (
 	spillLines = 2000
 )
 
-// ProviderToolsJSON renders the provider-facing tool schema for the
-// initial-analysis tool set. The bytes and digest must match the Quoin-side
-// attempt.CanonicalToolsJSON exactly (pinned by tools_test.go and enforced
-// at BeginModelCall through the tool schema digest).
+// ProviderToolsJSON delegates to Quoin's frozen catalog renderer. This keeps
+// provider schema/digest pinning byte-identical while the worker still owns
+// execution-mode dispatch.
 func ProviderToolsJSON(agentVersions ...string) ([]byte, error) {
 	agentVersion := WorkerAgentVersion
 	if len(agentVersions) == 1 {
 		agentVersion = agentVersions[0]
 	}
-	tools := []map[string]any{
-		toolSchema("bash", "在当前一次性工作区执行一条 bash 命令（/bin/bash --noprofile --norc -c）。无网络、无凭据，只可访问工作区与只读系统路径。", map[string]any{
-			"command": map[string]any{"type": "string"},
-		}, []string{"command"}),
-		toolSchema("read", "读取工作区内一个文本文件的内容（相对路径）。", map[string]any{
-			"path": map[string]any{"type": "string"},
-		}, []string{"path"}),
-		toolSchema("write", "把文本内容写入工作区内一个文件（相对路径）。", map[string]any{
-			"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
-		}, []string{"path", "content"}),
-		toolSchema("grep", "在工作区文件内按 RE2 正则搜索并返回匹配行。", map[string]any{
-			"pattern": map[string]any{"type": "string"}, "path": map[string]any{"type": "string"},
-		}, []string{"pattern", "path"}),
-		toolSchema("artifact_read", "按范围读取一个 Artifact 的文本片段；返回有界片段与 size/hash/eof/truncated。", map[string]any{
-			"artifactId": map[string]any{"type": "string"}, "offset": map[string]any{"type": "number"}, "limit": map[string]any{"type": "number"},
-		}, []string{"artifactId"}),
-		toolSchema("artifact_grep", "在 Artifact 文本内按 RE2 正则搜索；返回有界匹配片段与截断标记。", map[string]any{
-			"artifactId": map[string]any{"type": "string"}, "pattern": map[string]any{"type": "string"},
-		}, []string{"artifactId", "pattern"}),
-		toolSchema("thanos_query", "对全局 Thanos 执行一次只读 PromQL 即时查询（instant query）；模型只提供 query 表达式，连接与凭据由 Quoin 确定性解析，结果作为不可变 Evidence 封存。", map[string]any{
-			"query": map[string]any{"type": "string"},
-		}, []string{"query"}),
-	}
-	if agentVersion == WorkerInvestigationAgentVersion {
-		tools = append(tools, toolSchema("kubernetes_read", "对指定业务系统已绑定的 Kubernetes 连接执行固定只读操作。businessSystem 只接受业务系统 key 或名称；operation 只能为 discovery、pod_get、pod_list、events_list、pod_logs，绝不接受连接或凭据。", map[string]any{
-			"businessSystem": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string"},
-			"namespace": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "container": map[string]any{"type": "string"},
-		}, []string{"businessSystem", "operation"}))
-	}
-	wrapped := make([]any, 0, len(tools))
-	for _, tool := range tools {
-		wrapped = append(wrapped, map[string]any{"type": "function", "function": tool})
-	}
-	return json.Marshal(wrapped)
-}
-
-func toolSchema(name, description string, properties map[string]any, required []string) map[string]any {
-	sort.Strings(required)
-	return map[string]any{
-		"name": name, "description": description,
-		"parameters": map[string]any{
-			"type": "object", "properties": properties, "required": required,
-		},
-	}
+	return attempt.CanonicalToolsJSON(agentVersion)
 }
 
 // ProviderToolsDigest is the SHA-256 of ProviderToolsJSON as hex text.
@@ -136,6 +92,8 @@ func ExecutionModeFor(name string) string {
 	switch name {
 	case "artifact_read", "artifact_grep", "thanos_query", "kubernetes_read":
 		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
+	case "quoin_browser":
+		return "TOOL_EXECUTION_MODE_QUOIN_BROWSER"
 	default:
 		return "TOOL_EXECUTION_MODE_WORKER_LOCAL"
 	}

@@ -42,6 +42,13 @@ type ToolDef struct {
 	// succeeded execution commits deterministic Evidence together with
 	// the Tool Call terminal state (ARCH-TOOL-005, DATA-EVIDENCE-001).
 	ProducesEvidence bool
+	// Parameters, when non-nil, is the complete frozen provider-facing JSON
+	// Schema. It is reserved for closed union-shaped tools whose arguments
+	// cannot be represented by the simple string/number map above.
+	Parameters map[string]any
+	// ValidateArguments is the matching Quoin-side ingress validator for
+	// Parameters. It must reject unknown fields and unsupported union members.
+	ValidateArguments func([]byte) error
 }
 
 // ArgumentKind is the JSON kind of one argument.
@@ -113,7 +120,16 @@ var KubernetesReadTool = ToolDef{
 
 // InvestigationTools is intentionally a distinct catalog: ARCH-CHAT-006
 // permits Kubernetes observation only during an Investigation.
-var InvestigationTools = append(append([]ToolDef{}, InitialAnalysisTools...), KubernetesReadTool)
+// BrowserTool is available only to investigations. It is executed by Quoin,
+// never by the Plinth supervisor: requests are frozen and forwarded to a
+// Lintel-owned, closed browser-action executor.
+var BrowserTool = ToolDef{
+	Name: "quoin_browser", Version: "1", ExecutionMode: "quoin_browser", FailureMode: "return_to_model", ResultSchemaKind: "browser_tool_result_v1",
+	Description: "在已授权的浏览器身份中执行一个封闭的探索动作。只接受 open、页面导航、元素交互、受限读取、截图和会话关闭；不接受 JavaScript、HTTP、CDP 或 Playwright 指令。",
+	Parameters:  browserToolParameters(), ValidateArguments: validateBrowserToolArguments,
+}
+
+var InvestigationTools = append(append(append([]ToolDef{}, InitialAnalysisTools...), KubernetesReadTool), BrowserTool)
 
 // ToolsForAgentVersion returns the only catalog valid for an agent generation.
 func ToolsForAgentVersion(agentVersion string) []ToolDef {
@@ -142,6 +158,9 @@ func LookupTool(name string) (ToolDef, bool) { return LookupToolForAgentVersion(
 // object against the fixed catalog (ARCH-TOOL-001: structure is validated
 // before the pending row exists).
 func ValidateToolArguments(tool ToolDef, argumentsJSON []byte) error {
+	if tool.ValidateArguments != nil {
+		return tool.ValidateArguments(argumentsJSON)
+	}
 	if !jsonValid(argumentsJSON, "object") {
 		return fmt.Errorf("tool %s arguments must be a JSON object", tool.Name)
 	}
@@ -241,25 +260,25 @@ func CanonicalToolsJSON(agentVersions ...string) ([]byte, error) {
 	catalog := ToolsForAgentVersion(agentVersion)
 	tools := make([]any, 0, len(catalog))
 	for _, tool := range catalog {
-		properties := map[string]any{}
-		required := make([]string, 0, len(tool.Required))
-		for key, kind := range tool.Arguments {
-			properties[key] = map[string]any{"type": string(kind)}
+		parameters := tool.Parameters
+		if parameters == nil {
+			properties := map[string]any{}
+			required := make([]string, 0, len(tool.Required))
+			for key, kind := range tool.Arguments {
+				properties[key] = map[string]any{"type": string(kind)}
+			}
+			for _, key := range tool.Required {
+				required = append(required, key)
+			}
+			sort.Strings(required)
+			parameters = map[string]any{"type": "object", "properties": properties, "required": required}
 		}
-		for _, key := range tool.Required {
-			required = append(required, key)
-		}
-		sort.Strings(required)
 		tools = append(tools, map[string]any{
 			"type": "function",
 			"function": map[string]any{
 				"name":        tool.Name,
 				"description": tool.Description,
-				"parameters": map[string]any{
-					"type":       "object",
-					"properties": properties,
-					"required":   required,
-				},
+				"parameters":  parameters,
 			},
 		})
 	}
@@ -289,6 +308,9 @@ func toolSchemaVersionFor(agentVersion string) string {
 // whose payload has security-relevant routing semantics. It is called at the
 // Quoin ingress before CompleteToolCall can mutate the ledger.
 func ValidateToolResultPayload(schemaKind string, canonical []byte) error {
+	if schemaKind == "browser_tool_result_v1" {
+		return validateBrowserToolResult(canonical)
+	}
 	if schemaKind != "kubernetes_read_result_v1" {
 		return nil
 	}

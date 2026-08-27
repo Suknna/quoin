@@ -129,7 +129,14 @@ func (service *Service) Cancel(ctx context.Context, principalID int64, clientCom
 	if err != nil {
 		return StopOutcome{}, err
 	}
-	outcome := StopOutcome{AttemptID: attemptID, State: fenceState, RowVersion: rowVersion + 1}
+	// CancelFenceOn may be a durable no-op when an already-claimed normal close
+	// won the SQLite ordering point. Return the row that actually committed, not
+	// a fabricated +1 version.
+	committedState, committedVersion, err := service.attemptStateOn(ctx, conn, attemptID)
+	if err != nil {
+		return StopOutcome{}, err
+	}
+	outcome := StopOutcome{AttemptID: attemptID, State: committedState, RowVersion: committedVersion}
 	if fenceState == "Cancelling" {
 		// Idempotent on an already-Cancelling attempt, but only a
 		// Running -> Cancelling move owes the runtime a cancel frame.

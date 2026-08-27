@@ -39,6 +39,10 @@ type RuntimeSlice struct {
 	// TerminationReason maps the wire termination enum onto the frozen SQL
 	// name (injected from the app package's single mapper).
 	TerminationReason func(reason runtimev1.TerminationReason) string
+	// AfterCommit lets the Runtime owner close external resources owned by a
+	// naturally terminal parent attempt. It is deliberately post-commit: the
+	// attempt ledger remains the sole authority for the parent result.
+	AfterCommit func(context.Context, int64)
 }
 
 // Dispatch binds one Queued investigation attempt to the live Plinth
@@ -179,8 +183,21 @@ func (slice *RuntimeSlice) HandleResultProposal(ctx context.Context, envelope *r
 		reject(err.Error())
 		return
 	}
+	// A natural result that owns an Exploration is durably staged, not yet
+	// terminal. Withhold ResultAck so Plinth keeps the same proposal available
+	// until Runtime has closed the browser's trace/Stop obligation.
+	if slice.Service.HasPendingTerminal(ctx, proposal.GetAttemptId()) {
+		if slice.AfterCommit != nil {
+			go slice.AfterCommit(context.Background(), proposal.GetAttemptId())
+		}
+		sharedops.LogEvent("quoin", "info", "investigation.result_pending_browser_cleanup", "attempt="+strconv.FormatInt(proposal.GetAttemptId(), 10))
+		return
+	}
 	ack.GetResultAck().Accepted = true
 	_ = slice.SendEnvelope(ack)
+	if slice.AfterCommit != nil {
+		go slice.AfterCommit(context.Background(), proposal.GetAttemptId())
+	}
 	sharedops.LogEvent("quoin", "info", "investigation.result_committed", "attempt="+strconv.FormatInt(proposal.GetAttemptId(), 10)+" succeeded="+strconv.FormatBool(succeeded))
 }
 

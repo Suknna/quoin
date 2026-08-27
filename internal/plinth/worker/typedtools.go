@@ -49,6 +49,64 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 	}}); err != nil {
 		return err
 	}
+	if meta.mode == "TOOL_EXECUTION_MODE_QUOIN_BROWSER" {
+		if runner.Channel == nil {
+			return fmt.Errorf("quoin_browser requires the live runtime channel")
+		}
+		delivery, err := runner.Channel.RegisterBrowserToolResult(toolCallID)
+		if err != nil {
+			return err
+		}
+		// Registration happens before the sub-execution request so a very fast
+		// ToolResult cannot be lost. Its matching release must nevertheless run
+		// on every request, rejection, cancellation and writer-error path.
+		defer runner.Channel.ReleaseBrowserToolResult(toolCallID)
+		canonical := meta.argumentsJSON
+		if len(canonical) == 0 {
+			canonical, err = json.Marshal(meta.arguments)
+			if err != nil {
+				return err
+			}
+		}
+		digest := sha256.Sum256(canonical)
+		reply, err := runner.Channel.Request(ctx, &runtimev1.ControlEnvelope{
+			CorrelationId: uint64(toolCallID),
+			Msg: &runtimev1.ControlEnvelope_RequestBrowserSubExecution{RequestBrowserSubExecution: &runtimev1.RequestBrowserSubExecution{
+				ParentAttemptId: attemptID, ToolCallId: toolCallID,
+				Input: &runtimev1.BrowserSubExecutionInput{SchemaKind: "browser_tool_v1", CanonicalJson: canonical, ContentDigest: digest[:]},
+			}},
+		})
+		if err != nil {
+			return err
+		}
+		browserAck := reply.GetBrowserSubExecutionAck()
+		if browserAck == nil || !browserAck.GetAccepted() {
+			detail := "browser sub-execution rejected"
+			if browserAck != nil {
+				detail = browserAck.GetRejectReason().String()
+			}
+			return fmt.Errorf("%s", detail)
+		}
+		select {
+		case result := <-delivery:
+			if result == nil {
+				return fmt.Errorf("browser tool delivery closed")
+			}
+			// The deferred release below is the consumption boundary, including a
+			// Worker IPC failure after this result is received. Quoin's durable Tool
+			// Call ledger remains the replay authority across that boundary.
+			toolResult := &workerv1.ToolResult{ToolCallId: toolCallID, Success: result.GetSuccess(), EvidenceIds: result.GetEvidenceIds()}
+			if result.GetPayload() != nil {
+				toolResult.ResultJson = result.GetPayload().GetCanonicalJson()
+			}
+			if !result.GetSuccess() {
+				toolResult.ErrorDetail = result.GetErrorDetail()
+			}
+			return writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_ToolResult{ToolResult: toolResult}})
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if meta.mode != "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED" {
 		return nil
 	}

@@ -5,7 +5,9 @@ const evidenceTicket = process.env.QUOIN_EVIDENCE_DIR ? basename(process.env.QUO
 const ticket = process.env.QUOIN_TICKET ?? (evidenceTicket?.match(/^T\d+$/) ? evidenceTicket : 'T03')
 const fixture = ticket === 'T17' ? 'label-contract' : ticket === 'T04' ? 'alerts/realtime' : 'compose'
 const teardown = ticket === 'T17' ? '../test/e2e/label-contract/teardown.mjs' : '../test/e2e/compose/teardown.mjs'
-const browserBaseURL = ticket === 'T20' ? 'https://127.0.0.1:18480' : 'http://127.0.0.1:18080'
+const browserTicket = ticket === 'T20' || ticket === 'T22'
+const browserBaseURL = browserTicket ? 'https://127.0.0.1:18480' : 'http://127.0.0.1:18080'
+const browserStack = `../.artifacts/e2e-stack-${ticket.toLowerCase()}`
 
 export default defineConfig({
   testDir: './e2e',
@@ -22,24 +24,26 @@ export default defineConfig({
   // screenshots, or video. Other ticket suites keep their normal diagnostics.
   // T20's failure output lives under the private stack. globalTeardown removes
   // that directory on every Playwright exit, including a failed test.
-  outputDir: ticket === 'T20' ? '../.artifacts/e2e-stack-t20/playwright-output' : undefined,
-  reporter: ticket === 'T20' ? [['list']] : [
+  outputDir: browserTicket ? `${browserStack}/playwright-output` : undefined,
+  reporter: browserTicket ? [['list']] : [
     ['list'],
     ['html', { outputDir: `../.artifacts/tickets/${ticket}/playwright-report`, open: 'never' }],
   ],
   use: {
     baseURL: browserBaseURL,
-    ignoreHTTPSErrors: ticket === 'T20',
-    trace: ticket === 'T20' ? 'off' : 'retain-on-failure',
-    screenshot: ticket === 'T20' ? 'off' : 'only-on-failure',
-    video: ticket === 'T20' ? 'off' : 'retain-on-failure',
+    ignoreHTTPSErrors: browserTicket,
+    trace: browserTicket ? 'off' : 'retain-on-failure',
+    screenshot: browserTicket ? 'off' : 'only-on-failure',
+    video: browserTicket ? 'off' : 'retain-on-failure',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command: `bash ../test/e2e/${fixture}/server.sh`,
     url: 'http://127.0.0.1:18083/ready',
     reuseExistingServer: false,
-    timeout: 420_000,
+    // Fresh Chromium/Lintel images can take longer than seven minutes on a
+    // cold local Docker cache; readiness must cover the real stack bootstrap.
+    timeout: 1_200_000,
     stdout: 'ignore',
     stderr: 'ignore',
   },

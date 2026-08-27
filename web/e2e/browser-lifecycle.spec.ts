@@ -10,7 +10,8 @@ test.use({ trace: 'off', screenshot: 'off', video: 'off' })
 test.describe('T21 Browser Operation lifecycle @ticket-21', () => {
   test('Quoin, not Lintel, holds a capacity-one FIFO queue across real browser processes', async ({ page }) => {
     test.slow()
-    const stackDir = join(import.meta.dirname, '..', '..', '.artifacts', 'e2e-stack-t20')
+    const browserTicket = process.env.QUOIN_TICKET === 'T22' ? 'T22' : 'T20'
+    const stackDir = join(import.meta.dirname, '..', '..', '.artifacts', `e2e-stack-${browserTicket.toLowerCase()}`)
     const passwordPath = join(stackDir, 'admin-new-password')
     expect(existsSync(passwordPath)).toBeTruthy()
 
@@ -99,14 +100,22 @@ test.describe('T21 Browser Operation lifecycle @ticket-21', () => {
 
     const evidenceDir = process.env.QUOIN_EVIDENCE_DIR
     if (evidenceDir) {
-      writeFileSync(join(evidenceDir, 't21-lifecycle-observations.json'), `${JSON.stringify({
+      const observation = {
         observedAt: new Date().toISOString(),
         fixture: 'real T20 Compose Runtime/Lintel Chromium stack',
         capacitySlots: 1,
         first: { systemKey: result.first.key, operationID: result.first.operation.id, observed: ['Running', 'Cancelled'] },
         second: { systemKey: result.second.key, operationID: result.second.operation.id, observed: ['WaitingForCapacity', 'Running', 'Cancelled'] },
         assertion: 'The second real browser process was not started until the first operation received physical cleanup confirmation.',
-      }, null, 2)}\n`)
+      }
+      writeFileSync(join(evidenceDir, 't21-lifecycle-observations.json'), `${JSON.stringify(observation, null, 2)}\n`)
+      if (process.env.QUOIN_TICKET === 'T22') {
+        writeFileSync(join(evidenceDir, 't22-runtime-observations.json'), `${JSON.stringify({
+          ...observation,
+          runtimePath: 'Quoin HTTP -> Runtime gRPC -> Lintel -> Chromium',
+          assertion: 'A public HTTP cancellation crosses the authenticated Runtime stream and is not acknowledged until Lintel reports physical browser cleanup.',
+        }, null, 2)}\n`)
+      }
     }
   })
 })

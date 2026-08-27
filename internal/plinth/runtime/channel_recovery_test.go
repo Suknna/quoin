@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,11 +16,14 @@ import (
 
 // fakeStream captures outbound envelopes without a live gRPC stream.
 type fakeStream struct {
+	mu   sync.Mutex
 	sent []*runtimev1.ControlEnvelope
 	fail bool
 }
 
 func (stream *fakeStream) Send(envelope *runtimev1.ControlEnvelope) error {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
 	if stream.fail {
 		return errStreamDown
 	}
@@ -27,19 +31,48 @@ func (stream *fakeStream) Send(envelope *runtimev1.ControlEnvelope) error {
 	return nil
 }
 
+func (stream *fakeStream) snapshot() []*runtimev1.ControlEnvelope {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	return append([]*runtimev1.ControlEnvelope(nil), stream.sent...)
+}
+
+func (stream *fakeStream) reset() {
+	stream.mu.Lock()
+	stream.sent = nil
+	stream.mu.Unlock()
+}
+
+func (stream *fakeStream) setFail(value bool) {
+	stream.mu.Lock()
+	stream.fail = value
+	stream.mu.Unlock()
+}
+
 type fakeTaskSupervisor struct {
+	mu         sync.Mutex
 	dispatched int
 	cancels    int
 	bindings   []DispatchBinding
 }
 
 func (supervisor *fakeTaskSupervisor) HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding DispatchBinding, stopTask func(int64) bool) {
+	supervisor.mu.Lock()
 	supervisor.dispatched++
 	supervisor.bindings = append(supervisor.bindings, binding)
+	supervisor.mu.Unlock()
 }
 
 func (supervisor *fakeTaskSupervisor) HandleCancelAttempt(ctx context.Context, sink *FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool) {
+	supervisor.mu.Lock()
 	supervisor.cancels++
+	supervisor.mu.Unlock()
+}
+
+func (supervisor *fakeTaskSupervisor) snapshot() (int, int, []DispatchBinding) {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	return supervisor.dispatched, supervisor.cancels, append([]DispatchBinding(nil), supervisor.bindings...)
 }
 
 type downError struct{}
@@ -82,22 +115,23 @@ func TestPendingResultDeliveredUntilAckSurvives(t *testing.T) {
 	// The immediate delivery round sends the proposal.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(stream.sent) > 0 {
+		if len(stream.snapshot()) > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(stream.sent) == 0 {
+	frames := stream.snapshot()
+	if len(frames) == 0 {
 		t.Fatal("proposal never sent")
 	}
-	if got := stream.sent[0].GetResultProposal(); got == nil || got.GetAttemptId() != 7 || got.GetBootId() != "boot-a" || got.GetConnectionEpoch() != 1 {
-		t.Fatalf("proposal envelope wrong: %+v", stream.sent[0])
+	if got := frames[0].GetResultProposal(); got == nil || got.GetAttemptId() != 7 || got.GetBootId() != "boot-a" || got.GetConnectionEpoch() != 1 {
+		t.Fatalf("proposal envelope wrong: %+v", frames[0])
 	}
 	// The ack is lost; the retry loop re-delivers the identical proposal
 	// (Quoin's idempotent adjudication makes replays safe).
 	channel.DeliverPendingResults()
-	if len(stream.sent) != 2 {
-		t.Fatalf("retry round did not re-deliver: %d frames", len(stream.sent))
+	if frames := stream.snapshot(); len(frames) != 2 {
+		t.Fatalf("retry round did not re-deliver: %d frames", len(frames))
 	}
 	// A surviving ack completes the waiter and clears the entry.
 	channel.dispatchServerFrame(context.Background(), &FrameSink{channel: channel}, nil, &runtimev1.ControlEnvelope{
@@ -124,20 +158,21 @@ func TestReconcileReportFlushesPendingBeforeReporting(t *testing.T) {
 	channel, stream := newTestChannel(t)
 	binding := DispatchBinding{BootID: "boot-a", Epoch: 1}
 	channel.RegisterResult(resultProposal(9, binding))
-	stream.sent = nil
+	stream.reset()
 	// One task still executing, one finished with an un-acked result.
 	channel.RegisterTask(5, func() {})
 
 	channel.dispatchServerFrame(context.Background(), &FrameSink{channel: channel}, nil, &runtimev1.ControlEnvelope{
 		Msg: &runtimev1.ControlEnvelope_ReconcileRequest{ReconcileRequest: &runtimev1.ReconcileRequest{ActiveAttemptIds: []int64{5, 9}}},
 	})
-	if len(stream.sent) != 2 {
-		t.Fatalf("expected proposal + report, got %d frames", len(stream.sent))
+	frames := stream.snapshot()
+	if len(frames) != 2 {
+		t.Fatalf("expected proposal + report, got %d frames", len(frames))
 	}
-	if stream.sent[0].GetResultProposal() == nil || stream.sent[0].GetResultProposal().GetAttemptId() != 9 {
-		t.Fatalf("pending result must flush first: %+v", stream.sent[0])
+	if frames[0].GetResultProposal() == nil || frames[0].GetResultProposal().GetAttemptId() != 9 {
+		t.Fatalf("pending result must flush first: %+v", frames[0])
 	}
-	report := stream.sent[1].GetReconcileReport()
+	report := frames[1].GetReconcileReport()
 	if report == nil || len(report.GetRunningAttemptIds()) != 1 || report.GetRunningAttemptIds()[0] != 5 {
 		t.Fatalf("report must list only the executing attempt: %+v", report)
 	}
@@ -157,33 +192,39 @@ func TestDispatchDedupNeverSpawnsASecondWorker(t *testing.T) {
 	}
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && tasks.dispatched == 0 {
+	for time.Now().Before(deadline) {
+		dispatched, _, _ := tasks.snapshot()
+		if dispatched != 0 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if tasks.dispatched != 1 {
+	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
 		t.Fatal("first dispatch never reached the supervisor")
 	}
 	channel.RegisterTask(11, func() {})
-	stream.sent = nil
+	stream.reset()
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
-	if tasks.dispatched != 1 {
-		t.Fatalf("executing attempt re-ran: dispatched=%d", tasks.dispatched)
+	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
+		t.Fatalf("executing attempt re-ran: dispatched=%d", dispatched)
 	}
-	if len(stream.sent) != 1 || stream.sent[0].GetAttemptAccept() == nil || stream.sent[0].GetAttemptAccept().GetAttemptId() != 11 {
-		t.Fatalf("re-dispatch must re-ack the accept: %+v", stream.sent)
+	frames := stream.snapshot()
+	if len(frames) != 1 || frames[0].GetAttemptAccept() == nil || frames[0].GetAttemptAccept().GetAttemptId() != 11 {
+		t.Fatalf("re-dispatch must re-ack the accept: %+v", frames)
 	}
-	// A finished attempt with an un-acked result re-delivers the result
-	// instead of re-running.
-	channel.stopTask(11)
-	stream.sent = nil
+	// An Ack can be lost before the worker goroutine unwinds. A pending
+	// terminal result takes priority over the still-present active entry and
+	// re-delivers instead of sending AttemptAccept or re-running.
+	stream.reset()
 	channel.RegisterResult(resultProposal(11, DispatchBinding{BootID: "boot-a", Epoch: 2}))
-	stream.sent = nil // RegisterResult already fired its immediate delivery
+	stream.reset() // RegisterResult already fired its immediate delivery
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
-	if tasks.dispatched != 1 {
-		t.Fatalf("finished attempt re-ran: dispatched=%d", tasks.dispatched)
+	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
+		t.Fatalf("finished attempt re-ran: dispatched=%d", dispatched)
 	}
-	if len(stream.sent) != 1 || stream.sent[0].GetResultProposal() == nil {
-		t.Fatalf("re-dispatch must re-deliver the pending result: %+v", stream.sent)
+	frames = stream.snapshot()
+	if len(frames) != 1 || frames[0].GetResultProposal() == nil {
+		t.Fatalf("re-dispatch must re-deliver the pending result: %+v", frames)
 	}
 }
 
@@ -196,14 +237,19 @@ func TestDispatchBindingFlowsFromEnvelope(t *testing.T) {
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{AttemptId: 42}},
 	})
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(tasks.bindings) == 0 {
+	for time.Now().Before(deadline) {
+		_, _, bindings := tasks.snapshot()
+		if len(bindings) != 0 {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(tasks.bindings) != 1 {
+	_, _, bindings := tasks.snapshot()
+	if len(bindings) != 1 {
 		t.Fatal("dispatch never reached the supervisor")
 	}
-	if tasks.bindings[0] != (DispatchBinding{BootID: "boot-frozen", Epoch: 4}) {
-		t.Fatalf("binding=%+v", tasks.bindings[0])
+	if bindings[0] != (DispatchBinding{BootID: "boot-frozen", Epoch: 4}) {
+		t.Fatalf("binding=%+v", bindings[0])
 	}
 }
 
@@ -211,7 +257,7 @@ func TestDeliverySurvivesStreamOutage(t *testing.T) {
 	channel, stream := newTestChannel(t)
 	channel.RegisterResult(resultProposal(3, DispatchBinding{BootID: "boot-a", Epoch: 1}))
 	// The stream dies: delivery defers, the entry stays registered.
-	stream.fail = true
+	stream.setFail(true)
 	channel.DeliverPendingResults()
 	if !channel.HasPendingResult(3) {
 		t.Fatal("entry lost while the stream was down")
@@ -222,7 +268,94 @@ func TestDeliverySurvivesStreamOutage(t *testing.T) {
 	channel.sendStream = fresh
 	channel.outboundMu.Unlock()
 	channel.DeliverPendingResults()
-	if len(fresh.sent) != 1 || fresh.sent[0].GetResultProposal().GetAttemptId() != 3 {
-		t.Fatalf("reconnected delivery missing: %+v", fresh.sent)
+	frames := fresh.snapshot()
+	if len(frames) != 1 || frames[0].GetResultProposal().GetAttemptId() != 3 {
+		t.Fatalf("reconnected delivery missing: %+v", frames)
+	}
+}
+
+func TestBrowserToolDeliveryRoutesAndAcks(t *testing.T) {
+	channel, err := NewChannel(ChannelConfig{Slot: "plinth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &fakeStream{}
+	channel.sendStream = stream
+	waiter, err := channel.RegisterBrowserToolResult(41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel.dispatchServerFrame(context.Background(), &FrameSink{channel: channel}, nil, &runtimev1.ControlEnvelope{
+		CorrelationId: 41,
+		Msg:           &runtimev1.ControlEnvelope_ToolResultDelivery{ToolResultDelivery: &runtimev1.ToolResultDelivery{ToolCallId: 41, ChildAttemptId: 99, Success: true, Payload: &runtimev1.ResultPayload{SchemaKind: "browser_tool_result_v1", CanonicalJson: []byte(`{"outcome":"success","action":"open"}`)}}},
+	})
+	select {
+	case delivery := <-waiter:
+		if delivery.GetChildAttemptId() != 99 || !delivery.GetSuccess() {
+			t.Fatalf("delivery=%+v", delivery)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("browser ToolResultDelivery did not reach waiter")
+	}
+	frames := stream.snapshot()
+	if len(frames) != 1 || frames[0].GetToolResultDeliveryAck() == nil || frames[0].GetToolResultDeliveryAck().GetToolCallId() != 41 {
+		t.Fatalf("ack=%+v", frames)
+	}
+}
+
+func TestReleaseBrowserToolResultDropsConsumedCache(t *testing.T) {
+	channel, err := NewChannel(ChannelConfig{Slot: "plinth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel.deliverBrowserToolResult(&runtimev1.ToolResultDelivery{ToolCallId: 41, ChildAttemptId: 99, Success: true})
+	channel.ReleaseBrowserToolResult(41)
+	channel.browserMu.Lock()
+	defer channel.browserMu.Unlock()
+	if channel.browserResults[41] != nil || channel.browserWaiters[41] != nil {
+		t.Fatalf("consumed browser delivery remained cached: results=%v waiters=%v", channel.browserResults, channel.browserWaiters)
+	}
+}
+
+func TestBrowserToolDeliveryRejectsConflictingReplay(t *testing.T) {
+	channel, err := NewChannel(ChannelConfig{Slot: "plinth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &fakeStream{}
+	channel.sendStream = stream
+	first := &runtimev1.ToolResultDelivery{ToolCallId: 41, ChildAttemptId: 99, Success: true, Payload: &runtimev1.ResultPayload{SchemaKind: "browser_tool_result_v1", CanonicalJson: []byte(`{"action":"open","outcome":"success"}`)}}
+	if !channel.deliverBrowserToolResult(first) {
+		t.Fatal("first delivery was rejected")
+	}
+	channel.dispatchServerFrame(context.Background(), &FrameSink{channel: channel}, nil, &runtimev1.ControlEnvelope{CorrelationId: 42, Msg: &runtimev1.ControlEnvelope_ToolResultDelivery{ToolResultDelivery: &runtimev1.ToolResultDelivery{ToolCallId: 41, ChildAttemptId: 99, Success: false}}})
+	frames := stream.snapshot()
+	if len(frames) != 1 || frames[0].GetToolResultDeliveryAck().GetAccepted() {
+		t.Fatalf("conflicting replay was accepted: %+v", frames)
+	}
+}
+
+func TestBrowserToolDeliveryAfterReleaseDoesNotRebuildCache(t *testing.T) {
+	channel, err := NewChannel(ChannelConfig{Slot: "plinth"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter, err := channel.RegisterBrowserToolResult(41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &runtimev1.ToolResultDelivery{ToolCallId: 41, ChildAttemptId: 99, Success: true}
+	if !channel.deliverBrowserToolResult(first) {
+		t.Fatal("first delivery rejected")
+	}
+	<-waiter
+	channel.ReleaseBrowserToolResult(41)
+	if !channel.deliverBrowserToolResult(first) {
+		t.Fatal("late exact replay rejected")
+	}
+	channel.browserMu.Lock()
+	defer channel.browserMu.Unlock()
+	if len(channel.browserResults) != 0 || len(channel.browserWaiters) != 0 {
+		t.Fatalf("late replay rebuilt released cache: results=%v waiters=%v", channel.browserResults, channel.browserWaiters)
 	}
 }

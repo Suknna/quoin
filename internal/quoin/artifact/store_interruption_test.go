@@ -9,6 +9,7 @@ package artifact
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -47,7 +48,7 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 	// First attempt: begin, write a partial chunk, then abandon WITHOUT
 	// CommitUpload (the adapter closes both handles and removes the
 	// staging file when the stream errors).
-	conn, file, replayID, err := store.BeginUpload(ctx, header)
+	file, replayID, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,10 +59,10 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	file.Close()
-	conn.Close()
 	if err := os.RemoveAll(store.StagingPath(header.UploadID)); err != nil {
 		t.Fatal(err)
 	}
+	store.AbortUpload(header.UploadID)
 	// The ledger must still be uploading (a crash never fabricates a
 	// commit), and no blob may exist.
 	var state string
@@ -74,7 +75,7 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 
 	// Retry: the same upload_id and digest reset the staging file and
 	// commit normally (whole-body retransmission, RUNTIME-UPLOAD-002).
-	retryConn, retryFile, retryReplay, err := store.BeginUpload(ctx, header)
+	retryFile, retryReplay, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 	if _, err := retryFile.Write([]byte(body)); err != nil {
 		t.Fatal(err)
 	}
-	artifactID, err := store.CommitUpload(ctx, retryConn, header, retryFile)
+	artifactID, err := store.CommitUpload(ctx, header, retryFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,14 +97,14 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 		t.Fatalf("state=%q err=%v", committedState, err)
 	}
 	// A third begin replays the committed id (Ack-loss recovery).
-	replayConn, replayFile, replayID, err := store.BeginUpload(ctx, header)
+	replayFile, replayID, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replayID != artifactID {
 		t.Fatalf("replay id=%d want %d", replayID, artifactID)
 	}
-	if replayConn != nil || replayFile != nil {
+	if replayFile != nil {
 		t.Fatal("replay must not reopen staging handles")
 	}
 }
@@ -120,22 +121,19 @@ func TestTicket11UploadInterruptionMetadataConflict(t *testing.T) {
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	header := interruptedUploadHeader(attemptID, toolCallID, "first-body")
-	conn, file, _, err := store.BeginUpload(ctx, header)
+	file, _, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	file.Close()
-	conn.Close()
 	_ = os.RemoveAll(store.StagingPath(header.UploadID))
+	store.AbortUpload(header.UploadID)
 	different := interruptedUploadHeader(attemptID, toolCallID, "second-body")
 	different.UploadID = header.UploadID
-	conn, _, _, err = store.BeginUpload(ctx, different)
+	_, _, err = store.BeginUpload(ctx, different)
 	var rejection *Rejection
 	if !errors.As(err, &rejection) || rejection.Reason != RejectMetadataMismatch {
 		t.Fatalf("err=%v", err)
-	}
-	if conn != nil {
-		conn.Close()
 	}
 }
 
@@ -234,5 +232,147 @@ func TestTicket11MetadataAfterExpiryStable(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, expiresAt); err != nil {
 		t.Fatalf("expiresAt not RFC3339: %v", err)
+	}
+}
+
+// TestBeginUploadDoesNotHoldPoolConnectionWhileStreaming reproduces the
+// single-connection deployment: receiving a slow body must not starve every
+// unrelated read until the client finishes uploading.
+func TestBeginUploadDoesNotHoldPoolConnectionWhileStreaming(t *testing.T) {
+	db := newTestDB(t)
+	db.SetMaxOpenConns(1)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, toolCallID := seedToolOwner(t, db)
+	header := interruptedUploadHeader(attemptID, toolCallID, "slow body")
+	file, replayID, err := store.BeginUpload(context.Background(), header)
+	if err != nil || replayID != 0 {
+		t.Fatalf("begin replay=%d err=%v", replayID, err)
+	}
+	defer func() {
+		_ = file.Close()
+		store.AbortUpload(header.UploadID)
+	}()
+	// This query would block forever with the former BeginUpload connection
+	// retained across stream body writes.
+	queryContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var count int
+	if err := db.QueryRowContext(queryContext, `SELECT COUNT(*) FROM runtime_artifact_uploads WHERE upload_id=?`, header.UploadID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("unrelated query blocked or lost ledger: count=%d err=%v", count, err)
+	}
+}
+
+// TestCommitFailureNeverDeletesSharedBlob reproduces two uploads of the same
+// content where the second reference transaction fails after the first has
+// committed. The failed upload may remove only its staging name, never the
+// already-shared content-addressed blob.
+func TestCommitFailureNeverDeletesSharedBlob(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAttempt, firstTool := seedToolOwner(t, db)
+	body := "shared blob body"
+	_, digest := uploadText(t, store, context.Background(), firstAttempt, firstTool, body)
+	hash := sha256.Sum256([]byte(body))
+	// A separate upload capability may attach another generated artifact to the
+	// same pending owner; the digest is the shared physical blob identity.
+	header := UploadHeader{UploadID: "shared-blob-failing-reference", AttemptID: firstAttempt, BootID: "boot-1", ConnectionEpoch: 7, OwnerType: "tool_call", OwnerID: firstTool, Kind: "tool_result", RetentionKind: "generated", SizeBytes: int64(len(body)), SHA256: hash[:], MediaType: "text/plain"}
+	file, replayID, err := store.BeginUpload(context.Background(), header)
+	if err != nil || replayID != 0 {
+		t.Fatalf("begin replay=%d err=%v", replayID, err)
+	}
+	if _, err := file.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+	// Force the reference transaction to fail only after filesystem installation.
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE artifacts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitUpload(context.Background(), header, file); err == nil {
+		t.Fatal("reference failure unexpectedly committed")
+	}
+	blob := filepath.Join(store.dir, "blobs", digest+".blob")
+	got, err := os.ReadFile(blob)
+	if err != nil || string(got) != body {
+		t.Fatalf("shared blob was deleted or altered: body=%q err=%v", got, err)
+	}
+}
+
+func TestConcurrentSameUploadIDLinearizesToOneArtifact(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, toolCallID := seedToolOwner(t, db)
+	header := interruptedUploadHeader(attemptID, toolCallID, "linearized body")
+	first, replayID, err := store.BeginUpload(context.Background(), header)
+	if err != nil || replayID != 0 {
+		t.Fatalf("first begin replay=%d err=%v", replayID, err)
+	}
+	if _, err := first.WriteString("linearized body"); err != nil {
+		t.Fatal(err)
+	}
+	type beginResult struct {
+		file   *os.File
+		replay int64
+		err    error
+	}
+	secondStarted := make(chan struct{})
+	secondResult := make(chan beginResult, 1)
+	go func() {
+		close(secondStarted)
+		file, replay, beginErr := store.BeginUpload(context.Background(), header)
+		secondResult <- beginResult{file: file, replay: replay, err: beginErr}
+	}()
+	<-secondStarted
+	select {
+	case result := <-secondResult:
+		t.Fatalf("concurrent BeginUpload bypassed same-id lease: %+v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	artifactID, err := store.CommitUpload(context.Background(), header, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-secondResult:
+		if result.err != nil || result.file != nil || result.replay != artifactID {
+			t.Fatalf("second begin=%+v want committed replay=%d", result, artifactID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent BeginUpload did not resume after commit")
+	}
+	var artifacts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifacts`).Scan(&artifacts); err != nil || artifacts != 1 {
+		t.Fatalf("artifacts=%d err=%v", artifacts, err)
+	}
+}
+
+func TestExistingDigestBlobMustVerifyBeforeReferenceCommit(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, toolCallID := seedToolOwner(t, db)
+	header := interruptedUploadHeader(attemptID, toolCallID, "expected body")
+	if err := os.WriteFile(store.blobPath(hex.EncodeToString(header.SHA256)), []byte("corrupt body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, replayID, err := store.BeginUpload(context.Background(), header)
+	if err != nil || replayID != 0 {
+		t.Fatalf("begin replay=%d err=%v", replayID, err)
+	}
+	if _, err := file.WriteString("expected body"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitUpload(context.Background(), header, file); err == nil {
+		t.Fatal("corrupt existing blob was accepted")
 	}
 }

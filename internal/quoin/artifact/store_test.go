@@ -5,6 +5,7 @@ package artifact
 // attempt-scoped read grants and the bounded text read/grep paths.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -140,7 +141,7 @@ func uploadText(t *testing.T, store *Store, ctx context.Context, attemptID, tool
 		Kind: "tool_result", RetentionKind: "generated",
 		Sensitive: false, SizeBytes: int64(len(body)), SHA256: hash[:], MediaType: "text/plain",
 	}
-	conn, file, replayID, err := store.BeginUpload(ctx, header)
+	file, replayID, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func uploadText(t *testing.T, store *Store, ctx context.Context, attemptID, tool
 	if _, err := file.Write([]byte(body)); err != nil {
 		t.Fatal(err)
 	}
-	artifactID, err := store.CommitUpload(ctx, conn, header, file)
+	artifactID, err := store.CommitUpload(ctx, header, file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,12 +207,12 @@ func TestUploadReadGrepFences(t *testing.T) {
 		Kind: "tool_result", RetentionKind: "generated",
 		SizeBytes: 3, SHA256: badHash, MediaType: "text/plain",
 	}
-	conn, file, _, err := store.BeginUpload(ctx, header)
+	file, _, err := store.BeginUpload(ctx, header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = file.Write([]byte("abc"))
-	if _, err := store.CommitUpload(ctx, conn, header, file); err == nil {
+	if _, err := store.CommitUpload(ctx, header, file); err == nil {
 		t.Fatal("hash mismatch must reject the upload")
 	}
 	var state string
@@ -259,5 +260,197 @@ func TestUploadReadGrepFences(t *testing.T) {
 	}
 	if _, err := store.ReadText(ctx, attemptID, artifactID+100, "boot-1", 7, 1, 10); err == nil {
 		t.Fatal("ungranted artifact must reject")
+	}
+}
+
+// TestLintelBrowserArtifactOwnerClosure exercises the frozen SQLite tables and
+// the Store's Lintel-specific relation check. The small fixture intentionally
+// uses the real table CHECK constraints; unrelated parent/model provenance is
+// outside Artifact ownership and therefore omitted with foreign keys disabled.
+func TestLintelBrowserArtifactOwnerClosure(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TRIGGER trg_browser_operations_insert_closure; DROP TRIGGER trg_browser_exploration_actions_closure; DROP TRIGGER trg_browser_exploration_parent_tool; DROP TRIGGER trg_execution_attempts_insert_queued; DROP TRIGGER trg_execution_attempts_slot_registered`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO investigations(id,created_by,created_at) VALUES(1,1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,runtime_slot,boot_id,connection_epoch,lease_until,accepted_at,quoin_release_version,runtime_release_version,created_at) VALUES(11,'browser_exploration','investigation',1,'Running','lintel','lintel-boot',2,?,?, 'q','lintel',?)`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO browser_operations(id,identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,state,journey_catalog_digest,journey_catalog_version,requested_at,start_dispatched_at,lintel_boot_id,lintel_connection_epoch,started_at) VALUES(22,1,1,1,1,'exploration','Running',?,'v1',?,'lintel-boot','lintel-boot',2,?)`, strings.Repeat("a", 64), now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO browser_exploration_actions(operation_id,action_seq,child_attempt_id,tool_call_id,action_kind,target_description,started_at) VALUES(22,1,11,1,'open','Payments',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	// This row is deliberately action-bound but terminal, proving the Store does
+	// not treat relation existence alone as authority to attach browser bytes.
+	if _, err := db.Exec(`INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,runtime_slot,boot_id,connection_epoch,lease_until,accepted_at,quoin_release_version,runtime_release_version,created_at) VALUES(12,'browser_exploration','investigation',1,'Running','lintel','lintel-boot',2,?,?, 'q','lintel',?)`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO browser_operations(id,identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,state,journey_catalog_digest,journey_catalog_version,requested_at,start_dispatched_at,lintel_boot_id,lintel_connection_epoch,ended_at,terminal_reason,stop_confirmed_at,stop_confirmation_basis) VALUES(23,1,1,1,1,'exploration','Failed',?,'v1',?,'lintel-boot','lintel-boot',2,?,'protocol_error',?,'stop_ack')`, strings.Repeat("a", 64), now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO browser_exploration_actions(operation_id,action_seq,child_attempt_id,tool_call_id,action_kind,target_description,started_at) VALUES(23,1,12,2,'open','Payments',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	// A close claim is the only capability that allows this trace to become
+	// complete. CommitUpload must atomically bind its installed Artifact rather
+	// than leave crash recovery to infer from an unowned upload ledger row.
+	if _, err := db.Exec(`INSERT INTO browser_exploration_terminal_claims(child_attempt_id,operation_id,tool_call_id,state,created_at) VALUES(11,22,1,'claimed_complete',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"action":"close_session","status":"ok"}`)
+	digest := sha256.Sum256(body)
+	header := UploadHeader{RuntimeSlot: "lintel", UploadID: "lintel-trace", AttemptID: 11, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 22, Kind: "trace", RetentionKind: "generated", Sensitive: true, SizeBytes: int64(len(body)), SHA256: digest[:], MediaType: "application/json", TraceIntegrity: "complete"}
+	file, replayID, err := store.BeginUpload(context.Background(), header)
+	if err != nil || replayID != 0 {
+		t.Fatalf("valid Lintel trace BeginUpload replay=%d err=%v", replayID, err)
+	}
+	if _, err := file.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	artifactID, err := store.CommitUpload(context.Background(), header, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimState string
+	var claimArtifact int64
+	var claimDigest []byte
+	if err := db.QueryRow(`SELECT state,trace_artifact_id,trace_digest FROM browser_exploration_terminal_claims WHERE child_attempt_id=11`).Scan(&claimState, &claimArtifact, &claimDigest); err != nil || claimState != "artifact_committed_complete" || claimArtifact != artifactID || !bytes.Equal(claimDigest, digest[:]) {
+		t.Fatalf("committed trace claim state=%q artifact=%d digest=%x err=%v", claimState, claimArtifact, claimDigest, err)
+	}
+	// Reusing an upload ID is idempotent only with identical immutable metadata.
+	// A different browser-operation owner must be rejected rather than returning
+	// the first Artifact ID across ownership boundaries.
+	alteredOwner := header
+	alteredOwner.OwnerID = 23
+	if _, _, err := store.BeginUpload(context.Background(), alteredOwner); err == nil {
+		t.Fatal("same upload ID with changed owner was accepted")
+	}
+	// Integrity describes the terminal capability itself. An at-least-once
+	// retransmission may not reuse a complete upload ID to claim incomplete
+	// evidence (or the reverse), even when every other header field matches.
+	alteredIntegrity := header
+	alteredIntegrity.TraceIntegrity = "incomplete"
+	if _, _, err := store.BeginUpload(context.Background(), alteredIntegrity); err == nil {
+		t.Fatal("same upload ID with opposite trace integrity was accepted")
+	}
+	// A committed continuous trace may be replayed on a later authenticated
+	// same-boot stream without reopening an upload or rewriting its start fence.
+	traceReplay := header
+	traceReplay.ConnectionEpoch = 3
+	if _, replayID, err := store.BeginUpload(context.Background(), traceReplay); err != nil || replayID != artifactID {
+		t.Fatalf("same-boot later-epoch trace replay id=%d err=%v", replayID, err)
+	}
+	traceReplay.ConnectionEpoch = 1
+	if _, _, err := store.BeginUpload(context.Background(), traceReplay); err == nil {
+		t.Fatal("older epoch trace replay was accepted")
+	}
+	var kind, owner string
+	var ownerID int64
+	var sensitive int
+	if err := db.QueryRow(`SELECT kind,owner_type,owner_id,sensitive FROM artifacts WHERE id=?`, artifactID).Scan(&kind, &owner, &ownerID, &sensitive); err != nil || kind != "trace" || owner != "browser_operation" || ownerID != 22 || sensitive != 1 {
+		t.Fatalf("committed trace owner=%s/%d kind=%s sensitive=%d err=%v", owner, ownerID, kind, sensitive, err)
+	}
+	// A crash trace deliberately has no child Attempt fence: its authority is
+	// the running operation plus the current Lintel boot/epoch action fence.
+	operationTrace := header
+	operationTrace.UploadID, operationTrace.AttemptID = "lintel-operation-trace", 0
+	file, replayID, err = store.BeginUpload(context.Background(), operationTrace)
+	if err != nil || replayID != 0 {
+		t.Fatalf("operation-level crash trace BeginUpload replay=%d err=%v", replayID, err)
+	}
+	if _, err := file.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitUpload(context.Background(), operationTrace, file); err != nil {
+		t.Fatalf("operation-level crash trace commit: %v", err)
+	}
+	// A same-boot reconnect transports pending browser bytes over a successor
+	// epoch without rewriting the immutable Start epoch on either authority row.
+	successor := header
+	successor.UploadID, successor.ConnectionEpoch, successor.Kind, successor.Sensitive, successor.MediaType, successor.TraceIntegrity = "lintel-successor-epoch", 3, "screenshot", false, "image/png", ""
+	successor.SizeBytes = 0
+	emptySuccessorDigest := sha256.Sum256(nil)
+	successor.SHA256 = emptySuccessorDigest[:]
+	file, replayID, err = store.BeginUpload(context.Background(), successor)
+	if err != nil || replayID != 0 {
+		t.Fatalf("same-boot successor upload rejected replay=%d err=%v", replayID, err)
+	}
+	if _, err := store.CommitUpload(context.Background(), successor, file); err != nil {
+		t.Fatalf("same-boot successor upload commit: %v", err)
+	}
+	var childEpoch, operationEpoch int64
+	if err := db.QueryRow(`SELECT connection_epoch FROM execution_attempts WHERE id=11`).Scan(&childEpoch); err != nil || childEpoch != 2 {
+		t.Fatalf("child start epoch was rewritten epoch=%d err=%v", childEpoch, err)
+	}
+	if err := db.QueryRow(`SELECT lintel_connection_epoch FROM browser_operations WHERE id=22`).Scan(&operationEpoch); err != nil || operationEpoch != 2 {
+		t.Fatalf("operation start epoch was rewritten epoch=%d err=%v", operationEpoch, err)
+	}
+	emptyDigest := sha256.Sum256(nil)
+	for _, rejected := range []UploadHeader{
+		{RuntimeSlot: "lintel", UploadID: "wrong-op", AttemptID: 11, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 23, Kind: "screenshot", RetentionKind: "generated", SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "image/png"},
+		{RuntimeSlot: "lintel", UploadID: "terminal-op", AttemptID: 12, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 23, Kind: "screenshot", RetentionKind: "generated", SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "image/png"},
+		{RuntimeSlot: "lintel", UploadID: "wrong-boot", AttemptID: 11, BootID: "other-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 22, Kind: "screenshot", RetentionKind: "generated", SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "image/png"},
+		{RuntimeSlot: "lintel", UploadID: "stale-epoch", AttemptID: 11, BootID: "lintel-boot", ConnectionEpoch: 1, OwnerType: "browser_operation", OwnerID: 22, Kind: "screenshot", RetentionKind: "generated", SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "image/png"},
+		// attempt_id=0 is only the operation-level crash trace exception. It
+		// still carries the exact operation's frozen Lintel fence.
+		{RuntimeSlot: "lintel", UploadID: "operation-wrong-boot", AttemptID: 0, BootID: "other-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 22, Kind: "trace", RetentionKind: "generated", Sensitive: true, SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "application/json"},
+		{RuntimeSlot: "lintel", UploadID: "operation-stale-epoch", AttemptID: 0, BootID: "lintel-boot", ConnectionEpoch: 1, OwnerType: "browser_operation", OwnerID: 22, Kind: "trace", RetentionKind: "generated", Sensitive: true, SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "application/json"},
+		{RuntimeSlot: "lintel", UploadID: "operation-wrong-kind", AttemptID: 0, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 22, Kind: "screenshot", RetentionKind: "generated", SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "image/png"},
+		{RuntimeSlot: "lintel", UploadID: "operation-wrong-owner", AttemptID: 0, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "tool_call", OwnerID: 22, Kind: "trace", RetentionKind: "generated", Sensitive: true, SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "application/json"},
+		{RuntimeSlot: "lintel", UploadID: "operation-trace-not-sensitive", AttemptID: 0, BootID: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerID: 22, Kind: "trace", RetentionKind: "generated", Sensitive: false, SizeBytes: 0, SHA256: emptyDigest[:], MediaType: "application/json"},
+	} {
+		if _, _, err := store.BeginUpload(context.Background(), rejected); err == nil {
+			t.Fatalf("invalid Lintel header %+v was accepted", rejected)
+		}
+	}
+}
+
+func TestCommittedLintelScreenshotReplayAcceptsSuccessorEpochOnly(t *testing.T) {
+	digest := sha256.Sum256([]byte("screenshot"))
+	header := UploadHeader{
+		RuntimeSlot: "lintel", UploadID: "screenshot-replay", AttemptID: 7,
+		BootID: "boot-a", ConnectionEpoch: 8, OwnerType: "browser_operation", OwnerID: 9,
+		Kind: "screenshot", MediaType: "image/png", RetentionKind: "generated", Sensitive: true,
+		SizeBytes: int64(len("screenshot")), SHA256: digest[:],
+	}
+	attempt := sql.NullInt64{Int64: header.AttemptID, Valid: true}
+	if !sameCommittedUploadMetadata(attempt, header.BootID, 7, header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind, 1, header.SizeBytes, hex.EncodeToString(header.SHA256), sql.NullString{}, header) {
+		t.Fatal("same-boot successor epoch must replay a committed screenshot")
+	}
+	header.ConnectionEpoch = 7
+	if sameCommittedUploadMetadata(attempt, header.BootID, 8, header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind, 1, header.SizeBytes, hex.EncodeToString(header.SHA256), sql.NullString{}, header) {
+		t.Fatal("earlier epoch must not replay a committed browser artifact")
+	}
+}
+
+func TestInterruptedLintelUploadAcceptsOnlySuccessorTransportEpoch(t *testing.T) {
+	digest := sha256.Sum256([]byte("trace"))
+	header := UploadHeader{
+		RuntimeSlot: "lintel", UploadID: "interrupted-trace", AttemptID: 7,
+		BootID: "boot-a", ConnectionEpoch: 9, OwnerType: "browser_operation", OwnerID: 9,
+		Kind: "trace", MediaType: "application/json", RetentionKind: "generated", Sensitive: true,
+		SizeBytes: int64(len("trace")), SHA256: digest[:], TraceIntegrity: "incomplete",
+	}
+	attempt := sql.NullInt64{Int64: header.AttemptID, Valid: true}
+	if !sameRetryUploadMetadata(attempt, header.BootID, 8, header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind, 1, header.SizeBytes, hex.EncodeToString(header.SHA256), sql.NullString{String: "incomplete", Valid: true}, header) {
+		t.Fatal("same-boot successor epoch must retry an interrupted Lintel trace")
+	}
+	header.ConnectionEpoch = 8
+	if sameRetryUploadMetadata(attempt, header.BootID, 9, header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind, 1, header.SizeBytes, hex.EncodeToString(header.SHA256), sql.NullString{String: "incomplete", Valid: true}, header) {
+		t.Fatal("older epoch must not retry an interrupted Lintel trace")
+	}
+	header.BootID = "boot-b"
+	header.ConnectionEpoch = 10
+	if sameRetryUploadMetadata(attempt, "boot-a", 8, header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind, 1, header.SizeBytes, hex.EncodeToString(header.SHA256), sql.NullString{String: "incomplete", Valid: true}, header) {
+		t.Fatal("different boot must not retry an interrupted Lintel trace")
 	}
 }

@@ -70,13 +70,21 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-	var state, dispatchedBoot string
+	var state, dispatchedBoot, ownerState, kind string
 	var dispatchedEpoch uint64
-	if err = conn.QueryRowContext(ctx, `SELECT state,COALESCE(lintel_boot_id,''),COALESCE(lintel_connection_epoch,0) FROM browser_operations WHERE id=?`, operationID).Scan(&state, &dispatchedBoot, &dispatchedEpoch); err != nil {
+	if err = conn.QueryRowContext(ctx, `SELECT o.state,COALESCE(o.lintel_boot_id,''),COALESCE(o.lintel_connection_epoch,0),o.kind,COALESCE(parent.state,'')
+		FROM browser_operations o LEFT JOIN execution_attempts parent ON parent.id=o.owner_attempt_id WHERE o.id=?`, operationID).Scan(&state, &dispatchedBoot, &dispatchedEpoch, &kind, &ownerState); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DispatchInput{}, ErrNotFound
 		}
 		return DispatchInput{}, err
+	}
+	// An accepted browser child is durable before its Plinth Ack is delivered.
+	// If the parent reaches a natural terminal state in that narrow interval,
+	// never send a new Start: its cancellation trigger owns child closure and
+	// reconciliation will release any already-live operation.
+	if kind == "exploration" && ownerState != "Running" {
+		return DispatchInput{}, ErrConflict
 	}
 	if state == "Starting" {
 		// Unknown-outcome Start may be replayed only on the same boot after a
@@ -94,10 +102,6 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 		// request but before this durable Start fence.
 		var manualLoginCount int
 		if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations o JOIN sessions s ON s.id=o.actor_session_id JOIN users u ON u.id=s.user_id WHERE o.id=? AND o.kind='manual_login' AND s.revoked_at IS NULL AND u.enabled=1 AND s.auth_revision_at_issue=u.auth_revision`, operationID).Scan(&manualLoginCount); err != nil {
-			return DispatchInput{}, err
-		}
-		var kind string
-		if err = conn.QueryRowContext(ctx, `SELECT kind FROM browser_operations WHERE id=?`, operationID).Scan(&kind); err != nil {
 			return DispatchInput{}, err
 		}
 		if kind == "manual_login" && manualLoginCount != 1 {
@@ -169,7 +173,7 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	if input.Kind == "manual_login" && (input.ActorUserID == nil || input.ActorSessionID == nil) {
 		return DispatchInput{}, ErrInvalid
 	}
-	if input.Kind == "authentication_probe" && (input.ActorUserID != nil || input.ActorSessionID != nil || !profileGeneration.Valid) {
+	if (input.Kind == "authentication_probe" || input.Kind == "exploration") && (input.ActorUserID != nil || input.ActorSessionID != nil || !profileGeneration.Valid) {
 		return DispatchInput{}, ErrInvalid
 	}
 	input.Probe.Params = json.RawMessage(params)
@@ -203,6 +207,8 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "manual_login_v1", "operationId": operationID, "identity": identity, "actorUserId": input.ActorUserID, "actorSessionId": input.ActorSessionID, "authenticationProbe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
 	} else if input.Kind == "authentication_probe" {
 		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "authentication_probe_v1", "operationId": operationID, "phase": "revision_change", "identity": identity, "probe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
+	} else if input.Kind == "exploration" {
+		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "exploration_v1", "operationId": operationID, "identity": identity, "authenticationProbe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
 	} else {
 		err = ErrInvalid
 	}
@@ -266,17 +272,18 @@ func (service *Service) HandleStartAck(ctx context.Context, operationID int64, b
 		}
 		terminal := "runtime_unavailable"
 		switch reason {
-		case "identity_busy", "input_unsupported", "reconcile_required", "stale_stream", "internal":
+		case "identity_busy", "input_unsupported", "reconcile_required", "stale_stream", "download_blocked", "internal":
 			terminal = "protocol_error"
 		case "authentication_required":
 			if kind == "authentication_probe" {
 				terminal = "authentication_required"
 			}
 		case "profile_unavailable":
-			if kind == "authentication_probe" {
-				// The detailed inventory classification is durable evidence; until it
-				// is available, profile_missing is the conservative closed result.
-				terminal = "profile_missing"
+			if kind == "authentication_probe" || kind == "exploration" {
+				// The inventory report is the durable authority for why the frozen
+				// profile cannot be opened. Preserve its exact classification instead
+				// of collapsing a corrupt manifest or Chromium mismatch into missing.
+				terminal = profileUnavailableTerminalReason(ctx, conn, operationID, bootID, epoch)
 			}
 		}
 		_, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Failed',ended_at=?,terminal_reason=?,start_rejected_at=?,start_reject_reason=?,stop_confirmed_at=?,stop_confirmation_basis='start_rejected',row_version=row_version+1 WHERE id=? AND state='Starting'`, now, terminal, now, reason, now, operationID)
@@ -289,6 +296,32 @@ func (service *Service) HandleStartAck(ctx context.Context, operationID int64, b
 	}
 	committed = true
 	return nil
+}
+
+// profileUnavailableTerminalReason maps only the current boot's durable
+// inventory observation to a Browser Operation terminal reason. If a start
+// rejection races a completed inventory report, profile_missing remains the
+// conservative reason; it never fabricates a more specific diagnosis.
+func profileUnavailableTerminalReason(ctx context.Context, conn *sql.Conn, operationID int64, bootID string, epoch uint64) string {
+	var result string
+	err := conn.QueryRowContext(ctx, `SELECT r.result
+		FROM browser_operations o
+		JOIN browser_profile_reconciliations r ON r.profile_generation_id=o.profile_generation_id
+		WHERE o.id=? AND r.boot_id=? AND r.connection_epoch<=?
+		ORDER BY r.id DESC LIMIT 1`, operationID, bootID, epoch).Scan(&result)
+	if err != nil {
+		return "profile_missing"
+	}
+	switch result {
+	case "manifest_invalid":
+		return "profile_manifest_invalid"
+	case "chromium_revision_mismatch":
+		return "chromium_revision_mismatch"
+	case "missing":
+		return "profile_missing"
+	default:
+		return "profile_missing"
+	}
 }
 
 // PreparePublish persists idempotency before the control message leaves Quoin.

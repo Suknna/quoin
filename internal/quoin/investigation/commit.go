@@ -8,6 +8,7 @@ package investigation
 // observes a terminal state the durable store does not have.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -19,6 +20,11 @@ import (
 )
 
 // Result is the adjudicated ResultProposal payload.
+// ErrPendingBrowserCleanup means a frozen terminal was rechecked while an
+// Exploration obligation still existed. It is retried by reconciliation; it is
+// not a late model result.
+var ErrPendingBrowserCleanup = errors.New("browser cleanup remains pending")
+
 type Result struct {
 	AttemptID   int64
 	BootID      string
@@ -30,6 +36,39 @@ type Result struct {
 	Digest      []byte
 	EvidenceIDs []int64
 	ArtifactIDs []int64
+}
+
+// pendingTerminalProposal is the exact natural ResultProposal held while an
+// Exploration owned by the same Attempt seals its mandatory terminal trace and
+// physical Stop. Its digest makes a replay idempotent without terminalizing the
+// parent before that cleanup obligation is discharged.
+type pendingTerminalProposal struct {
+	AttemptID   int64           `json:"attemptId"`
+	BootID      string          `json:"bootId"`
+	Epoch       uint64          `json:"epoch"`
+	Succeeded   bool            `json:"succeeded"`
+	Termination string          `json:"termination,omitempty"`
+	SchemaKind  string          `json:"schemaKind"`
+	Canonical   json.RawMessage `json:"canonical"`
+	Digest      string          `json:"digest"`
+	EvidenceIDs []int64         `json:"evidenceIds"`
+	ArtifactIDs []int64         `json:"artifactIds"`
+	ModelCallID int64           `json:"modelCallId"`
+}
+
+func pendingProposalFor(result Result, modelCallID int64) ([]byte, []byte, error) {
+	body, err := json.Marshal(pendingTerminalProposal{
+		AttemptID: result.AttemptID, BootID: result.BootID, Epoch: result.Epoch,
+		Succeeded: result.Succeeded, Termination: result.Termination,
+		SchemaKind: result.SchemaKind, Canonical: json.RawMessage(result.Canonical),
+		Digest: hex.EncodeToString(result.Digest), EvidenceIDs: result.EvidenceIDs,
+		ArtifactIDs: result.ArtifactIDs, ModelCallID: modelCallID,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	digest := sha256.Sum256(body)
+	return body, digest[:], nil
 }
 
 // AcceptAttempt records Assigned -> Running (RUNTIME-TASK-004). The
@@ -58,6 +97,14 @@ func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
 // A result for a withdrawn user message is a late result (audit only,
 // DATA-INVEST-002).
 func (service *Service) CommitResult(ctx context.Context, result Result) error {
+	return service.commitResult(ctx, result, true, 0)
+}
+
+// commitResult is shared by initial proposal adjudication and the durable
+// pending-terminal drain. Only the initial path may stage a pending result.
+// pendingModelCallID is non-zero only when draining the frozen work item; it
+// binds that drain to the exact model call recorded before cleanup began.
+func (service *Service) commitResult(ctx context.Context, result Result, allowPending bool, pendingModelCallID int64) error {
 	if !result.Succeeded {
 		return service.commitFailure(ctx, result)
 	}
@@ -119,14 +166,56 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 		return ErrLateResult
 	}
 	var modelID string
+	var modelCallID int64
 	if err := conn.QueryRowContext(ctx, `
-		SELECT model_id FROM model_calls WHERE attempt_id=? AND status='succeeded'
-		ORDER BY id DESC LIMIT 1`, result.AttemptID).Scan(&modelID); err != nil {
+		SELECT id,model_id FROM model_calls WHERE attempt_id=? AND status='succeeded'
+		ORDER BY id DESC LIMIT 1`, result.AttemptID).Scan(&modelCallID, &modelID); err != nil {
 		return fmt.Errorf("result without a succeeded model call: %w", err)
+	}
+	if pendingModelCallID != 0 && modelCallID != pendingModelCallID {
+		return ErrLateResult
 	}
 	if len(result.ArtifactIDs) > 0 || len(result.EvidenceIDs) > 0 {
 		if err := validateReferences(ctx, conn, result); err != nil {
 			return fmt.Errorf("evidence/artifact references do not close: %w", err)
+		}
+	}
+	{
+		var outstanding int
+		if err := conn.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM browser_operations o
+			WHERE o.owner_attempt_id=? AND o.kind='exploration'
+			  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
+			       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
+		)`, result.AttemptID).Scan(&outstanding); err != nil {
+			return err
+		}
+		if outstanding != 0 {
+			if !allowPending {
+				return ErrPendingBrowserCleanup
+			}
+			proposal, proposalDigest, err := pendingProposalFor(result, modelCallID)
+			if err != nil {
+				return err
+			}
+			stored := false
+			if _, err := conn.ExecContext(ctx, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,model_call_id,proposal_json,proposal_digest,created_at)
+				VALUES(?,'model_result','Succeeded',?,?,?,?) ON CONFLICT(attempt_id) DO NOTHING`, result.AttemptID, modelCallID, string(proposal), proposalDigest, service.nowText()); err != nil {
+				return err
+			}
+			var existingDigest []byte
+			if err := conn.QueryRowContext(ctx, `SELECT proposal_digest FROM pending_attempt_terminals WHERE attempt_id=?`, result.AttemptID).Scan(&existingDigest); err != nil {
+				return err
+			}
+			stored = bytes.Equal(existingDigest, proposalDigest)
+			if !stored {
+				return ErrLateResult
+			}
+			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+				return err
+			}
+			committed = true
+			return nil
 		}
 	}
 	now := service.nowText()
@@ -172,12 +261,148 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 	if err := recordAudit(ctx, conn, "system", 0, "investigation.assistant_committed", "success", "investigation", investigationID, now); err != nil {
 		return err
 	}
+	if pendingModelCallID != 0 {
+		if _, err := conn.ExecContext(ctx, `DELETE FROM pending_attempt_terminals WHERE attempt_id=? AND model_call_id=?`, result.AttemptID, pendingModelCallID); err != nil {
+			return err
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
 	}
 	committed = true
 	notifyAttempt = result.AttemptID
 	return nil
+}
+
+// HasPendingTerminal reports whether a result proposal is durably awaiting
+// browser cleanup. Runtime must defer ResultAck while this remains true.
+func (service *Service) HasPendingTerminal(ctx context.Context, attemptID int64) bool {
+	var found int
+	return service.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_attempt_terminals WHERE attempt_id=?)`, attemptID).Scan(&found) == nil && found == 1
+}
+
+// CommitPendingTerminal revalidates and commits the frozen proposal only after
+// Runtime has observed that no browser cleanup obligation remains. The delete is
+// in the same transaction as the terminal parent write, so a crash retries the
+// exact immutable proposal rather than manufacturing a new result.
+func (service *Service) CommitPendingTerminal(ctx context.Context, attemptID int64) (Result, bool, error) {
+	var source, targetState string
+	// recovery_loss rows intentionally contain no model proposal or digest.
+	// Scan nullable columns as nullable before dispatching on source; otherwise a
+	// valid loss work item is silently undrainable at the SQL boundary.
+	var proposalJSON sql.NullString
+	var storedDigest []byte
+	var terminalReason sql.NullString
+	if err := service.db.QueryRowContext(ctx, `SELECT source,target_state,proposal_json,proposal_digest,terminal_reason FROM pending_attempt_terminals WHERE attempt_id=?`, attemptID).Scan(&source, &targetState, &proposalJSON, &storedDigest, &terminalReason); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Result{}, false, nil
+		}
+		return Result{}, false, err
+	}
+	if source == "recovery_loss" {
+		return service.commitRecoveryLossPending(ctx, attemptID, targetState, terminalReason.String)
+	}
+	if source != "model_result" {
+		return Result{}, false, errors.New("pending terminal source is invalid")
+	}
+	if !proposalJSON.Valid || len(storedDigest) != sha256.Size {
+		return Result{}, false, errors.New("model-result pending terminal is malformed")
+	}
+	actual := sha256.Sum256([]byte(proposalJSON.String))
+	if !bytes.Equal(actual[:], storedDigest) {
+		return Result{}, false, errors.New("pending terminal proposal digest mismatch")
+	}
+	var proposal pendingTerminalProposal
+	if err := json.Unmarshal([]byte(proposalJSON.String), &proposal); err != nil {
+		return Result{}, false, fmt.Errorf("parse pending terminal proposal: %w", err)
+	}
+	if proposal.AttemptID != attemptID || proposal.ModelCallID < 1 {
+		return Result{}, false, errors.New("pending terminal proposal binding malformed")
+	}
+	if (proposal.Succeeded && targetState != "Succeeded") || (!proposal.Succeeded && targetState != "Failed") {
+		return Result{}, false, errors.New("pending terminal target state does not match proposal")
+	}
+	var digest []byte
+	if proposal.Succeeded {
+		var err error
+		digest, err = hex.DecodeString(proposal.Digest)
+		if err != nil || len(digest) != sha256.Size {
+			return Result{}, false, errors.New("pending terminal proposal result digest malformed")
+		}
+	}
+	result := Result{AttemptID: proposal.AttemptID, BootID: proposal.BootID, Epoch: proposal.Epoch, Succeeded: proposal.Succeeded,
+		Termination: proposal.Termination, SchemaKind: proposal.SchemaKind, Canonical: []byte(proposal.Canonical), Digest: digest,
+		EvidenceIDs: proposal.EvidenceIDs, ArtifactIDs: proposal.ArtifactIDs}
+	if err := service.commitResult(ctx, result, false, proposal.ModelCallID); err != nil {
+		return Result{}, false, err
+	}
+	return result, true, nil
+}
+
+// commitRecoveryLossPending is the no-model half of the pending-terminal state
+// machine. It is reached only after Runtime verified every browser operation is
+// terminal and Stop-acknowledged, so it atomically publishes Interrupted and
+// consumes the immutable recovery-loss work item.
+func (service *Service) commitRecoveryLossPending(ctx context.Context, attemptID int64, targetState, reason string) (Result, bool, error) {
+	if targetState != "Interrupted" || reason == "" {
+		return Result{}, false, errors.New("recovery-loss pending terminal is malformed")
+	}
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return Result{}, false, err
+	}
+	// NotifyTerminal reads the same deliberately single-connection store. It
+	// must run only after this transaction connection has been returned, or a
+	// valid recovery-loss drain deadlocks after committing its Interrupted state.
+	notify := false
+	defer func() {
+		if notify {
+			service.NotifyTerminal(context.Background(), attemptID)
+		}
+	}()
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return Result{}, false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	// Recheck under the same writer transaction that consumes the pending row.
+	// Browser admission uses the same transaction boundary, so a late child
+	// cannot be admitted between this check and the Interrupted transition.
+	var outstanding int
+	if err = conn.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM browser_operations o
+		WHERE o.owner_attempt_id=? AND o.kind='exploration'
+		  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
+		       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
+	)`, attemptID).Scan(&outstanding); err != nil {
+		return Result{}, false, err
+	}
+	if outstanding != 0 {
+		return Result{}, false, nil
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE execution_attempts
+		SET state='Interrupted', ended_at=?, termination_reason=?, row_version=row_version+1
+		WHERE id=? AND state='Running'`, service.nowText(), reason, attemptID)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return Result{}, false, ErrLateResult
+	}
+	if _, err = conn.ExecContext(ctx, `DELETE FROM pending_attempt_terminals WHERE attempt_id=? AND source='recovery_loss'`, attemptID); err != nil {
+		return Result{}, false, err
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return Result{}, false, err
+	}
+	committed = true
+	notify = true
+	return Result{AttemptID: attemptID}, true, nil
 }
 
 // commitFailure records a failed attempt (DATA-ATTEMPT-005): no assistant
@@ -215,6 +440,44 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 	if err := verifyLease(ctx, conn, service.now(), result); err != nil {
 		return err
 	}
+	// A natural failure is no less capable of stranding an active Exploration
+	// than a successful ResultProposal. Freeze the exact failed terminal before
+	// touching the parent state; reconciliation will close the browser first and
+	// replay this immutable failure only afterwards.
+	var outstanding int
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id=? AND o.kind='exploration'
+		  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
+		       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
+	)`, result.AttemptID).Scan(&outstanding); err != nil {
+		return err
+	}
+	if outstanding != 0 {
+		var modelCallID int64
+		if err := conn.QueryRowContext(ctx, `SELECT id FROM model_calls WHERE attempt_id=? ORDER BY id DESC LIMIT 1`, result.AttemptID).Scan(&modelCallID); err != nil {
+			return fmt.Errorf("failed terminal without model call: %w", err)
+		}
+		proposal, proposalDigest, err := pendingProposalFor(result, modelCallID)
+		if err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,model_call_id,proposal_json,proposal_digest,created_at)
+			VALUES(?,'model_result','Failed',?,?,?,?) ON CONFLICT(attempt_id) DO NOTHING`, result.AttemptID, modelCallID, string(proposal), proposalDigest, service.nowText()); err != nil {
+			return err
+		}
+		var existingDigest []byte
+		if err := conn.QueryRowContext(ctx, `SELECT proposal_digest FROM pending_attempt_terminals WHERE attempt_id=?`, result.AttemptID).Scan(&existingDigest); err != nil {
+			return err
+		}
+		if !bytes.Equal(existingDigest, proposalDigest) {
+			return ErrLateResult
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
 	now := service.nowText()
 	reason := result.Termination
 	if reason == "" {
@@ -234,6 +497,12 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 	// The audit's domain reference is the investigation, never the attempt
 	// (audit rows are the authoritative record; DATA-AUDIT-001).
 	if err := recordAudit(ctx, conn, "system", 0, "investigation.attempt_failed", "success", "investigation", investigationID, now); err != nil {
+		return err
+	}
+	// Draining a frozen failed terminal must consume its sole work item in the
+	// same transaction as the parent transition. The delete is harmless for an
+	// ordinary direct failure, where no pending row exists.
+	if _, err := conn.ExecContext(ctx, `DELETE FROM pending_attempt_terminals WHERE attempt_id=?`, result.AttemptID); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

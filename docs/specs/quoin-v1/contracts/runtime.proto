@@ -328,6 +328,13 @@ message ControlEnvelope {
     StopBrowserOperation stop_browser_operation = 46;                  // Quoin -> Lintel；已提交终态后的幂等进程停止 fence
     StopBrowserOperationAck stop_browser_operation_ack = 47;           // Lintel -> Quoin；物理进程/隧道已停止
     CompleteBrowserOperationAck complete_browser_operation_ack = 48;   // Quoin -> Lintel；终态提交/重放裁决
+    ExecuteBrowserExplorationAction execute_browser_exploration_action = 49; // Quoin -> Lintel；一个已持久化 Exploration 子动作
+    BrowserExplorationActionResult browser_exploration_action_result = 50;   // Lintel -> Quoin；一个子动作的规范结果
+    BrowserExplorationActionResultAck browser_exploration_action_result_ack = 51; // Quoin -> Lintel；durable result acknowledgement
+    CancelBrowserExplorationAction cancel_browser_exploration_action = 52; // Quoin -> Lintel；父取消的 fenced action cancellation
+    CancelBrowserExplorationActionAck cancel_browser_exploration_action_ack = 53; // Lintel -> Quoin；取消请求已被持久接受/重放
+    BrowserExplorationTerminalClaim browser_exploration_terminal_claim = 54; // Lintel -> Quoin；trace 上传前的终态仲裁
+    BrowserExplorationTerminalClaimAck browser_exploration_terminal_claim_ack = 55; // Quoin -> Lintel；持久 claim 裁决
   }
 }
 
@@ -776,6 +783,100 @@ message ToolResultDelivery {
   ResultPayload payload = 6;       // 浏览器工具结构化结果（可空）
 }
 
+// Quoin -> Lintel：在同一 Exploration Browser Operation 内执行一个已持久化子动作。
+// 每个请求精确对应一个 browser_exploration child Attempt 和其 action 行；重复请求按
+// child_attempt_id 幂等，Lintel 必须回相同的规范结果。input 逐字绑定父 tool_calls
+// 的 canonical arguments，不暴露任意 JS、CDP、Playwright 或 HTTP 能力。
+message ExecuteBrowserExplorationAction {
+  int64 operation_id = 1;       // 持续存活的 browser_operations.id
+  int64 child_attempt_id = 2;   // 该 Tool Call 专属的 browser_exploration Attempt
+  int64 parent_attempt_id = 3;  // 父 Plinth Attempt
+  int64 tool_call_id = 4;       // 父 tool_calls.id；结果交付幂等键
+  BrowserSubExecutionInput input = 5;
+}
+
+// Lintel -> Quoin：一个封闭 Browser Tool action 的最终裁决。success 时 payload 的
+// schema_kind 固定为 browser_tool_result_v1；错误时 payload 为空且 error_code 是
+// browser-tool.schema.json error.code 的稳定映射。session_terminal 只在 close_session
+// 或不可恢复边界故障时为 true；可恢复错误绝不关闭连续 Exploration session。
+message BrowserExplorationActionResult {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 parent_attempt_id = 3;
+  int64 tool_call_id = 4;
+  bool success = 5;
+  ResultPayload payload = 6;
+  string error_code = 7;
+  string error_detail = 8;
+  bool session_terminal = 9;
+  // The first successful open carries the admission probe that authorizes
+  // browser_exploration_actions.action_seq=1. It is otherwise absent.
+  AuthenticationProbeObservation admission_probe = 10;
+  // The close_session success path also carries the fixed URL-prefix
+  // completion probe. Quoin persists it before it may transition the operation
+  // to Succeeded; an Indeterminate result must instead terminate Failed.
+  AuthenticationProbeObservation completion_probe = 16;
+  // A terminal result (close_session or fatal boundary failure) carries the
+  // operation facts needed for Quoin to close the Exploration only after the
+  // trace commit has succeeded. Trace bytes are uploaded separately.
+  BrowserOperationOutcome terminal_outcome = 11;
+  BrowserOperationTerminalReason terminal_reason = 12;
+  int64 trace_artifact_id = 13;
+  BrowserTraceIntegrity trace_integrity = 14;
+  bytes trace_digest = 15;
+}
+
+// Quoin returns this only after the exact action result was durably committed
+// (or recognized as an idempotent replay). Lintel retains unacknowledged results
+// across same-boot reconnects and removes only the acknowledged child entry.
+// Quoin -> Lintel：父 Tool Call/child Attempt 已进入 Cancelling 时的类型化取消。
+// Lintel 必须终止该 child 的动作，生成 error_code=Cancelled、session_terminal=true 的
+// BrowserExplorationActionResult，并在物理停止后重放该结果直到 Quoin Ack。
+message CancelBrowserExplorationAction {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 parent_attempt_id = 3;
+  int64 tool_call_id = 4;
+}
+
+// Lintel -> Quoin：相同 cancellation identity 的 at-least-once acceptance acknowledgement。
+message CancelBrowserExplorationActionAck {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 tool_call_id = 3;
+  bool accepted = 4;
+  string detail = 5;
+}
+
+// Lintel must obtain this durable arbitration before uploading a normal complete
+// Exploration trace. Quoin serializes it with parent cancellation: an accepted
+// claim wins a later cancellation; a cancellation committed first rejects it.
+message BrowserExplorationTerminalClaim {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 parent_attempt_id = 3;
+  int64 tool_call_id = 4;
+}
+
+message BrowserExplorationTerminalClaimAck {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 tool_call_id = 3;
+  bool accepted = 4;
+  string detail = 5;
+}
+
+message BrowserExplorationActionResultAck {
+  int64 operation_id = 1;
+  int64 child_attempt_id = 2;
+  int64 tool_call_id = 3;
+  bool accepted = 4;
+  string detail = 5;
+  // SHA-256 over deterministic BrowserExplorationActionResult wire bytes. This
+  // binds an acknowledgement to the exact replayed result, not merely its IDs.
+  bytes result_digest = 6;
+}
+
 message ToolResultDeliveryAck {
   int64 tool_call_id = 1;
   int64 child_attempt_id = 2;
@@ -806,6 +907,10 @@ enum BrowserOperationStartRejectReason {
   BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED = 6;
   BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM = 7;
   BROWSER_OPERATION_START_REJECT_REASON_INTERNAL = 8;
+  // The immutable initial navigation attempted a download. Lintel stops the
+  // Chromium process and Quoin closes the rejected Exploration as a typed
+  // model-visible result rather than treating it as a generic start failure.
+  BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED = 9;
 }
 
 enum BrowserOperationOutcome {
@@ -918,6 +1023,9 @@ message CompleteBrowserOperation {
   BrowserTraceIntegrity trace_integrity = 6;
   google.protobuf.Timestamp ended_at = 7;
   bytes result_digest = 8;                 // 规范 completion payload SHA-256，32 字节；重连重发必须稳定
+  // SHA-256 of the exact uploaded trace bytes. Required whenever trace_artifact_id
+  // is present, so Quoin can bind the completion to the immutable Artifact blob.
+  bytes trace_digest = 9;
 }
 
 message CompleteBrowserOperationAck {
@@ -1171,6 +1279,9 @@ message ArtifactUploadHeader {
   uint64 size_bytes = 10;
   bytes sha256 = 11;               // 完整内容 SHA-256（32 字节）
   string media_type = 12;          // IANA media type；与 artifacts.media_type 严格一致
+  // Browser trace uploads carry their terminal integrity at the irreversible
+  // Artifact commit boundary. Non-trace uploads MUST leave this unspecified.
+  BrowserTraceIntegrity trace_integrity = 13;
 }
 
 // 数据块：offset 必须连续（从 0 开始按序到达）；payload 长度部署受限（RUNTIME-UPLOAD-006）。

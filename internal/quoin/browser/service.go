@@ -106,6 +106,9 @@ type Operation struct {
 	StopConfirmedAt       *string       `json:"stopConfirmedAt,omitempty"`
 	StopConfirmationBasis *string       `json:"stopConfirmationBasis,omitempty"`
 	CleanupStateHash      *string       `json:"cleanupStateHash,omitempty"`
+	TraceArtifactID       *int64        `json:"traceArtifactId,omitempty,string"`
+	TraceIntegrity        *string       `json:"traceIntegrity,omitempty"`
+	CompletionDigest      *string       `json:"completionDigest,omitempty"`
 	CanAttach             bool          `json:"canAttach"`
 	CanPublish            bool          `json:"canPublish"`
 	CanCancel             bool          `json:"canCancel"`
@@ -464,6 +467,7 @@ func (service *Service) Cancel(ctx context.Context, systemKey string, operationI
 		return op, nil
 	}
 	now := service.now().UTC().Format(time.RFC3339Nano)
+	var update sql.Result
 	if op.StartedAt == nil {
 		// A zero started_at alone does not prove dispatch did not occur. The
 		// persisted Start fence is the authority for choosing cleanup semantics.
@@ -472,15 +476,25 @@ func (service *Service) Cancel(ctx context.Context, systemKey string, operationI
 			return Operation{}, err
 		}
 		if !startDispatched.Valid {
-			_, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND row_version=?`, now, now, operationID, expectedVersion)
+			update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND row_version=?`, now, now, operationID, expectedVersion)
 		} else {
-			_, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
+			update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
 		}
 	} else {
-		_, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
+		update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
 	}
 	if err != nil {
 		return Operation{}, err
+	}
+	if affected, _ := update.RowsAffected(); affected != 1 {
+		// The initial version check was only a read. A concurrent terminal/start
+		// transition can win before this UPDATE; return its real row version rather
+		// than acknowledging cancellation with the caller's stale expectation.
+		var current int64
+		if lookupErr := conn.QueryRowContext(ctx, `SELECT row_version FROM browser_operations WHERE id=?`, operationID).Scan(&current); lookupErr != nil {
+			return Operation{}, lookupErr
+		}
+		return Operation{}, &RowVersionError{Current: current}
 	}
 	if err = recordCommand(ctx, conn, actorID, clientCommandID, "cancel_browser_operation", digest, "browser_operation", operationID, now); err != nil {
 		return Operation{}, err
@@ -576,9 +590,9 @@ func (service *Service) profileOn(ctx context.Context, db sqlQueryer, id int64) 
 }
 func (service *Service) operationOn(ctx context.Context, db sqlQueryer, id int64) (Operation, error) {
 	var op Operation
-	var profile, actor, session sql.NullInt64
-	var dispatched, started, reconnect, ended, reason, stopped, basis, cleanup sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT o.id,o.identity_id,o.identity_revision_id,o.profile_generation_id,o.kind,o.state,o.journey_catalog_digest,o.journey_catalog_version,o.requested_at,o.actor_user_id,o.actor_session_id,o.row_version,o.start_dispatched_at,o.started_at,o.reconnect_deadline,o.ended_at,o.terminal_reason,o.stop_confirmed_at,o.stop_confirmation_basis,hex(o.cleanup_state_hash),COALESCE(u.username,'') FROM browser_operations o LEFT JOIN users u ON u.id=o.actor_user_id WHERE o.id=?`, id).Scan(&op.ID, &op.IdentityID, &op.RevisionID, &profile, &op.Kind, &op.State, &op.CatalogDigest, &op.CatalogVersion, &op.RequestedAt, &actor, &session, &op.RowVersion, &dispatched, &started, &reconnect, &ended, &reason, &stopped, &basis, &cleanup, &op.StartedByUsername)
+	var profile, actor, session, traceArtifact sql.NullInt64
+	var dispatched, started, reconnect, ended, reason, stopped, basis, cleanup, traceIntegrity, completionDigest sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT o.id,o.identity_id,o.identity_revision_id,o.profile_generation_id,o.kind,o.state,o.journey_catalog_digest,o.journey_catalog_version,o.requested_at,o.actor_user_id,o.actor_session_id,o.row_version,o.start_dispatched_at,o.started_at,o.reconnect_deadline,o.ended_at,o.terminal_reason,o.stop_confirmed_at,o.stop_confirmation_basis,hex(o.cleanup_state_hash),o.trace_artifact_id,o.trace_integrity,hex(o.completion_digest),COALESCE(u.username,'') FROM browser_operations o LEFT JOIN users u ON u.id=o.actor_user_id WHERE o.id=?`, id).Scan(&op.ID, &op.IdentityID, &op.RevisionID, &profile, &op.Kind, &op.State, &op.CatalogDigest, &op.CatalogVersion, &op.RequestedAt, &actor, &session, &op.RowVersion, &dispatched, &started, &reconnect, &ended, &reason, &stopped, &basis, &cleanup, &traceArtifact, &traceIntegrity, &completionDigest, &op.StartedByUsername)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -594,10 +608,14 @@ func (service *Service) operationOn(ctx context.Context, db sqlQueryer, id int64
 		v := session.Int64
 		op.ActorSessionID = &v
 	}
+	if traceArtifact.Valid {
+		v := traceArtifact.Int64
+		op.TraceArtifactID = &v
+	}
 	for _, x := range []struct {
 		s sql.NullString
 		p **string
-	}{{dispatched, &op.StartDispatchedAt}, {started, &op.StartedAt}, {reconnect, &op.ReconnectDeadline}, {ended, &op.EndedAt}, {reason, &op.TerminalReason}, {stopped, &op.StopConfirmedAt}, {basis, &op.StopConfirmationBasis}, {cleanup, &op.CleanupStateHash}} {
+	}{{dispatched, &op.StartDispatchedAt}, {started, &op.StartedAt}, {reconnect, &op.ReconnectDeadline}, {ended, &op.EndedAt}, {reason, &op.TerminalReason}, {stopped, &op.StopConfirmedAt}, {basis, &op.StopConfirmationBasis}, {cleanup, &op.CleanupStateHash}, {traceIntegrity, &op.TraceIntegrity}, {completionDigest, &op.CompletionDigest}} {
 		if x.s.Valid {
 			v := x.s.String
 			*x.p = &v

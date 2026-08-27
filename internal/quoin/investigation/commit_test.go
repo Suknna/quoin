@@ -8,6 +8,7 @@ package investigation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -206,3 +207,51 @@ func TestCommitRejectsWrongSchemaKindAndDigest(t *testing.T) {
 }
 
 var _ = sql.ErrNoRows
+
+func TestPendingFailureProposalPreservesTerminalIdentity(t *testing.T) {
+	proposal, digest, err := pendingProposalFor(Result{AttemptID: 41, BootID: "boot", Epoch: 7, Succeeded: false, Termination: "worker_protocol_error"}, 13)
+	if err != nil || len(digest) != 32 {
+		t.Fatalf("pending failure proposal err=%v digest=%x", err, digest)
+	}
+	var decoded pendingTerminalProposal
+	if err := json.Unmarshal(proposal, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Succeeded || decoded.Termination != "worker_protocol_error" || decoded.AttemptID != 41 || decoded.ModelCallID != 13 {
+		t.Fatalf("failed terminal proposal lost identity: %#v", decoded)
+	}
+}
+
+func TestCommitPendingRecoveryLossAcceptsNullModelColumns(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	created, err := service.Create(ctx, principalID, "cmd-recovery-loss", "请回答", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindRunning(t, db, created.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,terminal_reason,created_at)
+		VALUES(?,'recovery_loss','Interrupted','lease_expired',?)`, created.AttemptID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	_, committed, err := service.CommitPendingTerminal(ctx, created.AttemptID)
+	if err != nil || !committed {
+		t.Fatalf("recovery-loss drain committed=%t err=%v", committed, err)
+	}
+	var state string
+	var count int
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, created.AttemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_attempt_terminals WHERE attempt_id=?`, created.AttemptID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Interrupted" || count != 0 {
+		t.Fatalf("recovery-loss state=%s pending=%d", state, count)
+	}
+}

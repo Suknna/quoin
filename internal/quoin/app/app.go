@@ -257,6 +257,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 			return controlService.sendEnvelope(qruntime.SlotPlinth, envelope)
 		},
 		TerminationReason: terminationReasonOf,
+		AfterCommit:       controlService.closeTerminalParentExplorations,
 	}
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch

@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 // State file layout on the state volume: token.json (0600) holds the
@@ -67,11 +68,15 @@ type Channel struct {
 	// pendingMu guards the reliable terminal-result registry (T12,
 	// RUNTIME-TASK-008): every terminal ResultProposal is retried until a
 	// ResultAck survives the stream it travelled on.
-	pendingMu sync.Mutex
-	pending   map[int64]*pendingResult
-	replyMu   sync.Mutex
-	nextCorr  uint64
-	waiters   map[uint64]chan *runtimev1.ControlEnvelope
+	pendingMu       sync.Mutex
+	pending         map[int64]*pendingResult
+	replyMu         sync.Mutex
+	nextCorr        uint64
+	waiters         map[uint64]chan *runtimev1.ControlEnvelope
+	browserMu       sync.Mutex
+	browserWaiters  map[int64]chan *runtimev1.ToolResultDelivery
+	browserResults  map[int64]*runtimev1.ToolResultDelivery
+	browserReleased map[int64]*runtimev1.ToolResultDelivery
 }
 
 // pendingResult is one terminal result awaiting a durable ResultAck.
@@ -105,6 +110,7 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	return &Channel{
 		Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw),
 		active: map[int64]context.CancelFunc{}, pending: map[int64]*pendingResult{},
+		browserWaiters: map[int64]chan *runtimev1.ToolResultDelivery{}, browserResults: map[int64]*runtimev1.ToolResultDelivery{}, browserReleased: map[int64]*runtimev1.ToolResultDelivery{},
 	}, nil
 }
 
@@ -312,15 +318,19 @@ func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink
 			// boot already executes re-acks its accept; an attempt whose
 			// terminal result still awaits its ack re-delivers that result;
 			// neither ever spawns a second worker.
+			// A terminal proposal can be pending while its worker goroutine has
+			// not unwound yet. Result replay has priority over AttemptAccept: after
+			// an Ack-loss retry Quoin needs the exact terminal proposal, not a
+			// misleading confirmation that the attempt remains active.
+			if channel.HasPendingResult(task.GetAttemptId()) {
+				channel.DeliverPendingResults()
+				return
+			}
 			if channel.TaskActive(task.GetAttemptId()) {
 				_ = sink.Send(&runtimev1.ControlEnvelope{
 					CorrelationId: uint64(task.GetAttemptId()),
 					Msg:           &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: task.GetAttemptId()}},
 				})
-				return
-			}
-			if channel.HasPendingResult(task.GetAttemptId()) {
-				channel.DeliverPendingResults()
 				return
 			}
 			binding := DispatchBinding{BootID: envelope.GetBootId(), Epoch: envelope.GetConnectionEpoch()}
@@ -354,6 +364,11 @@ func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink
 		channel.deliverReply(envelope)
 	case *runtimev1.ControlEnvelope_CompleteToolCallAck:
 		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_BrowserSubExecutionAck:
+		channel.deliverReply(envelope)
+	case *runtimev1.ControlEnvelope_ToolResultDelivery:
+		accepted := channel.deliverBrowserToolResult(payload.ToolResultDelivery)
+		_ = sink.Send(&runtimev1.ControlEnvelope{CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_ToolResultDeliveryAck{ToolResultDeliveryAck: &runtimev1.ToolResultDeliveryAck{ToolCallId: payload.ToolResultDelivery.GetToolCallId(), ChildAttemptId: payload.ToolResultDelivery.GetChildAttemptId(), Accepted: accepted}}})
 	case *runtimev1.ControlEnvelope_ModelTokenDelta:
 		// Transient observer deltas never reply; the ledger is the
 		// authority (RUNTIME-AGENT).
@@ -433,6 +448,15 @@ func (channel *Channel) RegisterTask(attemptID int64, cancel context.CancelFunc)
 }
 
 // stopTask cancels one running attempt and reports whether it was live.
+// FinishTask removes a naturally terminated worker without invoking its
+// cancellation function. Pending terminal result replay remains independent in
+// channel.pending until Quoin's ResultAck is received.
+func (channel *Channel) FinishTask(attemptID int64) {
+	channel.cancelMu.Lock()
+	delete(channel.active, attemptID)
+	channel.cancelMu.Unlock()
+}
+
 func (channel *Channel) stopTask(attemptID int64) bool {
 	channel.cancelMu.Lock()
 	cancel, live := channel.active[attemptID]
@@ -645,3 +669,85 @@ func (channel *Channel) HasAnyPendingResult() bool {
 // resultDeliveryInterval is the fixed retry cadence for outstanding
 // terminal results (RUNTIME-SCOPE-004: frozen release-internal constant).
 const resultDeliveryInterval = 3 * time.Second
+
+// maxBrowserToolReplayTombstones bounds terminal replay protection after a
+// worker consumes a delivery. The durable Quoin ledger remains the authority.
+const maxBrowserToolReplayTombstones = 1024
+
+// RegisterBrowserToolResult reserves the one durable ToolResultDelivery for a
+// running quoin_browser Tool Call before its request leaves Plinth. A replay
+// delivered on a preceding stream is retained by tool_call_id, so reconnects
+// cannot race registration into a lost model turn.
+func (channel *Channel) RegisterBrowserToolResult(toolCallID int64) (<-chan *runtimev1.ToolResultDelivery, error) {
+	if toolCallID < 1 {
+		return nil, errors.New("browser tool call id must be positive")
+	}
+	channel.browserMu.Lock()
+	defer channel.browserMu.Unlock()
+	if result := channel.browserResults[toolCallID]; result != nil {
+		ready := make(chan *runtimev1.ToolResultDelivery, 1)
+		ready <- result
+		return ready, nil
+	}
+	if existing := channel.browserWaiters[toolCallID]; existing != nil {
+		return existing, nil
+	}
+	waiter := make(chan *runtimev1.ToolResultDelivery, 1)
+	channel.browserWaiters[toolCallID] = waiter
+	return waiter, nil
+}
+
+// ReleaseBrowserToolResult drops the process-local delivery cache after the
+// worker has consumed its terminal result. The durable Quoin Tool Call ledger,
+// rather than this cache, remains the replay authority across reconnects.
+func (channel *Channel) ReleaseBrowserToolResult(toolCallID int64) {
+	if toolCallID < 1 {
+		return
+	}
+	channel.browserMu.Lock()
+	if result := channel.browserResults[toolCallID]; result != nil {
+		if channel.browserReleased == nil {
+			channel.browserReleased = map[int64]*runtimev1.ToolResultDelivery{}
+		}
+		// This bounded tombstone rejects a conflicting delayed replay without
+		// retaining every worker result for the lifetime of the process.
+		if len(channel.browserReleased) >= maxBrowserToolReplayTombstones {
+			for id := range channel.browserReleased {
+				delete(channel.browserReleased, id)
+				break
+			}
+		}
+		channel.browserReleased[toolCallID] = result
+	}
+	delete(channel.browserResults, toolCallID)
+	delete(channel.browserWaiters, toolCallID)
+	channel.browserMu.Unlock()
+}
+
+// deliverBrowserToolResult accepts exact replays only. A different terminal
+// payload under the same Tool Call ID is a protocol violation, not a retry:
+// accepting it would let a stale stream replace the model-visible result.
+func (channel *Channel) deliverBrowserToolResult(result *runtimev1.ToolResultDelivery) bool {
+	if result == nil || result.GetToolCallId() < 1 {
+		return false
+	}
+	channel.browserMu.Lock()
+	if existing := channel.browserResults[result.GetToolCallId()]; existing != nil {
+		accepted := proto.Equal(existing, result)
+		channel.browserMu.Unlock()
+		return accepted
+	}
+	if released := channel.browserReleased[result.GetToolCallId()]; released != nil {
+		accepted := proto.Equal(released, result)
+		channel.browserMu.Unlock()
+		return accepted
+	}
+	waiter := channel.browserWaiters[result.GetToolCallId()]
+	channel.browserResults[result.GetToolCallId()] = result
+	delete(channel.browserWaiters, result.GetToolCallId())
+	channel.browserMu.Unlock()
+	if waiter != nil {
+		waiter <- result
+	}
+	return true
+}

@@ -90,6 +90,60 @@ func TestStartManualLoginMakesIdentityExclusivelyOccupied(t *testing.T) {
 	}
 }
 
+func TestPrepareStopForBootTargetsUnknownStartingOutcome(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	identity, _, err := service.Configure(context.Background(), 1, ConfigureInput{
+		SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login",
+		Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	op, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.PrepareDispatch(context.Background(), op.ID, "lintel-boot", 7); err != nil {
+		t.Fatal(err)
+	}
+	stop, err := service.PrepareStopForBoot(context.Background(), op.ID, "lintel-boot", 7)
+	if err != nil || stop.OperationID != op.ID || stop.BootID != "lintel-boot" || stop.Epoch != 7 {
+		t.Fatalf("unknown Start outcome did not produce typed Stop: %#v err=%v", stop, err)
+	}
+}
+
+func TestInitialDownloadStartRejectionIsPersisted(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	identity, _, err := service.Configure(context.Background(), 1, ConfigureInput{
+		SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login",
+		Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	op, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.PrepareDispatch(context.Background(), op.ID, "lintel-boot", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.HandleStartAck(context.Background(), op.ID, "lintel-boot", 7, false, "download_blocked", time.Time{}); err != nil {
+		t.Fatalf("persist initial download rejection: %v", err)
+	}
+	var state, rejected string
+	if err := db.QueryRow(`SELECT state,start_reject_reason FROM browser_operations WHERE id=?`, op.ID).Scan(&state, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Failed" || rejected != "download_blocked" {
+		t.Fatalf("initial download rejection state=%q reason=%q", state, rejected)
+	}
+}
+
 func TestPrepareDispatchClaimsFifoAndStartAckRuns(t *testing.T) {
 	db, service := newBrowserTestService(t)
 	defer db.Close()
@@ -299,6 +353,11 @@ func TestInterruptOldBootRunningRetainsCleanupFence(t *testing.T) {
 	if err != nil || cleaned.StopConfirmedAt == nil || cleaned.StopConfirmationBasis == nil || *cleaned.StopConfirmationBasis != "new_boot_cleanup_confirmed" {
 		t.Fatalf("successor cleanup proof was not persisted: %#v err=%v", cleaned, err)
 	}
+	// The physical StopAck is the release fence: only after its durable
+	// stop_confirmed_at may another operation acquire the Browser Identity.
+	if _, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-after-cleanup"); err != nil {
+		t.Fatalf("StopAck did not release identity: %v", err)
+	}
 }
 
 func TestInterruptOldBootStartingRetainsCleanupFence(t *testing.T) {
@@ -483,5 +542,69 @@ func TestTicket21CapacityRetryRebindsAfterNewBoot(t *testing.T) {
 	got, err := service.GetOperation(context.Background(), "payments", op.ID)
 	if err != nil || got.State != "Running" {
 		t.Fatalf("new boot capacity retry must reach Running: %#v err=%v", got, err)
+	}
+}
+
+func TestInterruptForQuoinRestartInterruptsSameLintelBoot(t *testing.T) {
+	db, service := newBrowserTestService(t)
+	defer db.Close()
+	identity, _, err := service.Configure(context.Background(), 1, ConfigureInput{SystemKey: "payments", Name: "Payments", StartURL: "https://payments.example.test/login", Probe: ProbeConfig{JourneyID: "authentication.url-prefix.v1", Version: 1, Params: []byte(`{"authenticatedUrlPrefix":"https://payments.example.test/app"}`)}, ClientCommandID: "configure-identity-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Dispatch = func(context.Context, int64) error { return nil }
+	op, err := service.StartManualLogin(context.Background(), "payments", 1, 1, identity.RowVersion, "start-login-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrepareDispatch(context.Background(), op.ID, "same-lintel-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.HandleStartAck(context.Background(), op.ID, "same-lintel-boot", 1, true, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := service.InterruptForQuoinRestart(context.Background(), "same-lintel-boot")
+	if err != nil || len(ids) != 1 || ids[0] != op.ID {
+		t.Fatalf("interrupt after Quoin restart: ids=%v err=%v", ids, err)
+	}
+	interrupted, err := service.GetOperation(context.Background(), "payments", op.ID)
+	if err != nil || interrupted.State != "Interrupted" || interrupted.TerminalReason == nil || *interrupted.TerminalReason != "shutdown" || interrupted.StopConfirmedAt != nil {
+		t.Fatalf("same-boot operation must be interrupted and remain cleanup fenced: %#v err=%v", interrupted, err)
+	}
+}
+
+func TestProfileUnavailableTerminalReasonUsesFrozenOperationGeneration(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/profile-reason.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE browser_operations (id INTEGER PRIMARY KEY, profile_generation_id INTEGER);
+		CREATE TABLE browser_profile_reconciliations (
+			id INTEGER PRIMARY KEY, boot_id TEXT, connection_epoch INTEGER,
+			profile_generation_id INTEGER, result TEXT
+		);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO browser_operations(id,profile_generation_id) VALUES(7,101);
+		INSERT INTO browser_profile_reconciliations(id,boot_id,connection_epoch,profile_generation_id,result) VALUES
+			(1,'lintel',4,100,'compatible'),
+			(2,'lintel',4,101,'manifest_invalid'),
+			(3,'lintel',5,101,'chromium_revision_mismatch')`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got := profileUnavailableTerminalReason(context.Background(), conn, 7, "lintel", 4); got != "profile_manifest_invalid" {
+		t.Fatalf("manifest-invalid operation profile classified as %q", got)
+	}
+	if got := profileUnavailableTerminalReason(context.Background(), conn, 7, "lintel", 5); got != "chromium_revision_mismatch" {
+		t.Fatalf("latest matching inventory reason=%q", got)
+	}
+	if got := profileUnavailableTerminalReason(context.Background(), conn, 7, "other-boot", 5); got != "profile_missing" {
+		t.Fatalf("unobserved boot must remain conservatively missing, got %q", got)
 	}
 }

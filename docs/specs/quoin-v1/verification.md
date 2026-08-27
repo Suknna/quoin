@@ -47,6 +47,7 @@
 - **VERIFY-EVIDENCE-003 —** configuration **MUST** 绑定 catalog、profile/schema、环境描述、工具锁、connection probe contract 及适用 contract digest；每个 scenario evidence index **MUST** 记录 invocation/cell、权威时间、环境 digest、工具版本、脱敏 argv、原始 exit code、逐断言 expected/actual/result、附件 digest/locator、cleanup outcome 与 causal/proof refs。（来源：Issue #21 Q21.6/Q21.7）
 - **VERIFY-EVIDENCE-004 —** DSSE/Sigstore **MUST** 复用发布链；Release manifest **MUST** 只通过既有 `validation.<category>.evidence_sha256` 单向绑定分类 bundle，且 **MUST NOT** 建立哈希自引用、顶层竞争字段或第二发布索引。SHA-256 单独只证明内容自洽/损坏检测，不提供来源认证。（来源：Issue #21 Q21.3/Q21.35）
 - **VERIFY-EVIDENCE-005 —** 原始 stdout/stderr、trace、截图、视频和 fixture transcript **MUST** 是 evidence attachment 而不是 verdict；判定所需事实 **MUST** 先提取为脱敏结构化 evidence。敏感 raw trace **MUST NOT** 成为 verdict 唯一证据。（来源：Issue #21 Q21.6/Q21.8/Q21.19）
+- **VERIFY-EVIDENCE-005a —** Artifact upload 授权测试必须以真实 gRPC adapter 覆盖：有效 Lintel bearer 仅接受 browser-operation 的 generated trace/screenshot header，拒绝错误 owner、非 sensitive trace 与其他 kind；Plinth 既有上传仍可用，未认证与 Lintel Artifact 读取均被拒绝。Store fixture 必须覆盖浏览器 child Attempt/action/Operation owner closure 及 boot/epoch fence，且 Lintel client fixture 必须检查 header、连续 chunks、End 与确定性 upload ID。（来源：Issue #45）
 
 ## 6. Release Qualification 环境矩阵
 

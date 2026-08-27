@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,9 @@ func (rejection *Rejection) Error() string {
 
 // UploadHeader is the first frame of one upload (RUNTIME-UPLOAD-001).
 type UploadHeader struct {
+	// RuntimeSlot is authenticated at the gRPC boundary and is deliberately
+	// not persisted: it narrows the Store's owner closure for Lintel uploads.
+	RuntimeSlot     string
 	UploadID        string
 	AttemptID       int64
 	BootID          string
@@ -71,6 +75,10 @@ type UploadHeader struct {
 	SizeBytes       int64
 	SHA256          []byte
 	MediaType       string
+	// TraceIntegrity is a closed wire value (complete|incomplete) carried only
+	// by Lintel trace uploads. It is intentionally part of the commit fence,
+	// not inferred later from a mutable ActionResult.
+	TraceIntegrity string
 }
 
 // Store is the artifact authority.
@@ -78,6 +86,16 @@ type Store struct {
 	db  *sql.DB
 	dir string
 	now func() time.Time
+
+	// uploadMu serializes one immutable upload_id from Begin through Commit or
+	// Abort. Two simultaneous streams must never truncate the same staging name
+	// or mint two logical artifacts for one idempotency capability.
+	uploadMu     sync.Mutex
+	uploadLeases map[string]chan struct{}
+	// blobMu covers only non-replacing blob installation and its directory fsync.
+	// It prevents a second digest-equivalent upload from referencing a link before
+	// the installing writer has durably synced the parent directory.
+	blobMu sync.Mutex
 }
 
 // NewStore builds the store on the product database and blob directory.
@@ -88,7 +106,7 @@ func NewStore(db *sql.DB, directory string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(directory, "staging"), 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dir: directory, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Store{db: db, dir: directory, now: func() time.Time { return time.Now().UTC() }, uploadLeases: make(map[string]chan struct{})}, nil
 }
 
 func (store *Store) stagingPath(uploadID string) string {
@@ -104,37 +122,88 @@ func (store *Store) blobPath(sha256Hex string) string {
 	return filepath.Join(store.dir, "blobs", sha256Hex+".blob")
 }
 
-// BeginUpload validates the header against the ledger fence and opens the
-// staging file. A retry of a crashed upload (same metadata, still
-// uploading) resets the staging file; a committed upload replays its
-// artifact id through artifactID>0 with nil conn/file (RUNTIME-UPLOAD-002).
-func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (conn *sql.Conn, file *os.File, artifactID int64, err error) {
+func (store *Store) acquireUpload(ctx context.Context, uploadID string) error {
+	for {
+		store.uploadMu.Lock()
+		if store.uploadLeases == nil {
+			store.uploadLeases = make(map[string]chan struct{})
+		}
+		if _, busy := store.uploadLeases[uploadID]; !busy {
+			store.uploadLeases[uploadID] = make(chan struct{})
+			store.uploadMu.Unlock()
+			return nil
+		}
+		wait := store.uploadLeases[uploadID]
+		store.uploadMu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (store *Store) releaseUpload(uploadID string) {
+	store.uploadMu.Lock()
+	defer store.uploadMu.Unlock()
+	if done := store.uploadLeases[uploadID]; done != nil {
+		delete(store.uploadLeases, uploadID)
+		close(done)
+	}
+}
+
+// AbortUpload ends one interrupted stream without changing its uploading ledger
+// row. A whole-body retry with the same immutable upload_id may then take over.
+func (store *Store) AbortUpload(uploadID string) {
+	_ = os.Remove(store.stagingPath(uploadID))
+	store.releaseUpload(uploadID)
+}
+
+// BeginUpload validates and records the short-lived ledger phase, then opens a
+// staging file. It deliberately returns no database handle: a slow or stalled
+// gRPC upload must never monopolize Quoin's (often single-connection) SQLite
+// pool. CommitUpload opens its own short transaction after the bytes are sealed.
+func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file *os.File, artifactID int64, err error) {
 	if header.UploadID == "" || len(header.SHA256) != 32 || header.SizeBytes < 0 {
-		return nil, nil, 0, &Rejection{RejectMetadataMismatch, "header fields incomplete"}
+		return nil, 0, &Rejection{RejectMetadataMismatch, "header fields incomplete"}
 	}
 	if header.Kind == "trace" && !header.Sensitive {
-		return nil, nil, 0, &Rejection{RejectMetadataMismatch, "trace artifacts must be sensitive"}
+		return nil, 0, &Rejection{RejectMetadataMismatch, "trace artifacts must be sensitive"}
 	}
-	conn, err = store.db.Conn(ctx)
+	if err := store.acquireUpload(ctx, header.UploadID); err != nil {
+		return nil, 0, err
+	}
+	keepLease := false
+	defer func() {
+		if !keepLease {
+			store.releaseUpload(header.UploadID)
+		}
+	}()
+	conn, err := store.db.Conn(ctx)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, 0, err
 	}
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		conn.Close()
-		return nil, nil, 0, err
+		return nil, 0, err
 	}
-	fail := func(rejection *Rejection) (*sql.Conn, *os.File, int64, error) {
+	fail := func(rejection *Rejection) (*os.File, int64, error) {
 		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		conn.Close()
-		return nil, nil, 0, rejection
+		return nil, 0, rejection
 	}
 	var state string
 	var storedArtifact sql.NullInt64
-	var storedSize int64
-	var storedSHA string
+	var storedAttempt sql.NullInt64
+	var storedBoot, storedOwnerType, storedKind, storedMediaType, storedRetention, storedSHA string
+	var storedTraceIntegrity sql.NullString
+	var storedEpoch, storedOwnerID, storedSensitive, storedSize int64
 	err = conn.QueryRowContext(ctx, `
-		SELECT state, artifact_id, size_bytes, sha256 FROM runtime_artifact_uploads WHERE upload_id=?`,
-		header.UploadID).Scan(&state, &storedArtifact, &storedSize, &storedSHA)
+		SELECT state, artifact_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id,
+			kind, media_type, retention_kind, sensitive, size_bytes, sha256, trace_integrity
+		FROM runtime_artifact_uploads WHERE upload_id=?`, header.UploadID).Scan(
+		&state, &storedArtifact, &storedAttempt, &storedBoot, &storedEpoch, &storedOwnerType, &storedOwnerID,
+		&storedKind, &storedMediaType, &storedRetention, &storedSensitive, &storedSize, &storedSHA, &storedTraceIntegrity)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// New upload: validate the attempt fence and the owner closure.
@@ -144,29 +213,34 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (conn 
 		now := store.now().Format(time.RFC3339Nano)
 		if _, err := conn.ExecContext(ctx, `
 			INSERT INTO runtime_artifact_uploads(upload_id,attempt_id,boot_id,connection_epoch,
-				owner_type,owner_id,kind,media_type,retention_kind,sensitive,size_bytes,sha256,state,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?)`,
-			header.UploadID, header.AttemptID, header.BootID, header.ConnectionEpoch,
+				owner_type,owner_id,kind,media_type,retention_kind,sensitive,size_bytes,sha256,trace_integrity,state,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?)`,
+			header.UploadID, nullableUploadAttempt(header.AttemptID), header.BootID, header.ConnectionEpoch,
 			header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind,
-			boolInt(header.Sensitive), header.SizeBytes, hex.EncodeToString(header.SHA256), now); err != nil {
+			boolInt(header.Sensitive), header.SizeBytes, hex.EncodeToString(header.SHA256), nullableTraceIntegrity(header), now); err != nil {
 			return fail(&Rejection{RejectInternal, err.Error()})
 		}
 	case err != nil:
 		return fail(&Rejection{RejectInternal, err.Error()})
 	case state == "committed":
-		if !storedArtifact.Valid || storedSize != header.SizeBytes || storedSHA != hex.EncodeToString(header.SHA256) {
+		if !storedArtifact.Valid || !sameCommittedUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
 			return fail(&Rejection{RejectMetadataMismatch, "committed upload metadata differs"})
 		}
 		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 			return fail(&Rejection{RejectInternal, err.Error()})
 		}
 		conn.Close()
-		return nil, nil, storedArtifact.Int64, nil
+		return nil, storedArtifact.Int64, nil
 	case state == "rejected":
 		return fail(&Rejection{RejectMetadataMismatch, "upload id was rejected"})
 	default:
-		// A crashed upload retrying: same metadata resets the staging file.
-		if storedSize != header.SizeBytes || storedSHA != hex.EncodeToString(header.SHA256) {
+		// A crashed upload retrying: the upload ID is a complete immutable
+		// capability, not merely a body digest. The browser-start fence and the
+		// live upload transport are intentionally distinct: a same-boot successor
+		// stream may retransmit an interrupted Lintel trace/screenshot without
+		// rewriting the ledger's original epoch. Reject every other metadata or
+		// epoch change before opening a new staging file.
+		if !sameRetryUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
 			return fail(&Rejection{RejectMetadataMismatch, "retry metadata differs"})
 		}
 		if rejection, ok := store.validateUploadOn(ctx, conn, header); !ok {
@@ -176,17 +250,77 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (conn 
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fail(&Rejection{RejectInternal, err.Error()})
 	}
+	// The transaction is over before the upload body is received. Do not hold a
+	// pool connection across network I/O.
+	conn.Close()
 	file, err = os.OpenFile(store.stagingPath(header.UploadID), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		conn.Close()
-		return nil, nil, 0, &Rejection{RejectInternal, err.Error()}
+		return nil, 0, &Rejection{RejectInternal, err.Error()}
 	}
-	return conn, file, 0, nil
+	keepLease = true
+	return file, 0, nil
+}
+
+// sameUploadMetadata enforces the ledger's idempotency contract: retries of a
+// stable upload ID must repeat the entire immutable capability, including its
+// owner and runtime fence, rather than only the bytes.
+func nullableUploadAttempt(attemptID int64) any {
+	if attemptID == 0 {
+		return nil
+	}
+	return attemptID
+}
+
+func nullableTraceIntegrity(header UploadHeader) any {
+	if header.TraceIntegrity == "" {
+		return nil
+	}
+	return header.TraceIntegrity
+}
+
+func sameUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
+	return sameUploadMetadataIgnoringEpoch(attempt, boot, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header) && epoch == int64(header.ConnectionEpoch)
+}
+
+func sameUploadMetadataIgnoringEpoch(attempt sql.NullInt64, boot, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
+	return attempt.Valid == (header.AttemptID != 0) && (!attempt.Valid || attempt.Int64 == header.AttemptID) &&
+		boot == header.BootID && ownerType == header.OwnerType && ownerID == header.OwnerID && kind == header.Kind &&
+		mediaType == header.MediaType && retention == header.RetentionKind &&
+		sensitive == int64(boolInt(header.Sensitive)) && size == header.SizeBytes && digest == hex.EncodeToString(header.SHA256) &&
+		traceIntegrity.Valid == (header.TraceIntegrity != "") && (!traceIntegrity.Valid || traceIntegrity.String == header.TraceIntegrity)
+}
+
+// sameCommittedUploadMetadata permits the one retry that can legitimately cross
+// a Runtime stream boundary: Lintel replaying an already committed browser
+// artifact over a later epoch of the same boot. A reply can be lost after either
+// a trace or screenshot commit; both must replay the existing Artifact ID rather
+// than turn an unknown outcome into a second logical upload. The capability
+// remains otherwise fully immutable, and no new body is accepted on this path.
+func sameCommittedUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
+	return sameRetryUploadMetadata(attempt, boot, epoch, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header)
+}
+
+// sameRetryUploadMetadata permits a same-boot Lintel successor transport for
+// both unknown (uploading) and committed trace/screenshot uploads. The ledger
+// itself remains immutable: this predicate never updates storedEpoch. Non-Lintel
+// uploads, a different boot, a lower epoch, or any capability mismatch remain
+// rejected.
+func sameRetryUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
+	if sameUploadMetadata(attempt, boot, epoch, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header) {
+		return true
+	}
+	return header.RuntimeSlot == "lintel" && (kind == "trace" || kind == "screenshot") && epoch < int64(header.ConnectionEpoch) &&
+		sameUploadMetadataIgnoringEpoch(attempt, boot, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header)
 }
 
 // validateUploadOn checks the attempt fence and owner closure inside the
 // ledger transaction (RUNTIME-UPLOAD-004).
 func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header UploadHeader) (*Rejection, bool) {
+	// The operation and child fields record the epoch that started the physical
+	// browser and are immutable audit facts. A same-boot reconnect may transport
+	// a pending Lintel upload on a later epoch, but must never rewrite that start
+	// fence. The authenticated Runtime bearer establishes the live transport
+	// epoch; below we accept only a monotonic same-boot successor.
 	if header.AttemptID != 0 {
 		var state string
 		var boot sql.NullString
@@ -194,17 +328,59 @@ func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header
 		if err := conn.QueryRowContext(ctx, `SELECT state,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, header.AttemptID).Scan(&state, &boot, &epoch); err != nil {
 			return &Rejection{RejectAttemptNotRunning, "attempt unknown"}, false
 		}
-		if state != "Running" {
+		// A Lintel cancellation trace is the sole exception: SQLite has already
+		// fenced the child to Cancelling, but the continuous trace must be
+		// committed before its parent Tool Call trigger can terminalize it.
+		if state != "Running" && !(state == "Cancelling" && header.RuntimeSlot == "lintel" && header.Kind == "trace" && header.OwnerType == "browser_operation") {
 			return &Rejection{RejectAttemptNotRunning, fmt.Sprintf("attempt is %s", state)}, false
 		}
 		if !boot.Valid || boot.String != header.BootID {
 			return &Rejection{RejectBootMismatch, "boot fence"}, false
 		}
-		if !epoch.Valid || epoch.Int64 != int64(header.ConnectionEpoch) {
+		if !epoch.Valid || (header.RuntimeSlot == "lintel" && epoch.Int64 > int64(header.ConnectionEpoch)) || (header.RuntimeSlot != "lintel" && epoch.Int64 != int64(header.ConnectionEpoch)) {
 			return &Rejection{RejectEpochMismatch, "epoch fence"}, false
 		}
 	}
 	switch header.Kind {
+	case "trace", "screenshot":
+		if header.RuntimeSlot != "lintel" {
+			break
+		}
+		if header.OwnerType != "browser_operation" || header.RetentionKind != "generated" || (header.AttemptID == 0 && header.Kind != "trace") {
+			return &Rejection{RejectMetadataMismatch, "Lintel browser artifacts require a generated browser operation owner and child attempt; only traces may use operation ownership"}, false
+		}
+		if header.Kind == "trace" && !header.Sensitive {
+			return &Rejection{RejectMetadataMismatch, "Lintel trace artifacts must be sensitive"}, false
+		}
+		if header.Kind == "trace" && header.TraceIntegrity != "complete" && header.TraceIntegrity != "incomplete" {
+			return &Rejection{RejectMetadataMismatch, "Lintel trace integrity must be complete or incomplete"}, false
+		}
+		if header.Kind != "trace" && header.TraceIntegrity != "" {
+			return &Rejection{RejectMetadataMismatch, "only Lintel traces carry trace integrity"}, false
+		}
+		var bound int
+		// A crash can happen after StartAck but before the first action row, or
+		// between two terminal child attempts. An attempt_id=0 trace is therefore
+		// authorized by the still-Running operation itself; a nonzero attempt keeps
+		// the stronger child/action fence used by ordinary action artifacts.
+		query := `SELECT EXISTS(SELECT 1 FROM browser_operations operation
+			WHERE operation.id=? AND operation.kind='exploration' AND operation.state='Running'
+			  AND operation.lintel_boot_id=? AND operation.lintel_connection_epoch<=?)`
+		args := []any{header.OwnerID, header.BootID, header.ConnectionEpoch}
+		if header.AttemptID != 0 {
+			query = `SELECT EXISTS(SELECT 1 FROM execution_attempts child
+				JOIN browser_exploration_actions action ON action.child_attempt_id=child.id
+				JOIN browser_operations operation ON operation.id=action.operation_id
+				WHERE child.id=? AND child.attempt_type='browser_exploration'
+				  AND child.state IN ('Running','Cancelling')
+				  AND child.boot_id=? AND child.connection_epoch<=? AND action.operation_id=?
+				  AND operation.kind='exploration' AND operation.state='Running')`
+			args = []any{header.AttemptID, header.BootID, header.ConnectionEpoch, header.OwnerID}
+		}
+		err := conn.QueryRowContext(ctx, query, args...).Scan(&bound)
+		if err != nil || bound != 1 {
+			return &Rejection{RejectMetadataMismatch, "Lintel browser artifact is not bound to a running exploration action"}, false
+		}
 	case "tool_result":
 		if header.OwnerType != "tool_call" {
 			return &Rejection{RejectMetadataMismatch, "tool_result must be owned by a tool_call"}, false
@@ -225,12 +401,19 @@ func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header
 }
 
 // CommitUpload finishes one staged upload: hash/size verification, fsync,
-// atomic rename into the content-addressed blob directory, fsync of the
-// parent, then the SQLite reference transaction (RUNTIME-UPLOAD-003).
-// The caller's connection is closed BEFORE any rejection bookkeeping runs
-// (rejectUpload needs a fresh pool connection and the production pool is
-// single-connection).
-func (store *Store) CommitUpload(ctx context.Context, conn *sql.Conn, header UploadHeader, staged *os.File) (int64, error) {
+// non-replacing installation into the content-addressed blob directory, fsync
+// of the parent, then the SQLite reference transaction (RUNTIME-UPLOAD-003).
+func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, staged *os.File) (int64, error) {
+	// BeginUpload owns this idempotency lease; every terminal Commit path releases
+	// it so a whole-body retry can linearize after an interrupted attempt.
+	defer store.releaseUpload(header.UploadID)
+	// The staging body is already sealed. Acquire a database connection only for
+	// the short reference transaction below, never while the stream is open.
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		_ = staged.Close()
+		return 0, err
+	}
 	closeConn := func() {
 		if conn != nil {
 			conn.Close()
@@ -289,26 +472,86 @@ func (store *Store) CommitUpload(ctx context.Context, conn *sql.Conn, header Upl
 	}
 	file.Close()
 	blobPath := store.blobPath(hex.EncodeToString(header.SHA256))
-	if err := os.Rename(store.stagingPath(header.UploadID), blobPath); err != nil {
+	// Rename would replace a concurrent writer's blob on Unix and the old
+	// failure cleanup could then delete a blob already referenced by another
+	// upload. Link provides non-replacing installation: either our sealed staging
+	// inode becomes the blob, or an equal digest blob already owns the path.
+	store.blobMu.Lock()
+	installErr := store.installVerifiedBlob(header, blobPath)
+	store.blobMu.Unlock()
+	if installErr != nil {
 		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
-		return 0, err
+		return 0, installErr
 	}
-	if directory, err := os.Open(filepath.Dir(blobPath)); err == nil {
-		_ = directory.Sync()
-		_ = directory.Close()
-	}
-	// The reference transaction: blobs + artifacts + ledger commit + the
-	// attempt-scoped read grant (ARCH-OUTPUT-002/004). Failure removes the
-	// orphan blob (RUNTIME-UPLOAD-003).
+	// The staging name is ours even when a concurrent upload had already
+	// installed the shared blob. Never unlink blobPath on transaction failure:
+	// it might now be referenced by that concurrent transaction. Orphan content
+	// is safe and collectible; deleting shared content is not.
+	_ = os.Remove(store.stagingPath(header.UploadID))
 	artifactID, err := store.commitReferences(ctx, conn, header)
 	if err != nil {
 		closeConn()
-		_ = os.Remove(blobPath)
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	return artifactID, nil
+}
+
+func (store *Store) installVerifiedBlob(header UploadHeader, blobPath string) error {
+	if err := os.Link(store.stagingPath(header.UploadID), blobPath); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		// A pre-existing digest path may be shared by a concurrent upload. Verify
+		// it before creating another logical reference: filename equality alone is
+		// not integrity evidence after a torn/manual filesystem write.
+		return verifyBlob(blobPath, header.SizeBytes, header.SHA256)
+	}
+	directory, err := os.Open(filepath.Dir(blobPath))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return err
+	}
+	return verifyBlob(blobPath, header.SizeBytes, header.SHA256)
+}
+
+func verifyBlob(path string, expectedSize int64, expectedHash []byte) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() != expectedSize {
+		return fmt.Errorf("content-addressed blob size differs from upload header")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	if !bytesEqual(hash.Sum(nil), expectedHash) {
+		return fmt.Errorf("content-addressed blob hash differs from upload header")
+	}
+	return nil
+}
+
+func bytesEqual(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // commitReferences writes artifact_blobs, artifacts and the ledger commit
@@ -323,6 +566,14 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	// BeginUpload's validation deliberately precedes network I/O, but it cannot
+	// authorize the final reference: cancellation, boot replacement, or an
+	// operation terminal transition may commit while bytes are staged. Re-read the
+	// complete owner/action/boot fence inside this same transaction, immediately
+	// before any artifact rows can be created.
+	if rejection, ok := store.validateUploadOn(ctx, conn, header); !ok {
+		return 0, rejection
+	}
 	shaHex := hex.EncodeToString(header.SHA256)
 	var blobID int64
 	err := conn.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
@@ -357,10 +608,56 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 	if err != nil {
 		return 0, err
 	}
-	if _, err := conn.ExecContext(ctx, `
+	// The irreversible Artifact commit is the only point where a trace may make
+	// a normal terminal claim durable. Do not infer integrity from a later ActionResult:
+	// cancellation/crash can race that message. A complete trace must consume the
+	// one matching pre-upload claim; an incomplete trace can only downgrade it.
+	if header.RuntimeSlot == "lintel" && header.Kind == "trace" && header.AttemptID > 0 {
+		var update sql.Result
+		if header.TraceIntegrity == "complete" {
+			update, err = conn.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
+				SET state='artifact_committed_complete',trace_artifact_id=?,trace_digest=?,finalized_at=?
+				WHERE child_attempt_id=? AND operation_id=? AND state='claimed_complete'
+				  AND NOT EXISTS (
+					SELECT 1 FROM browser_exploration_child_bindings binding
+					JOIN execution_attempts parent ON parent.id=binding.parent_attempt_id
+					WHERE binding.child_attempt_id=browser_exploration_terminal_claims.child_attempt_id
+					  AND parent.state <> 'Running'
+				  )`,
+				artifactID, header.SHA256, store.now().Format(time.RFC3339Nano), header.AttemptID, header.OwnerID)
+		} else {
+			// An incomplete trace may follow an already committed complete artifact
+			// when parent cancellation wins before ActionResult. Do not transition or
+			// erase that claim here: the ActionResult transaction atomically moves the
+			// immutable complete binding into historical columns while attaching this
+			// distinct incomplete trace to the operation.
+			update, err = conn.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
+				SET finalized_at=finalized_at
+				WHERE child_attempt_id=? AND operation_id=? AND state IN ('claimed_complete','artifact_committed_complete')`,
+				header.AttemptID, header.OwnerID)
+		}
+		if err != nil {
+			return 0, err
+		}
+		if rows, rowsErr := update.RowsAffected(); rowsErr != nil || (header.TraceIntegrity == "complete" && rows != 1) {
+			if rowsErr != nil {
+				return 0, rowsErr
+			}
+			return 0, &Rejection{RejectAttemptNotRunning, "complete trace has no accepted terminal claim"}
+		}
+	}
+	updated, err := conn.ExecContext(ctx, `
 		UPDATE runtime_artifact_uploads SET state='committed', artifact_id=?, committed_at=?, row_version=row_version+1
-		WHERE upload_id=? AND state='uploading'`, artifactID, store.now().Format(time.RFC3339Nano), header.UploadID); err != nil {
+		WHERE upload_id=? AND state='uploading'`, artifactID, store.now().Format(time.RFC3339Nano), header.UploadID)
+	if err != nil {
 		return 0, err
+	}
+	rows, err := updated.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if rows != 1 {
+		return 0, fmt.Errorf("upload ledger %q lost its commit linearization", header.UploadID)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return 0, err

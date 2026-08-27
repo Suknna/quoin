@@ -197,6 +197,24 @@ func attachmentEcho(body chatRequest) string {
 
 var artifactOutputPattern = regexp.MustCompile(`"output"\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
+// browserSessionTarget extracts only the opaque session id from an already
+// committed quoin_browser result. T22 never derives a session from a URL,
+// DOM, or profile path.
+var browserSessionPattern = regexp.MustCompile(`"sessionId"\s*:\s*"([^"]+)"`)
+
+func browserSessionTarget(body chatRequest) string {
+	for _, message := range body.Messages {
+		if message.Role != "tool" {
+			continue
+		}
+		match := browserSessionPattern.FindStringSubmatch(fmt.Sprint(message.Content))
+		if len(match) == 2 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
 // toolMessageCount counts the committed tool-result messages the agent
 // already carries (one per executed tool call).
 func toolMessageCount(body chatRequest) int {
@@ -252,6 +270,49 @@ func serveStream(writer http.ResponseWriter, body chatRequest) {
 	// partial-then-hangup branch that drives the attempt failure and the
 	// error frame.
 	if strings.Contains(prompt, "只读运维调查代理") {
+		// T22 is the real Exploration path: an Investigation model turn opens
+		// an existing read-only Browser Identity, then closes that same opaque
+		// session after receiving the committed result. It is deliberately not a
+		// manual-login operation.
+		if strings.Contains(prompt, "T22Browser") {
+			key := ""
+			for _, field := range strings.Fields(prompt) {
+				if strings.HasPrefix(field, "t22-browser-") {
+					key = field
+					break
+				}
+			}
+			if !body.hasToolResult() && key != "" {
+				log.Printf("investigation (T22Browser): opening exploration for %s", key)
+				arguments := fmt.Sprintf(`{"action":"open","businessSystemKey":%q}`, key)
+				// Emit actual argument fragments, not a complete arguments JSON in
+				// one delta. The OpenAI-compatible adapter surfaces native function
+				// calls only after it joins the streaming fragments (the production
+				// protocol form exercised by model/adapter_test.go).
+				split := len(arguments) / 2
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t22-open", "quoin_browser", arguments[:split])))
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t22-open", "", arguments[split:])))
+				chunk(mustJSONChunk(map[string]any{"id": "chat-t22", "object": "chat.completion.chunk", "model": body.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}}))
+				chunk("[DONE]")
+				return
+			}
+			if session := browserSessionTarget(body); session != "" && toolMessageCount(body) == 1 {
+				log.Printf("investigation (T22Browser): closing exploration session")
+				arguments := fmt.Sprintf(`{"action":"close_session","sessionId":%q}`, session)
+				split := len(arguments) / 2
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t22-close", "quoin_browser", arguments[:split])))
+				chunk(mustJSONChunk(toolCallChunk(body.Model, "call-t22-close", "", arguments[split:])))
+				chunk(mustJSONChunk(map[string]any{"id": "chat-t22", "object": "chat.completion.chunk", "model": body.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}}))
+				chunk("[DONE]")
+				return
+			}
+			if toolMessageCount(body) >= 2 {
+				chunk(mustJSONChunk(map[string]any{"id": "chat-t22", "object": "chat.completion.chunk", "model": body.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "T22 浏览器探索已完成（fixture-proof-t22）。"}, "finish_reason": nil}}}))
+				chunk(mustJSONChunk(map[string]any{"id": "chat-t22", "object": "chat.completion.chunk", "model": body.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}}))
+				chunk("[DONE]")
+				return
+			}
+		}
 		// T14 attachment branch: the first turn sees the frozen attachment
 		// locator block; it reads the artifact body through the granted
 		// artifact_read tool and echoes a bounded slice in the final answer.

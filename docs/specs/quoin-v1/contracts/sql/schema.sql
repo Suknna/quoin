@@ -919,10 +919,10 @@ CREATE TABLE browser_operations (
   reconnect_deadline         TEXT,
   ended_at                   TEXT,
   stop_confirmed_at          TEXT,                   -- 物理 Chromium/隧道停止确认；终态可先提交，但本列非空前仍持有身份/容量 fence
-  stop_confirmation_basis    TEXT CHECK (stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired')),
+  stop_confirmation_basis    TEXT CHECK (stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','no_capacity','start_rejected','stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired')),
   cleanup_state_hash         BLOB CHECK (cleanup_state_hash IS NULL OR length(cleanup_state_hash) = 32),
   start_rejected_at          TEXT,                   -- accepted=false 且非 NO_CAPACITY 的持久事实；与拒绝原因同事务写入
-  start_reject_reason        TEXT CHECK (start_reject_reason IS NULL OR start_reject_reason IN ('identity_busy','profile_unavailable','authentication_required','input_unsupported','reconcile_required','stale_stream','internal')),
+  start_reject_reason        TEXT CHECK (start_reject_reason IS NULL OR start_reject_reason IN ('identity_busy','profile_unavailable','authentication_required','input_unsupported','reconcile_required','stale_stream','download_blocked','internal')),
   terminal_reason            TEXT CHECK (terminal_reason IS NULL OR terminal_reason IN (
                                'client_closed_without_publish','grace_expired','session_revoked','new_boot','shutdown',
                                'slot_revoked','slot_replaced','profile_missing','profile_manifest_invalid','chromium_revision_mismatch',
@@ -974,7 +974,7 @@ CREATE TABLE browser_operations (
   CHECK (stop_confirmation_basis IS NULL
     OR (stop_confirmation_basis = 'not_dispatched' AND start_dispatched_at IS NULL)
     OR (stop_confirmation_basis = 'start_rejected' AND start_rejected_at IS NOT NULL)
-    OR (stop_confirmation_basis IN ('stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired') AND start_dispatched_at IS NOT NULL)),
+    OR (stop_confirmation_basis IN ('no_capacity','stop_ack','same_boot_cleanup_ack','inventory_absent','new_boot','new_boot_cleanup_confirmed','externally_fenced_storage_retired') AND start_dispatched_at IS NOT NULL)),
   CHECK ((stop_confirmation_basis IN ('same_boot_cleanup_ack','new_boot_cleanup_confirmed')) = (cleanup_state_hash IS NOT NULL)),
   CHECK (kind <> 'deployment_verification' OR stop_confirmation_basis IS NULL OR stop_confirmation_basis IN ('not_dispatched','start_rejected','same_boot_cleanup_ack','new_boot_cleanup_confirmed','externally_fenced_storage_retired')),
   CHECK (terminal_reason <> 'artifact_commit_failed' OR state = 'Failed'),
@@ -991,6 +991,11 @@ CREATE TABLE browser_operations (
   CHECK (state <> 'Succeeded' OR kind <> 'exploration' OR trace_integrity = 'complete')
 ) STRICT;
 CREATE INDEX idx_browser_operations_identity ON browser_operations (identity_id, requested_at);
+-- A physical continuous trace may certify exactly one operation. Together with
+-- the terminal CAS this forbids competing close/crash writers from borrowing
+-- or replacing an already sealed trace.
+CREATE UNIQUE INDEX ux_browser_operations_trace_artifact ON browser_operations (trace_artifact_id)
+  WHERE trace_artifact_id IS NOT NULL;
 CREATE INDEX idx_browser_operations_fifo ON browser_operations (id) WHERE state IN ('Queued','WaitingForCapacity');
 CREATE UNIQUE INDEX ux_browser_operation_active_identity ON browser_operations (identity_id)
   WHERE state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR stop_confirmed_at IS NULL;
@@ -1087,15 +1092,20 @@ CREATE TABLE browser_exploration_actions (
                              'check','uncheck','press','scroll','read','screenshot','wait_for','accept_dialog','dismiss_dialog')),
   page_id                  TEXT,
   origin                   TEXT,
+  -- The action request identity above is immutable. These terminal facts are
+  -- the actual current page/origin observed by Lintel in its bounded result.
+  observed_page_id         TEXT,
+  observed_origin          TEXT,
   target_description       TEXT,
   started_at               TEXT NOT NULL,
   ended_at                 TEXT,
   outcome                  TEXT CHECK (outcome IS NULL OR outcome IN ('success','recoverable_error','session_closed')),
   error_code               TEXT CHECK (error_code IS NULL OR error_code IN (
-                             'ElementNotFound','ElementNotUnique','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked',
+                             'ElementNotFound','ElementNotUnique','ElementNotInteractable','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked',
                              'ElementReferenceStale','AuthenticationRequired','AuthenticationProbeUnavailable',
                              'BrowserCrashed','ProfileUnavailable','RuntimeUnavailable','ProtocolError','ArtifactCommitFailed',
                              'Cancelled','LeaseExpired','ParentTerminated')),
+  result_digest            BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32),
   observation_version      INTEGER CHECK (observation_version IS NULL OR observation_version >= 1),
   observation_digest       TEXT CHECK (observation_digest IS NULL OR (length(observation_digest) = 64 AND observation_digest NOT GLOB '*[^0-9a-f]*')),
   observation_size_bytes   INTEGER CHECK (observation_size_bytes IS NULL OR observation_size_bytes >= 0),
@@ -1114,13 +1124,82 @@ CREATE TABLE browser_exploration_actions (
       (observation_version IS NULL AND observation_digest IS NULL AND observation_size_bytes IS NULL AND screenshot_artifact_id IS NULL)
       OR (observation_version IS NOT NULL AND observation_digest IS NOT NULL AND observation_size_bytes IS NOT NULL)))
   ),
-  CHECK (outcome <> 'recoverable_error' OR error_code IN (
-    'ElementNotFound','ElementNotUnique','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked','ElementReferenceStale')),
+   CHECK ((outcome IS NULL AND result_digest IS NULL) OR (outcome IS NOT NULL AND result_digest IS NOT NULL)),
+   CHECK (outcome <> 'recoverable_error' OR error_code IN (
+     'ElementNotFound','ElementNotUnique','ElementNotInteractable','ActionTimeout','NavigationFailed','DialogBlocked','DownloadBlocked','ElementReferenceStale')),
   CHECK (outcome <> 'session_closed' OR error_code IN (
     'AuthenticationRequired','AuthenticationProbeUnavailable','BrowserCrashed','ProfileUnavailable','RuntimeUnavailable',
-    'ProtocolError','ArtifactCommitFailed','Cancelled','LeaseExpired','ParentTerminated')),
+     'ProtocolError','ArtifactCommitFailed','Cancelled','LeaseExpired','ParentTerminated','DownloadBlocked')),
   CHECK (screenshot_artifact_id IS NULL OR (action_kind = 'screenshot' AND outcome = 'success'))
 ) STRICT;
+
+-- 每个浏览器子 Attempt 在创建时即冻结其精确 Exploration Operation 绑定。
+-- Action 审计行只在 child 已 Running 后才可插入，不能作为重连/取消期间的关联权威。
+CREATE TABLE browser_exploration_child_bindings (
+  child_attempt_id  INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  tool_call_id      INTEGER NOT NULL UNIQUE REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  operation_id      INTEGER NOT NULL REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  parent_attempt_id INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at        TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_browser_exploration_child_bindings_operation
+  ON browser_exploration_child_bindings (operation_id, child_attempt_id);
+
+-- A normal close must claim its terminal boundary before Lintel may upload its
+-- immutable complete trace. A claim authorizes staging exactly one trace, but is
+-- not a parent terminal fact: until the ActionResult transaction commits, a
+-- parent cancellation fence wins by SQLite commit order. Thus a pre-result
+-- cancellation requires the later trace/action closure to be incomplete; an
+-- independently installed artifact can remain historical evidence but cannot
+-- reverse the committed cancellation. Artifact installation is an independent
+-- durable transaction from the later ActionResult. Bind its immutable ID+digest
+-- to the claim in that transaction so boot recovery can account for it without
+-- inventing a successful result.
+CREATE TABLE browser_exploration_terminal_claims (
+  child_attempt_id INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  operation_id     INTEGER NOT NULL REFERENCES browser_operations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  tool_call_id     INTEGER NOT NULL UNIQUE REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  state            TEXT NOT NULL CHECK (state IN ('claimed_complete','artifact_committed_complete','downgraded_incomplete','committed_complete')),
+  trace_artifact_id INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  trace_digest      BLOB CHECK (trace_digest IS NULL OR length(trace_digest) = 32),
+  -- A cancellation can win after the complete Artifact transaction but before
+  -- ActionResult. The original complete trace remains immutable historical
+  -- evidence; the later cancellation attaches its own incomplete trace to the
+  -- operation instead of relabelling this Artifact.
+  historical_complete_trace_artifact_id INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  historical_complete_trace_digest BLOB CHECK (historical_complete_trace_digest IS NULL OR length(historical_complete_trace_digest) = 32),
+  created_at       TEXT NOT NULL,
+  finalized_at     TEXT,
+  CHECK ((state = 'claimed_complete' AND finalized_at IS NULL AND trace_artifact_id IS NULL AND trace_digest IS NULL
+          AND historical_complete_trace_artifact_id IS NULL AND historical_complete_trace_digest IS NULL)
+      OR (state = 'artifact_committed_complete' AND finalized_at IS NOT NULL AND trace_artifact_id IS NOT NULL AND trace_digest IS NOT NULL
+          AND historical_complete_trace_artifact_id IS NULL AND historical_complete_trace_digest IS NULL)
+      OR (state = 'downgraded_incomplete' AND finalized_at IS NOT NULL AND trace_artifact_id IS NULL AND trace_digest IS NULL
+          AND ((historical_complete_trace_artifact_id IS NULL AND historical_complete_trace_digest IS NULL)
+            OR (historical_complete_trace_artifact_id IS NOT NULL AND historical_complete_trace_digest IS NOT NULL)))
+      OR (state = 'committed_complete' AND finalized_at IS NOT NULL AND trace_artifact_id IS NOT NULL AND trace_digest IS NOT NULL
+          AND historical_complete_trace_artifact_id IS NULL AND historical_complete_trace_digest IS NULL))
+) STRICT;
+CREATE UNIQUE INDEX ux_browser_exploration_terminal_claim_operation
+  ON browser_exploration_terminal_claims (operation_id);
+CREATE TRIGGER trg_browser_exploration_terminal_claims_transition BEFORE UPDATE ON browser_exploration_terminal_claims
+WHEN NEW.child_attempt_id <> OLD.child_attempt_id OR NEW.operation_id <> OLD.operation_id OR NEW.tool_call_id <> OLD.tool_call_id
+  OR NEW.created_at <> OLD.created_at
+  OR NOT (((OLD.state = 'claimed_complete' AND NEW.state IN ('artifact_committed_complete','downgraded_incomplete')
+             AND NEW.historical_complete_trace_artifact_id IS NULL AND NEW.historical_complete_trace_digest IS NULL)
+           OR (OLD.state = 'artifact_committed_complete' AND NEW.state = 'committed_complete'
+               AND NEW.trace_artifact_id IS OLD.trace_artifact_id
+               AND NEW.trace_digest IS OLD.trace_digest
+               AND NEW.historical_complete_trace_artifact_id IS NULL AND NEW.historical_complete_trace_digest IS NULL)
+           OR (OLD.state = 'artifact_committed_complete' AND NEW.state = 'downgraded_incomplete'
+               AND NEW.trace_artifact_id IS NULL AND NEW.trace_digest IS NULL
+               AND NEW.historical_complete_trace_artifact_id IS OLD.trace_artifact_id
+               AND NEW.historical_complete_trace_digest IS OLD.trace_digest))
+          AND NEW.finalized_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'browser terminal claim may only finalize once'); END;
+CREATE TRIGGER trg_browser_exploration_terminal_claims_no_delete BEFORE DELETE ON browser_exploration_terminal_claims
+BEGIN SELECT RAISE(ABORT, 'browser terminal claim is retained history'); END;
+
 -- ============================================================================
 -- 7. 巡检运行与检查结果
 -- ============================================================================
@@ -1618,6 +1697,34 @@ CREATE TABLE model_calls (
                                AND context_budget_tokens IS NULL AND max_output_tokens IS NULL AND evicted_turn_count = 0))
 ) STRICT;
 
+-- A terminal intent that cannot safely close its Investigation parent until all
+-- Exploration processes have sealed and stopped. model_result retains the exact
+-- natural proposal; recovery_loss freezes a no-model Interrupted diagnostic.
+CREATE TABLE pending_attempt_terminals (
+  attempt_id       INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  source           TEXT NOT NULL CHECK (source IN ('model_result','recovery_loss')),
+  target_state     TEXT NOT NULL CHECK (target_state IN ('Succeeded','Failed','Interrupted')),
+  model_call_id    INTEGER REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  proposal_json    TEXT,
+  proposal_digest  BLOB CHECK (proposal_digest IS NULL OR length(proposal_digest) = 32),
+  terminal_reason  TEXT,
+  created_at       TEXT NOT NULL,
+  CHECK ((source='model_result' AND target_state IN ('Succeeded','Failed')
+          AND model_call_id IS NOT NULL AND proposal_json IS NOT NULL AND proposal_digest IS NOT NULL
+          AND terminal_reason IS NULL)
+      OR (source='recovery_loss' AND target_state='Interrupted'
+          AND model_call_id IS NULL AND proposal_json IS NULL AND proposal_digest IS NULL
+          AND terminal_reason IS NOT NULL))
+) STRICT;
+CREATE TRIGGER trg_pending_attempt_terminals_immutable BEFORE UPDATE ON pending_attempt_terminals
+BEGIN SELECT RAISE(ABORT, 'pending attempt terminal is immutable'); END;
+-- A user cancellation wins over a still-unacknowledged natural result. It
+-- intentionally discards the incompatible pending proposal before the parent
+-- enters Cancelling; any later replay is adjudicated as late.
+CREATE TRIGGER trg_execution_attempts_cancelling_discards_pending BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.state='Running' AND NEW.state='Cancelling'
+BEGIN DELETE FROM pending_attempt_terminals WHERE attempt_id=OLD.id; END;
+
 -- 每个物理模型请求的规范化响应审计；流式 delta 只用于实时投影，完成后在此封存组装结果。
 CREATE TABLE model_call_outputs (
   model_call_id   INTEGER PRIMARY KEY REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1887,6 +1994,9 @@ CREATE TABLE runtime_artifact_uploads (
   sensitive      INTEGER NOT NULL DEFAULT 0 CHECK (sensitive IN (0,1)),
   size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
   sha256         TEXT NOT NULL CHECK (length(sha256) = 64),
+  -- Lintel trace terminality is upload capability metadata, never inferred
+  -- from a later mutable action result. Non-trace uploads leave it NULL.
+  trace_integrity TEXT CHECK (trace_integrity IS NULL OR trace_integrity IN ('complete','incomplete')),
   state          TEXT NOT NULL CHECK (state IN ('uploading','committed','rejected')),
   row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   artifact_id    INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1897,6 +2007,8 @@ CREATE TABLE runtime_artifact_uploads (
   CHECK (state <> 'committed' OR (artifact_id IS NOT NULL AND committed_at IS NOT NULL)),
   CHECK (state = 'committed' OR (artifact_id IS NULL AND committed_at IS NULL)),
   CHECK (kind <> 'trace' OR sensitive = 1),
+  CHECK (kind = 'trace' OR trace_integrity IS NULL),
+  CHECK (kind <> 'trace' OR owner_type <> 'browser_operation' OR trace_integrity IS NOT NULL),
   CHECK (attempt_id IS NOT NULL OR (kind = 'trace' AND owner_type = 'browser_operation'))
 ) STRICT;
 CREATE INDEX idx_runtime_artifact_uploads_attempt ON runtime_artifact_uploads (attempt_id, created_at);
@@ -2365,6 +2477,10 @@ CREATE TRIGGER trg_browser_profile_reconciliations_no_delete BEFORE DELETE ON br
 BEGIN SELECT RAISE(ABORT, 'browser_profile_reconciliations is retained history'); END;
 CREATE TRIGGER trg_browser_exploration_actions_no_delete BEFORE DELETE ON browser_exploration_actions
 BEGIN SELECT RAISE(ABORT, 'browser_exploration_actions is retained history'); END;
+CREATE TRIGGER trg_browser_exploration_child_bindings_no_update BEFORE UPDATE ON browser_exploration_child_bindings
+BEGIN SELECT RAISE(ABORT, 'browser exploration child binding is immutable'); END;
+CREATE TRIGGER trg_browser_exploration_child_bindings_no_delete BEFORE DELETE ON browser_exploration_child_bindings
+BEGIN SELECT RAISE(ABORT, 'browser exploration child binding is retained history'); END;
 CREATE TRIGGER trg_config_discoveries_no_update BEFORE UPDATE ON config_discoveries
 BEGIN SELECT RAISE(ABORT, 'config_discoveries is append-only'); END;
 CREATE TRIGGER trg_config_discoveries_no_delete BEFORE DELETE ON config_discoveries
@@ -2540,6 +2656,10 @@ BEGIN SELECT RAISE(ABORT, 'browser_operation origin is immutable'); END;
 CREATE TRIGGER trg_browser_operations_completion_digest_once BEFORE UPDATE OF completion_digest ON browser_operations
 WHEN OLD.completion_digest IS NOT NULL AND NEW.completion_digest IS NOT OLD.completion_digest
 BEGIN SELECT RAISE(ABORT, 'browser operation completion digest is immutable once committed'); END;
+CREATE TRIGGER trg_browser_operations_trace_once BEFORE UPDATE OF trace_artifact_id, trace_integrity ON browser_operations
+WHEN OLD.trace_artifact_id IS NOT NULL AND (
+  NEW.trace_artifact_id IS NOT OLD.trace_artifact_id OR NEW.trace_integrity IS NOT OLD.trace_integrity)
+BEGIN SELECT RAISE(ABORT, 'browser operation trace is immutable once committed'); END;
 CREATE TRIGGER trg_browser_operations_insert_closure BEFORE INSERT ON browser_operations
 WHEN NEW.state <> 'Queued' OR NOT EXISTS (
   SELECT 1 FROM browser_identities i JOIN browser_identity_revisions r ON r.id = NEW.identity_revision_id
@@ -2777,10 +2897,11 @@ WHEN NEW.action_seq <> COALESCE((SELECT MAX(action_seq) + 1 FROM browser_explora
     SELECT 1 FROM browser_probe_results p
     WHERE p.operation_id = NEW.operation_id AND p.phase = 'admission' AND p.result = 'Authenticated'))
   OR NOT EXISTS (
-  SELECT 1 FROM browser_operations o
-  JOIN execution_attempts parent ON parent.id = o.owner_attempt_id
-  JOIN tool_calls t ON t.id = NEW.tool_call_id AND t.attempt_id = parent.id
-  JOIN execution_attempts child ON child.id = NEW.child_attempt_id
+  SELECT 1 FROM browser_exploration_child_bindings b
+  JOIN browser_operations o ON o.id = b.operation_id
+  JOIN execution_attempts parent ON parent.id = b.parent_attempt_id
+  JOIN tool_calls t ON t.id = NEW.tool_call_id AND t.id = b.tool_call_id AND t.attempt_id = parent.id
+  JOIN execution_attempts child ON child.id = NEW.child_attempt_id AND child.id = b.child_attempt_id
     AND child.attempt_type = 'browser_exploration' AND child.state = 'Running'
     AND child.scope_type = 'investigation' AND child.scope_id = parent.scope_id
     AND child.requested_by_tool_call_id = t.id
@@ -2808,12 +2929,13 @@ WHEN NEW.screenshot_artifact_id IS NOT NULL AND NOT EXISTS (
     AND a.owner_type = 'browser_operation' AND a.owner_id = o.id AND a.body_expired = 0)
 BEGIN SELECT RAISE(ABORT, 'browser action screenshot must be an available screenshot artifact owned by its operation'); END;
 CREATE TRIGGER trg_browser_exploration_actions_result_immutable BEFORE UPDATE OF
-  ended_at, outcome, error_code, observation_version, observation_digest, observation_size_bytes, screenshot_artifact_id
+  ended_at, outcome, error_code, observation_version, observation_digest, observation_size_bytes, observed_page_id, observed_origin, screenshot_artifact_id
   ON browser_exploration_actions
 WHEN OLD.outcome IS NOT NULL AND (
   NEW.ended_at IS NOT OLD.ended_at OR NEW.outcome IS NOT OLD.outcome OR NEW.error_code IS NOT OLD.error_code
   OR NEW.observation_version IS NOT OLD.observation_version OR NEW.observation_digest IS NOT OLD.observation_digest
-  OR NEW.observation_size_bytes IS NOT OLD.observation_size_bytes OR NEW.screenshot_artifact_id IS NOT OLD.screenshot_artifact_id)
+  OR NEW.observation_size_bytes IS NOT OLD.observation_size_bytes OR NEW.observed_page_id IS NOT OLD.observed_page_id
+  OR NEW.observed_origin IS NOT OLD.observed_origin OR NEW.screenshot_artifact_id IS NOT OLD.screenshot_artifact_id)
 BEGIN SELECT RAISE(ABORT, 'browser exploration action result is final once set'); END;
 
 -- 12.14 模型/工具调用：每行是一条物理请求/执行事实；归属与签名不可变，只允许状态/result 收口。
@@ -3538,7 +3660,7 @@ WHEN NOT (OLD.start_rejected_at IS NULL AND OLD.start_reject_reason IS NULL
   AND OLD.state = 'Starting' AND NEW.state = 'Failed'
   AND NEW.stop_confirmed_at IS NOT NULL AND NEW.stop_confirmation_basis = 'start_rejected'
   AND (
-    (NEW.start_reject_reason IN ('identity_busy','input_unsupported','reconcile_required','stale_stream','internal') AND NEW.terminal_reason = 'protocol_error')
+    (NEW.start_reject_reason IN ('identity_busy','input_unsupported','reconcile_required','stale_stream','download_blocked','internal') AND NEW.terminal_reason = 'protocol_error')
     OR (NEW.start_reject_reason = 'authentication_required' AND NEW.kind <> 'manual_login' AND NEW.terminal_reason = 'authentication_required')
     OR (NEW.start_reject_reason = 'profile_unavailable' AND NEW.kind <> 'manual_login'
       AND NEW.terminal_reason IN ('profile_missing','profile_manifest_invalid','chromium_revision_mismatch'))
@@ -3570,14 +3692,10 @@ WHEN NOT (
   OR (NEW.stop_confirmed_at IS OLD.stop_confirmed_at AND NEW.stop_confirmation_basis IS OLD.stop_confirmation_basis)
 )
 BEGIN SELECT RAISE(ABORT, 'browser_operation stop confirmation and its basis are terminal and write-once'); END;
--- 显式取消的父 Attempt 先进入 Cancelling；自然成功/失败/中断时保持 Running 直至收口。
--- 任何终态都必须等待会话级 operation、completion probe 与强制 trace 先提交；数据库不得用父状态 UPDATE 伪造浏览器终局。
-CREATE TRIGGER trg_execution_attempts_exploration_requires_closed_operation BEFORE UPDATE OF state ON execution_attempts
-WHEN OLD.attempt_type = 'investigation' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
-  AND EXISTS (
-    SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = OLD.id AND o.kind = 'exploration'
-      AND o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect'))
-BEGIN SELECT RAISE(ABORT, 'investigation attempt may terminate only after its exploration operation and mandatory trace are closed'); END;
+-- A natural Investigation terminal result may arrive while its Exploration is
+-- idle. Runtime AfterCommit sends the operation-level close, while reconnect
+-- and new-boot reconciliation retry that durable parent-terminal ownership
+-- fact; rejecting the result here would make graceful cleanup unreachable.
 CREATE TRIGGER trg_execution_attempts_journey_requires_closed_operation BEFORE UPDATE OF state ON execution_attempts
 WHEN OLD.attempt_type = 'inspection_collection' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
   AND EXISTS (
@@ -4106,11 +4224,12 @@ BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential may only be inserted in 
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
 -- 普通上传必须绑定 state='Running' Attempt 且 runtime_slot/boot_id/connection_epoch 精确一致；
+-- Lintel 同 boot 重连可在更高的传输 epoch 上传仍存活浏览器的结果，但不改写 Start epoch 审计事实；
 -- Session/Journey 连续 trace 可改由 active browser_operation 的冻结 Lintel boot/epoch 授权而不伪造一个 Tool Call Attempt。
--- 旧 Attempt、错误 operation 绑定或 ABA/epoch 不符一律拒绝 commit，只能 rejected；
+-- 旧 Attempt、错误 operation 绑定、不同 boot 或回退 epoch 一律拒绝 commit，只能 rejected；
 -- artifact_id/committed_at 一旦提交不可改；历史不可删除（DATA-ARTIFACT-006）。
 CREATE TRIGGER trg_runtime_artifact_uploads_origin_immutable BEFORE UPDATE OF
-  upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, media_type, retention_kind, sensitive, size_bytes, sha256, created_at ON runtime_artifact_uploads
+  upload_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id, kind, media_type, retention_kind, sensitive, size_bytes, sha256, trace_integrity, created_at ON runtime_artifact_uploads
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload origin is immutable'); END;
 CREATE TRIGGER trg_runtime_artifact_uploads_insert_state BEFORE INSERT ON runtime_artifact_uploads
 WHEN NEW.state <> 'uploading'
@@ -4134,12 +4253,14 @@ WHEN NEW.state = 'committed' AND NEW.artifact_id IS NOT NULL AND NOT EXISTS (
       EXISTS (
         SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id
           AND a.state = 'Running' AND a.runtime_slot IS NOT NULL
-          AND a.boot_id = NEW.boot_id AND a.connection_epoch = NEW.connection_epoch)
+          AND a.boot_id = NEW.boot_id
+          AND ((a.runtime_slot = 'lintel' AND a.connection_epoch <= NEW.connection_epoch)
+            OR (a.runtime_slot <> 'lintel' AND a.connection_epoch = NEW.connection_epoch)))
       OR (NEW.attempt_id IS NULL AND NEW.kind = 'trace' AND NEW.owner_type = 'browser_operation'
         AND EXISTS (
           SELECT 1 FROM browser_operations o WHERE o.id = NEW.owner_id
             AND o.kind IN ('journey','exploration') AND o.state = 'Running'
-            AND o.lintel_boot_id = NEW.boot_id AND o.lintel_connection_epoch = NEW.connection_epoch))
+            AND o.lintel_boot_id = NEW.boot_id AND o.lintel_connection_epoch <= NEW.connection_epoch))
     )
 )
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_upload commit requires a matching Running Attempt or active browser operation Lintel binding and an exactly matching artifact'); END;
@@ -4914,7 +5035,7 @@ BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attem
 -- kubernetes_read capability replaced them. Per-agent catalog membership is
 -- enforced by Quoin before this insert; this trigger seals the global name set.
 CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
-WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','thanos_query','kubernetes_read')
+WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','thanos_query','kubernetes_read','quoin_browser')
 BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
@@ -4959,13 +5080,58 @@ BEGIN
   WHERE child_attempt_id = OLD.id AND outcome IS NULL;
 END;
 CREATE TRIGGER trg_execution_attempts_failed_browser_action_closed BEFORE UPDATE OF state ON execution_attempts
-WHEN OLD.attempt_type = 'browser_exploration' AND NEW.state = 'Failed' AND NOT EXISTS (
-  SELECT 1 FROM browser_exploration_actions a JOIN browser_operations o ON o.id = a.operation_id
-  WHERE a.child_attempt_id = OLD.id AND a.outcome = 'session_closed'
-    AND o.state IN ('Failed','Cancelled','Interrupted'))
+WHEN OLD.attempt_type = 'browser_exploration' AND NEW.state = 'Failed'
+  -- A StartBrowserOperation rejection can occur after Quoin created the
+  -- operation/child but before any Lintel action was admitted. It has no action
+  -- to close; its failed parent Tool Call is the sole lawful terminal writer.
+  AND NOT (OLD.state = 'Queued' AND OLD.requested_by_tool_call_id IS NOT NULL AND OLD.runtime_slot IS NULL)
+  AND NOT EXISTS (
+    SELECT 1 FROM browser_exploration_actions a JOIN browser_operations o ON o.id = a.operation_id
+    WHERE a.child_attempt_id = OLD.id AND a.outcome = 'session_closed'
+      AND o.state IN ('Failed','Cancelled','Interrupted'))
 BEGIN SELECT RAISE(ABORT, 'failed browser action attempt requires a fatal action result and terminal exploration session'); END;
 -- quoin_browser Tool Call 是浏览器子 Attempt 的提交入口：父 Tool Result 先写入，AFTER trigger 在同一 statement
 -- 原子推进子 Attempt，避免“子 Attempt 已终态但父 Tool Call 仍 Running”的可提交分裂状态。
+-- Admission may reject an open before an Exploration Operation or action exists.
+-- A later Tool Call against an already terminal session is the other legal
+-- no-action path: it creates a frozen child tombstone and returns the typed
+-- ParentTerminated result. Every other pre-dispatch success remains forbidden.
+CREATE TRIGGER trg_tool_calls_admission_rejection_shape BEFORE UPDATE OF status ON tool_calls
+WHEN OLD.status = 'running' AND NEW.status = 'succeeded' AND NEW.execution_mode = 'quoin_browser'
+  AND EXISTS (SELECT 1 FROM execution_attempts child
+              WHERE child.requested_by_tool_call_id = NEW.id AND child.state = 'Queued'
+                AND child.runtime_slot IS NULL)
+  AND NOT (
+    json_valid(NEW.result_json)
+    AND json_extract(NEW.result_json,'$.action') = 'open'
+    AND json_extract(NEW.result_json,'$.error.code') IN ('IdentityBusy','AuthenticationRequired','ProfileUnavailable','DownloadBlocked')
+    AND (
+       (json_extract(NEW.result_json,'$.error.code') = 'IdentityBusy'
+        AND json_extract(NEW.result_json,'$.outcome') = 'recoverable_error'
+        AND json_extract(NEW.result_json,'$.error.retryableInSession') = 0)
+       OR
+        (json_extract(NEW.result_json,'$.error.code') IN ('AuthenticationRequired','ProfileUnavailable','DownloadBlocked')
+         AND json_extract(NEW.result_json,'$.outcome') = 'session_closed'
+         AND json_extract(NEW.result_json,'$.error.retryableInSession') = 0)
+      )
+    OR (
+     json_valid(NEW.result_json)
+     AND json_extract(NEW.result_json,'$.action') = json_extract(NEW.arguments_json,'$.action')
+     AND json_extract(NEW.result_json,'$.action') <> 'open'
+     AND json_extract(NEW.result_json,'$.sessionId') = json_extract(NEW.arguments_json,'$.sessionId')
+     AND json_extract(NEW.result_json,'$.outcome') = 'session_closed'
+     AND json_extract(NEW.result_json,'$.error.code') = 'ParentTerminated'
+     AND json_extract(NEW.result_json,'$.error.retryableInSession') = 0
+     AND EXISTS (
+       SELECT 1 FROM browser_exploration_child_bindings b
+       JOIN browser_operations o ON o.id=b.operation_id
+       WHERE b.child_attempt_id=(SELECT id FROM execution_attempts WHERE requested_by_tool_call_id=NEW.id)
+         AND b.tool_call_id=NEW.id AND o.kind='exploration'
+         AND o.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+     )
+   )
+)
+BEGIN SELECT RAISE(ABORT, 'pre-dispatch browser child may succeed only with a frozen admission or closed-session rejection'); END;
 CREATE TRIGGER trg_tool_calls_close_browser_child AFTER UPDATE OF status ON tool_calls
 WHEN OLD.status <> NEW.status AND NEW.execution_mode = 'quoin_browser'
   AND NEW.status IN ('succeeded','failed','cancelled')
@@ -4989,6 +5155,27 @@ BEGIN
   WHERE requested_by_tool_call_id = NEW.id
     AND state IN ('Queued','Assigned','Running','Cancelling');
 END;
+-- Parent cancellation changes the Tool Call first, leaving an active browser child
+-- in Cancelling while Lintel commits its mandatory terminal trace. Once that
+-- action fact has committed, SQLite—not an application-side Attempt update—is
+-- the sole authority that closes the fenced child.
+CREATE TRIGGER trg_browser_exploration_action_closes_cancelling_child AFTER UPDATE OF outcome ON browser_exploration_actions
+WHEN OLD.outcome IS NULL AND NEW.outcome = 'session_closed'
+  AND EXISTS (
+    SELECT 1 FROM execution_attempts c JOIN tool_calls t ON t.id=c.requested_by_tool_call_id
+    WHERE c.id=NEW.child_attempt_id AND c.state='Cancelling'
+      AND t.execution_mode='quoin_browser' AND t.status='cancelled'
+  )
+BEGIN
+  UPDATE execution_attempts
+  SET state='Cancelled', ended_at=COALESCE(ended_at,NEW.ended_at),
+      termination_reason='cancelled', row_version=row_version+1
+  WHERE id=NEW.child_attempt_id AND state='Cancelling';
+END;
+-- An Investigation result may terminalize while an idle exploration still owns
+-- Chromium. The Runtime AfterCommit hook durably dispatches an operation-level
+-- close, and reconnect/new-boot reconciliation repeats it; blocking success
+-- here would make that close path unreachable.
 CREATE TRIGGER trg_execution_attempts_success_requires_closed_calls BEFORE UPDATE OF state ON execution_attempts
 WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   EXISTS (SELECT 1 FROM model_calls mc WHERE mc.attempt_id = NEW.id AND mc.status = 'running')
@@ -4997,9 +5184,6 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     SELECT 1 FROM execution_attempts child
     JOIN tool_calls tc ON tc.id = child.requested_by_tool_call_id
     WHERE tc.attempt_id = NEW.id AND child.state IN ('Queued','Assigned','Running','Cancelling'))
-  OR (NEW.attempt_type = 'investigation' AND EXISTS (
-    SELECT 1 FROM browser_operations bo WHERE bo.owner_attempt_id = NEW.id
-      AND bo.kind = 'exploration' AND bo.state IN ('Queued','WaitingForCapacity','Starting','Running')))
   OR (NEW.attempt_type = 'browser_exploration' AND NOT EXISTS (
       SELECT 1 FROM tool_calls tc
       WHERE tc.id = NEW.requested_by_tool_call_id AND tc.execution_mode = 'quoin_browser' AND tc.status = 'succeeded'))

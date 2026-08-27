@@ -314,6 +314,10 @@ func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attem
 		}
 		return "Cancelled", nil
 	case "Running", "Cancelling":
+		// A terminal claim only authorizes the upload attempt. It is not a parent
+		// terminal fact: cancellation remains authoritative until the ActionResult
+		// commits in this same SQLite serialization domain. This prevents a staged
+		// complete artifact from making a prior parent cancellation inexpressible.
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE execution_attempts SET state='Cancelling', row_version=row_version+1
 			WHERE id=? AND state='Running'`, attemptID); err != nil {

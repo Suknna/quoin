@@ -31,7 +31,12 @@ func (service *Service) prepareStop(ctx context.Context, operationID int64, succ
 	var r StopRequest
 	var epoch int64
 	var terminalReason string
-	err := service.db.QueryRowContext(ctx, `SELECT id,lintel_boot_id,lintel_connection_epoch,COALESCE(terminal_reason,'') FROM browser_operations WHERE id=? AND state IN ('Succeeded','Failed','Cancelled','Interrupted') AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL`, operationID).Scan(&r.OperationID, &r.BootID, &epoch, &terminalReason)
+	// Starting is an unknown-outcome Start: Chromium may have been created even
+	// though Quoin never received StartAck. A parent terminal must still install
+	// a Stop tombstone on the current Lintel rather than leave that process
+	// ownerless. The subsequent typed completion/start rejection supplies the
+	// terminal domain state before HandleStopAck records confirmation.
+	err := service.db.QueryRowContext(ctx, `SELECT id,lintel_boot_id,lintel_connection_epoch,COALESCE(terminal_reason,'') FROM browser_operations WHERE id=? AND (state IN ('Succeeded','Failed','Cancelled','Interrupted') OR state='Starting') AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL`, operationID).Scan(&r.OperationID, &r.BootID, &epoch, &terminalReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StopRequest{}, ErrConflict
 	}

@@ -8,44 +8,60 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 ticket="${QUOIN_TICKET:-}"
+browser_ticket=0
+if [ "$ticket" = "T20" ] || [ "$ticket" = "T22" ]; then
+  browser_ticket=1
+fi
 stack="$repo_root/.artifacts/e2e-stack"
 compose_project="${QUOIN_COMPOSE_PROJECT:-quoin}"
-if [ "$ticket" = "T20" ]; then
-  stack="$repo_root/.artifacts/e2e-stack-t20"
-  compose_project=quoin-t20
-  export QUOIN_IMAGE_NAMESPACE=quoin-t20
+browser_fixture=""
+if [ "$browser_ticket" = "1" ]; then
+  # Browser tickets are isolated from each other and the ordinary Compose fixture.
+  ticket_slug=$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')
+  stack="$repo_root/.artifacts/e2e-stack-$ticket_slug"
+  compose_project="quoin-$ticket_slug"
+  browser_fixture="quoin-$ticket_slug-auth-fixture"
+  export QUOIN_IMAGE_NAMESPACE="quoin-$ticket_slug"
 fi
 export QUOIN_COMPOSE_PROJECT="$compose_project"
-if [ "$ticket" = "T20" ]; then
+if [ "$browser_ticket" = "1" ] && [ "${QUOIN_BROWSER_E2E_LOCK_HELD:-}" != "1" ]; then
+  # T20 and T22 use the same loopback TLS port and fixed browser fixture
+  # names. Serialize direct script invocations as well as Playwright runs so
+  # one bootstrap cannot remove another's generated Compose projection.
+  mkdir -p "$repo_root/.artifacts/tickets"
+  exec 9>"$repo_root/.artifacts/tickets/.browser-e2e.lock"
+  flock 9
+fi
+if [ "$browser_ticket" = "1" ]; then
   # Playwright only runs its global teardown after the webServer became ready.
   # A bootstrap failure happens before then, so it must synchronously clean the
   # isolated project, temporary credentials, private images and host helpers.
-  cleanup_failed_t20_bootstrap() {
+  cleanup_failed_browser_bootstrap() {
     status=$?
     trap - EXIT
     if [ "$status" -ne 0 ]; then
-      if ! QUOIN_TICKET=T20 QUOIN_EVIDENCE_DIR="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/T20}" node test/e2e/compose/teardown.mjs; then
-        echo 'FATAL: T20 bootstrap cleanup failed; inspect cleanup.json before retrying.' >&2
+      if ! QUOIN_TICKET="$ticket" QUOIN_EVIDENCE_DIR="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/$ticket}" node test/e2e/compose/teardown.mjs; then
+        echo "FATAL: $ticket browser bootstrap cleanup failed; inspect cleanup.json before retrying." >&2
         exit 70
       fi
     fi
     exit "$status"
   }
-  trap cleanup_failed_t20_bootstrap EXIT
+  trap cleanup_failed_browser_bootstrap EXIT
 fi
 # A failed prior webServer leaves owned fixtures behind (teardown.mjs only
-# runs on successful startup); clear only this test's project. T20 deliberately
-# does not remove shared T03/T07 fixtures from another acceptance run.
-if [ "$ticket" != "T20" ]; then
+# runs on successful startup); clear only this test's project. Browser tickets
+# deliberately do not remove shared T03/T07 fixtures from another acceptance run.
+if [ "$browser_ticket" != "1" ]; then
   docker rm -f e2e-fwd e2e-am quoin-t07-thanos >/dev/null 2>&1 || true
 else
-  docker rm -f quoin-t20-auth-fixture >/dev/null 2>&1 || true
+  docker rm -f "$browser_fixture" >/dev/null 2>&1 || true
   previous_compose="$stack/state/quoin/compose/generated/compose.yaml"
   if [ -f "$previous_compose" ]; then
     docker compose --project-name "$compose_project" --file "$previous_compose" down --volumes --remove-orphans >/dev/null
   fi
 fi
-if [ "$ticket" != "T20" ]; then
+if [ "$browser_ticket" != "1" ]; then
   docker compose --project-name "$compose_project" down --remove-orphans >/dev/null 2>&1 || true
 fi
 # The TLS proxy is a host-side test process, so it is not owned by Compose.
@@ -147,11 +163,22 @@ curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X PUT \
   -d "{\"currentPassword\":\"$password\",\"newPassword\":\"$newpass\"}" "$BASE/api/v1/auth/password" \
   -o "$stack/put.json" -w 'change-password-http=%{http_code}\n' 2>&1 | tee -a "$evidence/playwright-server.log"
 cat "$stack/put.json" >> "$evidence/playwright-server.log" 2>/dev/null || true
+# Changing a password revokes every existing Session, including CJ above. Log
+# in again before the browser fixture provisions Runtime connections.
+: > "$LOGIN_HEADERS"
+curl -sf -D "$LOGIN_HEADERS" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+  -d "{\"username\":\"admin\",\"password\":\"$newpass\"}" "$BASE/api/v1/auth/login" >/dev/null
+SESSION_COOKIE=$(awk 'tolower($1)=="set-cookie:" {print $2}' "$LOGIN_HEADERS" | tr -d '\r' | head -1)
+if [ -z "$SESSION_COOKIE" ]; then
+  echo 'FATAL: login after required password change returned no session cookie' | tee -a "$evidence/playwright-server.log" >&2
+  exit 1
+fi
+CJ="Cookie: $SESSION_COOKIE"
 
 # Ticket 20 intentionally provisions only its Quoin/Lintel browser path. It
 # must leave alert/model/Thanos fixtures owned by other ticket suites alone.
-if [ "$ticket" = "T20" ]; then
-  cat > "$stack/t20-auth-fixture.py" <<'PYEOF'
+if [ "$browser_ticket" = "1" ]; then
+  cat > "$stack/browser-auth-fixture.py" <<'PYEOF'
 import http.server
 
 def increment(name):
@@ -169,38 +196,49 @@ class S(http.server.BaseHTTPRequestHandler):
         elif self.path == '/authenticated' and 't20_auth=1' in self.headers.get('Cookie', ''):
             open('/state/authenticated-page', 'w').write('authenticated-page\n')
             self.send_response(200); self.end_headers(); self.wfile.write(b'authenticated')
+        elif self.path == '/login' and 't20_auth=1' in self.headers.get('Cookie', ''):
+            # A published profile revisits its frozen login URL. A real
+            # authenticated endpoint redirects that request to its landing
+            # page; without this, the fixture falsely declares the persisted
+            # cookie unauthenticated during an Exploration admission probe.
+            self.send_response(303); self.send_header('Location', '/authenticated'); self.end_headers()
         elif self.path.startswith('/ready'):
             increment('ready-seq')
             self.send_response(204); self.end_headers()
         elif self.path == '/complete':
             increment('submit-seq')
             open('/state/authenticated', 'w').write('authenticated\n')
-            self.send_response(303); self.send_header('Set-Cookie', 't20_auth=1; Path=/'); self.send_header('Location', '/authenticated'); self.end_headers()
+            self.send_response(303); self.send_header('Set-Cookie', 't20_auth=1; Path=/; Max-Age=3600'); self.send_header('Location', '/authenticated'); self.end_headers()
         else:
             increment('login-get-seq')
             self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
             # This fixture records only event kinds/counts. It never records an
             # input value, key, pointer coordinate, cookie, or page content.
-            self.wfile.write(b'<style>html,body,button{width:100%;height:100%;margin:0;border:0}button{font:32px sans-serif}</style><button type="button" autofocus>Press Enter to sign in</button><script>document.addEventListener("pointerdown",()=>navigator.sendBeacon("/input/pointer"));document.addEventListener("keydown",()=>{navigator.sendBeacon("/input/key");location.assign("/complete")});fetch("/ready?"+Date.now(),{cache:"no-store"});</script>')
+            self.wfile.write(b'<style>html,body,button{width:100%;height:100%;margin:0;border:0}button{font:32px sans-serif}</style><button type="button" autofocus>Press Enter to sign in</button><script>document.addEventListener("pointerdown",()=>navigator.sendBeacon("/input/pointer"));document.addEventListener("keydown",()=>navigator.sendBeacon("/input/key"));document.addEventListener("keyup",()=>location.assign("/complete"));fetch("/ready?"+Date.now(),{cache:"no-store"});</script>')
     def do_POST(self):
         if self.path == '/input/pointer':
             increment('pointerdown-seq'); self.send_response(204); self.end_headers(); return
         if self.path == '/input/key':
+            # Record the actual RFB key.  Navigation occurs on the same RFB
+            # press's key-up event, after the key-down input handoff completes;
+            # the old `fetch(...).then(location.assign)` continuation could be
+            # discarded after this request was already observed. /complete
+            # remains the only authority that writes auth state/cookie.
             increment('keydown-seq'); self.send_response(204); self.end_headers(); return
         self.send_response(404); self.end_headers()
     def log_message(self, *a): pass
 http.server.HTTPServer(('0.0.0.0', 8081), S).serve_forever()
 PYEOF
   NET=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep '_internal$' | head -1)
-  mkdir -p "$stack/t20-auth-fixture-state"
-  docker run -d --name quoin-t20-auth-fixture --network "$NET" --network-alias t20-auth-fixture -v "$stack/t20-auth-fixture.py:/app.py:ro" -v "$stack/t20-auth-fixture-state:/state" python:3.12-slim python /app.py >>"$evidence/playwright-server.log" 2>&1
+  mkdir -p "$stack/browser-auth-fixture-state"
+  docker run -d --name "$browser_fixture" --network "$NET" --network-alias "$browser_fixture" -v "$stack/browser-auth-fixture.py:/app.py:ro" -v "$stack/browser-auth-fixture-state:/state" python:3.12-slim python /app.py >>"$evidence/playwright-server.log" 2>&1
   fixture_ready=0
   for _ in $(seq 1 30); do
-    if docker exec quoin-t20-auth-fixture python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=1)' >/dev/null 2>&1; then fixture_ready=1; break; fi
+    if docker exec "$browser_fixture" python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=1)' >/dev/null 2>&1; then fixture_ready=1; break; fi
     sleep 1
   done
   if [ "$fixture_ready" != "1" ]; then
-    echo 'FATAL: T20 authentication fixture did not become ready' | tee -a "$evidence/playwright-server.log" >&2
+    echo "FATAL: $ticket authentication fixture did not become ready" | tee -a "$evidence/playwright-server.log" >&2
     exit 1
   fi
   LINTEL_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["lintel"]["rowVersion"]))')
@@ -227,16 +265,48 @@ PYEOF
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' tigervnc-scraping-server
     echo 'xvfb:'
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' xvfb
-  } >"$evidence/t20-components.log" 2>&1
+  } >"$evidence/${ticket,,}-components.log" 2>&1
+  if [ "$ticket" = "T22" ]; then
+    # T22 requires the real Plinth model turn in addition to the browser
+    # Runtime/Lintel path that T20 provisions.
+    go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
+    "$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &
+    printf '%s' "$!" >"$stack/fixture-provider.pid"
+    GW=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep '_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
+    curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
+      -d '{"clientCommandId":"e2e-t22-create-provider","name":"t22-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW"':18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
+      "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+    PLINTH_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["plinth"]["rowVersion"]))')
+    PREP=$(curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t22-prepare-plinth-$RANDOM\",\"expectedRowVersion\":$PLINTH_ROW}" "$BASE/api/v1/runtime-slots/plinth/registration/prepare")
+    HANDLE=$(printf '%s' "$PREP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["registrationTokenHandle"])')
+    REVEAL=$(curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"registrationTokenHandle\":\"$HANDLE\"}" "$BASE/api/v1/runtime-slots/registration-token/reveal")
+    printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T plinth register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
+    curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d '{"clientCommandId":"e2e-t22-probe-provider"}' "$BASE/api/v1/connections/t22-openai/probe" >>"$evidence/playwright-server.log"
+    qualified=""
+    for _ in $(seq 1 60); do
+      qualified=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t22-openai/probe-results" | python3 -c 'import json,sys; print(next((x["id"] for x in json.load(sys.stdin).get("items",[]) if x.get("outcome")=="passed"), ""))' 2>/dev/null || true)
+      [ -n "$qualified" ] && break
+      sleep 2
+    done
+    if [ -z "$qualified" ]; then
+      echo 'FATAL: T22 model provider did not qualify' | tee -a "$evidence/playwright-server.log" >&2
+      exit 1
+    fi
+    PROVIDER_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t22-openai" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
+    curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t22-enable-provider\",\"expectedRowVersion\":$PROVIDER_ROW,\"qualifiedProbeResultId\":\"$qualified\"}" "$BASE/api/v1/connections/t22-openai/enable" >>"$evidence/playwright-server.log"
+  fi
   start_ready_server
-  if [ "${QUOIN_T20_TEST_BOOTSTRAP_FAILURE:-}" = "1" ]; then
-    if [ "${QUOIN_T20_TEST_FAILURE_ARTIFACT:-}" = "1" ]; then
+  if [ "${QUOIN_BROWSER_TEST_BOOTSTRAP_FAILURE:-${QUOIN_T20_TEST_BOOTSTRAP_FAILURE:-}}" = "1" ]; then
+    if [ "${QUOIN_BROWSER_TEST_FAILURE_ARTIFACT:-${QUOIN_T20_TEST_FAILURE_ARTIFACT:-}}" = "1" ]; then
       mkdir -p "$stack/playwright-output"
       printf 'synthetic failure artifact for teardown verification\n' >"$stack/playwright-output/error-context.md"
     fi
-    echo 'intentional T20 bootstrap failure after owned resources were created' >&2
+    echo "intentional $ticket browser bootstrap failure after owned resources were created" >&2
     exit 97
   fi
+  # Both browser tickets stop here. Falling through into T03/T07/T10 fixture
+  # provisioning would mix an ordinary model provider and compose project into
+  # T22's browser-runtime proof.
   exec docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele 2>&1 | tee -a "$evidence/runtime-process.log"
 fi
 

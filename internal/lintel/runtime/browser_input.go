@@ -69,6 +69,8 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 		kind = "manual_login_v1"
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE:
 		kind = "authentication_probe_v1"
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION:
+		kind = "exploration_v1"
 	default:
 		return errors.New("unsupported browser operation kind")
 	}
@@ -90,7 +92,11 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 	} else if !hasProfileID || !matchesID(profileID, request.GetProfileGenerationId()) {
 		return errors.New("profile generation binding does not match frozen input")
 	}
-	binding, ok := value[map[bool]string{true: "authenticationProbe", false: "probe"}[kind == "manual_login_v1"]].(map[string]any)
+	bindingName := "probe"
+	if kind == "manual_login_v1" || kind == "exploration_v1" {
+		bindingName = "authenticationProbe"
+	}
+	binding, ok := value[bindingName].(map[string]any)
 	if !ok {
 		return fmt.Errorf("browser journey binding is missing for %q", kind)
 	}

@@ -63,6 +63,9 @@ type RuntimeService struct {
 	// sendEnvelopeForTest captures outbound control replies in package tests.
 	// Production leaves it nil and always routes through the live slot.
 	sendEnvelopeForTest func(slot string, envelope *runtimev1.ControlEnvelope) error
+	// browserExplorationSlotView is a narrow test seam for exercising the
+	// frozen SQLite action triggers without opening a live gRPC stream.
+	browserExplorationSlotView func(context.Context) (qruntime.SlotView, error)
 }
 
 func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {
@@ -218,7 +221,16 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if err := stream.Send(ack); err != nil {
 		return err
 	}
+	if slot == qruntime.SlotLintel {
+		// Hello is a physical-operation snapshot, not merely a capacity hint. The
+		// handshake acknowledgement must be the first server frame, so reconcile
+		// only after it is on the stream.
+		service.reconcileLintelPhysicalOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetActiveBrowserOperations())
+	}
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
+	// Lintel browser work is admission-gated below. A new boot must first
+	// reconcile the complete profile inventory before any replayed action or
+	// cancellation can touch Chromium.
 	// A different Lintel boot cannot own processes started by its predecessor.
 	// Record terminal interruption first, but retain the cleanup fence; after
 	// inventory, dispatchPendingBrowserStops asks this new boot to remove its
@@ -227,9 +239,24 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		if service.Browsers == nil {
 			return status.Error(codes.Internal, "browser authority unavailable")
 		}
+		// Runtime.Service keeps epoch history only in Quoin memory. A reconnect
+		// from an already-running Lintel boot with epoch > 1 and no remembered
+		// predecessor therefore proves that Quoin restarted. Browser operations
+		// are not recoverable across that control-plane restart, even though the
+		// Lintel boot ID is unchanged.
+		if decision.LastConnectionEpoch == 0 && hello.GetConnectionEpoch() > 1 {
+			if _, interruptErr := service.Browsers.InterruptForQuoinRestart(ctx, hello.GetBootId()); interruptErr != nil {
+				return status.Error(codes.Internal, "interrupt browser operations after Quoin restart")
+			}
+		}
 		if _, interruptErr := service.Browsers.InterruptOldBootOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch()); interruptErr != nil {
 			return status.Error(codes.Internal, "interrupt prior browser boot")
 		}
+		// New-boot interruption commits terminal Tool Call rows while Plinth may
+		// remain connected. Replay from those durable rows immediately; otherwise
+		// the parent model loop can wait forever for a child result that was only
+		// written during Lintel's profile-reconcile path.
+		go service.replayUndeliveredBrowserToolResults(context.Background())
 	}
 	// Inventory establishes Lintel's reconciliation fence before any Browser
 	// Operation dispatch is allowed on this new stream.
@@ -267,6 +294,8 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchQueuedInvestigations(context.Background())
 	}
 	if slot == qruntime.SlotLintel && !decision.ProfileReconcileRequired {
+		go service.dispatchAllCancellingBrowserExplorations(context.Background())
+		go service.replayRunningBrowserExplorationChildren(context.Background())
 		go service.dispatchPendingBrowserStops(context.Background())
 		go service.dispatchQueuedBrowserOperations(context.Background())
 	}
@@ -313,6 +342,9 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		switch payload := envelope.Msg.(type) {
 		case *runtimev1.ControlEnvelope_Heartbeat:
 			service.Slots.Touch(slot)
+			if slot == qruntime.SlotLintel {
+				service.reconcileLintelPhysicalOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch(), payload.Heartbeat.GetActiveBrowserOperations())
+			}
 			if slot == qruntime.SlotPlinth {
 				// Heartbeats renew the live stream's attempt leases
 				// (RUNTIME-TASK-007; runtime_slots stays memory-only,
@@ -337,6 +369,28 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			service.handleBeginToolCallRouted(ctx, envelope, payload.BeginToolCall)
 		case *runtimev1.ControlEnvelope_CompleteToolCall:
 			service.handleCompleteToolCallRouted(ctx, envelope, payload.CompleteToolCall)
+		case *runtimev1.ControlEnvelope_RequestBrowserSubExecution:
+			if slot == qruntime.SlotPlinth {
+				service.handleBrowserSubExecution(ctx, envelope, payload.RequestBrowserSubExecution)
+			}
+		case *runtimev1.ControlEnvelope_BrowserExplorationActionResult:
+			if slot == qruntime.SlotLintel {
+				service.handleBrowserExplorationActionResult(ctx, envelope, payload.BrowserExplorationActionResult)
+			}
+		case *runtimev1.ControlEnvelope_BrowserExplorationTerminalClaim:
+			if slot == qruntime.SlotLintel {
+				service.handleBrowserExplorationTerminalClaim(ctx, envelope, payload.BrowserExplorationTerminalClaim)
+			}
+		case *runtimev1.ControlEnvelope_CancelBrowserExplorationActionAck:
+			// The action result, not this receipt, is the durable cancellation
+			// outcome. Receiving the typed Ack only proves Lintel accepted the fence.
+			if slot == qruntime.SlotLintel {
+				sharedops.LogEvent("quoin", "info", "browser.cancel_accepted", fmt.Sprintf("child=%d", payload.CancelBrowserExplorationActionAck.GetChildAttemptId()))
+			}
+		case *runtimev1.ControlEnvelope_ToolResultDeliveryAck:
+			if slot == qruntime.SlotPlinth {
+				service.handleBrowserToolResultDeliveryAck(envelope, payload.ToolResultDeliveryAck)
+			}
 		case *runtimev1.ControlEnvelope_ModelTokenDelta:
 			// Transient visible deltas fan out to the investigation stream
 			// feeds only (RUNTIME-AGENT-004); the analysis slice has no
@@ -399,6 +453,11 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 				continue
 			}
 			sharedops.LogEvent("quoin", "info", "runtime.inventory_complete", "slot="+slot)
+			// This is the sole readiness edge for a reconciled boot. Only after
+			// the complete inventory transaction has committed may replayed work
+			// reach Lintel.
+			go service.dispatchAllCancellingBrowserExplorations(context.Background())
+			go service.replayRunningBrowserExplorationChildren(context.Background())
 			go service.dispatchPendingBrowserStops(context.Background())
 			go service.dispatchQueuedBrowserOperations(context.Background())
 		default:

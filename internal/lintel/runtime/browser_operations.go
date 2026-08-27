@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"sort"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/browser"
@@ -17,12 +18,22 @@ import (
 )
 
 func (channel *Channel) reply(replyTo *runtimev1.ControlEnvelope) *runtimev1.ControlEnvelope {
-	return &runtimev1.ControlEnvelope{MessageId: channel.nextMessageID(), CorrelationId: replyTo.GetMessageId(), ConnectionEpoch: channel.epoch, BootId: channel.bootID}
+	return &runtimev1.ControlEnvelope{CorrelationId: replyTo.GetMessageId(), ConnectionEpoch: channel.epoch, BootId: channel.bootID}
 }
 
 func (channel *Channel) inventoryResponse(envelope *runtimev1.ControlEnvelope, request *runtimev1.ProfileInventoryRequest) *runtimev1.ControlEnvelope {
-	observed := make([]*runtimev1.ObservedBrowserProfile, 0, len(request.GetProfiles()))
-	for _, expected := range request.GetProfiles() {
+	expectedProfiles := append([]*runtimev1.ExpectedBrowserProfile(nil), request.GetProfiles()...)
+	// Inventory is a complete set, not a request-order projection. Sorting makes
+	// the report deterministic across reconnects and lets Quoin compare it as a
+	// stable complete inventory.
+	sort.Slice(expectedProfiles, func(i, j int) bool {
+		if expectedProfiles[i].GetIdentityId() != expectedProfiles[j].GetIdentityId() {
+			return expectedProfiles[i].GetIdentityId() < expectedProfiles[j].GetIdentityId()
+		}
+		return expectedProfiles[i].GetProfileGenerationId() < expectedProfiles[j].GetProfileGenerationId()
+	})
+	observed := make([]*runtimev1.ObservedBrowserProfile, 0, len(expectedProfiles))
+	for _, expected := range expectedProfiles {
 		item := &runtimev1.ObservedBrowserProfile{IdentityId: expected.GetIdentityId(), ProfileGenerationId: expected.GetProfileGenerationId(), Status: runtimev1.ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_MISSING}
 		manifest, digest, err := channel.profiles.Inspect(expected.GetIdentityId(), expected.GetGeneration())
 		if err != nil {
@@ -55,17 +66,23 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 	if channel.started == nil {
 		channel.started = make(map[int64]*runtimev1.StartBrowserOperation)
 	}
+	if channel.startAckFences == nil {
+		channel.startAckFences = make(map[int64]chan struct{})
+	}
+	// Every Start response is an unknown-outcome reply. Replay the exact cached
+	// response before evaluating current operation state, including the cached
+	// stale-stream rejection below.
+	if previous := channel.startAcks[request.GetOperationId()]; previous != nil {
+		reply := channel.reply(envelope)
+		reply.Msg = &runtimev1.ControlEnvelope_StartBrowserOperationAck{StartBrowserOperationAck: previous}
+		return reply
+	}
 	// Stop can legitimately arrive before an in-flight Start reaches Lintel.
 	// The idempotent Stop acknowledgement is a terminal tombstone: never allow
 	// a later Start with the same operation ID to recreate Chromium.
 	if channel.stopAcks[request.GetOperationId()] != nil {
 		ack := &runtimev1.StartBrowserOperationAck{OperationId: request.GetOperationId(), RejectReason: runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM, Detail: "operation was already stopped"}
 		return channel.startAckReply(envelope, ack)
-	}
-	if previous := channel.startAcks[request.GetOperationId()]; previous != nil {
-		reply := channel.reply(envelope)
-		reply.Msg = &runtimev1.ControlEnvelope_StartBrowserOperationAck{StartBrowserOperationAck: previous}
-		return reply
 	}
 	ack := &runtimev1.StartBrowserOperationAck{OperationId: request.GetOperationId()}
 	if err := validateStartInput(request); err != nil {
@@ -86,20 +103,37 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED, "invalid frozen browser input"
 		return channel.startAckReply(envelope, ack)
 	}
+	// Publish the operation binding before starting Chromium. The manager can
+	// report a child-process crash synchronously with Start; without this
+	// barrier browserCrashed sees no operation and loses the only completion
+	// tombstone before the StartAck is cached.
+	channel.started[request.GetOperationId()] = request
+	// A post-admission process loss may reach the crash callback before the
+	// receive loop can send this StartAck. Its terminal completion waits on this
+	// gate so Quoin always observes the accepted Start boundary first.
+	channel.startAckFences[request.GetOperationId()] = make(chan struct{})
+	// Any rejection after publishing this provisional binding must remove it.
+	// Otherwise a failed profile/catalog validation looks like an active operation
+	// to crash/cancel routing and can strand its identity indefinitely.
+	started := false
+	defer func() {
+		if !started && channel.started[request.GetOperationId()] == request {
+			delete(channel.started, request.GetOperationId())
+			delete(channel.startAckFences, request.GetOperationId())
+		}
+	}()
 	var err error
 	switch request.GetKind() {
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN:
 		_, err = channel.browser.Start(context.Background(), request.GetOperationId(), input.Identity.StartURL)
-	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE:
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION:
 		if request.GetProfileGenerationId() < 1 || input.Identity.ProfileGeneration == 0 {
 			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE, "frozen profile generation is missing"
 			return channel.startAckReply(envelope, ack)
 		}
 		manifest, _, inspectErr := channel.profiles.Inspect(request.GetIdentityId(), input.Identity.ProfileGeneration)
-		// A revision-change probe deliberately runs the new immutable probe
-		// configuration against the current generation, whose manifest remains
-		// bound to the revision that published it. Identity/path integrity and
-		// Chromium compatibility are still verified by Inspect plus this check.
+		// The profile is immutable and Chromium revision-bound before a non-login
+		// operation may attach it.
 		if inspectErr != nil || manifest.ChromiumRevision != channel.Config.ChromiumRevision {
 			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE, "published profile is unavailable or incompatible"
 			return channel.startAckReply(envelope, ack)
@@ -109,28 +143,91 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE, "published profile path is invalid"
 			return channel.startAckReply(envelope, ack)
 		}
-		_, err = channel.browser.StartWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
+		if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION {
+			_, err = channel.browser.StartExplorationWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
+		} else {
+			_, err = channel.browser.StartWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
+		}
 	default:
 		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED, "browser operation kind is not implemented"
 		return channel.startAckReply(envelope, ack)
 	}
 	if err != nil {
 		sharedops.LogEvent("lintel", "warn", "browser.start_failed", err.Error())
+		// Capacity is checked before Manager reserves an operation or launches a
+		// process. It is the one retryable physical non-start.
 		if errors.Is(err, browser.ErrBusy) {
-			ack.RejectReason = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY
-		} else {
-			ack.RejectReason = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INTERNAL
+			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY, "browser capacity exhausted"
+			return channel.startAckReply(envelope, ack)
 		}
-		ack.Detail = "browser start failed"
+		// Chromium/recorder/initial-navigation startup is already a physical
+		// side-effect boundary. It must never be reported as a rejected Start:
+		// Quoin would close the child without a typed terminal trace and a later
+		// Stop could not fence the process attempt. Accept the durable operation,
+		// then emit the normal replayable terminal completion and Stop tombstone.
+		ack.Accepted, ack.StartedAt = true, timestamppb.Now()
+		started = true
+		channel.startAcks[request.GetOperationId()] = ack
+		// Physical startup has crossed the operation boundary but did not yield a
+		// usable Chromium. Own the terminal fence before StartAck is exposed: no
+		// action, probe, tunnel, or publish follow-up may race the post-Ack
+		// completion work item.
+		if channel.completing == nil {
+			channel.completing = make(map[int64]bool)
+		}
+		channel.completing[request.GetOperationId()] = true
+		if channel.startupFailures == nil {
+			channel.startupFailures = make(map[int64]*runtimev1.StartBrowserOperation)
+		}
+		// Do not upload or emit Completion from this function. RunConnect writes
+		// the accepted StartAck first, then consumes this one-shot work item on the
+		// same installed stream. Until Completion/Stop are acknowledged, started
+		// retains the operation in Hello/Heartbeat reconciliation.
+		channel.startupFailures[request.GetOperationId()] = request
 		return channel.startAckReply(envelope, ack)
 	}
-	channel.started[request.GetOperationId()] = request
 	ack.Accepted, ack.StartedAt = true, timestamppb.Now()
+	started = true
 	channel.startAcks[request.GetOperationId()] = ack
 	return channel.startAckReply(envelope, ack)
 }
 
+// takeStartupFailure consumes the post-StartAck work item exactly once. It is
+// called only after the current control stream has successfully sent StartAck.
+func (channel *Channel) takeStartupFailure(operationID int64) *runtimev1.StartBrowserOperation {
+	channel.operationMu.Lock()
+	defer channel.operationMu.Unlock()
+	start := channel.startupFailures[operationID]
+	delete(channel.startupFailures, operationID)
+	return start
+}
+
+func browserStartRejectReason(err error) runtimev1.BrowserOperationStartRejectReason {
+	if errors.Is(err, browser.ErrBusy) {
+		return runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY
+	}
+	if errors.Is(err, browser.ErrDownloadBlocked) {
+		return runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED
+	}
+	return runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INTERNAL
+}
+
+// recordStopTombstoneLocked retains every same-boot terminal fence. Eviction
+// would make a delayed Start observable again and could recreate Chromium after
+// Quoin had already durably stopped the operation. Channel lifetime (one boot)
+// is the only valid tombstone boundary.
+func (channel *Channel) recordStopTombstoneLocked(operationID int64, ack *runtimev1.StopBrowserOperationAck) {
+	channel.stopAcks[operationID] = ack
+}
+
 func (channel *Channel) startAckReply(envelope *runtimev1.ControlEnvelope, ack *runtimev1.StartBrowserOperationAck) *runtimev1.ControlEnvelope {
+	// Start acknowledgements, except NO_CAPACITY, are unknown-outcome replies.
+	// NO_CAPACITY proves no Chromium process was created and Quoin deliberately
+	// retains FIFO position in WaitingForCapacity; caching it here would make a
+	// later capacity retry on this same boot replay rejection forever.
+	if ack != nil && ack.GetOperationId() > 0 && ack.GetRejectReason() != runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY && channel.startAcks[ack.GetOperationId()] == nil {
+		channel.startAcks[ack.GetOperationId()] = ack
+	}
 	reply := channel.reply(envelope)
 	reply.Msg = &runtimev1.ControlEnvelope_StartBrowserOperationAck{StartBrowserOperationAck: ack}
 	return reply
@@ -225,21 +322,27 @@ func (channel *Channel) publishResponse(envelope *runtimev1.ControlEnvelope, req
 	probe.Result = runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_AUTHENTICATED
 	result.Accepted, result.ChromiumRevision, result.ProfileManifestDigest, result.ProbeResult = true, channel.Config.ChromiumRevision, digest, probe
 	channel.published[request.GetOperationId()] = result
-	delete(channel.started, request.GetOperationId())
+	// Retain the lifecycle binding until the terminal operation is durably
+	// acknowledged and Stop cleanup has completed. Detached Chromium is not a
+	// license for Hello/Heartbeat to report the operation absent in this window.
 	return reply()
 }
 
 func (channel *Channel) stopResponse(envelope *runtimev1.ControlEnvelope, request *runtimev1.StopBrowserOperation) *runtimev1.ControlEnvelope {
 	channel.operationMu.Lock()
-	if previous := channel.stopAcks[request.GetOperationId()]; previous != nil {
+	if previous := channel.stopAcks[request.GetOperationId()]; previous != nil && previous.GetCleanupOutcome() == runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED {
 		channel.operationMu.Unlock()
 		reply := channel.reply(envelope)
 		reply.Msg = &runtimev1.ControlEnvelope_StopBrowserOperationAck{StopBrowserOperationAck: previous}
 		return reply
 	}
-	// Retire the request before cancelling the relay: a delayed reconnect from
-	// a prior RFB close can no longer create a new tunnel during this Stop.
-	delete(channel.started, request.GetOperationId())
+	// A failed cleanup acknowledgement is not a terminal cleanup tombstone.
+	// Retrying Stop must retry the idempotent local cleanup (especially trace
+	// staging removal) until it can honestly report success. The operation ID is
+	// still fenced by stopAcks, so a delayed Start cannot recreate Chromium.
+	// Keep the lifecycle binding through physical Stop and cleanup. Hello and
+	// Heartbeat must reconcile it until the terminal outcome is durably fenced;
+	// forgetTerminalOperation removes it only after the required acknowledgements.
 	channel.operationMu.Unlock()
 	channel.tunnelMu.Lock()
 	cancel := channel.tunnelCancels[request.GetOperationId()]
@@ -252,17 +355,32 @@ func (channel *Channel) stopResponse(envelope *runtimev1.ControlEnvelope, reques
 		<-done
 	}
 	err := channel.browser.Stop(request.GetOperationId())
+	traceErr := channel.deleteTraceStaging(request.GetOperationId())
 	outcome := runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED
 	failure := runtimev1.BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED
-	if err != nil {
+	if err != nil || traceErr != nil {
 		outcome, failure = runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_FAILED, runtimev1.BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_INTERNAL
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%t", request.GetOperationId(), err == nil)))
-	ack := &runtimev1.StopBrowserOperationAck{OperationId: request.GetOperationId(), StoppedAt: timestamppb.Now(), CleanupOutcome: outcome, ProcessStopped: err == nil, TunnelClosed: err == nil, TraceStagingDeleted: err == nil, TemporaryProfileDeleted: err == nil, CleanupStateHash: sum[:], FailureCode: failure}
+	// traceStagingDeleted is true only after removal of a locally staged trace
+	// (or when this operation never staged one); it is not inferred from the
+	// unrelated Chromium Stop result.
+	traceDeleted := traceErr == nil
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%t:%t", request.GetOperationId(), err == nil, traceDeleted)))
+	ack := &runtimev1.StopBrowserOperationAck{OperationId: request.GetOperationId(), StoppedAt: timestamppb.Now(), CleanupOutcome: outcome, ProcessStopped: err == nil, TunnelClosed: err == nil, TraceStagingDeleted: traceDeleted, TemporaryProfileDeleted: err == nil, CleanupStateHash: sum[:], FailureCode: failure}
 	channel.operationMu.Lock()
-	channel.stopAcks[request.GetOperationId()] = ack
+	channel.recordStopTombstoneLocked(request.GetOperationId(), ack)
+	completionPending := channel.completed[request.GetOperationId()] != nil
 	channel.operationMu.Unlock()
+	// Once Stop is durable on this boot, all non-tombstone state can be released
+	// only if no terminal completion/action result still awaits Quoin's Ack.
+	// The Stop Ack itself remains to fence delayed Start frames.
+	if !completionPending && !channel.hasPendingExplorationResult(request.GetOperationId()) {
+		channel.forgetTerminalOperation(request.GetOperationId())
+	}
 	reply := channel.reply(envelope)
+	// Keep the Stop acknowledgement as a same-boot tombstone. A delayed Start
+	// must be rejected and a duplicate Stop must replay these exact facts; only a
+	// new Lintel boot discards this process-local control state.
 	reply.Msg = &runtimev1.ControlEnvelope_StopBrowserOperationAck{StopBrowserOperationAck: ack}
 	return reply
 }

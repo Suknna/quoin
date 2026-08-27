@@ -7,9 +7,12 @@ import { join, resolve } from 'node:path'
 export default async function globalTeardown() {
 const repoRoot = join(import.meta.dirname, '..', '..', '..')
 const ticket = process.env.QUOIN_TICKET ?? ''
-const stack = join(repoRoot, '.artifacts', ticket === 'T20' ? 'e2e-stack-t20' : 'e2e-stack')
+const browserTicket = ticket === 'T20' || ticket === 'T22'
+const ticketSlug = ticket.toLowerCase()
+const stack = join(repoRoot, '.artifacts', browserTicket ? `e2e-stack-${ticketSlug}` : 'e2e-stack')
 const evidenceDir = process.env.QUOIN_EVIDENCE_DIR ?? join(repoRoot, '.artifacts', 'tickets', 'T01')
-const composeProject = ticket === 'T20' ? 'quoin-t20' : 'quoin'
+const composeProject = browserTicket ? `quoin-${ticketSlug}` : 'quoin'
+const browserFixture = browserTicket ? `quoin-${ticketSlug}-auth-fixture` : ''
 const composeFile = join(stack, 'state', 'quoin', 'compose', 'generated', 'compose.yaml')
 const disposals = []
 const cleanupFailures = []
@@ -26,15 +29,15 @@ function record(name, command) {
 }
 
 if (existsSync(composeFile)) {
-  if (ticket === 'T20') record('ticket authentication fixture', 'if docker container inspect quoin-t20-auth-fixture >/dev/null 2>&1; then docker rm -f quoin-t20-auth-fixture; fi')
-  const downFlags = ticket === 'T20' ? 'down --volumes --remove-orphans' : 'down --remove-orphans'
+  if (browserTicket) record('ticket authentication fixture', `if docker container inspect ${browserFixture} >/dev/null 2>&1; then docker rm -f ${browserFixture}; fi`)
+  const downFlags = browserTicket ? 'down --volumes --remove-orphans' : 'down --remove-orphans'
   record('playwright containers+networks', `docker compose --project-name ${composeProject} --file "${composeFile}" ${downFlags}`)
-  if (ticket !== 'T20') record('playwright alertmanager+forwarder', 'docker rm -f e2e-am e2e-fwd')
+  if (!browserTicket) record('playwright alertmanager+forwarder', 'docker rm -f e2e-am e2e-fwd')
 }
 // T20 uses a private image namespace, so it removes only the images it built
 // and never overwrites or deletes shared developer image tags.
-if (ticket === 'T20') {
-  record('ticket-20 private images', 'for image in quoin-t20/quoin:v0.1.0-dev quoin-t20/plinth:v0.1.0-dev quoin-t20/lintel:v0.1.0-dev quoin-t20/stele:v0.1.0-dev; do if docker image inspect "$image" >/dev/null 2>&1; then docker rmi "$image" || exit $?; fi; done')
+if (browserTicket) {
+  record('ticket browser private images', `for image in quoin-${ticketSlug}/quoin:v0.1.0-dev quoin-${ticketSlug}/plinth:v0.1.0-dev quoin-${ticketSlug}/lintel:v0.1.0-dev quoin-${ticketSlug}/stele:v0.1.0-dev; do if docker image inspect "$image" >/dev/null 2>&1; then docker rmi "$image" || exit $?; fi; done`)
 } else {
   record('playwright images', 'docker rmi quoin/quoin:v0.1.0-dev quoin/plinth:v0.1.0-dev quoin/lintel:v0.1.0-dev quoin/stele:v0.1.0-dev')
 }
@@ -43,6 +46,9 @@ if (existsSync(join(stack, 'tls-proxy.pid'))) {
 }
 if (existsSync(join(stack, 'ready.pid'))) {
   record('ticket readiness server', `pid=$(cat "${join(stack, 'ready.pid')}"); if kill -0 "$pid" >/dev/null 2>&1; then kill "$pid"; fi`)
+}
+if (existsSync(join(stack, 'fixture-provider.pid'))) {
+  record('ticket model fixture', `pid=$(cat "${join(stack, 'fixture-provider.pid')}"); if kill -0 "$pid" >/dev/null 2>&1; then kill "$pid"; fi`)
 }
 if (existsSync(stack)) {
   rmSync(stack, { recursive: true, force: true })
@@ -60,8 +66,8 @@ if (existsSync(cleanupPath)) {
 }
 cleanup.playwright = {
   resources: disposals,
-  owned: ticket === 'T20'
-    ? ['quoin-t20 Compose containers/networks/volumes', 'quoin-t20-auth-fixture', 'quoin-t20 images', 'TLS proxy', 'readiness server', 'e2e-stack-t20 directory']
+  owned: browserTicket
+    ? [`quoin-${ticketSlug} Compose containers/networks/volumes`, browserFixture, `quoin-${ticketSlug} images`, 'TLS proxy', 'readiness server', `e2e-stack-${ticketSlug} directory`]
     : ['Compose stack', 'TLS proxy', 'e2e stack directory'],
   note: 'e2e stack removed after Chromium ticket acceptance',
 }
