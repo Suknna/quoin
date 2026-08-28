@@ -462,6 +462,11 @@ func (service *RuntimeService) handleJourneyResultProposal(ctx context.Context, 
 	}
 	ack.GetResultAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotLintel, ack)
+	if childScope == "run_check" {
+		// The journey ledger may have closed the collection and created the
+		// analysis attempt; dispatch it without waiting for another event.
+		go service.dispatchQueuedInspections(context.Background())
+	}
 	// The ledger transaction committed the domain terminal states; the
 	// physical Stop fence now releases identity and slot.
 	var operationID int64

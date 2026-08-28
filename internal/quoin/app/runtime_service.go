@@ -297,6 +297,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchQueuedResourceRefreshAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedInvestigations(context.Background())
+		go service.dispatchQueuedInspections(context.Background())
 	}
 	if slot == qruntime.SlotLintel && !decision.ProfileReconcileRequired {
 		go service.dispatchAllCancellingBrowserExplorations(context.Background())

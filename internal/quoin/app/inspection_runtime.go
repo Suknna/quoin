@@ -199,6 +199,9 @@ func (service *RuntimeService) handleInspectionPromQLResultProposal(ctx context.
 	}
 	ack.GetResultAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+	// The commit may have closed the collection and created the analysis
+	// attempt; dispatch it without waiting for an unrelated runtime event.
+	go service.dispatchQueuedInspections(context.Background())
 }
 
 // handleInspectionReportResultProposal adjudicates
