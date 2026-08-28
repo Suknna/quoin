@@ -12,22 +12,44 @@ import (
 )
 
 // VerificationAttempts exposes the generic Attempt authority configured to
-// reconstruct Config Verification's frozen PromQL input from its immutable
-// projections. It never reads a connection secret.
+// reconstruct Config Verification's frozen inputs (PromQL or Journey) from
+// their immutable projections. It never reads a connection secret.
 func (service *Service) VerificationAttempts() *attempt.Service {
 	attempts := attempt.NewService(service.db)
-	attempts.SnapshotRebuilder = service.rebuildVerificationAttemptInput
+	attempts.SnapshotRebuilder = service.rebuildVerificationAttempt
 	return attempts
 }
 
+// rebuildVerificationAttempt dispatches to the check-kind rebuilder: PromQL
+// children rebuild config_verification_execution_v1, browser children
+// rebuild the frozen inspection_collection_v1 journey input.
+func (service *Service) rebuildVerificationAttempt(ctx context.Context, attemptID int64) ([]byte, error) {
+	var kind string
+	if err := service.db.QueryRowContext(ctx, `
+		SELECT c.kind FROM execution_attempts a
+		JOIN config_verification_runs r ON r.id=a.scope_id
+		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=a.plan_key
+		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
+		WHERE a.id=?`, attemptID).Scan(&kind); err != nil {
+		return nil, err
+	}
+	if kind == "browser" {
+		return service.rebuildJourneyVerificationInput(ctx, attemptID)
+	}
+	return service.rebuildVerificationAttemptInput(ctx, attemptID)
+}
+
 // QueuedVerificationAttempts returns only the supervisor-only PromQL work
-// created by RunVerification. Browser checks have no place in this path.
+// created by RunVerification. Browser children dispatch to Lintel through
+// their journey operation (QueuedJourneyDispatches), never through Plinth.
 func (service *Service) QueuedVerificationAttempts(ctx context.Context) ([]int64, error) {
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
 		JOIN config_verification_runs r ON r.id=a.scope_id
+		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=a.plan_key
+		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
 		WHERE a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
-		  AND a.state='Queued' AND r.state='Running'
+		  AND a.state='Queued' AND r.state='Running' AND c.kind='promql'
 		ORDER BY a.id`)
 	if err != nil {
 		return nil, err

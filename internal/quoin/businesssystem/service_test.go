@@ -82,6 +82,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	seedThanosExecutionPath(t, db, now)
 	seedPlinthRuntime(t, db, now)
+	seedLintelRuntime(t, db, now)
 	contracts := labelcontract.NewService(db)
 	// Contract v1 active through the real zero-system activation command.
 	if _, err := contracts.CreateDraft(context.Background(), 1, "seed-contract-0001", []byte(activeContractYAML), config.Limits{}); err != nil {
@@ -118,6 +119,21 @@ func seedThanosExecutionPath(t *testing.T, db *sql.DB, now string) {
 	}
 	generationID, _ := generation.LastInsertId()
 	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=2 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedLintelRuntime(t *testing.T, db *sql.DB, now string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('lintel','unregistered',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('lintel',1,?,?,?,1)`, make([]byte, 32), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID, _ := credential.LastInsertId()
+	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='lintel'`, credentialID); err != nil {
 		t.Fatal(err)
 	}
 }

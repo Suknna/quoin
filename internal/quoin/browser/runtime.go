@@ -86,6 +86,11 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	if kind == "exploration" && ownerState != "Running" {
 		return DispatchInput{}, ErrConflict
 	}
+	// A journey operation dispatches only while its Config Verification child is
+	// still queued for Lintel; a fenced or terminal child cancels the Start.
+	if kind == "journey" && ownerState != "Queued" {
+		return DispatchInput{}, ErrConflict
+	}
 	if state == "Starting" {
 		// Unknown-outcome Start may be replayed only on the same boot after a
 		// reconnect. Preserve the original audit binding while sending on the
@@ -173,7 +178,7 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	if input.Kind == "manual_login" && (input.ActorUserID == nil || input.ActorSessionID == nil) {
 		return DispatchInput{}, ErrInvalid
 	}
-	if (input.Kind == "authentication_probe" || input.Kind == "exploration") && (input.ActorUserID != nil || input.ActorSessionID != nil || !profileGeneration.Valid) {
+	if (input.Kind == "authentication_probe" || input.Kind == "exploration" || input.Kind == "journey") && (input.ActorUserID != nil || input.ActorSessionID != nil || !profileGeneration.Valid) {
 		return DispatchInput{}, ErrInvalid
 	}
 	input.Probe.Params = json.RawMessage(params)
@@ -209,6 +214,8 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "authentication_probe_v1", "operationId": operationID, "phase": "revision_change", "identity": identity, "probe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
 	} else if input.Kind == "exploration" {
 		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "exploration_v1", "operationId": operationID, "identity": identity, "authenticationProbe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
+	} else if input.Kind == "journey" {
+		input.CanonicalJSON, err = service.buildJourneyOperationInput(ctx, conn, input, identity)
 	} else {
 		err = ErrInvalid
 	}
@@ -220,6 +227,37 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	}
 	committed = true
 	return input, nil
+}
+
+// buildJourneyOperationInput assembles the frozen inspection_collection_v1
+// Start payload of a journey operation from the same durable rows that froze
+// the child Attempt's snapshot (the operation's own catalog binding is the
+// execution authority, DATA-BROWSER-001).
+func (service *Service) buildJourneyOperationInput(ctx context.Context, conn *sql.Conn, input DispatchInput, identity map[string]any) ([]byte, error) {
+	var ownerAttempt sql.NullInt64
+	var journeyID sql.NullString
+	var journeyVersion sql.NullInt64
+	var planKey, checkKey, params string
+	if err := conn.QueryRowContext(ctx, `
+		SELECT o.owner_attempt_id,o.journey_id,o.journey_version,a.plan_key,a.check_key,COALESCE(c.journey_params_json,'{}')
+		FROM browser_operations o
+		JOIN execution_attempts a ON a.id=o.owner_attempt_id
+		JOIN config_verification_runs t ON t.id=a.scope_id AND a.scope_type='config_verification_run'
+		JOIN config_plans p ON p.config_version_id=t.config_version_id AND p.plan_key=a.plan_key
+		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key AND c.kind='browser'
+		WHERE o.id=?`, input.OperationID).Scan(&ownerAttempt, &journeyID, &journeyVersion, &planKey, &checkKey, &params); err != nil {
+		return nil, err
+	}
+	if !ownerAttempt.Valid || ownerAttempt.Int64 < 1 || !journeyID.Valid || !journeyVersion.Valid || journeyVersion.Int64 < 1 {
+		return nil, ErrInvalid
+	}
+	return json.Marshal(map[string]any{
+		"schemaKind": "inspection_collection_v1", "attemptId": ownerAttempt.Int64, "operationId": input.OperationID,
+		"identity":            identity,
+		"journey":             map[string]any{"id": journeyID.String, "version": journeyVersion.Int64, "params": json.RawMessage(params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}},
+		"authenticationProbe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}},
+		"planKey":             planKey, "checkKey": checkKey,
+	})
 }
 
 func (service *Service) HandleStartAck(ctx context.Context, operationID int64, bootID string, epoch uint64, accepted bool, reason string, startedAt time.Time) error {

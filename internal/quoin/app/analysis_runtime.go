@@ -169,6 +169,8 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	if attemptType == "inspection_collection" {
 		if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "resource_discovery_result_v1" {
 			service.handleResourceRefreshResultProposal(ctx, envelope, proposal)
+		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "browser_journey_result_v1" {
+			service.handleJourneyResultProposal(ctx, envelope, proposal)
 		} else {
 			service.handleVerificationResultProposal(ctx, envelope, proposal)
 		}
@@ -242,6 +244,9 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *r
 			if err := service.BusinessSystems.ConvergeResourceRefreshCancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", err.Error())
 			}
+			// A cancelled Lintel journey child settles its technical gap and its
+			// operation through the shared convergence sweep.
+			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
 		}
 	case "initial_analysis":
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {

@@ -310,7 +310,7 @@ func SemanticChecks(document BusinessSystemDocument, businessSystemLabel string)
 			case "promql":
 				fields = append(fields, ValidateCheckExpression(check.Expression, businessSystemLabel, document.SystemKey, checkPath+".query.expression")...)
 			case "browser":
-				fields = append(fields, ValidateJourneyReference(check.JourneyID, check.JourneyParams, checkPath)...)
+				fields = append(fields, ValidateJourneyReferenceVersion(check.JourneyID, 0, "journey", check.JourneyParams, checkPath)...)
 			}
 		}
 	}

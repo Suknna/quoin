@@ -262,7 +262,13 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
 	application.resourceRefreshDispatchFunc = controlService.dispatchQueuedResourceRefreshAttempts
-	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
+	application.verificationDispatchFunc = func(ctx context.Context) {
+		controlService.dispatchQueuedVerificationAttempts(ctx)
+		// Browser-check children flow through their journey Browser Operation's
+		// global FIFO, not the supervisor queue (CFG-VERIFYRUN-002).
+		controlService.dispatchQueuedBrowserOperations(ctx)
+		controlService.dispatchReadyJourneyAttempts(ctx)
+	}
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
 	// disconnect is what enters AwaitingReconnect; a tunnel reconnect must not

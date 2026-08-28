@@ -43,6 +43,8 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE
 	case "exploration":
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION
+	case "journey":
+		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY
 	default:
 		return browser.ErrInvalid
 	}
@@ -102,6 +104,8 @@ func browserOperationSchemaKind(kind string) string {
 		return "authentication_probe_v1"
 	case "exploration":
 		return "exploration_v1"
+	case "journey":
+		return "inspection_collection_v1"
 	default:
 		return ""
 	}
@@ -175,6 +179,7 @@ func (service *RuntimeService) handleBrowserStopAck(ctx context.Context, envelop
 			go service.finalizeCancellation(context.Background(), parentID, "investigation")
 		}
 		go service.reconcilePendingAttemptTerminals(context.Background())
+		go service.reconcileJourneyVerificationChildren(context.Background())
 		go service.dispatchQueuedBrowserOperations(context.Background())
 	}
 }
@@ -305,6 +310,7 @@ func (service *RuntimeService) handleBrowserStartAck(ctx context.Context, envelo
 	})
 	if err == nil && ack.GetAccepted() {
 		go service.dispatchPendingExplorationAction(context.Background(), ack.GetOperationId())
+		go service.dispatchReadyJourneyAttempts(context.Background())
 	} else if err == nil && rejectReason != "no_capacity" {
 		// NO_CAPACITY is an explicit non-start: Browser.Service keeps the Operation
 		// in WaitingForCapacity at its original FIFO position. It is not a model
@@ -323,6 +329,7 @@ func (service *RuntimeService) handleBrowserStartAck(ctx context.Context, envelo
 		go service.reconcileTerminalParentExplorations(context.Background())
 		go service.reconcilePendingAttemptTerminals(context.Background())
 		go service.dispatchAllCancellingBrowserExplorations(context.Background())
+		go service.reconcileJourneyVerificationChildren(context.Background())
 	}
 	// NO_CAPACITY keeps its original FIFO position unless its parent already
 	// terminalized; reconciliation above then closes it with the no_capacity

@@ -27,9 +27,9 @@ var ErrNotFound = errors.New("business system or config version not found")
 // request digest (HTTP-COMMAND-003).
 var ErrCommandReused = errors.New("client command id reused with a different request")
 
-// ErrBrowserVerificationUnavailable reports a draft whose browser checks
-// have no executor in this build (HTTP-CONFIG-003: deterministic 503).
-var ErrBrowserVerificationUnavailable = errors.New("browser checks cannot be executed in this build")
+// ErrBrowserIdentityMissing reports a draft whose browser checks cannot run
+// because the business system has no Browser Identity configured yet.
+var ErrBrowserIdentityMissing = errors.New("business system has no browser identity")
 
 // ConflictError carries the frozen publish conflict codes.
 type ConflictError struct {

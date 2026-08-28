@@ -152,11 +152,18 @@ func (service *Service) Get(ctx context.Context, attemptID int64) (View, error) 
 // binding (RUNTIME-TASK-001/002). The row-version increment and the WHERE
 // fence happen in one UPDATE statement (DATA-ATTEMPT-006).
 func (service *Service) BindToStream(ctx context.Context, attemptID int64, bootID string, epoch uint64, lease time.Duration) error {
+	return service.BindToSlot(ctx, attemptID, "plinth", bootID, epoch, lease)
+}
+
+// BindToSlot is the slot-parameterized dispatch binding: config verification
+// browser children bind to lintel (CFG-VERIFYRUN-002), every other caller
+// keeps the Plinth supervisor binding.
+func (service *Service) BindToSlot(ctx context.Context, attemptID int64, slot, bootID string, epoch uint64, lease time.Duration) error {
 	result, err := service.db.ExecContext(ctx, `
 		UPDATE execution_attempts
-		SET state='Assigned', runtime_slot='plinth', boot_id=?, connection_epoch=?,
+		SET state='Assigned', runtime_slot=?, boot_id=?, connection_epoch=?,
 		    lease_until=?, runtime_release_version=?, row_version=row_version+1
-		WHERE id=? AND state='Queued'`, bootID, epoch, service.now().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID)
+		WHERE id=? AND state='Queued'`, slot, bootID, epoch, service.now().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID)
 	if err != nil {
 		return err
 	}

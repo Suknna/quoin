@@ -71,6 +71,27 @@ func (service *Service) HandleCompletion(ctx context.Context, completion Complet
 		return nil
 	}
 	if kind != "authentication_probe" || len(completion.Probes) != 1 {
+		if kind == "journey" {
+			// Journey operations terminalize through the journey ledger for real
+			// results; only physical loss completions (crash/startup failure) arrive
+			// here, and they can never claim success.
+			if completion.Outcome != "Failed" || len(completion.Probes) != 0 {
+				return ErrInvalid
+			}
+			switch completion.TerminalReason {
+			case "browser_crashed", "runtime_unavailable", "protocol_error", "artifact_commit_failed":
+			default:
+				return ErrInvalid
+			}
+			if _, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Failed',ended_at=?,terminal_reason=?,completion_digest=?,row_version=row_version+1 WHERE id=? AND state='Running'`, completion.EndedAt.UTC().Format(time.RFC3339Nano), completion.TerminalReason, completion.Digest, completion.ID); err != nil {
+				return err
+			}
+			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+				return err
+			}
+			committed = true
+			return nil
+		}
 		return ErrInvalid
 	}
 	probe := completion.Probes[0]

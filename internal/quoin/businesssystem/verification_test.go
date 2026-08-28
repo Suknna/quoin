@@ -317,14 +317,15 @@ func TestRunVerificationRejectsBrowserChecksWithoutExecutor(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT id FROM config_plans WHERE config_version_id=?`, versionID(t, draft)).Scan(&planID); err != nil {
 		t.Fatal(err)
 	}
-	// The browser executor is a later ticket; a valid browser check row must
-	// be rejected at creation instead of producing a Run that never converges.
-	if _, err := h.db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,journey_id,journey_params_json) VALUES(?,'browser-check','Browser','?','browser','any-journey','{}')`, planID); err != nil {
+	// Browser checks execute through Lintel; a system without a Browser
+	// Identity must be rejected at creation instead of producing a Run that
+	// can never converge.
+	if _, err := h.db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,journey_id,journey_params_json) VALUES(?,'browser-check','Browser','?','browser','page.status-marker.v1','{}')`, planID); err != nil {
 		t.Fatal(err)
 	}
 	_, err := h.systems.RunVerification(context.Background(), h.principal, "cmd-browser-run-0002", "payments", versionID(t, draft))
-	if !errors.Is(err, ErrBrowserVerificationUnavailable) {
-		t.Fatalf("browser-bearing draft must be deterministically rejected: %#v", err)
+	if !errors.Is(err, ErrBrowserIdentityMissing) {
+		t.Fatalf("browser-bearing draft without an identity must be deterministically rejected: %#v", err)
 	}
 	var runs int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM config_verification_runs WHERE config_version_id=?`, versionID(t, draft)).Scan(&runs); err != nil || runs != 0 {

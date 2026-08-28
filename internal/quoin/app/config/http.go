@@ -105,8 +105,8 @@ func mapDomainError(err error) error {
 		return conflict
 	case errors.Is(err, businesssystem.ErrNotFound), errors.Is(err, labelcontract.ErrNotFound):
 		return problem(http.StatusNotFound, "not_found", "目标对象不存在，可能刚被删除或路径不正确。")
-	case errors.Is(err, businesssystem.ErrBrowserVerificationUnavailable):
-		return problem(http.StatusServiceUnavailable, "external_dependency_unavailable", "该配置包含浏览器检查，当前版本暂不支持执行浏览器验证。")
+	case errors.Is(err, businesssystem.ErrBrowserIdentityMissing):
+		return problem(http.StatusConflict, "browser_identity_missing", "该配置包含浏览器检查，但业务系统尚未配置浏览器身份，请先完成浏览器身份配置。")
 	case errors.Is(err, thanos.ErrThanosUnavailable):
 		return problem(http.StatusServiceUnavailable, "external_dependency_unavailable", "尚未配置可用的 Thanos 连接，暂时无法执行配置验证或资源刷新。")
 	}

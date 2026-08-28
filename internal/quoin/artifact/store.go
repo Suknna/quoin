@@ -361,11 +361,13 @@ func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header
 		var bound int
 		// A crash can happen after StartAck but before the first action row, or
 		// between two terminal child attempts. An attempt_id=0 trace is therefore
-		// authorized by the still-Running operation itself; a nonzero attempt keeps
-		// the stronger child/action fence used by ordinary action artifacts.
+		// authorized by the still-Running operation itself (a Journey's mandatory
+		// whole-run trace or an Exploration's operation-owned trace); a nonzero
+		// attempt keeps the stronger child/action fence used by ordinary action
+		// artifacts.
 		query := `SELECT EXISTS(SELECT 1 FROM browser_operations operation
-			WHERE operation.id=? AND operation.kind='exploration' AND operation.state='Running'
-			  AND operation.lintel_boot_id=? AND operation.lintel_connection_epoch<=?)`
+			WHERE operation.id=? AND operation.kind IN ('journey','exploration') AND operation.state='Running'
+				AND operation.lintel_boot_id=? AND operation.lintel_connection_epoch<=?)`
 		args := []any{header.OwnerID, header.BootID, header.ConnectionEpoch}
 		if header.AttemptID != 0 {
 			query = `SELECT EXISTS(SELECT 1 FROM execution_attempts child
@@ -379,7 +381,7 @@ func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header
 		}
 		err := conn.QueryRowContext(ctx, query, args...).Scan(&bound)
 		if err != nil || bound != 1 {
-			return &Rejection{RejectMetadataMismatch, "Lintel browser artifact is not bound to a running exploration action"}, false
+			return &Rejection{RejectMetadataMismatch, "Lintel browser artifact is not bound to a running journey/exploration operation or exploration action"}, false
 		}
 	case "tool_result":
 		if header.OwnerType != "tool_call" {

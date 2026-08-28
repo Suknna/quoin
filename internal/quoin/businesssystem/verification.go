@@ -32,13 +32,17 @@ type VerificationRunSummary struct {
 	CreatedAt              string  `json:"createdAt"`
 }
 
-// VerificationCheckResult is one append-only per-check outcome row.
+// VerificationCheckResult is one append-only per-check outcome row. GapDetail
+// carries the journey ledger's bounded human diagnosis when the check closed
+// through browser_journey_results (DATA-BROWSER-011: the machine code stays
+// the authority; this text is the upper-layer diagnostic).
 type VerificationCheckResult struct {
 	PlanKey    string  `json:"planKey"`
 	CheckKey   string  `json:"checkKey"`
 	Status     string  `json:"status"`
 	EvidenceID *string `json:"evidenceId,omitempty"`
 	GapReason  *string `json:"gapReason,omitempty"`
+	GapDetail  *string `json:"gapDetail,omitempty"`
 }
 
 // VerificationRunDetail is the ConfigVerificationRunDetail projection; the
@@ -95,17 +99,15 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 		}
 		return VerificationRunDetail{}, err
 	}
-	// Browser checks have no executor in this build: a run that could never
-	// converge would hold the active-run fence against the draft forever, so
-	// the command fails deterministically instead of creating it.
+	// Browser checks execute through the Lintel journey executor: every check
+	// freezes a lintel-dispatched child Attempt and its journey operation, or
+	// settles deterministically as a local gap inside this transaction
+	// (CFG-VERIFYRUN-002, DATA-BROWSER-003/006).
 	var browserCount int
 	if err := conn.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
 		WHERE p.config_version_id=? AND c.kind='browser'`, versionID).Scan(&browserCount); err != nil {
 		return VerificationRunDetail{}, err
-	}
-	if browserCount > 0 {
-		return VerificationRunDetail{}, ErrBrowserVerificationUnavailable
 	}
 	now := service.nowText()
 	insert, err := conn.ExecContext(ctx, `
@@ -147,15 +149,28 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 		WHERE p.config_version_id=? AND c.kind='promql'`, versionID).Scan(&promQLCount); err != nil {
 		return VerificationRunDetail{}, err
 	}
-	if promQLCount > 0 {
+	if promQLCount > 0 || browserCount > 0 {
 		// The scope trigger only permits child work beneath an active Run.
 		// This parent transition and every child/grant insert still share the
 		// creation transaction, so an unavailable connection rolls all of it back.
 		if _, err := conn.ExecContext(ctx, `UPDATE config_verification_runs SET state='Running', evidence_at=?, row_version=2 WHERE id=? AND state='Queued'`, now, runID); err != nil {
 			return VerificationRunDetail{}, mapVerificationAbort(err)
 		}
-		if _, err := createPromQLVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
-			return VerificationRunDetail{}, err
+		if promQLCount > 0 {
+			if _, err := createPromQLVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
+				return VerificationRunDetail{}, err
+			}
+		}
+		if browserCount > 0 {
+			if _, err := createBrowserVerificationAttempts(ctx, conn, runID, versionID, contractID, systemID, now); err != nil {
+				return VerificationRunDetail{}, err
+			}
+			// The run's browser checks share one Browser Identity and execute
+			// serially; admit the first child (and freeze its snapshot) inside
+			// the creation transaction, later children follow on Stop fences.
+			if _, err := admitNextJourneyChildOn(ctx, conn, now); err != nil {
+				return VerificationRunDetail{}, err
+			}
 		}
 	} else if checkCount == 0 {
 		// The deterministic completion path: with no check to execute, the
@@ -618,8 +633,10 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 	}
 	detail.CheckResults = []VerificationCheckResult{}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT plan_key,check_key,status,evidence_id,gap_reason
-		FROM config_verification_run_check_results WHERE verification_run_id=? ORDER BY plan_key,check_key`, runID)
+		SELECT r.plan_key,r.check_key,r.status,r.evidence_id,r.gap_reason,j.error_detail
+		FROM config_verification_run_check_results r
+		LEFT JOIN browser_journey_results j ON j.attempt_id=r.attempt_id
+		WHERE r.verification_run_id=? ORDER BY r.plan_key,r.check_key`, runID)
 	if err != nil {
 		return VerificationRunDetail{}, err
 	}
@@ -627,8 +644,8 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 	for rows.Next() {
 		var result VerificationCheckResult
 		var evidenceID sql.NullInt64
-		var gapReason sql.NullString
-		if err := rows.Scan(&result.PlanKey, &result.CheckKey, &result.Status, &evidenceID, &gapReason); err != nil {
+		var gapReason, gapDetail sql.NullString
+		if err := rows.Scan(&result.PlanKey, &result.CheckKey, &result.Status, &evidenceID, &gapReason, &gapDetail); err != nil {
 			return VerificationRunDetail{}, err
 		}
 		if evidenceID.Valid {
@@ -638,6 +655,10 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 		if gapReason.Valid {
 			value := gapReason.String
 			result.GapReason = &value
+		}
+		if gapDetail.Valid {
+			value := gapDetail.String
+			result.GapDetail = &value
 		}
 		detail.CheckResults = append(detail.CheckResults, result)
 	}

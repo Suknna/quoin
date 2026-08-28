@@ -23,6 +23,19 @@ func JourneyCatalog() (document map[string]any, version, digest string, err erro
 	return document, version, digest, nil
 }
 
+// JourneyVersion resolves the embedded catalog's current implementation
+// version of a stable Journey ID (0 when absent).
+func JourneyVersion(journeyID string) int64 {
+	document, _, _, err := JourneyCatalog()
+	if err != nil {
+		return 0
+	}
+	journeys, _ := document["journeys"].(map[string]any)
+	entry, _ := journeys[journeyID].(map[string]any)
+	version, _ := entry["version"].(float64)
+	return int64(version)
+}
+
 // ValidateJourneyReference statically validates one browser check against the
 // embedded catalog: the stable journey_id must exist and the (normalized)
 // params must satisfy that entry's closed params_schema.

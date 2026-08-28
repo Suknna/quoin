@@ -171,6 +171,30 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 	return nil
 }
 
+// convergeVerificationRunOn closes the parent Run once every configured check
+// has settled; Passed requires full ok+Evidence coverage (DATA-CONFIG-007).
+// It runs inside the caller's open transaction.
+func convergeVerificationRunOn(ctx context.Context, conn *sql.Conn, runID int64) error {
+	var pending, failed int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=r.config_version_id)
+		  - (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id),
+		  (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
+		FROM config_verification_runs r WHERE r.id=?`, runID).Scan(&pending, &failed); err != nil {
+		return err
+	}
+	if pending != 0 {
+		return nil
+	}
+	state, detail := "Passed", any(nil)
+	if failed > 0 {
+		state, detail = "Failed", "存在未通过、部分或失败的配置验证检查"
+	}
+	_, err := conn.ExecContext(ctx, `UPDATE config_verification_runs SET state=?,result_detail=?,row_version=row_version+1 WHERE id=? AND state='Running'`, state, detail, runID)
+	return err
+}
+
 // RecordVerificationTechnicalGap closes a mechanically interrupted PromQL
 // Attempt without inventing Evidence. It is used only after the generic
 // Attempt authority has durably placed the child in a terminal state.
