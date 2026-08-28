@@ -36,6 +36,9 @@ func (e *RejectionError) Error() string { return e.Detail }
 type Service struct {
 	db  *sql.DB
 	now func() time.Time
+	// JourneyCore commits run_check browser results through the shared frozen
+	// journey closure; wired by the app package.
+	JourneyCore JourneyCore
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
@@ -309,9 +312,6 @@ func (s *Service) browserChild(ctx context.Context, conn *sql.Conn, runID, versi
 	if err != nil {
 		return err
 	}
-	if err = freezeInput(ctx, conn, attemptID, "inspection_collection_v1", body, versionID, contractID, now); err != nil {
-		return err
-	}
 	ready := identity.ProfileGenerationID.Valid && identity.Generation.Valid
 	if !ready {
 		// No published profile can never authenticate; settle terminally so
@@ -341,8 +341,10 @@ func (s *Service) browserChild(ctx context.Context, conn *sql.Conn, runID, versi
 			return err
 		}
 	}
-	// A ready, free identity leaves the child Queued with its frozen journey
-	// input; runtime admission creates the browser operation and dispatches.
+	// A ready, free identity remains a bare Queued child. Identity-serial
+	// admission creates its browser operation and freezes the operation-bound
+	// inspection_collection_v1 snapshot in one transaction; the immutable
+	// dispatch input must carry the real operationId.
 	return nil
 }
 

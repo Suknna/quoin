@@ -112,7 +112,43 @@ type journeyEvidenceFact struct {
 // binding, catalog output revalidation, Evidence creation and the single
 // ledger INSERT land in one transaction whose triggers close the operation
 // and the Attempt.
+// JourneyScope abstracts the parent domain of one journey child so the
+// single browser_journey_results closure serves both Config Verification and
+// manual Inspection runs without duplicating the frozen validation core.
+type JourneyScope struct {
+	// ScopeType is the child attempt's frozen scope ('config_verification_run'
+	// or 'run_check').
+	ScopeType string
+	// RebuildFrozenInput returns the frozen inspection_collection_v1 bytes.
+	RebuildFrozenInput func(ctx context.Context, attemptID int64) ([]byte, error)
+	// EvidenceTarget is the primary structured Evidence target_type.
+	EvidenceTarget string
+	// EvidenceParams renders the Evidence params_json for (planKey, checkKey).
+	EvidenceParams func(planKey, checkKey string) string
+	// Converge closes the parent run inside the same commit transaction.
+	Converge func(ctx context.Context, conn *sql.Conn, runID int64) error
+}
+
+// CommitJourneyProposal commits a Config Verification browser child result.
 func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
+	return service.CommitJourneyProposalScoped(ctx, attemptID, bootID, epoch, raw, JourneyScope{
+		ScopeType:          "config_verification_run",
+		RebuildFrozenInput: service.rebuildJourneyVerificationInput,
+		EvidenceTarget:     "config_verification_run",
+		EvidenceParams: func(planKey, checkKey string) string {
+			params, _ := json.Marshal(map[string]string{"plan_key": planKey, "check_key": checkKey})
+			return string(params)
+		},
+		Converge: func(ctx context.Context, conn *sql.Conn, runID int64) error {
+			return convergeVerificationRunOn(ctx, conn, runID)
+		},
+	})
+}
+
+// CommitJourneyProposalScoped is the scope-parameterized journey result
+// closure (browser_journey_results is the single commit entry for every
+// domain; the SQL trigger derives the domain check result by scope).
+func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte, scope JourneyScope) error {
 	if err := validateJourneyVerificationShape(raw); err != nil {
 		return fmt.Errorf("journey result violates the frozen contract: %w", err)
 	}
@@ -127,7 +163,7 @@ func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int
 	// the Attempt snapshot to the operation ID plus the Journey parameters,
 	// catalog and probe references; a changed durable row cannot be committed
 	// merely because the result still names a valid operation.
-	frozenInput, err := service.rebuildJourneyVerificationInput(ctx, attemptID)
+	frozenInput, err := scope.RebuildFrozenInput(ctx, attemptID)
 	if err != nil {
 		return fmt.Errorf("rebuild frozen journey input: %w", err)
 	}
@@ -155,9 +191,9 @@ func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int
 	var attemptBoot string
 	var attemptEpoch uint64
 	err = conn.QueryRowContext(ctx, `
-		SELECT a.scope_id,a.plan_key,a.check_key,a.state,COALESCE(a.boot_id,''),COALESCE(a.connection_epoch,0)
+		SELECT a.scope_id,COALESCE(a.plan_key,(SELECT r.plan_key FROM inspection_runs r WHERE r.id=a.scope_id AND a.scope_type='run_check')),a.check_key,a.state,COALESCE(a.boot_id,''),COALESCE(a.connection_epoch,0)
 		FROM execution_attempts a
-		WHERE a.id=? AND a.scope_type='config_verification_run' AND a.attempt_type='inspection_collection' AND a.runtime_slot='lintel'`, attemptID).
+		WHERE a.id=? AND a.scope_type=? AND a.attempt_type='inspection_collection' AND a.runtime_slot='lintel'`, attemptID, scope.ScopeType).
 		Scan(&runID, &planKey, &checkKey, &attemptState, &attemptBoot, &attemptEpoch)
 	if err != nil {
 		return err
@@ -271,11 +307,10 @@ func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int
 	}
 	var primaryEvidenceID any
 	if result.Outcome == "success" {
-		params, _ := json.Marshal(map[string]string{"plan_key": planKey, "check_key": checkKey})
 		insert, err := conn.ExecContext(ctx, `
 			INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,integrity,created_at)
-			VALUES(?,'config_verification_run',?,?,?,?,?,?)`,
-			attemptID, runID, string(params), result.Evidence[0].ObservedAt, marshalContent(result.Evidence[0].Content), "complete", now)
+			VALUES(?,?,?,?,?,?,?,?)`,
+			attemptID, scope.EvidenceTarget, runID, scope.EvidenceParams(planKey, checkKey), result.Evidence[0].ObservedAt, marshalContent(result.Evidence[0].Content), "complete", now)
 		if err != nil {
 			return err
 		}
@@ -304,7 +339,7 @@ func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int
 		*result.OperationID, attemptID, digest, result.Outcome, primaryEvidenceID, nullableGap, nullableOriginalGap, nullableTerminal, nullableDetail, now); err != nil {
 		return err
 	}
-	if err := convergeVerificationRunOn(ctx, conn, runID); err != nil {
+	if err := scope.Converge(ctx, conn, runID); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

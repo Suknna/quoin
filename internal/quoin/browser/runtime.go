@@ -239,13 +239,14 @@ func (service *Service) buildJourneyOperationInput(ctx context.Context, conn *sq
 	var journeyVersion sql.NullInt64
 	var planKey, checkKey, params string
 	if err := conn.QueryRowContext(ctx, `
-		SELECT o.owner_attempt_id,o.journey_id,o.journey_version,a.plan_key,a.check_key,COALESCE(c.journey_params_json,'{}')
+		SELECT o.owner_attempt_id,o.journey_id,o.journey_version,COALESCE(a.plan_key,r.plan_key),a.check_key,COALESCE(c.journey_params_json,'{}')
 		FROM browser_operations o
 		JOIN execution_attempts a ON a.id=o.owner_attempt_id
-		JOIN config_verification_runs t ON t.id=a.scope_id AND a.scope_type='config_verification_run'
-		JOIN config_plans p ON p.config_version_id=t.config_version_id AND p.plan_key=a.plan_key
+		LEFT JOIN config_verification_runs t ON t.id=a.scope_id AND a.scope_type='config_verification_run'
+		LEFT JOIN inspection_runs r ON r.id=a.scope_id AND a.scope_type='run_check'
+		JOIN config_plans p ON p.config_version_id=COALESCE(t.config_version_id,r.config_version_id) AND p.plan_key=COALESCE(a.plan_key,r.plan_key)
 		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key AND c.kind='browser'
-		WHERE o.id=?`, input.OperationID).Scan(&ownerAttempt, &journeyID, &journeyVersion, &planKey, &checkKey, &params); err != nil {
+		WHERE o.id=? AND a.scope_type IN ('config_verification_run','run_check')`, input.OperationID).Scan(&ownerAttempt, &journeyID, &journeyVersion, &planKey, &checkKey, &params); err != nil {
 		return nil, err
 	}
 	if !ownerAttempt.Valid || ownerAttempt.Int64 < 1 || !journeyID.Valid || !journeyVersion.Valid || journeyVersion.Int64 < 1 {

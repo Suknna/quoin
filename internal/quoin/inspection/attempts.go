@@ -83,6 +83,8 @@ func (s *Service) rebuildAttemptInput(ctx context.Context, attemptID int64) ([]b
 	switch schemaKind {
 	case "inspection_promql_execution_v1":
 		canonical, err = s.rebuildPromQLInput(ctx, attemptID)
+	case "inspection_collection_v1":
+		canonical, err = s.rebuildJourneyInput(ctx, attemptID)
 	case "inspection_analysis_v1":
 		canonical, err = s.rebuildAnalysisInput(ctx, attemptID)
 	default:
@@ -135,6 +137,29 @@ func (s *Service) rebuildPromQLInput(ctx context.Context, attemptID int64) ([]by
 		"query":   map[string]any{"mode": mode, "expression": expression, "rangeSeconds": rangePointer, "stepSeconds": stepPointer},
 		"grantId": grant.Int64,
 	})
+}
+
+func (s *Service) rebuildJourneyInput(ctx context.Context, attemptID int64) ([]byte, error) {
+	var runID, opID, identityID, revisionID, profileID, generation, journeyVersion, probeVersion int64
+	var planKey, checkKey, journeyID, params, catalogDigest, catalogVersion, startURL, probeID, probeParams string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT r.id,o.id,o.identity_id,o.identity_revision_id,o.profile_generation_id,g.generation,
+		 r.plan_key,a.check_key,o.journey_id,COALESCE(c.journey_params_json,'{}'),o.journey_version,o.journey_catalog_digest,o.journey_catalog_version,
+		 ir.start_url,ir.probe_journey_id,ir.probe_journey_version,COALESCE(ir.probe_params_json,'{}')
+		FROM execution_attempts a JOIN inspection_runs r ON r.id=a.scope_id
+		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
+		JOIN browser_profile_generations g ON g.id=o.profile_generation_id
+		JOIN browser_identity_revisions ir ON ir.id=o.identity_revision_id
+		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
+		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key AND c.kind='browser'
+		WHERE a.id=? AND a.scope_type='run_check'`, attemptID).Scan(&runID, &opID, &identityID, &revisionID, &profileID, &generation, &planKey, &checkKey, &journeyID, &params, &journeyVersion, &catalogDigest, &catalogVersion, &startURL, &probeID, &probeVersion, &probeParams)
+	if err != nil {
+		return nil, err
+	}
+	binding := func(id string, v int64, p string) map[string]any {
+		return map[string]any{"id": id, "version": v, "params": json.RawMessage(p), "catalog": map[string]any{"digest": catalogDigest, "version": catalogVersion}}
+	}
+	return json.Marshal(map[string]any{"schemaKind": "inspection_collection_v1", "attemptId": attemptID, "operationId": opID, "identity": map[string]any{"identityId": identityID, "identityRevisionId": revisionID, "profileGenerationId": profileID, "profileGeneration": generation, "startUrl": startURL}, "journey": binding(journeyID, journeyVersion, params), "authenticationProbe": binding(probeID, probeVersion, probeParams), "planKey": planKey, "checkKey": checkKey})
 }
 
 func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]byte, error) {

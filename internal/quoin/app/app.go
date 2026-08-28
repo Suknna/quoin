@@ -275,6 +275,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		controlService.dispatchQueuedBrowserOperations(ctx)
 		controlService.dispatchReadyJourneyAttempts(ctx)
 	}
+	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	// A BrowserTunnel is only transient Runtime transport. A user WebSocket

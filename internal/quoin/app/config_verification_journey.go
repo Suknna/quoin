@@ -36,7 +36,17 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 	if !view.Connected || view.ConnectionEpoch == nil {
 		return qruntime.ErrNotConnected
 	}
+	var scopeType string
+	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType); err != nil {
+		return err
+	}
 	attempts := service.BusinessSystems.VerificationAttempts()
+	if scopeType == "run_check" {
+		if service.Inspections == nil {
+			return fmt.Errorf("inspections are not wired")
+		}
+		attempts = service.Inspections.Attempts()
+	}
 	if err := attempts.BindToSlot(ctx, attemptID, "lintel", view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
 		return err
 	}
@@ -46,7 +56,7 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 	}
 	var scopeID int64
 	var planKey, checkKey string
-	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_id,plan_key,check_key FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &planKey, &checkKey); err != nil {
+	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_id,COALESCE(plan_key,''),check_key FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &planKey, &checkKey); err != nil {
 		return err
 	}
 	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{
@@ -55,7 +65,7 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
-			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN, ScopeId: scopeID,
+			ScopeType: map[bool]runtimev1.ScopeType{true: runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK, false: runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN}[scopeType == "run_check"], ScopeId: scopeID,
 			PlanKey: planKey, CheckKey: checkKey,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest},
@@ -73,7 +83,7 @@ func (service *RuntimeService) dispatchReadyJourneyAttempts(ctx context.Context)
 	rows, err := service.BusinessSystems.DB().QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
-		WHERE a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
+		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
 		  AND a.state='Queued' AND o.state='Running' AND o.stop_confirmed_at IS NULL
 		ORDER BY a.id LIMIT ?`, journeyConvergenceBatchSize)
 	if err != nil {
@@ -187,13 +197,28 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 			more = true
 		}
 	}
+	if service.Inspections != nil {
+		for admittedCount := 0; admittedCount < journeyConvergenceBatchSize; admittedCount++ {
+			admitted, err := service.Inspections.AdmitNextJourneyChild(ctx)
+			if err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.journey_admit", err.Error())
+				break
+			}
+			if !admitted {
+				break
+			}
+			if admittedCount == journeyConvergenceBatchSize-1 {
+				more = true
+			}
+		}
+	}
 	db := service.BusinessSystems.DB()
 	// 1) Terminal operation with an active child: interrupt the child first.
 	rows, err := db.QueryContext(ctx, `
-		SELECT a.id, o.id, o.state, COALESCE(o.terminal_reason,'')
+		SELECT a.id, o.id, o.state, COALESCE(o.terminal_reason,''), a.scope_type
 		FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
-		WHERE a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
+		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
 		  AND a.state IN ('Queued','Assigned','Running')
 		  AND o.state IN ('Succeeded','Failed','Cancelled','Interrupted')
 		ORDER BY a.id LIMIT ?`, journeyConvergenceBatchSize)
@@ -201,11 +226,12 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 		type orphan struct {
 			attempt, operation     int64
 			operationState, reason string
+			scope                  string
 		}
 		var orphans []orphan
 		for rows.Next() {
 			var item orphan
-			if scanErr := rows.Scan(&item.attempt, &item.operation, &item.operationState, &item.reason); scanErr != nil {
+			if scanErr := rows.Scan(&item.attempt, &item.operation, &item.operationState, &item.reason, &item.scope); scanErr != nil {
 				break
 			}
 			orphans = append(orphans, item)
@@ -223,7 +249,14 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 		for _, item := range orphans {
 			// A Succeeded operation closed through the journey ledger must have
 			// closed its child in the same statement; anything else is technical.
-			if _, err := attempts.Interrupt(ctx, item.attempt, technicalReason(item.operationState, item.reason)); err == nil {
+			childAttempts := attempts
+			if item.scope == "run_check" {
+				if service.Inspections == nil {
+					continue
+				}
+				childAttempts = service.Inspections.Attempts()
+			}
+			if _, err := childAttempts.Interrupt(ctx, item.attempt, technicalReason(item.operationState, item.reason)); err == nil {
 				service.recordJourneyTechnicalGap(ctx, item.attempt, gapReasonForOperation(item.operationState, item.reason))
 			}
 		}
@@ -231,9 +264,9 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 	// 2) Terminal child whose operation is still active: close the operation
 	// through its terminal state and let the Stop fence release the identity.
 	rows, err = db.QueryContext(ctx, `
-		SELECT a.id, a.state, o.id, o.start_dispatched_at IS NOT NULL FROM execution_attempts a
+		SELECT a.id, a.state, o.id, o.start_dispatched_at IS NOT NULL, a.scope_type FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
-		WHERE a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
+		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
 		  AND a.state IN ('Succeeded','Failed','Cancelled','Interrupted')
 		  AND o.state IN ('Queued','WaitingForCapacity','Starting','Running')
 		ORDER BY a.id LIMIT ?`, journeyConvergenceBatchSize)
@@ -244,11 +277,12 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 		attempt, operation int64
 		attemptState       string
 		dispatched         bool
+		scope              string
 	}
 	var stragglers []straggler
 	for rows.Next() {
 		var item straggler
-		if scanErr := rows.Scan(&item.attempt, &item.attemptState, &item.operation, &item.dispatched); scanErr != nil {
+		if scanErr := rows.Scan(&item.attempt, &item.attemptState, &item.operation, &item.dispatched, &item.scope); scanErr != nil {
 			break
 		}
 		stragglers = append(stragglers, item)
@@ -288,7 +322,15 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 		if stopBasis == nil {
 			go func() { _ = service.dispatchBrowserStop(context.Background(), item.operation) }()
 		}
-		service.recordJourneyTechnicalGap(ctx, item.attempt, gapReasonForAttempt(item.attemptState))
+		if item.scope == "run_check" {
+			if service.Inspections != nil {
+				if err := service.Inspections.RecordJourneyTechnicalGap(ctx, item.attempt, gapReasonForAttempt(item.attemptState)); err != nil {
+					sharedops.LogEvent("quoin", "error", "inspection.journey_gap", fmt.Sprintf("attempt=%d error=%s", item.attempt, err.Error()))
+				}
+			}
+		} else {
+			service.recordJourneyTechnicalGap(ctx, item.attempt, gapReasonForAttempt(item.attemptState))
+		}
 	}
 	if service.dispatchCancellingJourneyChecks(ctx) {
 		more = true
@@ -307,6 +349,16 @@ func (service *RuntimeService) recordJourneyTechnicalGap(ctx context.Context, at
 	if reason == "" {
 		reason = "interrupted"
 	}
+	var scope string
+	_ = service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scope)
+	if scope == "run_check" {
+		if service.Inspections != nil {
+			if err := service.Inspections.RecordJourneyTechnicalGap(ctx, attemptID, reason); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.journey_gap", fmt.Sprintf("attempt=%d error=%s", attemptID, err.Error()))
+			}
+		}
+		return
+	}
 	if err := service.BusinessSystems.RecordVerificationTechnicalGap(ctx, attemptID, reason); err != nil {
 		sharedops.LogEvent("quoin", "error", "config_verification.journey_gap", fmt.Sprintf("attempt=%d error=%s", attemptID, err.Error()))
 	}
@@ -324,7 +376,7 @@ func (service *RuntimeService) convergeCancelledJourneyChild(ctx context.Context
 	var operationState string
 	err := db.QueryRowContext(ctx, `SELECT o.id,o.state FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
-		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'`, attemptID).Scan(&operationID, &operationState)
+		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')`, attemptID).Scan(&operationID, &operationState)
 	if err != nil {
 		return // not a journey child
 	}
@@ -392,8 +444,20 @@ func (service *RuntimeService) handleJourneyResultProposal(ctx context.Context, 
 		reject("expected browser_journey_result_v1 payload")
 		return
 	}
-	if err := service.BusinessSystems.CommitJourneyProposal(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), payload.GetCanonicalJson()); err != nil {
-		reject(err.Error())
+	var childScope string
+	_ = service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, proposal.GetAttemptId()).Scan(&childScope)
+	var commitErr error
+	if childScope == "run_check" {
+		if service.Inspections == nil {
+			reject("inspections are not wired")
+			return
+		}
+		commitErr = service.Inspections.CommitJourneyProposal(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), payload.GetCanonicalJson())
+	} else {
+		commitErr = service.BusinessSystems.CommitJourneyProposal(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), payload.GetCanonicalJson())
+	}
+	if commitErr != nil {
+		reject(commitErr.Error())
 		return
 	}
 	ack.GetResultAck().Accepted = true

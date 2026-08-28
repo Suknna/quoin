@@ -83,7 +83,9 @@ func newTestHarness(t *testing.T) *testHarness {
 	if _, err := contracts.Activate(context.Background(), 1, "seed-activate-0001", labelcontract.ActivateInput{ContractVersion: 1, ExpectedStateRowVersion: 1, ExpectedTargetRowVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
-	return &testHarness{db: db, service: NewService(db), attempts: attempt.NewService(db), systems: businesssystem.NewService(db), principal: 1}
+	h := &testHarness{db: db, service: NewService(db), attempts: attempt.NewService(db), systems: businesssystem.NewService(db), principal: 1}
+	h.service.JourneyCore = h.systems.CommitJourneyProposalScoped
+	return h
 }
 
 // publishMixedPlan uploads and publishes the mixed plan through the real
@@ -168,9 +170,10 @@ func schemaSeed() string {
 		`INSERT INTO connection_revisions(id, connection_id, revision_seq, config_json, created_at) VALUES (1, 1, 1, '{}', '` + now + `')`,
 		`INSERT INTO credential_generations(id, connection_id, generation_seq, envelope_version, key_binding_revision, nonce, ciphertext, created_at) VALUES (1, 1, 1, 1, 1, zeroblob(12), zeroblob(16), '` + now + `')`,
 		`UPDATE connections SET current_revision_id=1, current_credential_generation_id=1, row_version=2 WHERE id=1`,
-		`INSERT INTO runtime_slots(slot, state, row_version, created_at) VALUES ('plinth','unregistered',1,'` + now + `')`,
-		`INSERT INTO runtime_credentials(slot, generation, token_digest, created_at, confirmed_at, first_authenticated_at, row_version) VALUES ('plinth', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1)`,
+		`INSERT INTO runtime_slots(slot, state, row_version, created_at) VALUES ('plinth','unregistered',1,'` + now + `'),('lintel','unregistered',1,'` + now + `')`,
+		`INSERT INTO runtime_credentials(slot, generation, token_digest, created_at, confirmed_at, first_authenticated_at, row_version) VALUES ('plinth', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1),('lintel', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1)`,
 		`UPDATE runtime_slots SET state='registered', current_credential_id=(SELECT id FROM runtime_credentials WHERE slot='plinth'), row_version=2 WHERE slot='plinth'`,
+		`UPDATE runtime_slots SET state='registered', current_credential_id=(SELECT id FROM runtime_credentials WHERE slot='lintel'), row_version=2 WHERE slot='lintel'`,
 	}, "; ")
 }
 
@@ -393,19 +396,28 @@ func TestBrowserChildFreezesRealCatalogBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A ready free identity leaves the browser child Queued with the real
-	// catalog-bound journey input frozen for admission.
+	// A ready free identity leaves the browser child bare and Queued. Admission
+	// serializes its identity, creates the operation and only then freezes the
+	// operation-bound input so Start and Dispatch use identical bytes.
 	var state string
-	var digest string
+	var snapshots int
 	if err := h.db.QueryRow(`
-		SELECT a.state, s.content_digest FROM execution_attempts a
-		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
+		SELECT a.state, (SELECT COUNT(*) FROM attempt_input_snapshots s WHERE s.attempt_id=a.id)
+		FROM execution_attempts a
 		WHERE a.scope_type='run_check' AND a.scope_id=? AND a.check_key='status-page'`, detail.RunID).
-		Scan(&state, &digest); err != nil {
+		Scan(&state, &snapshots); err != nil {
 		t.Fatal(err)
 	}
-	if state != "Queued" || len(digest) != 64 {
-		t.Fatalf("ready identity child should stay Queued with a frozen digest, got %s/%d", state, len(digest))
+	if state != "Queued" || snapshots != 0 {
+		t.Fatalf("ready identity child should stay bare Queued before admission, got %s/%d", state, snapshots)
+	}
+	admitted, err := h.service.AdmitNextJourneyChild(context.Background())
+	if err != nil || !admitted {
+		t.Fatalf("admission must create the operation-bound snapshot: admitted=%v err=%v", admitted, err)
+	}
+	var digest string
+	if err := h.db.QueryRow(`SELECT s.content_digest FROM execution_attempts a JOIN attempt_input_snapshots s ON s.attempt_id=a.id WHERE a.scope_type='run_check' AND a.scope_id=? AND a.check_key='status-page'`, detail.RunID).Scan(&digest); err != nil || len(digest) != 64 {
+		t.Fatalf("admitted child lacks frozen input: digest=%q err=%v", digest, err)
 	}
 	var settled int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND check_key='status-page'`, detail.RunID).Scan(&settled); err != nil {
@@ -698,5 +710,107 @@ func TestImmutableReportClosure(t *testing.T) {
 	}
 	if reports != 1 {
 		t.Fatalf("exactly one immutable report must exist, got %d", reports)
+	}
+}
+
+func journeyInspectionResult(attemptID, operationID int64) []byte {
+	_, catalogVersion, catalogDigest, err := quoinconfig.JourneyCatalog()
+	if err != nil {
+		panic(err)
+	}
+	catalog := map[string]any{"digest": catalogDigest, "version": catalogVersion}
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	body, _ := json.Marshal(map[string]any{
+		"schemaKind": "browser_journey_result_v1", "attemptId": attemptID, "operationId": operationID,
+		"outcome": "success",
+		"probeResults": []map[string]any{
+			{"phase": "admission", "result": "Authenticated", "journeyId": "authentication.url-prefix.v1", "journeyVersion": 1, "catalog": catalog, "reasonCode": nil, "observedAt": observedAt},
+			{"phase": "completion", "result": "Authenticated", "journeyId": "authentication.url-prefix.v1", "journeyVersion": 1, "catalog": catalog, "reasonCode": nil, "observedAt": observedAt},
+		},
+		"evidence":        []map[string]any{{"kind": "structured", "primary": true, "observedAt": observedAt, "content": map[string]any{"statusText": "SYSTEM OK"}, "artifactId": nil}},
+		"traceArtifactId": nil, "traceIntegrity": nil, "gapCode": nil, "originalGapCode": nil, "terminalReason": nil, "errorDetail": nil,
+	})
+	return body
+}
+
+func TestRunCheckJourneyResultClosure(t *testing.T) {
+	h := newTestHarness(t)
+	h.publishMixedPlan(t)
+	h.seedBrowserIdentity(t, true)
+	h.seedModelProvider(t)
+	ctx := context.Background()
+	detail, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "mixed-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ready free identity left the browser child bare; admission creates
+	// its operation and freezes the operation-bound input.
+	admitted, err := h.service.AdmitNextJourneyChild(ctx)
+	if err != nil || !admitted {
+		t.Fatalf("admission should admit the browser child: admitted=%v err=%v", admitted, err)
+	}
+	var browserAttempt, operationID int64
+	if err := h.db.QueryRow(`SELECT a.id,o.id FROM execution_attempts a JOIN browser_operations o ON o.owner_attempt_id=a.id WHERE a.scope_id=? AND a.check_key='status-page'`, detail.RunID).Scan(&browserAttempt, &operationID); err != nil {
+		t.Fatal(err)
+	}
+	var kind string
+	if err := h.db.QueryRow(`SELECT schema_kind FROM attempt_input_snapshots WHERE attempt_id=?`, browserAttempt).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "inspection_collection_v1" {
+		t.Fatalf("admission should freeze inspection_collection_v1, got %s", kind)
+	}
+	// Walk the durable dispatch fences exactly like the runtime loop.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := h.db.Exec(`UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id='boot-j1',lintel_connection_epoch=1,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.Exec(`UPDATE browser_operations SET state='Running',started_at=?,row_version=row_version+1 WHERE id=? AND state='Starting'`, now, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.attempts.BindToSlot(ctx, browserAttempt, "lintel", "boot-j1", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.attempts.Accept(ctx, browserAttempt, "boot-j1", 1); err != nil {
+		t.Fatal(err)
+	}
+	// Settle the PromQL child too so the run can converge all-ok.
+	promqlAttempt := h.promqlAttemptID(t, detail.RunID)
+	h.dispatchPromQL(t, promqlAttempt)
+	if err := h.service.CommitPromQLProposal(ctx, promqlAttempt, "plinth-boot", 1, promqlSuccessProposal(promqlAttempt, detail.RunID, "success", "instant")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.service.CommitJourneyProposal(ctx, browserAttempt, "boot-j1", 1, journeyInspectionResult(browserAttempt, operationID)); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var evidenceID int64
+	if err := h.db.QueryRow(`SELECT status,evidence_id FROM inspection_check_results WHERE run_id=? AND check_key='status-page'`, detail.RunID).Scan(&status, &evidenceID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ok" || evidenceID < 1 {
+		t.Fatalf("journey result should derive ok + evidence, got %s/%d", status, evidenceID)
+	}
+	var browserState, operationState string
+	if err := h.db.QueryRow(`SELECT a.state,o.state FROM execution_attempts a JOIN browser_operations o ON o.owner_attempt_id=a.id WHERE a.id=?`, browserAttempt).Scan(&browserState, &operationState); err != nil {
+		t.Fatal(err)
+	}
+	if browserState != "Succeeded" || operationState != "Succeeded" {
+		t.Fatalf("journey closure = attempt %s / operation %s", browserState, operationState)
+	}
+	final, err := h.service.GetRun(ctx, "payments", detail.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.State != "Completed" {
+		t.Fatalf("all-ok run should converge Completed, got %s", final.State)
+	}
+	// Completed collection immediately owns its analysis attempt.
+	var analysis int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?`, detail.RunID).Scan(&analysis); err != nil {
+		t.Fatal(err)
+	}
+	if analysis != 1 {
+		t.Fatalf("convergence should create one analysis attempt, got %d", analysis)
 	}
 }

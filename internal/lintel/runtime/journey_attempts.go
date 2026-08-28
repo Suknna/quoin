@@ -60,8 +60,8 @@ func (channel *Channel) handleJourneyDispatch(envelope *runtimev1.ControlEnvelop
 		_ = channel.sendControl(&runtimev1.ControlEnvelope{ConnectionEpoch: channel.epoch, BootId: channel.bootID, CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_AttemptReject{AttemptReject: &runtimev1.AttemptReject{AttemptId: dispatch.GetAttemptId(), Reason: reason}}})
 	}
 	if dispatch.GetAttemptType() != runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION ||
-		dispatch.GetScopeType() != runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN ||
-		dispatch.GetPlanKey() == "" || dispatch.GetCheckKey() == "" || dispatch.GetInput() == nil {
+		(dispatch.GetScopeType() != runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN && dispatch.GetScopeType() != runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK) ||
+		dispatch.GetCheckKey() == "" || dispatch.GetInput() == nil {
 		reject(runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "journey dispatch envelope is incomplete")
 		return
 	}
