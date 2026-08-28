@@ -150,6 +150,22 @@ func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 			sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_dispatch", err.Error())
 		}
 	}
+	// A freshly created Run has no browser runtime event to react to yet:
+	// drive its identity-serial admission here (the same sweep the browser
+	// event flow re-runs), then dispatch any operation-ready journey child.
+	for admitted := 0; admitted < journeyConvergenceBatchSize; admitted++ {
+		ok, admitErr := service.Inspections.AdmitNextJourneyChild(ctx)
+		if admitErr != nil {
+			sharedops.LogEvent("quoin", "error", "inspection.journey_admit", admitErr.Error())
+			break
+		}
+		if !ok {
+			break
+		}
+	}
+	// Ready-dispatch is idempotent; false only means no child was dispatched
+	// in this pass (their operations may still be starting).
+	service.dispatchReadyJourneyAttempts(ctx)
 }
 
 // handleInspectionPromQLResultProposal adjudicates inspection_promql_result_v1.
