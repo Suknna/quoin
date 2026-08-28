@@ -151,6 +151,10 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 			err = service.BusinessSystems.RecordVerificationTechnicalGap(ctx, view.ID, reason)
 		case "resource_refresh_run":
 			err = service.BusinessSystems.RecordResourceRefreshTechnicalGap(ctx, view.ID, reason)
+		case "run_check":
+			if service.Inspections != nil {
+				err = service.Inspections.RecordPromQLTechnicalGap(ctx, view.ID, reason)
+			}
 		}
 		if err != nil {
 			sharedops.LogEvent("quoin", "error", "inspection_collection.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))

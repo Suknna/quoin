@@ -227,6 +227,50 @@ func (s *Service) CommitJourneyProposal(ctx context.Context, attemptID int64, bo
 	})
 }
 
+// RecordPromQLTechnicalGap closes a terminally lost run_check PromQL child:
+// the frozen closure admits no check result without a Running attempt, so the
+// Run itself becomes Interrupted once no active child remains.
+func (s *Service) RecordPromQLTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
+	_ = reason
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	var runID int64
+	var state string
+	if err = conn.QueryRowContext(ctx, `
+		SELECT a.scope_id, a.state FROM execution_attempts a
+		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).
+		Scan(&runID, &state); err != nil {
+		return err
+	}
+	if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
+		return fmt.Errorf("attempt %d is not terminal", attemptID)
+	}
+	if _, err = conn.ExecContext(ctx, `
+		UPDATE inspection_runs SET state='Interrupted', row_version=row_version+1
+		WHERE id=? AND state='Running' AND NOT EXISTS (
+			SELECT 1 FROM execution_attempts WHERE scope_type='run_check' AND scope_id=? AND state IN ('Queued','Assigned','Running','Cancelling'))`,
+		runID, runID); err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 // RecordJourneyTechnicalGap settles one terminally interrupted run_check
 // browser child without inventing Evidence, then converges the Run.
 func (s *Service) RecordJourneyTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
