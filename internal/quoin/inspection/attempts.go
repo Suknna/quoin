@@ -206,10 +206,26 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	grantRows, err := s.db.QueryContext(ctx, `SELECT g.artifact_id FROM attempt_artifact_grants g JOIN attempt_input_snapshots s ON s.id=g.source_id JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.artifact_id=g.artifact_id WHERE g.attempt_id=? AND g.source_kind='input_snapshot' AND s.attempt_id=? ORDER BY i.item_seq`, attemptID, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer grantRows.Close()
+	artifactIDs := []int64{}
+	for grantRows.Next() {
+		var id int64
+		if err := grantRows.Scan(&id); err != nil {
+			return nil, err
+		}
+		artifactIDs = append(artifactIDs, id)
+	}
+	if err := grantRows.Err(); err != nil {
+		return nil, err
+	}
 	return json.Marshal(reportInput{
 		SchemaKind: reportInputKind, AttemptID: attemptID, InspectionRunID: runID,
 		ReportVersion: reportVersion, ConfigVersionID: configVersionID, PlanKey: planKey,
-		EvidenceIDs: evidenceIDs, ArtifactIDs: []int64{}, KnowledgeVersionID: []int64{},
+		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: modelID, ContextBudgetTokens: contextBudget, MaxOutputTokens: maxOutput},
 	})
 }

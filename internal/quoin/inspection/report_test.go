@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/artifact"
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
@@ -193,17 +194,18 @@ func (h *testHarness) seedSucceededModelCall(t *testing.T, attemptID int64, prom
 	return callID
 }
 
-func reportProposalBody(attemptID, runID, callID int64, content string, evidenceIDs []int64, promptDigest string) []byte {
+func reportProposalBody(attemptID, runID, callID int64, content string, evidenceIDs, artifactIDs []int64, promptDigest string) []byte {
 	evidenceJSON, _ := json.Marshal(evidenceIDs)
 	evidenceSum := sha256.Sum256(evidenceJSON)
 	evidenceDigest := hex.EncodeToString(evidenceSum[:])
-	canonical := fmt.Sprintf("inspection_report_result_v1|%d|%d|%d|success|%s|%s|[]|[]|%s|%s",
-		attemptID, runID, callID, content, string(evidenceJSON), evidenceDigest, promptDigest)
+	artifactJSON, _ := json.Marshal(artifactIDs)
+	canonical := fmt.Sprintf("inspection_report_result_v1|%d|%d|%d|success|%s|%s|%s|[]|%s|%s",
+		attemptID, runID, callID, content, string(evidenceJSON), string(artifactJSON), evidenceDigest, promptDigest)
 	resultSum := sha256.Sum256([]byte(canonical))
 	body, _ := json.Marshal(map[string]any{
 		"schemaKind": "inspection_report_result_v1", "attemptId": attemptID, "inspectionRunId": runID,
 		"modelCallId": callID, "outcome": "success", "content": content,
-		"evidenceIds": evidenceIDs, "artifactIds": []int64{}, "knowledgeVersionIds": []int64{},
+		"evidenceIds": evidenceIDs, "artifactIds": artifactIDs, "knowledgeVersionIds": []int64{},
 		"resultDigest": hex.EncodeToString(resultSum[:]), "evidenceDigest": evidenceDigest, "promptDigest": promptDigest,
 	})
 	return body
@@ -214,6 +216,11 @@ func TestImmutableReportClosure(t *testing.T) {
 	h.publishMixedPlan(t)
 	h.seedBrowserIdentity(t, false)
 	h.seedModelProvider(t)
+	store, err := artifact.NewStore(h.db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
 	ctx := context.Background()
 	detail, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "mixed-plan")
 	if err != nil {
@@ -239,8 +246,8 @@ func TestImmutableReportClosure(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?)`, analysisID).Scan(&itemCount); err != nil {
 		t.Fatal(err)
 	}
-	// run + 2 check results + 1 evidence + config + contract = 6 items.
-	if itemCount != 6 {
+	// run + 2 check results + 1 evidence + its readable artifact + config + contract.
+	if itemCount != 7 {
 		t.Fatalf("analysis frozen items = %d", itemCount)
 	}
 	if err := h.attempts.BindToSlot(ctx, analysisID, "plinth", "plinth-boot", 1, time.Minute); err != nil {
@@ -268,7 +275,24 @@ func TestImmutableReportClosure(t *testing.T) {
 	if len(evidenceIDs) != 1 {
 		t.Fatalf("expected one collected evidence, got %d", len(evidenceIDs))
 	}
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, promptDigest)); err != nil {
+	var artifactIDs []int64
+	artifactRows, err := h.db.Query(`SELECT g.artifact_id FROM attempt_artifact_grants g JOIN attempt_input_snapshots s ON s.id=g.source_id JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.artifact_id=g.artifact_id WHERE g.attempt_id=? AND g.source_kind='input_snapshot' ORDER BY i.item_seq`, analysisID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for artifactRows.Next() {
+		var id int64
+		if err = artifactRows.Scan(&id); err != nil {
+			artifactRows.Close()
+			t.Fatal(err)
+		}
+		artifactIDs = append(artifactIDs, id)
+	}
+	artifactRows.Close()
+	if len(artifactIDs) != len(evidenceIDs) {
+		t.Fatalf("frozen artifact grants = %v", artifactIDs)
+	}
+	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
 	final, err := h.service.GetRun(ctx, "payments", detail.RunID)
@@ -290,10 +314,10 @@ func TestImmutableReportClosure(t *testing.T) {
 		t.Fatalf("analysis attempt state = %s", analysisState)
 	}
 	// Same-bytes replay is idempotent; tampered content never lands.
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, promptDigest)); err != nil {
+	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatalf("identical replay must be idempotent: %v", err)
 	}
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "篡改内容", evidenceIDs, promptDigest)); err == nil {
+	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "篡改内容", evidenceIDs, artifactIDs, promptDigest)); err == nil {
 		t.Fatal("tampered report replay must be rejected")
 	}
 	var reports int

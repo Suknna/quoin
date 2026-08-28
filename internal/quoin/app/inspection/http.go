@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/inspection"
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -52,12 +53,12 @@ func mapDomainError(err error) *problemError {
 	if errors.As(err, &rejection) {
 		status := http.StatusUnprocessableEntity
 		switch rejection.Code {
-		case "active_conflict":
-			status = http.StatusConflict
-		case "row_version_conflict":
+		case "active_conflict", "row_version_conflict":
 			status = http.StatusConflict
 		case "not_found", "empty_plan":
 			status = http.StatusNotFound
+		case "thanos_unavailable":
+			status = http.StatusServiceUnavailable
 		}
 		return problem(status, rejection.Code, rejection.Detail)
 	}
@@ -66,6 +67,9 @@ func mapDomainError(err error) *problemError {
 	}
 	if errors.Is(err, inspection.ErrCommandReused) {
 		return problem(http.StatusConflict, "command_reused", "命令标识已用于其它请求，请更换后重试")
+	}
+	if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
+		return problem(http.StatusServiceUnavailable, "thanos_unavailable", "尚无可用的 Thanos 指标连接，请先创建并启用连接后重试。")
 	}
 	return problem(http.StatusInternalServerError, "internal", "请求无法完成，请稍后重试")
 }

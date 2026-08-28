@@ -121,6 +121,9 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
 		workMode = workerv1.WorkMode_WORK_MODE_INVESTIGATION
 		runner.failureSchemaKind = InvestigationOutputSchemaKind
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
+		workMode = workerv1.WorkMode_WORK_MODE_INSPECTION_ANALYSIS
+		runner.failureSchemaKind = InspectionOutputSchemaKind
 	}
 	workspaceDir := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
 	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {

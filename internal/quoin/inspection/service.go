@@ -37,7 +37,14 @@ type Service struct {
 	now func() time.Time
 	// JourneyCore commits run_check browser results through the shared frozen
 	// journey closure; wired by the app package.
-	JourneyCore JourneyCore
+	JourneyCore    JourneyCore
+	artifactWriter func(context.Context, *sql.Conn, int64, []byte) (int64, error)
+}
+
+// SetArtifactWriter injects the content-addressed Evidence materializer used
+// to make frozen report inputs readable without exposing Quoin storage paths.
+func (s *Service) SetArtifactWriter(writer func(context.Context, *sql.Conn, int64, []byte) (int64, error)) {
+	s.artifactWriter = writer
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db, now: time.Now} }
@@ -169,6 +176,13 @@ func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, cl
 			err = s.browserChild(ctx, conn, runID, versionID, contractID, planKey, systemID, check, now)
 		}
 		if err != nil {
+			// A plan carrying PromQL checks cannot claim execution without an
+			// authorized Thanos path. The whole creation rolls back (no orphan
+			// run or children) and the typed error surfaces as a retryable
+			// 503, mirroring Config Verification.
+			if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
+				return RunDetail{}, fmt.Errorf("%w: %s", err, "尚无可用的 Thanos 指标连接，请先创建并启用连接后重试")
+			}
 			return RunDetail{}, err
 		}
 	}

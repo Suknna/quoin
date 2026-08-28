@@ -501,7 +501,11 @@ func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, stage
 }
 
 func (store *Store) installVerifiedBlob(header UploadHeader, blobPath string) error {
-	if err := os.Link(store.stagingPath(header.UploadID), blobPath); err != nil {
+	return store.installVerifiedBlobFrom(store.stagingPath(header.UploadID), header, blobPath)
+}
+
+func (store *Store) installVerifiedBlobFrom(stagingPath string, header UploadHeader, blobPath string) error {
+	if err := os.Link(stagingPath, blobPath); err != nil {
 		if !os.IsExist(err) {
 			return err
 		}
@@ -519,6 +523,64 @@ func (store *Store) installVerifiedBlob(header UploadHeader, blobPath string) er
 		return err
 	}
 	return verifyBlob(blobPath, header.SizeBytes, header.SHA256)
+}
+
+// MaterializeEvidenceTransaction creates the content-addressed, attempt-readable
+// report source for one immutable Evidence. The caller owns the SQLite transaction.
+func (store *Store) MaterializeEvidenceTransaction(ctx context.Context, conn *sql.Conn, evidenceID int64, body []byte) (int64, error) {
+	if evidenceID < 1 {
+		return 0, errors.New("evidence id must be positive")
+	}
+	sum := sha256.Sum256(body)
+	shaHex := hex.EncodeToString(sum[:])
+	var existing int64
+	err := conn.QueryRowContext(ctx, `SELECT a.id FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.owner_type='evidence' AND a.owner_id=? AND a.kind='report_file' AND b.sha256=?`, evidenceID, shaHex).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	staged, err := os.CreateTemp(filepath.Join(store.dir, "staging"), "evidence-*.part")
+	if err != nil {
+		return 0, err
+	}
+	stagingPath := staged.Name()
+	defer os.Remove(stagingPath)
+	if _, err = staged.Write(body); err != nil {
+		staged.Close()
+		return 0, err
+	}
+	if err = staged.Sync(); err != nil {
+		staged.Close()
+		return 0, err
+	}
+	if err = staged.Close(); err != nil {
+		return 0, err
+	}
+	header := UploadHeader{SizeBytes: int64(len(body)), SHA256: sum[:]}
+	store.blobMu.Lock()
+	err = store.installVerifiedBlobFrom(stagingPath, header, store.blobPath(shaHex))
+	store.blobMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	var blobID int64
+	err = conn.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		insert, insertErr := conn.ExecContext(ctx, `INSERT INTO artifact_blobs(sha256,size_bytes,storage_key,created_at) VALUES(?,?,?,?)`, shaHex, len(body), "blobs/"+shaHex+".blob", store.now().Format(time.RFC3339Nano))
+		if insertErr != nil {
+			return 0, insertErr
+		}
+		blobID, err = insert.LastInsertId()
+	} else if err != nil {
+		return 0, err
+	}
+	insert, err := conn.ExecContext(ctx, `INSERT INTO artifacts(blob_id,kind,media_type,sensitive,retention_kind,owner_type,owner_id,created_at) VALUES(?,'report_file','application/json',0,'long_term','evidence',?,?)`, blobID, evidenceID, store.now().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return insert.LastInsertId()
 }
 
 func verifyBlob(path string, expectedSize int64, expectedHash []byte) error {

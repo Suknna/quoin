@@ -132,19 +132,22 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		return err
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT x.id, x.evidence_id FROM inspection_check_results x
+		SELECT x.id, x.evidence_id, e.result_json, e.artifact_id
+		FROM inspection_check_results x LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
 	if err != nil {
 		return err
 	}
 	type settledCheck struct {
-		resultID int64
-		evidence sql.NullInt64
+		resultID   int64
+		evidence   sql.NullInt64
+		resultJSON sql.NullString
+		artifactID sql.NullInt64
 	}
 	checks := []settledCheck{}
 	for rows.Next() {
 		var check settledCheck
-		if err = rows.Scan(&check.resultID, &check.evidence); err != nil {
+		if err = rows.Scan(&check.resultID, &check.evidence, &check.resultJSON, &check.artifactID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -154,10 +157,29 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		return err
 	}
 	evidenceIDs := []int64{}
+	artifactIDs := []int64{}
 	for _, check := range checks {
-		if check.evidence.Valid {
-			evidenceIDs = append(evidenceIDs, check.evidence.Int64)
+		if !check.evidence.Valid {
+			continue
 		}
+		evidenceIDs = append(evidenceIDs, check.evidence.Int64)
+		if check.artifactID.Valid {
+			artifactIDs = append(artifactIDs, check.artifactID.Int64)
+			continue
+		}
+		if !check.resultJSON.Valid {
+			return fmt.Errorf("inspection evidence %d has no readable result", check.evidence.Int64)
+		}
+		// In production app wiring injects the artifact store. Isolated domain
+		// tests deliberately exercise the report ledger without a filesystem.
+		if s.artifactWriter == nil {
+			continue
+		}
+		artifactID, materializeErr := s.artifactWriter(ctx, conn, check.evidence.Int64, []byte(check.resultJSON.String))
+		if materializeErr != nil {
+			return materializeErr
+		}
+		artifactIDs = append(artifactIDs, artifactID)
 	}
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
@@ -172,7 +194,7 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
 		ReportVersion: int64(reportVersion + 1), ConfigVersionID: configVersionID, PlanKey: planKey,
-		EvidenceIDs: evidenceIDs, ArtifactIDs: []int64{}, KnowledgeVersionID: []int64{},
+		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
 	}
 	body, err := json.Marshal(input)
@@ -212,6 +234,16 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		if _, err = conn.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id)
 			VALUES(?,?,'inspection_evidence',?,?)`, snapshotID, itemSeq, hex.EncodeToString(evidenceDigest[:]), evidenceID); err != nil {
+			return err
+		}
+	}
+	for _, artifactID := range artifactIDs {
+		itemSeq++
+		artifactDigest := sha256.Sum256([]byte(fmt.Sprintf("artifact:%d", artifactID)))
+		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id) VALUES(?,?,'inspection_artifact',?,?)`, snapshotID, itemSeq, hex.EncodeToString(artifactDigest[:]), artifactID); err != nil {
+			return err
+		}
+		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at) VALUES(?,?,'input_snapshot',?,?)`, analysisID, artifactID, snapshotID, now); err != nil {
 			return err
 		}
 	}

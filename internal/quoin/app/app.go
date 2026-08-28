@@ -227,6 +227,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// content-addressed store; the deployment boundary (default 10 MiB,
 	// HTTP-FILE-002) is environment-tunable.
 	application.investigations.SetAttachmentStore(artifactStore, attachmentLimitBytes())
+	application.inspections.SetArtifactWriter(artifactStore.MaterializeEvidenceTransaction)
 	// The attempt ledger seals a tool call before its tool_result read
 	// grant (the frozen grant closure requires the succeeded state); wire
 	// the grant write into CompleteToolCall's transaction.

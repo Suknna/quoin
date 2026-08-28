@@ -454,3 +454,43 @@ func TestInterruptedLintelUploadAcceptsOnlySuccessorTransportEpoch(t *testing.T)
 		t.Fatal("different boot must not retry an interrupted Lintel trace")
 	}
 }
+
+func TestMaterializeEvidenceTransactionIsIdempotent(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	evidence, err := db.Exec(`INSERT INTO evidence(target_type,target_id,params_json,observed_at,result_json,integrity,created_at) VALUES('inspection_run',1,'{}',?,?,'complete',?)`, now, `{"value":1}`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceID, _ := evidence.LastInsertId()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.MaterializeEvidenceTransaction(context.Background(), conn, evidenceID, []byte(`{"value":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.MaterializeEvidenceTransaction(context.Background(), conn, evidenceID, []byte(`{"value":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("materialization ids differ: %d %d", first, second)
+	}
+	if _, err = conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(`{"value":1}`))
+	if err = verifyBlob(store.blobPath(hex.EncodeToString(sum[:])), int64(len(`{"value":1}`)), sum[:]); err != nil {
+		t.Fatalf("materialized blob: %v", err)
+	}
+}

@@ -42,6 +42,7 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 // identifier for a successful investigation turn (mirrors the Quoin-side
 // investigation.OutputSchemaKind).
 const InvestigationOutputSchemaKind = "investigation_output_v1"
+const InspectionOutputSchemaKind = "inspection_report_result_v1"
 
 // maxModelRetries bounds the worker-side physical retry budget per logical
 // call (ARCH-AGENT-004: only transport-class failures with no visible
@@ -70,6 +71,18 @@ var initialAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInitialMessages(input)
+	},
+}
+
+var inspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.InspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInspectionMessages(input)
 	},
 }
 
@@ -156,6 +169,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		mode = initialAnalysisMode
 	case investigationMode.schemaKind:
 		mode = investigationMode
+	case inspectionAnalysisMode.schemaKind:
+		mode = inspectionAnalysisMode
 	default:
 		return attemptMode{}, fmt.Errorf("unsupported schema_kind %q", start.GetSchemaKind())
 	}
@@ -289,6 +304,36 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 		}
 		// Final answer: no tool calls → propose the immutable output.
 		if len(prepared) == 0 {
+			if mode.schemaKind == inspectionAnalysisMode.schemaKind {
+				input, err := agent.ParseInspectionInput(start.GetCanonicalJson())
+				if err != nil {
+					return err
+				}
+				evidenceJSON, _ := json.Marshal(input.EvidenceIDs)
+				artifactJSON, _ := json.Marshal(input.ArtifactIDs)
+				evidenceSum := sha256.Sum256(evidenceJSON)
+				evidenceDigest := hex.EncodeToString(evidenceSum[:])
+				promptSum := sha256.Sum256([]byte(mode.prompt))
+				promptDigest := hex.EncodeToString(promptSum[:])
+				canonicalResult := fmt.Sprintf("inspection_report_result_v1|%d|%d|%d|success|%s|%s|%s|[]|%s|%s", input.AttemptID, input.InspectionRunID, modelCallID, assistantText, evidenceJSON, artifactJSON, evidenceDigest, promptDigest)
+				resultSum := sha256.Sum256([]byte(canonicalResult))
+				canonical, err := json.Marshal(map[string]any{"schemaKind": "inspection_report_result_v1", "attemptId": input.AttemptID, "inspectionRunId": input.InspectionRunID, "modelCallId": modelCallID, "outcome": "success", "content": assistantText, "evidenceIds": input.EvidenceIDs, "artifactIds": input.ArtifactIDs, "knowledgeVersionIds": []int64{}, "resultDigest": hex.EncodeToString(resultSum[:]), "evidenceDigest": evidenceDigest, "promptDigest": promptDigest})
+				if err != nil {
+					return err
+				}
+				digest := sha256.Sum256(canonical)
+				if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_WorkerResultProposal{WorkerResultProposal: &workerv1.WorkerResultProposal{SchemaKind: mode.outputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:], EvidenceIds: input.EvidenceIDs, ArtifactIds: input.ArtifactIDs}}}); err != nil {
+					return err
+				}
+				ack, err := reader.Read()
+				if err != nil {
+					return err
+				}
+				if ack.GetWorkerResultAck() == nil || !ack.GetWorkerResultAck().GetAccepted() {
+					return fmt.Errorf("%w: result rejected", ErrProtocol)
+				}
+				return nil
+			}
 			canonical, err := json.Marshal(assistantText)
 			if err != nil {
 				return err

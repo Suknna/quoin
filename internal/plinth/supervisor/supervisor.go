@@ -59,7 +59,7 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
 		}
-	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION:
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS:
 		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
@@ -180,6 +180,9 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
 		failureSchema = "investigation_output_v1"
 		systemPrompt = plinthagent.InvestigationSystemPrompt
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
+		failureSchema = "inspection_report_result_v1"
+		systemPrompt = plinthagent.InspectionSystemPrompt
 	}
 	// The frozen input snapshot carries the model contract (model id and
 	// budgets, ARCH-AGENT-003); the supervisor resolves the base URL and

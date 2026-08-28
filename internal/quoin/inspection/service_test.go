@@ -23,6 +23,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	_ "modernc.org/sqlite"
 )
 
@@ -423,5 +424,29 @@ func TestBrowserChildFreezesRealCatalogBinding(t *testing.T) {
 	}
 	if settled != 0 {
 		t.Fatalf("ready free identity must not settle a result at creation, got %d", settled)
+	}
+}
+
+func TestCreateRunThanosUnavailableTyped(t *testing.T) {
+	h := newTestHarness(t)
+	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	h.publishMixedPlan(t)
+	h.seedBrowserIdentity(t, false)
+	_, err := h.service.CreateInspectionRun(context.Background(), h.principal, "cmd-1", "payments", "mixed-plan")
+	if !errors.Is(err, thanos.ErrThanosUnavailable) {
+		t.Fatalf("unusable thanos must surface the typed sentinel, got %v", err)
+	}
+	// The transaction rolled back: no orphan run or children survive.
+	var runs, children int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='run_check'`).Scan(&children); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 || children != 0 {
+		t.Fatalf("rejected creation must leave no orphans: runs=%d children=%d", runs, children)
 	}
 }
