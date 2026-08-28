@@ -38,6 +38,13 @@ func main() {
 			serveBigMatrix(writer)
 		case "up":
 			serveSmallVector(writer)
+		case "vector(1)":
+			// The frozen Thanos connection probe contract requires exactly one
+			// vector sample with value "1" (internal/plinth/connections).
+			writeJSON(writer, map[string]any{"status": "success", "data": map[string]any{
+				"resultType": "vector",
+				"result":     []any{map[string]any{"metric": map[string]any{"__name": "vector", "job": "fixture"}, "value": []any{float64(time.Now().Unix()), "1"}}},
+			}})
 		case "error":
 			writeJSON(writer, map[string]any{"status": "error", "errorType": "bad_data", "error": "deterministic fixture query failure"})
 		case "notjson":

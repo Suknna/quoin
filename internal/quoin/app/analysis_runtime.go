@@ -177,6 +177,8 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 			service.handleResourceRefreshResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "browser_journey_result_v1" {
 			service.handleJourneyResultProposal(ctx, envelope, proposal)
+		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_promql_result_v1" {
+			service.handleInspectionPromQLResultProposal(ctx, envelope, proposal)
 		} else {
 			service.handleVerificationResultProposal(ctx, envelope, proposal)
 		}
