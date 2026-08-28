@@ -184,6 +184,10 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 		}
 		return
 	}
+	if attemptType == "inspection_analysis" {
+		service.handleInspectionReportResultProposal(ctx, envelope, proposal)
+		return
+	}
 	if attemptType != "initial_analysis" {
 		sharedops.LogEvent("quoin", "info", "result.unhandled_type", attemptType)
 		return
