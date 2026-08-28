@@ -13,9 +13,11 @@ import (
 const Version = "v1"
 
 // JCS is the RFC 8785 canonical JSON catalog. It deliberately exposes only
-// the built-in authentication probe used to publish a manually logged-in
-// Browser Identity. No user-authored browser program is accepted.
-const JCS = `{"catalog_version":"v1","journeys":{"authentication.url-prefix.v1":{"evidence_kinds":[],"output_schema":{"additionalProperties":false,"properties":{"reasonCode":{"type":["string","null"]},"result":{"enum":["Authenticated","Unauthenticated","Indeterminate"]}},"required":["result","reasonCode"],"type":"object"},"params_schema":{"additionalProperties":false,"properties":{"authenticatedUrlPrefix":{"format":"uri","type":"string"}},"required":["authenticatedUrlPrefix"],"type":"object"},"purpose":"authentication_probe","steps_digest":"e7d3461d596a7b0b58fd0e2bd8403003903e876e16022f7f11b9852dd945d405","summary":"Reports whether Chromium's foreground URL has the configured authenticated prefix.","version":1}}}`
+// built-in journeys: the authentication probe used to publish a manually
+// logged-in Browser Identity, and the read-only status-marker Journey that
+// Config Verification browser checks execute. No user-authored browser
+// program is accepted.
+const JCS = `{"catalog_version":"v1","journeys":{"authentication.url-prefix.v1":{"evidence_kinds":[],"output_schema":{"additionalProperties":false,"properties":{"reasonCode":{"type":["string","null"]},"result":{"enum":["Authenticated","Unauthenticated","Indeterminate"]}},"required":["result","reasonCode"],"type":"object"},"params_schema":{"additionalProperties":false,"properties":{"authenticatedUrlPrefix":{"format":"uri","type":"string"}},"required":["authenticatedUrlPrefix"],"type":"object"},"purpose":"authentication_probe","steps_digest":"e7d3461d596a7b0b58fd0e2bd8403003903e876e16022f7f11b9852dd945d405","summary":"Reports whether Chromium's foreground URL has the configured authenticated prefix.","version":1},"page.status-marker.v1":{"evidence_kinds":["structured"],"output_schema":{"additionalProperties":false,"properties":{"statusText":{"maxLength":1000,"minLength":1,"type":"string"}},"required":["statusText"],"type":"object"},"params_schema":{"additionalProperties":false,"properties":{"path":{"pattern":"^/[^?#\\s]*$","type":"string"}},"required":["path"],"type":"object"},"purpose":"journey","steps_digest":"c4efc3f95352c04bffb7f5c2b6b56cade322852f36606e4e1816f9e41d1ecd4f","summary":"Navigates to a relative path from the identity start URL and reports the page's [data-quoin-status] marker text.","version":2}}}`
 
 // Bytes returns the exact embedded catalog bytes. Callers must not re-marshal
 // a parsed representation before calculating the digest.

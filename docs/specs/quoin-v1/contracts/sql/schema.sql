@@ -1564,7 +1564,8 @@ CREATE TABLE execution_attempts (
     OR (attempt_type = 'browser_exploration' AND runtime_slot = 'lintel')
     OR (attempt_type = 'inspection_collection' AND (
       (scope_type = 'run_check' AND runtime_slot = 'lintel')
-      OR (scope_type IN ('config_verification_run','resource_refresh_run') AND runtime_slot = 'plinth')
+      OR (scope_type = 'config_verification_run' AND runtime_slot IN ('plinth','lintel'))
+      OR (scope_type = 'resource_refresh_run' AND runtime_slot = 'plinth')
     ))
     OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','connection_probe') AND runtime_slot = 'plinth')
   ),
@@ -2693,7 +2694,13 @@ WHEN NEW.state = 'Starting' AND OLD.state IN ('Queued','WaitingForCapacity') AND
 BEGIN SELECT RAISE(ABORT, 'browser operation may dispatch Start only at the global FIFO head'); END;
 CREATE TRIGGER trg_execution_attempts_browser_dispatch_after_operation_running BEFORE UPDATE OF state ON execution_attempts
 WHEN NEW.state = 'Assigned' AND OLD.state = 'Queued' AND (
-  (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check'
+  (NEW.attempt_type = 'inspection_collection'
+    AND (NEW.scope_type = 'run_check'
+      OR (NEW.scope_type = 'config_verification_run' AND EXISTS (
+        SELECT 1 FROM config_verification_runs t
+        JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+        WHERE t.id = NEW.scope_id AND c.kind = 'browser')))
     AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = NEW.id AND o.kind = 'journey' AND o.state = 'Running'))
   OR (NEW.attempt_type = 'browser_exploration'
     AND NOT EXISTS (
@@ -4344,6 +4351,19 @@ WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
 )
 BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
+-- Config Verification 子 Attempt 的 slot 与 check kind 固定映射（CFG-VERIFYRUN-002、RUNTIME-TASK-003）：
+-- PromQL check 只派发 plinth supervisor，Browser check 只派发 lintel。表级 CHECK 只放宽
+-- config_verification_run 允许两种 slot，精确映射由此处闭合；run_check 固定 lintel 由表级 CHECK 拥有。
+CREATE TRIGGER trg_execution_attempts_config_verification_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
+WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'config_verification_run' AND NOT EXISTS (
+  SELECT 1 FROM config_verification_runs t
+  JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
+  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+  WHERE t.id = NEW.scope_id
+    AND ((c.kind = 'promql' AND NEW.runtime_slot = 'plinth')
+      OR (c.kind = 'browser' AND NEW.runtime_slot = 'lintel'))
+)
+BEGIN SELECT RAISE(ABORT, 'config verification attempt slot must match its check kind'); END;
 
 -- 派发绑定（runtime_slot/boot_id/connection_epoch/accepted_at）一旦设置不可改；
 -- lease_until 可由心跳续期（可再生，row_version 照常递增）；requested_by_tool_call_id 不可改。
@@ -4725,7 +4745,7 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         SELECT 1 FROM config_verification_runs t JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
         JOIN config_checks c ON c.plan_id = p.id
         WHERE t.id = NEW.scope_id AND t.state = 'Running'
-          AND c.check_key = NEW.check_key AND c.kind = 'promql'
+          AND c.check_key = NEW.check_key AND c.kind IN ('promql','browser')
           AND NEW.plan_key IS NOT NULL AND NEW.check_key IS NOT NULL))
    OR (NEW.scope_type = 'resource_refresh_run' AND NOT EXISTS (
         SELECT 1 FROM resource_refresh_runs r JOIN config_discoveries d ON d.config_version_id=r.config_version_id AND d.discovery_key=NEW.discovery_key
@@ -4759,7 +4779,13 @@ WHEN NOT EXISTS (
       WHEN 'knowledge_extraction' THEN 'knowledge_extraction_v1'
       WHEN 'embedding' THEN 'embedding_v1'
       WHEN 'inspection_collection' THEN CASE a.scope_type
-        WHEN 'config_verification_run' THEN 'config_verification_execution_v1'
+        WHEN 'config_verification_run' THEN CASE WHEN EXISTS (
+          SELECT 1 FROM config_verification_runs t
+          JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = a.plan_key
+          JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+          WHERE t.id = a.scope_id AND c.kind = 'browser')
+          THEN 'inspection_collection_v1'
+          ELSE 'config_verification_execution_v1' END
         WHEN 'resource_refresh_run' THEN 'resource_refresh_execution_v1'
         ELSE 'inspection_collection_v1'
       END

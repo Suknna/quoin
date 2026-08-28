@@ -126,7 +126,7 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 	switch request.GetKind() {
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN:
 		_, err = channel.browser.Start(context.Background(), request.GetOperationId(), input.Identity.StartURL)
-	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION:
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY:
 		if request.GetProfileGenerationId() < 1 || input.Identity.ProfileGeneration == 0 {
 			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE, "frozen profile generation is missing"
 			return channel.startAckReply(envelope, ack)

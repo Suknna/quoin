@@ -1,10 +1,7 @@
-// Package runtime implements Lintel's outbound Runtime channel (T06): the
-// attached-stdin one-time registration subcommand, atomic token persistence
-// and the outbound Connect loop carrying the Journey Catalog digest,
-// browser capacity and Chromium revision in the Hello (RUNTIME-CTRL-010).
-// The catalog is embedded as an empty journeys object for this stage; a
-// later release builds the full catalog and both sides must agree on its
-// JCS digest.
+// Package runtime implements Lintel's outbound Runtime channel: the
+// attached-stdin one-time registration subcommand, atomic token persistence,
+// and control-stream state. The versioned Journey Catalog is embedded by both
+// Lintel and Quoin, which reject a digest mismatch before browser work starts.
 package runtime
 
 import (
@@ -28,9 +25,7 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/browser"
 	"github.com/Suknna/quoin/internal/lintel/browser/exploration"
-	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/lintel/profile"
-	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -115,6 +110,10 @@ type Channel struct {
 	// owns completing. That path must classify its eventual result as a crash,
 	// never turn a concurrent process loss into a successful close/cancellation.
 	browserCrashes map[int64]bool
+	// Journey attempt state (T23): one executing child per operation and the
+	// still-unacknowledged result proposals retained for same-boot replay.
+	journeyRuns      map[int64]*journeyRun
+	journeyProposals map[int64]*runtimev1.ResultProposal
 	// Test seams retain the production Manager as the only normal execution
 	// authority while allowing deterministic Runtime route tests without Chromium.
 	executeBrowserAction func(context.Context, int64, exploration.Action) browser.ExplorationResult
@@ -144,7 +143,7 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	if err := cleanupExplorationTraceStaging(config.StateDirectory); err != nil {
 		return nil, err
 	}
-	channel := &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw), browser: config.Browser, profiles: profile.NewStore(config.StateDirectory), started: make(map[int64]*runtimev1.StartBrowserOperation), startAcks: make(map[int64]*runtimev1.StartBrowserOperationAck), completed: make(map[int64]*runtimev1.CompleteBrowserOperation), completing: make(map[int64]bool), startupFailures: make(map[int64]*runtimev1.StartBrowserOperation), startAckFences: make(map[int64]chan struct{}), stopAcks: make(map[int64]*runtimev1.StopBrowserOperationAck), published: make(map[int64]*runtimev1.PublishBrowserProfileResult), tunnelCancels: make(map[int64]context.CancelFunc), tunnelDones: make(map[int64]chan struct{}), tunnelGenerations: make(map[int64]uint64), explorationRunning: make(map[int64]bool), explorationCancels: make(map[int64]context.CancelFunc), explorationDone: make(map[int64]chan struct{}), explorationCancelling: make(map[int64]bool), explorationClaims: make(map[int64]*runtimev1.BrowserExplorationTerminalClaim), explorationClaimAcks: make(map[int64]chan *runtimev1.BrowserExplorationTerminalClaimAck), explorationResults: make(map[int64]*runtimev1.BrowserExplorationActionResult), explorationTraces: make(map[int64][]explorationTraceEntry), explorationTraceSeals: make(map[int64]explorationTraceSeal), explorationChildren: make(map[int64]int64), traceStaging: make(map[int64]string), explorationTerminalChildren: make(map[int64]int64), explorationActionCapabilities: make(map[int64]int64), browserCrashes: make(map[int64]bool)}
+	channel := &Channel{Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw), browser: config.Browser, profiles: profile.NewStore(config.StateDirectory), journeyRuns: make(map[int64]*journeyRun), journeyProposals: make(map[int64]*runtimev1.ResultProposal), started: make(map[int64]*runtimev1.StartBrowserOperation), startAcks: make(map[int64]*runtimev1.StartBrowserOperationAck), completed: make(map[int64]*runtimev1.CompleteBrowserOperation), completing: make(map[int64]bool), startupFailures: make(map[int64]*runtimev1.StartBrowserOperation), startAckFences: make(map[int64]chan struct{}), stopAcks: make(map[int64]*runtimev1.StopBrowserOperationAck), published: make(map[int64]*runtimev1.PublishBrowserProfileResult), tunnelCancels: make(map[int64]context.CancelFunc), tunnelDones: make(map[int64]chan struct{}), tunnelGenerations: make(map[int64]uint64), explorationRunning: make(map[int64]bool), explorationCancels: make(map[int64]context.CancelFunc), explorationDone: make(map[int64]chan struct{}), explorationCancelling: make(map[int64]bool), explorationClaims: make(map[int64]*runtimev1.BrowserExplorationTerminalClaim), explorationClaimAcks: make(map[int64]chan *runtimev1.BrowserExplorationTerminalClaimAck), explorationResults: make(map[int64]*runtimev1.BrowserExplorationActionResult), explorationTraces: make(map[int64][]explorationTraceEntry), explorationTraceSeals: make(map[int64]explorationTraceSeal), explorationChildren: make(map[int64]int64), traceStaging: make(map[int64]string), explorationTerminalChildren: make(map[int64]int64), explorationActionCapabilities: make(map[int64]int64), browserCrashes: make(map[int64]bool)}
 	config.Browser.OnCrash = channel.browserCrashed
 	return channel, nil
 }
@@ -240,205 +239,6 @@ func (channel *Channel) loadToken() (stateFile, error) {
 		return state, errors.New("状态卷 token 不完整")
 	}
 	return state, nil
-}
-
-// RunConnect keeps the lintel control stream alive; the Hello carries the
-// catalog digest/version, browser capacity and Chromium revision
-// (RUNTIME-CTRL-010), and each new boot answers the ProfileInventoryRequest
-// with a complete empty report (RUNTIME-BROWSER-002).
-func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Server) error {
-	state, err := channel.loadToken()
-	if err != nil {
-		return fmt.Errorf("尚未注册（读取状态卷失败）: %w", err)
-	}
-	connection, err := channel.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-	client := runtimev1.NewRuntimeControlClient(connection)
-	streamCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+state.LongTermToken))
-	stream, err := client.Connect(streamCtx)
-	if err != nil {
-		return err
-	}
-	epoch := channel.epoch + 1
-	channel.epoch = epoch
-	atomic.StoreUint64(&channel.outbound, 1) // Hello consumes the first outbound ID.
-	hello := &runtimev1.Hello{
-		Slot:                    runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
-		BootId:                  channel.bootID,
-		ConnectionEpoch:         epoch,
-		ReleaseVersion:          buildinfo.Release,
-		JourneyCatalogDigest:    catalog.Digest(),
-		JourneyCatalogVersion:   catalog.Version,
-		BrowserCapacitySlots:    channel.Config.BrowserSlots,
-		ChromiumRevision:        channel.Config.ChromiumRevision,
-		ActiveBrowserOperations: channel.activeBrowserOperationIDs(),
-	}
-	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: epoch, BootId: channel.bootID, Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {
-		return err
-	}
-	ack, err := stream.Recv()
-	if err != nil {
-		return err
-	}
-	helloAck := ack.GetHelloAck()
-	if helloAck == nil || !helloAck.GetAccepted() {
-		if readiness != nil {
-			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.RuntimeUnregistered})
-		}
-		return fmt.Errorf("握手被拒绝: %s", helloAck.GetRejectReason())
-	}
-	if readiness != nil {
-		// A new Lintel boot remains fenced until Quoin accepts its complete
-		// profile inventory. No browser work is considered ready before then.
-		readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: !helloAck.GetProfileReconcileRequired(), Reason: sharedops.Ready})
-	}
-	channel.installBrowserTunnelBinding(browserTunnelBinding{client: runtimev1.NewBrowserTunnelClient(connection), context: streamCtx, epoch: epoch})
-	defer channel.removeBrowserTunnelBinding(epoch)
-	channel.installArtifactUploadBinding(artifactUploadBinding{client: runtimev1.NewArtifactServiceClient(connection), context: streamCtx, epoch: epoch})
-	defer channel.removeArtifactUploadBinding(epoch)
-	sharedops.LogEvent("lintel", "info", "runtime.connected", "quoin="+channel.Config.QuoinEndpoint)
-	var outbound sync.Mutex
-	// Allocate the per-direction sequence while holding the same mutex that
-	// writes the stream. A producer must not reserve id N, lose the send race to
-	// N+1, and make Quoin observe a reordered control sequence.
-	send := func(envelope *runtimev1.ControlEnvelope) error {
-		outbound.Lock()
-		defer outbound.Unlock()
-		envelope.MessageId = atomic.AddUint64(&channel.outbound, 1)
-		if heartbeat := envelope.GetHeartbeat(); heartbeat != nil {
-			heartbeat.Seq = envelope.MessageId
-		}
-		return stream.Send(envelope)
-	}
-	channel.controlMu.Lock()
-	channel.controlSend = send
-	channel.controlMu.Unlock()
-	defer func() {
-		// A stream failure has no ordering relationship left to preserve. Release
-		// any start gate so its completion is retained and replayed on the next
-		// same-boot connection instead of leaving a crash goroutine blocked.
-		channel.releaseAllStartAckFences()
-		channel.controlMu.Lock()
-		channel.controlSend = nil
-		channel.controlMu.Unlock()
-	}()
-	// Completion and action results are unknown-outcome messages until Quoin
-	// acknowledges their durable commit. Existing action-result envelopes are
-	// replayed after every same-boot reconnect.
-	channel.resendPendingCompletions()
-	channel.resendPendingExplorationClaims()
-	channel.resendPendingExplorationResults()
-	channel.reopenRunningBrowserTunnels()
-	heartbeat := time.NewTicker(10 * time.Second)
-	defer heartbeat.Stop()
-	heartbeatStop, heartbeatDone := make(chan struct{}), make(chan struct{})
-	defer func() { close(heartbeatStop); <-heartbeatDone }()
-	go func() {
-		defer close(heartbeatDone)
-		for {
-			select {
-			case <-heartbeatStop:
-				return
-			case <-ctx.Done():
-				return
-			case <-heartbeat.C:
-				active := channel.activeBrowserOperationIDs()
-				if err := send(&runtimev1.ControlEnvelope{
-					ConnectionEpoch: epoch, BootId: channel.bootID,
-					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{ActiveBrowserOperations: active, Capacity: &runtimev1.Capacity{Running: uint32(len(active)), Max: channel.Config.BrowserSlots}}},
-				}); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	seenMessageIDs := map[uint64]struct{}{}
-	for {
-		envelope, err := stream.Recv()
-		if err != nil {
-			if readiness != nil {
-				readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
-			}
-			return fmt.Errorf("控制流结束: %w", err)
-		}
-		if !isCurrentControlEnvelope(envelope, channel.bootID, epoch, seenMessageIDs) {
-			continue
-		}
-		if ack := envelope.GetCompleteBrowserOperationAck(); ack != nil {
-			channel.acknowledgeCompletion(ack)
-			continue
-		}
-		if ack := envelope.GetBrowserExplorationActionResultAck(); ack != nil {
-			channel.acknowledgeExplorationResult(ack)
-			continue
-		}
-		if ack := envelope.GetBrowserExplorationTerminalClaimAck(); ack != nil {
-			channel.acknowledgeExplorationTerminalClaim(ack)
-			continue
-		}
-		if request := envelope.GetProfileInventoryRequest(); request != nil {
-			if err := send(channel.inventoryResponse(envelope, request)); err != nil {
-				return err
-			}
-			if readiness != nil {
-				readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: true, Reason: sharedops.Ready})
-			}
-			continue
-		}
-		if request := envelope.GetStartBrowserOperation(); request != nil {
-			response := channel.startResponse(envelope, request)
-			if err := send(response); err != nil {
-				return err
-			}
-			if response.GetStartBrowserOperationAck().GetAccepted() {
-				// The StartAck has reached the single serialized control writer. Only
-				// now may a concurrent crash terminalization enter that same writer.
-				channel.releaseStartAckFence(request.GetOperationId())
-				// A Chromium process can crash after Start created it but before this
-				// StartAck was written. Start failure is deliberately consumed only
-				// after this current-stream send succeeds, so its upload/completion
-				// cannot overtake Quoin's Running transition. Its completing fence was
-				// set before StartAck, so it is the *only* allowed post-Ack follow-up.
-				if failedStart := channel.takeStartupFailure(request.GetOperationId()); failedStart != nil {
-					go channel.recordStartupFailure(failedStart)
-					continue
-				}
-				// Replay only completions that predate this Start.
-				channel.resendPendingCompletions()
-				// Quoin commits Running from the durable Ack before Lintel executes
-				// the follow-up operation work.
-				if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN {
-					go channel.openBrowserTunnel(request)
-				} else if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE {
-					go channel.completeRevisionProbe(request)
-				}
-			}
-			continue
-		}
-		if request := envelope.GetExecuteBrowserExplorationAction(); request != nil {
-			channel.handleExplorationAction(envelope, request)
-			continue
-		}
-		if request := envelope.GetCancelBrowserExplorationAction(); request != nil {
-			channel.handleExplorationCancellation(envelope, request)
-			continue
-		}
-		if request := envelope.GetPublishBrowserProfile(); request != nil {
-			if err := send(channel.publishResponse(envelope, request)); err != nil {
-				return err
-			}
-			continue
-		}
-		if request := envelope.GetStopBrowserOperation(); request != nil {
-			if err := send(channel.stopResponse(envelope, request)); err != nil {
-				return err
-			}
-			continue
-		}
-	}
 }
 
 // isCurrentControlEnvelope fences buffered frames from a superseded stream

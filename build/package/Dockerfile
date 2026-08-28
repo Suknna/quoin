@@ -41,13 +41,27 @@ COPY --from=build /out/plinth /plinth
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/plinth"]
 
-FROM debian:13-slim AS lintel
+FROM node:24-bookworm-slim AS journey-node
+WORKDIR /src
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY web/package.json web/package.json
+# The Lintel-owned Chromium remains the only browser binary. Playwright's
+# library controls its loopback CDP endpoint, so installation must not download
+# a second browser distribution (https://playwright.dev/docs/library).
+RUN corepack enable && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pnpm install --filter @quoin/web --prod --frozen-lockfile
+
+FROM node:24-bookworm-slim AS lintel
 # Chromium's dependency set is large; tolerate bounded transient mirror resets
 # without accepting missing packages or weakening APT signature verification.
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       chromium xvfb tigervnc-scraping-server ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# pnpm's workspace links in /web/node_modules resolve through the workspace
+# store at /node_modules; retain both ends instead of flattening dependencies.
+COPY --from=journey-node /src/node_modules /node_modules
+COPY --from=journey-node /src/web/node_modules /web/node_modules
+COPY internal/lintel/browser/journey/playwright-runner.mjs /web/journey-runner.mjs
 USER 65532:65532
 COPY --from=build /out/lintel /lintel
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck

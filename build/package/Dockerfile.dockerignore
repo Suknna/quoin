@@ -2,6 +2,11 @@
 *
 !go.mod
 !go.sum
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!web
+!web/package.json
 !cmd
 !cmd/**
 !internal

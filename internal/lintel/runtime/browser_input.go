@@ -71,6 +71,8 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 		kind = "authentication_probe_v1"
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION:
 		kind = "exploration_v1"
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY:
+		kind = "inspection_collection_v1"
 	default:
 		return errors.New("unsupported browser operation kind")
 	}
@@ -93,7 +95,7 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 		return errors.New("profile generation binding does not match frozen input")
 	}
 	bindingName := "probe"
-	if kind == "manual_login_v1" || kind == "exploration_v1" {
+	if kind == "manual_login_v1" || kind == "exploration_v1" || kind == "inspection_collection_v1" {
 		bindingName = "authenticationProbe"
 	}
 	binding, ok := value[bindingName].(map[string]any)

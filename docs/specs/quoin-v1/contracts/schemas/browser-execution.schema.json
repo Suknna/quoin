@@ -133,7 +133,7 @@
     "inspectionCollectionInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaKind", "attemptId", "operationId", "identity", "journey", "planKey", "checkKey"],
+      "required": ["schemaKind", "attemptId", "operationId", "identity", "journey", "authenticationProbe", "planKey", "checkKey"],
       "properties": {
         "schemaKind": { "const": "inspection_collection_v1" },
         "attemptId": { "$ref": "#/$defs/locatorId" },
@@ -154,6 +154,7 @@
           ]
         },
         "journey": { "$ref": "#/$defs/journeyBinding" },
+        "authenticationProbe": { "$ref": "#/$defs/journeyBinding" },
         "planKey": { "type": "string", "minLength": 1, "maxLength": 200 },
         "checkKey": { "type": "string", "minLength": 1, "maxLength": 200 }
       }
