@@ -32,6 +32,10 @@ func (service *RuntimeService) agentAttempts(attemptType string) *attempt.Servic
 		if service.Analyses != nil {
 			return service.Analyses.Attempts()
 		}
+	case "inspection_analysis":
+		if service.Inspections != nil {
+			return service.Inspections.Attempts()
+		}
 	}
 	return nil
 }
