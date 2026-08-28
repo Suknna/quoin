@@ -21,6 +21,7 @@ var projections = map[string]string{
 	"docs/specs/quoin-v1/contracts/schemas/readiness-response.schema.json":            "internal/gen/contracts/readiness-response.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/config-verification-execution.schema.json": "internal/gen/contracts/config-verification-execution.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/inspection-promql-execution.schema.json":   "internal/gen/contracts/inspection-promql-execution.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/inspection-report.schema.json":             "internal/gen/contracts/inspection-report.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/resource-refresh-execution.schema.json":    "internal/gen/contracts/resource-refresh-execution.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/browser-execution.schema.json":             "internal/gen/contracts/browser-execution.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/browser-tool.schema.json":                  "internal/gen/contracts/browser-tool.schema.json",

@@ -1602,6 +1602,8 @@ CREATE TABLE attempt_input_snapshots (
   schema_kind      TEXT NOT NULL,
   renderer_version TEXT NOT NULL,
   content_digest   TEXT NOT NULL CHECK (length(content_digest) = 64),
+  -- inspection_analysis_v1 专用：冻结 Quoin 预分配的 Report 版本（结构化事实，非正文 digest）。
+  inspection_report_version INTEGER CHECK (inspection_report_version IS NULL OR inspection_report_version >= 1),
   created_at       TEXT NOT NULL
 ) STRICT;
 
@@ -1946,6 +1948,23 @@ CREATE TABLE inspection_report_knowledge_versions (
   PRIMARY KEY (report_id, knowledge_version_id),
   UNIQUE (report_id, ordinal)
 ) WITHOUT ROWID, STRICT;
+
+-- Report ResultProposal 的不可变重放账本。唯一入口由 AFTER INSERT trigger
+-- 在同一外层事务创建 Report、全部有序引用及 Attempt 成功终态。
+CREATE TABLE inspection_report_result_ledgers (
+  attempt_id                 INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  inspection_run_id          INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  report_version             INTEGER NOT NULL CHECK (report_version >= 1),
+  model_call_id              INTEGER NOT NULL REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  result_digest              BLOB NOT NULL CHECK (length(result_digest) = 32),
+  evidence_digest            TEXT NOT NULL CHECK (length(evidence_digest) = 64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+  content                    TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 1000000),
+  prompt_digest              TEXT NOT NULL CHECK (length(prompt_digest) = 64 AND prompt_digest NOT GLOB '*[^0-9a-f]*'),
+  evidence_ids_json          TEXT NOT NULL CHECK (json_valid(evidence_ids_json) AND json_type(evidence_ids_json) = 'array'),
+  artifact_ids_json          TEXT NOT NULL CHECK (json_valid(artifact_ids_json) AND json_type(artifact_ids_json) = 'array'),
+  knowledge_version_ids_json TEXT NOT NULL CHECK (json_valid(knowledge_version_ids_json) AND json_type(knowledge_version_ids_json) = 'array'),
+  created_at                 TEXT NOT NULL
+) STRICT;
 
 -- ============================================================================
 -- 9. Artifact 与来源材料引用
@@ -4859,6 +4878,7 @@ WHEN NOT EXISTS (
       WHEN 'browser_exploration' THEN 'browser_exploration_v1'
       WHEN 'connection_probe' THEN 'connection_probe_v1'
     END)
+  OR (NEW.schema_kind = 'inspection_analysis_v1') <> (NEW.inspection_report_version IS NOT NULL)
 BEGIN SELECT RAISE(ABORT, 'attempt input snapshot schema_kind must match the versioned schema of the same Queued Attempt type'); END;
 CREATE TRIGGER trg_attempt_input_item_closure BEFORE INSERT ON attempt_input_items
 WHEN NOT EXISTS (
@@ -5844,3 +5864,103 @@ CREATE TRIGGER trg_verification_subject_drifts_no_update BEFORE UPDATE ON verifi
 CREATE TRIGGER trg_verification_subject_drifts_no_delete BEFORE DELETE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
 CREATE TRIGGER trg_verification_receipts_no_update BEFORE UPDATE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
 CREATE TRIGGER trg_verification_receipts_no_delete BEFORE DELETE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
+
+
+-- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
+-- ledger; direct Report writes and a successful analysis without that ledger
+-- are rejected by these fences.
+CREATE TRIGGER trg_inspection_reports_ledger_only BEFORE INSERT ON inspection_reports
+WHEN NOT EXISTS (
+  SELECT 1 FROM inspection_report_result_ledgers l
+  WHERE l.attempt_id=NEW.attempt_id AND l.inspection_run_id=NEW.run_id AND NEW.version=l.report_version
+)
+BEGIN SELECT RAISE(ABORT, 'inspection report must be created by its typed ResultProposal ledger'); END;
+CREATE TRIGGER trg_inspection_report_result_closure BEFORE INSERT ON inspection_report_result_ledgers
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a JOIN inspection_runs r ON r.id=a.scope_id
+  WHERE a.id=NEW.attempt_id AND a.attempt_type='inspection_analysis' AND a.scope_type='run'
+    AND a.scope_id=NEW.inspection_run_id AND a.state='Running' AND a.accepted_at IS NOT NULL
+    AND r.state IN ('Completed','CompletedWithGaps')
+)
+OR NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.id=NEW.model_call_id AND m.attempt_id=NEW.attempt_id AND m.status='succeeded' AND m.prompt_digest=NEW.prompt_digest)
+OR NOT EXISTS (SELECT 1 FROM attempt_input_snapshots s WHERE s.attempt_id=NEW.attempt_id AND s.inspection_report_version=NEW.report_version)
+OR (SELECT count(*) FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.inspection_run_id IS NOT NULL) <> 1
+OR NOT EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.inspection_run_id=NEW.inspection_run_id)
+OR NEW.report_version <> (SELECT count(*) + 1 FROM inspection_reports r WHERE r.run_id=NEW.inspection_run_id)
+OR EXISTS (SELECT 1 FROM inspection_check_results c WHERE c.run_id=NEW.inspection_run_id AND NOT EXISTS (
+             SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.inspection_check_result_id=c.id))
+OR EXISTS (SELECT 1 FROM inspection_check_results c WHERE c.run_id=NEW.inspection_run_id AND c.evidence_id IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM json_each(NEW.evidence_ids_json) x WHERE x.value=c.evidence_id))
+OR EXISTS (SELECT 1 FROM json_each(NEW.evidence_ids_json) x
+           WHERE x.type <> 'integer' OR NOT EXISTS (
+             SELECT 1 FROM inspection_check_results c JOIN evidence e ON e.id=c.evidence_id
+             WHERE c.run_id=NEW.inspection_run_id AND e.id=x.value AND e.integrity='complete'
+               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.evidence_id=e.id)))
+OR EXISTS (SELECT 1 FROM json_each(NEW.artifact_ids_json) x
+           WHERE x.type <> 'integer' OR NOT EXISTS (
+             SELECT 1 FROM evidence e WHERE e.target_type='inspection_run' AND e.target_id=NEW.inspection_run_id AND e.artifact_id=x.value
+               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.artifact_id=e.artifact_id)))
+OR EXISTS (SELECT 1 FROM json_each(NEW.knowledge_version_ids_json) x
+           WHERE x.type <> 'integer' OR NOT EXISTS (SELECT 1 FROM knowledge_versions k WHERE k.id=x.value
+               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.knowledge_version_id=k.id)))
+OR (SELECT count(*) FROM json_each(NEW.evidence_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.evidence_ids_json))
+OR (SELECT count(*) FROM json_each(NEW.artifact_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.artifact_ids_json))
+OR (SELECT count(*) FROM json_each(NEW.knowledge_version_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.knowledge_version_ids_json))
+OR NEW.evidence_ids_json <> json(NEW.evidence_ids_json)
+OR NEW.artifact_ids_json <> json(NEW.artifact_ids_json)
+OR NEW.knowledge_version_ids_json <> json(NEW.knowledge_version_ids_json)
+OR NEW.evidence_digest <> lower(hex(sha256(NEW.evidence_ids_json)))
+OR NEW.result_digest <> sha256('inspection_report_result_v1|' || NEW.attempt_id || '|' || NEW.inspection_run_id || '|' || NEW.model_call_id || '|success|' || NEW.content || '|' || NEW.evidence_ids_json || '|' || NEW.artifact_ids_json || '|' || NEW.knowledge_version_ids_json || '|' || NEW.evidence_digest || '|' || NEW.prompt_digest)
+BEGIN SELECT RAISE(ABORT, 'inspection Report ResultProposal must close one running Run analysis and only its immutable references'); END;
+CREATE TRIGGER trg_inspection_report_result_commit AFTER INSERT ON inspection_report_result_ledgers
+BEGIN
+  INSERT INTO inspection_reports(run_id,version,attempt_id,evidence_digest,model_id,prompt_digest,content,created_at)
+  SELECT NEW.inspection_run_id,NEW.report_version,NEW.attempt_id,NEW.evidence_digest,m.model_id,NEW.prompt_digest,NEW.content,NEW.created_at
+  FROM model_calls m WHERE m.id=NEW.model_call_id AND m.attempt_id=NEW.attempt_id AND m.status='succeeded';
+  INSERT INTO inspection_report_evidence(report_id,evidence_id,ordinal)
+  SELECT r.id,x.value,x.key FROM inspection_reports r JOIN json_each(NEW.evidence_ids_json) x WHERE r.attempt_id=NEW.attempt_id;
+  INSERT INTO inspection_report_artifacts(report_id,artifact_id,ordinal)
+  SELECT r.id,x.value,x.key FROM inspection_reports r JOIN json_each(NEW.artifact_ids_json) x WHERE r.attempt_id=NEW.attempt_id;
+  INSERT INTO inspection_report_knowledge_versions(report_id,knowledge_version_id,ordinal)
+  SELECT r.id,x.value,x.key FROM inspection_reports r JOIN json_each(NEW.knowledge_version_ids_json) x WHERE r.attempt_id=NEW.attempt_id;
+  UPDATE execution_attempts SET state='Succeeded',ended_at=NEW.created_at,row_version=row_version+1
+  WHERE id=NEW.attempt_id AND state='Running';
+END;
+
+CREATE TRIGGER trg_inspection_analysis_success_report BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.state='Running' AND NEW.state='Succeeded' AND NEW.attempt_type='inspection_analysis'
+  AND NOT EXISTS (SELECT 1 FROM inspection_report_result_ledgers l WHERE l.attempt_id=NEW.id)
+BEGIN SELECT RAISE(ABORT, 'Succeeded inspection analysis Attempt must atomically commit its immutable Report ledger'); END;
+
+CREATE TRIGGER trg_inspection_report_result_ledgers_immutable BEFORE UPDATE ON inspection_report_result_ledgers
+BEGIN SELECT RAISE(ABORT, 'inspection Report ResultProposal ledger is immutable'); END;
+CREATE TRIGGER trg_inspection_report_result_ledgers_no_delete BEFORE DELETE ON inspection_report_result_ledgers
+BEGIN SELECT RAISE(ABORT, 'inspection Report ResultProposal ledger is append-only'); END;
+
+CREATE TRIGGER trg_inspection_analysis_requires_closed_run BEFORE INSERT ON execution_attempts
+WHEN NEW.attempt_type='inspection_analysis' AND NEW.scope_type='run' AND NOT EXISTS (
+  SELECT 1 FROM inspection_runs r WHERE r.id=NEW.scope_id AND r.state IN ('Completed','CompletedWithGaps')
+)
+BEGIN SELECT RAISE(ABORT, 'inspection analysis requires a collection-complete Inspection Run'); END;
+
+CREATE TRIGGER trg_inspection_report_evidence_ledger_closure BEFORE INSERT ON inspection_report_evidence
+WHEN NOT EXISTS (
+  SELECT 1 FROM inspection_reports r JOIN inspection_report_result_ledgers l ON l.attempt_id=r.attempt_id
+  JOIN json_each(l.evidence_ids_json) x ON x.value=NEW.evidence_id AND x.key=NEW.ordinal
+  WHERE r.id=NEW.report_id
+)
+BEGIN SELECT RAISE(ABORT, 'inspection Report Evidence reference must exactly match its immutable ResultProposal ledger'); END;
+CREATE TRIGGER trg_inspection_report_artifact_ledger_closure BEFORE INSERT ON inspection_report_artifacts
+WHEN NOT EXISTS (
+  SELECT 1 FROM inspection_reports r JOIN inspection_report_result_ledgers l ON l.attempt_id=r.attempt_id
+  JOIN json_each(l.artifact_ids_json) x ON x.value=NEW.artifact_id AND x.key=NEW.ordinal
+  WHERE r.id=NEW.report_id
+)
+BEGIN SELECT RAISE(ABORT, 'inspection Report Artifact reference must exactly match its immutable ResultProposal ledger'); END;
+CREATE TRIGGER trg_inspection_report_knowledge_ledger_closure BEFORE INSERT ON inspection_report_knowledge_versions
+WHEN NOT EXISTS (
+  SELECT 1 FROM inspection_reports r JOIN inspection_report_result_ledgers l ON l.attempt_id=r.attempt_id
+  JOIN json_each(l.knowledge_version_ids_json) x ON x.value=NEW.knowledge_version_id AND x.key=NEW.ordinal
+  WHERE r.id=NEW.report_id
+)
+BEGIN SELECT RAISE(ABORT, 'inspection Report Knowledge reference must exactly match its immutable ResultProposal ledger'); END;

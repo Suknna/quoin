@@ -1,12 +1,37 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"modernc.org/sqlite"
 )
+
+// The frozen SQL contract computes canonical digest projections with a
+// sha256 SQL function; engines must register it deterministically.
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction("sha256", 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("sha256: expected 1 argument")
+		}
+		var data []byte
+		switch value := args[0].(type) {
+		case string:
+			data = []byte(value)
+		case []byte:
+			data = value
+		default:
+			return nil, fmt.Errorf("sha256: unsupported argument type %T", args[0])
+		}
+		sum := sha256.Sum256(data)
+		return sum[:], nil
+	})
+}
 
 const mixedInspectionTime = "2026-08-28T00:00:00Z"
 const mixedInspectionDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -323,6 +348,13 @@ func verifyMixedInspectionPromQLSQLite(root string) error {
 		return fmt.Errorf("browser run_check accepted a duplicate Journey ResultProposal: %w", err)
 	}
 
+	if err := mixedExec(db, `UPDATE inspection_runs SET state='Completed', row_version=row_version+1 WHERE id=1`); err != nil {
+		return err
+	}
+	if err := verifyMixedInspectionReportClosure(db); err != nil {
+		return err
+	}
+
 	if err := mixedExec(db, `
 		INSERT INTO inspection_runs(id, business_system_id, plan_key, config_version_id, label_contract_version_id,
 			trigger_kind, scheduled_for, state, row_version, evidence_at, rerun_of_id, created_at)
@@ -346,6 +378,288 @@ func verifyMixedInspectionPromQLSQLite(root string) error {
 		return fmt.Errorf("Inspection collection accepted the non-run_check scope: %w", err)
 	}
 	return nil
+}
+
+func verifyMixedInspectionReportClosure(db *sql.DB) error {
+	// The report fixture preserves Report/result/state closures. It bypasses only
+	// the separately proven model-provider qualification machinery needed to seed
+	// one accepted model call without duplicating that connection contract here.
+	for _, trigger := range []string{"trg_execution_attempts_dispatch_ready", "trg_attempt_connection_grant_closure", "trg_model_call_grant_closure", "trg_model_call_success_output", "trg_model_call_success_input"} {
+		if err := mixedExec(db, "DROP TRIGGER "+trigger); err != nil {
+			return err
+		}
+	}
+	ledgerReject := "inspection Report ResultProposal must close one running Run analysis and only its immutable references"
+	ledgerInsert := `INSERT INTO inspection_report_result_ledgers(attempt_id,inspection_run_id,report_version,model_call_id,result_digest,evidence_digest,content,prompt_digest,evidence_ids_json,artifact_ids_json,knowledge_version_ids_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+	evidenceDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("[2,3]")))
+
+	// The frozen preallocated version (2) deliberately disagrees with the ledger
+	// claim (1) while the Report count still allows 1: only the structured
+	// snapshot fact rejects this proposal.
+	mismatchAttempt, mismatchCall, err := seedReportAnalysisLifecycle(db, 2, []int64{1})
+	if err != nil {
+		return err
+	}
+	mismatchResult := sha256.Sum256([]byte(reportResultCanonical(mismatchAttempt, mismatchCall, evidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		mismatchAttempt, 1, 1, mismatchCall, mismatchResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report frozen version fence: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, mismatchAttempt); err != nil {
+		return fmt.Errorf("cancel mismatch attempt: %w", err)
+	}
+
+	// Count predicate isolated: two frozen Run locators including the right one.
+	noRunAttempt, noRunCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1, 1})
+	if err != nil {
+		return err
+	}
+	noRunResult := sha256.Sum256([]byte(reportResultCanonical(noRunAttempt, noRunCall, evidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		noRunAttempt, 1, 1, noRunCall, noRunResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report frozen Run locator count fence: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, noRunAttempt); err != nil {
+		return fmt.Errorf("cancel run-locator-count attempt: %w", err)
+	}
+
+	// A real second Run closes its own PromQL check with real Evidence. That
+	// Evidence is frozen into the analysis input, but it never belongs to Run 1's
+	// check results: only the run-fact binding can reject the proposal.
+	foreignEvidence, err := seedForeignRunEvidence(db)
+	if err != nil {
+		return err
+	}
+	foreignAttempt, foreignCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1}, foreignEvidence)
+	if err != nil {
+		return err
+	}
+	foreignJSON := fmt.Sprintf("[2,3,%d]", foreignEvidence)
+	foreignDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(foreignJSON)))
+	foreignResult := sha256.Sum256([]byte(reportResultCanonical(foreignAttempt, foreignCall, foreignDigest, mixedInspectionDigest, "immutable report", foreignJSON)))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		foreignAttempt, 1, 1, foreignCall, foreignResult[:], foreignDigest, "immutable report", mixedInspectionDigest, foreignJSON, "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report cross-Run Evidence fence: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, foreignAttempt); err != nil {
+		return fmt.Errorf("cancel foreign attempt: %w", err)
+	}
+
+	// Binding predicate isolated: exactly one frozen Run locator, but it points
+	// at the real foreign Run 3 instead of the ledger's Run 1.
+	bindingAttempt, bindingCall, err := seedReportAnalysisLifecycle(db, 1, []int64{3})
+	if err != nil {
+		return err
+	}
+	bindingResult := sha256.Sum256([]byte(reportResultCanonical(bindingAttempt, bindingCall, evidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		bindingAttempt, 1, 1, bindingCall, bindingResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report frozen Run locator binding fence: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, bindingAttempt); err != nil {
+		return fmt.Errorf("cancel run-locator-binding attempt: %w", err)
+	}
+
+	// Locator typing on a fully valid lifecycle: every non-type arm (version,
+	// Run locator, coverage, digests) must pass, so removing the x.type fence
+	// would let these payloads through. The string "2" and the real 2.0 both
+	// numerically cover Run 1's required Evidence 2 under SQLite affinity.
+	typeAttempt, typeCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1})
+	if err != nil {
+		return err
+	}
+	for _, payload := range []struct{ json string }{{`["2",3]`}, {"[2.0,3]"}} {
+		payloadDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(payload.json)))
+		payloadResult := sha256.Sum256([]byte(reportResultCanonical(typeAttempt, typeCall, payloadDigest, mixedInspectionDigest, "immutable report", payload.json)))
+		if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+			typeAttempt, 1, 1, typeCall, payloadResult[:], payloadDigest, "immutable report", mixedInspectionDigest, payload.json, "[]", "[]", mixedInspectionTime); err != nil {
+			return fmt.Errorf("report non-integer locator fence (%s): %w", payload.json, err)
+		}
+	}
+	wrongEvidenceDigest := strings.Repeat("c", 64)
+	wrongEvidenceResult := sha256.Sum256([]byte(reportResultCanonical(typeAttempt, typeCall, wrongEvidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		typeAttempt, 1, 1, typeCall, wrongEvidenceResult[:], wrongEvidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report evidence digest provenance fence: %w", err)
+	}
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		typeAttempt, 1, 1, typeCall, make([]byte, 32), evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report result digest provenance fence: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, typeAttempt); err != nil {
+		return fmt.Errorf("cancel locator-type attempt: %w", err)
+	}
+
+	// Happy path: every frozen fact lines up.
+	attemptID, modelCallID, err := seedReportAnalysisLifecycle(db, 1, []int64{1})
+	if err != nil {
+		return err
+	}
+	wrongPrompt := strings.Repeat("b", 64)
+	wrongPromptResult := sha256.Sum256([]byte(reportResultCanonical(attemptID, modelCallID, evidenceDigest, wrongPrompt, "immutable report", "[2,3]")))
+	if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert,
+		attemptID, 1, 1, modelCallID, wrongPromptResult[:], evidenceDigest, "immutable report", wrongPrompt, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("report prompt provenance fence: %w", err)
+	}
+	if err := mixedMustRejectCause(db, "Succeeded inspection analysis Attempt must atomically commit its immutable Report ledger", `UPDATE execution_attempts SET state='Succeeded', ended_at=?, row_version=4 WHERE id=?`, mixedInspectionTime, attemptID); err != nil {
+		return fmt.Errorf("report analysis direct success fence: %w", err)
+	}
+	validResult := sha256.Sum256([]byte(reportResultCanonical(attemptID, modelCallID, evidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
+	if err := mixedTransaction(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(ledgerInsert, attemptID, 1, 1, modelCallID, validResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime)
+		return err
+	}); err != nil {
+		return fmt.Errorf("commit Report ResultProposal: %w", err)
+	}
+	var reports int
+	var state string
+	if err := db.QueryRow(`SELECT count(*) FROM inspection_reports WHERE attempt_id=?`, attemptID).Scan(&reports); err != nil {
+		return err
+	}
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+		return err
+	}
+	if reports != 1 || state != "Succeeded" {
+		return fmt.Errorf("Report ResultProposal did not atomically close Report/Attempt: reports=%d state=%s", reports, state)
+	}
+	if err := mixedMustRejectCause(db, "inspection Report Evidence reference must exactly match its immutable ResultProposal ledger", `INSERT INTO inspection_report_evidence(report_id,evidence_id,ordinal) SELECT id,1,2 FROM inspection_reports WHERE attempt_id=?`, attemptID); err != nil {
+		return fmt.Errorf("Report Evidence append fence: %w", err)
+	}
+	if err := mixedMustRejectCause(db, "inspection Report Artifact reference must exactly match its immutable ResultProposal ledger", `INSERT INTO inspection_report_artifacts(report_id,artifact_id,ordinal) SELECT id,1,0 FROM inspection_reports WHERE attempt_id=?`, attemptID); err != nil {
+		return fmt.Errorf("Report Artifact append fence: %w", err)
+	}
+	if err := mixedMustReject(db, ledgerInsert, attemptID, 1, 1, modelCallID, make([]byte, 32), evidenceDigest, "mutated", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+		return fmt.Errorf("Report ResultProposal accepted mutated replay: %w", err)
+	}
+	return nil
+}
+
+// seedForeignRunEvidence reopens the second Inspection Run, closes its PromQL
+// check through the real collection/evidence/check-result closure, and returns
+// the resulting Evidence id.
+func seedForeignRunEvidence(db *sql.DB) (int64, error) {
+	if err := mixedExec(db, `INSERT INTO inspection_runs(id, business_system_id, plan_key, config_version_id, label_contract_version_id,
+		trigger_kind, scheduled_for, state, row_version, evidence_at, rerun_of_id, created_at)
+		VALUES (3, 1, 'plan', 1, 1, 'manual', NULL, 'Running', 1, ?, NULL, ?)`, mixedInspectionTime, mixedInspectionTime); err != nil {
+		return 0, fmt.Errorf("create foreign run: %w", err)
+	}
+	result, err := db.Exec(`INSERT INTO execution_attempts(attempt_type, scope_type, scope_id, plan_key, check_key, discovery_key, state, row_version, runtime_slot, requested_by_tool_call_id, connection_epoch, boot_id, lease_until, accepted_at, quoin_release_version, runtime_release_version, agent_version, termination_reason, created_at)
+		VALUES ('inspection_collection', 'run_check', 3, NULL, 'promql', NULL, 'Queued', 1, NULL, NULL, NULL, NULL, NULL, NULL, 'quoin-v1', NULL, NULL, NULL, ?)`, mixedInspectionTime)
+	if err != nil {
+		return 0, fmt.Errorf("create foreign collection attempt: %w", err)
+	}
+	collectionID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := mixedExec(db, `INSERT INTO attempt_input_snapshots(attempt_id, schema_kind, renderer_version, content_digest, created_at)
+		VALUES (?, 'inspection_promql_execution_v1', 'v1', ?, ?)`, collectionID, mixedInspectionDigest, mixedInspectionTime); err != nil {
+		return 0, fmt.Errorf("freeze foreign collection input: %w", err)
+	}
+	if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_run_id) SELECT id, 1, 'inspection_run', ?, 3 FROM attempt_input_snapshots WHERE attempt_id=?`, mixedInspectionDigest, collectionID); err != nil {
+		return 0, fmt.Errorf("freeze foreign collection Run item: %w", err)
+	}
+	if err := mixedExec(db, `INSERT INTO attempt_connection_grants(attempt_id, purpose, business_system_id, connection_id, connection_revision_id, credential_generation_id, qualified_probe_result_id, created_by_tool_call_id, created_at)
+		VALUES (?, 'config_thanos_query', NULL, 1, 1, 1, NULL, NULL, ?)`, collectionID, mixedInspectionTime); err != nil {
+		return 0, fmt.Errorf("seed foreign collection grant: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Assigned', runtime_slot='plinth', boot_id='plinth-foreign-boot', connection_epoch=1, lease_until=?, runtime_release_version='plinth-v1', row_version=2 WHERE id=?`, "2026-08-29T00:00:00Z", collectionID); err != nil {
+		return 0, fmt.Errorf("assign foreign collection: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Running', accepted_at=?, row_version=3 WHERE id=?`, mixedInspectionTime, collectionID); err != nil {
+		return 0, fmt.Errorf("start foreign collection: %w", err)
+	}
+	var evidenceID int64
+	if err := mixedTransaction(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT INTO evidence(attempt_id, tool_call_id, target_type, target_id, params_json, observed_at, result_json, artifact_id, warnings_json, errors_json, integrity, created_at)
+			VALUES (?, NULL, 'inspection_run', 3, '{"plan_key":"plan","check_key":"promql"}', ?, '{"resultType":"vector","result":[{"metric":{"job":"quoin"},"value":[0,"1"]}]}', NULL, '[]', '[]', 'complete', ?)`,
+			collectionID, mixedInspectionTime, mixedInspectionTime); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(`SELECT id FROM evidence WHERE attempt_id=? ORDER BY id DESC LIMIT 1`, collectionID).Scan(&evidenceID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO inspection_check_results(run_id, check_key, status, evidence_id, attempt_id, result_digest, gap_reason, created_at)
+			VALUES (3, 'promql', 'ok', ?, ?, zeroblob(32), NULL, ?)`, evidenceID, collectionID, mixedInspectionTime)
+		return err
+	}); err != nil {
+		return 0, fmt.Errorf("commit foreign collection result: %w", err)
+	}
+	// The foreign Run deliberately stays Running: the Report closure only ever
+	// validates the ledger's own Run, and this Evidence must remain real yet
+	// never enter Run 1's frozen result set.
+	return evidenceID, nil
+}
+
+// reportResultCanonical mirrors the frozen SQL canonical projection that binds
+// result_digest to the exact typed ResultProposal payload.
+func reportResultCanonical(attemptID, modelCallID int64, evidenceDigest, promptDigest, content, evidenceJSON string) string {
+	return fmt.Sprintf("inspection_report_result_v1|%d|1|%d|success|%s|%s|[]|[]|%s|%s", attemptID, modelCallID, content, evidenceJSON, evidenceDigest, promptDigest)
+}
+
+// seedReportAnalysisLifecycle freezes one inspection_analysis input snapshot
+// (Run locator items, evidence, check results, structured preallocated Report
+// version), then drives the Attempt and one succeeded model call. runLocators
+// pins the exact frozen inspection_run_id item set (default [1]).
+func seedReportAnalysisLifecycle(db *sql.DB, reportVersion int, runLocators []int64, extraEvidenceIDs ...int64) (int64, int64, error) {
+	if runLocators == nil {
+		runLocators = []int64{1}
+	}
+	result, err := db.Exec(`INSERT INTO execution_attempts(attempt_type, scope_type, scope_id, plan_key, check_key, discovery_key, state, row_version, runtime_slot, requested_by_tool_call_id, connection_epoch, boot_id, lease_until, accepted_at, quoin_release_version, runtime_release_version, agent_version, termination_reason, created_at)
+		VALUES ('inspection_analysis', 'run', 1, NULL, NULL, NULL, 'Queued', 1, NULL, NULL, NULL, NULL, NULL, NULL, 'quoin-v1', NULL, NULL, NULL, ?)`, mixedInspectionTime)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create report analysis Attempt: %w", err)
+	}
+	attemptID, err := result.LastInsertId()
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := mixedExec(db, `INSERT INTO attempt_input_snapshots(attempt_id, schema_kind, renderer_version, content_digest, inspection_report_version, created_at)
+		VALUES (?, 'inspection_analysis_v1', 'v1', ?, ?, ?)`, attemptID, mixedInspectionDigest, reportVersion, mixedInspectionTime); err != nil {
+		return 0, 0, fmt.Errorf("freeze report input: %w", err)
+	}
+	for offset, runID := range runLocators {
+		itemSeq := 1
+		if offset > 0 {
+			itemSeq = 20 + offset
+		}
+		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_run_id) SELECT id, ?, 'inspection_run', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, itemSeq, mixedInspectionDigest, runID, attemptID); err != nil {
+			return 0, 0, fmt.Errorf("freeze report Run input: %w", err)
+		}
+	}
+	for sequence, evidenceID := range []int{2, 3} {
+		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id) SELECT id,?, 'inspection_evidence', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, sequence+2, mixedInspectionDigest, evidenceID, attemptID); err != nil {
+			return 0, 0, fmt.Errorf("freeze report Evidence input: %w", err)
+		}
+	}
+	for sequence, checkResultID := range []int{1, 2} {
+		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_check_result_id) SELECT id,?, 'inspection_check_result', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, sequence+4, mixedInspectionDigest, checkResultID, attemptID); err != nil {
+			return 0, 0, fmt.Errorf("freeze report check-result input: %w", err)
+		}
+	}
+	for offset, evidenceID := range extraEvidenceIDs {
+		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id) SELECT id,?, 'inspection_evidence', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, offset+6, mixedInspectionDigest, evidenceID, attemptID); err != nil {
+			return 0, 0, fmt.Errorf("freeze report extra Evidence input: %w", err)
+		}
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Assigned', runtime_slot='plinth', boot_id='plinth-report-boot', connection_epoch=1, lease_until=?, runtime_release_version='plinth-v1', agent_version='agent-v1', row_version=2 WHERE id=?`, "2026-08-29T00:00:00Z", attemptID); err != nil {
+		return 0, 0, fmt.Errorf("assign report analysis: %w", err)
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Running', accepted_at=?, row_version=3 WHERE id=?`, mixedInspectionTime, attemptID); err != nil {
+		return 0, 0, fmt.Errorf("start report analysis: %w", err)
+	}
+	call, err := db.Exec(`INSERT INTO model_calls(attempt_id,call_seq,retry_seq,operation,model_id,connection_grant_id,provider_request_id,prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest,input_snapshot_digest,rendered_request_digest,context_budget_tokens,max_output_tokens,estimated_input_tokens,evicted_turn_count,usage_json,latency_ms,status,termination_reason,started_at,ended_at) VALUES (?,1,0,'chat','model',1,NULL,'v1','agent-v1',?, 'v1', ?, ?, ?, 2,1,0,0,NULL,NULL,'running',NULL,?,NULL)`, attemptID, mixedInspectionDigest, mixedInspectionDigest, mixedInspectionDigest, mixedInspectionDigest, mixedInspectionTime)
+	if err != nil {
+		return 0, 0, fmt.Errorf("seed running report model call: %w", err)
+	}
+	modelCallID, err := call.LastInsertId()
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := mixedExec(db, `UPDATE model_calls SET status='succeeded', usage_json='{}', latency_ms=1, ended_at=? WHERE id=?`, mixedInspectionTime, modelCallID); err != nil {
+		return 0, 0, fmt.Errorf("seal report model call: %w", err)
+	}
+	return attemptID, modelCallID, nil
 }
 
 func bootstrapMixedInspectionRun(db *sql.DB) error {

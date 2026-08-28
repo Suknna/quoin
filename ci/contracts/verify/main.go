@@ -92,7 +92,26 @@ func verifySchemas(root string) error {
 			return fmt.Errorf("validate %s: %w", item.data, err)
 		}
 	}
-	return verifyInspectionPromQLSchema(compiled["inspection-promql-execution.schema.json"])
+	if err := verifyInspectionPromQLSchema(compiled["inspection-promql-execution.schema.json"]); err != nil {
+		return err
+	}
+	return verifyInspectionReportSchema(compiled["inspection-report.schema.json"])
+}
+
+func verifyInspectionReportSchema(schema *jsonschema.Schema) error {
+	validInput := map[string]any{"schemaKind": "inspection_analysis_v1", "attemptId": 1, "inspectionRunId": 2, "reportVersion": 1, "configVersionId": 3, "planKey": "production", "evidenceIds": []any{4}, "artifactIds": []any{}, "knowledgeVersionIds": []any{}, "modelContract": map[string]any{"modelId": "model", "contextBudgetTokens": 1, "maxOutputTokens": 1}}
+	validResult := map[string]any{"schemaKind": "inspection_report_result_v1", "attemptId": 1, "inspectionRunId": 2, "modelCallId": 3, "outcome": "success", "content": "report", "evidenceIds": []any{4}, "artifactIds": []any{}, "knowledgeVersionIds": []any{}, "resultDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "evidenceDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "promptDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	for name, value := range map[string]map[string]any{"input": validInput, "result": validResult} {
+		if err := schema.Validate(value); err != nil {
+			return fmt.Errorf("inspection Report valid %s: %w", name, err)
+		}
+	}
+	invalid := maps.Clone(validResult)
+	invalid["evidenceIds"] = []any{4, 4}
+	if err := schema.Validate(invalid); err == nil {
+		return fmt.Errorf("inspection Report accepted duplicate evidence locator")
+	}
+	return nil
 }
 
 func verifyInspectionPromQLSchema(schema *jsonschema.Schema) error {

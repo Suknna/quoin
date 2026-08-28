@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/inspection-report.schema.json",
+  "title": "Quoin immutable Inspection Report contracts",
+  "description": "Manual Inspection 的 Plinth report-analysis input 与 ResultProposal。所有 locator 均由 Quoin 在冻结 Input 和单一 SQLite closure 中重新裁决。",
+  "oneOf": [{"$ref":"#/$defs/input"},{"$ref":"#/$defs/result"}],
+  "$defs": {
+    "id": {"type":"integer","minimum":1},
+    "digest": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "modelContract": {"type":"object","additionalProperties":false,"required":["modelId","contextBudgetTokens","maxOutputTokens"],"properties":{"modelId":{"type":"string","minLength":1,"maxLength":500},"contextBudgetTokens":{"type":"integer","minimum":1},"maxOutputTokens":{"type":"integer","minimum":1}}},
+    "input": {"type":"object","additionalProperties":false,"required":["schemaKind","attemptId","inspectionRunId","reportVersion","configVersionId","planKey","evidenceIds","artifactIds","knowledgeVersionIds","modelContract"],"properties":{"schemaKind":{"const":"inspection_analysis_v1"},"attemptId":{"$ref":"#/$defs/id"},"inspectionRunId":{"$ref":"#/$defs/id"},"reportVersion":{"$ref":"#/$defs/id"},"configVersionId":{"$ref":"#/$defs/id"},"planKey":{"type":"string","minLength":1,"maxLength":200},"evidenceIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"artifactIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"knowledgeVersionIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"modelContract":{"$ref":"#/$defs/modelContract"}}},
+    "result": {"type":"object","additionalProperties":false,"required":["schemaKind","attemptId","inspectionRunId","modelCallId","outcome","content","evidenceIds","artifactIds","knowledgeVersionIds","resultDigest","evidenceDigest","promptDigest"],"properties":{"schemaKind":{"const":"inspection_report_result_v1"},"attemptId":{"$ref":"#/$defs/id"},"inspectionRunId":{"$ref":"#/$defs/id"},"modelCallId":{"$ref":"#/$defs/id"},"outcome":{"const":"success"},"content":{"type":"string","minLength":1,"maxLength":1000000},"evidenceIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"artifactIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"knowledgeVersionIds":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"resultDigest":{"$ref":"#/$defs/digest"},"evidenceDigest":{"$ref":"#/$defs/digest"},"promptDigest":{"$ref":"#/$defs/digest"}}}
+  }
+}

@@ -73,3 +73,8 @@
 - **CFG-VALIDATION-003 —** PromQL 校验 **MUST** 以官方 parser 验证：合法表达式通过；非法语法拒绝；VectorSelector 缺业务系统 label / 非精确 `=` / 值不等于 system key 拒绝；discovery selector 含 `offset`/`@`/聚合/`label_replace`/子查询拒绝；check expression 允许 `offset`/`@`/子查询（只需通过 AST 与归属校验）。（来源：Issue #8 交付纪律）
 - **CFG-VALIDATION-004 —** SQL 投影 **MUST** 以 SQLite harness 验证：根投影列持久化与 `system_key` 匹配触发器、发布投影同步（同一事务、`row_version` 递增）、check 类型化 CHECK（instant/range 组合、跨 kind 排斥、零/负 range/step 拒绝）、`config_verification_runs` 生命周期（active 唯一、终态不可变、来源不可改、row_version 精确 +1、check 结果条件约束）、`scope_type='config_verification_run'` 与 journey 浏览器操作绑定（DATA-VALIDATION-002）。（来源：Issue #12 交付纪律）
 - **CFG-VALIDATION-005 —** catalog 验证 **MUST** 覆盖：生成器拒绝重复稳定 ID；每个嵌套参数 Schema 通过 draft 2020-12 metaschema 编译且 required 只引用已声明参数；Journey 参数正反例按对应嵌套 Schema 执行；相同输入的两次独立生成产出完全相同的文件字节与 digest；Quoin/Lintel 嵌入字节相等；相邻正式 v1 catalog 的旧 ID/参数契约兼容门；`Hello.journey_catalog_digest` 不匹配拒绝（RUNTIME-VALIDATION-002）。（来源：Issue #12 验收条件）
+
+
+### CFG-INSPECTRUN-002 — Immutable report closure
+
+Mixed collection 已收口后，Quoin 以冻结的 config version/plan 和准确的 collection Evidence 集创建一次 `inspection_analysis`。模型只能撰写报告内容和选择冻结 locator；程序不预设健康 verdict 或 severity。`inspection_report_result_v1` 的 locator、payload digest 与 Evidence digest 由 Quoin 重验，并经单一 SQLite closure 形成不可修改的 Report。collection gap 仍是报告可见事实，不会删除其它 check 的 Evidence；分析失败不会产生占位 Report。
