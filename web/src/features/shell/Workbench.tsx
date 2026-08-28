@@ -18,6 +18,9 @@ import '../admin/business-systems/business-systems.css'
 import { InvestigationChat } from '../investigation/InvestigationChat'
 import { InvestigationsList } from '../investigation/InvestigationsList'
 import { NewInvestigation, type InvestigationSourceRef } from '../investigation/NewInvestigation'
+import { InspectionsPage } from '../inspection/InspectionsPage'
+import { RunDetailPage } from '../inspection/RunDetailPage'
+import '../inspection/inspection.css'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -28,6 +31,12 @@ type ModuleKey = 'alerts' | 'investigations' | 'inspections' | 'business-systems
 type AlertSegment = 'current' | 'history' | 'intake'
 
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
+type InspectionView = { kind: 'list' } | { kind: 'detail'; runId: string }
+
+function inspectionViewFromPath(): InspectionView {
+  const match = window.location.pathname.match(/^\/inspections\/runs\/(\d+)$/)
+  return match ? { kind: 'detail', runId: match[1] } : { kind: 'list' }
+}
 
 type BusinessSystemView = { kind: 'list' } | { kind: 'system'; systemKey: string } | { kind: 'browser-login'; systemKey: string } | { kind: 'version'; systemKey: string; versionId: string }
 
@@ -104,6 +113,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes'>('users')
 	const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
 	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
+  const [inspectionView, setInspectionView] = useState<InspectionView>(inspectionViewFromPath)
 	const [uploadOpen, setUploadOpen] = useState(false)
 	const [contractsOpen, setContractsOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
@@ -118,7 +128,8 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
        const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
        setOpenAnalysisId(analysisMatch ? analysisMatch[2] : null)
        setInvestigationView(investigationViewFromPath())
-       setBusinessSystemView(businessSystemViewFromPath())
+        setBusinessSystemView(businessSystemViewFromPath())
+        setInspectionView(inspectionViewFromPath())
        const alertRoute = alertRouteFromPath()
        setAlertSegment(alertRoute.segment)
        setAlertSystemFilter(alertRoute.businessSystemKey)
@@ -133,8 +144,9 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
      setActive(key)
      setDrawerOpen(false)
      setSelectedOccurrence(null)
-     setOpenAnalysisId(null)
-     if (key === 'alerts') {
+      setOpenAnalysisId(null)
+      if (key === 'inspections') setInspectionView(inspectionViewFromPath())
+      if (key === 'alerts') {
        const route = alertRouteFromPath()
        setAlertSegment(route.segment)
        setAlertSystemFilter(route.businessSystemKey)
@@ -178,6 +190,18 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 		setActive('investigations')
 		setInvestigationView({ kind: 'new', sources })
 	}
+
+  function openInspection(runId: string) {
+    window.history.pushState({}, '', `/inspections/runs/${encodeURIComponent(runId)}`)
+    setActive('inspections')
+    setInspectionView({ kind: 'detail', runId })
+  }
+
+  function backToInspections() {
+    window.history.pushState({}, '', '/inspections')
+    setActive('inspections')
+    setInspectionView({ kind: 'list' })
+  }
 
   function backToInvestigations() {
     window.history.pushState({}, '', '/investigations')
@@ -271,7 +295,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             )}
           </>
         )}
-        {active !== 'alerts' && (
+         {active !== 'alerts' && active !== 'inspections' && (
           <div className="inline-status" role="status">
             <span className="status-dot waiting" />
             <div><strong>此能力尚未接入</strong><p>当前安装已经就绪；后续纵向票会在这里加入真实对象。</p></div>
@@ -335,7 +359,11 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             </div>
             {user.role === 'admin' && <AlertSourceForm onCreated={() => undefined} />}
           </div>
-        ) : active === 'investigations' && investigationView.kind === 'new' ? (
+         ) : active === 'inspections' && inspectionView.kind === 'detail' ? (
+           <RunDetailPage runId={inspectionView.runId} onBack={backToInspections} />
+         ) : active === 'inspections' ? (
+           <InspectionsPage onOpenRun={openInspection} />
+         ) : active === 'investigations' && investigationView.kind === 'new' ? (
           <NewInvestigation
             sources={investigationView.sources}
             onCreated={(investigationId) => openInvestigation(investigationId)}

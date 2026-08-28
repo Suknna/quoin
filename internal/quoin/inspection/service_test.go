@@ -272,8 +272,8 @@ func TestCreateMixedRunAndPromQLClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.State != "CompletedWithGaps" || final.Report != nil {
-		t.Fatalf("run should converge CompletedWithGaps without a report yet, got %s report=%v", final.State, final.Report)
+	if final.State != "CompletedWithGaps" || final.ReportCount != 0 {
+		t.Fatalf("run should converge CompletedWithGaps without a report yet, got %s reports=%d", final.State, final.ReportCount)
 	}
 	// The browser gap stayed visible instead of erasing the run's evidence.
 	var gaps int
@@ -687,8 +687,12 @@ func TestImmutableReportClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.Report == nil || final.Report.Version != 1 || final.Report.Content != "巡检报告正文" || final.Report.ModelID != "fixture-chat-1" {
-		t.Fatalf("immutable report missing or wrong: %+v", final.Report)
+	if final.ReportCount != 1 {
+		t.Fatalf("run should expose one report version, got %d", final.ReportCount)
+	}
+	report, err := h.service.GetReport(ctx, detail.RunID, 1)
+	if err != nil || report.Version != 1 || report.Content != "巡检报告正文" || report.ModelID != "fixture-chat-1" || len(report.EvidenceIDs) != 1 || report.EvidenceDigest == "" {
+		t.Fatalf("immutable report missing or wrong: %+v err=%v", report, err)
 	}
 	var analysisState string
 	if err := h.db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, analysisID).Scan(&analysisState); err != nil {

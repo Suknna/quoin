@@ -71,10 +71,10 @@ func mapDomainError(err error) *problemError {
 }
 
 func (handler *Handler) listRuns(ctx context.Context, input *struct {
-	Session   string `cookie:"__Host-quoin-session"`
-	SystemKey string `query:"systemKey"`
-	Cursor    string `query:"cursor"`
-	Limit     int    `query:"limit"`
+	Session           string `cookie:"__Host-quoin-session"`
+	BusinessSystemKey string `query:"businessSystemKey"`
+	Cursor            string `query:"cursor"`
+	Limit             int    `query:"limit"`
 }) (*struct {
 	CacheControl string     `header:"Cache-Control"`
 	Body         runListing `json:"body"`
@@ -82,14 +82,14 @@ func (handler *Handler) listRuns(ctx context.Context, input *struct {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
 	}
-	if input.SystemKey == "" {
-		return nil, problem(http.StatusBadRequest, "malformed_request", "缺少 systemKey 查询参数。")
+	if input.BusinessSystemKey == "" {
+		return nil, problem(http.StatusBadRequest, "malformed_request", "缺少 businessSystemKey 查询参数。")
 	}
 	cursor, cursorProblem := decodeCursor(input.Cursor)
 	if cursorProblem != nil {
 		return nil, cursorProblem
 	}
-	items, more, err := handler.Inspections.ListRuns(ctx, input.SystemKey, cursor, input.Limit)
+	items, more, err := handler.Inspections.ListRuns(ctx, input.BusinessSystemKey, cursor, input.Limit)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -100,7 +100,7 @@ func (handler *Handler) listRuns(ctx context.Context, input *struct {
 	response.Body.Items = items
 	if more && len(items) > 0 {
 		last := items[len(items)-1]
-		response.Body.NextCursor = base64.StdEncoding.EncodeToString([]byte(last.CreatedAt + "\x00" + strconv.FormatInt(last.RunID, 10)))
+		response.Body.NextCursor = base64.StdEncoding.EncodeToString([]byte(last.CreatedAt + "\x00" + last.ID))
 	}
 	return response, nil
 }
@@ -138,9 +138,9 @@ func decodeCursor(raw string) (string, *problemError) {
 func (handler *Handler) createRun(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		SystemKey       string `json:"systemKey" minLength:"1" maxLength:"200"`
-		PlanKey         string `json:"planKey" minLength:"1" maxLength:"200"`
-		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		BusinessSystemKey string `json:"businessSystemKey" minLength:"1" maxLength:"200"`
+		PlanKey           string `json:"planKey" minLength:"1" maxLength:"200"`
+		ClientCommandID   string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
 }) (*struct {
 	Status       int                  `header:"-"`
@@ -151,7 +151,7 @@ func (handler *Handler) createRun(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, err
 	}
-	detail, err := handler.Inspections.CreateInspectionRun(ctx, principalID, input.Body.ClientCommandID, input.Body.SystemKey, input.Body.PlanKey)
+	detail, err := handler.Inspections.CreateInspectionRun(ctx, principalID, input.Body.ClientCommandID, input.Body.BusinessSystemKey, input.Body.PlanKey)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -194,6 +194,61 @@ func (handler *Handler) getRun(ctx context.Context, input *struct {
 	}{CacheControl: noStore(), Body: detail}, nil
 }
 
+func (handler *Handler) listReports(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	RunID   string `path:"runId"`
+	Limit   int    `query:"limit"`
+}) (*struct {
+	CacheControl string        `header:"Cache-Control"`
+	Body         reportListing `json:"body"`
+}, error) {
+	if _, err := handler.reader(ctx, input.Session); err != nil {
+		return nil, err
+	}
+	runID, parseErr := strconv.ParseInt(input.RunID, 10, 64)
+	if parseErr != nil || runID < 1 {
+		return nil, problem(http.StatusBadRequest, "malformed_request", "巡检 Run 标识无效。")
+	}
+	items, err := handler.Inspections.ListReports(ctx, runID, input.Limit)
+	if err != nil {
+		return nil, mapDomainError(err)
+	}
+	return &struct {
+		CacheControl string        `header:"Cache-Control"`
+		Body         reportListing `json:"body"`
+	}{CacheControl: noStore(), Body: reportListing{Items: items}}, nil
+}
+
+func (handler *Handler) getReport(ctx context.Context, input *struct {
+	Session       string `cookie:"__Host-quoin-session"`
+	RunID         string `path:"runId"`
+	ReportVersion string `path:"reportVersion"`
+}) (*struct {
+	CacheControl string                  `header:"Cache-Control"`
+	Body         inspection.ReportDetail `json:"body"`
+}, error) {
+	if _, err := handler.reader(ctx, input.Session); err != nil {
+		return nil, err
+	}
+	runID, runErr := strconv.ParseInt(input.RunID, 10, 64)
+	version, versionErr := strconv.ParseInt(input.ReportVersion, 10, 64)
+	if runErr != nil || runID < 1 || versionErr != nil || version < 1 {
+		return nil, problem(http.StatusBadRequest, "malformed_request", "巡检 Run 或报告版本标识无效。")
+	}
+	detail, err := handler.Inspections.GetReport(ctx, runID, version)
+	if err != nil {
+		return nil, mapDomainError(err)
+	}
+	return &struct {
+		CacheControl string                  `header:"Cache-Control"`
+		Body         inspection.ReportDetail `json:"body"`
+	}{CacheControl: noStore(), Body: detail}, nil
+}
+
+type reportListing struct {
+	Items []inspection.ReportSummaryItem `json:"items"`
+}
+
 func (handler *Handler) cancelRun(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	RunID   string `path:"runId"`
@@ -233,5 +288,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs", OperationID: "listInspectionRuns"}, handler.listRuns)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs", OperationID: "createInspectionRun"}, handler.createRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}", OperationID: "getInspectionRun"}, handler.getRun)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}/reports", OperationID: "listInspectionReports"}, handler.listReports)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}/reports/{reportVersion}", OperationID: "getInspectionReport"}, handler.getReport)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs/{runId}/cancel", OperationID: "cancelInspectionRun"}, handler.cancelRun)
 }
