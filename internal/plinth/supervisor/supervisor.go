@@ -54,6 +54,8 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 			supervisor.runConfigVerification(parent, sink, client, dispatch, binding, stopTask)
 		case runtimev1.ScopeType_SCOPE_TYPE_RESOURCE_REFRESH_RUN:
 			supervisor.runResourceRefresh(parent, sink, client, dispatch, binding, stopTask)
+		case runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK:
+			supervisor.runInspectionPromQL(parent, sink, client, dispatch, binding, stopTask)
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
 		}

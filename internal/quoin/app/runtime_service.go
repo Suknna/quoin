@@ -20,6 +20,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
@@ -52,6 +53,10 @@ type RuntimeService struct {
 	Artifacts *artifact.Store
 	// Browsers owns durable Browser Identity/Operation authority (T20).
 	Browsers *browser.Service
+	// Inspections owns manual Inspection Runs: run_check PromQL children and
+	// inspection_analysis report attempts (T24); nil keeps the handshake-only
+	// behaviour for tests that do not exercise it.
+	Inspections *inspection.Service
 	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
 	// Lintel must agree on (RUNTIME-CTRL-010); empty means no catalog
 	// embedded yet, which keeps lintel handshake-rejected with CATALOG_

@@ -124,6 +124,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 				sharedops.LogEvent("quoin", "error", "config_verification.accept_failed", err.Error())
 			}
 		}
+	case "inspection_analysis":
+		if service.Inspections != nil {
+			if err := service.Inspections.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.accept_failed", err.Error())
+			}
+		}
 	case "initial_analysis":
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())

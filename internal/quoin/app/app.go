@@ -27,6 +27,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
+	appinspection "github.com/Suknna/quoin/internal/quoin/app/inspection"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
@@ -35,6 +36,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
@@ -61,6 +63,7 @@ type apiServer struct {
 	analyses                    *analysis.Service
 	investigations              *investigation.Service
 	systems                     *businesssystem.Service
+	inspections                 *inspection.Service
 	contracts                   *labelcontract.Service
 	browsers                    *browser.Service
 	investigationUpload         *appinvestigation.Handler
@@ -73,6 +76,7 @@ type apiServer struct {
 	investigationDispatchFunc   func(ctx context.Context, attemptID int64) error
 	resourceRefreshDispatchFunc func(ctx context.Context)
 	verificationDispatchFunc    func(ctx context.Context)
+	inspectionDispatchFunc      func(ctx context.Context)
 	browserPublishDispatchFunc  func(ctx context.Context, request browser.PublishRequest) error
 	browserStopDispatchFunc     func(ctx context.Context, operationID int64) error
 	browserTunnels              *browserTunnelHub
@@ -104,6 +108,7 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		analyses:       analysis.NewService(db),
 		investigations: investigation.NewService(db),
 		systems:        businesssystem.NewService(db),
+		inspections:    inspection.NewService(db),
 		contracts:      labelcontract.NewService(db),
 		browsers:       browser.NewService(db),
 		browserTunnels: newBrowserTunnelHub(),
@@ -229,6 +234,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
 	controlService.BusinessSystems = application.systems
+	controlService.Inspections = application.inspections
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations
 	controlService.Artifacts = artifactStore
@@ -269,6 +275,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		controlService.dispatchQueuedBrowserOperations(ctx)
 		controlService.dispatchReadyJourneyAttempts(ctx)
 	}
+	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
 	// disconnect is what enters AwaitingReconnect; a tunnel reconnect must not
@@ -412,9 +419,28 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			if application.verificationDispatchFunc != nil {
 				application.verificationDispatchFunc(ctx)
 			}
+			if application.inspectionDispatchFunc != nil {
+				application.inspectionDispatchFunc(ctx)
+			}
 		},
 	}
 	configHandler.Register(api)
+	inspectionHandler := &appinspection.Handler{
+		Inspections: application.inspections,
+		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateFull(ctx, cookie, "使用巡检")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+		DispatchInspections: func(ctx context.Context) {
+			if application.inspectionDispatchFunc != nil {
+				application.inspectionDispatchFunc(ctx)
+			}
+		},
+	}
+	inspectionHandler.Register(api)
 	// The raw multipart upload routes (NewHandler) reuse this handler's
 	// authentication seams; returning it keeps the mux wiring after the
 	// full registration completes.

@@ -604,3 +604,92 @@ func parseRunCursor(cursor string) (string, int64, error) {
 	}
 	return createdAt, value, nil
 }
+
+// CancelRun applies the one-shot cancel fence: the command carries the current
+// row version; Queued children close here, dispatched children move to
+// Cancelling and the Run only becomes terminal once the fences settle.
+func (s *Service) CancelRun(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID, expectedRowVersion int64) (RunDetail, error) {
+	const command = "inspection_run.cancel"
+	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "runId": runID, "expectedRowVersion": expectedRowVersion})
+	if d, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
+		return d, err
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return RunDetail{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	if d, replayed, err := s.replayOn(ctx, conn, principalID, clientCommandID, digest); replayed || err != nil {
+		if replayed {
+			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+				return RunDetail{}, err
+			}
+			committed = true
+		}
+		return d, err
+	}
+	var systemID int64
+	if err = conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
+		return RunDetail{}, ErrNotFound
+	}
+	rows, err := conn.QueryContext(ctx, `
+		SELECT id, state FROM execution_attempts
+		WHERE scope_type='run_check' AND scope_id=? AND state IN ('Queued','Assigned','Running')`, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	var childIDs []int64
+	for rows.Next() {
+		var childID int64
+		var childState string
+		if err = rows.Scan(&childID, &childState); err != nil {
+			rows.Close()
+			return RunDetail{}, err
+		}
+		childIDs = append(childIDs, childID)
+	}
+	if err = rows.Close(); err != nil {
+		return RunDetail{}, err
+	}
+	attempts := attempt.NewService(s.db)
+	for _, childID := range childIDs {
+		if _, err = attempts.CancelFenceOn(ctx, conn, childID); err != nil {
+			return RunDetail{}, err
+		}
+	}
+	update, err := conn.ExecContext(ctx, `
+		UPDATE inspection_runs SET state='Cancelled', row_version=row_version+1
+		WHERE id=? AND business_system_id=? AND row_version=? AND state IN ('Queued','Running')`,
+		runID, systemID, expectedRowVersion)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	affected, _ := update.RowsAffected()
+	if affected == 0 {
+		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "row_version_conflict", Detail: "巡检 Run 已变化或已进入终态，请刷新后重试", SystemKey: systemKey, ObjectID: runID}, &committed)
+	}
+	if err = s.audit(ctx, conn, principalID, clientCommandID, command, runID, s.nowText()); err != nil {
+		return RunDetail{}, err
+	}
+	detail, err := s.detailOn(ctx, conn, systemKey, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, runID, detail); err != nil {
+		return RunDetail{}, err
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return RunDetail{}, err
+	}
+	committed = true
+	return detail, nil
+}
