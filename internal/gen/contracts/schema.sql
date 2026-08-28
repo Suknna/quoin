@@ -1238,8 +1238,8 @@ CREATE TABLE inspection_check_results (
   check_key     TEXT NOT NULL,
   status        TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
   evidence_id   INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  attempt_id    INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- browser result 绑定精确 inspection_collection Attempt；PromQL 为 NULL
-  result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- operation-less Journey Result 重放摘要；有 operation 时与 browser_journey_results 同值
+  attempt_id    INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每项都绑定精确 inspection_collection Attempt；PromQL 的 immutable ResultProposal 同样受 Attempt/epoch fence
+  result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- PromQL/operation-less Journey Result 重放摘要；有 operation 时与 browser_journey_results 同值
   gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
                 'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
                 'artifact_commit_failed','journey_failed','query_failed','partial_response','no_data','cancelled','interrupted')),
@@ -1250,7 +1250,7 @@ CREATE TABLE inspection_check_results (
     OR (status IN ('error','gap') AND gap_reason IS NOT NULL)
   ),
   CHECK (attempt_id IS NOT NULL OR result_digest IS NULL),
-  CHECK (result_digest IS NULL OR status = 'gap' OR evidence_id IS NOT NULL)
+  CHECK (result_digest IS NULL OR status IN ('error','gap') OR evidence_id IS NOT NULL)
 ) STRICT;
 CREATE UNIQUE INDEX ux_inspection_check_result_evidence ON inspection_check_results (evidence_id) WHERE evidence_id IS NOT NULL;
 
@@ -1563,7 +1563,7 @@ CREATE TABLE execution_attempts (
     runtime_slot IS NULL
     OR (attempt_type = 'browser_exploration' AND runtime_slot = 'lintel')
     OR (attempt_type = 'inspection_collection' AND (
-      (scope_type = 'run_check' AND runtime_slot = 'lintel')
+      (scope_type = 'run_check' AND runtime_slot IN ('plinth','lintel'))
       OR (scope_type = 'config_verification_run' AND runtime_slot IN ('plinth','lintel'))
       OR (scope_type = 'resource_refresh_run' AND runtime_slot = 'plinth')
     ))
@@ -1657,6 +1657,10 @@ CREATE TABLE attempt_connection_grants (
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
   (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id, COALESCE(business_system_id, 0));
+-- PromQL collection has one deterministic global Thanos locator. A credential rotation must not
+-- leave a Queued Attempt with competing historical grants; it must re-freeze a fresh Attempt.
+CREATE UNIQUE INDEX ux_attempt_connection_grant_config_thanos_attempt ON attempt_connection_grants (attempt_id)
+  WHERE purpose = 'config_thanos_query';
 
 CREATE TABLE model_calls (
   id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -2328,10 +2332,18 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
   SELECT 1 FROM execution_attempts a
   WHERE a.id = NEW.attempt_id
     AND a.attempt_type = 'inspection_collection'
-    AND a.scope_type IN ('config_verification_run','resource_refresh_run')
     AND a.state = 'Queued'
+    AND (
+      a.scope_type IN ('config_verification_run','resource_refresh_run')
+      OR (a.scope_type = 'run_check' AND EXISTS (
+        SELECT 1 FROM inspection_runs r
+        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+        WHERE r.id = a.scope_id AND r.state = 'Running' AND c.kind = 'promql'
+      ))
+    )
 )
-BEGIN SELECT RAISE(ABORT, 'config_thanos_query grant requires one Queued Config Verification or Resource Refresh inspection_collection Attempt'); END;
+BEGIN SELECT RAISE(ABORT, 'config_thanos_query grant requires one Queued PromQL Config Verification, Resource Refresh, or Running Inspection Run collection Attempt'); END;
 CREATE TRIGGER trg_evidence_no_update BEFORE UPDATE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
 CREATE TRIGGER trg_evidence_no_delete BEFORE DELETE ON evidence
@@ -2346,11 +2358,14 @@ WHEN (NEW.tool_call_id IS NOT NULL AND NEW.attempt_id IS NULL)
    ))
    OR (NEW.attempt_id IS NOT NULL AND NEW.tool_call_id IS NULL AND NOT EXISTS (
      SELECT 1 FROM execution_attempts a
-      WHERE a.id = NEW.attempt_id AND a.state = 'Running'
-        AND a.accepted_at IS NOT NULL
-        AND ((a.runtime_slot = 'lintel' AND a.attempt_type IN ('inspection_collection','browser_exploration'))
-          OR (a.runtime_slot = 'plinth' AND a.attempt_type = 'inspection_collection' AND a.scope_type = 'config_verification_run'))
-    ))
+     WHERE a.id = NEW.attempt_id AND a.state = 'Running'
+       AND a.accepted_at IS NOT NULL
+       AND (
+         (a.runtime_slot = 'lintel' AND a.attempt_type IN ('inspection_collection','browser_exploration'))
+         OR (a.runtime_slot = 'plinth' AND a.attempt_type = 'inspection_collection'
+             AND a.scope_type IN ('run_check','config_verification_run'))
+       )
+   ))
 BEGIN SELECT RAISE(ABORT, 'Evidence must be Quoin-local, close to one same Running Attempt and running Tool Call, or close to one accepted Runtime collection/exploration Attempt'); END;
 CREATE TRIGGER trg_inspection_reports_no_update BEFORE UPDATE ON inspection_reports
 BEGIN SELECT RAISE(ABORT, 'inspection_reports is append-only'); END;
@@ -2678,6 +2693,20 @@ WHEN NEW.state <> 'Queued' OR NOT EXISTS (
     AND ((a.state = 'Queued' AND a.runtime_slot IS NULL)
       OR (a.state IN ('Assigned','Running') AND a.runtime_slot = 'lintel'))
     AND a.scope_type IN ('run_check','config_verification_run') AND a.check_key IS NOT NULL
+    AND (
+      (a.scope_type = 'run_check' AND EXISTS (
+        SELECT 1 FROM inspection_runs r
+        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+        WHERE r.id = a.scope_id AND c.kind = 'browser' AND c.journey_id = NEW.journey_id
+      ))
+      OR (a.scope_type = 'config_verification_run' AND EXISTS (
+        SELECT 1 FROM config_verification_runs r
+        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = a.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+        WHERE r.id = a.scope_id AND c.kind = 'browser' AND c.journey_id = NEW.journey_id
+      ))
+    )
     AND ((a.scope_type = 'run_check' AND i.business_system_id = (SELECT business_system_id FROM inspection_runs WHERE id = a.scope_id))
       OR (a.scope_type = 'config_verification_run' AND i.business_system_id = (SELECT business_system_id FROM config_verification_runs WHERE id = a.scope_id)))
   )) OR (NEW.kind = 'exploration' AND NOT EXISTS (
@@ -2695,13 +2724,34 @@ BEGIN SELECT RAISE(ABORT, 'browser operation may dispatch Start only at the glob
 CREATE TRIGGER trg_execution_attempts_browser_dispatch_after_operation_running BEFORE UPDATE OF state ON execution_attempts
 WHEN NEW.state = 'Assigned' AND OLD.state = 'Queued' AND (
   (NEW.attempt_type = 'inspection_collection'
-    AND (NEW.scope_type = 'run_check'
+    AND ((NEW.scope_type = 'run_check' AND EXISTS (
+        SELECT 1 FROM inspection_runs r
+        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+        WHERE r.id = NEW.scope_id AND c.kind = 'browser'))
       OR (NEW.scope_type = 'config_verification_run' AND EXISTS (
         SELECT 1 FROM config_verification_runs t
         JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
         JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
         WHERE t.id = NEW.scope_id AND c.kind = 'browser')))
-    AND NOT EXISTS (SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id = NEW.id AND o.kind = 'journey' AND o.state = 'Running'))
+    AND NOT EXISTS (
+      SELECT 1 FROM browser_operations o
+      WHERE o.owner_attempt_id = NEW.id AND o.kind = 'journey' AND o.state = 'Running'
+        AND (
+          (NEW.scope_type = 'run_check' AND EXISTS (
+            SELECT 1 FROM inspection_runs r
+                JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+            JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+            WHERE r.id = NEW.scope_id AND c.kind = 'browser' AND c.journey_id = o.journey_id
+          ))
+          OR (NEW.scope_type = 'config_verification_run' AND EXISTS (
+            SELECT 1 FROM config_verification_runs r
+                JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = NEW.plan_key
+            JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+            WHERE r.id = NEW.scope_id AND c.kind = 'browser' AND c.journey_id = o.journey_id
+          ))
+        )
+    ))
   OR (NEW.attempt_type = 'browser_exploration'
     AND NOT EXISTS (
       SELECT 1 FROM tool_calls t JOIN browser_operations o ON o.owner_attempt_id = t.attempt_id
@@ -4352,8 +4402,8 @@ WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
 -- Config Verification 子 Attempt 的 slot 与 check kind 固定映射（CFG-VERIFYRUN-002、RUNTIME-TASK-003）：
--- PromQL check 只派发 plinth supervisor，Browser check 只派发 lintel。表级 CHECK 只放宽
--- config_verification_run 允许两种 slot，精确映射由此处闭合；run_check 固定 lintel 由表级 CHECK 拥有。
+-- PromQL check 只派发 plinth supervisor，Browser check 只派发 lintel。表级 CHECK 仅允许
+-- inspection_collection 的合法 Runtime 集合；精确映射由各自 scope 的 trigger 闭合。
 CREATE TRIGGER trg_execution_attempts_config_verification_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
 WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'config_verification_run' AND NOT EXISTS (
   SELECT 1 FROM config_verification_runs t
@@ -4364,6 +4414,16 @@ WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'config_ver
       OR (c.kind = 'browser' AND NEW.runtime_slot = 'lintel'))
 )
 BEGIN SELECT RAISE(ABORT, 'config verification attempt slot must match its check kind'); END;
+CREATE TRIGGER trg_execution_attempts_run_check_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
+WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check' AND NOT EXISTS (
+  SELECT 1 FROM inspection_runs r
+  JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+  WHERE r.id = NEW.scope_id AND r.state = 'Running'
+    AND ((c.kind = 'promql' AND NEW.runtime_slot = 'plinth')
+      OR (c.kind = 'browser' AND NEW.runtime_slot = 'lintel'))
+)
+BEGIN SELECT RAISE(ABORT, 'inspection run check attempt slot must match its check kind'); END;
 
 -- 派发绑定（runtime_slot/boot_id/connection_epoch/accepted_at）一旦设置不可改；
 -- lease_until 可由心跳续期（可再生，row_version 照常递增）；requested_by_tool_call_id 不可改。
@@ -4754,7 +4814,7 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         SELECT 1 FROM inspection_runs r JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
         JOIN config_checks c ON c.plan_id = p.id
         WHERE r.id = NEW.scope_id AND r.state = 'Running'
-          AND c.check_key = NEW.check_key AND c.kind = 'browser' AND NEW.check_key IS NOT NULL))
+          AND c.check_key = NEW.check_key AND c.kind IN ('promql','browser') AND NEW.check_key IS NOT NULL))
 BEGIN SELECT RAISE(ABORT, 'execution_attempt scope must reference the active object required by its fixed work mode'); END;
 
 CREATE TRIGGER trg_browser_exploration_parent_tool BEFORE INSERT ON execution_attempts
@@ -4787,6 +4847,13 @@ WHEN NOT EXISTS (
           THEN 'inspection_collection_v1'
           ELSE 'config_verification_execution_v1' END
         WHEN 'resource_refresh_run' THEN 'resource_refresh_execution_v1'
+        WHEN 'run_check' THEN CASE WHEN EXISTS (
+          SELECT 1 FROM inspection_runs r
+          JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+          JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+          WHERE r.id = a.scope_id AND c.kind = 'promql')
+          THEN 'inspection_promql_execution_v1'
+          ELSE 'inspection_collection_v1' END
         ELSE 'inspection_collection_v1'
       END
       WHEN 'browser_exploration' THEN 'browser_exploration_v1'
@@ -4827,6 +4894,28 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'kubernetes_probe'))
         )
       )))
+  OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check'
+      AND EXISTS (
+        SELECT 1 FROM inspection_runs r
+        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
+        WHERE r.id = NEW.scope_id AND c.kind = 'promql'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM attempt_connection_grants g
+        JOIN connections connection ON connection.id = g.connection_id
+        JOIN connection_revisions revision ON revision.id = g.connection_revision_id
+          AND revision.connection_id = connection.id
+        JOIN credential_generations credential ON credential.id = g.credential_generation_id
+          AND credential.connection_id = connection.id
+        JOIN root_key_state root_key ON root_key.id = 1
+        WHERE g.attempt_id = NEW.id AND g.purpose = 'config_thanos_query'
+          AND connection.type = 'thanos' AND connection.enabled = 1 AND connection.revalidation_required = 0
+          AND connection.current_revision_id = revision.id
+          AND connection.current_credential_generation_id = credential.id
+          AND credential.key_binding_revision = root_key.binding_revision
+      ))
   OR (NEW.runtime_slot = 'lintel' AND NEW.agent_version IS NOT NULL)
 )
 BEGIN SELECT RAISE(ABORT, 'attempt cannot dispatch without frozen input, release binding, and required model grant'); END;
@@ -4990,7 +5079,15 @@ WHEN NOT EXISTS (
         )
         OR (NEW.purpose = 'thanos_query' AND c.type = 'thanos' AND NEW.qualified_probe_result_id IS NULL)
         OR (NEW.purpose = 'config_thanos_query' AND c.type = 'thanos' AND NEW.qualified_probe_result_id IS NULL
-            AND a.attempt_type = 'inspection_collection' AND a.scope_type IN ('config_verification_run','resource_refresh_run'))
+            AND a.attempt_type = 'inspection_collection' AND (
+              a.scope_type IN ('config_verification_run','resource_refresh_run')
+              OR (a.scope_type = 'run_check' AND EXISTS (
+                SELECT 1 FROM inspection_runs r
+                JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+                JOIN config_checks check_definition ON check_definition.plan_id = p.id AND check_definition.check_key = a.check_key
+                WHERE r.id = a.scope_id AND r.state = 'Running' AND check_definition.kind = 'promql'
+              ))
+            ))
         OR (NEW.purpose = 'kubernetes_read' AND c.type = 'kubernetes' AND NEW.qualified_probe_result_id IS NULL
           AND EXISTS (SELECT 1 FROM business_system_kubernetes_connections map
                       WHERE map.business_system_id = NEW.business_system_id AND map.connection_id = c.id AND map.state = 'Active'))
@@ -5272,8 +5369,22 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
                 AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.knowledge_version_id = i.knowledge_version_id
                                 AND e.embedding_generation_id = NEW.scope_id AND e.state = 'ready'))
       OR NOT EXISTS (SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id AND g.vector_dim IS NOT NULL)))
+  OR (NEW.attempt_type = 'inspection_collection' AND NOT EXISTS (
+    SELECT 1 FROM inspection_check_results r
+    WHERE NEW.scope_type = 'run_check' AND r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM config_verification_run_check_results r
+    WHERE NEW.scope_type = 'config_verification_run' AND r.verification_run_id = NEW.scope_id
+      AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM observed_refresh_log l
+    WHERE NEW.scope_type = 'resource_refresh_run' AND l.resource_refresh_run_id = NEW.scope_id
+      AND l.attempt_id = NEW.id AND l.result_digest IS NOT NULL
+  ))
   OR (NEW.attempt_type = 'connection_probe' AND NOT EXISTS (
-      SELECT 1 FROM connection_probe_results p
+    SELECT 1 FROM connection_probe_results p
       WHERE p.attempt_id = NEW.id AND p.connection_id = NEW.scope_id
         AND ((p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
           OR (p.connection_type = 'thanos' AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id))
@@ -5294,21 +5405,28 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   ))
 )
 BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt must atomically commit the valid domain result for its fixed work mode'); END;
--- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。
--- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。PromQL ok 与 Journey
--- success 引用唯一完整 Evidence；Journey 业务 gap 和技术 gap 不制造空 Evidence。
+-- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。PromQL 与 Journey
+-- 都绑定精确 collection Attempt；PromQL ok 与 Journey success 引用唯一完整 Evidence，业务 gap
+-- 和技术 gap 不制造空 Evidence。
 CREATE TRIGGER trg_inspection_check_results_closure BEFORE INSERT ON inspection_check_results
 WHEN NOT EXISTS (
   SELECT 1 FROM inspection_runs r
   JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
   JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
   WHERE r.id = NEW.run_id AND r.state = 'Running' AND (
-    (c.kind = 'promql' AND NEW.attempt_id IS NULL AND NEW.result_digest IS NULL AND (
+    (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL AND NEW.result_digest IS NOT NULL AND EXISTS (
+      SELECT 1 FROM execution_attempts a
+      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+        AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id AND a.check_key = NEW.check_key
+        AND a.runtime_slot = 'plinth' AND a.state = 'Running' AND a.accepted_at IS NOT NULL
+    ) AND (
       (NEW.status = 'ok' AND EXISTS (
-        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id IS NULL
-          AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id AND e.integrity = 'complete'
+        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id = NEW.attempt_id
+          AND e.tool_call_id IS NULL AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id
+          AND e.integrity = 'complete' AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
           AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
-      OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL)))
+      OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL
+          AND NEW.gap_reason IN ('query_failed','partial_response','no_data','cancelled','interrupted'))))
     OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM execution_attempts a
       WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
@@ -5343,6 +5461,22 @@ WHEN NOT EXISTS (
 OR (NEW.evidence_id IS NOT NULL AND EXISTS (
   SELECT 1 FROM inspection_check_results r WHERE r.evidence_id = NEW.evidence_id))
 BEGIN SELECT RAISE(ABORT, 'inspection result must be one exact PromQL result, an atomically committed Journey ResultProposal, or a terminal technical gap'); END;
+-- PromQL ResultProposal commits its typed Evidence, check result, and Attempt
+-- completion in this one outer INSERT statement (DATA-TX-018). A gap/error
+-- remains a successful transport collection with a typed domain result.
+CREATE TRIGGER trg_inspection_promql_result_commit AFTER INSERT ON inspection_check_results
+WHEN NEW.result_digest IS NOT NULL AND EXISTS (
+  SELECT 1 FROM execution_attempts a
+  JOIN inspection_runs r ON r.id = a.scope_id
+  JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
+  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+  WHERE a.id = NEW.attempt_id AND a.scope_type = 'run_check' AND c.kind = 'promql'
+)
+BEGIN
+  UPDATE execution_attempts
+  SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
+  WHERE id = NEW.attempt_id AND state = 'Running';
+END;
 CREATE TRIGGER trg_inspection_local_journey_result AFTER INSERT ON inspection_check_results
 WHEN NEW.result_digest IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM browser_journey_results j WHERE j.attempt_id = NEW.attempt_id)

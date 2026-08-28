@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bufbuild/protocompile"
 	"github.com/dlclark/regexp2"
@@ -89,6 +91,176 @@ func verifySchemas(root string) error {
 		if err := compiled[item.schema].Validate(value); err != nil {
 			return fmt.Errorf("validate %s: %w", item.data, err)
 		}
+	}
+	return verifyInspectionPromQLSchema(compiled["inspection-promql-execution.schema.json"])
+}
+
+func verifyInspectionPromQLSchema(schema *jsonschema.Schema) error {
+	valid := []map[string]any{
+		{
+			"schemaKind": "inspection_promql_execution_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "grantId": 3,
+			"evidenceAt": "2026-08-28T00:00:00Z", "query": map[string]any{"mode": "instant", "expression": "up", "rangeSeconds": nil, "stepSeconds": nil},
+		},
+		{
+			"schemaKind": "inspection_promql_execution_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "latency", "grantId": 3,
+			"evidenceAt": "2026-08-28T00:05:00Z", "query": map[string]any{"mode": "range", "expression": "up", "rangeSeconds": 300, "stepSeconds": 60},
+		},
+		{
+			"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "latency", "queryMode": "range", "outcome": "success", "observedAt": "2026-08-28T00:05:01Z",
+			"executionWindow": map[string]any{"startAt": "2026-08-28T00:00:00Z", "endAt": "2026-08-28T00:05:00Z", "stepSeconds": 60}, "result": map[string]any{"resultType": "matrix", "result": []any{map[string]any{"metric": map[string]any{"job": "api"}, "values": []any{[]any{1724716800, "1"}}}}}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+		},
+		{
+			"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "success", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+			"result": map[string]any{"resultType": "vector", "result": []any{map[string]any{"metric": map[string]any{"job": "api"}, "value": []any{1724716800, "1"}}}}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+		},
+		{
+			"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "gap", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+			"result": nil, "warnings": []any{}, "errors": []any{"no data"}, "gapReason": "no_data",
+		},
+	}
+	for _, value := range valid {
+		if err := schema.Validate(value); err != nil {
+			return fmt.Errorf("inspection PromQL valid fixture: %w", err)
+		}
+	}
+	if err := verifyInspectionPromQLRangeWindow(valid[1], valid[2]); err != nil {
+		return fmt.Errorf("inspection PromQL valid range result: %w", err)
+	}
+	for name, change := range map[string]func(map[string]any){
+		"missing window": func(result map[string]any) { result["executionWindow"] = nil },
+		"wrong end": func(result map[string]any) {
+			result["executionWindow"] = map[string]any{"startAt": "2026-08-28T00:00:00Z", "endAt": "2026-08-28T00:04:00Z", "stepSeconds": 60}
+		},
+		"wrong start": func(result map[string]any) {
+			result["executionWindow"] = map[string]any{"startAt": "2026-08-28T00:01:00Z", "endAt": "2026-08-28T00:05:00Z", "stepSeconds": 60}
+		},
+		"wrong step": func(result map[string]any) {
+			result["executionWindow"] = map[string]any{"startAt": "2026-08-28T00:00:00Z", "endAt": "2026-08-28T00:05:00Z", "stepSeconds": 30}
+		},
+		"downgraded mode": func(result map[string]any) { result["queryMode"] = "instant"; result["executionWindow"] = nil },
+	} {
+		candidate := maps.Clone(valid[2])
+		change(candidate)
+		if err := verifyInspectionPromQLRangeWindow(valid[1], candidate); err == nil {
+			return fmt.Errorf("inspection PromQL accepted %s range result", name)
+		}
+	}
+	rangeWithoutWindow := map[string]any{
+		"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "latency", "queryMode": "range", "outcome": "success", "observedAt": "2026-08-28T00:05:01Z", "executionWindow": nil,
+		"result": map[string]any{"resultType": "vector", "result": []any{map[string]any{"metric": map[string]any{}, "value": []any{1724716800, "1"}}}}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+	}
+	if err := schema.Validate(rangeWithoutWindow); err == nil {
+		return fmt.Errorf("inspection PromQL accepted range result without executionWindow")
+	}
+	for _, gapReason := range []string{"identity_busy", "runtime_unavailable", "authentication_required", "authentication_probe_unavailable", "artifact_commit_failed", "journey_failed", "unknown_gap"} {
+		value := map[string]any{
+			"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "gap", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+			"result": nil, "warnings": []any{}, "errors": []any{"gap"}, "gapReason": gapReason,
+		}
+		if err := schema.Validate(value); err == nil {
+			return fmt.Errorf("inspection PromQL accepted non-PromQL gap reason %q", gapReason)
+		}
+	}
+	invalid := []struct {
+		name  string
+		value map[string]any
+	}{
+		{
+			name: "missing evidenceAt",
+			value: map[string]any{
+				"schemaKind": "inspection_promql_execution_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "grantId": 3,
+				"query": map[string]any{"mode": "instant", "expression": "up", "rangeSeconds": nil, "stepSeconds": nil},
+			},
+		},
+		{
+			name: "missing result",
+			value: map[string]any{
+				"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "success", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+				"result": nil, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+			},
+		},
+		{
+			name: "empty result object",
+			value: map[string]any{
+				"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "success", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+				"result": map[string]any{}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+			},
+		},
+		{
+			name: "unknown result type",
+			value: map[string]any{
+				"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "success", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+				"result": map[string]any{"resultType": "histogram", "result": []any{}}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+			},
+		},
+		{
+			name: "empty vector",
+			value: map[string]any{
+				"schemaKind": "inspection_promql_result_v1", "attemptId": 1, "inspectionRunId": 2, "checkKey": "availability", "queryMode": "instant", "outcome": "success", "observedAt": "2026-08-28T00:00:00Z", "executionWindow": nil,
+				"result": map[string]any{"resultType": "vector", "result": []any{}}, "warnings": []any{}, "errors": []any{}, "gapReason": nil,
+			},
+		},
+	}
+	for _, test := range invalid {
+		if err := schema.Validate(test.value); err == nil {
+			return fmt.Errorf("inspection PromQL accepted invalid %s", test.name)
+		}
+	}
+	return nil
+}
+
+func verifyInspectionPromQLRangeWindow(input, result map[string]any) error {
+	for _, field := range []string{"attemptId", "inspectionRunId", "checkKey"} {
+		if input[field] != result[field] {
+			return fmt.Errorf("result %s does not match frozen input", field)
+		}
+	}
+	query, ok := input["query"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("input has no query")
+	}
+	mode, ok := query["mode"].(string)
+	if !ok || (mode != "instant" && mode != "range") {
+		return fmt.Errorf("input has invalid query mode")
+	}
+	resultMode, ok := result["queryMode"].(string)
+	if !ok || resultMode != mode {
+		return fmt.Errorf("result queryMode does not match frozen input")
+	}
+	window := result["executionWindow"]
+	if mode == "instant" {
+		if window != nil {
+			return fmt.Errorf("instant result must not return an executionWindow")
+		}
+		return nil
+	}
+	rangeSeconds, ok := query["rangeSeconds"].(int)
+	if !ok || rangeSeconds < 1 {
+		return fmt.Errorf("input has no positive rangeSeconds")
+	}
+	stepSeconds, ok := query["stepSeconds"].(int)
+	if !ok || stepSeconds < 1 {
+		return fmt.Errorf("input has no positive stepSeconds")
+	}
+	evidenceAt, err := time.Parse(time.RFC3339, input["evidenceAt"].(string))
+	if err != nil {
+		return fmt.Errorf("parse evidenceAt: %w", err)
+	}
+	actual, ok := window.(map[string]any)
+	if !ok {
+		return fmt.Errorf("range result has no executionWindow")
+	}
+	start, err := time.Parse(time.RFC3339, actual["startAt"].(string))
+	if err != nil {
+		return fmt.Errorf("parse startAt: %w", err)
+	}
+	end, err := time.Parse(time.RFC3339, actual["endAt"].(string))
+	if err != nil {
+		return fmt.Errorf("parse endAt: %w", err)
+	}
+	actualStep, ok := actual["stepSeconds"].(int)
+	if !ok || actualStep != stepSeconds || !end.Equal(evidenceAt) || !start.Equal(end.Add(-time.Duration(rangeSeconds)*time.Second)) {
+		return fmt.Errorf("executionWindow must exactly match frozen evidenceAt/rangeSeconds/stepSeconds")
 	}
 	return nil
 }
@@ -214,7 +386,10 @@ func verifySQLite(root string) error {
 	if rows.Next() {
 		return fmt.Errorf("foreign_key_check returned violations")
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return verifyMixedInspectionPromQLSQLite(root)
 }
 
 type ecmaRegexp regexp2.Regexp
