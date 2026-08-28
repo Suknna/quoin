@@ -82,7 +82,16 @@ func (supervisor *Supervisor) runInspectionPromQL(parent context.Context, sink *
 		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "gap", nil, warnings, "partial_response")
 		return
 	}
-	supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "success", result, nil, "")
+	// The frozen result field is the closed Prometheus projection itself
+	// ({resultType, result}), not the whole HTTP envelope.
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(result, &envelope); err != nil || len(envelope.Data) == 0 {
+		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, []string{"PromQL response carried no data projection"}, "query_failed")
+		return
+	}
+	supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "success", envelope.Data, nil, "")
 }
 
 func (supervisor *Supervisor) proposeInspectionPromQL(sink *runtime.FrameSink, attemptID int64, binding runtime.DispatchBinding, input inspectionPromQLInput, outcome string, result json.RawMessage, messages []string, gapReason string) {
