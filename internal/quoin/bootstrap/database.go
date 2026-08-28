@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"fmt"
 	"net/url"
@@ -17,8 +18,27 @@ import (
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	sharedops "github.com/Suknna/quoin/internal/ops"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
+
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction("sha256", 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("sha256: expected one argument")
+		}
+		var input []byte
+		switch value := args[0].(type) {
+		case string:
+			input = []byte(value)
+		case []byte:
+			input = value
+		default:
+			return nil, fmt.Errorf("sha256: unsupported argument type %T", args[0])
+		}
+		sum := sha256.Sum256(input)
+		return sum[:], nil
+	})
+}
 
 const verifierPlaintext = "quoin-root-key-verifier-v1"
 
