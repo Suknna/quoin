@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +34,10 @@ func main() {
 		hits.queries[query]++
 		hits.mu.Unlock()
 		log.Printf("query hit: %q", query)
+		if strings.HasPrefix(query, `up{business_system="`) {
+			serveSmallVector(writer)
+			return
+		}
 		switch query {
 		case "big":
 			serveBigMatrix(writer)
