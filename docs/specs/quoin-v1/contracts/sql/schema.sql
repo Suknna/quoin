@@ -5898,8 +5898,10 @@ OR EXISTS (SELECT 1 FROM json_each(NEW.evidence_ids_json) x
                AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.evidence_id=e.id)))
 OR EXISTS (SELECT 1 FROM json_each(NEW.artifact_ids_json) x
            WHERE x.type <> 'integer' OR NOT EXISTS (
-             SELECT 1 FROM evidence e WHERE e.target_type='inspection_run' AND e.target_id=NEW.inspection_run_id AND e.artifact_id=x.value
-               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.artifact_id=e.artifact_id)))
+             SELECT 1 FROM evidence e WHERE e.target_type='inspection_run' AND e.target_id=NEW.inspection_run_id
+               AND (e.artifact_id=x.value
+                 OR EXISTS (SELECT 1 FROM artifacts a WHERE a.id=x.value AND a.owner_type='evidence' AND a.owner_id=e.id))
+               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.artifact_id=x.value)))
 OR EXISTS (SELECT 1 FROM json_each(NEW.knowledge_version_ids_json) x
            WHERE x.type <> 'integer' OR NOT EXISTS (SELECT 1 FROM knowledge_versions k WHERE k.id=x.value
                AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.knowledge_version_id=k.id)))

@@ -396,7 +396,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	// The frozen preallocated version (2) deliberately disagrees with the ledger
 	// claim (1) while the Report count still allows 1: only the structured
 	// snapshot fact rejects this proposal.
-	mismatchAttempt, mismatchCall, err := seedReportAnalysisLifecycle(db, 2, []int64{1})
+	mismatchAttempt, mismatchCall, err := seedReportAnalysisLifecycle(db, 2, []int64{1}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -410,7 +410,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	}
 
 	// Count predicate isolated: two frozen Run locators including the right one.
-	noRunAttempt, noRunCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1, 1})
+	noRunAttempt, noRunCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1, 1}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -430,7 +430,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	foreignAttempt, foreignCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1}, foreignEvidence)
+	foreignAttempt, foreignCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1}, []int64{foreignEvidence}, nil)
 	if err != nil {
 		return err
 	}
@@ -447,7 +447,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 
 	// Binding predicate isolated: exactly one frozen Run locator, but it points
 	// at the real foreign Run 3 instead of the ledger's Run 1.
-	bindingAttempt, bindingCall, err := seedReportAnalysisLifecycle(db, 1, []int64{3})
+	bindingAttempt, bindingCall, err := seedReportAnalysisLifecycle(db, 1, []int64{3}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -460,11 +460,52 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 		return fmt.Errorf("cancel run-locator-binding attempt: %w", err)
 	}
 
+	// Evidence-owned content artifacts (T24c): the amended arm admits an
+	// artifact owned by the run's Evidence when frozen into the analysis
+	// input, and rejects a foreign evidence-owned artifact.
+	if err := seedEvidenceOwnedArtifact(db); err != nil {
+		return err
+	}
+	artifactPositive, artifactCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1}, nil, []int64{9})
+	if err != nil {
+		return err
+	}
+	{
+		evidenceJSON := "[2,3]"
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(evidenceJSON)))
+		canonical := fmt.Sprintf("inspection_report_result_v1|%d|1|%d|success|immutable report|%s|[9]|[]|%s|%s", artifactPositive, artifactCall, evidenceJSON, digest, mixedInspectionDigest)
+		resultDigest := sha256.Sum256([]byte(canonical))
+		if err := mixedExec(db, ledgerInsert, artifactPositive, 1, 1, artifactCall, resultDigest[:], digest, "immutable report", mixedInspectionDigest, evidenceJSON, "[9]", "[]", mixedInspectionTime); err != nil {
+			return fmt.Errorf("report evidence-owned artifact commit: %w", err)
+		}
+	}
+	// The next analysis version may only cite run-owned facts: a foreign
+	// evidence-owned artifact stays rejected even when frozen into the input.
+	if err := seedForeignEvidenceArtifact(db); err != nil {
+		return err
+	}
+	t24cForeignAttempt, t24cForeignCall, err := seedReportAnalysisLifecycle(db, 2, []int64{1}, nil, []int64{10})
+	if err != nil {
+		return err
+	}
+	{
+		evidenceJSON := "[2,3]"
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(evidenceJSON)))
+		canonical := fmt.Sprintf("inspection_report_result_v1|%d|1|%d|success|immutable report|%s|[10]|[]|%s|%s", t24cForeignAttempt, t24cForeignCall, evidenceJSON, digest, mixedInspectionDigest)
+		resultDigest := sha256.Sum256([]byte(canonical))
+		if err := mixedMustRejectCause(db, ledgerReject, ledgerInsert, t24cForeignAttempt, 1, 2, t24cForeignCall, resultDigest[:], digest, "immutable report", mixedInspectionDigest, evidenceJSON, "[10]", "[]", mixedInspectionTime); err != nil {
+			return fmt.Errorf("report foreign evidence-owned artifact fence: %w", err)
+		}
+	}
+	if err := mixedExec(db, `UPDATE execution_attempts SET state='Failed', ended_at=?, termination_reason='replaced', row_version=row_version+1 WHERE id=?`, mixedInspectionTime, t24cForeignAttempt); err != nil {
+		return fmt.Errorf("cancel t24c foreign artifact attempt: %w", err)
+	}
+
 	// Locator typing on a fully valid lifecycle: every non-type arm (version,
 	// Run locator, coverage, digests) must pass, so removing the x.type fence
 	// would let these payloads through. The string "2" and the real 2.0 both
 	// numerically cover Run 1's required Evidence 2 under SQLite affinity.
-	typeAttempt, typeCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1})
+	typeAttempt, typeCall, err := seedReportAnalysisLifecycle(db, 1, []int64{1}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -491,7 +532,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	}
 
 	// Happy path: every frozen fact lines up.
-	attemptID, modelCallID, err := seedReportAnalysisLifecycle(db, 1, []int64{1})
+	attemptID, modelCallID, err := seedReportAnalysisLifecycle(db, 2, []int64{1}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -506,7 +547,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	}
 	validResult := sha256.Sum256([]byte(reportResultCanonical(attemptID, modelCallID, evidenceDigest, mixedInspectionDigest, "immutable report", "[2,3]")))
 	if err := mixedTransaction(db, func(tx *sql.Tx) error {
-		_, err := tx.Exec(ledgerInsert, attemptID, 1, 1, modelCallID, validResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime)
+		_, err := tx.Exec(ledgerInsert, attemptID, 1, 2, modelCallID, validResult[:], evidenceDigest, "immutable report", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime)
 		return err
 	}); err != nil {
 		return fmt.Errorf("commit Report ResultProposal: %w", err)
@@ -528,7 +569,7 @@ func verifyMixedInspectionReportClosure(db *sql.DB) error {
 	if err := mixedMustRejectCause(db, "inspection Report Artifact reference must exactly match its immutable ResultProposal ledger", `INSERT INTO inspection_report_artifacts(report_id,artifact_id,ordinal) SELECT id,1,0 FROM inspection_reports WHERE attempt_id=?`, attemptID); err != nil {
 		return fmt.Errorf("Report Artifact append fence: %w", err)
 	}
-	if err := mixedMustReject(db, ledgerInsert, attemptID, 1, 1, modelCallID, make([]byte, 32), evidenceDigest, "mutated", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
+	if err := mixedMustReject(db, ledgerInsert, attemptID, 1, 2, modelCallID, make([]byte, 32), evidenceDigest, "mutated", mixedInspectionDigest, "[2,3]", "[]", "[]", mixedInspectionTime); err != nil {
 		return fmt.Errorf("Report ResultProposal accepted mutated replay: %w", err)
 	}
 	return nil
@@ -601,7 +642,7 @@ func reportResultCanonical(attemptID, modelCallID int64, evidenceDigest, promptD
 // (Run locator items, evidence, check results, structured preallocated Report
 // version), then drives the Attempt and one succeeded model call. runLocators
 // pins the exact frozen inspection_run_id item set (default [1]).
-func seedReportAnalysisLifecycle(db *sql.DB, reportVersion int, runLocators []int64, extraEvidenceIDs ...int64) (int64, int64, error) {
+func seedReportAnalysisLifecycle(db *sql.DB, reportVersion int, runLocators, extraEvidenceIDs, extraArtifactIDs []int64) (int64, int64, error) {
 	if runLocators == nil {
 		runLocators = []int64{1}
 	}
@@ -640,6 +681,11 @@ func seedReportAnalysisLifecycle(db *sql.DB, reportVersion int, runLocators []in
 	for offset, evidenceID := range extraEvidenceIDs {
 		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id) SELECT id,?, 'inspection_evidence', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, offset+6, mixedInspectionDigest, evidenceID, attemptID); err != nil {
 			return 0, 0, fmt.Errorf("freeze report extra Evidence input: %w", err)
+		}
+	}
+	for offset, artifactID := range extraArtifactIDs {
+		if err := mixedExec(db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id) SELECT id,?, 'inspection_evidence_content', ?, ? FROM attempt_input_snapshots WHERE attempt_id=?`, offset+7, mixedInspectionDigest, artifactID, attemptID); err != nil {
+			return 0, 0, fmt.Errorf("freeze report Evidence content artifact input: %w", err)
 		}
 	}
 	if err := mixedExec(db, `UPDATE execution_attempts SET state='Assigned', runtime_slot='plinth', boot_id='plinth-report-boot', connection_epoch=1, lease_until=?, runtime_release_version='plinth-v1', agent_version='agent-v1', row_version=2 WHERE id=?`, "2026-08-29T00:00:00Z", attemptID); err != nil {
@@ -881,4 +927,25 @@ func mixedMustRejectCause(db *sql.DB, cause, statement string, args ...any) erro
 
 func compactSQL(statement string) string {
 	return strings.Join(strings.Fields(statement), " ")
+}
+
+// seedEvidenceOwnedArtifact materializes an evidence-owned content artifact
+// (id 9) for the run's first evidence and freezes it into the analysis input.
+func seedEvidenceOwnedArtifact(db *sql.DB) error {
+	return mixedExecMany(db,
+		`INSERT INTO artifact_blobs(id, sha256, size_bytes, storage_key, created_at) VALUES (9, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 6, 'blobs/t24c-evidence', '2026-08-28T00:00:00Z')`,
+		`INSERT INTO artifacts(id, blob_id, kind, media_type, sensitive, retention_kind, owner_type, owner_id, expires_at, body_expired, created_at, created_by) VALUES (9, 9, 'report_file', 'application/json', 0, 'long_term', 'evidence', 2, NULL, 0, '2026-08-28T00:00:00Z', 1)`,
+	)
+}
+
+// seedForeignEvidenceArtifact materializes an artifact owned by a real
+// Evidence of ANOTHER run (run 3's closed check) and freezes it into this
+// input; the run-fact arm must reject it even though it is frozen.
+func seedForeignEvidenceArtifact(db *sql.DB) error {
+	return mixedExecMany(db,
+		`INSERT INTO artifact_blobs(id, sha256, size_bytes, storage_key, created_at) VALUES (10, 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 6, 'blobs/t24c-foreign', '2026-08-28T00:00:00Z')`,
+		`INSERT INTO artifacts(id, blob_id, kind, media_type, sensitive, retention_kind, owner_type, owner_id, expires_at, body_expired, created_at, created_by)
+		 SELECT 10, 10, 'report_file', 'application/json', 0, 'long_term', 'evidence', e.id, NULL, 0, '2026-08-28T00:00:00Z', 1
+		 FROM evidence e WHERE e.target_type='inspection_run' AND e.target_id=3`,
+	)
 }
