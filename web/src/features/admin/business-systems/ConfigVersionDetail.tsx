@@ -12,6 +12,7 @@ import {
   type VerificationRunSummary,
 } from './api'
 import { DiscoveryTable, PlanTable } from './BusinessSystemDetail'
+import { VerificationRunChecks } from './verification/VerificationRunChecks'
 
 // The immutable version detail (UI-SYSTEM-005): metadata and typed
 // projections, the exportable YAML body, and the Admin publish action with
@@ -38,6 +39,7 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
   const [running, setRunning] = useState(false)
   const [cancellingRunID, setCancellingRunID] = useState<string | null>(null)
   const [runError, setRunError] = useState('')
+  const [expandedRunID, setExpandedRunID] = useState<string | null>(null)
   const publishedNotified = useRef(false)
   // A ref closes the interval before React can commit disabled button state,
   // so rapid double-click/Space can never create a second cancel command.
@@ -240,15 +242,27 @@ export function ConfigVersionPage({ systemKey, versionId, isAdmin, onBack, onPub
             <ul className="verify-run-list">
               {runs.map((run) => (
                 <li key={run.id}>
-                  <span className={`status-pill ${run.state === 'Passed' ? 'ok' : run.state === 'Queued' || run.state === 'Running' ? 'waiting' : 'muted'}`}>
-                    {verificationStateText[run.state]}
-                  </span>
-                  <span>Run #{run.id}</span>
-                  <time dateTime={run.createdAt}>{formatTime(run.createdAt)}</time>
-                  {(run.state === 'Queued' || run.state === 'Running') && (
-                    <button className="text-button" disabled={cancellingRunID !== null} onClick={() => void cancelRun(run)}>
-                      {cancellingRunID === run.id ? '正在取消…' : '取消'}
+                  <div className="verify-run-row">
+                    <span className={`status-pill ${run.state === 'Passed' ? 'ok' : run.state === 'Queued' || run.state === 'Running' ? 'waiting' : 'muted'}`}>
+                      {verificationStateText[run.state]}
+                    </span>
+                    <span>Run #{run.id}</span>
+                    <time dateTime={run.createdAt}>{formatTime(run.createdAt)}</time>
+                    <button
+                      className="text-button"
+                      aria-expanded={expandedRunID === run.id}
+                      onClick={() => setExpandedRunID((current) => (current === run.id ? null : run.id))}
+                    >
+                      {expandedRunID === run.id ? '收起结果' : '查看结果'}
                     </button>
+                    {(run.state === 'Queued' || run.state === 'Running') && (
+                      <button className="text-button" disabled={cancellingRunID !== null} onClick={() => void cancelRun(run)}>
+                        {cancellingRunID === run.id ? '正在取消…' : '取消'}
+                      </button>
+                    )}
+                  </div>
+                  {expandedRunID === run.id && (
+                    <VerificationRunChecks key={run.id} systemKey={systemKey} versionId={versionId} runId={run.id} onRunUpdated={loadRuns} />
                   )}
                 </li>
               ))}

@@ -369,3 +369,40 @@
   .browser-login-viewport { min-height: 58vh; }
   .browser-login-actions > button { flex: 1 1 auto; }
 }
+
+/* Config Verification check-level results (T23) */
+.verify-run-list li {
+  display: block;
+}
+.verify-run-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.verification-checks {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-subtle, #d8dee9);
+  border-radius: 8px;
+  background: var(--surface-raised, #f6f8fa);
+}
+.verification-checks-meta {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+  color: var(--text-muted, #57606a);
+  font-size: 0.9rem;
+}
+.verification-check-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.verification-check-table th,
+.verification-check-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border-subtle, #e5e9f0);
+}

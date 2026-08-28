@@ -1,0 +1,4 @@
+# Tickets that require the isolated Chromium/Lintel acceptance stack.
+T20
+T22
+T23

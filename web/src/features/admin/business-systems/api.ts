@@ -396,6 +396,15 @@ export async function runVerification(key: string, versionId: string): Promise<V
   return (await response.json()) as VerificationRunDetail
 }
 
+export async function getVerificationDetail(key: string, versionId: string, runId: string): Promise<VerificationRunDetail> {
+  const response = await fetch(
+    `/api/v1/business-systems/${encodeURIComponent(key)}/config/${versionId}/verifications/${runId}`,
+    { credentials: 'include' },
+  )
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as VerificationRunDetail
+}
+
 export async function cancelVerification(
   key: string,
   versionId: string,

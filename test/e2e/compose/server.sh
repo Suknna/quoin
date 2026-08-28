@@ -8,8 +8,17 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 ticket="${QUOIN_TICKET:-}"
+# The exact ticket acceptance block passes only QUOIN_EVIDENCE_DIR to the
+# Playwright leg; mirror the config's ticket inference so the webServer boots
+# the matching isolated stack instead of the shared fixture.
+if [ -z "$ticket" ] && [ -n "${QUOIN_EVIDENCE_DIR:-}" ]; then
+  candidate=$(basename "$QUOIN_EVIDENCE_DIR")
+  case "$candidate" in
+    T[0-9][0-9]) ticket="$candidate" ;;
+  esac
+fi
 browser_ticket=0
-if [ "$ticket" = "T20" ] || [ "$ticket" = "T22" ]; then
+if grep -qxF "$ticket" test/e2e/browser-tickets.txt; then
   browser_ticket=1
 fi
 stack="$repo_root/.artifacts/e2e-stack"
@@ -25,8 +34,8 @@ if [ "$browser_ticket" = "1" ]; then
 fi
 export QUOIN_COMPOSE_PROJECT="$compose_project"
 if [ "$browser_ticket" = "1" ] && [ "${QUOIN_BROWSER_E2E_LOCK_HELD:-}" != "1" ]; then
-  # T20 and T22 use the same loopback TLS port and fixed browser fixture
-  # names. Serialize direct script invocations as well as Playwright runs so
+# Browser tickets use the same loopback TLS port and fixed browser fixture
+# names. Serialize direct script invocations as well as Playwright runs so
   # one bootstrap cannot remove another's generated Compose projection.
   mkdir -p "$repo_root/.artifacts/tickets"
   exec 9>"$repo_root/.artifacts/tickets/.browser-e2e.lock"
@@ -175,8 +184,8 @@ if [ -z "$SESSION_COOKIE" ]; then
 fi
 CJ="Cookie: $SESSION_COOKIE"
 
-# Ticket 20 intentionally provisions only its Quoin/Lintel browser path. It
-# must leave alert/model/Thanos fixtures owned by other ticket suites alone.
+# Browser-ticket stacks intentionally provision only the Quoin/Lintel path.
+# They leave alert/model/Thanos fixtures owned by other ticket suites alone.
 if [ "$browser_ticket" = "1" ]; then
   cat > "$stack/browser-auth-fixture.py" <<'PYEOF'
 import http.server
@@ -202,6 +211,18 @@ class S(http.server.BaseHTTPRequestHandler):
             # page; without this, the fixture falsely declares the persisted
             # cookie unauthenticated during an Exploration admission probe.
             self.send_response(303); self.send_header('Location', '/authenticated'); self.end_headers()
+        elif self.path == '/status' and 't20_auth=1' in self.headers.get('Cookie', ''):
+            # The status-marker journey's happy target: a real authenticated
+            # page whose marker element carries the typed output text.
+            increment('status-seq')
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
+            self.wfile.write(b'<!doctype html><html><body><main data-quoin-status="ok">SYSTEM OK</main></body></html>')
+        elif self.path == '/status-broken' and 't20_auth=1' in self.headers.get('Cookie', ''):
+            # The journey failure case: an authenticated page that never shows
+            # the frozen selector, so the bounded wait ends in journey_failed.
+            increment('status-broken-seq')
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers()
+            self.wfile.write(b'<!doctype html><html><body><main>no marker here</main></body></html>')
         elif self.path.startswith('/ready'):
             increment('ready-seq')
             self.send_response(204); self.end_headers()
@@ -267,8 +288,8 @@ PYEOF
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' xvfb
   } >"$evidence/${ticket,,}-components.log" 2>&1
   if [ "$ticket" = "T22" ]; then
-    # T22 requires the real Plinth model turn in addition to the browser
-    # Runtime/Lintel path that T20 provisions.
+    # T22 requires the real Plinth model turn in addition to the common
+    # browser-ticket Runtime/Lintel path.
     go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
     "$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &
     printf '%s' "$!" >"$stack/fixture-provider.pid"
@@ -296,17 +317,17 @@ PYEOF
     curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t22-enable-provider\",\"expectedRowVersion\":$PROVIDER_ROW,\"qualifiedProbeResultId\":\"$qualified\"}" "$BASE/api/v1/connections/t22-openai/enable" >>"$evidence/playwright-server.log"
   fi
   start_ready_server
-  if [ "${QUOIN_BROWSER_TEST_BOOTSTRAP_FAILURE:-${QUOIN_T20_TEST_BOOTSTRAP_FAILURE:-}}" = "1" ]; then
-    if [ "${QUOIN_BROWSER_TEST_FAILURE_ARTIFACT:-${QUOIN_T20_TEST_FAILURE_ARTIFACT:-}}" = "1" ]; then
+  if [ "${QUOIN_BROWSER_TEST_BOOTSTRAP_FAILURE:-}" = "1" ]; then
+    if [ "${QUOIN_BROWSER_TEST_FAILURE_ARTIFACT:-}" = "1" ]; then
       mkdir -p "$stack/playwright-output"
       printf 'synthetic failure artifact for teardown verification\n' >"$stack/playwright-output/error-context.md"
     fi
     echo "intentional $ticket browser bootstrap failure after owned resources were created" >&2
     exit 97
   fi
-  # Both browser tickets stop here. Falling through into T03/T07/T10 fixture
-  # provisioning would mix an ordinary model provider and compose project into
-  # T22's browser-runtime proof.
+# Every browser ticket stops here. Falling through into T03/T07/T10 fixture
+# provisioning would mix an ordinary model provider and compose project into
+# an isolated browser-runtime proof.
   exec docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" logs -f quoin plinth lintel stele 2>&1 | tee -a "$evidence/runtime-process.log"
 fi
 
@@ -414,129 +435,9 @@ curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t07-create-1","name":"main-thanos","connection":{"type":"thanos","baseUrl":"http://quoin-t07-thanos:9090","password":"e2e-thanos-secret"}}' \
   "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
 
-# --- T10 fixtures: an enabled qualified provider + a firing analysis alert -
-# The probe runs through the real command path (creation never auto-probes);
-# poll the immutable probe-results endpoint, then enable.
-curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-  -d '{"clientCommandId":"e2e-t10-probe-$RANDOM"}' \
-  "$BASE/api/v1/connections/main-openai/probe" >>"$evidence/playwright-server.log"
-enable_ok=0
-for _ in $(seq 1 60); do
-  PROBE_ID=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/main-openai/probe-results" 2>/dev/null | python3 -c 'import json,sys
-try:
-    items=json.load(sys.stdin).get("items",[])
-    print(next((i["id"] for i in items if i.get("outcome")=="passed"), ""))
-except Exception:
-    print("")' 2>/dev/null)
-  if [ -n "$PROBE_ID" ]; then
-    CONN_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/main-openai" 2>/dev/null)
-    ROW_VER=$(printf '%s' "$CONN_ROW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
-    ENABLE=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-      -d "{\"clientCommandId\":\"e2e-t10-enable-$RANDOM\",\"expectedRowVersion\":$ROW_VER,\"qualifiedProbeResultId\":\"$PROBE_ID\"}" \
-      "$BASE/api/v1/connections/main-openai/enable")
-    if printf '%s' "$ENABLE" | grep -q '"enabled":true'; then enable_ok=1; break; fi
-  fi
-  sleep 2
-done
-if [ "$enable_ok" != "1" ]; then
-  { echo "FATAL: main-openai never qualified/enabled for T10"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T10Probe severity=critical instance=db-2 job=quoin; then
-  { echo "FATAL: amtool could not fire T10Probe"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-t10_seen=0
-for _ in $(seq 1 30); do
-  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
-  if printf '%s' "$SNAPSHOT" | grep -q T10Probe; then t10_seen=1; break; fi
-  sleep 1
-done
-if [ "$t10_seen" != "1" ]; then
-  { echo "FATAL: T10Probe never reached the Quoin alert store"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-
-# --- T11 fixtures: the deterministic Thanos query target and an enabled
-# thanos tool provider + connection for the analysis tool-details layer ---
-pkill -f "fixtures/thanos-query" >/dev/null 2>&1 || true
-go build -o "$stack/fixture-thanos" ./test/fixtures/thanos-query
-("$stack/fixture-thanos" -address "0.0.0.0:18444" >"$evidence/fixture-thanos.log" 2>&1 &)
-curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-  -d '{"clientCommandId":"e2e-t11-create-provider","name":"t11-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW2"':18443","chatModelId":"fixture-chat-thanos","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
-  "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
-curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-  -d '{"clientCommandId":"e2e-t11-probe-provider"}' \
-  "$BASE/api/v1/connections/t11-openai/probe" >>"$evidence/playwright-server.log"
-# The T10 fixture left main-openai enabled and the frozen contract admits a
-# single enabled connection per type (DATA-CONN-003): the T11 analysis runs
-# on t11-openai, so retire the T10 provider first.
-MAIN_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/main-openai" 2>/dev/null | python3 -c 'import json,sys
-print(json.load(sys.stdin).get("rowVersion", ""))' 2>/dev/null)
-if [ -n "$MAIN_ROW" ]; then
-  curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-    -d "{\"clientCommandId\":\"e2e-t11-disable-main\",\"expectedRowVersion\":$MAIN_ROW}" \
-    "$BASE/api/v1/connections/main-openai/disable" >>"$evidence/playwright-server.log"
-fi
-t11_provider_ok=0
-for _ in $(seq 1 60); do
-  PROBE_ID=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t11-openai/probe-results" 2>/dev/null | python3 -c 'import json,sys
-try:
-    items=json.load(sys.stdin).get("items",[])
-    print(next((i["id"] for i in items if i.get("outcome")=="passed"), ""))
-except Exception:
-    print("")' 2>/dev/null)
-  if [ -n "$PROBE_ID" ]; then
-    CONN_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t11-openai" 2>/dev/null)
-    ROW_VER=$(printf '%s' "$CONN_ROW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
-    ENABLE=$(curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-      -d "{\"clientCommandId\":\"e2e-t11-enable-provider\",\"expectedRowVersion\":$ROW_VER,\"qualifiedProbeResultId\":\"$PROBE_ID\"}" \
-      "$BASE/api/v1/connections/t11-openai/enable")
-    if printf '%s' "$ENABLE" | grep -q '"enabled":true'; then t11_provider_ok=1; break; fi
-  fi
-  sleep 2
-done
-if [ "$t11_provider_ok" != "1" ]; then
-  { echo "FATAL: t11-openai never qualified/enabled"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-  -d '{"clientCommandId":"e2e-t11-create-thanos","name":"t11-thanos","connection":{"type":"thanos","baseUrl":"http://'"$GW2"':18444"}}' \
-  "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
-THANOS_ROW=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t11-thanos" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
-curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-  -d "{\"clientCommandId\":\"e2e-t11-enable-thanos\",\"expectedRowVersion\":$THANOS_ROW}" \
-  "$BASE/api/v1/connections/t11-thanos/enable" >>"$evidence/playwright-server.log"
-if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T11Thanosa severity=warning instance=db-3 job=quoin; then
-  { echo "FATAL: amtool could not fire T11Thanosa"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-t11_seen=0
-for _ in $(seq 1 30); do
-  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
-  if printf '%s' "$SNAPSHOT" | grep -q T11Thanosa; then t11_seen=1; break; fi
-  sleep 1
-done
-if [ "$t11_seen" != "1" ]; then
-  { echo "FATAL: T11Thanosa never reached the Quoin alert store"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-
-# --- T12 fixtures: a slow provider alert for the recovery UI scenario ---
-if ! docker exec e2e-am amtool --alertmanager.url=http://127.0.0.1:9093 alert add alertname=T12SlowPage severity=warning instance=db-4 job=quoin; then
-  { echo "FATAL: amtool could not fire T12SlowPage"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
-t12_seen=0
-for _ in $(seq 1 30); do
-  SNAPSHOT=$(curl -s -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/alerts" 2>/dev/null || true)
-  if printf '%s' "$SNAPSHOT" | grep -q T12SlowPage; then t12_seen=1; break; fi
-  sleep 1
-done
-if [ "$t12_seen" != "1" ]; then
-  { echo "FATAL: T12SlowPage never reached the Quoin alert store"; } | tee -a "$evidence/playwright-server.log" >&2
-  exit 1
-fi
+# The UI analysis ticket fixtures are maintained separately so this bootstrap
+# stays focused on stack lifecycle and shared runtime setup.
+source test/e2e/compose/fixtures-analysis.sh
 
 # The fixture doubles as the ready marker: tests only run once every step
 # (login/change/source/reveal/AM alert) has completed.

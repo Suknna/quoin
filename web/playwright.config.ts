@@ -1,11 +1,13 @@
-import { basename } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { defineConfig, devices } from '@playwright/test'
 
 const evidenceTicket = process.env.QUOIN_EVIDENCE_DIR ? basename(process.env.QUOIN_EVIDENCE_DIR) : undefined
 const ticket = process.env.QUOIN_TICKET ?? (evidenceTicket?.match(/^T\d+$/) ? evidenceTicket : 'T03')
 const fixture = ticket === 'T17' ? 'label-contract' : ticket === 'T04' ? 'alerts/realtime' : 'compose'
 const teardown = ticket === 'T17' ? '../test/e2e/label-contract/teardown.mjs' : '../test/e2e/compose/teardown.mjs'
-const browserTicket = ticket === 'T20' || ticket === 'T22'
+const browserTickets = new Set(readFileSync(join(import.meta.dirname, '../test/e2e/browser-tickets.txt'), 'utf8').match(/^T\d+$/gm) ?? [])
+const browserTicket = browserTickets.has(ticket)
 const browserBaseURL = browserTicket ? 'https://127.0.0.1:18480' : 'http://127.0.0.1:18080'
 const browserStack = `../.artifacts/e2e-stack-${ticket.toLowerCase()}`
 
@@ -22,8 +24,8 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   // Browser-login policy forbids retaining page-derived reports, traces,
   // screenshots, or video. Other ticket suites keep their normal diagnostics.
-  // T20's failure output lives under the private stack. globalTeardown removes
-  // that directory on every Playwright exit, including a failed test.
+  // Browser-ticket failure output lives under the private stack. globalTeardown
+  // removes that directory on every Playwright exit, including a failed test.
   outputDir: browserTicket ? `${browserStack}/playwright-output` : undefined,
   reporter: browserTicket ? [['list']] : [
     ['list'],

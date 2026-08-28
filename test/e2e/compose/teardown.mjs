@@ -2,12 +2,14 @@
 // records the disposition into the ticket cleanup evidence.
 import { execSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
 export default async function globalTeardown() {
 const repoRoot = join(import.meta.dirname, '..', '..', '..')
-const ticket = process.env.QUOIN_TICKET ?? ''
-const browserTicket = ticket === 'T20' || ticket === 'T22'
+const evidenceTicket = process.env.QUOIN_EVIDENCE_DIR ? basename(process.env.QUOIN_EVIDENCE_DIR) : undefined
+const ticket = process.env.QUOIN_TICKET ?? (evidenceTicket?.match(/^T\d+$/) ? evidenceTicket : '')
+const browserTickets = new Set(readFileSync(join(repoRoot, 'test/e2e/browser-tickets.txt'), 'utf8').match(/^T\d+$/gm) ?? [])
+const browserTicket = browserTickets.has(ticket)
 const ticketSlug = ticket.toLowerCase()
 const stack = join(repoRoot, '.artifacts', browserTicket ? `e2e-stack-${ticketSlug}` : 'e2e-stack')
 const evidenceDir = process.env.QUOIN_EVIDENCE_DIR ?? join(repoRoot, '.artifacts', 'tickets', 'T01')
@@ -34,8 +36,8 @@ if (existsSync(composeFile)) {
   record('playwright containers+networks', `docker compose --project-name ${composeProject} --file "${composeFile}" ${downFlags}`)
   if (!browserTicket) record('playwright alertmanager+forwarder', 'docker rm -f e2e-am e2e-fwd')
 }
-// T20 uses a private image namespace, so it removes only the images it built
-// and never overwrites or deletes shared developer image tags.
+// Every browser ticket uses a private image namespace, so teardown removes
+// only images it built and never overwrites or deletes shared developer tags.
 if (browserTicket) {
   record('ticket browser private images', `for image in quoin-${ticketSlug}/quoin:v0.1.0-dev quoin-${ticketSlug}/plinth:v0.1.0-dev quoin-${ticketSlug}/lintel:v0.1.0-dev quoin-${ticketSlug}/stele:v0.1.0-dev; do if docker image inspect "$image" >/dev/null 2>&1; then docker rmi "$image" || exit $?; fi; done`)
 } else {
@@ -78,9 +80,9 @@ if (cleanupFailures.length > 0) {
 }
 }
 
-// The T20 webServer invokes this module directly when bootstrap fails before
-// Playwright has registered globalTeardown. Normal successful runs use the
-// exported hook above.
+// A browser-ticket webServer invokes this module directly when bootstrap
+// fails before Playwright has registered globalTeardown. Normal successful runs
+// use the exported hook above.
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
   globalTeardown().catch((error) => {
     console.error(error)
