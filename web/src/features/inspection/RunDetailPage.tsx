@@ -30,7 +30,30 @@ export function RunDetailPage({ runId, onBack }: Props) {
     }).catch((error: unknown) => { if (current === request.current) setMessage(error instanceof Error ? error.message : '暂时无法读取巡检 Run。') })
   }, [runId])
   useEffect(() => { load(); return () => { request.current += 1 } }, [load])
-  useEffect(() => { if (!detail || !inspectionActive(detail.state)) return; const timer = window.setTimeout(load, 2000); return () => window.clearTimeout(timer) }, [detail, load])
+  // A closed collection can still be awaiting its analysis report: keep
+  // re-reading for a bounded window (analysis failure produces no placeholder
+  // report, so an unbounded poll would never settle).
+  const reportWaitStartedAt = useRef(0)
+  useEffect(() => {
+    if (!detail) return
+    const collectionClosed = detail.state === 'Completed' || detail.state === 'CompletedWithGaps'
+    const awaitingReport = collectionClosed && detail.reportCount === 0
+    if (awaitingReport && reportWaitStartedAt.current === 0) reportWaitStartedAt.current = Date.now()
+    if (!awaitingReport) reportWaitStartedAt.current = 0
+    const shouldPoll = inspectionActive(detail.state) || (awaitingReport && Date.now() - reportWaitStartedAt.current < 240_000)
+    if (!shouldPoll) return
+    const timer = window.setTimeout(load, 2000)
+    return () => window.clearTimeout(timer)
+  }, [detail, load])
+  // A run that just closed may commit its report after the last active-state
+  // poll: re-read once per report-count change so the card always lands.
+  const lastReportCount = useRef(0)
+  useEffect(() => {
+    if (detail && detail.reportCount !== lastReportCount.current) {
+      lastReportCount.current = detail.reportCount
+      if (detail.reportCount > 0) load()
+    }
+  }, [detail, load])
   async function cancel() {
     if (!detail) return
     setCancelling(true); setMessage('')
