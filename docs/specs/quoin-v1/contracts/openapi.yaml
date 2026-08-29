@@ -6639,7 +6639,15 @@ components:
             gapReason:
               type: string
               enum: [runtime_unavailable, authentication_required, authentication_probe_unavailable, identity_busy, artifact_commit_failed, journey_failed, query_failed, partial_response, no_data, cancelled, interrupted]
-      description: ok 必须且只能携带 Evidence locator；error/gap 必须且只能携带缺口原因。
+        - type: object
+          required: [checkKey, status]
+          additionalProperties: false
+          properties:
+            checkKey:
+              $ref: '#/components/schemas/StableKey'
+            status:
+              const: cancelling
+      description: ok 必须且只能携带 Evidence locator；error/gap 必须且只能携带缺口原因；cancelling 表示 Runtime 尚未确认物理停止。
     ReportSummary:
       type: object
       required: [version, createdAt, modelId]

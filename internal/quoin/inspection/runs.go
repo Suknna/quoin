@@ -319,11 +319,14 @@ func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string
 		detail.EvidenceAt = &evidenceAt.String
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT c.check_key, COALESCE(x.status,''), x.evidence_id, x.gap_reason
+		SELECT c.check_key,
+			COALESCE(x.status, CASE a.state WHEN 'Cancelling' THEN 'cancelling' WHEN 'Cancelled' THEN 'gap' ELSE '' END),
+			x.evidence_id, COALESCE(x.gap_reason, CASE WHEN a.state='Cancelled' THEN 'cancelled' END)
 		FROM config_checks c
 		JOIN config_plans p ON p.id=c.plan_id
 		JOIN inspection_runs r ON r.config_version_id=p.config_version_id AND r.plan_key=p.plan_key
 		LEFT JOIN inspection_check_results x ON x.run_id=r.id AND x.check_key=c.check_key
+		LEFT JOIN execution_attempts a ON a.scope_type='run_check' AND a.scope_id=r.id AND a.check_key=c.check_key
 		WHERE r.id=? ORDER BY c.check_key`, runID)
 	if err != nil {
 		return detail, err

@@ -37,6 +37,7 @@ export interface InspectionRunSummary {
 export type InspectionCheckResult =
   | { checkKey: string; status: 'ok'; evidenceId: string }
   | { checkKey: string; status: 'error' | 'gap'; gapReason: string }
+  | { checkKey: string; status: 'cancelling' }
 
 export interface InspectionRunDetail extends InspectionRunSummary {
   checks: InspectionCheckResult[]

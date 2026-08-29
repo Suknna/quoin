@@ -56,7 +56,8 @@ export function RunDetailPage({ runId, onBack, onOpenRun }: Props) {
     const awaitingReport = collectionClosed && detail.reportCount === 0
     if (awaitingReport && reportWaitStartedAt.current === 0) reportWaitStartedAt.current = Date.now()
     if (!awaitingReport) reportWaitStartedAt.current = 0
-    const shouldPoll = inspectionActive(detail.state) || detail.analysisActive || (awaitingReport && Date.now() - reportWaitStartedAt.current < 240_000)
+    const collectionCancelling = detail.checks.some((check) => check.status === 'cancelling')
+    const shouldPoll = inspectionActive(detail.state) || collectionCancelling || detail.analysisActive || (awaitingReport && Date.now() - reportWaitStartedAt.current < 240_000)
     if (!shouldPoll) return
     const timer = window.setTimeout(load, 2000)
     return () => window.clearTimeout(timer)
@@ -107,7 +108,7 @@ export function RunDetailPage({ runId, onBack, onOpenRun }: Props) {
     {(active || analysisPending) && <button className="secondary-button" disabled={busy || analysisCancelling} onClick={() => void cancel()}>{cancelling || analysisCancelling ? '正在取消…' : active ? '取消巡检' : '取消进行中的分析'}</button>}
     {canRerun && <div className="inspection-controls" aria-label="巡检后续操作">{canReanalyze && <button className="secondary-button" disabled={busy || analysisPending} onClick={() => void reanalyze()}>{reanalyzing ? '正在重新分析…' : '重新分析'}</button>}<button className="secondary-button" disabled={busy} onClick={() => void rerun()}>{rerunning ? '正在重新采证…' : '重新采证'}</button><p className="detail-muted">重新分析复用本 Run 的 Evidence；重新采证会创建新的 Run。</p></div>}
     <h3>检查结果</h3>
-    {detail.checks.length === 0 ? <p className="detail-muted">{active ? '检查尚未产生结果，正在自动刷新。' : '该 Run 没有检查结果。'}</p> : <table className="data-table inspection-checks"><thead><tr><th>检查</th><th>结果</th><th>Evidence</th></tr></thead><tbody>{detail.checks.map((check) => <tr key={check.checkKey}><td>{check.checkKey}</td><td>{check.status === 'ok' ? <span className="status-pill ok">通过</span> : check.status ? <><span className="status-pill muted">{check.status === 'gap' ? '缺口' : '错误'}</span><span className="gap-reason">{inspectionGapReasonText[check.gapReason] ?? check.gapReason}</span></> : '等待结果'}</td><td>{check.status === 'ok' ? `#${check.evidenceId}` : '—'}</td></tr>)}</tbody></table>}
+    {detail.checks.length === 0 ? <p className="detail-muted">{active ? '检查尚未产生结果，正在自动刷新。' : '该 Run 没有检查结果。'}</p> : <table className="data-table inspection-checks"><thead><tr><th>检查</th><th>结果</th><th>Evidence</th></tr></thead><tbody>{detail.checks.map((check) => <tr key={check.checkKey}><td>{check.checkKey}</td><td>{check.status === 'ok' ? <span className="status-pill ok">通过</span> : check.status === 'cancelling' ? <span className="status-pill waiting">正在取消…</span> : check.status ? <><span className="status-pill muted">{check.status === 'gap' ? '缺口' : '错误'}</span><span className="gap-reason">{inspectionGapReasonText[check.gapReason] ?? check.gapReason}</span></> : '等待结果'}</td><td>{check.status === 'ok' ? `#${check.evidenceId}` : '—'}</td></tr>)}</tbody></table>}
     <h3>不可变报告</h3>
     {!report ? <p className="detail-muted">{active ? '检查完成后将由 Plinth 生成并原子提交报告。' : detail.reportCount > 0 ? '正在读取报告…' : '此 Run 尚未形成报告。'}</p> : <article className="inspection-report"><header><strong>报告 v{report.version}</strong><span>模型：{report.modelId}</span><time dateTime={report.createdAt}>{formatInspectionTime(report.createdAt)}</time></header><pre>{report.content}</pre><footer><span>Evidence：{report.evidenceIds.map((id) => `#${id}`).join('、') || '—'}</span></footer></article>}
   </section>
