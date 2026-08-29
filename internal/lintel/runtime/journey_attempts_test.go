@@ -39,6 +39,8 @@ func (recorder *envelopeRecorder) record(envelope *runtimev1.ControlEnvelope) {
 		kind = "reject"
 	case *runtimev1.ControlEnvelope_ResultProposal:
 		kind = "result"
+	case *runtimev1.ControlEnvelope_CancelAck:
+		kind = "cancel"
 	}
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
@@ -73,6 +75,7 @@ func newJourneyTestChannel(t *testing.T) (*Channel, *envelopeRecorder) {
 		completing:       map[int64]bool{},
 		journeyRuns:      map[int64]*journeyRun{},
 		journeyProposals: map[int64]*runtimev1.ResultProposal{},
+		journeyCancelled: map[int64]bool{},
 	}
 	recorder := &envelopeRecorder{}
 	channel.controlMu.Lock()
@@ -216,6 +219,68 @@ func TestCompletedJourneyRedispatchReplaysPendingProposal(t *testing.T) {
 	}
 	if run := channel.journeyRuns[77]; run != completed {
 		t.Fatal("completed unacknowledged journey must not replace its running entry")
+	}
+}
+
+func TestJourneyCancelBeforeDispatchPreventsWorkerStart(t *testing.T) {
+	channel, recorder := newJourneyTestChannel(t)
+	canonical := mustMarshalJSON(t, journeyOperationInput(42))
+	channel.started[42] = &runtimev1.StartBrowserOperation{
+		OperationId: 42, Kind: runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY,
+		IdentityId: 5, IdentityRevisionId: 6, ProfileGenerationId: 7,
+		JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version,
+		Input: browserOperationInput(canonical),
+	}
+	cancelEnvelope := &runtimev1.ControlEnvelope{CorrelationId: 19}
+	channel.handleJourneyCancel(cancelEnvelope, &runtimev1.CancelAttempt{AttemptId: 77})
+	envelope, dispatch := journeyDispatchEnvelope(t, canonical)
+	channel.handleJourneyDispatch(envelope, dispatch)
+	channel.operationMu.Lock()
+	run := channel.journeyRuns[77]
+	cancelled := channel.journeyCancelled[77]
+	channel.operationMu.Unlock()
+	if !cancelled || run != nil {
+		t.Fatalf("delayed dispatch started cancelled journey: cancelled=%v run=%v", cancelled, run)
+	}
+	if got := countKind(recorder.snapshot(), "cancel"); got < 1 {
+		t.Fatalf("cancel-before-dispatch must acknowledge the stopped attempt, got %#v", recorder.snapshot())
+	}
+}
+
+func TestJourneyCancelAcknowledgesOnlyAfterExecutionReturns(t *testing.T) {
+	channel, recorder := newJourneyTestChannel(t)
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	channel.stopBrowser = func(operationID int64) error {
+		if operationID != 42 {
+			t.Fatalf("stopped wrong operation: %d", operationID)
+		}
+		close(stopped)
+		return nil
+	}
+	channel.journeyRuns[88] = &journeyRun{cancel: func() { close(cancelled) }, done: done, operation: 42}
+	channel.handleJourneyCancel(&runtimev1.ControlEnvelope{CorrelationId: 20}, &runtimev1.CancelAttempt{AttemptId: 88})
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancel was not delivered to the running journey")
+	}
+	if got := countKind(recorder.snapshot(), "cancel"); got != 0 {
+		t.Fatalf("CancelAck arrived before journey execution returned: %#v", recorder.snapshot())
+	}
+	close(done)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("CancelAck fence did not stop the browser operation")
+	}
+	deadline := time.Now().Add(time.Second)
+	for countKind(recorder.snapshot(), "cancel") == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := countKind(recorder.snapshot(), "cancel"); got != 1 {
+		t.Fatalf("CancelAck was not emitted after journey execution returned: %#v", recorder.snapshot())
 	}
 }
 

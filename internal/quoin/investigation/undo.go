@@ -3,7 +3,7 @@ package investigation
 // Latest-turn Undo (DATA-INVEST-002): one transaction withdraws the latest
 // user turn and every successor (assistant replies, tool calls, evidence
 // references, knowledge drafts stay as a read-only withdrawn branch), fences
-// the turn's active attempt (Queued/Assigned close directly; Running closes
+// the turn's active attempt (Queued closes directly; Assigned/Running close
 // to Cancelling with the runtime cancel dispatched after commit) and moves
 // the head to the last remaining active message — NULL when the whole
 // branch is withdrawn, after which the next send carries an explicit
@@ -36,8 +36,8 @@ type UndoOutcome struct {
 	AttemptID int64
 	// AttemptState is the fenced attempt state after the transaction.
 	AttemptState string
-	// DispatchRequired is true when the attempt moved Running -> Cancelling:
-	// the app layer must deliver the runtime CancelAttempt frame after the
+	// DispatchRequired is true when the attempt moved Assigned/Running ->
+	// Cancelling: the app layer must deliver the runtime CancelAttempt frame after the
 	// commit (RUNTIME-CANCEL-001). Replayed commands never re-dispatch.
 	DispatchRequired bool
 }

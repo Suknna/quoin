@@ -52,7 +52,6 @@ func (stream *fakeStream) setFail(value bool) {
 type fakeTaskSupervisor struct {
 	mu         sync.Mutex
 	dispatched int
-	cancels    int
 	bindings   []DispatchBinding
 }
 
@@ -63,16 +62,39 @@ func (supervisor *fakeTaskSupervisor) HandleDispatchAttempt(ctx context.Context,
 	supervisor.mu.Unlock()
 }
 
-func (supervisor *fakeTaskSupervisor) HandleCancelAttempt(ctx context.Context, sink *FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool) {
-	supervisor.mu.Lock()
-	supervisor.cancels++
-	supervisor.mu.Unlock()
-}
-
-func (supervisor *fakeTaskSupervisor) snapshot() (int, int, []DispatchBinding) {
+func (supervisor *fakeTaskSupervisor) snapshot() (int, []DispatchBinding) {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	return supervisor.dispatched, supervisor.cancels, append([]DispatchBinding(nil), supervisor.bindings...)
+	return supervisor.dispatched, append([]DispatchBinding(nil), supervisor.bindings...)
+}
+
+type cancellationFenceSupervisor struct {
+	mu        sync.Mutex
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+	starts    int
+}
+
+func (supervisor *cancellationFenceSupervisor) HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding DispatchBinding, stopTask func(int64) bool) {
+	supervisor.mu.Lock()
+	supervisor.starts++
+	first := supervisor.starts == 1
+	supervisor.mu.Unlock()
+	if first {
+		close(supervisor.started)
+	}
+	<-ctx.Done()
+	if first {
+		close(supervisor.cancelled)
+		<-supervisor.release
+	}
+}
+
+func (supervisor *cancellationFenceSupervisor) startCount() int {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	return supervisor.starts
 }
 
 type downError struct{}
@@ -178,6 +200,53 @@ func TestReconcileReportFlushesPendingBeforeReporting(t *testing.T) {
 	}
 }
 
+func TestDispatchRegistersCancellationFenceBeforeSupervisorRuns(t *testing.T) {
+	channel, stream := newTestChannel(t)
+	tasks := &cancellationFenceSupervisor{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
+	channel.Tasks = tasks
+	sink := &FrameSink{channel: channel}
+	dispatch := &runtimev1.ControlEnvelope{BootId: "boot-a", ConnectionEpoch: 2, Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{AttemptId: 19}}}
+	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
+	// dispatchServerFrame returns before the supervisor goroutine is guaranteed
+	// to run. The Channel must nevertheless already own a cancellation fence.
+	if !channel.TaskActive(19) {
+		t.Fatal("dispatch returned without a cancellable task fence")
+	}
+	cancelReturned := make(chan struct{})
+	go func() {
+		channel.dispatchServerFrame(context.Background(), sink, nil, &runtimev1.ControlEnvelope{Msg: &runtimev1.ControlEnvelope_CancelAttempt{CancelAttempt: &runtimev1.CancelAttempt{AttemptId: 19}}})
+		close(cancelReturned)
+	}()
+	select {
+	case <-tasks.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor parent context was not cancelled")
+	}
+	if !channel.TaskActive(19) || len(stream.snapshot()) != 0 {
+		t.Fatal("CancelAck returned before the supervisor worker stopped")
+	}
+	close(tasks.release)
+	select {
+	case <-cancelReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CancelAttempt did not wait for worker shutdown")
+	}
+	if channel.TaskActive(19) {
+		t.Fatal("cancelled worker remained active after CancelAck")
+	}
+	frames := stream.snapshot()
+	if len(frames) != 1 || frames[0].GetCancelAck() == nil {
+		t.Fatalf("cancel completion must emit exactly one CancelAck: %+v", frames)
+	}
+	// A delayed/retried DispatchAttempt after cancellation must not start a
+	// replacement worker after Quoin has received the cancellation fence.
+	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
+	time.Sleep(20 * time.Millisecond)
+	if got := tasks.startCount(); got != 1 {
+		t.Fatalf("cancelled attempt restarted %d times", got)
+	}
+}
+
 func TestDispatchDedupNeverSpawnsASecondWorker(t *testing.T) {
 	channel, stream := newTestChannel(t)
 	tasks := &fakeTaskSupervisor{}
@@ -193,19 +262,19 @@ func TestDispatchDedupNeverSpawnsASecondWorker(t *testing.T) {
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		dispatched, _, _ := tasks.snapshot()
+		dispatched, _ := tasks.snapshot()
 		if dispatched != 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
+	if dispatched, _ := tasks.snapshot(); dispatched != 1 {
 		t.Fatal("first dispatch never reached the supervisor")
 	}
 	channel.RegisterTask(11, func() {})
 	stream.reset()
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
-	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
+	if dispatched, _ := tasks.snapshot(); dispatched != 1 {
 		t.Fatalf("executing attempt re-ran: dispatched=%d", dispatched)
 	}
 	frames := stream.snapshot()
@@ -219,7 +288,7 @@ func TestDispatchDedupNeverSpawnsASecondWorker(t *testing.T) {
 	channel.RegisterResult(resultProposal(11, DispatchBinding{BootID: "boot-a", Epoch: 2}))
 	stream.reset() // RegisterResult already fired its immediate delivery
 	channel.dispatchServerFrame(context.Background(), sink, nil, dispatch)
-	if dispatched, _, _ := tasks.snapshot(); dispatched != 1 {
+	if dispatched, _ := tasks.snapshot(); dispatched != 1 {
 		t.Fatalf("finished attempt re-ran: dispatched=%d", dispatched)
 	}
 	frames = stream.snapshot()
@@ -238,13 +307,13 @@ func TestDispatchBindingFlowsFromEnvelope(t *testing.T) {
 	})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		_, _, bindings := tasks.snapshot()
+		_, bindings := tasks.snapshot()
 		if len(bindings) != 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	_, _, bindings := tasks.snapshot()
+	_, bindings := tasks.snapshot()
 	if len(bindings) != 1 {
 		t.Fatal("dispatch never reached the supervisor")
 	}

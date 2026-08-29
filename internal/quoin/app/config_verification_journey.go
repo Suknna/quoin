@@ -118,10 +118,10 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 		return false
 	}
 	rows, err := service.BusinessSystems.DB().QueryContext(ctx, `
-		SELECT a.id, COALESCE(o.lintel_boot_id,''), COALESCE(o.lintel_connection_epoch,0), o.state
+		SELECT a.id, COALESCE(o.lintel_boot_id,''), COALESCE(o.lintel_connection_epoch,0), o.state, a.scope_type
 		FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
-		WHERE a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
+		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
 		  AND a.state='Cancelling'
 		ORDER BY a.id LIMIT ?`, journeyConvergenceBatchSize)
 	if err != nil {
@@ -132,6 +132,7 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 		attempt int64
 		boot    string
 		epoch   uint64
+		scope   string
 	}
 	var pending []cancelling
 	scanned := 0
@@ -139,7 +140,7 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 		var item cancelling
 		scanned++
 		var operationState string
-		if err := rows.Scan(&item.attempt, &item.boot, &item.epoch, &operationState); err != nil {
+		if err := rows.Scan(&item.attempt, &item.boot, &item.epoch, &operationState, &item.scope); err != nil {
 			return false
 		}
 		// An operation already terminal left nothing to stop; convergence only
@@ -159,7 +160,14 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 	for _, item := range pending {
 		if item.boot == "" || item.epoch == 0 {
 			// Never dispatched: close the child directly through the fence.
-			if err := service.BusinessSystems.VerificationAttempts().CancelAck(ctx, item.attempt); err == nil {
+			childAttempts := service.BusinessSystems.VerificationAttempts()
+			if item.scope == "run_check" {
+				if service.Inspections == nil {
+					continue
+				}
+				childAttempts = service.Inspections.Attempts()
+			}
+			if err := childAttempts.CancelAck(ctx, item.attempt); err == nil {
 				service.recordJourneyTechnicalGap(ctx, item.attempt, "cancelled")
 			}
 			continue

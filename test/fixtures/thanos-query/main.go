@@ -38,6 +38,17 @@ func main() {
 			serveSmallVector(writer)
 			return
 		}
+		if strings.HasPrefix(query, `slow{business_system="`) {
+			// Integration acceptance uses this cooperative delay to prove that a
+			// Runtime cancellation reaches a live typed PromQL worker.
+			select {
+			case <-time.After(5 * time.Second):
+				serveSmallVector(writer)
+			case <-request.Context().Done():
+				log.Printf("slow query cancelled: %q", query)
+			}
+			return
+		}
 		switch query {
 		case "big":
 			serveBigMatrix(writer)

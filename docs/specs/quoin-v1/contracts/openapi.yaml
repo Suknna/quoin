@@ -2941,7 +2941,7 @@ paths:
       x-quoin-maintenance-access: upgrade-drain
       x-external-dependency: true
       summary: 取消配置 Verification Run（clientCommandId + expectedRowVersion）
-      description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Verification Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued/Assigned 子 Attempt 置 Cancelled、Running 子 Attempt 置 Cancelling。Verification Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
+      description: 按 SQLite 提交顺序持久化取消 fence：Queued/Running 的 Config Verification Run 在命令事务内直接进入 Cancelled；若存在 active 浏览器子 Attempt，同一事务将 Queued 子 Attempt 置 Cancelled、Assigned/Running 子 Attempt 置 Cancelling；后者仅在 Runtime 实际停止并返回 CancelAck 后才进入 Cancelled。Verification Run 终态立即拒绝迟到 check 结果；Cancelling 子 Attempt 继续占据 active 槽位直至 Runtime 确认或 lease 到期形成终态。成功结果先提交则取消返回已完成，取消先提交则迟到结果只留 Attempt 审计。命令幂等；陈旧 expectedRowVersion 返回 409（DATA-CONFIG-007、DATA-TX-005）。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - $ref: '#/components/parameters/VersionId'
@@ -6585,7 +6585,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/InspectionRunSummary'
         - type: object
-          required: [checks, reportCount]
+          required: [checks, reportCount, analysisActive]
           properties:
             checks:
               type: array
@@ -6595,6 +6595,26 @@ components:
               type: integer
               minimum: 0
               description: 报告版本总数；完整版本历史经 listInspectionReports 游标读取。
+            analysisActive:
+              type: boolean
+              description: 当前是否存在尚未终结的 inspection_analysis Attempt；用于轮询和取消控制。
+            latestAnalysis:
+              $ref: '#/components/schemas/InspectionAnalysisStatus'
+              description: 最新 inspection_analysis Attempt 的只读生命周期投影；失败、取消和中断时用于说明恢复路径，不携带模型输入或报告内容。
+    InspectionAnalysisStatus:
+      type: object
+      required: [id, state]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        state:
+          type: string
+          enum: [Queued, Assigned, Running, Cancelling, Succeeded, Failed, Cancelled, Interrupted]
+        terminationReason:
+          type: string
+          maxLength: 128
+          description: Runtime 以受控枚举提交的非秘密终止原因；只在失败或中断等终态投影。
     CheckResultSummary:
       oneOf:
         - type: object

@@ -360,7 +360,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             {user.role === 'admin' && <AlertSourceForm onCreated={() => undefined} />}
           </div>
          ) : active === 'inspections' && inspectionView.kind === 'detail' ? (
-           <RunDetailPage runId={inspectionView.runId} onBack={backToInspections} />
+           <RunDetailPage runId={inspectionView.runId} onBack={backToInspections} onOpenRun={openInspection} />
          ) : active === 'inspections' ? (
            <InspectionsPage onOpenRun={openInspection} />
          ) : active === 'investigations' && investigationView.kind === 'new' ? (

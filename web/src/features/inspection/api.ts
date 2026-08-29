@@ -41,6 +41,23 @@ export type InspectionCheckResult =
 export interface InspectionRunDetail extends InspectionRunSummary {
   checks: InspectionCheckResult[]
   reportCount: number
+  analysisActive: boolean
+  latestAnalysis?: InspectionAnalysisStatus
+}
+
+/** Safe lifecycle projection for the latest immutable report-analysis Attempt. */
+export interface InspectionAnalysisStatus {
+  id: string
+  state: 'Queued' | 'Assigned' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
+  terminationReason?: string
+}
+
+export interface InspectionAttemptSummary {
+  id: string
+  type: 'inspection_analysis' | 'inspection_collection'
+  state: 'Queued' | 'Assigned' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
+  rowVersion: number
+  createdAt: string
 }
 
 export interface InspectionReportSummary {
@@ -96,6 +113,26 @@ export async function cancelInspectionRun(runId: string, expectedRowVersion: num
   const response = await fetch(`/api/v1/inspections/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
+  })
+  if (!response.ok) throw await failure(response)
+  return (await response.json()) as InspectionRunDetail
+}
+
+/** Reuses this Run's immutable collected Evidence to create its next Report version. */
+export async function reanalyzeInspectionRun(runId: string): Promise<InspectionAttemptSummary> {
+  const response = await fetch(`/api/v1/inspections/runs/${encodeURIComponent(runId)}/analyze`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId() }),
+  })
+  if (!response.ok) throw await failure(response)
+  return (await response.json()) as InspectionAttemptSummary
+}
+
+/** Starts a distinct Run that recollects evidence from this Run's frozen plan. */
+export async function rerunInspection(runId: string): Promise<InspectionRunDetail> {
+  const response = await fetch(`/api/v1/inspections/runs/${encodeURIComponent(runId)}/rerun`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId() }),
   })
   if (!response.ok) throw await failure(response)
   return (await response.json()) as InspectionRunDetail

@@ -266,8 +266,9 @@ func (service *Service) CommitResultOn(ctx context.Context, conn *sql.Conn, atte
 }
 
 // CancelFence commits the idempotent cancellation fence (DATA-ATTEMPT-003):
-// Queued/Assigned close as Cancelled directly, Running closes to Cancelling
-// (the runtime's CancelAck finishes it). Terminal attempts return their
+// Queued closes as Cancelled directly; Assigned/Running close to Cancelling
+// because an Assigned DispatchAttempt may already be in flight (the runtime's
+// CancelAck finishes it). Terminal attempts return their
 // state unchanged so the caller can answer "already completed" instead of a
 // conflict (HTTP-COMMAND-005).
 func (service *Service) CancelFence(ctx context.Context, attemptID int64) (state string, err error) {
@@ -308,7 +309,7 @@ func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attem
 	switch state {
 	case "Succeeded", "Failed", "Cancelled", "Interrupted":
 		return state, nil
-	case "Queued", "Assigned":
+	case "Queued":
 		result, err := conn.ExecContext(ctx, `
 			UPDATE execution_attempts
 			SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
@@ -320,14 +321,18 @@ func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attem
 			return "", fmt.Errorf("attempt %d cancellation fence lost the race", attemptID)
 		}
 		return "Cancelled", nil
-	case "Running", "Cancelling":
+	case "Assigned", "Running", "Cancelling":
+		// Assigned is a dispatch-commit state, not proof that the runtime has
+		// not started. A frame can be in flight (or Accepted can be delayed),
+		// so it must receive the same durable cancellation and replay treatment
+		// as Running rather than being locally declared stopped.
 		// A terminal claim only authorizes the upload attempt. It is not a parent
 		// terminal fact: cancellation remains authoritative until the ActionResult
 		// commits in this same SQLite serialization domain. This prevents a staged
 		// complete artifact from making a prior parent cancellation inexpressible.
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE execution_attempts SET state='Cancelling', row_version=row_version+1
-			WHERE id=? AND state='Running'`, attemptID); err != nil {
+			WHERE id=? AND state IN ('Assigned','Running')`, attemptID); err != nil {
 			return "", err
 		}
 		// Whether the UPDATE won or the attempt was already Cancelling,

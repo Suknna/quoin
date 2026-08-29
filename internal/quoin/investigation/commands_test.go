@@ -260,11 +260,17 @@ func closeAttemptSucceeded(t *testing.T, db *sql.DB, service *Service, attemptID
 	})
 }
 
+func bindAssigned(t *testing.T, db *sql.DB, attemptID int64) error {
+	t.Helper()
+	lease := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	_, err := db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot-t',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=? AND state='Queued'`, lease, attemptID)
+	return err
+}
+
 func bindRunning(t *testing.T, db *sql.DB, attemptID int64) error {
 	t.Helper()
 	now := testNow()
-	lease := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
-	if _, err := db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot-t',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=? AND state='Queued'`, lease, attemptID); err != nil {
+	if err := bindAssigned(t, db, attemptID); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,row_version=row_version+1 WHERE id=? AND state='Assigned'`, now, attemptID); err != nil {

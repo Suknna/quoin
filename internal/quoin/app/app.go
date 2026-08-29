@@ -47,39 +47,41 @@ import (
 )
 
 type servers struct {
-	public *http.Server
-	ops    *sharedops.Server
-	relay  *grpc.Server
+	public         *http.Server
+	ops            *sharedops.Server
+	relay          *grpc.Server
+	beforeShutdown func()
 }
 
 type apiServer struct {
-	auth                        *auth.Service
-	db                          *sql.DB
-	alerts                      *alerts.Service
-	reveals                     *secrets.Store
-	commands                    *commandReplay
-	runtime                     *qruntime.Service
-	connections                 *connections.Service
-	analyses                    *analysis.Service
-	investigations              *investigation.Service
-	systems                     *businesssystem.Service
-	inspections                 *inspection.Service
-	contracts                   *labelcontract.Service
-	browsers                    *browser.Service
-	investigationUpload         *appinvestigation.Handler
-	configHandler               *appconfig.Handler
-	artifacts                   *artifact.Store
-	rootKey                     func() ([]byte, error)
-	probeDispatchFunc           func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc          func(ctx context.Context, attemptID int64) error
-	analysisDispatchFunc        func(ctx context.Context, attemptID int64) error
-	investigationDispatchFunc   func(ctx context.Context, attemptID int64) error
-	resourceRefreshDispatchFunc func(ctx context.Context)
-	verificationDispatchFunc    func(ctx context.Context)
-	inspectionDispatchFunc      func(ctx context.Context)
-	browserPublishDispatchFunc  func(ctx context.Context, request browser.PublishRequest) error
-	browserStopDispatchFunc     func(ctx context.Context, operationID int64) error
-	browserTunnels              *browserTunnelHub
+	auth                         *auth.Service
+	db                           *sql.DB
+	alerts                       *alerts.Service
+	reveals                      *secrets.Store
+	commands                     *commandReplay
+	runtime                      *qruntime.Service
+	connections                  *connections.Service
+	analyses                     *analysis.Service
+	investigations               *investigation.Service
+	systems                      *businesssystem.Service
+	inspections                  *inspection.Service
+	contracts                    *labelcontract.Service
+	browsers                     *browser.Service
+	investigationUpload          *appinvestigation.Handler
+	configHandler                *appconfig.Handler
+	artifacts                    *artifact.Store
+	rootKey                      func() ([]byte, error)
+	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
+	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
+	resourceRefreshDispatchFunc  func(ctx context.Context)
+	verificationDispatchFunc     func(ctx context.Context)
+	inspectionDispatchFunc       func(ctx context.Context)
+	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
+	browserPublishDispatchFunc   func(ctx context.Context, request browser.PublishRequest) error
+	browserStopDispatchFunc      func(ctx context.Context, operationID int64) error
+	browserTunnels               *browserTunnelHub
 }
 
 // attachmentLimitBytes resolves the deployment message-level attachment
@@ -217,6 +219,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("read Stele service token: %w", err)
 	}
 	serverSet.relay = grpc.NewServer()
+	serverSet.beforeShutdown = application.runtime.CloseAll
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
 	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
 	if err != nil {
@@ -278,6 +281,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
+	application.inspectionCancelDispatchFunc = controlService.dispatchInspectionCancellation
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
 	// disconnect is what enters AwaitingReconnect; a tunnel reconnect must not
@@ -441,6 +445,12 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			if application.inspectionDispatchFunc != nil {
 				application.inspectionDispatchFunc(ctx)
 			}
+		},
+		CancelDispatch: func(ctx context.Context, attemptID int64) error {
+			if application.inspectionCancelDispatchFunc == nil {
+				return errors.New("inspection cancel dispatch not wired")
+			}
+			return application.inspectionCancelDispatchFunc(ctx, attemptID)
 		},
 	}
 	inspectionHandler.Register(api)
@@ -627,6 +637,9 @@ func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) 
 	// closing budget stays inside the reserved >=15s connection-close window.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if serverSet.beforeShutdown != nil {
+		serverSet.beforeShutdown()
+	}
 	serverSet.relay.GracefulStop()
 	_ = serverSet.public.Shutdown(shutdownCtx)
 	return nil

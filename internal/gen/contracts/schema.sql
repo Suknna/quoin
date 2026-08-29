@@ -1545,7 +1545,11 @@ CREATE TABLE execution_attempts (
   CHECK (
     (state = 'Queued' AND runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL AND runtime_release_version IS NULL)
     OR (state = 'Assigned' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NULL AND runtime_release_version IS NOT NULL)
-    OR (state IN ('Running','Cancelling') AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NOT NULL AND runtime_release_version IS NOT NULL)
+    OR (state = 'Running' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND accepted_at IS NOT NULL AND runtime_release_version IS NOT NULL)
+    -- A cancellation fence may win after dispatch binding but before Accept. The
+    -- assigned Runtime can already be executing, so preserve its binding and
+    -- allow CancelAttempt replay even though accepted_at has not arrived yet.
+    OR (state = 'Cancelling' AND runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND runtime_release_version IS NOT NULL)
     OR (state IN ('Succeeded','Failed','Cancelled','Interrupted') AND (
       (runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL AND runtime_release_version IS NULL)
       OR (runtime_slot IS NOT NULL AND boot_id IS NOT NULL AND connection_epoch IS NOT NULL AND lease_until IS NOT NULL AND runtime_release_version IS NOT NULL)
@@ -3859,7 +3863,7 @@ WHEN NEW.state <> OLD.state AND NOT (
       OR EXISTS (SELECT 1 FROM observed_refresh_log l WHERE l.attempt_id = OLD.id AND l.result_digest IS NOT NULL)
     ))
   ))
-  OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
+  OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelling','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Succeeded','Failed','Cancelling','Interrupted'))
   OR (OLD.state = 'Cancelling' AND NEW.state = 'Cancelled')
 )
@@ -4785,18 +4789,33 @@ BEGIN
   UPDATE label_contract_activations SET applied_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
   WHERE id = NEW.id;
 END;
--- 12.39 巡检运行闭合：正式 Run 只消费该启用系统的当前已发布配置与当前 Label Contract。
+-- 12.39 巡检运行闭合：新手工 Run 只消费该启用系统的当前已发布配置与当前 Label Contract。
+-- 重新采证是唯一例外：它必须从一个已终止的同系统源 Run 逐字段复制不可变
+-- config/contract/plan 绑定，不能被当前发布指针重写。
 CREATE TRIGGER trg_inspection_runs_closure BEFORE INSERT ON inspection_runs
 WHEN NOT EXISTS (
   SELECT 1 FROM business_systems b
   JOIN business_system_config_versions v ON v.id = b.current_config_version_id AND v.business_system_id = b.id
   JOIN config_plans p ON p.config_version_id = v.id AND p.plan_key = NEW.plan_key
   JOIN label_contract_state s ON s.id = 1 AND s.current_contract_id = NEW.label_contract_version_id
-  WHERE b.id = NEW.business_system_id AND b.enabled = 1
+  WHERE NEW.rerun_of_id IS NULL
+    AND b.id = NEW.business_system_id AND b.enabled = 1
     AND v.id = NEW.config_version_id AND v.state = 'published' AND v.published_at IS NOT NULL
     AND v.label_contract_version_id = NEW.label_contract_version_id
+  UNION ALL
+  SELECT 1 FROM inspection_runs source
+  JOIN business_systems b ON b.id = source.business_system_id
+  JOIN config_plans p ON p.config_version_id = source.config_version_id AND p.plan_key = source.plan_key
+  WHERE NEW.rerun_of_id IS NOT NULL AND NEW.trigger_kind = 'manual'
+    AND NEW.scheduled_for IS NULL AND source.id = NEW.rerun_of_id
+    AND b.enabled = 1
+    AND source.state IN ('Completed','CompletedWithGaps','Failed','Cancelled','Interrupted')
+    AND source.business_system_id = NEW.business_system_id
+    AND source.config_version_id = NEW.config_version_id
+    AND source.label_contract_version_id = NEW.label_contract_version_id
+    AND source.plan_key = NEW.plan_key
 )
-BEGIN SELECT RAISE(ABORT, 'inspection_run must bind the enabled business system current published config, configured plan, and current label contract'); END;
+BEGIN SELECT RAISE(ABORT, 'inspection_run must bind the enabled business system current published config/current label contract, or exactly copy a terminal source Run'); END;
 
 -- 12.40 execution_attempts 统一从 Queued 创建；输入快照/grant 依赖 Attempt ID，禁止绕过派发事务直接出生为 active/terminal。
 CREATE TRIGGER trg_execution_attempts_insert_queued BEFORE INSERT ON execution_attempts

@@ -106,7 +106,15 @@ func (h *testHarness) publishMixedPlan(t *testing.T) int64 {
 	if _, err := fmt.Sscanf(draft.ID, "%d", &versionID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.systems.Publish(context.Background(), h.principal, "seed-publish-"+fmt.Sprint(time.Now().UnixNano()), "payments", versionID, nil); err != nil {
+	var current sql.NullInt64
+	if err := h.db.QueryRow(`SELECT current_config_version_id FROM business_systems WHERE key='payments'`).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	var expectedCurrent *int64
+	if current.Valid {
+		expectedCurrent = &current.Int64
+	}
+	if _, err := h.systems.Publish(context.Background(), h.principal, "seed-publish-"+fmt.Sprint(time.Now().UnixNano()), "payments", versionID, expectedCurrent); err != nil {
 		t.Fatalf("publish mixed plan: %v", err)
 	}
 	return versionID

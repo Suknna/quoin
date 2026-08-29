@@ -92,32 +92,43 @@ func selectReportModelProvider(ctx context.Context, conn *sql.Conn) (modelProvid
 	return selected, nil
 }
 
-// startReportAnalysisOn creates the collection-following analysis attempt
-// inside the caller's transaction. It is a no-op unless the Run has closed
-// and no analysis attempt exists yet.
+// startReportAnalysisOn creates the first analysis attempt after collection
+// closes. A missing model provider is recoverable here: the reconciler retries
+// later instead of creating a placeholder report.
 func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, runID int64, now string) error {
+	_, err := s.createReportAnalysisOn(ctx, conn, runID, now, false)
+	if errors.Is(err, ErrModelProviderMissing) {
+		return nil
+	}
+	return err
+}
+
+// createReportAnalysisOn freezes one report attempt. allowPrior is used only
+// by the explicit re-analysis command: it permits prior terminal attempts but
+// never an additional concurrent attempt, so every report version has exactly
+// one live producer.
+func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, runID int64, now string, allowPrior bool) (int64, error) {
 	var runState string
 	if err := conn.QueryRowContext(ctx, `SELECT state FROM inspection_runs WHERE id=?`, runID).Scan(&runState); err != nil {
-		return err
+		return 0, err
 	}
 	if runState != "Completed" && runState != "CompletedWithGaps" {
-		return nil
+		return 0, nil
 	}
-	var existing int
-	if err := conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM execution_attempts WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?`, runID).
-		Scan(&existing); err != nil {
-		return err
-	}
-	if existing != 0 {
-		return nil
+	if !allowPrior {
+		var existing int
+		if err := conn.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM execution_attempts WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?`, runID).
+			Scan(&existing); err != nil {
+			return 0, err
+		}
+		if existing != 0 {
+			return 0, nil
+		}
 	}
 	provider, err := selectReportModelProvider(ctx, conn)
 	if err != nil {
-		// A closed collection without a usable model keeps its state; the
-		// reconciliation loop retries the analysis creation (RUNTIME-TASK-013
-		// failure semantics: no placeholder report).
-		return nil
+		return 0, err
 	}
 	var configVersionID int64
 	var planKey string
@@ -125,18 +136,18 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 	if err = conn.QueryRowContext(ctx, `
 		SELECT config_version_id, plan_key, label_contract_version_id FROM inspection_runs WHERE id=?`, runID).
 		Scan(&configVersionID, &planKey, &contractID); err != nil {
-		return err
+		return 0, err
 	}
 	var reportVersion int
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
-		return err
+		return 0, err
 	}
 	rows, err := conn.QueryContext(ctx, `
 		SELECT x.id, x.evidence_id, e.result_json, e.artifact_id
 		FROM inspection_check_results x LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	type settledCheck struct {
 		resultID   int64
@@ -149,12 +160,12 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		var check settledCheck
 		if err = rows.Scan(&check.resultID, &check.evidence, &check.resultJSON, &check.artifactID); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		checks = append(checks, check)
 	}
 	if err = rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	evidenceIDs := []int64{}
 	artifactIDs := []int64{}
@@ -168,7 +179,7 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 			continue
 		}
 		if !check.resultJSON.Valid {
-			return fmt.Errorf("inspection evidence %d has no readable result", check.evidence.Int64)
+			return 0, fmt.Errorf("inspection evidence %d has no readable result", check.evidence.Int64)
 		}
 		// In production app wiring injects the artifact store. Isolated domain
 		// tests deliberately exercise the report ledger without a filesystem.
@@ -177,7 +188,7 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		}
 		artifactID, materializeErr := s.artifactWriter(ctx, conn, check.evidence.Int64, []byte(check.resultJSON.String))
 		if materializeErr != nil {
-			return materializeErr
+			return 0, materializeErr
 		}
 		artifactIDs = append(artifactIDs, artifactID)
 	}
@@ -185,11 +196,11 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
 		VALUES('inspection_analysis','run',?,'Queued',?,?,?)`, runID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	analysisID, err := insert.LastInsertId()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
@@ -199,24 +210,24 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	digest := sha256.Sum256(body)
 	snapshot, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,inspection_report_version,created_at)
 		VALUES(?,?,?,?,?,?)`, analysisID, reportInputKind, "v1", hex.EncodeToString(digest[:]), input.ReportVersion, now)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	snapshotID, err := snapshot.LastInsertId()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	runDigest := sha256.Sum256([]byte(fmt.Sprintf("inspection-run:%d", runID)))
 	if _, err = conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_run_id)
 		VALUES(?,1,'inspection_run',?,?)`, snapshotID, hex.EncodeToString(runDigest[:]), runID); err != nil {
-		return err
+		return 0, err
 	}
 	itemSeq := 1
 	for _, check := range checks {
@@ -225,7 +236,7 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		if _, err = conn.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_check_result_id)
 			VALUES(?,?,'inspection_check_result',?,?)`, snapshotID, itemSeq, hex.EncodeToString(checkDigest[:]), check.resultID); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	for _, evidenceID := range evidenceIDs {
@@ -234,17 +245,17 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 		if _, err = conn.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id)
 			VALUES(?,?,'inspection_evidence',?,?)`, snapshotID, itemSeq, hex.EncodeToString(evidenceDigest[:]), evidenceID); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	for _, artifactID := range artifactIDs {
 		itemSeq++
 		artifactDigest := sha256.Sum256([]byte(fmt.Sprintf("artifact:%d", artifactID)))
 		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id) VALUES(?,?,'inspection_artifact',?,?)`, snapshotID, itemSeq, hex.EncodeToString(artifactDigest[:]), artifactID); err != nil {
-			return err
+			return 0, err
 		}
 		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at) VALUES(?,?,'input_snapshot',?,?)`, analysisID, artifactID, snapshotID, now); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", configVersionID)))
@@ -252,21 +263,23 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 	if _, err = conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
 		VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID); err != nil {
-		return err
+		return 0, err
 	}
 	contractDigest := sha256.Sum256([]byte(fmt.Sprintf("label-contract-version:%d", contractID)))
 	itemSeq++
-	_, err = conn.ExecContext(ctx, `
+	if _, err = conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		VALUES(?,?,'label_contract',?,?)`, snapshotID, itemSeq, hex.EncodeToString(contractDigest[:]), contractID)
-	if err != nil {
-		return err
+		VALUES(?,?,'label_contract',?,?)`, snapshotID, itemSeq, hex.EncodeToString(contractDigest[:]), contractID); err != nil {
+		return 0, err
 	}
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?, 'chat_model', ?,?,?,?,?)`,
 		analysisID, provider.ConnectionID, provider.RevisionID, provider.CredentialGen, provider.ProbeResultID, now)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return analysisID, nil
 }
 
 type reportProposal struct {

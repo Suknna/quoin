@@ -55,7 +55,7 @@ func streamedToolArguments(t *testing.T, stream string) string {
 func TestT22FixtureOpensAndClosesQuoinBrowserSession(t *testing.T) {
 	open := fixtureChatRequest(t, `{"model":"fixture-chat-1","stream":true,"messages":[{"role":"system","content":"只读运维调查代理"},{"role":"user","content":"T22Browser t22-browser-payments"}]}`)
 	openResponse := httptest.NewRecorder()
-	serveStream(openResponse, open)
+	serveStream(openResponse, httptest.NewRequest("POST", "/v1/chat/completions", nil), open, 0)
 	openBody := openResponse.Body.String()
 	if !strings.Contains(openBody, `"name":"quoin_browser"`) || streamedToolArguments(t, openBody) != `{"action":"open","businessSystemKey":"t22-browser-payments"}` {
 		t.Fatalf("T22 first turn did not open the keyed quoin_browser path")
@@ -63,7 +63,7 @@ func TestT22FixtureOpensAndClosesQuoinBrowserSession(t *testing.T) {
 
 	close := fixtureChatRequest(t, `{"model":"fixture-chat-1","stream":true,"messages":[{"role":"system","content":"只读运维调查代理"},{"role":"user","content":"T22Browser t22-browser-payments"},{"role":"tool","content":"{\"success\":true,\"sessionId\":\"42\"}"}]}`)
 	closeResponse := httptest.NewRecorder()
-	serveStream(closeResponse, close)
+	serveStream(closeResponse, httptest.NewRequest("POST", "/v1/chat/completions", nil), close, 0)
 	closeBody := closeResponse.Body.String()
 	if !strings.Contains(closeBody, `"name":"quoin_browser"`) || streamedToolArguments(t, closeBody) != `{"action":"close_session","sessionId":"42"}` {
 		t.Fatalf("T22 second turn did not close the committed opaque browser session")

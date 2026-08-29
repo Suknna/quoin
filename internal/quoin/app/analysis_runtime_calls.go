@@ -410,15 +410,25 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 	}
 	var boot sql.NullString
 	var epoch sql.NullInt64
-	row := service.Connections.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
-	if err := row.Scan(&boot, &epoch); err != nil {
+	var runtimeSlot sql.NullString
+	row := service.Connections.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch,runtime_slot FROM execution_attempts WHERE id=?`, attemptID)
+	if err := row.Scan(&boot, &epoch, &runtimeSlot); err != nil {
 		return err
 	}
 	if !boot.Valid || !epoch.Valid {
 		// Unbound attempts finalize locally.
 		return finalizeUnbound()
 	}
-	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
+	targetSlot := qruntime.SlotPlinth
+	if runtimeSlot.Valid {
+		switch runtimeSlot.String {
+		case qruntime.SlotPlinth, qruntime.SlotLintel:
+			targetSlot = runtimeSlot.String
+		default:
+			return fmt.Errorf("attempt %d has unknown runtime slot %q", attemptID, runtimeSlot.String)
+		}
+	}
+	view, err := service.Slots.View(ctx, targetSlot)
 	if err != nil {
 		return err
 	}
@@ -427,7 +437,7 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		// lease sweeper closes the Cancelling state deterministically.
 		return nil
 	}
-	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
+	return service.sendEnvelope(targetSlot, &runtimev1.ControlEnvelope{
 		ConnectionEpoch: *view.ConnectionEpoch,
 		CorrelationId:   uint64(attemptID),
 		BootId:          view.BootID,

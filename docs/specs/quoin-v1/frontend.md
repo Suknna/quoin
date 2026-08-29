@@ -114,7 +114,7 @@
 - **UI-INSPECTION-002 —** 标题区“运行巡检”打开轻量选择层：搜索业务系统，再选择其已发布计划；从系统详情进入则预填。提交后进入新 Run；同计划已有 active Run时打开已有对象，不重复创建。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-INSPECTION-003 —** Run 详情是连续事实页：状态/时间、检查结果、Evidence gap、分析状态、报告版本；使用简短页内 section navigation，不拆成互相隐藏的 tabs。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-INSPECTION-004 —** 检查项默认一行显示检查名、`ok/gap`、采证时间和 Evidence 数；展开后显示原始 PromQL/Journey、参数、真实结果、warnings、gap code 与 Attempt。程序不得生成红黄绿健康结论。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-INSPECTION-005 —** “重新分析现有证据”与“重新采集”是两个动作：前者不访问外部系统并创建新 Report；后者创建新 Run 与 `evidence_at`。两者不弹确认，但提交前用一句话说明影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-INSPECTION-005 —** “重新分析现有证据”与“重新采集”是两个动作：前者仅对 `Completed|CompletedWithGaps` 且没有 active analysis 的 Run 可用，不访问外部系统并创建新 Report；后者对 `Completed|CompletedWithGaps|Failed|Cancelled|Interrupted` Run 可用，创建新 Run 与 `evidence_at`。两者不弹确认，但提交前用一句话说明影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-INSPECTION-006 —** `AuthenticationRequired` 旁提供“重新登录”。发布新 Browser Profile 后回到原 Run；旧 gap 不修改、不自动补跑，页面明确提示重新采集会创建新 Run。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 
 ## 9. 知识工作台

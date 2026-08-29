@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	sql "database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -239,7 +240,16 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 
 // handleCancelAckRouted finishes Cancelling -> Cancelled for the owning
 // slice (RUNTIME-CANCEL-003).
-func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *runtimev1.CancelAck) {
+func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot string, ack *runtimev1.CancelAck) {
+	var expectedSlot sql.NullString
+	if err := service.Connections.DB().QueryRowContext(ctx, `SELECT runtime_slot FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&expectedSlot); err != nil {
+		sharedops.LogEvent("quoin", "error", "cancel_ack.lookup_failed", err.Error())
+		return
+	}
+	if expectedSlot.Valid && expectedSlot.String != slot {
+		sharedops.LogEvent("quoin", "info", "cancel_ack.slot_mismatch", fmt.Sprintf("attempt=%d expected=%s got=%s", ack.GetAttemptId(), expectedSlot.String, slot))
+		return
+	}
 	attemptType, err := service.attemptTypeOf(ctx, ack.GetAttemptId())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "cancel_ack.lookup_failed", err.Error())
@@ -247,6 +257,20 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *r
 	}
 	switch attemptType {
 	case "inspection_collection":
+		var scopeType string
+		if service.Inspections != nil {
+			_ = service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType)
+		}
+		if scopeType == "run_check" && service.Inspections != nil {
+			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.cancel_ack", err.Error())
+				return
+			}
+			// A cancelled journey child must release its operation and persist its
+			// cancellation gap; a PromQL child has no Browser Operation to close.
+			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
+			return
+		}
 		if service.BusinessSystems != nil {
 			if err := service.BusinessSystems.VerificationAttempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "config_verification.cancel_ack", err.Error())
@@ -259,6 +283,12 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, ack *r
 			// A cancelled Lintel journey child settles its technical gap and its
 			// operation through the shared convergence sweep.
 			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
+		}
+	case "inspection_analysis":
+		if service.Inspections != nil {
+			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.analysis_cancel_ack", err.Error())
+			}
 		}
 	case "initial_analysis":
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {

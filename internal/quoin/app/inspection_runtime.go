@@ -121,6 +121,50 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 	})
 }
 
+// dispatchInspectionCancellation routes an already-committed inspection fence.
+// PromQL collection and report analysis run on Plinth; journey collection is
+// owned by Lintel and therefore flows through the shared journey reconciler.
+func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Context, attemptID int64) error {
+	if service.Inspections == nil {
+		return fmt.Errorf("inspections are not wired")
+	}
+	var attemptType, scopeType string
+	if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT attempt_type,scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType, &scopeType); err != nil {
+		return err
+	}
+	if attemptType == "inspection_collection" && scopeType == "run_check" {
+		var journeyCount int
+		if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&journeyCount); err != nil {
+			return err
+		}
+		if journeyCount != 0 {
+			// The shared reconciler sends CancelAttempt to Lintel or closes an
+			// undispatched journey locally. It owns the Browser Operation stop
+			// fence and must not be bypassed by a generic Plinth frame.
+			service.reconcileJourneyVerificationChildren(ctx)
+			return nil
+		}
+	}
+	if attemptType != "inspection_collection" && attemptType != "inspection_analysis" {
+		return fmt.Errorf("attempt %d is not an inspection cancellation target", attemptID)
+	}
+	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
+	if err != nil {
+		return err
+	}
+	if !view.Connected || view.ConnectionEpoch == nil {
+		// The durable fence is enough while disconnected: stream-loss / lease
+		// convergence will close it without pretending the send succeeded.
+		return nil
+	}
+	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
+		ConnectionEpoch: *view.ConnectionEpoch,
+		CorrelationId:   uint64(attemptID),
+		BootId:          view.BootID,
+		Msg:             &runtimev1.ControlEnvelope_CancelAttempt{CancelAttempt: &runtimev1.CancelAttempt{AttemptId: attemptID}},
+	})
+}
+
 // dispatchQueuedInspections sweeps the independent Plinth and Lintel paths.
 // A Plinth outage must not prevent a scheduled browser check from entering the
 // existing Lintel capacity queue.
@@ -249,6 +293,24 @@ func (service *RuntimeService) handleInspectionReportResultProposal(ctx context.
 	digest := sha256.Sum256(payload.GetCanonicalJson())
 	if hex.EncodeToString(digest[:]) != hex.EncodeToString(payload.GetContentDigest()) {
 		reject("content digest mismatch")
+		return
+	}
+	if proposal.GetOutcome() == runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED {
+		termination := terminationReasonOf(proposal.GetTerminationReason())
+		if termination == "" {
+			reject("failed outcome requires a termination reason")
+			return
+		}
+		if err := service.Inspections.Attempts().CommitResult(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), false, termination); err != nil {
+			reject(err.Error())
+			return
+		}
+		ack.GetResultAck().Accepted = true
+		_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+		return
+	}
+	if proposal.GetOutcome() != runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED {
+		reject("unsupported inspection report outcome")
 		return
 	}
 	if err := service.Inspections.CommitReportProposal(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), payload.GetCanonicalJson()); err != nil {

@@ -64,7 +64,11 @@ type Channel struct {
 	// active survives control-stream reconnects within this boot: the
 	// task goroutines keep running while the stream re-establishes, so the
 	// registry must not be wiped per connection (T12, RUNTIME-TASK-005).
-	active map[int64]context.CancelFunc
+	active map[int64]*activeTask
+	// cancelled holds per-boot cancellation tombstones. A duplicate dispatch
+	// arriving after CancelAttempt must never revive a worker that Quoin already
+	// observed as cancelled (RUNTIME-CTRL-008 / RUNTIME-CANCEL-003).
+	cancelled map[int64]struct{}
 	// pendingMu guards the reliable terminal-result registry (T12,
 	// RUNTIME-TASK-008): every terminal ResultProposal is retried until a
 	// ResultAck survives the stream it travelled on.
@@ -80,6 +84,11 @@ type Channel struct {
 }
 
 // pendingResult is one terminal result awaiting a durable ResultAck.
+type activeTask struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 type pendingResult struct {
 	proposal *runtimev1.ResultProposal
 	ack      chan *runtimev1.ResultAck
@@ -109,7 +118,7 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	}
 	return &Channel{
 		Config: config, bootID: base64.RawURLEncoding.EncodeToString(bootRaw),
-		active: map[int64]context.CancelFunc{}, pending: map[int64]*pendingResult{},
+		active: map[int64]*activeTask{}, pending: map[int64]*pendingResult{},
 		browserWaiters: map[int64]chan *runtimev1.ToolResultDelivery{}, browserResults: map[int64]*runtimev1.ToolResultDelivery{}, browserReleased: map[int64]*runtimev1.ToolResultDelivery{},
 	}, nil
 }
@@ -326,6 +335,14 @@ func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink
 				channel.DeliverPendingResults()
 				return
 			}
+			if channel.TaskCancelled(task.GetAttemptId()) {
+				channel.waitForTask(task.GetAttemptId())
+				_ = sink.Send(&runtimev1.ControlEnvelope{
+					CorrelationId: uint64(task.GetAttemptId()),
+					Msg:           &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: task.GetAttemptId()}},
+				})
+				return
+			}
 			if channel.TaskActive(task.GetAttemptId()) {
 				_ = sink.Send(&runtimev1.ControlEnvelope{
 					CorrelationId: uint64(task.GetAttemptId()),
@@ -334,12 +351,22 @@ func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink
 				return
 			}
 			binding := DispatchBinding{BootID: envelope.GetBootId(), Epoch: envelope.GetConnectionEpoch()}
-			go channel.Tasks.HandleDispatchAttempt(ctx, sink, client, task, binding, channel.stopTask)
+			// Register a cancellation fence before scheduling supervisor work. A
+			// following CancelAttempt must be able to cancel this parent even when
+			// the dispatch goroutine has not yet registered its child task.
+			taskCtx, taskCancel := context.WithCancel(ctx)
+			channel.RegisterTask(task.GetAttemptId(), taskCancel)
+			go func() {
+				channel.Tasks.HandleDispatchAttempt(taskCtx, sink, client, task, binding, channel.stopTask)
+				channel.FinishTask(task.GetAttemptId())
+			}()
 		}
 	case *runtimev1.ControlEnvelope_CancelAttempt:
-		if channel.Tasks != nil {
-			channel.Tasks.HandleCancelAttempt(ctx, sink, payload.CancelAttempt, channel.stopTask)
-		}
+		channel.cancelAndWait(payload.CancelAttempt.GetAttemptId())
+		_ = sink.Send(&runtimev1.ControlEnvelope{
+			CorrelationId: uint64(payload.CancelAttempt.GetAttemptId()),
+			Msg:           &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: payload.CancelAttempt.GetAttemptId()}},
+		})
 	case *runtimev1.ControlEnvelope_ReconcileRequest:
 		// Same-boot reconnect reconciliation (RUNTIME-TASK-005): pending
 		// terminal results are flushed BEFORE the report so Quoin never
@@ -393,10 +420,10 @@ func (channel *Channel) sendEnvelope(envelope *runtimev1.ControlEnvelope) error 
 }
 
 // TaskSupervisor executes dispatched attempts (T07 probes, T10 agent
-// analysis) and answers cancellation.
+// analysis). Channel owns cancellation acknowledgement so it can wait for the
+// registered task's physical shutdown before replying (RUNTIME-CANCEL-003).
 type TaskSupervisor interface {
 	HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding DispatchBinding, stopTask func(int64) bool)
-	HandleCancelAttempt(ctx context.Context, sink *FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool)
 }
 
 // FrameSink replies on the live control stream with correct fencing.
@@ -437,14 +464,26 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	)
 }
 
-// RegisterTask records the cancel func of one running attempt.
+// RegisterTask records the cancel func of one running attempt. A cancellation
+// that reached this boot before the worker registered wins: the late child is
+// immediately cancelled and must not overwrite the tombstone.
 func (channel *Channel) RegisterTask(attemptID int64, cancel context.CancelFunc) {
 	channel.cancelMu.Lock()
-	defer channel.cancelMu.Unlock()
-	if channel.active == nil {
-		channel.active = map[int64]context.CancelFunc{}
+	if _, cancelled := channel.cancelled[attemptID]; cancelled {
+		channel.cancelMu.Unlock()
+		cancel()
+		return
 	}
-	channel.active[attemptID] = cancel
+	if channel.active == nil {
+		channel.active = map[int64]*activeTask{}
+	}
+	task := channel.active[attemptID]
+	if task == nil {
+		task = &activeTask{done: make(chan struct{})}
+		channel.active[attemptID] = task
+	}
+	task.cancel = cancel
+	channel.cancelMu.Unlock()
 }
 
 // stopTask cancels one running attempt and reports whether it was live.
@@ -453,19 +492,70 @@ func (channel *Channel) RegisterTask(attemptID int64, cancel context.CancelFunc)
 // channel.pending until Quoin's ResultAck is received.
 func (channel *Channel) FinishTask(attemptID int64) {
 	channel.cancelMu.Lock()
+	task := channel.active[attemptID]
 	delete(channel.active, attemptID)
 	channel.cancelMu.Unlock()
+	if task != nil {
+		close(task.done)
+	}
 }
 
+// stopTask only signals the task context. It is also deferred by natural
+// supervisor completion paths, so the durable cancellation tombstone belongs
+// exclusively to cancelAndWait (the CancelAttempt command path).
 func (channel *Channel) stopTask(attemptID int64) bool {
 	channel.cancelMu.Lock()
-	cancel, live := channel.active[attemptID]
-	delete(channel.active, attemptID)
+	task := channel.active[attemptID]
+	var cancel context.CancelFunc
+	if task != nil {
+		cancel = task.cancel
+	}
 	channel.cancelMu.Unlock()
-	if live {
+	if cancel != nil {
 		cancel()
 	}
-	return live
+	return task != nil
+}
+
+// cancelAndWait makes a cancellation durable, signals the active worker, and
+// waits for its goroutine to exit before Channel emits CancelAck.
+func (channel *Channel) cancelAndWait(attemptID int64) {
+	channel.cancelMu.Lock()
+	if channel.cancelled == nil {
+		channel.cancelled = map[int64]struct{}{}
+	}
+	channel.cancelled[attemptID] = struct{}{}
+	task := channel.active[attemptID]
+	var cancel context.CancelFunc
+	if task != nil {
+		cancel = task.cancel
+	}
+	channel.cancelMu.Unlock()
+	if task == nil {
+		return
+	}
+	if cancel != nil {
+		cancel()
+	}
+	<-task.done
+}
+
+// TaskCancelled reports whether this boot has durably observed a cancellation
+// for the attempt, including the dispatch-before-registration interleaving.
+func (channel *Channel) TaskCancelled(attemptID int64) bool {
+	channel.cancelMu.Lock()
+	defer channel.cancelMu.Unlock()
+	_, cancelled := channel.cancelled[attemptID]
+	return cancelled
+}
+
+func (channel *Channel) waitForTask(attemptID int64) {
+	channel.cancelMu.Lock()
+	task := channel.active[attemptID]
+	channel.cancelMu.Unlock()
+	if task != nil {
+		<-task.done
+	}
 }
 
 // BearerToken returns the current long-term token for RPCs made outside

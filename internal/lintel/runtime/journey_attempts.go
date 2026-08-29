@@ -124,6 +124,12 @@ func (channel *Channel) handleJourneyDispatch(envelope *runtimev1.ControlEnvelop
 		channel.sendJourneyResult(proposal)
 		return
 	}
+	if channel.journeyCancelled[frozen.AttemptID] {
+		channel.operationMu.Unlock()
+		cancel()
+		channel.sendJourneyCancelAck(envelope.GetCorrelationId(), frozen.AttemptID)
+		return
+	}
 	channel.journeyRuns[frozen.AttemptID] = run
 	channel.operationMu.Unlock()
 	_ = channel.sendControl(&runtimev1.ControlEnvelope{ConnectionEpoch: channel.epoch, BootId: channel.bootID, CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: frozen.AttemptID}}})
@@ -135,18 +141,33 @@ func (channel *Channel) handleJourneyDispatch(envelope *runtimev1.ControlEnvelop
 // reject it as late; the physical Stop fence releases the operation).
 func (channel *Channel) handleJourneyCancel(envelope *runtimev1.ControlEnvelope, request *runtimev1.CancelAttempt) {
 	channel.operationMu.Lock()
+	channel.journeyCancelled[request.GetAttemptId()] = true
 	run := channel.journeyRuns[request.GetAttemptId()]
 	channel.operationMu.Unlock()
 	if run == nil {
-		_ = channel.sendControl(&runtimev1.ControlEnvelope{ConnectionEpoch: channel.epoch, BootId: channel.bootID, CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: request.GetAttemptId()}}})
+		// No process has begun. The tombstone prevents a delayed DispatchAttempt
+		// from starting one, so acknowledging immediately is physically truthful.
+		channel.sendJourneyCancelAck(envelope.GetCorrelationId(), request.GetAttemptId())
 		return
 	}
 	run.cancel()
-	select {
-	case <-run.done:
-	case <-time.After(20 * time.Second):
-	}
-	_ = channel.sendControl(&runtimev1.ControlEnvelope{ConnectionEpoch: channel.epoch, BootId: channel.bootID, CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: request.GetAttemptId()}}})
+	// The control receiver must remain available while a browser operation is
+	// unwinding. Ack asynchronously, but only after the Journey goroutine and
+	// its Chromium operation have both stopped. Quoin's later Stop operation is
+	// intentionally idempotent: it records the durable ownership release after
+	// this Runtime-side physical fence.
+	go func(correlationID uint64, attemptID, operationID int64, done <-chan struct{}) {
+		<-done
+		if err := channel.stopBrowserOperation(operationID); err != nil {
+			sharedops.LogEvent("lintel", "error", "journey.cancel_stop_failed", fmt.Sprintf("attempt=%d operation=%d error=%s", attemptID, operationID, err))
+			return
+		}
+		channel.sendJourneyCancelAck(correlationID, attemptID)
+	}(envelope.GetCorrelationId(), request.GetAttemptId(), run.operation, run.done)
+}
+
+func (channel *Channel) sendJourneyCancelAck(correlationID uint64, attemptID int64) {
+	_ = channel.sendControl(&runtimev1.ControlEnvelope{ConnectionEpoch: channel.epoch, BootId: channel.bootID, CorrelationId: correlationID, Msg: &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: attemptID}}})
 }
 
 // runJourney executes the frozen program and proposes the sealed result. The

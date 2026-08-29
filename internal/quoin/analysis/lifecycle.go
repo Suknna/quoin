@@ -48,8 +48,8 @@ type CancelOutcome struct {
 	// AttemptID identifies the attempt the fence touched (0 when the
 	// analysis was already terminal).
 	AttemptID int64
-	// DispatchRequired is true when the fence moved a Running attempt to
-	// Cancelling: the app layer must send CancelAttempt to the runtime
+	// DispatchRequired is true when the fence moved an Assigned or Running
+	// attempt to Cancelling: the app layer must send CancelAttempt to the runtime
 	// (RUNTIME-CANCEL-001). Replayed commands never re-dispatch.
 	DispatchRequired bool
 }

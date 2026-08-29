@@ -146,22 +146,37 @@ func (s *Service) GetReport(ctx context.Context, runID, version int64) (ReportDe
 	return detail, rows.Err()
 }
 
-// CancelRun applies the one-shot cancel fence: the command carries the current
-// row version; Queued children close here, dispatched children move to
-// Cancelling and the Run only becomes terminal once the fences settle.
+// CancelOutcome separates the durable Run projection from the runtime work
+// that still needs a best-effort cancellation delivery after commit.
+type CancelOutcome struct {
+	Detail             RunDetail
+	DispatchAttemptIDs []int64
+}
+
+// CancelRun preserves the original domain API for callers that only need the
+// current authoritative Run projection.
 func (s *Service) CancelRun(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID, expectedRowVersion int64) (RunDetail, error) {
+	outcome, err := s.CancelRunWithDispatch(ctx, principalID, clientCommandID, systemKey, runID, expectedRowVersion)
+	return outcome.Detail, err
+}
+
+// CancelRunWithDispatch commits one cancellation fence for either collection
+// children of an active Run or its active report analysis. Only Cancelling
+// attempts are returned for external delivery; only Queued work closes in
+// this transaction, while an Assigned DispatchAttempt may already be in flight.
+func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID, expectedRowVersion int64) (CancelOutcome, error) {
 	const command = "inspection_run.cancel"
 	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "runId": runID, "expectedRowVersion": expectedRowVersion})
 	if d, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
-		return d, err
+		return CancelOutcome{Detail: d}, err
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
 	}
 	defer conn.Close()
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
 	}
 	committed := false
 	defer func() {
@@ -172,67 +187,113 @@ func (s *Service) CancelRun(ctx context.Context, principalID int64, clientComman
 	if d, replayed, err := s.replayOn(ctx, conn, principalID, clientCommandID, digest); replayed || err != nil {
 		if replayed {
 			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return RunDetail{}, err
+				return CancelOutcome{}, err
 			}
 			committed = true
 		}
-		return d, err
+		return CancelOutcome{Detail: d}, err
 	}
 	var systemID int64
-	if err = conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
-		return RunDetail{}, ErrNotFound
+	var runState string
+	var rowVersion int64
+	if err = conn.QueryRowContext(ctx, `
+		SELECT r.business_system_id,r.state,r.row_version FROM inspection_runs r
+		JOIN business_systems s ON s.id=r.business_system_id
+		WHERE r.id=? AND s.key=?`, runID, systemKey).Scan(&systemID, &runState, &rowVersion); errors.Is(err, sql.ErrNoRows) {
+		return CancelOutcome{}, ErrNotFound
+	} else if err != nil {
+		return CancelOutcome{}, err
+	}
+	if rowVersion != expectedRowVersion {
+		return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, systemKey, runID, &committed)
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT id, state FROM execution_attempts
-		WHERE scope_type='run_check' AND scope_id=? AND state IN ('Queued','Assigned','Running')`, runID)
+		SELECT id FROM execution_attempts
+		WHERE state IN ('Queued','Assigned','Running','Cancelling') AND (
+			(scope_type='run_check' AND scope_id=?)
+			OR (attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?)
+		) ORDER BY id`, runID, runID)
 	if err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
 	}
 	var childIDs []int64
 	for rows.Next() {
 		var childID int64
-		var childState string
-		if err = rows.Scan(&childID, &childState); err != nil {
+		if err = rows.Scan(&childID); err != nil {
 			rows.Close()
-			return RunDetail{}, err
+			return CancelOutcome{}, err
 		}
 		childIDs = append(childIDs, childID)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return CancelOutcome{}, err
+	}
 	if err = rows.Close(); err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
+	}
+	if runState != "Queued" && runState != "Running" && len(childIDs) == 0 {
+		// A terminal collection result committed first. With the caller's still
+		// current version there is no cancellation work left, so commit this
+		// command as a successful observation of the winner rather than turning
+		// a result-vs-cancel race into a spurious 409.
+		if runState != "Completed" && runState != "CompletedWithGaps" {
+			return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, systemKey, runID, &committed)
+		}
+		detail, detailErr := s.detailOn(ctx, conn, systemKey, runID)
+		if detailErr != nil {
+			return CancelOutcome{}, detailErr
+		}
+		if auditErr := s.audit(ctx, conn, principalID, clientCommandID, command, runID, s.nowText()); auditErr != nil {
+			return CancelOutcome{}, auditErr
+		}
+		if commandErr := s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, runID, detail); commandErr != nil {
+			return CancelOutcome{}, commandErr
+		}
+		if _, commitErr := conn.ExecContext(ctx, "COMMIT"); commitErr != nil {
+			return CancelOutcome{}, commitErr
+		}
+		committed = true
+		return CancelOutcome{Detail: detail}, nil
 	}
 	attempts := attempt.NewService(s.db)
+	dispatchIDs := []int64{}
 	for _, childID := range childIDs {
-		if _, err = attempts.CancelFenceOn(ctx, conn, childID); err != nil {
-			return RunDetail{}, err
+		state, fenceErr := attempts.CancelFenceOn(ctx, conn, childID)
+		if fenceErr != nil {
+			return CancelOutcome{}, fenceErr
+		}
+		if state == "Cancelling" {
+			dispatchIDs = append(dispatchIDs, childID)
 		}
 	}
-	update, err := conn.ExecContext(ctx, `
-		UPDATE inspection_runs SET state='Cancelled', row_version=row_version+1
-		WHERE id=? AND business_system_id=? AND row_version=? AND state IN ('Queued','Running')`,
-		runID, systemID, expectedRowVersion)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	affected, _ := update.RowsAffected()
-	if affected == 0 {
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "row_version_conflict", Detail: "巡检 Run 已变化或已进入终态，请刷新后重试", SystemKey: systemKey, ObjectID: runID}, &committed)
-	}
-	if err = s.audit(ctx, conn, principalID, clientCommandID, command, runID, s.nowText()); err != nil {
-		return RunDetail{}, err
+	if runState == "Queued" || runState == "Running" {
+		if _, err = conn.ExecContext(ctx, `
+			UPDATE inspection_runs SET state='Cancelled',row_version=row_version+1
+			WHERE id=? AND business_system_id=? AND row_version=? AND state IN ('Queued','Running')`, runID, systemID, expectedRowVersion); err != nil {
+			return CancelOutcome{}, err
+		}
 	}
 	detail, err := s.detailOn(ctx, conn, systemKey, runID)
 	if err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
+	}
+	if err = s.audit(ctx, conn, principalID, clientCommandID, command, runID, s.nowText()); err != nil {
+		return CancelOutcome{}, err
 	}
 	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, runID, detail); err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return RunDetail{}, err
+		return CancelOutcome{}, err
 	}
 	committed = true
-	return detail, nil
+	return CancelOutcome{Detail: detail, DispatchAttemptIDs: dispatchIDs}, nil
+}
+
+func (s *Service) rejectCancel(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command, digest, systemKey string, runID int64, committed *bool) (CancelOutcome, error) {
+	detail, err := s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "row_version_conflict", Detail: "巡检 Run 已变化或已进入终态，请刷新后重试", SystemKey: systemKey, ObjectID: runID}, committed)
+	return CancelOutcome{Detail: detail}, err
 }
 
 func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string, runID int64) (RunDetail, error) {
@@ -290,6 +351,33 @@ func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string
 	}
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&detail.ReportCount); err != nil {
 		return detail, err
+	}
+	var activeAnalysis int
+	if err = conn.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM execution_attempts
+			WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?
+			AND state IN ('Queued','Assigned','Running','Cancelling')
+		)`, runID).Scan(&activeAnalysis); err != nil {
+		return detail, err
+	}
+	detail.AnalysisActive = activeAnalysis != 0
+	var latestID int64
+	var latestState string
+	var terminationReason sql.NullString
+	err = conn.QueryRowContext(ctx, `
+		SELECT id, state, termination_reason
+		FROM execution_attempts
+		WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?
+		ORDER BY id DESC LIMIT 1`, runID).Scan(&latestID, &latestState, &terminationReason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return detail, err
+	}
+	if err == nil {
+		detail.LatestAnalysis = &InspectionAttemptStatus{ID: locatorID(latestID), State: latestState}
+		if terminationReason.Valid {
+			detail.LatestAnalysis.TerminationReason = &terminationReason.String
+		}
 	}
 	return detail, nil
 }

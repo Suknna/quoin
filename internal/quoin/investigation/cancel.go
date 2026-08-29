@@ -3,8 +3,8 @@ package investigation
 // Explicit Stop (HTTP-COMMAND-005, DATA-ATTEMPT-003): the idempotent
 // cancellation fence is its own versioned command — transport aborts never
 // express domain cancellation. Success already committed answers the
-// completed object (200, never 409); the fence moves Queued/Assigned to
-// Cancelled directly and Running to Cancelling, after which the app layer
+// completed object (200, never 409); the fence moves Queued to Cancelled
+// directly and Assigned/Running to Cancelling, after which the app layer
 // delivers the runtime CancelAttempt frame and the runtime's CancelAck (or
 // the loss convergence) finishes Cancelled — no fenced middle state
 // survives (DATA-TX-005).
@@ -23,8 +23,8 @@ type StopOutcome struct {
 	AttemptID  int64
 	State      string
 	RowVersion int64
-	// DispatchRequired is true when the fence moved Running -> Cancelling:
-	// the app layer must send the runtime CancelAttempt frame after the
+	// DispatchRequired is true when the fence moved Assigned/Running ->
+	// Cancelling: the app layer must send the runtime CancelAttempt frame after the
 	// commit (RUNTIME-CANCEL-001). Replays and already-Cancelling fences
 	// never re-dispatch.
 	DispatchRequired bool
@@ -138,9 +138,10 @@ func (service *Service) Cancel(ctx context.Context, principalID int64, clientCom
 	}
 	outcome := StopOutcome{AttemptID: attemptID, State: committedState, RowVersion: committedVersion}
 	if fenceState == "Cancelling" {
-		// Idempotent on an already-Cancelling attempt, but only a
-		// Running -> Cancelling move owes the runtime a cancel frame.
-		outcome.DispatchRequired = state == "Running"
+		// Assigned may already have a DispatchAttempt frame in flight. Like a
+		// Running attempt, it owes the Runtime one post-commit cancel frame;
+		// only a replayed Cancelling fence avoids duplicate dispatch.
+		outcome.DispatchRequired = state == "Assigned" || state == "Running"
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return StopOutcome{}, err

@@ -437,6 +437,28 @@ func TestStopFenceCommitOrderings(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Assigned means the dispatch frame may be in flight. A stop must send the
+	// Runtime cancel frame too, so an Accept arriving after this fence cannot
+	// start orphaned work.
+	assigned, err := service.Create(ctx, principalID, "cmd-stop-assigned", "已派发停止", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindAssigned(t, db, assigned.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	assignedView, err := service.AttemptView(ctx, assigned.InvestigationID, assigned.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err = service.Cancel(ctx, principalID, "cmd-stop-assigned-cmd", assigned.InvestigationID, assigned.AttemptID, assignedView.RowVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != "Cancelling" || !outcome.DispatchRequired {
+		t.Fatalf("assigned outcome wrong: %+v", outcome)
+	}
+
 	// Stale row version on a still-active attempt conflicts.
 	stale, err := service.Create(ctx, principalID, "cmd-stop-stale", "版本过期", nil, nil)
 	if err != nil {

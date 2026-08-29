@@ -61,18 +61,29 @@ type CheckResult struct {
 }
 
 type RunDetail struct {
-	RunID             int64         `json:"-"`
-	ID                string        `json:"id"`
-	BusinessSystemKey string        `json:"businessSystemKey"`
-	PlanKey           string        `json:"planKey"`
-	State             string        `json:"state"`
-	RowVersion        int64         `json:"rowVersion"`
-	TriggerKind       string        `json:"triggerKind"`
-	ScheduledFor      *string       `json:"scheduledFor,omitempty"`
-	EvidenceAt        *string       `json:"evidenceAt,omitempty"`
-	CreatedAt         string        `json:"createdAt"`
-	Checks            []CheckResult `json:"checks"`
-	ReportCount       int           `json:"reportCount"`
+	RunID             int64                    `json:"-"`
+	ID                string                   `json:"id"`
+	BusinessSystemKey string                   `json:"businessSystemKey"`
+	PlanKey           string                   `json:"planKey"`
+	State             string                   `json:"state"`
+	RowVersion        int64                    `json:"rowVersion"`
+	TriggerKind       string                   `json:"triggerKind"`
+	ScheduledFor      *string                  `json:"scheduledFor,omitempty"`
+	EvidenceAt        *string                  `json:"evidenceAt,omitempty"`
+	CreatedAt         string                   `json:"createdAt"`
+	Checks            []CheckResult            `json:"checks"`
+	ReportCount       int                      `json:"reportCount"`
+	AnalysisActive    bool                     `json:"analysisActive"`
+	LatestAnalysis    *InspectionAttemptStatus `json:"latestAnalysis,omitempty"`
+}
+
+// InspectionAttemptStatus is the safe, read-only lifecycle projection for the
+// most recent report analysis. It makes failures and cancellations recoverable
+// in the Run UI without exposing model input or report content.
+type InspectionAttemptStatus struct {
+	ID                string  `json:"id"`
+	State             string  `json:"state"`
+	TerminationReason *string `json:"terminationReason,omitempty"`
 }
 
 type ReportSummaryItem struct {

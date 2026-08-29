@@ -18,6 +18,7 @@ import (
 
 func main() {
 	address := flag.String("address", "127.0.0.1:18443", "listen address")
+	completionDelay := flag.Duration("completion-delay", 0, "deterministic cancellable delay before each chat response")
 	flag.Parse()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", func(writer http.ResponseWriter, request *http.Request) {
@@ -44,10 +45,10 @@ func main() {
 		}
 		writer.Header().Set("X-Request-Id", "req-fixture-"+fmt.Sprint(time.Now().UnixNano()))
 		if body.Stream {
-			serveStream(writer, body)
+			serveStream(writer, request, body, *completionDelay)
 			return
 		}
-		serveCompletion(writer, body)
+		serveCompletion(writer, request, body, *completionDelay)
 	})
 	mux.HandleFunc("POST /v1/embeddings", func(writer http.ResponseWriter, request *http.Request) {
 		if !authorize(writer, request) {
@@ -252,7 +253,16 @@ func toolCallChunkIndexed(model, callID string, index int, toolName, arguments s
 // chunks (partial stream failure fixture). The agent's first call answers a
 // streaming native tool call (bash); its continuation returns the final
 // text diagnosis.
-func serveStream(writer http.ResponseWriter, body chatRequest) {
+func serveStream(writer http.ResponseWriter, request *http.Request, body chatRequest, delay time.Duration) {
+	if delay > 0 {
+		log.Printf("stream delayed: model=%s duration=%s", body.Model, delay)
+		select {
+		case <-time.After(delay):
+		case <-request.Context().Done():
+			log.Printf("stream cancelled: model=%s", body.Model)
+			return
+		}
+	}
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-store")
 	flusher, _ := writer.(http.Flusher)
@@ -670,7 +680,16 @@ func jsonQuote(value string) string {
 }
 
 // serveCompletion answers tool calls deterministically by prompt content.
-func serveCompletion(writer http.ResponseWriter, body chatRequest) {
+func serveCompletion(writer http.ResponseWriter, request *http.Request, body chatRequest, delay time.Duration) {
+	if delay > 0 {
+		log.Printf("completion delayed: model=%s duration=%s", body.Model, delay)
+		select {
+		case <-time.After(delay):
+		case <-request.Context().Done():
+			log.Printf("completion cancelled: model=%s", body.Model)
+			return
+		}
+	}
 	prompt := promptText(body.Messages)
 	switch {
 	case strings.Contains(prompt, "both probe tools"):

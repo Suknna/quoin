@@ -129,6 +129,12 @@ func verifyMixedInspectionPromQLSQLite(root string) error {
 		WHERE id=?`, mixedInspectionTime, promqlAttemptID); err != nil {
 		return err
 	}
+	if err := mixedMustReject(db, `
+		UPDATE execution_attempts
+		SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=3
+		WHERE id=?`, mixedInspectionTime, promqlAttemptID); err != nil {
+		return fmt.Errorf("Assigned attempt bypassed the Cancelling cancellation fence: %w", err)
+	}
 	if err := mixedExec(db, `UPDATE execution_attempts SET state='Running', accepted_at=?, row_version=3 WHERE id=?`, mixedInspectionTime, promqlAttemptID); err != nil {
 		return err
 	}

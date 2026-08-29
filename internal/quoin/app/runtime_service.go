@@ -292,6 +292,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		// reconcile), then queued attempts created while the slot was
 		// disconnected bind to this live stream and dispatch immediately.
 		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
+		go service.dispatchAllCancellingInspections(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedVerificationAttempts(context.Background())
 		go service.dispatchQueuedResourceRefreshAttempts(context.Background())
@@ -300,6 +301,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchQueuedInspections(context.Background())
 	}
 	if slot == qruntime.SlotLintel && !decision.ProfileReconcileRequired {
+		go service.reconcileJourneyVerificationChildren(context.Background())
 		go service.dispatchAllCancellingBrowserExplorations(context.Background())
 		go service.replayRunningBrowserExplorationChildren(context.Background())
 		go service.dispatchPendingBrowserStops(context.Background())
@@ -366,7 +368,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		case *runtimev1.ControlEnvelope_ResultProposal:
 			service.handleResultProposalRouted(ctx, envelope, payload.ResultProposal)
 		case *runtimev1.ControlEnvelope_CancelAck:
-			service.handleCancelAckRouted(ctx, payload.CancelAck)
+			service.handleCancelAckRouted(ctx, slot, payload.CancelAck)
 		case *runtimev1.ControlEnvelope_BeginModelCall:
 			service.handleBeginModelCallRouted(ctx, envelope, payload.BeginModelCall)
 		case *runtimev1.ControlEnvelope_CompleteModelCall:
@@ -462,6 +464,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			// This is the sole readiness edge for a reconciled boot. Only after
 			// the complete inventory transaction has committed may replayed work
 			// reach Lintel.
+			go service.reconcileJourneyVerificationChildren(context.Background())
 			go service.dispatchAllCancellingBrowserExplorations(context.Background())
 			go service.replayRunningBrowserExplorationChildren(context.Background())
 			go service.dispatchPendingBrowserStops(context.Background())

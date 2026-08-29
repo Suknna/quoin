@@ -278,8 +278,10 @@ PYEOF
     exit 1
   fi
   {
-    echo 'lintel-image:'
-    docker image inspect "${QUOIN_IMAGE_NAMESPACE:-quoin}/lintel:v0.1.0-dev" --format '{{.Id}}'
+    for component in quoin plinth lintel stele; do
+      echo "${component}-image:"
+      docker image inspect "${QUOIN_IMAGE_NAMESPACE:-quoin}/${component}:v0.1.0-dev" --format '{{.Id}}'
+    done
     echo 'chromium:'
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel chromium --version
     echo 'tigervnc-scraping-server:'
@@ -287,29 +289,45 @@ PYEOF
     echo 'xvfb:'
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' xvfb
   } >"$evidence/${ticket,,}-components.log" 2>&1
-  if [ "$ticket" = "T22" ] || [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
+  if [ "$ticket" = "T22" ] || [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ] || [ "$ticket" = "T26" ]; then
     # T25 runs beside ordinary E2E stacks, so it must not reuse their fixture
     # ports. Other tickets retain their established endpoints.
     fixture_provider_port=18443
     fixture_thanos_port=18444
     if [ "$ticket" = "T25" ]; then fixture_provider_port=18445; fixture_thanos_port=18446; fi
+    if [ "$ticket" = "T26" ]; then fixture_provider_port=18447; fixture_thanos_port=18448; fi
     go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
-    "$stack/fixture-provider" -address "0.0.0.0:$fixture_provider_port" >"$evidence/fixture-provider.log" 2>&1 &
+    fixture_provider_args=(-address "0.0.0.0:$fixture_provider_port")
+    # T26 deliberately holds a real report-model HTTP call open so Chromium can
+    # cancel an accepted inspection_analysis Attempt and observe worker context
+    # cancellation rather than merely a database fence.
+    if [ "$ticket" = "T26" ]; then fixture_provider_args+=(-completion-delay 2s); fi
+    "$stack/fixture-provider" "${fixture_provider_args[@]}" >"$evidence/fixture-provider.log" 2>&1 &
     printf '%s' "$!" >"$stack/fixture-provider.pid"
-    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
+    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ] || [ "$ticket" = "T26" ]; then
       go build -o "$stack/fixture-thanos" ./test/fixtures/thanos-query
         "$stack/fixture-thanos" -address "0.0.0.0:$fixture_thanos_port" >"$evidence/fixture-thanos.log" 2>&1 &
       printf '%s' "$!" >"$stack/fixture-thanos.pid"
     fi
+    {
+      echo 'fixture-provider-binary-sha256:'
+      sha256sum "$stack/fixture-provider"
+      if [ -f "$stack/fixture-thanos" ]; then
+        echo 'fixture-thanos-binary-sha256:'
+        sha256sum "$stack/fixture-thanos"
+      fi
+      echo 'fixture-build-go:'
+      go version
+    } >>"$evidence/${ticket,,}-components.log"
     GW=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep '_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
     provider_name="t22-openai"
-    if [ "$ticket" = "T24" ]; then provider_name="t24-openai"; elif [ "$ticket" = "T25" ]; then provider_name="t25-openai"; fi
+    if [ "$ticket" = "T24" ]; then provider_name="t24-openai"; elif [ "$ticket" = "T25" ]; then provider_name="t25-openai"; elif [ "$ticket" = "T26" ]; then provider_name="t26-openai"; fi
     provider_url="http://$GW:$fixture_provider_port"
     curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
       -d '{"clientCommandId":"e2e-'"${ticket,,}"'-create-provider","name":"'"$provider_name"'","connection":{"type":"model_provider","baseUrl":"'"$provider_url"'","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
       "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
     thanos_name=""
-    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
+    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ] || [ "$ticket" = "T26" ]; then
       thanos_name="${ticket,,}-thanos"
       thanos_url="http://$GW:$fixture_thanos_port"
       curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \

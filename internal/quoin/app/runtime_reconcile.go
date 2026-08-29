@@ -228,6 +228,12 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 	}
 	if attemptType == "inspection_collection" && service.BusinessSystems != nil {
 		view, err := service.attemptsService().Get(ctx, attemptID)
+		if err == nil && view.ScopeType == "config_verification_run" {
+			if cancelErr := service.BusinessSystems.VerificationAttempts().CancelAck(ctx, attemptID); cancelErr != nil {
+				sharedops.LogEvent("quoin", "error", "config_verification.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, cancelErr))
+			}
+			return
+		}
 		if err == nil && view.ScopeType == "resource_refresh_run" {
 			if err := service.attemptsService().CancelAck(ctx, attemptID); err != nil {
 				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", fmt.Sprintf("attempt=%d %v", attemptID, err))
@@ -240,6 +246,25 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 		}
 	}
 	switch attemptType {
+	case "inspection_collection":
+		if service.Inspections != nil {
+			var scopeType string
+			_ = service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType)
+			if scopeType == "run_check" {
+				if err := service.Inspections.Attempts().CancelAck(ctx, attemptID); err != nil {
+					sharedops.LogEvent("quoin", "error", "inspection.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+					return
+				}
+				service.convergeCancelledJourneyChild(ctx, attemptID)
+				return
+			}
+		}
+	case "inspection_analysis":
+		if service.Inspections != nil {
+			if err := service.Inspections.Attempts().CancelAck(ctx, attemptID); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.analysis_cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+			}
+		}
 	case "initial_analysis":
 		if service.Analyses != nil {
 			if err := service.Analyses.CancelAck(ctx, attemptID); err != nil {
@@ -483,6 +508,15 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 	for _, view := range active {
 		if reported[view.ID] {
 			renew = true
+			if view.State == "Cancelling" && (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") {
+				// The Runtime is still executing a fence whose first send may have
+				// been lost. Re-send rather than treating its active report as proof
+				// that the cancellation converged.
+				if err := service.dispatchInspectionCancellation(ctx, view.ID); err != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.cancel_replay", fmt.Sprintf("attempt=%d %v", view.ID, err))
+				}
+				continue
+			}
 			if view.State == "Assigned" && service.Analyses != nil && view.AttemptType == "initial_analysis" {
 				// The accept was lost with the stream; the runtime is
 				// already executing the attempt.
@@ -497,8 +531,8 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
-			if view.State == "Assigned" && view.AttemptType == "inspection_collection" && service.BusinessSystems != nil {
-				if err := service.BusinessSystems.VerificationAttempts().Accept(ctx, view.ID, bootID, 0); err != nil {
+			if view.State == "Assigned" && (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+				if err := service.Inspections.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
@@ -546,6 +580,9 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 		return fmt.Errorf("agent services not wired")
 	}
 	attempts := service.attemptsService()
+	if (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+		attempts = service.Inspections.Attempts()
+	}
 	input, err := attempts.DispatchInputFor(ctx, view.ID)
 	if err != nil {
 		return err
@@ -578,6 +615,12 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	if view.AttemptType == "investigation" {
 		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION
 		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION
+	} else if view.AttemptType == "inspection_collection" && view.ScopeType == "run_check" {
+		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION
+		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK
+	} else if view.AttemptType == "inspection_analysis" && view.ScopeType == "run" {
+		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS
+		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN
 	}
 	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
 		ConnectionEpoch: bindingEpoch,
@@ -598,10 +641,10 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	})
 }
 
-// onPlinthStreamEnded converges Cancelling attempts bound to the ended
-// stream: the cancellation fence already committed, so the attempt must
-// not stay in the Cancelling middle state (RUNTIME-CANCEL-003). Running
-// attempts keep their lease window for a same-boot reconnect.
+// onPlinthStreamEnded preserves Cancelling attempts bound to the ended stream.
+// A detached same-boot stream is not proof that its worker stopped, so turning
+// the fence into Cancelled here could lie about physical execution. Reconnect
+// replay re-sends CancelAttempt; a new boot or an expired lease converges loss.
 func (service *RuntimeService) onPlinthStreamEnded(ctx context.Context, bootID string, epoch uint64) {
 	attempts := service.attemptsService()
 	if attempts == nil {
@@ -619,8 +662,7 @@ func (service *RuntimeService) onPlinthStreamEnded(ctx context.Context, bootID s
 		if view.ConnectionEpoch != nil && uint64(*view.ConnectionEpoch) != epoch {
 			continue
 		}
-		service.finalizeCancellation(ctx, view.ID, view.AttemptType)
-		sharedops.LogEvent("quoin", "info", "reconcile.stream_end_cancelled", fmt.Sprintf("attempt=%d", view.ID))
+		sharedops.LogEvent("quoin", "info", "reconcile.stream_end_cancel_pending", fmt.Sprintf("attempt=%d", view.ID))
 	}
 }
 
@@ -696,6 +738,10 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 					if service.BusinessSystems != nil {
 						var closeErr error
 						switch item.ScopeType {
+						case "run_check":
+							if service.Inspections != nil {
+								closeErr = service.Inspections.RecordPromQLTechnicalGap(ctx, item.AttemptID, "interrupted")
+							}
 						case "config_verification_run":
 							closeErr = service.BusinessSystems.RecordVerificationTechnicalGap(ctx, item.AttemptID, "interrupted")
 						case "resource_refresh_run":
@@ -715,6 +761,51 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 
 // dispatchAllCancellingBrowserExplorations replays cancellation after a Lintel
 // reconnect. The database remains the authority; a lost send changes nothing.
+// dispatchAllCancellingInspections replays durable Plinth cancellation fences
+// after reconnect. Sending is best effort; the fence stays Cancelling and this
+// method retries on every attachment until a CancelAck or loss convergence.
+func (service *RuntimeService) dispatchAllCancellingInspections(ctx context.Context) {
+	if service.Inspections == nil {
+		return
+	}
+	rows, err := service.Inspections.DB().QueryContext(ctx, `
+		SELECT a.id FROM execution_attempts a
+		WHERE a.state='Cancelling' AND a.attempt_type IN ('inspection_collection','inspection_analysis')
+		AND NOT EXISTS (SELECT 1 FROM browser_operations b WHERE b.owner_attempt_id=a.id AND b.kind='journey')
+		ORDER BY a.id`)
+	if err != nil {
+		sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())
+		return
+	}
+	// SQLite uses a single connection. Materialize every durable fence and
+	// release this cursor before dispatchInspectionCancellation re-reads the
+	// Attempt and the active Runtime slot.
+	var attemptIDs []int64
+	for rows.Next() {
+		var attemptID int64
+		if err := rows.Scan(&attemptID); err != nil {
+			_ = rows.Close()
+			sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())
+			return
+		}
+		attemptIDs = append(attemptIDs, attemptID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())
+		return
+	}
+	if err := rows.Close(); err != nil {
+		sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())
+		return
+	}
+	for _, attemptID := range attemptIDs {
+		if err := service.dispatchInspectionCancellation(ctx, attemptID); err != nil {
+			sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", fmt.Sprintf("attempt=%d %v", attemptID, err))
+		}
+	}
+}
+
 func (service *RuntimeService) dispatchAllCancellingBrowserExplorations(ctx context.Context) {
 	if service.Analyses == nil {
 		return
