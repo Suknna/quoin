@@ -7,6 +7,7 @@ import {
 } from '@assistant-ui/react'
 import { ToolCallTimeline, EvidenceLink } from './tools/ToolCallTimeline'
 import { TurnContext, durableId, type AttachmentMeta } from './turnContext'
+import { FeedbackControl } from '../feedback/FeedbackControl'
 
 // MessageShells renders the per-message views with the T15 turn controls
 // (UI-CHAT-005): Retry at a failed turn's user message, Undo under the
@@ -57,11 +58,17 @@ function UserMessageShell() {
 function AssistantMessageShell() {
   const messageId = useAuiState((state) => state.message.id)
   const extras = useContext(TurnContext)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   if (!extras) return null
   const withdrawn = extras.withdrawnFor(messageId)
   const attemptId = extras.attemptFor(messageId)
   const evidenceIds = extras.evidenceFor(messageId)
   const isActiveAttempt = attemptId !== undefined && attemptId === extras.activeAttemptId
+  // The diagnosis affordances bind to the durable assistant message only
+  // (UI-FEEDBACK-001/003): live in-flight turns and withdrawn branches
+  // carry no actions.
+  const durable = durableId(messageId)
+  const canRecord = !withdrawn && durable !== null && extras.onOrganizeKnowledge !== undefined
   return (
     <MessagePrimitive.Root className={`chat-message chat-message-assistant${withdrawn ? ' withdrawn' : ''}`}>
       {withdrawn && <p className="withdrawn-badge">该回合已撤回（保留审计）</p>}
@@ -75,6 +82,19 @@ function AssistantMessageShell() {
             <EvidenceLink key={evidenceId} evidenceId={evidenceId} />
           ))}
         </div>
+      )}
+      {canRecord && (
+        <div className="message-diagnosis" aria-label="诊断操作">
+          <button type="button" className="text-button" aria-expanded={feedbackOpen} onClick={() => setFeedbackOpen(!feedbackOpen)}>
+            记录实际结果
+          </button>
+          <button type="button" className="text-button" onClick={() => durable && extras.onOrganizeKnowledge?.(durable)}>
+            整理为知识
+          </button>
+        </div>
+      )}
+      {canRecord && feedbackOpen && durable && (
+        <FeedbackControl target={{ type: 'investigation_message', id: durable }} />
       )}
     </MessagePrimitive.Root>
   )

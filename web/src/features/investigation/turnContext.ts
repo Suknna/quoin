@@ -42,6 +42,9 @@ export interface TurnExtras {
   onStop: () => void
   onRetry: (messageId: string) => void
   onUndo: (messageId: string) => void
+  // T27: the assistant message menu's 整理为知识 action (UI-FEEDBACK-003);
+  // undefined keeps older surfaces compiling without the affordance.
+  onOrganizeKnowledge?: (messageId: string) => void
 }
 
 export const TurnContext = createContext<TurnExtras | null>(null)

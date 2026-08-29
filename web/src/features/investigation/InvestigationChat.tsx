@@ -15,9 +15,10 @@ import { ChatThread, type TurnRestore } from './ChatThread'
 interface InvestigationChatProps {
   investigationId: string
   onBack: () => void
+  onOpenCandidate?: (candidateId: string) => void
 }
 
-export function InvestigationChat({ investigationId, onBack }: InvestigationChatProps) {
+export function InvestigationChat({ investigationId, onBack, onOpenCandidate }: InvestigationChatProps) {
   const [detail, setDetail] = useState<InvestigationDetail | null>(null)
   const [messages, setMessages] = useState<InvestigationMessage[]>([])
   const [attemptStates, setAttemptStates] = useState<Record<string, AttemptFacts>>({})
@@ -159,6 +160,7 @@ export function InvestigationChat({ investigationId, onBack }: InvestigationChat
         onRestoreConsumed={() => setRestore(null)}
         onUndo={(message) => void onUndo(message)}
         onTurnFinished={onTurnFinished}
+        onOpenCandidate={onOpenCandidate}
       />
     </div>
   )

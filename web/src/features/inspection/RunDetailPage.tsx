@@ -4,8 +4,9 @@ import {
   inspectionGapReasonText, inspectionStateText, listInspectionReports, reanalyzeInspectionRun, rerunInspection,
   type InspectionReportDetail, type InspectionRunDetail,
 } from './api'
+import { api as knowledgeApi, CommandConflictError } from '../knowledge/api'
 
-interface Props { runId: string; onBack: () => void; onOpenRun: (runId: string) => void }
+interface Props { runId: string; onBack: () => void; onOpenRun: (runId: string) => void; onOpenKnowledgeCandidate?: (candidateId: string) => void }
 
 function analysisOutcomeText(detail: InspectionRunDetail): string | null {
   const latest = detail.latestAnalysis
@@ -18,7 +19,27 @@ function analysisOutcomeText(detail: InspectionRunDetail): string | null {
   }
 }
 
-export function RunDetailPage({ runId, onBack, onOpenRun }: Props) {
+export function RunDetailPage({ runId, onBack, onOpenRun, onOpenKnowledgeCandidate }: Props) {
+  const [organizeBusy, setOrganizeBusy] = useState(false)
+  const [organizeMessage, setOrganizeMessage] = useState('')
+
+  async function organizeFromReport() {
+    if (!report) return
+    setOrganizeBusy(true)
+    setOrganizeMessage('')
+    try {
+      const candidate = await knowledgeApi.createReportCandidate(runId, report.version)
+      onOpenKnowledgeCandidate?.(candidate.id)
+    } catch (reason) {
+      if (reason instanceof CommandConflictError) {
+        setOrganizeMessage('该报告已标记为不采纳，不能再整理为知识。')
+      } else {
+        setOrganizeMessage(reason instanceof Error ? reason.message : '暂时无法整理为知识。')
+      }
+    } finally {
+      setOrganizeBusy(false)
+    }
+  }
   const [detail, setDetail] = useState<InspectionRunDetail | null>(null)
   const [report, setReport] = useState<InspectionReportDetail | null>(null)
   const [message, setMessage] = useState('')
@@ -110,6 +131,12 @@ export function RunDetailPage({ runId, onBack, onOpenRun }: Props) {
     <h3>检查结果</h3>
     {detail.checks.length === 0 ? <p className="detail-muted">{active ? '检查尚未产生结果，正在自动刷新。' : '该 Run 没有检查结果。'}</p> : <table className="data-table inspection-checks"><thead><tr><th>检查</th><th>结果</th><th>Evidence</th></tr></thead><tbody>{detail.checks.map((check) => <tr key={check.checkKey}><td>{check.checkKey}</td><td>{check.status === 'ok' ? <span className="status-pill ok">通过</span> : check.status === 'cancelling' ? <span className="status-pill waiting">正在取消…</span> : check.status ? <><span className="status-pill muted">{check.status === 'gap' ? '缺口' : '错误'}</span><span className="gap-reason">{inspectionGapReasonText[check.gapReason] ?? check.gapReason}</span></> : '等待结果'}</td><td>{check.status === 'ok' ? `#${check.evidenceId}` : '—'}</td></tr>)}</tbody></table>}
     <h3>不可变报告</h3>
-    {!report ? <p className="detail-muted">{active ? '检查完成后将由 Plinth 生成并原子提交报告。' : detail.reportCount > 0 ? '正在读取报告…' : '此 Run 尚未形成报告。'}</p> : <article className="inspection-report"><header><strong>报告 v{report.version}</strong><span>模型：{report.modelId}</span><time dateTime={report.createdAt}>{formatInspectionTime(report.createdAt)}</time></header><pre>{report.content}</pre><footer><span>Evidence：{report.evidenceIds.map((id) => `#${id}`).join('、') || '—'}</span></footer></article>}
+    {!report ? <p className="detail-muted">{active ? '检查完成后将由 Plinth 生成并原子提交报告。' : detail.reportCount > 0 ? '正在读取报告…' : '此 Run 尚未形成报告。'}</p> : <>
+      <div className="inspection-report-actions">
+        <button className="secondary-button" disabled={organizeBusy} onClick={() => void organizeFromReport()}>{organizeBusy ? '正在整理…' : '整理为知识'}</button>
+      </div>
+      {organizeMessage && <p className="field-error" role="alert">{organizeMessage}</p>}
+      <article className="inspection-report"><header><strong>报告 v{report.version}</strong><span>模型：{report.modelId}</span><time dateTime={report.createdAt}>{formatInspectionTime(report.createdAt)}</time></header><pre>{report.content}</pre><footer><span>Evidence：{report.evidenceIds.map((id) => `#${id}`).join('、') || '—'}</span></footer></article>
+    </>}
   </section>
 }

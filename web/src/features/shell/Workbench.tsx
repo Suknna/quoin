@@ -21,6 +21,9 @@ import { NewInvestigation, type InvestigationSourceRef } from '../investigation/
 import { InspectionsPage } from '../inspection/InspectionsPage'
 import { RunDetailPage } from '../inspection/RunDetailPage'
 import '../inspection/inspection.css'
+import { CandidateEditor } from '../knowledge/CandidateEditor'
+import { CandidatesList, KnowledgeDetailPane, KnowledgeList } from '../knowledge/KnowledgeModule'
+import '../knowledge/knowledge.css'
 
 interface WorkbenchProps {
   user: UserSummary
@@ -32,6 +35,16 @@ type AlertSegment = 'current' | 'history' | 'intake'
 
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
 type InspectionView = { kind: 'list' } | { kind: 'detail'; runId: string }
+
+type KnowledgeView = { kind: 'list' } | { kind: 'candidate'; candidateId: string } | { kind: 'knowledge'; knowledgeId: string }
+
+function knowledgeViewFromPath(): KnowledgeView {
+  const candidateMatch = window.location.pathname.match(/^\/knowledge\/candidates\/(\d+)$/)
+  if (candidateMatch) return { kind: 'candidate', candidateId: candidateMatch[1] }
+  const knowledgeMatch = window.location.pathname.match(/^\/knowledge\/items\/(\d+)$/)
+  if (knowledgeMatch) return { kind: 'knowledge', knowledgeId: knowledgeMatch[1] }
+  return { kind: 'list' }
+}
 
 function inspectionViewFromPath(): InspectionView {
   const match = window.location.pathname.match(/^\/inspections\/runs\/(\d+)$/)
@@ -114,6 +127,8 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 	const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
 	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
   const [inspectionView, setInspectionView] = useState<InspectionView>(inspectionViewFromPath)
+  const [knowledgeView, setKnowledgeView] = useState<KnowledgeView>(knowledgeViewFromPath)
+  const [knowledgeSegment, setKnowledgeSegment] = useState<'knowledge' | 'candidates'>(() => (knowledgeViewFromPath().kind === 'candidate' ? 'candidates' : 'knowledge'))
 	const [uploadOpen, setUploadOpen] = useState(false)
 	const [contractsOpen, setContractsOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
@@ -190,6 +205,26 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 		setActive('investigations')
 		setInvestigationView({ kind: 'new', sources })
 	}
+
+  function openKnowledgeCandidate(candidateId: string) {
+    window.history.pushState({}, '', `/knowledge/candidates/${encodeURIComponent(candidateId)}`)
+    setActive('knowledge')
+    setKnowledgeView({ kind: 'candidate', candidateId })
+    setKnowledgeSegment('candidates')
+  }
+
+  function openKnowledge(knowledgeId: string) {
+    window.history.pushState({}, '', `/knowledge/items/${encodeURIComponent(knowledgeId)}`)
+    setActive('knowledge')
+    setKnowledgeView({ kind: 'knowledge', knowledgeId })
+    setKnowledgeSegment('knowledge')
+  }
+
+  function backToKnowledge(segment: 'knowledge' | 'candidates' = 'knowledge') {
+    window.history.pushState({}, '', '/knowledge')
+    setKnowledgeView({ kind: 'list' })
+    setKnowledgeSegment(segment)
+  }
 
   function openInspection(runId: string) {
     window.history.pushState({}, '', `/inspections/runs/${encodeURIComponent(runId)}`)
@@ -295,7 +330,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             )}
           </>
         )}
-         {active !== 'alerts' && active !== 'inspections' && (
+         {active !== 'alerts' && active !== 'inspections' && active !== 'knowledge' && (
           <div className="inline-status" role="status">
             <span className="status-dot waiting" />
             <div><strong>此能力尚未接入</strong><p>当前安装已经就绪；后续纵向票会在这里加入真实对象。</p></div>
@@ -326,6 +361,17 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 				onNew={() => newInvestigation([])}
 			/>
 		)}
+		{active === 'knowledge' && (
+			<>
+			<div className="segmented" aria-label="知识视图">
+				<button aria-pressed={knowledgeSegment === 'knowledge'} onClick={() => { setKnowledgeSegment('knowledge'); if (knowledgeView.kind !== 'list') backToKnowledge('knowledge') }}>知识</button>
+				<button aria-pressed={knowledgeSegment === 'candidates'} onClick={() => { setKnowledgeSegment('candidates'); if (knowledgeView.kind === 'knowledge') backToKnowledge('candidates') }}>待确认</button>
+			</div>
+			{knowledgeSegment === 'candidates'
+				? <CandidatesList key={knowledgeView.kind === 'candidate' ? 'open' : 'fresh'} onOpen={openKnowledgeCandidate} />
+				: <KnowledgeList key={knowledgeView.kind === 'knowledge' ? 'open' : 'fresh'} onOpen={openKnowledge} />}
+			</>
+		)}
 		{active === 'business-systems' && (
 			<BusinessSystemsList
 				// Remount when returning from a sub-view so the list reflects
@@ -344,6 +390,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
         ) : active === 'alerts' && selectedOccurrence ? (
           <AlertDetail
             occurrenceId={selectedOccurrence}
+            onOpenKnowledgeCandidate={openKnowledgeCandidate}
             openAnalysisId={openAnalysisId ?? undefined}
                   onOpenAnalysis={(analysisId) => { window.history.pushState({}, '', alertsPath(`/alerts/${selectedOccurrence}/analyses/${analysisId}`)); setOpenAnalysisId(analysisId) }}
                   onCloseAnalysis={() => { window.history.pushState({}, '', alertsPath(`/alerts/${selectedOccurrence}`)); setOpenAnalysisId(null) }}
@@ -370,7 +417,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             onBack={backToInvestigations}
           />
         ) : active === 'investigations' && investigationView.kind === 'chat' ? (
-          <InvestigationChat investigationId={investigationView.investigationId} onBack={backToInvestigations} />
+          <InvestigationChat investigationId={investigationView.investigationId} onBack={backToInvestigations} onOpenCandidate={openKnowledgeCandidate} />
         ) : active === 'investigations' ? (
           <div className="detail-content">
             <div className="empty-state">
@@ -407,6 +454,23 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
               <ModuleIcon name="business-systems" large />
               <h2>业务系统</h2>
               <p>左侧选择业务系统查看当前配置、版本历史与发布状态。</p>
+            </div>
+          </div>
+        ) : active === 'knowledge' && knowledgeView.kind === 'candidate' ? (
+          <CandidateEditor
+            key={knowledgeView.candidateId}
+            candidateId={knowledgeView.candidateId}
+            onClose={() => backToKnowledge('candidates')}
+            onConfirmed={(knowledgeId) => openKnowledge(knowledgeId)}
+          />
+        ) : active === 'knowledge' && knowledgeView.kind === 'knowledge' ? (
+          <KnowledgeDetailPane knowledgeId={knowledgeView.knowledgeId} />
+        ) : active === 'knowledge' ? (
+          <div className="detail-content">
+            <div className="empty-state">
+              <ModuleIcon name="knowledge" large />
+              <h2>知识</h2>
+              <p>左侧查看已确认的知识与待确认候选；从诊断结论的“整理为知识”开始沉淀。</p>
             </div>
           </div>
         ) : (

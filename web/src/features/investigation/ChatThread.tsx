@@ -8,6 +8,7 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react'
 import { api, type InvestigationMessage, type MessageAttachmentSummary } from './api'
+import { api as knowledgeApi } from '../knowledge/api'
 import { canOfferRetry, canOfferUndo, mergeAttachmentIds, type AttemptFacts } from './chatControls'
 import { uploadAttachment, attachmentCommandId } from './attachments/api'
 import { ChatSurface } from './ChatSurface'
@@ -42,6 +43,8 @@ interface ChatThreadProps {
   onRestoreConsumed: () => void
   onUndo: (message: InvestigationMessage) => void
   onTurnFinished: () => void
+  // T27: opens the knowledge candidate editor for one assistant message.
+  onOpenCandidate?: (candidateId: string) => void
 }
 
 // quoinAttachmentAdapter stages every selected/dropped/pasted file
@@ -91,7 +94,7 @@ const quoinAttachmentAdapter: AttachmentAdapter = {
   }),
 }
 
-export function ChatThread({ investigationId, messages, headMessageId, attachMessageId, activeAttemptId, attemptStates, restore, onRestoreConsumed, onUndo, onTurnFinished }: ChatThreadProps) {
+export function ChatThread({ investigationId, messages, headMessageId, attachMessageId, activeAttemptId, attemptStates, restore, onRestoreConsumed, onUndo, onTurnFinished, onOpenCandidate }: ChatThreadProps) {
   const headRef = useRef<string | null>(headMessageId)
   useEffect(() => {
     // The parent reconciles the committed head after every turn; the next
@@ -239,14 +242,22 @@ export function ChatThread({ investigationId, messages, headMessageId, attachMes
   }, [investigationId, runtime, byId])
 
   // A finished turn that committed no durable assistant message (failed or
-  // cancelled) leaves a local error bubble. Rebuild the thread in place
-  // from the durable projection once nothing runs; the composer draft is
-  // captured and re-seeded around the reset (UI-FORM-005: 等待期间保护
-  // 已输入内容).
+  // cancelled) leaves a local error bubble, and a finished turn that DID
+  // commit one still carries the runtime-local streaming copy. Rebuild the
+  // thread in place from the durable projection once nothing runs: the
+  // committed store is the authority and the per-message affordances
+  // (Undo/Retry/记录实际结果/整理为知识) bind to durable ids. The composer
+  // draft is captured and re-seeded around the reset (UI-FORM-005: 等待期间
+  // 保护已输入内容).
   useEffect(() => {
     if (activeAttemptId) return
     const state = runtime.thread.getState()
-    if (state.messages.length <= messages.length) return
+    if (state.messages.length <= messages.length) {
+      const last = state.messages.at(-1)
+      // Equal lengths with a non-durable tail mean the committed assistant
+      // turn exists in the store but not yet in the runtime copy.
+      if (!last || durableId(last.id) !== null || messages.length === 0) return
+    }
     const draft = runtime.thread.composer.getState().text
     runtime.thread.reset(initialMessages)
     if (draft !== '') runtime.thread.composer.setText(draft)
@@ -281,6 +292,13 @@ export function ChatThread({ investigationId, messages, headMessageId, attachMes
         const message = byId.get(messageId)
         if (message) onUndo(message)
       },
+      onOrganizeKnowledge: onOpenCandidate
+        ? (messageId) => {
+            void knowledgeApi.createMessageCandidate(investigationId, messageId)
+              .then((candidate) => onOpenCandidate(candidate.id))
+              .catch((reason: unknown) => setControlError(reason instanceof Error ? reason.message : '暂时无法整理为知识，请重试。'))
+          }
+        : undefined,
       attachmentMeta: (attachmentId) => {
         for (const message of messages) {
           const found = metaOf(message, attachmentId)
@@ -319,7 +337,7 @@ export function ChatThread({ investigationId, messages, headMessageId, attachMes
         return message ? canOfferRetry(attemptStates, message, activeAttemptId) : false
       },
     }
-  }, [investigationId, activeAttemptId, live, messages, byId, attemptStates, stopping, controlError, stop, retry, onUndo])
+  }, [investigationId, activeAttemptId, live, messages, byId, attemptStates, stopping, controlError, stop, retry, onUndo, onOpenCandidate])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

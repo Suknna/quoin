@@ -7,7 +7,7 @@ import { fetchAnalysis } from '../analysis/api'
 import type { AlertOccurrenceSummary, ObservationSummary } from './api'
 import { fetchObservations, fetchOccurrence } from './api'
 
-export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCloseAnalysis, onBack, onStartInvestigation }: { occurrenceId: string; openAnalysisId?: string; onOpenAnalysis?: (analysisId: string) => void; onCloseAnalysis?: () => void; onBack: () => void; onStartInvestigation?: () => void }) {
+export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCloseAnalysis, onBack, onStartInvestigation, onOpenKnowledgeCandidate }: { occurrenceId: string; openAnalysisId?: string; onOpenAnalysis?: (analysisId: string) => void; onCloseAnalysis?: () => void; onBack: () => void; onStartInvestigation?: () => void; onOpenKnowledgeCandidate?: (candidateId: string) => void }) {
   const [occurrence, setOccurrence] = useState<AlertOccurrenceSummary | null>(null)
   const [observations, setObservations] = useState<ObservationSummary[]>([])
   const [error, setError] = useState('')
@@ -134,7 +134,7 @@ export function AlertDetail({ occurrenceId, openAnalysisId, onOpenAnalysis, onCl
       <AnalysisPanel occurrenceId={occurrenceId} onOpenAnalysis={(detail) => { setReading(detail); onOpenAnalysis?.(detail.id) }} />
       {reading && (
         <div className="reading-overlay">
-          <AnalysisDetail occurrenceId={occurrenceId} analysisId={reading.id} onClose={() => { setReading(null); onCloseAnalysis?.() }} />
+          <AnalysisDetail occurrenceId={occurrenceId} analysisId={reading.id} onClose={() => { setReading(null); onCloseAnalysis?.() }} onOpenCandidate={(candidateId) => onOpenKnowledgeCandidate?.(candidateId)} />
         </div>
       )}
     </div>
