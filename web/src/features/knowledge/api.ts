@@ -16,6 +16,7 @@ export interface CandidateSummary {
   draftRevision: number
   draftTitle?: string
   draftBody?: string
+  draftScope?: Record<string, unknown>
   targetKnowledgeId?: string
   confirmedKnowledgeId?: string
 }
@@ -68,6 +69,7 @@ export interface KnowledgeVersionDetail {
   versionSeq: number
   title: string
   body: string
+  scope?: Record<string, unknown>
   sourceCandidateId: string
   createdAt: string
   eligible: boolean
@@ -168,7 +170,7 @@ export const api = {
     request<Page<CandidateSummary>>(`/api/v1/knowledge/candidates${query}`),
   getCandidate: (candidateId: string) =>
     request<CandidateDetail>(`/api/v1/knowledge/candidates/${candidateId}`),
-  editDraft: (candidateId: string, expectedRevision: number, changes: { title?: string; body?: string }) =>
+  editDraft: (candidateId: string, expectedRevision: number, changes: { title?: string; body?: string; scope?: Record<string, unknown> }) =>
     request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: commandBody({ expectedRevision, ...changes }),

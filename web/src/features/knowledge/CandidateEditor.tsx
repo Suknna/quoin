@@ -23,6 +23,8 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
   const [notice, setNotice] = useState('')
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
+  const [scopeRows, setScopeRows] = useState<Array<{ key: string; value: string }>>([])
+  const [scopeTouched, setScopeTouched] = useState(false)
   const [revision, setRevision] = useState(0)
   const [rowVersion, setRowVersion] = useState(1)
   const [busy, setBusy] = useState(false)
@@ -37,6 +39,8 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
         setDetail(next)
         setTitle(next.draftTitle ?? '')
         setBody(next.draftBody ?? '')
+        setScopeRows(scopeToRows(next.draftScope))
+        setScopeTouched(false)
         setRevision(next.draftRevision)
         setRowVersion(next.rowVersion)
       })
@@ -46,12 +50,28 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
     return () => { cancelled = true }
   }, [candidateId])
 
+  function draftChanges(): { title?: string; body?: string; scope?: Record<string, unknown> } {
+    const changes: { title?: string; body?: string; scope?: Record<string, unknown> } = { title, body }
+    if (scopeTouched) changes.scope = rowsToScope(scopeRows)
+    return changes
+  }
+
+  function updateScopeRow(index: number, change: { key?: string; value?: string }) {
+    setScopeRows((rows) => rows.map((row, position) => (position === index ? { ...row, ...change } : row)))
+    setScopeTouched(true)
+  }
+
+  function removeScopeRow(index: number) {
+    setScopeRows((rows) => rows.filter((_, position) => position !== index))
+    setScopeTouched(true)
+  }
+
   async function saveDraft() {
     setBusy(true)
     setError('')
     setNotice('')
     try {
-      const next = await api.editDraft(candidateId, revision, { title, body })
+      const next = await api.editDraft(candidateId, revision, draftChanges())
       setRevision(next.draftRevision)
       setRowVersion(next.rowVersion)
       setNotice('草稿已保存。')
@@ -146,6 +166,28 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
           <span>正文</span>
           <textarea className="candidate-body" value={body} disabled={!operable || busy} rows={10} onChange={(event) => setBody(event.target.value)} />
         </label>
+        <fieldset className="field candidate-scope" disabled={!operable || busy}>
+          <legend>适用范围（可选，键值对）</legend>
+          {scopeRows.length === 0 && <p className="detail-muted">未限定范围：适用于所有场景。</p>}
+          {scopeRows.map((row, index) => (
+            <div className="candidate-scope-row" key={index}>
+              <input
+                aria-label={`范围键 ${index + 1}`}
+                value={row.key}
+                placeholder="例如：业务系统"
+                onChange={(event) => updateScopeRow(index, { key: event.target.value })}
+              />
+              <input
+                aria-label={`范围值 ${index + 1}`}
+                value={row.value}
+                placeholder="例如：payments"
+                onChange={(event) => updateScopeRow(index, { value: event.target.value })}
+              />
+              <button type="button" className="text-button" aria-label={`移除范围 ${index + 1}`} onClick={() => removeScopeRow(index)}>移除</button>
+            </div>
+          ))}
+          <button type="button" className="text-button" onClick={() => { setScopeRows([...scopeRows, { key: '', value: '' }]); setScopeTouched(true) }}>添加范围</button>
+        </fieldset>
         <div className="candidate-actions">
           {operable && (
             <>
@@ -176,4 +218,22 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
       )}
     </div>
   )
+}
+
+// scopeToRows materializes the draft scope object as editable rows.
+function scopeToRows(scope: Record<string, unknown> | undefined): Array<{ key: string; value: string }> {
+  if (!scope) return []
+  return Object.entries(scope).map(([key, value]) => ({ key, value: typeof value === 'string' ? value : JSON.stringify(value) }))
+}
+
+// rowsToScope serializes the rows back to a scope object (rows with an
+// empty key are ignored; all-empty means no restriction).
+function rowsToScope(rows: Array<{ key: string; value: string }>): Record<string, unknown> {
+  const scope: Record<string, unknown> = {}
+  for (const row of rows) {
+    const key = row.key.trim()
+    if (key === '') continue
+    scope[key] = row.value
+  }
+  return scope
 }

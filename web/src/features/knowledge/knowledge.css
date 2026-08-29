@@ -176,3 +176,46 @@
 @media (prefers-reduced-motion: reduce) {
   .knowledge-item, .feedback-value { transition: none; }
 }
+
+.candidate-scope {
+  border: 1px solid var(--border-subtle, #d8dce3);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.candidate-scope legend {
+  padding: 0 0.3rem;
+  font-size: 0.9rem;
+  color: var(--text-muted, #5a6270);
+}
+
+.candidate-scope-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.candidate-scope-row input {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border-subtle, #d8dce3);
+  border-radius: 6px;
+}
+
+.knowledge-scope {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.knowledge-scope div {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.knowledge-scope dt { font-weight: 600; }
+.knowledge-scope dd { margin: 0; }

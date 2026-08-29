@@ -59,6 +59,22 @@ describe('CandidateEditor', () => {
     expect(screen.getByText(/r3/)).toBeInTheDocument()
   })
 
+  it('edits the scope rows and saves them with the draft', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response(detail))
+    render(<CandidateEditor candidateId="5" onClose={() => undefined} onConfirmed={() => undefined} />)
+    await screen.findByDisplayValue('连接池处置')
+    fireEvent.click(screen.getByRole('button', { name: '添加范围' }))
+    fireEvent.change(screen.getByLabelText('范围键 1'), { target: { value: '业务系统' } })
+    fireEvent.change(screen.getByLabelText('范围值 1'), { target: { value: 'payments' } })
+    vi.mocked(fetch).mockResolvedValue(response({ ...detail, draftRevision: 1, draftScope: { 业务系统: 'payments' } }))
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }))
+    await waitFor(() => expect(screen.getByText('草稿已保存。')).toBeInTheDocument())
+    const editCall = vi.mocked(fetch).mock.calls.find((call) => String(call[0]).endsWith('/knowledge/candidates/5') && (call[1] as RequestInit | undefined)?.method === 'PATCH')
+    expect(editCall).toBeDefined()
+    const body = JSON.parse(String(editCall?.[1]?.body)) as { scope: Record<string, string> }
+    expect(body.scope).toEqual({ 业务系统: 'payments' })
+  })
+
   it('confirms through the human boundary and hands the knowledge id over', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(response(detail))
     const confirmed = vi.fn()

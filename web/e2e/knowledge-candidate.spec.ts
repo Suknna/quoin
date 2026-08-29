@@ -107,9 +107,13 @@ test.describe('T27 诊断反馈与知识确认 @ticket-27', () => {
       matchesAnalysisOutput: detail.sourceType === 'initial_analysis_output' && detail.originalSuggestion?.source.type === 'initial_analysis_output',
     }
 
-    // Revisioned draft: edit, save, observe the revision bump.
+    // Revisioned draft: edit title and the 适用范围 rows (UI-KNOWLEDGE-003),
+    // save, observe the revision bump.
     const editedTitle = `T27 连接池处置 ${Date.now()}`
     await page.getByLabel('标题').fill(editedTitle)
+    await page.getByRole('button', { name: '添加范围' }).click()
+    await page.getByLabel('范围键 1').fill('业务系统')
+    await page.getByLabel('范围值 1').fill('payments')
     await page.getByRole('button', { name: '保存草稿' }).click()
     await expect(page.getByText('草稿已保存。')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText(/r1/).first()).toBeVisible()
@@ -199,6 +203,12 @@ test.describe('T27 诊断反馈与知识确认 @ticket-27', () => {
     expect(knowledgeDetail.eligible).toBe(true)
     expect(secondConfirm.status).toBe(409)
     await expect(page.getByText(/共 1 个版本/)).toBeVisible()
+    // The scope draft rides into the immutable version (DATA-KNOWLEDGE-001).
+    const versionDetail = await api<{ scope?: Record<string, string> }>(page, `/api/v1/knowledge/items/${knowledgeId}/versions/${knowledgeDetail.currentVersionId}`)
+    evidence.versionScope = versionDetail.scope ?? null
+    expect(versionDetail.scope?.['业务系统']).toBe('payments')
+    await expect(page.locator('.knowledge-scope').getByText('业务系统')).toBeVisible()
+    await expect(page.locator('.knowledge-scope dd')).toHaveText('payments')
 
     // ---------- Part 2: assistant message source ------------------------
     await page.getByRole('navigation', { name: '全局模块' }).getByRole('button', { name: '告警' }).click()

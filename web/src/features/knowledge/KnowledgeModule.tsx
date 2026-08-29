@@ -77,6 +77,7 @@ export function CandidatesList({ onOpen }: { onOpen: (candidateId: string) => vo
 export function KnowledgeDetailPane({ knowledgeId }: { knowledgeId: string }) {
   const [detail, setDetail] = useState<KnowledgeDetail | null>(null)
   const [versions, setVersions] = useState<KnowledgeVersionSummary[]>([])
+  const [scope, setScope] = useState<Record<string, unknown> | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
     let cancelled = false
@@ -86,12 +87,16 @@ export function KnowledgeDetailPane({ knowledgeId }: { knowledgeId: string }) {
       if (cancelled) return
       setError('')
       setDetail(null)
+      setScope(null)
       void Promise.all([api.getKnowledge(knowledgeId), api.listVersions(knowledgeId)])
         .then(([next, page]) => {
           if (cancelled) return
           setDetail(next)
           setVersions(page.items)
+          // The current version's scope rides along for the 适用范围 card.
+          return api.getVersion(knowledgeId, next.currentVersionId)
         })
+        .then((version) => { if (!cancelled && version) setScope(version.scope ?? null) })
         .catch((reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : '知识暂时不可读。') })
     })
     return () => { cancelled = true }
@@ -107,6 +112,12 @@ export function KnowledgeDetailPane({ knowledgeId }: { knowledgeId: string }) {
           共 {detail.versionCount} 个版本 · {detail.eligible ? '当前可被检索复用' : '已退出检索'}
         </p>
       </header>
+      <section aria-label="适用范围">
+        <h3>适用范围</h3>
+        {scope && Object.keys(scope).length > 0
+          ? <dl className="knowledge-scope">{Object.entries(scope).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl>
+          : <p className="detail-muted">未限定范围：适用于所有场景。</p>}
+      </section>
       <section aria-label="版本历史">
         <h3>不可变版本历史</h3>
         <ol className="knowledge-versions">
