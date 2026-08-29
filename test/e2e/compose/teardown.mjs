@@ -21,6 +21,15 @@ export default async function globalTeardown() {
   }
   if (existsSync(compose)) {
     removeProbe('ticket authentication fixture', 'container', `docker rm -f ${fixture} >/dev/null 2>&1 || true`, `docker container inspect ${fixture} >/dev/null 2>&1`)
+    if (!browserTicket) {
+      // The shared non-browser boot creates three stack-owned fixtures with
+      // plain `docker run` (no compose labels): the T07 Thanos target and the
+      // Alertmanager/webhook forwarders. They attach to quoin_internal, so
+      // the project network probe below can only pass after they are gone
+      // (server.sh removes the same set on the next boot; ownership is this
+      // boot's).
+      removeProbe('shared stack fixture containers', 'container-set', `docker rm -f quoin-t07-thanos e2e-fwd e2e-am >/dev/null 2>&1 || true`, `docker ps -aq --filter name=^quoin-t07-thanos$ --filter name=^e2e-fwd$ --filter name=^e2e-am$ | grep -q .`)
+    }
     removeProbe('compose project containers', 'container-set', `docker compose --project-name ${project} --file "${compose}" down --volumes --remove-orphans >/dev/null`, `test -n "$(docker ps -aq --filter label=com.docker.compose.project=${project})"`)
     removeProbe('compose project networks', 'network-set', 'true', `test -n "$(docker network ls -q --filter label=com.docker.compose.project=${project})"`)
     removeProbe('compose project volumes', 'volume-set', 'true', `test -n "$(docker volume ls -q --filter label=com.docker.compose.project=${project})"`)
