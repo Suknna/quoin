@@ -352,12 +352,17 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			service.Slots.Touch(slot)
 			if slot == qruntime.SlotLintel {
 				service.reconcileLintelPhysicalOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch(), payload.Heartbeat.GetActiveBrowserOperations())
+				// A post-commit cancellation send can fail while this stream stays
+				// alive; heartbeat is the durable replay cadence for its fence.
+				go service.reconcileJourneyVerificationChildren(context.Background())
 			}
 			if slot == qruntime.SlotPlinth {
 				// Heartbeats renew the live stream's attempt leases
 				// (RUNTIME-TASK-007; runtime_slots stays memory-only,
 				// RUNTIME-CTRL-005).
 				service.renewPlinthLeases(ctx, hello.GetBootId())
+				// Lease renewal must not mask a failed initial cancellation send.
+				go service.dispatchAllCancellingInspections(context.Background())
 			}
 		case *runtimev1.ControlEnvelope_ReconcileReport:
 			if slot == qruntime.SlotPlinth {

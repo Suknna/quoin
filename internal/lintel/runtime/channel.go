@@ -354,6 +354,15 @@ func (channel *Channel) forgetTerminalOperation(operationID int64) {
 	delete(channel.explorationActionCapabilities, operationID)
 	delete(channel.explorationTerminalChildren, operationID)
 	delete(channel.published, operationID)
+	// Journey bindings are only needed while their Browser Operation can still
+	// start or stop. stopAcks remains the operation-level late-Start fence.
+	for attemptID, boundOperationID := range channel.journeyOperations {
+		if boundOperationID == operationID {
+			delete(channel.journeyOperations, attemptID)
+			delete(channel.journeyCancelled, attemptID)
+			delete(channel.journeyCancelDone, attemptID)
+		}
+	}
 	channel.operationMu.Unlock()
 	channel.explorationMu.Lock()
 	delete(channel.explorationChildren, operationID)

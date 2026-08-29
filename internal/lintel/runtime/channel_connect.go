@@ -35,13 +35,6 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	}
 	epoch := channel.epoch + 1
 	channel.epoch = epoch
-	// Control frames from an older epoch cannot be dispatched on this stream.
-	// Quoin replays durable Cancelling fences after attach, so cancellation
-	// tombstones are scoped to one control epoch rather than a whole long boot.
-	channel.operationMu.Lock()
-	channel.journeyCancelled = make(map[int64]bool)
-	channel.journeyCancelDone = make(map[int64]chan struct{})
-	channel.operationMu.Unlock()
 	atomic.StoreUint64(&channel.outbound, 1) // Hello consumes the first outbound ID.
 	hello := &runtimev1.Hello{
 		Slot:                    runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
