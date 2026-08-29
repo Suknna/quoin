@@ -250,6 +250,12 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	}
 	channel.Artifacts = runtimev1.NewArtifactServiceClient(connection)
 	channel.epoch++
+	// Frames from the prior stream carry its epoch and are rejected before task
+	// dispatch. The next attach replays durable Cancelling fences, so these
+	// transport-local pre-dispatch tombstones need not grow across a long boot.
+	channel.cancelMu.Lock()
+	channel.cancelled = make(map[int64]struct{})
+	channel.cancelMu.Unlock()
 	hello := &runtimev1.Hello{
 		Slot:            runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
 		BootId:          channel.bootID,

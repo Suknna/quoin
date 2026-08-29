@@ -129,7 +129,8 @@ func (channel *Channel) handleJourneyDispatch(envelope *runtimev1.ControlEnvelop
 		channel.operationMu.Unlock()
 		cancel()
 		if completion == nil {
-			channel.sendJourneyCancelAck(envelope.GetCorrelationId(), frozen.AttemptID)
+			// A prior physical Stop failed and deliberately released its leader.
+			// Do not falsely acknowledge it; the next CancelAttempt retries Stop.
 			return
 		}
 		go func() {
