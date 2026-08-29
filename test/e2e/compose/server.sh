@@ -287,30 +287,37 @@ PYEOF
     echo 'xvfb:'
     docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" exec -T lintel dpkg-query -W -f='${Version}\n' xvfb
   } >"$evidence/${ticket,,}-components.log" 2>&1
-  if [ "$ticket" = "T22" ] || [ "$ticket" = "T24" ]; then
-    # T22 requires the real Plinth model turn in addition to the common
-    # browser-ticket Runtime/Lintel path.
+  if [ "$ticket" = "T22" ] || [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
+    # T25 runs beside ordinary E2E stacks, so it must not reuse their fixture
+    # ports. Other tickets retain their established endpoints.
+    fixture_provider_port=18443
+    fixture_thanos_port=18444
+    if [ "$ticket" = "T25" ]; then fixture_provider_port=18445; fixture_thanos_port=18446; fi
     go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
-    "$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &
+    "$stack/fixture-provider" -address "0.0.0.0:$fixture_provider_port" >"$evidence/fixture-provider.log" 2>&1 &
     printf '%s' "$!" >"$stack/fixture-provider.pid"
-    if [ "$ticket" = "T24" ]; then
+    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
       go build -o "$stack/fixture-thanos" ./test/fixtures/thanos-query
-      "$stack/fixture-thanos" -address "0.0.0.0:18444" >"$evidence/fixture-thanos.log" 2>&1 &
+        "$stack/fixture-thanos" -address "0.0.0.0:$fixture_thanos_port" >"$evidence/fixture-thanos.log" 2>&1 &
       printf '%s' "$!" >"$stack/fixture-thanos.pid"
     fi
     GW=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep '_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
     provider_name="t22-openai"
-    if [ "$ticket" = "T24" ]; then provider_name="t24-openai"; fi
+    if [ "$ticket" = "T24" ]; then provider_name="t24-openai"; elif [ "$ticket" = "T25" ]; then provider_name="t25-openai"; fi
+    provider_url="http://$GW:$fixture_provider_port"
     curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-      -d '{"clientCommandId":"e2e-'"${ticket,,}"'-create-provider","name":"'"$provider_name"'","connection":{"type":"model_provider","baseUrl":"http://'"$GW"':18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
+      -d '{"clientCommandId":"e2e-'"${ticket,,}"'-create-provider","name":"'"$provider_name"'","connection":{"type":"model_provider","baseUrl":"'"$provider_url"'","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
       "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
-    if [ "$ticket" = "T24" ]; then
+    thanos_name=""
+    if [ "$ticket" = "T24" ] || [ "$ticket" = "T25" ]; then
+      thanos_name="${ticket,,}-thanos"
+      thanos_url="http://$GW:$fixture_thanos_port"
       curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-        -d '{"clientCommandId":"e2e-t24-create-thanos","name":"t24-thanos","connection":{"type":"thanos","baseUrl":"http://'"$GW"':18444"}}' \
+        -d '{"clientCommandId":"e2e-'"${ticket,,}"'-create-thanos","name":"'"$thanos_name"'","connection":{"type":"thanos","baseUrl":"'"$thanos_url"'"}}' \
         "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
     fi
     PLINTH_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/runtime" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["plinth"]["rowVersion"]))')
-    PREP=$(curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-t22-prepare-plinth-$RANDOM\",\"expectedRowVersion\":$PLINTH_ROW}" "$BASE/api/v1/runtime-slots/plinth/registration/prepare")
+    PREP=$(curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-${ticket,,}-prepare-plinth-$RANDOM\",\"expectedRowVersion\":$PLINTH_ROW}" "$BASE/api/v1/runtime-slots/plinth/registration/prepare")
     HANDLE=$(printf '%s' "$PREP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["registrationTokenHandle"])')
     REVEAL=$(curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"registrationTokenHandle\":\"$HANDLE\"}" "$BASE/api/v1/runtime-slots/registration-token/reveal")
     printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"slot":d["slot"],"generation":d["generation"],"token":d["registrationToken"]}))' | docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" run --rm --no-deps -i -T plinth register --config /etc/quoin/component.yaml >>"$evidence/playwright-server.log" 2>&1
@@ -322,30 +329,30 @@ PYEOF
       sleep 2
     done
     if [ -z "$qualified" ]; then
-      echo 'FATAL: T22 model provider did not qualify' | tee -a "$evidence/playwright-server.log" >&2
+      echo "FATAL: $ticket model provider did not qualify" | tee -a "$evidence/playwright-server.log" >&2
       exit 1
     fi
     PROVIDER_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/$provider_name" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
     curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST -d "{\"clientCommandId\":\"e2e-${ticket,,}-enable-provider\",\"expectedRowVersion\":$PROVIDER_ROW,\"qualifiedProbeResultId\":\"$qualified\"}" "$BASE/api/v1/connections/$provider_name/enable" >>"$evidence/playwright-server.log"
-    if [ "$ticket" = "T24" ]; then
-      # Manual Inspection's PromQL child is admitted only through an enabled,
+    if [ -n "$thanos_name" ]; then
+      # The scheduled PromQL child is admitted only through an enabled,
       # qualified deployment-global Thanos connection. Probe/qualify/enable it
       # through the same real Plinth Runtime path as the model provider.
       curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-        -d '{"clientCommandId":"e2e-t24-probe-thanos"}' "$BASE/api/v1/connections/t24-thanos/probe" >>"$evidence/playwright-server.log"
+        -d '{"clientCommandId":"e2e-'"${ticket,,}"'-probe-thanos"}' "$BASE/api/v1/connections/$thanos_name/probe" >>"$evidence/playwright-server.log"
       thanos_qualified=""
       for _ in $(seq 1 60); do
-        thanos_qualified=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t24-thanos/probe-results" | python3 -c 'import json,sys; print(next((x["id"] for x in json.load(sys.stdin).get("items",[]) if x.get("outcome")=="passed"), ""))' 2>/dev/null || true)
+        thanos_qualified=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/$thanos_name/probe-results" | python3 -c 'import json,sys; print(next((x["id"] for x in json.load(sys.stdin).get("items",[]) if x.get("outcome")=="passed"), ""))' 2>/dev/null || true)
         [ -n "$thanos_qualified" ] && break
         sleep 2
       done
       if [ -z "$thanos_qualified" ]; then
-        echo 'FATAL: T24 Thanos connection did not qualify' | tee -a "$evidence/playwright-server.log" >&2
+        echo "FATAL: $ticket Thanos connection did not qualify" | tee -a "$evidence/playwright-server.log" >&2
         exit 1
       fi
-      THANOS_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/t24-thanos" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
+      THANOS_ROW=$(curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/connections/$thanos_name" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rowVersion"])')
       curl -sf -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
-        -d "{\"clientCommandId\":\"e2e-t24-enable-thanos\",\"expectedRowVersion\":$THANOS_ROW,\"qualifiedProbeResultId\":\"$thanos_qualified\"}" "$BASE/api/v1/connections/t24-thanos/enable" >>"$evidence/playwright-server.log"
+        -d "{\"clientCommandId\":\"e2e-${ticket,,}-enable-thanos\",\"expectedRowVersion\":$THANOS_ROW,\"qualifiedProbeResultId\":\"$thanos_qualified\"}" "$BASE/api/v1/connections/$thanos_name/enable" >>"$evidence/playwright-server.log"
     fi
   fi
   start_ready_server

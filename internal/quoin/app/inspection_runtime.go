@@ -16,6 +16,7 @@ import (
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
+	"github.com/Suknna/quoin/internal/quoin/inspection/scheduler"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -120,34 +121,34 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 	})
 }
 
-// dispatchQueuedInspections sweeps both inspection queues after a Plinth
-// stream attaches (created while disconnected converge here).
+// dispatchQueuedInspections sweeps the independent Plinth and Lintel paths.
+// A Plinth outage must not prevent a scheduled browser check from entering the
+// existing Lintel capacity queue.
 func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 	if service.Inspections == nil {
 		return
 	}
 	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
-	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
-		return
-	}
-	promqlIDs, err := service.Inspections.QueuedPromQLAttempts(ctx)
-	if err != nil {
-		sharedops.LogEvent("quoin", "error", "inspection.queue_scan", err.Error())
-		return
-	}
-	for _, id := range promqlIDs {
-		if err := service.dispatchInspectionAttempt(ctx, id); err != nil {
-			sharedops.LogEvent("quoin", "error", "inspection.queue_dispatch", err.Error())
+	if err == nil && view.Connected && view.ConnectionEpoch != nil {
+		promqlIDs, scanErr := service.Inspections.QueuedPromQLAttempts(ctx)
+		if scanErr != nil {
+			sharedops.LogEvent("quoin", "error", "inspection.queue_scan", scanErr.Error())
+		} else {
+			for _, id := range promqlIDs {
+				if dispatchErr := service.dispatchInspectionAttempt(ctx, id); dispatchErr != nil {
+					sharedops.LogEvent("quoin", "error", "inspection.queue_dispatch", dispatchErr.Error())
+				}
+			}
 		}
-	}
-	analysisIDs, err := service.Inspections.QueuedAnalysisAttempts(ctx)
-	if err != nil {
-		sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_scan", err.Error())
-		return
-	}
-	for _, id := range analysisIDs {
-		if err := service.dispatchInspectionAnalysis(ctx, id); err != nil {
-			sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_dispatch", err.Error())
+		analysisIDs, scanErr := service.Inspections.QueuedAnalysisAttempts(ctx)
+		if scanErr != nil {
+			sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_scan", scanErr.Error())
+		} else {
+			for _, id := range analysisIDs {
+				if dispatchErr := service.dispatchInspectionAnalysis(ctx, id); dispatchErr != nil {
+					sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_dispatch", dispatchErr.Error())
+				}
+			}
 		}
 	}
 	// A freshly created Run has no browser runtime event to react to yet:
@@ -166,6 +167,26 @@ func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 	// Ready-dispatch is idempotent; false only means no child was dispatched
 	// in this pass (their operations may still be starting).
 	service.dispatchReadyJourneyAttempts(ctx)
+}
+
+// RunInspectionScheduler starts the durable minute scheduler after every
+// Quoin boot. SQLite keys, rather than process memory, make repeated startup
+// ticks safe.
+func (service *RuntimeService) RunInspectionScheduler(ctx context.Context) {
+	if service.Inspections == nil {
+		return
+	}
+	availability := func(ctx context.Context) inspection.RuntimeAvailability {
+		plinth, plinthErr := service.Slots.View(ctx, qruntime.SlotPlinth)
+		lintel, lintelErr := service.Slots.View(ctx, qruntime.SlotLintel)
+		return inspection.RuntimeAvailability{
+			Plinth: plinthErr == nil && plinth.Connected && plinth.ConnectionEpoch != nil,
+			Lintel: lintelErr == nil && lintel.Connected && lintel.ConnectionEpoch != nil,
+		}
+	}
+	scheduler.New(service.Inspections, availability).AfterTick(service.dispatchQueuedInspections).Run(ctx, func(err error) {
+		sharedops.LogEvent("quoin", "error", "inspection.schedule", err.Error())
+	})
 }
 
 // handleInspectionPromQLResultProposal adjudicates inspection_promql_result_v1.

@@ -5447,6 +5447,15 @@ WHEN NOT EXISTS (
           AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
       OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL
           AND NEW.gap_reason IN ('query_failed','partial_response','no_data','cancelled','interrupted'))))
+    OR (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL
+      AND NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL
+      AND NEW.result_digest IS NULL AND NEW.gap_reason = 'runtime_unavailable'
+      AND EXISTS (
+        SELECT 1 FROM execution_attempts a
+        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
+          AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id AND a.check_key = NEW.check_key
+          AND a.state = 'Failed' AND a.runtime_slot IS NULL AND a.accepted_at IS NULL
+      ))
     OR (c.kind = 'browser' AND NEW.attempt_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM execution_attempts a
       WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'

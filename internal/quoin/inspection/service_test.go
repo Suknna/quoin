@@ -36,6 +36,7 @@ resource_discoveries: []
 inspection_plans:
   - key: mixed-plan
     display_name: 混合巡检
+    cron: "* * * * *"
     checks:
       - key: up-instant
         display_name: Up Instant
@@ -51,6 +52,10 @@ inspection_plans:
         journey_id: page.status-marker.v1
         journey_params:
           path: /status
+  - key: intentionally-empty
+    display_name: 暂无检查的计划
+    cron: "* * * * *"
+    checks: []
 `
 
 type testHarness struct {
@@ -448,5 +453,121 @@ func TestCreateRunThanosUnavailableTyped(t *testing.T) {
 	}
 	if runs != 0 || children != 0 {
 		t.Fatalf("rejected creation must leave no orphans: runs=%d children=%d", runs, children)
+	}
+}
+
+func TestCreateScheduledInspectionRunDoesNotMislabelThanosFailure(t *testing.T) {
+	h := newTestHarness(t)
+	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	versionID := h.publishMixedPlan(t)
+	plans, err := h.service.ScheduledPlans(context.Background())
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("scheduled plans = %#v, %v", plans, err)
+	}
+	_, err = h.service.CreateScheduledInspectionRun(context.Background(), plans[0], time.Date(2026, time.August, 29, 0, 0, 0, 0, time.UTC), RuntimeAvailability{Plinth: true, Lintel: true})
+	if !errors.Is(err, thanos.ErrThanosUnavailable) {
+		t.Fatalf("unavailable Thanos must not become runtime_unavailable, got %v", err)
+	}
+	var runs, gaps int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_runs WHERE config_version_id=?`, versionID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_check_results WHERE gap_reason='runtime_unavailable'`).Scan(&gaps); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 || gaps != 0 {
+		t.Fatalf("Thanos failure must roll back rather than forge runtime gap: runs=%d gaps=%d", runs, gaps)
+	}
+}
+
+func TestCreateScheduledInspectionRunIsDeterministicAndRecordsUnavailableSlots(t *testing.T) {
+	h := newTestHarness(t)
+	versionID := h.publishMixedPlan(t)
+	plans, err := h.service.ScheduledPlans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].ConfigVersionID != versionID {
+		t.Fatalf("current scheduled plans = %+v, want version %d", plans, versionID)
+	}
+	boundary := time.Date(2026, time.August, 28, 0, 30, 0, 0, time.UTC)
+	availability := RuntimeAvailability{}
+	first, err := h.service.CreateScheduledInspectionRun(context.Background(), plans[0], boundary, availability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TriggerKind != "schedule" || first.ScheduledFor == nil || *first.ScheduledFor != boundary.Format(time.RFC3339Nano) || first.State != "CompletedWithGaps" {
+		t.Fatalf("scheduled unavailable run = %+v", first)
+	}
+	var gaps, attempts, undispatchedFailures int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND gap_reason='runtime_unavailable'`, first.RunID).Scan(&gaps); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='run_check' AND scope_id=?`, first.RunID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='run_check' AND scope_id=? AND state='Failed' AND runtime_slot IS NULL AND accepted_at IS NULL`, first.RunID).Scan(&undispatchedFailures); err != nil {
+		t.Fatal(err)
+	}
+	if gaps != 2 || attempts != 2 || undispatchedFailures != 2 {
+		t.Fatalf("unavailable slots must persist two undispatched terminal child gaps, gaps=%d attempts=%d failed=%d", gaps, attempts, undispatchedFailures)
+	}
+	// A fresh Service models process restart: its only duplicate memory is the
+	// committed SQLite key, not a scheduler-local cursor.
+	restarted := NewService(h.db)
+	restarted.now = h.service.now
+	replayed, err := restarted.CreateScheduledInspectionRun(context.Background(), plans[0], boundary, availability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.RunID != first.RunID {
+		t.Fatalf("same deterministic key created a second run: %d then %d", first.RunID, replayed.RunID)
+	}
+	var count int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_runs WHERE business_system_id=(SELECT id FROM business_systems WHERE key='payments') AND plan_key='mixed-plan' AND scheduled_for=?`, boundary.Format(time.RFC3339Nano)).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("scheduled key rows = %d, want 1", count)
+	}
+}
+
+func TestScheduledPlansIgnorePlansWithoutChecks(t *testing.T) {
+	h := newTestHarness(t)
+	h.publishMixedPlan(t)
+
+	plans, err := h.service.ScheduledPlans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].PlanKey != "mixed-plan" {
+		t.Fatalf("scheduled plans = %#v, want only checked mixed-plan", plans)
+	}
+}
+
+func TestCreateScheduledInspectionRunRecordsOverlapWithoutBackfill(t *testing.T) {
+	h := newTestHarness(t)
+	h.publishMixedPlan(t)
+	h.seedBrowserIdentity(t, false)
+	manual, err := h.service.CreateInspectionRun(context.Background(), h.principal, "manual-active", "payments", "mixed-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manual.State != "Running" {
+		t.Fatalf("manual run state = %s, want Running", manual.State)
+	}
+	plans, err := h.service.ScheduledPlans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := time.Date(2026, time.August, 28, 0, 30, 0, 0, time.UTC)
+	detail, err := h.service.CreateScheduledInspectionRun(context.Background(), plans[0], boundary, RuntimeAvailability{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "SkippedOverlap" || detail.TriggerKind != "schedule" {
+		t.Fatalf("overlap result = %+v, want terminal SkippedOverlap", detail)
 	}
 }

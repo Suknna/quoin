@@ -522,3 +522,220 @@ type RunSummary struct {
 	EvidenceAt        *string `json:"evidenceAt,omitempty"`
 	CreatedAt         string  `json:"createdAt"`
 }
+
+// ScheduledPlan is a current, already-validated typed plan projection. Cron
+// remains parsed by the scheduler, but the scheduler never reparses YAML.
+type ScheduledPlan struct {
+	SystemKey       string
+	PlanKey         string
+	Cron            string
+	Timezone        string
+	ConfigVersionID int64
+}
+
+// RuntimeAvailability is sampled by the scheduling runtime at the boundary.
+// A false slot produces a durable runtime_unavailable check gap rather than a
+// queued execution that would silently run later.
+type RuntimeAvailability struct {
+	Plinth bool
+	Lintel bool
+}
+
+// ScheduledPlans lists only plans that are active through the current
+// published configuration pointer. It deliberately has no scheduler cursor:
+// immutable inspection_runs rows are the duplicate authority.
+func (s *Service) ScheduledPlans(ctx context.Context) ([]ScheduledPlan, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT b.key,p.plan_key,p.cron,v.timezone,v.id
+		FROM business_systems b
+		JOIN business_system_config_versions v ON v.id=b.current_config_version_id AND v.state='published'
+		JOIN config_plans p ON p.config_version_id=v.id
+		WHERE b.enabled=1 AND p.cron IS NOT NULL
+		  AND EXISTS (SELECT 1 FROM config_checks c WHERE c.plan_id=p.id)
+		ORDER BY b.id,p.plan_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	plans := []ScheduledPlan{}
+	for rows.Next() {
+		var plan ScheduledPlan
+		if err := rows.Scan(&plan.SystemKey, &plan.PlanKey, &plan.Cron, &plan.Timezone, &plan.ConfigVersionID); err != nil {
+			return nil, err
+		}
+		plans = append(plans, plan)
+	}
+	return plans, rows.Err()
+}
+
+// CreateScheduledInspectionRun commits one due UTC occurrence. The scheduler
+// supplies the immutable config version it observed; the transaction refuses
+// to create an old-plan occurrence if publication changed before commit.
+func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan ScheduledPlan, scheduledFor time.Time, availability RuntimeAvailability) (RunDetail, error) {
+	scheduledFor = scheduledFor.UTC()
+	if scheduledFor.Nanosecond() != 0 || scheduledFor.Second() != 0 {
+		return RunDetail{}, fmt.Errorf("scheduled_for must be a minute boundary")
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return RunDetail{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	scheduledText := scheduledFor.Format(time.RFC3339Nano)
+	var existingID int64
+	err = conn.QueryRowContext(ctx, `
+		SELECT r.id FROM inspection_runs r
+		JOIN business_systems b ON b.id=r.business_system_id
+		WHERE b.key=? AND r.plan_key=? AND r.scheduled_for=?`, plan.SystemKey, plan.PlanKey, scheduledText).Scan(&existingID)
+	if err == nil {
+		detail, detailErr := s.detailOn(ctx, conn, plan.SystemKey, existingID)
+		if detailErr != nil {
+			return RunDetail{}, detailErr
+		}
+		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return RunDetail{}, err
+		}
+		committed = true
+		return detail, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return RunDetail{}, err
+	}
+
+	var systemID, versionID, contractID, planID int64
+	err = conn.QueryRowContext(ctx, `
+		SELECT b.id,v.id,v.label_contract_version_id,p.id
+		FROM business_systems b
+		JOIN business_system_config_versions v ON v.id=b.current_config_version_id AND v.state='published'
+		JOIN config_plans p ON p.config_version_id=v.id AND p.plan_key=? AND p.cron IS NOT NULL
+		WHERE b.key=? AND b.enabled=1 AND v.id=?`, plan.PlanKey, plan.SystemKey, plan.ConfigVersionID).
+		Scan(&systemID, &versionID, &contractID, &planID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A concurrent publish/disable made the earlier read stale. This is not
+		// an error and must not turn the previous configuration into a Run.
+		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return RunDetail{}, err
+		}
+		committed = true
+		return RunDetail{}, nil
+	}
+	if err != nil {
+		return RunDetail{}, err
+	}
+	checks, err := loadChecks(ctx, conn, planID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if len(checks) == 0 {
+		return RunDetail{}, fmt.Errorf("scheduled plan %s/%s has no checks", plan.SystemKey, plan.PlanKey)
+	}
+
+	now := s.nowText()
+	insert, err := conn.ExecContext(ctx, `
+		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
+		VALUES(?,?,?,?, 'schedule',?,'Queued',?)`, systemID, plan.PlanKey, versionID, contractID, scheduledText, now)
+	if err != nil {
+		// The active unique index is the commit-order overlap decision. Only an
+		// actual active Run converts this boundary into SkippedOverlap; never
+		// disguise an unrelated database failure as a scheduling decision.
+		var activeID int64
+		activeErr := conn.QueryRowContext(ctx, `
+			SELECT id FROM inspection_runs
+			WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, plan.PlanKey).
+			Scan(&activeID)
+		if errors.Is(activeErr, sql.ErrNoRows) {
+			return RunDetail{}, err
+		}
+		if activeErr != nil {
+			return RunDetail{}, activeErr
+		}
+		if _, err = conn.ExecContext(ctx, `
+			INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
+			VALUES(?,?,?,?, 'schedule',?,'SkippedOverlap',?)`, systemID, plan.PlanKey, versionID, contractID, scheduledText, now); err != nil {
+			return RunDetail{}, err
+		}
+		if err = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND scheduled_for=?`, systemID, plan.PlanKey, scheduledText).Scan(&existingID); err != nil {
+			return RunDetail{}, err
+		}
+		detail, err := s.detailOn(ctx, conn, plan.SystemKey, existingID)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return RunDetail{}, err
+		}
+		committed = true
+		return detail, nil
+	}
+	runID, err := insert.LastInsertId()
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
+		return RunDetail{}, err
+	}
+	for _, check := range checks {
+		if (check.kind == "promql" && !availability.Plinth) || (check.kind == "browser" && !availability.Lintel) {
+			if err = s.runtimeUnavailableChild(ctx, conn, runID, check.key, now); err != nil {
+				return RunDetail{}, err
+			}
+			continue
+		}
+		if check.kind == "promql" {
+			err = s.promqlChild(ctx, conn, runID, versionID, contractID, check, now)
+		} else {
+			err = s.browserChild(ctx, conn, runID, versionID, contractID, plan.PlanKey, systemID, check, now)
+		}
+		if err != nil {
+			// A missing or stale Thanos grant is a configuration failure, not a
+			// Runtime-slot outage. Roll this occurrence back rather than forging a
+			// boundary-time runtime_unavailable gap.
+			return RunDetail{}, err
+		}
+	}
+	if err = s.convergeOn(ctx, conn, runID); err != nil {
+		return RunDetail{}, err
+	}
+	detail, err := s.detailOn(ctx, conn, plan.SystemKey, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return RunDetail{}, err
+	}
+	committed = true
+	return detail, nil
+}
+
+// runtimeUnavailableChild records a boundary-time Runtime outage as a terminal
+// technical child. The frozen result trigger requires every gap to identify an
+// exact Attempt, even when no dispatch could be attempted.
+func (s *Service) runtimeUnavailableChild(ctx context.Context, conn *sql.Conn, runID int64, checkKey, now string) error {
+	insert, err := conn.ExecContext(ctx, `
+		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,created_at)
+		VALUES('inspection_collection','run_check',?,?,'Queued',?,?)`, runID, checkKey, attempt.ReleaseVersion(), now)
+	if err != nil {
+		return err
+	}
+	attemptID, err := insert.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed',ended_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, attemptID); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `
+		INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
+		VALUES(?,?,'gap',NULL,?,NULL,'runtime_unavailable',?)`, runID, checkKey, attemptID, now)
+	return err
+}

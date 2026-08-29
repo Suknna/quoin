@@ -288,6 +288,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// disappeared without reconnecting (RUNTIME-TASK-006).
 	go controlService.RunLeaseSweeper(ctx)
 	go controlService.RunResourceRefreshScheduler(ctx)
+	go controlService.RunInspectionScheduler(ctx)
 	return serverSet.run(ctx, config)
 }
 
