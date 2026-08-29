@@ -111,6 +111,10 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED, "journey start is missing attempt binding"
 		return channel.startAckReply(envelope, ack)
 	}
+	if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY && channel.journeyCancelled[input.AttemptID] {
+		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM, "journey attempt was already cancelled"
+		return channel.startAckReply(envelope, ack)
+	}
 	// Publish the operation binding before starting Chromium. The manager can
 	// report a child-process crash synchronously with Start; without this
 	// barrier browserCrashed sees no operation and loses the only completion

@@ -125,9 +125,17 @@ func (channel *Channel) handleJourneyDispatch(envelope *runtimev1.ControlEnvelop
 		return
 	}
 	if channel.journeyCancelled[frozen.AttemptID] {
+		completion := channel.journeyCancelDone[frozen.AttemptID]
 		channel.operationMu.Unlock()
 		cancel()
-		channel.sendJourneyCancelAck(envelope.GetCorrelationId(), frozen.AttemptID)
+		if completion == nil {
+			channel.sendJourneyCancelAck(envelope.GetCorrelationId(), frozen.AttemptID)
+			return
+		}
+		go func() {
+			<-completion
+			channel.sendJourneyCancelAck(envelope.GetCorrelationId(), frozen.AttemptID)
+		}()
 		return
 	}
 	channel.journeyRuns[frozen.AttemptID] = run

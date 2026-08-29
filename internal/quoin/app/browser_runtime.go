@@ -42,8 +42,16 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 		if err := service.Connections.DB().QueryRowContext(ctx, `SELECT owner_attempt_id FROM browser_operations WHERE id=? AND kind='journey'`, operationID).Scan(&attemptID); err != nil {
 			return err
 		}
-		if err := service.attemptsService().BindToSlot(ctx, attemptID, qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+		attemptView, err := service.attemptsService().Get(ctx, attemptID)
+		if err != nil {
 			return err
+		}
+		if attemptView.State == "Queued" {
+			if err := service.attemptsService().BindToSlot(ctx, attemptID, qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+				return err
+			}
+		} else if attemptView.State != "Assigned" || attemptView.RuntimeSlot == nil || *attemptView.RuntimeSlot != qruntime.SlotLintel || attemptView.BootID == nil || *attemptView.BootID != view.BootID {
+			return fmt.Errorf("journey attempt %d is not start-replayable", attemptID)
 		}
 	}
 	requested, err := time.Parse(time.RFC3339Nano, input.RequestedAt)
