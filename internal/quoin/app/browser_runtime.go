@@ -7,6 +7,7 @@ import (
 	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,6 +31,20 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 	input, err := service.Browsers.PrepareDispatchWithCapacity(ctx, operationID, view.BootID, *view.ConnectionEpoch, capacity)
 	if err != nil {
 		return err
+	}
+	// A Journey browser operation may not physically start while its owning
+	// attempt is still Queued: CancelFenceOn would correctly close Queued work
+	// locally, but Chromium would then be an unowned live process. Bind the child
+	// before sending Start so a concurrent cancellation becomes Cancelling and is
+	// replayed to Lintel if either control frame crosses in flight.
+	if input.Kind == "journey" {
+		var attemptID int64
+		if err := service.Connections.DB().QueryRowContext(ctx, `SELECT owner_attempt_id FROM browser_operations WHERE id=? AND kind='journey'`, operationID).Scan(&attemptID); err != nil {
+			return err
+		}
+		if err := service.attemptsService().BindToSlot(ctx, attemptID, qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+			return err
+		}
 	}
 	requested, err := time.Parse(time.RFC3339Nano, input.RequestedAt)
 	if err != nil {

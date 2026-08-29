@@ -22,9 +22,9 @@ import (
 // runtime loop or control stream.
 const journeyConvergenceBatchSize = 32
 
-// dispatchJourneyAttempt binds one Queued browser child to the live Lintel
-// stream and sends its DispatchAttempt. The frozen input bytes are rebuilt
-// and digest-verified by the generic attempt authority.
+// dispatchJourneyAttempt sends one Lintel-bound browser child. Browser Start
+// binds the child before Chromium can run; this function accepts that already
+// Assigned state and only binds bare Queued children for recovery compatibility.
 func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attemptID int64) error {
 	if service.BusinessSystems == nil {
 		return fmt.Errorf("business systems are not wired")
@@ -47,8 +47,16 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 		}
 		attempts = service.Inspections.Attempts()
 	}
-	if err := attempts.BindToSlot(ctx, attemptID, "lintel", view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	attemptView, err := attempts.Get(ctx, attemptID)
+	if err != nil {
 		return err
+	}
+	if attemptView.State == "Queued" {
+		if err := attempts.BindToSlot(ctx, attemptID, "lintel", view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+			return err
+		}
+	} else if attemptView.State != "Assigned" || attemptView.BootID == nil || *attemptView.BootID != view.BootID {
+		return fmt.Errorf("journey attempt %d is not dispatchable", attemptID)
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)
 	if err != nil {
@@ -74,8 +82,8 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 }
 
 // dispatchReadyJourneyAttempts dispatches every browser child whose journey
-// operation is already Running (Start acknowledged) but whose Attempt is
-// still Queued.
+// operation is already Running (Start acknowledged) and whose Attempt was
+// bound before its physical Browser start.
 func (service *RuntimeService) dispatchReadyJourneyAttempts(ctx context.Context) bool {
 	if service.BusinessSystems == nil {
 		return false
@@ -84,7 +92,7 @@ func (service *RuntimeService) dispatchReadyJourneyAttempts(ctx context.Context)
 		SELECT a.id FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
 		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
-		  AND a.state='Queued' AND o.state='Running' AND o.stop_confirmed_at IS NULL
+		  AND a.state='Assigned' AND o.state='Running' AND o.stop_confirmed_at IS NULL
 		ORDER BY a.id LIMIT ?`, journeyConvergenceBatchSize)
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "config_verification.journey_scan", err.Error())
