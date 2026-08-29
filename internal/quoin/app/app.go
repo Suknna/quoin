@@ -29,6 +29,7 @@ import (
 	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
 	appinspection "github.com/Suknna/quoin/internal/quoin/app/inspection"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
+	appknowledge "github.com/Suknna/quoin/internal/quoin/app/knowledge"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
@@ -36,8 +37,10 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/feedback"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
+	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
@@ -66,6 +69,8 @@ type apiServer struct {
 	systems                      *businesssystem.Service
 	inspections                  *inspection.Service
 	contracts                    *labelcontract.Service
+	feedbackService              *feedback.Service
+	knowledgeService             *knowledge.Service
 	browsers                     *browser.Service
 	investigationUpload          *appinvestigation.Handler
 	configHandler                *appconfig.Handler
@@ -101,19 +106,21 @@ func attachmentLimitBytes() int64 {
 // string only in tests that never touch connections.
 func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
 	application := &apiServer{
-		auth:           service,
-		db:             db,
-		alerts:         alerts.NewService(db),
-		reveals:        secrets.NewStore(),
-		commands:       newCommandReplay(),
-		runtime:        qruntime.NewService(db),
-		analyses:       analysis.NewService(db),
-		investigations: investigation.NewService(db),
-		systems:        businesssystem.NewService(db),
-		inspections:    inspection.NewService(db),
-		contracts:      labelcontract.NewService(db),
-		browsers:       browser.NewService(db),
-		browserTunnels: newBrowserTunnelHub(),
+		auth:             service,
+		db:               db,
+		alerts:           alerts.NewService(db),
+		reveals:          secrets.NewStore(),
+		commands:         newCommandReplay(),
+		runtime:          qruntime.NewService(db),
+		analyses:         analysis.NewService(db),
+		investigations:   investigation.NewService(db),
+		systems:          businesssystem.NewService(db),
+		inspections:      inspection.NewService(db),
+		contracts:        labelcontract.NewService(db),
+		feedbackService:  feedback.NewService(db),
+		knowledgeService: knowledge.NewService(db),
+		browsers:         browser.NewService(db),
+		browserTunnels:   newBrowserTunnelHub(),
 	}
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
@@ -454,6 +461,18 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 		},
 	}
 	inspectionHandler.Register(api)
+	knowledgeHandler := &appknowledge.Handler{
+		Feedback:  application.feedbackService,
+		Knowledge: application.knowledgeService,
+		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateFull(ctx, cookie, "使用知识")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+	}
+	knowledgeHandler.Register(api)
 	// The raw multipart upload routes (NewHandler) reuse this handler's
 	// authentication seams; returning it keeps the mux wiring after the
 	// full registration completes.
