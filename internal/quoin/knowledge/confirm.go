@@ -57,9 +57,9 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	}
 	var state, sourceType string
 	var draftRevision, sourceID int64
-	var draftTitle, draftBody sql.NullString
-	err = conn.QueryRowContext(ctx, `SELECT state, source_type, source_id, draft_revision, draft_title, draft_body FROM knowledge_candidates WHERE id=?`, candidateID).
-		Scan(&state, &sourceType, &sourceID, &draftRevision, &draftTitle, &draftBody)
+	var draftTitle, draftBody, draftScope sql.NullString
+	err = conn.QueryRowContext(ctx, `SELECT state, source_type, source_id, draft_revision, draft_title, draft_body, draft_scope_json FROM knowledge_candidates WHERE id=?`, candidateID).
+		Scan(&state, &sourceType, &sourceID, &draftRevision, &draftTitle, &draftBody, &draftScope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, ErrNotFound)
 	}
@@ -78,6 +78,11 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	}
 	now := service.nowText()
 	title, body := draftValues(draftTitle, draftBody)
+	var scopeValue any
+	if draftScope.Valid && draftScope.String != "" && draftScope.String != "{}" {
+		specific := draftScope.String
+		scopeValue = &specific
+	}
 	// 1. The aggregate exists first with no current pointer.
 	knowledgeInsert, err := conn.ExecContext(ctx, `INSERT INTO reusable_knowledge(created_by,created_at) VALUES(?,?)`, principalID, now)
 	if err != nil {
@@ -106,8 +111,8 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	}
 	// 3. The first immutable version (append-only; seq 1).
 	versionInsert, err := conn.ExecContext(ctx, `
-		INSERT INTO knowledge_versions(knowledge_id,version_seq,title,body,source_candidate_id,created_by,created_at)
-		VALUES(?,1,?,?,?,?,?)`, knowledgeID, title, body, candidateID, principalID, now)
+		INSERT INTO knowledge_versions(knowledge_id,version_seq,title,body,scope_json,source_candidate_id,created_by,created_at)
+		VALUES(?,1,?,?,?,?,?,?)`, knowledgeID, title, body, scopeValue, candidateID, principalID, now)
 	if err != nil {
 		return CandidateSummary{}, err
 	}

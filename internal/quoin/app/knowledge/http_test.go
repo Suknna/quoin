@@ -360,8 +360,17 @@ func TestCandidateLifecycleThroughHTTP(t *testing.T) {
 		t.Fatalf("conflict envelope broken: %v", conflict)
 	}
 
+	// Scope edits ride the same revisioned PATCH (UI-KNOWLEDGE-003).
+	status, scoped := f.do(t, http.MethodPatch, path, `{"clientCommandId":"http-edit-scope","expectedRevision":1,"scope":{"businessSystem":"payments"}}`)
+	if status != http.StatusOK || scoped["draftRevision"].(float64) != 2 {
+		t.Fatalf("scope edit = %d %v", status, scoped)
+	}
+	if scoped["draftScope"].(map[string]any)["businessSystem"] != "payments" {
+		t.Fatalf("draftScope projection = %v", scoped["draftScope"])
+	}
+
 	// Confirm creates the first immutable version and the browse entry.
-	status, confirmed := f.do(t, http.MethodPost, path+"/confirm", `{"clientCommandId":"http-confirm-1","expectedRevision":1}`)
+	status, confirmed := f.do(t, http.MethodPost, path+"/confirm", `{"clientCommandId":"http-confirm-1","expectedRevision":2}`)
 	if status != http.StatusOK || confirmed["state"] != "Confirmed" || confirmed["confirmedKnowledgeId"] == nil {
 		t.Fatalf("confirm = %d %v", status, confirmed)
 	}

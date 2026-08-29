@@ -141,7 +141,9 @@ func candidateCommandProblem(err error) *problemError {
 	case errors.Is(err, knowledge.ErrCommandReused):
 		return commandReusedProblem()
 	case errors.Is(err, knowledge.ErrEmptyEdit):
-		return problemUnprocessable("至少修改标题或正文。")
+		return problemUnprocessable("至少修改标题、正文或适用范围。")
+	case errors.Is(err, knowledge.ErrInvalidScope):
+		return problemUnprocessable("适用范围必须是键值对象。")
 	case errors.As(err, &revision):
 		conflict := problem(409, "row_version_conflict", "草稿已被更新，请基于最新版本修改。")
 		conflict.Conflict = map[string]any{"code": "row_version_conflict", "currentRevision": revision.Current}
@@ -228,10 +230,11 @@ func (handler *Handler) editKnowledgeCandidateDraft(ctx context.Context, input *
 	Session     string `cookie:"__Host-quoin-session"`
 	CandidateID string `path:"candidateId"`
 	Body        struct {
-		ClientCommandID  string  `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		ExpectedRevision int64   `json:"expectedRevision" minimum:"0"`
-		Title            *string `json:"title,omitempty"`
-		Body             *string `json:"body,omitempty"`
+		ClientCommandID  string           `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		ExpectedRevision int64            `json:"expectedRevision" minimum:"0"`
+		Title            *string          `json:"title,omitempty"`
+		Body             *string          `json:"body,omitempty"`
+		Scope            *json.RawMessage `json:"scope,omitempty"`
 	}
 }) (*candidateBody, error) {
 	principalID, authProblem := handler.user(ctx, input.Session)
@@ -242,7 +245,7 @@ func (handler *Handler) editKnowledgeCandidateDraft(ctx context.Context, input *
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.EditDraft(ctx, principalID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body)
+	summary, err := handler.Knowledge.EditDraft(ctx, principalID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body, input.Body.Scope)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}

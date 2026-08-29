@@ -80,17 +80,18 @@ func (err *StateConflict) Error() string {
 
 // CandidateSummary is the wire projection of one candidate.
 type CandidateSummary struct {
-	ID                   string `json:"id"`
-	SourceType           string `json:"sourceType"`
-	SourceID             string `json:"sourceId"`
-	State                string `json:"state"`
-	RowVersion           int64  `json:"rowVersion"`
-	Generation           int64  `json:"generation"`
-	DraftRevision        int64  `json:"draftRevision"`
-	DraftTitle           string `json:"draftTitle,omitempty"`
-	DraftBody            string `json:"draftBody,omitempty"`
-	TargetKnowledgeID    string `json:"targetKnowledgeId,omitempty"`
-	ConfirmedKnowledgeID string `json:"confirmedKnowledgeId,omitempty"`
+	ID                   string          `json:"id"`
+	SourceType           string          `json:"sourceType"`
+	SourceID             string          `json:"sourceId"`
+	State                string          `json:"state"`
+	RowVersion           int64           `json:"rowVersion"`
+	Generation           int64           `json:"generation"`
+	DraftRevision        int64           `json:"draftRevision"`
+	DraftTitle           string          `json:"draftTitle,omitempty"`
+	DraftBody            string          `json:"draftBody,omitempty"`
+	DraftScope           json.RawMessage `json:"draftScope,omitempty"`
+	TargetKnowledgeID    string          `json:"targetKnowledgeId,omitempty"`
+	ConfirmedKnowledgeID string          `json:"confirmedKnowledgeId,omitempty"`
 }
 
 // CandidateDetail adds the immutable original model suggestion.

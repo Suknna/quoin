@@ -2079,6 +2079,7 @@ CREATE TABLE knowledge_candidates (
   original_suggestion_json TEXT NOT NULL CHECK (json_valid(original_suggestion_json)), -- 模型原始建议不可变
   draft_title             TEXT,
   draft_body              TEXT,
+  draft_scope_json        TEXT CHECK (draft_scope_json IS NULL OR json_valid(draft_scope_json)), -- 适用范围草稿（UI-KNOWLEDGE-003）；确认时写入版本的 scope_json
   draft_revision          INTEGER NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
   confirmed_knowledge_id  INTEGER REFERENCES reusable_knowledge(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_by              INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,

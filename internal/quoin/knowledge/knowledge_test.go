@@ -470,7 +470,7 @@ func TestDraftEditRevisionAndConflicts(t *testing.T) {
 	}
 	candidateID := parseID(t, created.Candidate.ID)
 	newTitle := "连接池耗尽处置"
-	edited, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-1", candidateID, 0, &newTitle, nil)
+	edited, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-1", candidateID, 0, &newTitle, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,13 +478,13 @@ func TestDraftEditRevisionAndConflicts(t *testing.T) {
 		t.Fatalf("edit result broken: %+v", edited)
 	}
 	// Stale expected revision reports the authoritative value.
-	_, err = f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-2", candidateID, 0, &newTitle, nil)
+	_, err = f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-2", candidateID, 0, &newTitle, nil, nil)
 	var conflict *RevisionConflict
 	if !errors.As(err, &conflict) || conflict.Current != 1 {
 		t.Fatalf("stale revision conflict = %v", err)
 	}
 	// Replay of the committed edit returns the same summary.
-	replayed, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-1", candidateID, 0, &newTitle, nil)
+	replayed, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-1", candidateID, 0, &newTitle, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,8 +504,55 @@ func TestDraftEditRevisionAndConflicts(t *testing.T) {
 		t.Fatalf("original suggestion mutated: %q", suggestion.Title)
 	}
 	// An empty edit is rejected deterministically.
-	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-3", candidateID, 1, nil, nil); !errors.Is(err, ErrEmptyEdit) {
+	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-edit-3", candidateID, 1, nil, nil, nil); !errors.Is(err, ErrEmptyEdit) {
 		t.Fatalf("empty edit accepted: %v", err)
+	}
+}
+
+func TestDraftScopePersistsIntoVersion(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-scope-0", f.occurrenceID, f.analysisID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateID := parseID(t, created.Candidate.ID)
+	scope := json.RawMessage(`{"businessSystem":"payments","alertname":"HighErrorRate"}`)
+	edited, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-scope-1", candidateID, 0, nil, nil, &scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(edited.DraftScope) != `{"alertname":"HighErrorRate","businessSystem":"payments"}` {
+		t.Fatalf("draft scope projection = %s", edited.DraftScope)
+	}
+	confirmed, err := f.service.Confirm(ctx, f.userID, "cmd-kn-scope-2", candidateID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := f.service.GetKnowledge(ctx, parseID(t, confirmed.ConfirmedKnowledgeID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := f.service.GetVersion(ctx, parseID(t, confirmed.ConfirmedKnowledgeID), parseID(t, detail.CurrentVersionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(version.Scope, &decoded); err != nil {
+		t.Fatalf("version scope missing: %v", err)
+	}
+	if decoded["businessSystem"] != "payments" || decoded["alertname"] != "HighErrorRate" {
+		t.Fatalf("version scope = %v", decoded)
+	}
+	// Clearing the scope stores no restriction again.
+	empty := json.RawMessage(`{}`)
+	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-scope-3", parseID(t, "0"), 0, nil, nil, &empty); err == nil {
+		t.Fatal("candidate 0 accepted")
+	}
+	// A non-object scope is a deterministic 422.
+	array := json.RawMessage(`[1]`)
+	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-scope-4", candidateID, 1, nil, nil, &array); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("array scope accepted: %v", err)
 	}
 }
 
@@ -518,7 +565,7 @@ func TestConfirmCreatesImmutableFirstVersion(t *testing.T) {
 	}
 	candidateID := parseID(t, created.Candidate.ID)
 	newBody := "连接池上限不足时先扩容再重启实例。"
-	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-cf-1", candidateID, 0, nil, &newBody); err != nil {
+	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-cf-1", candidateID, 0, nil, &newBody, nil); err != nil {
 		t.Fatal(err)
 	}
 	confirmed, err := f.service.Confirm(ctx, f.userID, "cmd-kn-cf-2", candidateID, 1)
@@ -571,7 +618,7 @@ func TestConfirmCreatesImmutableFirstVersion(t *testing.T) {
 		t.Fatalf("candidate produced %d versions", versions)
 	}
 	// Draft edits after confirmation are state conflicts.
-	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-cf-4", candidateID, 1, &newBody, nil); err == nil {
+	if _, err := f.service.EditDraft(ctx, f.userID, "cmd-kn-cf-4", candidateID, 1, &newBody, nil, nil); err == nil {
 		t.Fatal("edit after confirm accepted")
 	}
 	// Stale revision confirm conflicts with the current value reported.

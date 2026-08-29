@@ -48,7 +48,7 @@ type ListResult[T any] struct {
 
 const candidateColumns = `
 	c.id, c.source_type, c.source_id, c.state, c.row_version, c.generation,
-	c.draft_revision, COALESCE(c.draft_title,''), COALESCE(c.draft_body,''),
+	c.draft_revision, COALESCE(c.draft_title,''), COALESCE(c.draft_body,''), c.draft_scope_json,
 	COALESCE(c.target_knowledge_id,0), COALESCE(c.confirmed_knowledge_id,0)`
 
 // scanCandidateOn reads one candidate row through the given connection.
@@ -78,7 +78,8 @@ func (service *Service) candidateBySource(ctx context.Context, conn *sql.Conn, s
 func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 	var id, sourceID, rowVersion, generation, draftRevision, targetKnowledge, confirmedKnowledge int64
 	var sourceType, state, draftTitle, draftBody string
-	if err := scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &targetKnowledge, &confirmedKnowledge); err != nil {
+	var draftScope sql.NullString
+	if err := scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge); err != nil {
 		return CandidateSummary{}, err
 	}
 	summary := CandidateSummary{
@@ -91,6 +92,9 @@ func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 		DraftRevision: draftRevision,
 		DraftTitle:    draftTitle,
 		DraftBody:     draftBody,
+	}
+	if draftScope.Valid && draftScope.String != "" {
+		summary.DraftScope = json.RawMessage(draftScope.String)
 	}
 	if targetKnowledge != 0 {
 		summary.TargetKnowledgeID = fmt.Sprintf("%d", targetKnowledge)
@@ -109,9 +113,10 @@ func (service *Service) GetCandidate(ctx context.Context, candidateID int64) (Ca
 		FROM knowledge_candidates c WHERE c.id=?`, candidateID)
 	var summary CandidateSummary
 	var id, sourceID, targetKnowledge, confirmedKnowledge int64
+	var draftScope sql.NullString
 	var original []byte
 	if err := row.Scan(&id, &summary.SourceType, &sourceID, &summary.State, &summary.RowVersion, &summary.Generation,
-		&summary.DraftRevision, &summary.DraftTitle, &summary.DraftBody, &targetKnowledge, &confirmedKnowledge, &original); err != nil {
+		&summary.DraftRevision, &summary.DraftTitle, &summary.DraftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &original); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return CandidateDetail{}, ErrNotFound
 		}
@@ -124,6 +129,9 @@ func (service *Service) GetCandidate(ctx context.Context, candidateID int64) (Ca
 	}
 	if confirmedKnowledge != 0 {
 		summary.ConfirmedKnowledgeID = fmt.Sprintf("%d", confirmedKnowledge)
+	}
+	if draftScope.Valid && draftScope.String != "" {
+		summary.DraftScope = json.RawMessage(draftScope.String)
 	}
 	return CandidateDetail{CandidateSummary: summary, OriginalSuggestion: append([]byte(nil), original...)}, nil
 }
@@ -167,14 +175,18 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 	for rows.Next() {
 		var id, sourceID, rowVersion, generation, draftRevision, targetKnowledge, confirmedKnowledge int64
 		var sourceType, state, draftTitle, draftBody, createdAt string
+		var draftScope sql.NullString
 		var awaiting int
-		if err := rows.Scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &targetKnowledge, &confirmedKnowledge, &createdAt, &awaiting); err != nil {
+		if err := rows.Scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &createdAt, &awaiting); err != nil {
 			return nil, nil, err
 		}
 		summary := CandidateSummary{
 			ID: fmt.Sprintf("%d", id), SourceType: sourceType, SourceID: fmt.Sprintf("%d", sourceID),
 			State: state, RowVersion: rowVersion, Generation: generation, DraftRevision: draftRevision,
 			DraftTitle: draftTitle, DraftBody: draftBody,
+		}
+		if draftScope.Valid && draftScope.String != "" {
+			summary.DraftScope = json.RawMessage(draftScope.String)
 		}
 		if targetKnowledge != 0 {
 			summary.TargetKnowledgeID = fmt.Sprintf("%d", targetKnowledge)

@@ -6902,6 +6902,10 @@ components:
           type: string
         draftBody:
           type: string
+        draftScope:
+          type: object
+          additionalProperties: true
+          description: 适用范围草稿投影（UI-KNOWLEDGE-003）；确认时随草稿写入不可变版本的 scope。
         targetKnowledgeId:
           $ref: '#/components/schemas/LocatorId'
           description: 仅 knowledge_version 修订 Candidate 在确认前后携带，指向将追加版本的 Reusable Knowledge。
@@ -6941,9 +6945,14 @@ components:
               type: string
             body:
               type: string
+            scope:
+              type: object
+              additionalProperties: true
+              description: 适用范围草稿（UI-KNOWLEDGE-003、DATA-KNOWLEDGE-001）；空对象表示清除范围。确认时随草稿写入不可变版本。
           anyOf:
             - required: [title]
             - required: [body]
+            - required: [scope]
       description: 至少提供一个草稿变更字段（anyOf 强制），防止无变化编辑。
     ConfirmCandidateRequest:
       allOf:
