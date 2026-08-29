@@ -69,6 +69,9 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 	if channel.startAckFences == nil {
 		channel.startAckFences = make(map[int64]chan struct{})
 	}
+	if channel.journeyOperations == nil {
+		channel.journeyOperations = make(map[int64]int64)
+	}
 	// Every Start response is an unknown-outcome reply. Replay the exact cached
 	// response before evaluating current operation state, including the cached
 	// stale-stream rejection below.
@@ -94,7 +97,8 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		return channel.startAckReply(envelope, ack)
 	}
 	var input struct {
-		Identity struct {
+		AttemptID int64 `json:"attemptId"`
+		Identity  struct {
 			StartURL          string `json:"startUrl"`
 			ProfileGeneration uint64 `json:"profileGeneration"`
 		} `json:"identity"`
@@ -103,11 +107,18 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED, "invalid frozen browser input"
 		return channel.startAckReply(envelope, ack)
 	}
+	if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY && input.AttemptID < 1 {
+		ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED, "journey start is missing attempt binding"
+		return channel.startAckReply(envelope, ack)
+	}
 	// Publish the operation binding before starting Chromium. The manager can
 	// report a child-process crash synchronously with Start; without this
 	// barrier browserCrashed sees no operation and loses the only completion
 	// tombstone before the StartAck is cached.
 	channel.started[request.GetOperationId()] = request
+	if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY {
+		channel.journeyOperations[input.AttemptID] = request.GetOperationId()
+	}
 	// A post-admission process loss may reach the crash callback before the
 	// receive loop can send this StartAck. Its terminal completion waits on this
 	// gate so Quoin always observes the accepted Start boundary first.
@@ -120,6 +131,9 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		if !started && channel.started[request.GetOperationId()] == request {
 			delete(channel.started, request.GetOperationId())
 			delete(channel.startAckFences, request.GetOperationId())
+			if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY && channel.journeyOperations[input.AttemptID] == request.GetOperationId() {
+				delete(channel.journeyOperations, input.AttemptID)
+			}
 		}
 	}()
 	var err error

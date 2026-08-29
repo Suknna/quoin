@@ -231,6 +231,18 @@ func TestJourneyCancelBeforeDispatchPreventsWorkerStart(t *testing.T) {
 		JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version,
 		Input: browserOperationInput(canonical),
 	}
+	if channel.journeyOperations == nil {
+		channel.journeyOperations = make(map[int64]int64)
+	}
+	channel.journeyOperations[77] = 42
+	stopped := make(chan struct{})
+	channel.stopBrowser = func(operationID int64) error {
+		if operationID != 42 {
+			t.Fatalf("stopped wrong pre-dispatch operation: %d", operationID)
+		}
+		close(stopped)
+		return nil
+	}
 	cancelEnvelope := &runtimev1.ControlEnvelope{CorrelationId: 19}
 	channel.handleJourneyCancel(cancelEnvelope, &runtimev1.CancelAttempt{AttemptId: 77})
 	envelope, dispatch := journeyDispatchEnvelope(t, canonical)
@@ -241,6 +253,11 @@ func TestJourneyCancelBeforeDispatchPreventsWorkerStart(t *testing.T) {
 	channel.operationMu.Unlock()
 	if !cancelled || run != nil {
 		t.Fatalf("delayed dispatch started cancelled journey: cancelled=%v run=%v", cancelled, run)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("cancel-before-dispatch did not stop the started browser operation")
 	}
 	if got := countKind(recorder.snapshot(), "cancel"); got < 1 {
 		t.Fatalf("cancel-before-dispatch must acknowledge the stopped attempt, got %#v", recorder.snapshot())

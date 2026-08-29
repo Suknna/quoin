@@ -143,27 +143,43 @@ func (channel *Channel) handleJourneyCancel(envelope *runtimev1.ControlEnvelope,
 	channel.operationMu.Lock()
 	channel.journeyCancelled[request.GetAttemptId()] = true
 	run := channel.journeyRuns[request.GetAttemptId()]
-	channel.operationMu.Unlock()
-	if run == nil {
-		// No process has begun. The tombstone prevents a delayed DispatchAttempt
-		// from starting one, so acknowledging immediately is physically truthful.
-		channel.sendJourneyCancelAck(envelope.GetCorrelationId(), request.GetAttemptId())
-		return
+	operationID := channel.journeyOperations[request.GetAttemptId()]
+	if operationID == 0 && run != nil {
+		operationID = run.operation
 	}
-	run.cancel()
-	// The control receiver must remain available while a browser operation is
-	// unwinding. Ack asynchronously, but only after the Journey goroutine and
-	// its Chromium operation have both stopped. Quoin's later Stop operation is
-	// intentionally idempotent: it records the durable ownership release after
-	// this Runtime-side physical fence.
-	go func(correlationID uint64, attemptID, operationID int64, done <-chan struct{}) {
-		<-done
-		if err := channel.stopBrowserOperation(operationID); err != nil {
-			sharedops.LogEvent("lintel", "error", "journey.cancel_stop_failed", fmt.Sprintf("attempt=%d operation=%d error=%s", attemptID, operationID, err))
-			return
+	if channel.journeyCancelDone == nil {
+		channel.journeyCancelDone = make(map[int64]chan struct{})
+	}
+	completion := channel.journeyCancelDone[request.GetAttemptId()]
+	leader := completion == nil
+	if leader {
+		completion = make(chan struct{})
+		channel.journeyCancelDone[request.GetAttemptId()] = completion
+	}
+	channel.operationMu.Unlock()
+	if run != nil {
+		run.cancel()
+	}
+	// All duplicate cancellation frames share one completion fence. A Journey
+	// may have a started Chromium operation before its DispatchAttempt arrives;
+	// the operation binding published by StartBrowserOperation makes that window
+	// physically cancellable rather than falsely acknowledging an ownerless tab.
+	go func(correlationID uint64, attemptID, operationID int64, run *journeyRun, completion chan struct{}, leader bool) {
+		if leader {
+			if run != nil {
+				<-run.done
+			}
+			if operationID != 0 {
+				if err := channel.stopBrowserOperation(operationID); err != nil {
+					sharedops.LogEvent("lintel", "error", "journey.cancel_stop_failed", fmt.Sprintf("attempt=%d operation=%d error=%s", attemptID, operationID, err))
+					return
+				}
+			}
+			close(completion)
 		}
+		<-completion
 		channel.sendJourneyCancelAck(correlationID, attemptID)
-	}(envelope.GetCorrelationId(), request.GetAttemptId(), run.operation, run.done)
+	}(envelope.GetCorrelationId(), request.GetAttemptId(), operationID, run, completion, leader)
 }
 
 func (channel *Channel) sendJourneyCancelAck(correlationID uint64, attemptID int64) {
