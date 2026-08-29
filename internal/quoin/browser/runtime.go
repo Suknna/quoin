@@ -86,9 +86,10 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	if kind == "exploration" && ownerState != "Running" {
 		return DispatchInput{}, ErrConflict
 	}
-	// A journey operation dispatches only while its Config Verification child is
-	// still queued for Lintel; a fenced or terminal child cancels the Start.
-	if kind == "journey" && ownerState != "Queued" {
+	// The initial Journey Start requires a Queued owner. Its unknown-outcome
+	// same-boot replay occurs after dispatchBrowserOperation has bound that owner
+	// to Lintel (Assigned), so retain that exact state only for Starting replay.
+	if kind == "journey" && ownerState != "Queued" && !(state == "Starting" && ownerState == "Assigned") {
 		return DispatchInput{}, ErrConflict
 	}
 	if state == "Starting" {
