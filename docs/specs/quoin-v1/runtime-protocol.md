@@ -53,7 +53,7 @@
 
 - **RUNTIME-CANCEL-001 —** 用户取消 **MUST** 先由 Quoin 事务提交 cancellation fence（`Queued` 直接 `Cancelled`；`Assigned` 或 `Running` 先转 `Cancelling`）。`Assigned` 的 `DispatchAttempt` 可能已经在途，必须与 `Running` 一样发送 `CancelAttempt`；事务提交后 **MUST** 才发送 `CancelAttempt`（DATA-ATTEMPT-003、HTTP-COMMAND-005）。
 - **RUNTIME-CANCEL-002 —** 成功结果与取消 **MUST** 按 SQLite 提交顺序裁决（DATA-TX-005）：成功先提交则取消返回已完成对象；取消先提交则迟到结果不产生有效消息/Report/Candidate，只留审计。
-- **RUNTIME-CANCEL-003 —** Runtime 收到 `CancelAttempt` 停止后 **MUST** 回 `CancelAck`；Quoin 收到后转 `Cancelled`。fence 与 transport detach 并发时 **MUST NOT** 停留在 `Cancelling` 中间态：lease 到期或流关闭后 Quoin 按 RUNTIME-TASK-006 收敛终态。旧流迟到的 `CancelAck`/`AttemptAccept` 按 RUNTIME-CTRL-009 envelope fence 丢弃。
+- **RUNTIME-CANCEL-003 —** Runtime 收到 `CancelAttempt` 停止后 **MUST** 回 `CancelAck`；Quoin 收到后转 `Cancelled`。同 boot transport detach 不是物理停止证明：fence 与其并发时 Attempt **MUST** 保持 `Cancelling`，并在同 boot reconnect 后重发 `CancelAttempt`；只有有效 `CancelAck`、新 boot 的实际运行集合调和或 lease/loss 才可收敛终态。旧流迟到的 `CancelAck`/`AttemptAccept` 按 RUNTIME-CTRL-009 envelope fence 丢弃。
 
 ## 6. Plinth 模型与工具循环
 
