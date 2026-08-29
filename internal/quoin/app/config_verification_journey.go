@@ -137,10 +137,11 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 	}
 	defer rows.Close()
 	type cancelling struct {
-		attempt int64
-		boot    string
-		epoch   uint64
-		scope   string
+		attempt  int64
+		boot     string
+		epoch    uint64
+		scope    string
+		terminal bool
 	}
 	var pending []cancelling
 	scanned := 0
@@ -151,11 +152,10 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 		if err := rows.Scan(&item.attempt, &item.boot, &item.epoch, &operationState, &item.scope); err != nil {
 			return false
 		}
-		// An operation already terminal left nothing to stop; convergence only
-		// needs the child/operation closure handled by the sweep below.
-		if operationState == "Succeeded" || operationState == "Failed" || operationState == "Cancelled" || operationState == "Interrupted" {
-			continue
-		}
+		// A terminal operation has already released the physical Browser work.
+		// Its Cancelling child still requires a durable CancelAck-equivalent
+		// convergence if the original Ack was lost with the control stream.
+		item.terminal = operationState == "Succeeded" || operationState == "Failed" || operationState == "Cancelled" || operationState == "Interrupted"
 		pending = append(pending, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -166,15 +166,21 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 		return false
 	}
 	for _, item := range pending {
+		childAttempts := service.BusinessSystems.VerificationAttempts()
+		if item.scope == "run_check" {
+			if service.Inspections == nil {
+				continue
+			}
+			childAttempts = service.Inspections.Attempts()
+		}
+		if item.terminal {
+			if err := childAttempts.CancelAck(ctx, item.attempt); err == nil {
+				service.recordJourneyTechnicalGap(ctx, item.attempt, "cancelled")
+			}
+			continue
+		}
 		if item.boot == "" || item.epoch == 0 {
 			// Never dispatched: close the child directly through the fence.
-			childAttempts := service.BusinessSystems.VerificationAttempts()
-			if item.scope == "run_check" {
-				if service.Inspections == nil {
-					continue
-				}
-				childAttempts = service.Inspections.Attempts()
-			}
 			if err := childAttempts.CancelAck(ctx, item.attempt); err == nil {
 				service.recordJourneyTechnicalGap(ctx, item.attempt, "cancelled")
 			}

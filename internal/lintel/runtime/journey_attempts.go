@@ -180,6 +180,13 @@ func (channel *Channel) handleJourneyCancel(envelope *runtimev1.ControlEnvelope,
 			if operationID != 0 {
 				if err := channel.stopBrowserOperation(operationID); err != nil {
 					sharedops.LogEvent("lintel", "error", "journey.cancel_stop_failed", fmt.Sprintf("attempt=%d operation=%d error=%s", attemptID, operationID, err))
+					// Do not acknowledge a failed physical stop. Release leadership so a
+					// replayed CancelAttempt can retry instead of wedging this boot.
+					channel.operationMu.Lock()
+					if channel.journeyCancelDone[attemptID] == completion {
+						delete(channel.journeyCancelDone, attemptID)
+					}
+					channel.operationMu.Unlock()
 					return
 				}
 			}
