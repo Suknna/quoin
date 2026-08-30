@@ -7,9 +7,10 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
+	"flag"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -63,14 +64,14 @@ func main() {
 			return
 		}
 		writer.Header().Set("X-Request-Id", "req-fixture-emb-"+fmt.Sprint(time.Now().UnixNano()))
-		// 16-dimension deterministic vector derived from the input length.
-		dimension := 16
+		// The dimension is a deterministic property of the model id, so the
+		// drift acceptance can switch models and observe a different
+		// validated dimension through the real path (fixture-embed-wide is
+		// the frozen 32-dimension variant; every other model serves 16).
+		dimension := embeddingDimension(body.Model)
 		data := make([]map[string]any, 0, len(body.Input))
 		for index, input := range body.Input {
-			vector := make([]float64, dimension)
-			for step := 0; step < dimension; step++ {
-				vector[step] = float64((len(input)*13+step*7)%97) / 97.0
-			}
+			vector := embedText(input, dimension)
 			data = append(data, map[string]any{"object": "embedding", "index": index, "embedding": vector})
 		}
 		writeJSON(writer, map[string]any{
@@ -81,6 +82,100 @@ func main() {
 	})
 	log.Printf("fixture model provider listening on %s", *address)
 	log.Fatal(http.ListenAndServe(*address, mux))
+}
+
+// embeddingDimension maps model ids to frozen vector dimensions. A single
+// mapping keeps probes, generations and the drift scenario consistent:
+// fixture-embed-1 (and unknown models) serve 16, fixture-embed-wide serves 32.
+func embeddingDimension(model string) int {
+	if model == "fixture-embed-wide" {
+		return 32
+	}
+	return 16
+}
+
+// embedText derives a deterministic unit vector from the input's tokens:
+// lowercased ASCII word runs plus CJK bigrams. Texts that share vocabulary
+// land in the same buckets, so cosine similarity tracks real token overlap
+// instead of input length. Inputs with no tokens fall back to a whole-string
+// bucket so the vector is never zero.
+func embedText(input string, dimension int) []float64 {
+	vector := make([]float64, dimension)
+	tokens := semanticTokens(input)
+	if len(tokens) == 0 {
+		tokens = []string{input}
+	}
+	for _, token := range tokens {
+		vector[tokenBucket(token)%dimension] += 1
+	}
+	norm := 0.0
+	for _, component := range vector {
+		norm += component * component
+	}
+	if norm == 0 {
+		vector[0] = 1
+		return vector
+	}
+	norm = math.Sqrt(norm)
+	for index := range vector {
+		vector[index] /= norm
+	}
+	return vector
+}
+
+// semanticTokens splits ASCII words and CJK bigrams; a single CJK rune is
+// its own token.
+func semanticTokens(input string) []string {
+	var tokens []string
+	var run []rune
+	flushWord := func() {
+		if len(run) > 0 {
+			tokens = append(tokens, strings.ToLower(string(run)))
+			run = run[:0]
+		}
+	}
+	var cjk []rune
+	flushCJK := func() {
+		switch len(cjk) {
+		case 0:
+		case 1:
+			tokens = append(tokens, string(cjk))
+		default:
+			for index := 0; index+1 < len(cjk); index++ {
+				tokens = append(tokens, string(cjk[index:index+2]))
+			}
+		}
+		cjk = cjk[:0]
+	}
+	for _, symbol := range input {
+		switch {
+		case symbol >= 0x30 && symbol <= 0x39 || symbol >= 0x41 && symbol <= 0x5A || symbol >= 0x61 && symbol <= 0x7A:
+			flushCJK()
+			run = append(run, symbol)
+		case symbol >= 0x4E00 && symbol <= 0x9FFF:
+			flushWord()
+			cjk = append(cjk, symbol)
+		default:
+			flushWord()
+			flushCJK()
+		}
+	}
+	flushWord()
+	flushCJK()
+	return tokens
+}
+
+// tokenBucket is FNV-1a: stable across processes and runs.
+func tokenBucket(token string) int {
+	hash := 2166136261
+	for index := 0; index < len(token); index++ {
+		hash ^= int(token[index])
+		hash *= 16777619
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	return hash
 }
 
 func authorize(writer http.ResponseWriter, request *http.Request) bool {
