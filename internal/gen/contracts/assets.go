@@ -26,6 +26,15 @@ var (
 	//go:embed browser-tool.schema.json
 	BrowserToolSchema []byte
 
+	//go:embed release-manifest.schema.json
+	ReleaseManifestSchema []byte
+
+	//go:embed plinth-worker-tools.schema.json
+	PlinthWorkerToolsSchema []byte
+
+	//go:embed release-inputs.yaml
+	ReleaseInputsYAML []byte
+
 	//go:embed metrics.yaml
 	MetricsYAML []byte
 

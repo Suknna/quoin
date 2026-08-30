@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/release-manifest.schema.json",
+  "x-quoin-contract-version": 1,
+  "title": "Quoin v1 release manifest",
+  "description": "OPS-RELEASE-* 的唯一机器权威。由发布程序从机器契约、依赖锁和真实验收证据生成，禁止手填。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "release_version",
+    "source_commit",
+    "generated_at",
+    "images",
+    "browser",
+    "helm",
+    "compose",
+    "deployment_helper",
+    "offline",
+    "sigstore_bundles",
+    "contracts",
+    "validation"
+  ],
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "release_version": {
+      "type": "string",
+      "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "source_commit": { "$ref": "#/$defs/gitCommit" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quoin", "plinth", "lintel", "stele"],
+      "properties": {
+        "quoin": { "$ref": "#/$defs/multiPlatformImage" },
+        "plinth": { "$ref": "#/$defs/multiPlatformImage" },
+        "lintel": { "$ref": "#/$defs/multiPlatformImage" },
+        "stele": { "$ref": "#/$defs/multiPlatformImage" }
+      }
+    },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["playwright_version", "chromium_revision", "artifacts"],
+      "properties": {
+        "playwright_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "chromium_revision": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": { "$ref": "#/$defs/browserArtifact" },
+            "linux/arm64": { "$ref": "#/$defs/browserArtifact" }
+          }
+        }
+      }
+    },
+    "helm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oci_repository", "oci_digest", "tgz_asset_name", "tgz_sha256"],
+      "properties": {
+        "oci_repository": { "$ref": "#/$defs/ociRepository" },
+        "oci_digest": { "$ref": "#/$defs/ociDigest" },
+        "tgz_asset_name": { "type": "string", "pattern": "^quoin-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\\.tgz$" },
+        "tgz_sha256": { "$ref": "#/$defs/bareSha256" }
+      }
+    },
+    "compose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_name", "bundle_sha256"],
+      "properties": {
+        "asset_name": { "type": "string", "pattern": "^quoin-compose-v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\\.tar\\.gz$" },
+        "bundle_sha256": {
+          "$ref": "#/$defs/bareSha256",
+          "description": "Compose bundle 不含 release-manifest.json，避免 manifest 记录自身容器的哈希。"
+        }
+      }
+    },
+    "deployment_helper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifacts"],
+      "properties": {
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": {
+              "allOf": [
+                { "$ref": "#/$defs/releaseBlob" },
+                { "type": "object", "properties": { "asset_name": { "const": "quoin-deploy-linux-amd64" } } }
+              ]
+            },
+            "linux/arm64": {
+              "allOf": [
+                { "$ref": "#/$defs/releaseBlob" },
+                { "type": "object", "properties": { "asset_name": { "const": "quoin-deploy-linux-arm64" } } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "offline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_name"],
+      "properties": {
+        "asset_name": { "type": "string", "pattern": "^quoin-offline-v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\\.tar\\.zst$" }
+      },
+      "description": "只记录可发现的外部归档与签名 bundle 名称；不得记录归档自身 hash，以免内含 manifest 时形成哈希自引用。"
+    },
+    "sigstore_bundles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_indexes", "image_manifests", "helm_oci", "release_manifest", "compose", "deployment_helper", "offline"],
+      "properties": {
+        "image_indexes": { "$ref": "#/$defs/componentBundleNames" },
+        "image_manifests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["quoin", "plinth", "lintel", "stele"],
+          "properties": {
+            "quoin": { "$ref": "#/$defs/platformBundleNames" },
+            "plinth": { "$ref": "#/$defs/platformBundleNames" },
+            "lintel": { "$ref": "#/$defs/platformBundleNames" },
+            "stele": { "$ref": "#/$defs/platformBundleNames" }
+          }
+        },
+        "helm_oci": { "$ref": "#/$defs/bundleAssetName" },
+        "release_manifest": { "$ref": "#/$defs/bundleAssetName" },
+        "compose": { "$ref": "#/$defs/bundleAssetName" },
+        "deployment_helper": { "$ref": "#/$defs/platformBundleNames" },
+        "offline": { "$ref": "#/$defs/bundleAssetName" }
+      },
+      "description": "每个外部 Sigstore bundle 的可发现资产名；发布门从 bundle 读取 subjectDigest，并与本 manifest 对应 digest 或 blob SHA-256 比较。"
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_config_version",
+        "deployment_config_sha256",
+        "database_schema_version",
+        "database_schema_sha256",
+        "runtime_proto_version",
+        "runtime_proto_sha256",
+        "worker_protocol_version",
+        "worker_protocol_sha256",
+        "metrics_contract_version",
+        "metrics_sha256",
+        "plinth_worker_tools_version",
+        "plinth_worker_tools_sha256",
+        "release_inputs_version",
+        "release_inputs_sha256",
+        "readiness_response_version",
+        "readiness_response_sha256",
+        "journey_catalog_version",
+        "journey_catalog_sha256"
+      ],
+      "properties": {
+        "deployment_config_version": { "type": "integer", "minimum": 1 },
+        "deployment_config_sha256": { "$ref": "#/$defs/bareSha256" },
+        "database_schema_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "database_schema_sha256": { "$ref": "#/$defs/bareSha256" },
+        "runtime_proto_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "runtime_proto_sha256": { "$ref": "#/$defs/bareSha256" },
+        "worker_protocol_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "worker_protocol_sha256": { "$ref": "#/$defs/bareSha256" },
+        "metrics_contract_version": { "type": "integer", "minimum": 1 },
+        "metrics_sha256": { "$ref": "#/$defs/bareSha256" },
+        "plinth_worker_tools_version": { "type": "integer", "minimum": 1 },
+        "plinth_worker_tools_sha256": { "$ref": "#/$defs/bareSha256" },
+        "release_inputs_version": { "type": "integer", "minimum": 1 },
+        "release_inputs_sha256": { "$ref": "#/$defs/bareSha256" },
+        "readiness_response_version": { "type": "integer", "minimum": 1 },
+        "readiness_response_sha256": { "$ref": "#/$defs/bareSha256" },
+        "journey_catalog_version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "journey_catalog_sha256": { "$ref": "#/$defs/bareSha256" }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contracts",
+        "compose_linux_amd64",
+        "compose_linux_arm64",
+        "kubernetes_linux_amd64",
+        "kubernetes_linux_arm64",
+        "offline_import",
+        "supply_chain"
+      ],
+      "properties": {
+        "contracts": { "$ref": "#/$defs/passedEvidence" },
+        "compose_linux_amd64": { "$ref": "#/$defs/passedEvidence" },
+        "compose_linux_arm64": { "$ref": "#/$defs/passedEvidence" },
+        "kubernetes_linux_amd64": { "$ref": "#/$defs/passedEvidence" },
+        "kubernetes_linux_arm64": { "$ref": "#/$defs/passedEvidence" },
+        "offline_import": { "$ref": "#/$defs/passedEvidence" },
+        "supply_chain": { "$ref": "#/$defs/passedEvidence" }
+      }
+    }
+  },
+  "$defs": {
+    "gitCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bareSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ociRepository": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "multiPlatformImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "index_digest", "platforms"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/ociRepository" },
+        "index_digest": { "$ref": "#/$defs/ociDigest" },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["linux/amd64", "linux/arm64"],
+          "properties": {
+            "linux/amd64": { "$ref": "#/$defs/ociDigest" },
+            "linux/arm64": { "$ref": "#/$defs/ociDigest" }
+          }
+        }
+      }
+    },
+    "browserArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/bareSha256" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "bundleAssetName": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+\\.sigstore\\.json$" },
+    "platformBundleNames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linux/amd64", "linux/arm64"],
+      "properties": {
+        "linux/amd64": { "$ref": "#/$defs/bundleAssetName" },
+        "linux/arm64": { "$ref": "#/$defs/bundleAssetName" }
+      }
+    },
+    "componentBundleNames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quoin", "plinth", "lintel", "stele"],
+      "properties": {
+        "quoin": { "$ref": "#/$defs/bundleAssetName" },
+        "plinth": { "$ref": "#/$defs/bundleAssetName" },
+        "lintel": { "$ref": "#/$defs/bundleAssetName" },
+        "stele": { "$ref": "#/$defs/bundleAssetName" }
+      }
+    },
+    "releaseBlob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_name", "sha256"],
+      "properties": {
+        "asset_name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "sha256": { "$ref": "#/$defs/bareSha256" }
+      }
+    },
+    "passedEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_sha256"],
+      "properties": {
+        "status": { "const": "passed" },
+        "evidence_sha256": { "$ref": "#/$defs/bareSha256" }
+      }
+    }
+  }
+}

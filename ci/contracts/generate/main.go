@@ -24,10 +24,13 @@ var projections = map[string]string{
 	"docs/specs/quoin-v1/contracts/schemas/inspection-report.schema.json":             "internal/gen/contracts/inspection-report.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/resource-refresh-execution.schema.json":    "internal/gen/contracts/resource-refresh-execution.schema.json",
 	"docs/specs/quoin-v1/contracts/schemas/browser-execution.schema.json":             "internal/gen/contracts/browser-execution.schema.json",
-	"docs/specs/quoin-v1/contracts/schemas/browser-tool.schema.json":                  "internal/gen/contracts/browser-tool.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/browser-tool.schema.json":                         "internal/gen/contracts/browser-tool.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/release-manifest.schema.json":                     "internal/gen/contracts/release-manifest.schema.json",
+	"docs/specs/quoin-v1/contracts/schemas/plinth-worker-tools.schema.json":                  "internal/gen/contracts/plinth-worker-tools.schema.json",
 	"docs/specs/quoin-v1/contracts/metrics.yaml":                                      "internal/gen/contracts/metrics.yaml",
 	"docs/specs/quoin-v1/contracts/connection-probes.yaml":                            "internal/gen/contracts/connection-probes.yaml",
 	"docs/specs/quoin-v1/contracts/plinth-worker-tools.yaml":                          "internal/gen/contracts/plinth-worker-tools.yaml",
+	"docs/specs/quoin-v1/contracts/release-inputs.yaml":                               "internal/gen/contracts/release-inputs.yaml",
 }
 
 func main() {
