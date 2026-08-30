@@ -53,9 +53,26 @@ export interface KnowledgeDetail extends KnowledgeSummary {
   versionCount: number
 }
 
+// index/embedding 状态的人类标签（UI-KNOWLEDGE-002/005：分数与索引状态并列展示）。
+export const indexStateLabels: Record<string, string> = {
+  ready: '语义索引就绪',
+  stale: '语义索引已换代（结果来自旧一代索引）',
+  rebuilding: '语义索引重建中',
+}
+
+export const embeddingStateLabels: Record<string, string> = {
+  not_configured: '未配置语义索引',
+  pending: '语义索引生成中',
+  ready: '语义索引就绪',
+  failed: '语义索引生成失败',
+  stale: '语义索引待重建',
+  rebuilding: '语义索引重建中',
+}
+
 export interface KnowledgeSearchHit {
   knowledge: KnowledgeSummary
   score: number
+  indexState?: 'ready' | 'stale' | 'rebuilding'
 }
 
 export interface KnowledgeQueryResult {

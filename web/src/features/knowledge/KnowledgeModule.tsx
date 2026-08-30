@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { feedbackValueLabels, fetchFeedback, type FeedbackTimeline, type FeedbackTargetType } from '../feedback/api'
 import {
-  api, candidateSourceLabels, candidateStateLabels,
+  api, candidateSourceLabels, candidateStateLabels, embeddingStateLabels, indexStateLabels,
   type CandidateSummary, type KnowledgeDetail, type KnowledgeQueryResult, type KnowledgeSearchHit, type KnowledgeSummary, type KnowledgeVersionDetail, type KnowledgeVersionSummary,
 } from './api'
 
@@ -74,7 +74,7 @@ export function KnowledgeList({ onOpen }: { onOpen: (knowledgeId: string) => voi
     } finally { setLoadingMore(false) }
   }
   const renderItems = (matches: KnowledgeSummary[], label: string) => <section aria-label={label}><h3>{label}</h3>{matches.length === 0 ? <p className="detail-muted">没有匹配项。</p> : <ul className="knowledge-list">{matches.map((item) => <li key={item.id}><button className="knowledge-item" onClick={() => onOpen(item.id)}><strong>{item.title}</strong><span className="detail-muted">v{item.currentVersionSeq} · {item.eligible ? '可复用' : '已退出检索'}</span></button></li>)}</ul>}</section>
-  const renderHits = (matches: KnowledgeSearchHit[], label: string, secondaryScores: Map<string, number>) => <section aria-label={label}><h3>{label}</h3>{matches.length === 0 ? <p className="detail-muted">没有匹配项。</p> : <ul className="knowledge-list">{matches.map((hit) => <li key={hit.knowledge.id}><button className="knowledge-item" onClick={() => onOpen(hit.knowledge.id)}><strong>{hit.knowledge.title}</strong><span className="detail-muted">{label}分数 {hit.score.toFixed(3)}{secondaryScores.has(hit.knowledge.id) ? ` · 同时命中另一种检索（分数 ${secondaryScores.get(hit.knowledge.id)?.toFixed(3)}）` : ''}</span></button></li>)}</ul>}</section>
+  const renderHits = (matches: KnowledgeSearchHit[], label: string, secondaryScores: Map<string, number>, withIndexState: boolean) => <section aria-label={label}><h3>{label}</h3>{matches.length === 0 ? <p className="detail-muted">没有匹配项。</p> : <ul className="knowledge-list">{matches.map((hit) => <li key={hit.knowledge.id}><button className="knowledge-item" onClick={() => onOpen(hit.knowledge.id)}><strong>{hit.knowledge.title}</strong><span className="detail-muted">{label}分数 {hit.score.toFixed(3)}{secondaryScores.has(hit.knowledge.id) ? ` · 同时命中另一种检索（分数 ${secondaryScores.get(hit.knowledge.id)?.toFixed(3)}）` : ''}{withIndexState && hit.indexState ? ` · ${indexStateLabels[hit.indexState] ?? hit.indexState}` : ''}</span></button></li>)}</ul>}</section>
   if (error) return <p className="field-error" role="alert">{error}</p>
   if (!items) return <p className="inline-status">正在读取知识…</p>
   const exact = results?.exactTextMatches ?? []
@@ -84,7 +84,7 @@ export function KnowledgeList({ onOpen }: { onOpen: (knowledgeId: string) => voi
   const exactScores = new Map(exact.map((hit) => [hit.knowledge.id, hit.score]))
   return <>
     <form className="knowledge-search" onSubmit={(event) => { event.preventDefault(); void search() }}><label className="field"><span>检索知识</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入关键词" /></label><button className="secondary-button" type="submit">搜索</button></form>
-    {results ? <>{renderHits(exact, '精确文本匹配', semanticScores)}{renderHits(semantic, '语义相似', exactScores)}{searchCursor && <button className="secondary-button" disabled={loadingMore} onClick={() => void loadMoreSearch()}>{loadingMore ? '正在加载…' : '加载更多'}</button>}</> : <>{items.length === 0 ? <p className="detail-muted">还没有确认过任何知识。在初步分析、巡检报告或调查消息上使用“整理为知识”，确认后会出现在这里。</p> : renderItems(items, '已确认知识')}{nextCursor && <button className="secondary-button" disabled={loadingMore} onClick={() => void loadMoreBrowse()}>{loadingMore ? '正在加载…' : '加载更多'}</button>}</>}
+    {results ? <>{renderHits(exact, '精确文本匹配', semanticScores, false)}{renderHits(semantic, '语义相似', exactScores, true)}{searchCursor && <button className="secondary-button" disabled={loadingMore} onClick={() => void loadMoreSearch()}>{loadingMore ? '正在加载…' : '加载更多'}</button>}</> : <>{items.length === 0 ? <p className="detail-muted">还没有确认过任何知识。在初步分析、巡检报告或调查消息上使用“整理为知识”，确认后会出现在这里。</p> : renderItems(items, '已确认知识')}{nextCursor && <button className="secondary-button" disabled={loadingMore} onClick={() => void loadMoreBrowse()}>{loadingMore ? '正在加载…' : '加载更多'}</button>}</>}
   </>
 }
 
@@ -209,7 +209,7 @@ export function KnowledgeDetailPane({ knowledgeId }: { knowledgeId: string }) {
       {confirmingStop && <div className="dialog-scrim" role="presentation" onClick={() => setConfirmingStop(false)}><div className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="stop-reuse-title" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'Escape') setConfirmingStop(false) }}><h3 id="stop-reuse-title">停止复用当前版本？</h3><p>该版本会永久退出检索，不能重新启用。若要恢复内容，请创建并确认一个新版本。</p><div className="dialog-actions"><button className="secondary-button" autoFocus onClick={() => setConfirmingStop(false)}>取消</button><button className="primary-button danger" disabled={busy} onClick={() => void stopReuse()}>确认停止复用</button></div></div></div>}
       <section aria-label="当前版本">
         <h3>当前版本</h3>
-        {currentVersion ? <><p>{currentVersion.body}</p><p className="detail-muted">检索资格：{currentVersion.eligible ? '可检索' : '已退出检索'} · Embedding 索引：{currentVersion.embeddingState}</p></> : <p className="detail-muted">正在读取当前版本…</p>}
+        {currentVersion ? <><p>{currentVersion.body}</p><p className="detail-muted">检索资格：{currentVersion.eligible ? '可检索' : '已退出检索'} · Embedding 索引：{embeddingStateLabels[currentVersion.embeddingState] ?? currentVersion.embeddingState}</p></> : <p className="detail-muted">正在读取当前版本…</p>}
       </section>
       <section aria-label="来源诊断与反馈">
         <h3>来源诊断与反馈</h3>
@@ -230,7 +230,7 @@ export function KnowledgeDetailPane({ knowledgeId }: { knowledgeId: string }) {
               <strong>v{version.versionSeq} · {version.title}</strong>
               <span className="detail-muted">
                 {version.id === detail.currentVersionId ? '当前版本 · ' : ''}
-                {version.eligible ? '可检索' : '已退出检索'} · 创建于 {formatTime(version.createdAt)}
+                {version.eligible ? '可检索' : '已退出检索'} · {embeddingStateLabels[version.embeddingState] ?? version.embeddingState} · 创建于 {formatTime(version.createdAt)}
               </span>
             </li>
           ))}
