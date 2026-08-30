@@ -9,6 +9,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,69 @@ type artifactMetadata struct {
 func (application *apiServer) registerEvidenceRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/evidence/{evidenceId}", OperationID: "getEvidence"}, application.getEvidence)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/artifacts/{artifactId}", OperationID: "getArtifactMetadata"}, application.getArtifactMetadata)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/source-materials/{materialId}", OperationID: "getSourceMaterial"}, application.getSourceMaterial)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/source-materials/{materialId}/content", OperationID: "downloadSourceMaterialContent"}, application.downloadSourceMaterialContent)
+}
+
+type sourceMaterialBody struct {
+	Body sourceMaterialSummary `json:"body"`
+}
+type sourceMaterialSummary struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Digest    string `json:"digest"`
+	SizeBytes int64  `json:"sizeBytes"`
+	CreatedAt string `json:"createdAt"`
+}
+type sourceMaterialContentBody struct {
+	ContentType string `header:"Content-Type"`
+	Body        []byte
+}
+
+func (application *apiServer) getSourceMaterial(ctx context.Context, input *struct {
+	Session    string `cookie:"__Host-quoin-session"`
+	MaterialID string `path:"materialId"`
+}) (*sourceMaterialBody, error) {
+	if _, err := application.authenticateFull(ctx, input.Session, "读取来源材料"); err != nil {
+		return nil, err
+	}
+	id, err := strconv.ParseInt(input.MaterialID, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, huma.Error404NotFound("来源材料不存在", nil)
+	}
+	var item sourceMaterialSummary
+	if err := application.db.QueryRowContext(ctx, `SELECT id,kind,digest,size_bytes,created_at FROM source_materials WHERE id=?`, id).Scan(&item.ID, &item.Kind, &item.Digest, &item.SizeBytes, &item.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("来源材料不存在", nil)
+		}
+		return nil, huma.Error500InternalServerError("无法读取来源材料", err)
+	}
+	return &sourceMaterialBody{Body: item}, nil
+}
+
+func (application *apiServer) downloadSourceMaterialContent(ctx context.Context, input *struct {
+	Session    string `cookie:"__Host-quoin-session"`
+	MaterialID string `path:"materialId"`
+}) (*sourceMaterialContentBody, error) {
+	if _, err := application.authenticateFull(ctx, input.Session, "读取来源材料原文"); err != nil {
+		return nil, err
+	}
+	id, err := strconv.ParseInt(input.MaterialID, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, huma.Error404NotFound("来源材料正文不存在", nil)
+	}
+	var kind string
+	var content *string
+	if err := application.db.QueryRowContext(ctx, `SELECT kind,content FROM source_materials WHERE id=?`, id).Scan(&kind, &content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, huma.Error404NotFound("来源材料正文不存在", nil)
+		}
+		return nil, huma.Error500InternalServerError("无法读取来源材料正文", err)
+	}
+	if kind != "knowledge_import" || content == nil {
+		return nil, huma.Error404NotFound("来源材料正文不存在", nil)
+	}
+	return &sourceMaterialContentBody{ContentType: "text/plain; charset=utf-8", Body: []byte(*content)}, nil
 }
 
 // getEvidence returns the immutable detail of one Evidence row.

@@ -51,7 +51,7 @@ func (handler *Handler) createAnalysisKnowledgeCandidate(ctx context.Context, in
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -63,7 +63,7 @@ func (handler *Handler) createAnalysisKnowledgeCandidate(ctx context.Context, in
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	result, err := handler.Knowledge.CreateFromAnalysisOutput(ctx, principalID, input.Body.ClientCommandID, occurrenceID, analysisID)
+	result, err := handler.Knowledge.CreateFromAnalysisOutputAs(ctx, actor, input.Body.ClientCommandID, occurrenceID, analysisID)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -80,7 +80,7 @@ func (handler *Handler) createInvestigationKnowledgeCandidate(ctx context.Contex
 		SourceID        string `json:"sourceId"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -95,7 +95,7 @@ func (handler *Handler) createInvestigationKnowledgeCandidate(ctx context.Contex
 	if input.Body.SourceType != knowledge.SourceMessage {
 		return nil, problemUnprocessable("调查来源必须是 assistant 消息。")
 	}
-	result, err := handler.Knowledge.CreateFromInvestigationMessage(ctx, principalID, input.Body.ClientCommandID, investigationID, sourceID)
+	result, err := handler.Knowledge.CreateFromInvestigationMessageAs(ctx, actor, input.Body.ClientCommandID, investigationID, sourceID)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -111,7 +111,7 @@ func (handler *Handler) createReportKnowledgeCandidate(ctx context.Context, inpu
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -123,7 +123,7 @@ func (handler *Handler) createReportKnowledgeCandidate(ctx context.Context, inpu
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	result, err := handler.Knowledge.CreateFromReport(ctx, principalID, input.Body.ClientCommandID, runID, reportVersion)
+	result, err := handler.Knowledge.CreateFromReportAs(ctx, actor, input.Body.ClientCommandID, runID, reportVersion)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -140,6 +140,8 @@ func candidateCommandProblem(err error) *problemError {
 		return problem(404, "not_found", "候选不存在。")
 	case errors.Is(err, knowledge.ErrCommandReused):
 		return commandReusedProblem()
+	case errors.Is(err, knowledge.ErrActorRevoked):
+		return problem(401, "unauthenticated", "登录状态已失效，请重新登录。")
 	case errors.Is(err, knowledge.ErrEmptyEdit):
 		return problemUnprocessable("至少修改标题、正文或适用范围。")
 	case errors.Is(err, knowledge.ErrInvalidScope):
@@ -237,7 +239,7 @@ func (handler *Handler) editKnowledgeCandidateDraft(ctx context.Context, input *
 		Scope            *json.RawMessage `json:"scope,omitempty"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -245,7 +247,7 @@ func (handler *Handler) editKnowledgeCandidateDraft(ctx context.Context, input *
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.EditDraft(ctx, principalID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body, input.Body.Scope)
+	summary, err := handler.Knowledge.EditDraftAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body, input.Body.Scope)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -260,7 +262,7 @@ func (handler *Handler) confirmKnowledgeCandidate(ctx context.Context, input *st
 		ExpectedRevision int64  `json:"expectedRevision" minimum:"0"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -268,7 +270,7 @@ func (handler *Handler) confirmKnowledgeCandidate(ctx context.Context, input *st
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.Confirm(ctx, principalID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision)
+	summary, err := handler.Knowledge.ConfirmAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -283,7 +285,7 @@ func (handler *Handler) excludeKnowledgeCandidate(ctx context.Context, input *st
 		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
 	}
 }) (*candidateBody, error) {
-	principalID, authProblem := handler.user(ctx, input.Session)
+	actor, authProblem := handler.actor(ctx, input.Session)
 	if authProblem != nil {
 		return nil, authProblem
 	}
@@ -291,7 +293,7 @@ func (handler *Handler) excludeKnowledgeCandidate(ctx context.Context, input *st
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.Exclude(ctx, principalID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRowVersion)
+	summary, err := handler.Knowledge.ExcludeAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -427,6 +429,11 @@ func (handler *Handler) listKnowledgeVersions(ctx context.Context, input *struct
 		if cursorProblem := decodeCursor(input.Cursor, &cursor); cursorProblem != nil {
 			return nil, cursorProblem
 		}
+		// A version cursor is scoped to one knowledge: reusing another
+		// knowledge's cursor would apply a foreign keyset boundary.
+		if cursor.KnowledgeID != knowledgeID || cursor.ID <= 0 {
+			return nil, problem(400, "malformed_request", "分页游标与当前知识不一致。")
+		}
 		after = &cursor
 	}
 	items, next, err := handler.Knowledge.ListVersions(ctx, knowledgeID, after, input.Limit)
@@ -436,6 +443,7 @@ func (handler *Handler) listKnowledgeVersions(ctx context.Context, input *struct
 	output := &versionPageBody{}
 	output.Body.Items = items
 	if next != nil {
+		next.KnowledgeID = knowledgeID
 		output.Body.NextCursor = encodeCursor(*next)
 	}
 	return output, nil

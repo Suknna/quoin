@@ -13,19 +13,22 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/feedback"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/danielgtaylor/huma/v2"
 )
 
 // Authenticate resolves the session cookie to the acting user id.
-type Authenticate func(ctx context.Context, cookie string) (int64, error)
+type Authenticate func(ctx context.Context, cookie string) (auth.Session, error)
 
 // Handler owns the knowledge and feedback routes.
 type Handler struct {
-	Feedback     *feedback.Service
-	Knowledge    *knowledge.Service
-	Authenticate Authenticate
+	Feedback       *feedback.Service
+	Knowledge      *knowledge.Service
+	Authenticate   Authenticate
+	DispatchImport func(context.Context, int64) error
+	DispatchCancel func(context.Context, int64) error
 }
 
 // problemError serializes to the frozen ErrorModel shape (HTTP-ERROR-001),
@@ -117,14 +120,262 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/items/{knowledgeId}", OperationID: "getKnowledge"}, handler.getKnowledge)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/items/{knowledgeId}/versions", OperationID: "listKnowledgeVersions"}, handler.listKnowledgeVersions)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/items/{knowledgeId}/versions/{versionId}", OperationID: "getKnowledgeVersion"}, handler.getKnowledgeVersion)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches", OperationID: "importKnowledgeBatch", DefaultStatus: http.StatusAccepted}, handler.importBatch)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/import-batches", OperationID: "listKnowledgeImportBatches"}, handler.listImportBatches)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/import-batches/{batchId}", OperationID: "getKnowledgeImportBatch"}, handler.getImportBatch)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches/{batchId}/confirm", OperationID: "confirmKnowledgeBatch"}, handler.confirmImportBatch)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches/{batchId}/cancel", OperationID: "cancelKnowledgeImportBatch"}, handler.cancelImportBatch)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/items/{knowledgeId}/versions", OperationID: "createKnowledgeRevisionCandidate", DefaultStatus: http.StatusCreated}, handler.createRevisionCandidate)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/items/{knowledgeId}/versions/{versionId}/stop-reuse", OperationID: "stopKnowledgeReuse", DefaultStatus: http.StatusNoContent}, handler.stopReuse)
+}
+
+func (handler *Handler) importBatch(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	Body    struct {
+		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		Text            string `json:"text" minLength:"1" maxLength:"1048576"`
+	}
+}) (*struct {
+	Body knowledge.ImportBatchDetail `json:"body"`
+}, error) {
+	actor, authProblem := handler.actor(ctx, input.Session)
+	if authProblem != nil {
+		return nil, authProblem
+	}
+	result, err := handler.Knowledge.StartImportAs(ctx, actor, input.Body.ClientCommandID, input.Body.Text)
+	if err != nil {
+		switch {
+		case errors.Is(err, knowledge.ErrModelProviderMissing):
+			return nil, problem(503, "model_provider_unavailable", "没有可用且已验证的模型供应商。")
+		case errors.Is(err, knowledge.ErrEmptyImport):
+			return nil, problemUnprocessable("导入原文不能为空。")
+		case errors.Is(err, knowledge.ErrCommandReused):
+			return nil, commandReusedProblem()
+		case errors.Is(err, knowledge.ErrActorRevoked):
+			return nil, problem(401, "unauthenticated", "登录状态已失效，请重新登录。")
+		default:
+			return nil, problem(500, "unavailable", "暂时无法创建知识导入，请重试。")
+		}
+	}
+	if handler.DispatchImport != nil {
+		// The transaction already made the batch observable. A disconnected
+		// runtime leaves its frozen attempt Queued for attach-time dispatch;
+		// receipt is therefore still truthful and idempotent.
+		_ = handler.DispatchImport(ctx, result.AttemptID)
+	}
+	return &struct {
+		Body knowledge.ImportBatchDetail `json:"body"`
+	}{Body: result.Batch}, nil
+}
+
+func (handler *Handler) confirmImportBatch(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	BatchID string `path:"batchId"`
+	Body    struct {
+		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		Items           []struct {
+			CandidateID      string `json:"candidateId" minLength:"1" pattern:"^[1-9][0-9]*$"`
+			ExpectedRevision int64  `json:"expectedRevision" minimum:"0"`
+		} `json:"items" minItems:"1"`
+	}
+}) (*struct {
+	Body knowledge.ImportBatchDetail `json:"body"`
+}, error) {
+	actor, p := handler.actor(ctx, input.Session)
+	if p != nil {
+		return nil, p
+	}
+	batchID, p := parseID(input.BatchID)
+	if p != nil {
+		return nil, p
+	}
+	items := make([]knowledge.BatchConfirmation, 0, len(input.Body.Items))
+	for _, item := range input.Body.Items {
+		id, idp := parseID(item.CandidateID)
+		if idp != nil {
+			return nil, idp
+		}
+		items = append(items, knowledge.BatchConfirmation{CandidateID: id, ExpectedRevision: item.ExpectedRevision})
+	}
+	detail, err := handler.Knowledge.ConfirmBatchAs(ctx, actor, input.Body.ClientCommandID, batchID, items)
+	if err != nil {
+		return nil, candidateCommandProblem(err)
+	}
+	return &struct {
+		Body knowledge.ImportBatchDetail `json:"body"`
+	}{Body: detail}, nil
+}
+
+func (handler *Handler) cancelImportBatch(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	BatchID string `path:"batchId"`
+	Body    struct {
+		ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
+	}
+}) (*struct {
+	Body knowledge.ImportBatchDetail `json:"body"`
+}, error) {
+	actor, p := handler.actor(ctx, input.Session)
+	if p != nil {
+		return nil, p
+	}
+	batchID, p := parseID(input.BatchID)
+	if p != nil {
+		return nil, p
+	}
+	detail, attemptID, err := handler.Knowledge.CancelBatchAs(ctx, actor, input.Body.ClientCommandID, batchID, input.Body.ExpectedRowVersion)
+	if err != nil {
+		return nil, candidateCommandProblem(err)
+	}
+	if attemptID != 0 && handler.DispatchCancel != nil {
+		_ = handler.DispatchCancel(ctx, attemptID)
+	}
+	return &struct {
+		Body knowledge.ImportBatchDetail `json:"body"`
+	}{Body: detail}, nil
+}
+
+func (handler *Handler) createRevisionCandidate(ctx context.Context, input *struct {
+	Session     string `cookie:"__Host-quoin-session"`
+	KnowledgeID string `path:"knowledgeId"`
+	Body        struct {
+		ClientCommandID          string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		ExpectedCurrentVersionID string `json:"expectedCurrentVersionId" minLength:"1" pattern:"^[1-9][0-9]*$"`
+		ExpectedRowVersion       int64  `json:"expectedRowVersion" minimum:"1"`
+	}
+}) (*candidateBody, error) {
+	actor, p := handler.actor(ctx, input.Session)
+	if p != nil {
+		return nil, p
+	}
+	knowledgeID, p := parseID(input.KnowledgeID)
+	if p != nil {
+		return nil, p
+	}
+	versionID, p := parseID(input.Body.ExpectedCurrentVersionID)
+	if p != nil {
+		return nil, p
+	}
+	candidate, created, err := handler.Knowledge.CreateRevisionCandidateAs(ctx, actor, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion)
+	if err != nil {
+		return nil, candidateCommandProblem(err)
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	return &candidateBody{Status: status, Body: candidate}, nil
+}
+
+func (handler *Handler) stopReuse(ctx context.Context, input *struct {
+	Session     string `cookie:"__Host-quoin-session"`
+	KnowledgeID string `path:"knowledgeId"`
+	VersionID   string `path:"versionId"`
+	Body        struct {
+		ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
+	}
+}) (*struct{}, error) {
+	actor, p := handler.actor(ctx, input.Session)
+	if p != nil {
+		return nil, p
+	}
+	knowledgeID, p := parseID(input.KnowledgeID)
+	if p != nil {
+		return nil, p
+	}
+	versionID, p := parseID(input.VersionID)
+	if p != nil {
+		return nil, p
+	}
+	if err := handler.Knowledge.StopReuseAs(ctx, actor, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion); err != nil {
+		return nil, candidateCommandProblem(err)
+	}
+	return &struct{}{}, nil
+}
+
+func (handler *Handler) listImportBatches(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	State   string `query:"state" enum:"Processing,AwaitingConfirmation,Failed,Completed,Cancelled"`
+	Cursor  string `query:"cursor"`
+	Limit   int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
+}) (*struct {
+	Body struct {
+		Items      []knowledge.ImportBatchSummary `json:"items"`
+		NextCursor string                         `json:"nextCursor,omitempty"`
+	} `json:"body"`
+}, error) {
+	if _, authProblem := handler.user(ctx, input.Session); authProblem != nil {
+		return nil, authProblem
+	}
+	var after knowledge.ImportBatchCursor
+	if err := decodeCursor(input.Cursor, &after); err != nil {
+		return nil, err
+	}
+	var cursor *knowledge.ImportBatchCursor
+	if input.Cursor != "" {
+		// The batch cursor binds the state filter it was minted under.
+		if after.State != input.State {
+			return nil, problem(400, "malformed_request", "分页游标与当前筛选不一致。")
+		}
+		cursor = &after
+	}
+	items, next, err := handler.Knowledge.ListImportBatches(ctx, input.State, cursor, input.Limit)
+	if err != nil {
+		// Cursor shape and scope were already validated above; a failure here
+		// is a server-side read problem, not a malformed request.
+		return nil, problem(500, "unavailable", "暂时无法读取导入批次，请重试。")
+	}
+	output := &struct {
+		Body struct {
+			Items      []knowledge.ImportBatchSummary `json:"items"`
+			NextCursor string                         `json:"nextCursor,omitempty"`
+		} `json:"body"`
+	}{}
+	output.Body.Items = items
+	if next != nil {
+		output.Body.NextCursor = encodeCursor(next)
+	}
+	return output, nil
+}
+
+func (handler *Handler) getImportBatch(ctx context.Context, input *struct {
+	Session string `cookie:"__Host-quoin-session"`
+	BatchID string `path:"batchId"`
+}) (*struct {
+	Body knowledge.ImportBatchDetail `json:"body"`
+}, error) {
+	if _, authProblem := handler.user(ctx, input.Session); authProblem != nil {
+		return nil, authProblem
+	}
+	batchID, idProblem := parseID(input.BatchID)
+	if idProblem != nil {
+		return nil, idProblem
+	}
+	batch, err := handler.Knowledge.GetImportBatch(ctx, batchID)
+	if errors.Is(err, knowledge.ErrNotFound) {
+		return nil, problem(404, "not_found", "导入批次不存在。")
+	}
+	if err != nil {
+		return nil, problem(500, "unavailable", "暂时无法读取导入批次，请重试。")
+	}
+	return &struct {
+		Body knowledge.ImportBatchDetail `json:"body"`
+	}{Body: batch}, nil
+}
+
+func (handler *Handler) actor(ctx context.Context, cookie string) (knowledge.MutationActor, *problemError) {
+	session, err := handler.Authenticate(ctx, cookie)
+	if err != nil {
+		return knowledge.MutationActor{}, problem(401, "unauthenticated", "请重新登录。")
+	}
+	return knowledge.MutationActor{ID: session.User.ID, AuthRevision: session.User.AuthRevision}, nil
 }
 
 func (handler *Handler) user(ctx context.Context, cookie string) (int64, *problemError) {
-	principalID, err := handler.Authenticate(ctx, cookie)
-	if err != nil {
-		return 0, problem(401, "unauthenticated", "请重新登录。")
-	}
-	return principalID, nil
+	actor, err := handler.actor(ctx, cookie)
+	return actor.ID, err
 }
 
 func feedbackProblem(err error) *problemError {

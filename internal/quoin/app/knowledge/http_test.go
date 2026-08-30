@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/feedback"
 	domainknowledge "github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/danielgtaylor/huma/v2"
@@ -49,11 +51,11 @@ func newHTTPFixture(t *testing.T) *httpFixture {
 	domainHandler := &Handler{
 		Feedback:  feedback.NewService(db),
 		Knowledge: domainknowledge.NewService(db),
-		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+		Authenticate: func(ctx context.Context, cookie string) (auth.Session, error) {
 			if cookie != f.cookie {
-				return 0, errors.New("unauthenticated")
+				return auth.Session{}, errors.New("unauthenticated")
 			}
-			return f.userID, nil
+			return auth.Session{User: auth.User{ID: f.userID}}, nil
 		},
 	}
 	mux := http.NewServeMux()
@@ -425,4 +427,93 @@ func TestFeedbackValidationThroughHTTP(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d", recorder.Code)
 	}
+}
+
+// TestVersionCursorIsScopeBound proves a version cursor minted under one
+// knowledge is malformed for another: the cross-resource keyset boundary is
+// rejected instead of silently skipping data (HTTP-PAGE-001).
+func TestVersionCursorIsScopeBound(t *testing.T) {
+	f := newHTTPFixture(t)
+	f.seedUser(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Two reusable knowledges with one current version each, seeded through
+	// the same trigger-satisfying shape the domain confirm path writes.
+	confirmed := make([]string, 0, 2)
+	for _, title := range []string{"游标甲", "游标乙"} {
+		material, err := f.db.Exec(`INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at) VALUES('knowledge_import',?,1,'原文',?,?)`, strings.Repeat("3", 64), f.userID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		materialID, _ := material.LastInsertId()
+		importBatch, err := f.db.Exec(`INSERT INTO knowledge_import_batches(source_material_id,state,created_by,created_at) VALUES(?, 'Processing', ?, ?)`, materialID, f.userID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		importBatchID, _ := importBatch.LastInsertId()
+		if _, err := f.db.Exec(`UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=?`, importBatchID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.Exec(`UPDATE knowledge_import_batches SET state='Completed',row_version=row_version+1 WHERE id=?`, importBatchID); err != nil {
+			t.Fatal(err)
+		}
+		knowledge, err := f.db.Exec(`INSERT INTO reusable_knowledge(created_by,created_at) VALUES(?,?)`, f.userID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		knowledgeID, _ := knowledge.LastInsertId()
+		// The candidate is confirmed first so the version trigger accepts its
+		// producer; the version then becomes the current pointer.
+		candidate, err := f.db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,confirmed_knowledge_id,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at) VALUES(?, 'source_material', ?, 1, 'Confirmed', ?, '{"v":1}', ?, ?, 0, ?, ?)`, importBatchID, materialID, knowledgeID, title, title+"正文", f.userID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidateID, _ := candidate.LastInsertId()
+		version, err := f.db.Exec(`INSERT INTO knowledge_versions(knowledge_id,version_seq,title,body,scope_json,source_candidate_id,created_by,created_at) VALUES(?,1,?,?,NULL,?,?,?)`, knowledgeID, title, title+"正文", candidateID, f.userID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		versionID, _ := version.LastInsertId()
+		if _, err := f.db.Exec(`UPDATE reusable_knowledge SET current_version_id=?,row_version=row_version+1 WHERE id=?`, versionID, knowledgeID); err != nil {
+			t.Fatal(err)
+		}
+		confirmed = append(confirmed, strconv.FormatInt(knowledgeID, 10))
+	}
+
+	first, second := confirmed[0], confirmed[1]
+	mint := func(scope string, id int64) string {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]int64{"k": mustParse(t, scope), "i": id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	own := mint(first, 1)
+	// The minting knowledge accepts its scoped cursor.
+	status, _ := f.do(t, http.MethodGet, "/api/v1/knowledge/items/"+first+"/versions?cursor="+url.QueryEscape(own), "")
+	if status != http.StatusOK {
+		t.Fatalf("own cursor status = %d, want 200", status)
+	}
+	// The same token under the second knowledge must be malformed, never a
+	// silently wrong (empty) page.
+	status, _ = f.do(t, http.MethodGet, "/api/v1/knowledge/items/"+second+"/versions?cursor="+url.QueryEscape(own), "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("cross-knowledge cursor status = %d, want 400", status)
+	}
+	// A cursor without any scope binding is malformed outright.
+	unscoped := base64.RawURLEncoding.EncodeToString([]byte(`{"i":1}`))
+	status, _ = f.do(t, http.MethodGet, "/api/v1/knowledge/items/"+first+"/versions?cursor="+url.QueryEscape(unscoped), "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("unscoped cursor status = %d, want 400", status)
+	}
+}
+
+func mustParse(t *testing.T, value string) int64 {
+	t.Helper()
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
