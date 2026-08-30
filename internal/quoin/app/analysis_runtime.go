@@ -135,6 +135,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())
 		}
+	case "knowledge_extraction":
+		if service.Knowledge != nil {
+			if err := service.Knowledge.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "knowledge.accept_failed", err.Error())
+			}
+		}
 	case "investigation":
 		if service.Investigations != nil {
 			if err := service.Investigations.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
@@ -187,6 +193,10 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	}
 	if attemptType == "inspection_analysis" {
 		service.handleInspectionReportResultProposal(ctx, envelope, proposal)
+		return
+	}
+	if attemptType == "knowledge_extraction" {
+		service.handleKnowledgeExtractionResultProposal(ctx, envelope, proposal)
 		return
 	}
 	if attemptType != "initial_analysis" {
@@ -294,6 +304,12 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.cancel_ack", err.Error())
 		}
+	case "knowledge_extraction":
+		if service.Knowledge != nil {
+			if err := service.Knowledge.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "knowledge.cancel_ack", err.Error())
+			}
+		}
 	case "investigation":
 		if service.Investigations != nil {
 			if err := service.Investigations.CancelAck(ctx, ack.GetAttemptId()); err != nil {
@@ -319,4 +335,31 @@ func (service *RuntimeService) attemptTypeOf(ctx context.Context, attemptID int6
 	var attemptType string
 	err := service.Analyses.DB().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType)
 	return attemptType, err
+}
+
+// handleAttemptRejectRouted closes a knowledge import only for a terminal
+// dispatch rejection. Capacity rejection deliberately preserves Assigned so a
+// later reconnect/reconcile can replay the frozen dispatch.
+func (service *RuntimeService) handleAttemptRejectRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, reject *runtimev1.AttemptReject) {
+	attemptType, err := service.attemptTypeOf(ctx, reject.GetAttemptId())
+	if err != nil {
+		sharedops.LogEvent("quoin", "error", "reject.lookup_failed", err.Error())
+		return
+	}
+	if attemptType != "knowledge_extraction" || service.Knowledge == nil {
+		sharedops.LogEvent("quoin", "info", "reject.unhandled_type", attemptType)
+		return
+	}
+	var reason string
+	switch reject.GetReason() {
+	case runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_NO_CAPACITY:
+		reason = "no_capacity"
+	case runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INTERNAL:
+		reason = "provider_unavailable"
+	default:
+		reason = "worker_protocol_error"
+	}
+	if err := service.Knowledge.RejectExtraction(ctx, reject.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), reason); err != nil && !errors.Is(err, attempt.ErrLateResult) {
+		sharedops.LogEvent("quoin", "error", "knowledge.reject_failed", fmt.Sprintf("attempt=%d %v", reject.GetAttemptId(), err))
+	}
 }

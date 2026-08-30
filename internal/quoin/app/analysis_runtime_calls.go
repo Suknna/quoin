@@ -36,6 +36,10 @@ func (service *RuntimeService) agentAttempts(attemptType string) *attempt.Servic
 		if service.Inspections != nil {
 			return service.Inspections.Attempts()
 		}
+	case "knowledge_extraction":
+		if service.Knowledge != nil {
+			return service.Knowledge.Attempts()
+		}
 	}
 	return nil
 }
@@ -405,6 +409,11 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 			return fmt.Errorf("business systems not wired")
 		}
 		finalizeUnbound = func() error { return service.BusinessSystems.VerificationAttempts().CancelAck(ctx, attemptID) }
+	case "knowledge_extraction":
+		if service.Knowledge == nil {
+			return fmt.Errorf("knowledge service not wired")
+		}
+		finalizeUnbound = func() error { return service.Knowledge.Attempts().CancelAck(ctx, attemptID) }
 	default:
 		return finalizeUnbound()
 	}

@@ -122,6 +122,12 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		}
 		return
 	}
+	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
+		if err := service.Knowledge.InterruptExtraction(ctx, view.ID, reason); err != nil {
+			sharedops.LogEvent("quoin", "error", "knowledge.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+		}
+		return
+	}
 	if view.AttemptType == "investigation" {
 		// Create recovery_loss before *any* browser activity observation. The
 		// same BEGIN IMMEDIATE ordering point owns both the no-browser fast path
@@ -517,6 +523,12 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 				}
 				continue
 			}
+			if view.State == "Assigned" && service.Knowledge != nil && view.AttemptType == "knowledge_extraction" {
+				// Accept can be lost while the Runtime executes the frozen import.
+				if err := service.Knowledge.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
+				}
+			}
 			if view.State == "Assigned" && service.Analyses != nil && view.AttemptType == "initial_analysis" {
 				// The accept was lost with the stream; the runtime is
 				// already executing the attempt.
@@ -576,12 +588,15 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 // agent attempt with its frozen binding (the schema forbids rebinding;
 // the accept fence matches the boot, RUNTIME-TASK-005).
 func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view attempt.View) error {
-	if service.Analyses == nil && service.Investigations == nil {
-		return fmt.Errorf("agent services not wired")
-	}
 	attempts := service.attemptsService()
 	if (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
 		attempts = service.Inspections.Attempts()
+	}
+	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
+		attempts = service.Knowledge.Attempts()
+	}
+	if attempts == nil {
+		return fmt.Errorf("attempt service not wired for %s", view.AttemptType)
 	}
 	input, err := attempts.DispatchInputFor(ctx, view.ID)
 	if err != nil {
@@ -615,6 +630,9 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	if view.AttemptType == "investigation" {
 		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION
 		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION
+	} else if view.AttemptType == "knowledge_extraction" {
+		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION
+		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH
 	} else if view.AttemptType == "inspection_collection" && view.ScopeType == "run_check" {
 		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION
 		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK
@@ -733,6 +751,12 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 						// The sweep converged the attempt row; close any
 						// attached stream with the interruption terminal view.
 						service.Investigations.NotifyTerminal(ctx, item.AttemptID)
+					}
+				case "knowledge_extraction":
+					if service.Knowledge != nil {
+						if err := service.Knowledge.InterruptExtraction(ctx, item.AttemptID, "lease_expired"); err != nil {
+							sharedops.LogEvent("quoin", "error", "knowledge_extraction.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, err))
+						}
 					}
 				case "inspection_collection":
 					if service.BusinessSystems != nil {
@@ -1104,6 +1128,40 @@ func (service *RuntimeService) closeTerminalParentExplorations(ctx context.Conte
 			// Start is an unknown outcome: install Stop after the durable cancel
 			// materialization even if Lintel never sent StartAck.
 			_ = service.dispatchBrowserStop(context.Background(), item.operationID)
+		}
+	}
+}
+
+// dispatchAllCancellingKnowledgeExtractions replays cancellation fences after
+// Plinth reconnect; extraction attempts use the common routed cancel protocol.
+func (service *RuntimeService) dispatchAllCancellingKnowledgeExtractions(ctx context.Context) {
+	if service.Knowledge == nil {
+		return
+	}
+	rows, err := service.Knowledge.DB().QueryContext(ctx, `SELECT id FROM execution_attempts WHERE state='Cancelling' AND attempt_type='knowledge_extraction' ORDER BY id`)
+	if err != nil {
+		sharedops.LogEvent("quoin", "error", "knowledge.cancel_replay", err.Error())
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			sharedops.LogEvent("quoin", "error", "knowledge.cancel_replay", err.Error())
+			return
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		sharedops.LogEvent("quoin", "error", "knowledge.cancel_replay", err.Error())
+		return
+	}
+	_ = rows.Close()
+	for _, id := range ids {
+		if err := service.dispatchCancelRouted(ctx, id); err != nil {
+			sharedops.LogEvent("quoin", "error", "knowledge.cancel_replay", fmt.Sprintf("attempt=%d %v", id, err))
 		}
 	}
 }

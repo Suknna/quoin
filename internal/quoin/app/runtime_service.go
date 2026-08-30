@@ -22,6 +22,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
+	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -46,6 +47,8 @@ type RuntimeService struct {
 	// Investigations owns investigation attempts (T13); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Investigations *investigation.Service
+	// Knowledge owns source-material extraction attempts (T28).
+	Knowledge *knowledge.Service
 	// InvestigationRuntime carries the investigation runtime slice
 	// (dispatch, result adjudication, delta fan-out).
 	InvestigationRuntime *appinvestigation.RuntimeSlice
@@ -293,10 +296,12 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		// disconnected bind to this live stream and dispatch immediately.
 		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
 		go service.dispatchAllCancellingInspections(context.Background())
+		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedVerificationAttempts(context.Background())
 		go service.dispatchQueuedResourceRefreshAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
+		go service.dispatchQueuedKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedInvestigations(context.Background())
 		go service.dispatchQueuedInspections(context.Background())
 	}
@@ -363,6 +368,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 				service.renewPlinthLeases(ctx, hello.GetBootId())
 				// Lease renewal must not mask a failed initial cancellation send.
 				go service.dispatchAllCancellingInspections(context.Background())
+				go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 			}
 		case *runtimev1.ControlEnvelope_ReconcileReport:
 			if slot == qruntime.SlotPlinth {
@@ -370,6 +376,8 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			}
 		case *runtimev1.ControlEnvelope_AttemptAccept:
 			service.handleAttemptAcceptRouted(ctx, envelope, payload.AttemptAccept)
+		case *runtimev1.ControlEnvelope_AttemptReject:
+			service.handleAttemptRejectRouted(ctx, envelope, payload.AttemptReject)
 		case *runtimev1.ControlEnvelope_ResultProposal:
 			service.handleResultProposalRouted(ctx, envelope, payload.ResultProposal)
 		case *runtimev1.ControlEnvelope_CancelAck:

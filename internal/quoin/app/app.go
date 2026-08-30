@@ -79,6 +79,7 @@ type apiServer struct {
 	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
 	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
 	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
+	knowledgeDispatchFunc        func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
 	resourceRefreshDispatchFunc  func(ctx context.Context)
 	verificationDispatchFunc     func(ctx context.Context)
@@ -129,6 +130,14 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		return os.ReadFile(rootKeyFile)
 	}
 	application.connections = connections.NewService(db, application.rootKey)
+	// Derived projections reconcile at boot: the knowledge search docs are
+	// rebuilt from their authority (current ∧ not exited) so a torn history
+	// cannot silently hide confirmed knowledge from retrieval.
+	rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := application.knowledgeService.RebuildSearchDocs(rebuildCtx); err != nil {
+		sharedops.LogEvent("quoin", "error", "knowledge.search_docs_rebuild_failed", err.Error())
+	}
+	rebuildCancel()
 	connections.SetReleaseVersion(buildinfo.Release)
 	attempt.SetReleaseVersion(buildinfo.Release)
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
@@ -248,6 +257,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.Inspections = application.inspections
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations
+	controlService.Knowledge = application.knowledgeService
 	controlService.Artifacts = artifactStore
 	controlService.Browsers = application.browsers
 	application.browsers.Dispatch = controlService.dispatchBrowserOperation
@@ -256,6 +266,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.probeDispatchFunc = controlService.dispatchAttempt
 	application.cancelDispatchFunc = controlService.dispatchCancelRouted
 	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
+	application.knowledgeDispatchFunc = controlService.dispatchKnowledgeExtractionAttempt
 	investigationRuntime := &appinvestigation.RuntimeSlice{
 		Service: application.investigations,
 		DB:      application.db,
@@ -464,12 +475,20 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	knowledgeHandler := &appknowledge.Handler{
 		Feedback:  application.feedbackService,
 		Knowledge: application.knowledgeService,
-		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateFull(ctx, cookie, "使用知识")
-			if err != nil {
-				return 0, err
+		DispatchImport: func(ctx context.Context, attemptID int64) error {
+			if application.knowledgeDispatchFunc == nil {
+				return errors.New("knowledge import dispatch not wired")
 			}
-			return session.User.ID, nil
+			return application.knowledgeDispatchFunc(ctx, attemptID)
+		},
+		DispatchCancel: func(ctx context.Context, attemptID int64) error {
+			if application.cancelDispatchFunc == nil {
+				return errors.New("knowledge cancellation dispatch not wired")
+			}
+			return application.cancelDispatchFunc(ctx, attemptID)
+		},
+		Authenticate: func(ctx context.Context, cookie string) (auth.Session, error) {
+			return application.authenticateFull(ctx, cookie, "使用知识")
 		},
 	}
 	knowledgeHandler.Register(api)
