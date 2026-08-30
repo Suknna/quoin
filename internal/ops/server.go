@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -55,10 +56,23 @@ func New(component, address string, reason Reason) (*Server, error) {
 	}
 	registry := prometheus.NewRegistry()
 	server := &Server{state: state, registry: registry}
-	registerComponentMetrics(component, registry, ready)
-	server.readyGauge = registryGauge(registry, component+"_ready", readinessHelp(component), boolValue(ready))
+	collectors, err := registerCatalogMetrics(registry, component)
+	if err != nil {
+		return nil, fmt.Errorf("project frozen metrics catalog for %s: %w", component, err)
+	}
+	readyGauge, ok := collectors[component+"_ready"].(prometheus.Gauge)
+	if !ok {
+		return nil, fmt.Errorf("metrics catalog is missing the %s_ready gauge", component)
+	}
+	server.readyGauge = readyGauge
+	server.readyGauge.Set(float64(boolValue(ready)))
 	if component == "quoin" {
-		server.accepting = registryGauge(registry, "quoin_accepting_work", "Whether Quoin is accepting new domain work.", boolValue(ready))
+		accepting, ok := collectors["quoin_accepting_work"].(prometheus.Gauge)
+		if !ok {
+			return nil, fmt.Errorf("metrics catalog is missing the quoin_accepting_work gauge")
+		}
+		server.accepting = accepting
+		server.accepting.Set(float64(boolValue(ready)))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(writer http.ResponseWriter, _ *http.Request) {
@@ -83,28 +97,6 @@ func New(component, address string, reason Reason) (*Server, error) {
 	return server, nil
 }
 
-// registerComponentMetrics preinitializes the T01-applicable gauge families from
-// contracts/metrics.yaml. Label values stay inside the closed catalog sets; the
-// acceptance test asserts exported families and label values against the catalog.
-func registerComponentMetrics(component string, registry *prometheus.Registry, ready bool) {
-	switch component {
-	case "quoin":
-		labeledGauge(registry, "quoin_maintenance", "Whether Quoin maintenance is active for each closed reason.", "maintenance_reason",
-			[]string{"Restore", "Upgrade", "RootKeyRebind", "LintelRecovery"}, 0)
-		registryGauge(registry, "quoin_upgrade_prepared", "Whether the current Upgrade maintenance revision is fully safe and has a succeeded pre-upgrade backup.", 0)
-		labeledGauge(registry, "quoin_storage_writable", "Whether each Quoin persistent storage target passed the durability probe.", "quoin_storage",
-			[]string{"data", "backup"}, 1)
-	case "plinth":
-		labeledGauge(registry, "plinth_storage_writable", "Whether each Plinth local storage target passed its write probe.", "plinth_storage",
-			[]string{"state", "workspace"}, 1)
-	case "lintel":
-		labeledGauge(registry, "lintel_storage_writable", "Whether each Lintel state or shared-memory target passed its probe.", "lintel_storage",
-			[]string{"state", "shm"}, 1)
-	case "stele":
-		registryGauge(registry, "stele_quoin_available", "Whether Stele can currently reach an accepted same-version Quoin relay service.", 0)
-	}
-}
-
 func registryGauge(registry *prometheus.Registry, name, help string, value int) prometheus.Gauge {
 	metric := prometheus.NewGauge(prometheus.GaugeOpts{Name: name, Help: help})
 	metric.Set(float64(value))
@@ -119,12 +111,14 @@ func boolValue(value bool) int {
 	return 0
 }
 
-func labeledGauge(registry *prometheus.Registry, name, help, label string, values []string, value int) {
-	metric := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: name, Help: help}, []string{label})
-	for _, candidate := range values {
-		metric.WithLabelValues(candidate).Set(float64(value))
-	}
-	registry.MustRegister(metric)
+// ProjectedLabelValues exposes one resolved values_from enum projection for
+// the OPS-METRIC-001 fixture: the machine-check must read exactly what the
+// components export, including the handwritten mirror in this package.
+func ProjectedLabelValues(t interface{ Helper() }, source string) []string {
+	t.Helper()
+	values := append([]string(nil), enumLabelValues[source]...)
+	sort.Strings(values)
+	return values
 }
 
 func (server *Server) Run(ctx context.Context) error {
@@ -138,7 +132,12 @@ func (server *Server) Run(ctx context.Context) error {
 		current := server.Readiness()
 		LogEvent(current.Component, "info", "component.draining", "SIGTERM received; new admissions stopped")
 		server.SetReadiness(Readiness{Component: current.Component, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: Draining})
-		timer := time.NewTimer(time.Second)
+		// Hold the drained-but-alive state for a bounded window so the frozen
+		// contract is observable (OPS-HEALTH-006): /readyz already answers
+		// 503 draining, /livez keeps answering 200 while the component can
+		// still close out work. The hold stays far inside the reserved 15s
+		// connection-close window of the 60s stop grace.
+		timer := time.NewTimer(5 * time.Second)
 		defer timer.Stop()
 		<-timer.C
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 14*time.Second)
