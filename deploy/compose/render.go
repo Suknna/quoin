@@ -23,8 +23,20 @@ type Projection struct {
 	ComposeFile string
 }
 
+// Options extends the canonical Compose projection. Images carries explicit
+// digest-pinned component references (repository@sha256:...) resolved from a
+// release manifest; a component without an entry keeps the local dev image
+// expression so existing harnesses are unchanged.
+type Options struct {
+	Images map[string]string
+}
+
 type renderData struct {
 	UID, GID            int
+	QuoinImage          string
+	PlinthImage         string
+	LintelImage         string
+	SteleImage          string
 	QuoinConfigBind     string
 	PlinthConfigBind    string
 	LintelConfigBind    string
@@ -47,6 +59,10 @@ type renderData struct {
 }
 
 func Render(input contract.ComposeInstall, stateDirectory string) (Projection, error) {
+	return RenderWithOptions(input, stateDirectory, Options{})
+}
+
+func RenderWithOptions(input contract.ComposeInstall, stateDirectory string, options Options) (Projection, error) {
 	if input.Document != "compose-install" {
 		return Projection{}, fmt.Errorf("deployment document must be compose-install")
 	}
@@ -104,6 +120,10 @@ func Render(input contract.ComposeInstall, stateDirectory string) (Projection, e
 	}
 	values := renderData{
 		UID: os.Getuid(), GID: os.Getgid(),
+		QuoinImage:          imageReference(options, "quoin"),
+		PlinthImage:         imageReference(options, "plinth"),
+		LintelImage:         imageReference(options, "lintel"),
+		SteleImage:          imageReference(options, "stele"),
 		QuoinConfigBind:     bind(quoinPath, "/etc/quoin/component.yaml", "ro"),
 		PlinthConfigBind:    bind(plinthPath, "/etc/quoin/component.yaml", "ro"),
 		LintelConfigBind:    bind(lintelPath, "/etc/quoin/component.yaml", "ro"),
@@ -188,6 +208,52 @@ func bind(hostPath, containerPath, mode string) string {
 		value += ":" + mode
 	}
 	return quote(value)
+}
+
+// imageReference projects a component image line: a digest-pinned reference
+// from the release manifest when provided, otherwise the local dev
+// expression the existing harnesses resolve through the environment.
+func imageReference(options Options, component string) string {
+	if reference, ok := options.Images[component]; ok && reference != "" {
+		return reference
+	}
+	return "${QUOIN_IMAGE_NAMESPACE:-quoin}/" + component + ":v0.1.0-dev"
+}
+
+// RenderVerifyOverlay writes the one-shot in-network verifier service next to
+// the canonical projection (OPS-VERIFY-003: the Compose path checks
+// host-unpublished ops listeners through a same-network disposable service;
+// it holds no product or external credentials).
+func RenderVerifyOverlay(projection Projection, options Options) (string, error) {
+	overlay := `services:
+  quoin-verifier:
+    image: ` + imageReference(options, "quoin") + `
+    entrypoint: ["/quoin-healthcheck"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal]
+    restart: "no"
+`
+	path := filepath.Join(projection.Directory, "verify.yaml")
+	temporary := path + ".tmp"
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.WriteString(overlay); err != nil {
+		file.Close()
+		os.Remove(temporary)
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return path, os.Rename(temporary, path)
 }
 
 func quote(value string) string {

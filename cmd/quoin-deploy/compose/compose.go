@@ -1,0 +1,75 @@
+// Package compose is the deployment helper's Compose backend command
+// surface (OPS-HELPER-001): `quoin-deploy compose install|verify`.
+package compose
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+
+	"github.com/Suknna/quoin/cmd/quoin-deploy/install"
+	"github.com/Suknna/quoin/cmd/quoin-deploy/verify"
+	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
+	"github.com/Suknna/quoin/internal/deploy/report"
+)
+
+// Main dispatches one Compose backend command. Unsupported commands exit 2
+// without any deployment side effect.
+func Main(command string, arguments []string) {
+	switch command {
+	case "install":
+		flags := Parse("compose install", arguments)
+		install.Run(flags.ConfigPath, flags.ReleaseManifestPath, flags.ReportPath)
+	case "verify":
+		flags := Parse("compose verify", arguments)
+		verify.Run(flags.ConfigPath, flags.ReleaseManifestPath, flags.ReportPath)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|verify> --config <path> [--release-manifest <path>] [--report <path>]")
+		os.Exit(2)
+	}
+}
+
+// Flags carries the stable helper flag set shared by the Compose
+// subcommands: --config and --report form the primary invocation surface;
+// --release-manifest selects the digest-pinned formal release artifacts.
+type Flags struct {
+	ConfigPath          string
+	ReleaseManifestPath string
+	ReportPath          string
+}
+
+// Parse returns the parsed flags, exiting 2 on malformed invocations. Every
+// exit path writes a minimal invalid-input report first (OPS-HELPER-003: all
+// paths produce verification-report.json).
+func Parse(name string, arguments []string) Flags {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", "", "strict compose-install YAML")
+	releaseManifestPath := flags.String("release-manifest", "", "release-manifest.json with the digest-pinned four-component artifacts")
+	reportPath := flags.String("report", "", "where the atomic verification-report.json is written")
+	parseErr := flags.Parse(arguments)
+	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
+	if !invalid {
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath}
+	}
+	brief := report.New("compose", fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH), name, *configPath, "")
+	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")
+	brief.ExitCode = 2
+	path := *reportPath
+	if path == "" {
+		if stateDir, err := deployconfig.StateDirectory(); err == nil {
+			path = filepath.Join(stateDir, "verification-report.json")
+		} else {
+			path = "verification-report.json"
+		}
+	}
+	_ = brief.Finish(path)
+	if parseErr != nil {
+		os.Exit(2)
+	}
+	fmt.Fprintln(os.Stderr, "quoin-deploy:", name, "requires --config and takes no positional arguments")
+	os.Exit(2)
+	return Flags{}
+}
