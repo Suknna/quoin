@@ -56,13 +56,21 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}()
 	errCh := make(chan error, 2)
-	go func() { errCh <- server.Run(ctx) }()
+	opsDone := make(chan error, 1)
+	go func() { opsDone <- server.Run(ctx) }()
 	go func() { errCh <- webhook.ListenAndServe() }()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return webhook.Shutdown(shutdownCtx)
+		webhookErr := webhook.Shutdown(shutdownCtx)
+		// The ops listener owns the drained readiness window after SIGTERM;
+		// the process must not exit before that surface has closed.
+		opsErr := <-opsDone
+		if webhookErr != nil {
+			return webhookErr
+		}
+		return opsErr
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil

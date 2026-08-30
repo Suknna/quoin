@@ -18,6 +18,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/buildinfo"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -100,7 +101,7 @@ func (relay *Relay) refresh() {
 		relay.lastError = err
 		relay.ready = false
 		relay.mu.Unlock()
-		fmt.Fprintf(os.Stderr, `{"ts":%q,"level":"error","component":"stele","code":"relay.snapshot_failed","msg":%q}`+"\n", time.Now().UTC().Format(time.RFC3339Nano), err.Error())
+		sharedops.LogEvent("stele", "error", "relay.snapshot_failed", err.Error())
 		return
 	}
 	if response.GetQuoinReleaseVersion() != buildinfo.Release {

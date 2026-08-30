@@ -667,23 +667,31 @@ func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) 
 		runtimeTLS := &tls.Config{Certificates: []tls.Certificate{tlsConfig}, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}}
 		errCh <- serverSet.relay.Serve(tls.NewListener(runtimeListener, runtimeTLS))
 	}()
-	go func() { errCh <- serverSet.ops.Run(ctx) }()
+	opsDone := make(chan error, 1)
+	go func() { opsDone <- serverSet.ops.Run(ctx) }()
 	select {
 	case <-ctx.Done():
+		// OPS-SHUTDOWN-001/OPS-HEALTH-006: the ops listener owns the drained
+		// readiness window after SIGTERM; the process must not exit before
+		// that surface has closed, or /readyz draining and /livez 200 would
+		// never be observable.
+		opsDrained := <-opsDone
+		// OPS-SHUTDOWN-001: 60s total grace; the ops drain happened above, so
+		// this closing budget stays inside the reserved >=15s
+		// connection-close window.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if serverSet.beforeShutdown != nil {
+			serverSet.beforeShutdown()
+		}
+		serverSet.relay.GracefulStop()
+		_ = serverSet.public.Shutdown(shutdownCtx)
+		return opsDrained
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, grpc.ErrServerStopped) {
 			return err
 		}
 	}
-	// OPS-SHUTDOWN-001: 60s total grace; the ops drain happened above, so this
-	// closing budget stays inside the reserved >=15s connection-close window.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if serverSet.beforeShutdown != nil {
-		serverSet.beforeShutdown()
-	}
-	serverSet.relay.GracefulStop()
-	_ = serverSet.public.Shutdown(shutdownCtx)
 	return nil
 }
 
