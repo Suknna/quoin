@@ -135,7 +135,7 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())
 		}
-	case "knowledge_extraction":
+	case "knowledge_extraction", "embedding":
 		if service.Knowledge != nil {
 			if err := service.Knowledge.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 				sharedops.LogEvent("quoin", "error", "knowledge.accept_failed", err.Error())
@@ -197,6 +197,10 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	}
 	if attemptType == "knowledge_extraction" {
 		service.handleKnowledgeExtractionResultProposal(ctx, envelope, proposal)
+		return
+	}
+	if attemptType == "embedding" {
+		service.handleEmbeddingResultProposal(ctx, envelope, proposal)
 		return
 	}
 	if attemptType != "initial_analysis" {
@@ -304,7 +308,7 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 		if err := service.Analyses.CancelAck(ctx, ack.GetAttemptId()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.cancel_ack", err.Error())
 		}
-	case "knowledge_extraction":
+	case "knowledge_extraction", "embedding":
 		if service.Knowledge != nil {
 			if err := service.Knowledge.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "knowledge.cancel_ack", err.Error())
@@ -346,8 +350,21 @@ func (service *RuntimeService) handleAttemptRejectRouted(ctx context.Context, en
 		sharedops.LogEvent("quoin", "error", "reject.lookup_failed", err.Error())
 		return
 	}
-	if attemptType != "knowledge_extraction" || service.Knowledge == nil {
+	if service.Knowledge == nil || (attemptType != "knowledge_extraction" && attemptType != "embedding") {
 		sharedops.LogEvent("quoin", "info", "reject.unhandled_type", attemptType)
+		return
+	}
+	if attemptType == "embedding" {
+		reason := "worker_protocol_error"
+		switch reject.GetReason() {
+		case runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_NO_CAPACITY:
+			reason = "no_capacity"
+		case runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INTERNAL:
+			reason = "provider_unavailable"
+		}
+		if err := service.Knowledge.Embeddings().Interrupt(ctx, reject.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), reason); err != nil && !errors.Is(err, attempt.ErrLateResult) {
+			sharedops.LogEvent("quoin", "error", "embedding.reject_failed", fmt.Sprintf("attempt=%d %v", reject.GetAttemptId(), err))
+		}
 		return
 	}
 	var reason string

@@ -57,6 +57,12 @@ func (service *RuntimeService) handleBeginModelCallRouted(ctx context.Context, e
 		service.handleBeginModelCall(ctx, envelope, begin)
 		return
 	}
+	if attemptType == "embedding" {
+		// Supervisor-direct embedding calls share the probe ledger slice
+		// (operation embedding, purpose resolved from the frozen grant).
+		service.handleBeginModelCall(ctx, envelope, begin)
+		return
+	}
 	attempts := service.agentAttempts(attemptType)
 	if attempts == nil {
 		service.rejectBegin(ctx, envelope, begin, "attempt type not handled")
@@ -131,7 +137,7 @@ func (service *RuntimeService) handleCompleteModelCallRouted(ctx context.Context
 		service.rejectComplete(ctx, envelope, complete, "attempt lookup failed: "+err.Error(), runtimev1.ModelCallCompletionRejectReason_MODEL_CALL_COMPLETION_REJECT_REASON_INVALID_COMPLETION)
 		return
 	}
-	if attemptType == "connection_probe" {
+	if attemptType == "connection_probe" || attemptType == "embedding" {
 		service.handleCompleteModelCall(ctx, envelope, complete)
 		return
 	}

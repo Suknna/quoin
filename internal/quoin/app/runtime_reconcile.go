@@ -779,6 +779,10 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 					}
 				}
 			}
+			// Keep the semantic projection converging between external
+			// triggers: drift detection, pending batches and settled
+			// generation switches all reconcile on the tick.
+			service.dispatchQueuedEmbeddings(ctx)
 		}
 	}
 }

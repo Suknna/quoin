@@ -264,6 +264,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.browserPublishDispatchFunc = controlService.dispatchBrowserPublish
 	application.browserStopDispatchFunc = controlService.dispatchBrowserStop
 	application.probeDispatchFunc = controlService.dispatchAttempt
+	// The semantic search channel embeds the query through the same real
+	// dispatch path; the kick is best effort (failures leave the query
+	// attempt Queued for the reconnect sweep and an honestly empty page).
+	application.knowledgeService.Embeddings().SetDispatcher(controlService.dispatchEmbeddingAttemptForSearch)
 	application.cancelDispatchFunc = controlService.dispatchCancelRouted
 	application.analysisDispatchFunc = controlService.dispatchAnalysisAttempt
 	application.knowledgeDispatchFunc = controlService.dispatchKnowledgeExtractionAttempt

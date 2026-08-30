@@ -44,15 +44,20 @@ func (service *RuntimeService) handleBeginModelCall(ctx context.Context, envelop
 		operation = "embedding"
 	}
 	// The probe attempt carries model_probe_chat + model_probe_embedding
-	// grants; pick the one matching this operation.
+	// grants; an embedding generation attempt carries the plain embedding
+	// grant frozen over the qualified probe result (DATA-CONN-008).
 	purpose := "model_probe_chat"
 	if operation == "embedding" {
 		purpose = "model_probe_embedding"
 	}
+	var attemptType string
+	if lookupErr := service.Connections.DB().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, begin.GetAttemptId()).Scan(&attemptType); lookupErr == nil && attemptType == "embedding" {
+		purpose = "embedding"
+	}
 	var grantID int64
 	err := service.Connections.DB().QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose=? ORDER BY id LIMIT 1`, begin.GetAttemptId(), purpose).Scan(&grantID)
 	if err != nil {
-		reject(fmt.Sprintf("probe grant missing for %s: %v", purpose, err))
+		reject(fmt.Sprintf("model grant missing for %s: %v", purpose, err))
 		return
 	}
 	// The chat probe exposes the frozen probe tool schemas; digests are the
