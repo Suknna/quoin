@@ -274,6 +274,22 @@ func serveStream(writer http.ResponseWriter, request *http.Request, body chatReq
 	}
 	model := body.Model
 	prompt := promptText(body.Messages)
+	if strings.Contains(prompt, "Quoin 知识提炼助手") || strings.Contains(prompt, "T28 导入原文") || strings.Contains(prompt, "T28_CANCEL_SLOW") {
+		if strings.Contains(prompt, "T28_CANCEL_SLOW") {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-request.Context().Done():
+				return
+			}
+		}
+		// T28: extraction returns the closed proposal consumed by the dedicated
+		// worker mode; it deliberately does not enter the generic tool loop.
+		content := `{"items":[{"title":"连接池超时处置","body":"先检查连接池上限与等待超时，再观察连接数和错误率。","scope":{}}]}`
+		chunk(mustJSONChunk(map[string]any{"id": "chat-knowledge", "object": "chat.completion.chunk", "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": content}, "finish_reason": nil}}}))
+		chunk(mustJSONChunk(map[string]any{"id": "chat-knowledge", "object": "chat.completion.chunk", "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}}))
+		chunk("[DONE]")
+		return
+	}
 	// T13 investigation fixtures branch on the frozen investigation system
 	// contract: a deterministic Chinese answer (the acceptance asserts the
 	// multi-byte deltas survive the byte-level SSE framing exactly) and a

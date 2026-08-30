@@ -62,6 +62,10 @@ export default async function globalTeardown() {
   // never overwrite that record with a no-op pass.
   let merged = { phases: [] }
   if (existsSync(cleanupFile)) { try { merged = JSON.parse(readFileSync(cleanupFile, 'utf8')) } catch { merged = { phases: [] } } }
+  // A prior test may have written its own evidence object before bootstrap
+  // cleanup. Preserve no unstructured object as cleanup authority; append to
+  // the only durable cleanup shape instead of throwing after product success.
+  if (!Array.isArray(merged.phases)) merged = { phases: [] }
   merged.phases.push({ phase, resources })
   writeFileSync(cleanupFile, JSON.stringify(merged, null, 2))
 }

@@ -464,9 +464,21 @@ if [ "$probe_seen" != "1" ]; then
   exit 1
 fi
 # --- T08 fixtures: the deterministic model provider + UI connections -----
-pkill -f "fixtures/model-provider" >/dev/null 2>&1 || true
+# The binary lives under the stack, not its Go source directory. Retain and
+# terminate its PID explicitly so a rerun cannot silently use an old fixture
+# binary that still owns port 18443.
+fixture_pid="$stack/fixture-provider.pid"
+if [ -f "$fixture_pid" ]; then
+  previous_fixture_pid=$(cat "$fixture_pid" 2>/dev/null || true)
+  if [ -n "$previous_fixture_pid" ] && kill -0 "$previous_fixture_pid" >/dev/null 2>&1; then
+    kill "$previous_fixture_pid" >/dev/null 2>&1 || true
+    wait "$previous_fixture_pid" 2>/dev/null || true
+  fi
+fi
+rm -f "$fixture_pid"
 go build -o "$stack/fixture-provider" ./test/fixtures/model-provider
-("$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &)
+"$stack/fixture-provider" -address "0.0.0.0:18443" >"$evidence/fixture-provider.log" 2>&1 &
+echo $! >"$fixture_pid"
 GW2=$(docker compose --project-name "$compose_project" --file "$stack/state/quoin/compose/generated/compose.yaml" ps -q quoin | xargs docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' | tr ' ' '\n' | grep 'quoin_internal$' | head -1 | xargs docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}')
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t08-create-1","name":"main-openai","connection":{"type":"model_provider","baseUrl":"http://'"$GW2"':18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}' \
