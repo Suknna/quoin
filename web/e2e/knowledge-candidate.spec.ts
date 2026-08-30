@@ -313,7 +313,10 @@ test.describe('T27 诊断反馈与知识确认 @ticket-27', () => {
 
     // ---------- Knowledge module projection -----------------------------
     await page.getByRole('navigation', { name: '全局模块' }).getByRole('button', { name: '知识' }).click()
-    await expect(page.getByRole('heading', { name: '知识', exact: true })).toBeVisible()
+    // Scope to the module list landmark: the detail-pane empty state also
+    // carries a 知识 heading, so the page-level role lookup is ambiguous
+    // (strict mode) whenever the module lands on its list view.
+    await expect(page.getByRole('complementary', { name: '知识列表' }).getByRole('heading', { name: '知识', exact: true })).toBeVisible()
     const knowledgeItems = (await api<{ items: Knowledge[] }>(page, '/api/v1/knowledge')).items
     evidence.browseAfter = knowledgeItems.map((item) => ({ id: item.id, title: item.title, eligible: item.eligible }))
     expect(knowledgeItems.length).toBe(2)
