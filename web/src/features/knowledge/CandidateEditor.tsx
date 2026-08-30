@@ -15,9 +15,10 @@ interface CandidateEditorProps {
   candidateId: string
   onClose: () => void
   onConfirmed: (knowledgeId: string) => void
+  onDirtyChange?: (dirty: boolean) => void
 }
 
-export function CandidateEditor({ candidateId, onClose, onConfirmed }: CandidateEditorProps) {
+export function CandidateEditor({ candidateId, onClose, onConfirmed, onDirtyChange }: CandidateEditorProps) {
   const [detail, setDetail] = useState<CandidateDetail | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -29,6 +30,14 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
   const [rowVersion, setRowVersion] = useState(1)
   const [busy, setBusy] = useState(false)
   const [confirmingExclude, setConfirmingExclude] = useState(false)
+  const [confirmingLeave, setConfirmingLeave] = useState(false)
+
+  // Leaving with unsaved edits discards human work: every exit path routes
+  // through this explicit decision instead of silently unmounting the draft.
+  function leave() {
+    if (hasUnsavedDraft) { setConfirmingLeave(true); return }
+    onClose()
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -66,6 +75,21 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
     setScopeTouched(true)
   }
 
+  const hasUnsavedDraft = detail !== null && (title !== (detail.draftTitle ?? '') || body !== (detail.draftBody ?? '') || scopeTouched)
+
+  // Report draft state upward so the shell can guard every leave path, and
+  // ask the browser itself before refresh/close drops the input.
+  useEffect(() => {
+    onDirtyChange?.(hasUnsavedDraft)
+    return () => { onDirtyChange?.(false) }
+  }, [hasUnsavedDraft, onDirtyChange])
+  useEffect(() => {
+    if (!hasUnsavedDraft) return
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault() }
+    window.addEventListener('beforeunload', guard)
+    return () => window.removeEventListener('beforeunload', guard)
+  }, [hasUnsavedDraft])
+
   async function saveDraft() {
     setBusy(true)
     setError('')
@@ -74,6 +98,8 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
       const next = await api.editDraft(candidateId, revision, draftChanges())
       setRevision(next.draftRevision)
       setRowVersion(next.rowVersion)
+      setDetail((current) => current ? { ...current, draftTitle: title, draftBody: body, draftScope: scopeTouched ? rowsToScope(scopeRows) : current.draftScope, draftRevision: next.draftRevision, rowVersion: next.rowVersion } : current)
+      setScopeTouched(false)
       setNotice('草稿已保存。')
     } catch (reason) {
       if (reason instanceof CommandConflictError && reason.conflict?.currentRevision !== undefined) {
@@ -137,7 +163,7 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
   const operable = detail.state === 'AwaitingConfirmation'
   return (
     <div className="candidate-editor" role="document" aria-label="知识候选编辑层">
-      <button className="text-button" onClick={onClose}>← 返回知识</button>
+      <button className="text-button" onClick={leave}>← 返回知识</button>
       <header className="candidate-header">
         <p className="eyebrow">{candidateSourceLabels[detail.sourceType]} · {candidateStateLabels[detail.state]}</p>
         <h2>整理为知识</h2>
@@ -192,7 +218,8 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
           {operable && (
             <>
               <button className="secondary-button" disabled={busy} onClick={() => void saveDraft()}>保存草稿</button>
-              <button className="primary-button" disabled={busy} onClick={() => void confirm()}>确认并创建知识</button>
+              <button className="primary-button" disabled={busy || hasUnsavedDraft} onClick={() => void confirm()}>确认并创建知识</button>
+              {hasUnsavedDraft && <p className="detail-muted">请先保存草稿，再确认创建知识。</p>}
               <button className="text-button" disabled={busy} onClick={() => setConfirmingExclude(true)}>不使用这条建议</button>
             </>
           )}
@@ -204,6 +231,18 @@ export function CandidateEditor({ candidateId, onClose, onConfirmed }: Candidate
           )}
         </div>
       </section>
+      {confirmingLeave && (
+        <div className="dialog-scrim" role="presentation" onClick={() => setConfirmingLeave(false)}>
+          <div className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="candidate-leave-title" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'Escape') setConfirmingLeave(false) }}>
+            <h3 id="candidate-leave-title">放弃未保存的草稿？</h3>
+            <p>返回后未保存的标题、正文或适用范围修改会丢失；服务器上仍保留最近一次保存的草稿。</p>
+            <div className="dialog-actions">
+              <button type="button" className="secondary-button" autoFocus onClick={() => setConfirmingLeave(false)}>继续编辑</button>
+              <button type="button" className="primary-button danger" onClick={() => { setConfirmingLeave(false); onClose() }}>放弃修改并返回</button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmingExclude && (
         <div className="dialog-scrim" role="presentation" onClick={() => setConfirmingExclude(false)}>
           <div className="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="candidate-exclude-title" onClick={(event) => event.stopPropagation()}>

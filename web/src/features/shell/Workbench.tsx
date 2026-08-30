@@ -23,6 +23,7 @@ import { RunDetailPage } from '../inspection/RunDetailPage'
 import '../inspection/inspection.css'
 import { CandidateEditor } from '../knowledge/CandidateEditor'
 import { CandidatesList, KnowledgeDetailPane, KnowledgeList } from '../knowledge/KnowledgeModule'
+import { ImportBatchList, ImportKnowledge } from '../knowledge/ImportKnowledge'
 import '../knowledge/knowledge.css'
 
 interface WorkbenchProps {
@@ -36,13 +37,16 @@ type AlertSegment = 'current' | 'history' | 'intake'
 type InvestigationView = { kind: 'list' } | { kind: 'new'; sources: InvestigationSourceRef[] } | { kind: 'chat'; investigationId: string }
 type InspectionView = { kind: 'list' } | { kind: 'detail'; runId: string }
 
-type KnowledgeView = { kind: 'list' } | { kind: 'candidate'; candidateId: string } | { kind: 'knowledge'; knowledgeId: string }
+type KnowledgeView = { kind: 'list' } | { kind: 'import'; batchId?: string } | { kind: 'candidate'; candidateId: string } | { kind: 'knowledge'; knowledgeId: string }
 
 function knowledgeViewFromPath(): KnowledgeView {
   const candidateMatch = window.location.pathname.match(/^\/knowledge\/candidates\/(\d+)$/)
   if (candidateMatch) return { kind: 'candidate', candidateId: candidateMatch[1] }
   const knowledgeMatch = window.location.pathname.match(/^\/knowledge\/items\/(\d+)$/)
   if (knowledgeMatch) return { kind: 'knowledge', knowledgeId: knowledgeMatch[1] }
+  const importMatch = window.location.pathname.match(/^\/knowledge\/import\/(\d+)$/)
+  if (importMatch) return { kind: 'import', batchId: importMatch[1] }
+  if (window.location.pathname === '/knowledge/import') return { kind: 'import' }
   return { kind: 'list' }
 }
 
@@ -128,16 +132,36 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
   const [inspectionView, setInspectionView] = useState<InspectionView>(inspectionViewFromPath)
   const [knowledgeView, setKnowledgeView] = useState<KnowledgeView>(knowledgeViewFromPath)
-  const [knowledgeSegment, setKnowledgeSegment] = useState<'knowledge' | 'candidates'>(() => (knowledgeViewFromPath().kind === 'candidate' ? 'candidates' : 'knowledge'))
+  const [knowledgeSegment, setKnowledgeSegment] = useState<'knowledge' | 'candidates' | 'imports'>(() => knowledgeViewFromPath().kind === 'candidate' ? 'candidates' : knowledgeViewFromPath().kind === 'import' ? 'imports' : 'knowledge')
+  const [candidateReturnBatchID, setCandidateReturnBatchID] = useState<string | null>(null)
 	const [uploadOpen, setUploadOpen] = useState(false)
 	const [contractsOpen, setContractsOpen] = useState(false)
   const profileButton = useRef<HTMLButtonElement>(null)
   const visibleModules = modules.filter((item) => !item.adminOnly || user.role === 'admin')
+  // A dirty candidate draft must never be dropped by navigation without an
+  // explicit decision: the editor reports its state and every leave path
+  // (module nav, in-module nav, browser back/forward) asks first.
+  const dirtyDraftRef = useRef(false)
+  const lastPathRef = useRef(window.location.pathname)
+  const confirmLeaveDraft = () => {
+    if (!dirtyDraftRef.current) return true
+    if (window.confirm('有未保存的草稿修改，离开将丢弃这些修改。确定离开吗？')) {
+      dirtyDraftRef.current = false
+      return true
+    }
+    return false
+  }
 
   useEffect(() => {
     void api.runtime().then(setRuntime).catch(() => setRuntimeError(true))
        const sync = () => {
-       setActive(moduleFromPath())
+        if (window.location.pathname !== lastPathRef.current && !confirmLeaveDraft()) {
+          // The browser already moved; restore the route the draft lives on.
+          window.history.pushState({}, '', lastPathRef.current)
+          return
+        }
+        lastPathRef.current = window.location.pathname
+        setActive(moduleFromPath())
        const match = window.location.pathname.match(/^\/alerts\/(\d+)/)
        setSelectedOccurrence(match ? match[1] : null)
        const analysisMatch = window.location.pathname.match(/^\/alerts\/(\d+)\/analyses\/(\d+)/)
@@ -145,7 +169,14 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
        setInvestigationView(investigationViewFromPath())
         setBusinessSystemView(businessSystemViewFromPath())
         setInspectionView(inspectionViewFromPath())
-       const alertRoute = alertRouteFromPath()
+        const knowledgeRoute = knowledgeViewFromPath()
+        // A route sync into any non-candidate knowledge view also drops the
+        // per-open return target: a later revision candidate must not inherit
+        // an old import batch.
+        if (knowledgeRoute.kind !== 'candidate') setCandidateReturnBatchID(null)
+        setKnowledgeView(knowledgeRoute)
+         setKnowledgeSegment(knowledgeRoute.kind === 'candidate' ? 'candidates' : knowledgeRoute.kind === 'import' ? 'imports' : 'knowledge')
+        const alertRoute = alertRouteFromPath()
        setAlertSegment(alertRoute.segment)
        setAlertSystemFilter(alertRoute.businessSystemKey)
      }
@@ -154,8 +185,10 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
     return () => window.removeEventListener('popstate', sync)
   }, [])
 
-   function navigate(key: ModuleKey, path: string) {
-     window.history.pushState({}, '', path)
+    function navigate(key: ModuleKey, path: string) {
+      if (!confirmLeaveDraft()) return
+      window.history.pushState({}, '', path)
+      lastPathRef.current = path
      setActive(key)
      setDrawerOpen(false)
      setSelectedOccurrence(null)
@@ -206,15 +239,23 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 		setInvestigationView({ kind: 'new', sources })
 	}
 
-  function openKnowledgeCandidate(candidateId: string) {
+  function openKnowledgeCandidate(candidateId: string, returnBatchID?: string) {
+    if (!confirmLeaveDraft()) return
+    // The return target is per-open, never a residue across candidates.
+    setCandidateReturnBatchID(returnBatchID ?? null)
     window.history.pushState({}, '', `/knowledge/candidates/${encodeURIComponent(candidateId)}`)
+    lastPathRef.current = window.location.pathname
     setActive('knowledge')
     setKnowledgeView({ kind: 'candidate', candidateId })
     setKnowledgeSegment('candidates')
   }
 
   function openKnowledge(knowledgeId: string) {
+    if (!confirmLeaveDraft()) return
+    // Leaving the candidate context also drops its per-open return target.
+    setCandidateReturnBatchID(null)
     window.history.pushState({}, '', `/knowledge/items/${encodeURIComponent(knowledgeId)}`)
+    lastPathRef.current = window.location.pathname
     setActive('knowledge')
     setKnowledgeView({ kind: 'knowledge', knowledgeId })
     setKnowledgeSegment('knowledge')
@@ -281,6 +322,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   }
 
   async function logout() {
+    if (!confirmLeaveDraft()) return
     setProfileOpen(false)
     await api.logout().catch(() => undefined)
     onLogout()
@@ -364,11 +406,14 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
 		{active === 'knowledge' && (
 			<>
 			<div className="segmented" aria-label="知识视图">
-				<button aria-pressed={knowledgeSegment === 'knowledge'} onClick={() => { setKnowledgeSegment('knowledge'); if (knowledgeView.kind !== 'list') backToKnowledge('knowledge') }}>知识</button>
-				<button aria-pressed={knowledgeSegment === 'candidates'} onClick={() => { setKnowledgeSegment('candidates'); if (knowledgeView.kind === 'knowledge') backToKnowledge('candidates') }}>待确认</button>
+				<button aria-pressed={knowledgeSegment === 'knowledge'} onClick={() => { if (knowledgeView.kind !== 'list') { if (!confirmLeaveDraft()) return; backToKnowledge('knowledge') } else { setKnowledgeSegment('knowledge') } }}>知识</button>
+				<button aria-pressed={knowledgeSegment === 'candidates'} onClick={() => { if (knowledgeView.kind === 'knowledge') { if (!confirmLeaveDraft()) return; backToKnowledge('candidates') } else { setKnowledgeSegment('candidates') } }}>待确认</button>
+        <button aria-pressed={knowledgeSegment === 'imports'} onClick={() => { if (knowledgeView.kind !== 'import') { if (!confirmLeaveDraft()) return; window.history.pushState({}, '', '/knowledge/import'); lastPathRef.current = window.location.pathname; setKnowledgeView({ kind: 'import' }) } setKnowledgeSegment('imports') }}>导入批次</button>
 			</div>
 			{knowledgeSegment === 'candidates'
-				? <CandidatesList key={knowledgeView.kind === 'candidate' ? 'open' : 'fresh'} onOpen={openKnowledgeCandidate} />
+				? <CandidatesList key={knowledgeView.kind === 'candidate' ? 'open' : 'fresh'} onOpen={(candidateID) => openKnowledgeCandidate(candidateID)} />
+        : knowledgeSegment === 'imports'
+          ? <ImportBatchList key={knowledgeView.kind === 'import' ? 'open' : 'fresh'} onNew={() => { window.history.pushState({}, '', '/knowledge/import'); setKnowledgeView({ kind: 'import' }) }} onOpen={(batchId) => { window.history.pushState({}, '', `/knowledge/import/${batchId}`); setKnowledgeView({ kind: 'import', batchId }) }} />
 				: <KnowledgeList key={knowledgeView.kind === 'knowledge' ? 'open' : 'fresh'} onOpen={openKnowledge} />}
 			</>
 		)}
@@ -456,11 +501,17 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
               <p>左侧选择业务系统查看当前配置、版本历史与发布状态。</p>
             </div>
           </div>
+        ) : active === 'knowledge' && knowledgeView.kind === 'import' ? (
+          <ImportKnowledge batchId={knowledgeView.batchId} onOpenCandidate={(candidateID, batchID) => openKnowledgeCandidate(candidateID, batchID)} onSelectBatch={(batchID) => { window.history.replaceState({}, '', `/knowledge/import/${batchID}`); setKnowledgeView({ kind: 'import', batchId: batchID }) }} onBack={() => { window.history.pushState({}, '', '/knowledge/import'); setKnowledgeView({ kind: 'import' }) }} />
         ) : active === 'knowledge' && knowledgeView.kind === 'candidate' ? (
           <CandidateEditor
             key={knowledgeView.candidateId}
             candidateId={knowledgeView.candidateId}
-            onClose={() => backToKnowledge('candidates')}
+            onDirtyChange={(dirty) => { dirtyDraftRef.current = dirty }}
+            onClose={() => {
+              if (candidateReturnBatchID) { const batchID = candidateReturnBatchID; setCandidateReturnBatchID(null); window.history.pushState({}, '', `/knowledge/import/${batchID}`); setKnowledgeSegment('imports'); setKnowledgeView({ kind: 'import', batchId: batchID }); return }
+              backToKnowledge('candidates')
+            }}
             onConfirmed={(knowledgeId) => openKnowledge(knowledgeId)}
           />
         ) : active === 'knowledge' && knowledgeView.kind === 'knowledge' ? (

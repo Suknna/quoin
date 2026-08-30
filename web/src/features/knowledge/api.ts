@@ -53,6 +53,18 @@ export interface KnowledgeDetail extends KnowledgeSummary {
   versionCount: number
 }
 
+export interface KnowledgeSearchHit {
+  knowledge: KnowledgeSummary
+  score: number
+}
+
+export interface KnowledgeQueryResult {
+  mode: 'query'
+  exactTextMatches: KnowledgeSearchHit[]
+  semanticMatches: KnowledgeSearchHit[]
+  nextCursor?: string
+}
+
 export interface KnowledgeVersionSummary {
   id: string
   versionSeq: number
@@ -77,6 +89,18 @@ export interface KnowledgeVersionDetail {
   embeddingState: string
   exitedAt?: string
   exitReason?: string
+}
+
+export interface ImportBatchSummary {
+  id: string
+  state: 'Processing' | 'AwaitingConfirmation' | 'Failed' | 'Completed' | 'Cancelled'
+  rowVersion: number
+  generation: number
+  createdAt: string
+}
+
+export interface ImportBatchDetail extends ImportBatchSummary {
+  candidates: CandidateSummary[]
 }
 
 export interface Page<T> {
@@ -131,7 +155,21 @@ async function problemMessage(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: 'include', ...init })
+  // A command body is created once by the caller. Retrying this exact RequestInit
+  // therefore preserves clientCommandId across transient transport failures.
+  let response: Response | undefined
+  let lastError: unknown
+  for (let retry = 0; retry < 3; retry += 1) {
+    try {
+      response = await fetch(path, { credentials: 'include', ...init })
+      if (response.ok || (response.status !== 429 && response.status < 500)) break
+      lastError = new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      lastError = error
+    }
+    if (retry < 2) await new Promise((resolve) => window.setTimeout(resolve, 1000 * (retry + 1)))
+  }
+  if (!response) throw (lastError instanceof Error ? lastError : new Error('网络连接暂时不可用，请重试。'))
   if (!response.ok) {
     if (response.status === 409) {
       let conflict: ConflictInfo | null = null
@@ -145,6 +183,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(await problemMessage(response))
   }
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -166,8 +205,8 @@ export const api = {
     request<CandidateSummary>(`/api/v1/inspections/runs/${runId}/reports/${reportVersion}/knowledge-candidates`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({}),
     }),
-  listCandidates: (query = '') =>
-    request<Page<CandidateSummary>>(`/api/v1/knowledge/candidates${query}`),
+  listCandidates: (query = '', cursor?: string) =>
+    request<Page<CandidateSummary>>(`/api/v1/knowledge/candidates${query}${cursor ? `${query ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : ''}`),
   getCandidate: (candidateId: string) =>
     request<CandidateDetail>(`/api/v1/knowledge/candidates/${candidateId}`),
   editDraft: (candidateId: string, expectedRevision: number, changes: { title?: string; body?: string; scope?: Record<string, unknown> }) =>
@@ -183,11 +222,29 @@ export const api = {
     request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}/exclude`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
     }),
-  browse: () => request<{ mode: 'browse'; items: KnowledgeSummary[]; nextCursor?: string }>('/api/v1/knowledge'),
+  browse: (cursor?: string) => request<{ mode: 'browse'; items: KnowledgeSummary[]; nextCursor?: string }>(`/api/v1/knowledge${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+  search: (query: string, cursor?: string) => request<KnowledgeQueryResult>(`/api/v1/knowledge?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
   getKnowledge: (knowledgeId: string) =>
     request<KnowledgeDetail>(`/api/v1/knowledge/items/${knowledgeId}`),
-  listVersions: (knowledgeId: string) =>
-    request<Page<KnowledgeVersionSummary>>(`/api/v1/knowledge/items/${knowledgeId}/versions`),
+  listVersions: (knowledgeId: string, cursor?: string) =>
+    request<Page<KnowledgeVersionSummary>>(`/api/v1/knowledge/items/${knowledgeId}/versions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
   getVersion: (knowledgeId: string, versionId: string) =>
     request<KnowledgeVersionDetail>(`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}`),
+  startImport: (text: string) => request<ImportBatchDetail>('/api/v1/knowledge/import-batches', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ text }),
+  }),
+  listImportBatches: (cursor?: string) => request<Page<ImportBatchSummary>>(`/api/v1/knowledge/import-batches${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+  getImportBatch: (batchId: string) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}`),
+  confirmBatch: (batchId: string, items: Array<{ candidateId: string; expectedRevision: number }>) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ items }),
+  }),
+  cancelBatch: (batchId: string, expectedRowVersion: number) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
+  }),
+  createRevision: (knowledgeId: string, expectedCurrentVersionId: string, expectedRowVersion: number) => request<CandidateSummary>(`/api/v1/knowledge/items/${knowledgeId}/versions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedCurrentVersionId, expectedRowVersion }),
+  }),
+  stopReuse: (knowledgeId: string, versionId: string, expectedRowVersion: number) => request<void>(`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}/stop-reuse`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
+  }),
 }
