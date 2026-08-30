@@ -17,6 +17,8 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/knowledge/embedding"
+	"github.com/Suknna/quoin/internal/quoin/knowledge/retrieval"
 )
 
 // MutationActor is the authenticated session fact rechecked inside a
@@ -177,19 +179,49 @@ type VersionDetail struct {
 
 // Service owns the knowledge domain writes and reads.
 type Service struct {
-	db       *sql.DB
-	now      func() time.Time
-	attempts *attempt.Service
+	db         *sql.DB
+	now        func() time.Time
+	attempts   *attempt.Service
+	embeddings *embedding.Service
+	semantic   *retrieval.Service
 }
 
 // NewService builds the knowledge domain service. Knowledge extraction owns a
 // typed Plinth attempt, so its rebuilder belongs to this aggregate rather than
-// a catch-all runtime switch.
+// a catch-all runtime switch; embedding attempts share the same attempt
+// machine with their own typed rebuilder branch.
 func NewService(db *sql.DB) *Service {
 	service := &Service{db: db, now: time.Now}
 	service.attempts = attempt.NewService(db)
-	service.attempts.SnapshotRebuilder = service.RebuildImportInput
+	service.attempts.SnapshotRebuilder = service.rebuildAttemptInput
+	service.embeddings = embedding.NewService(db)
+	service.semantic = retrieval.NewService(db)
 	return service
+}
+
+// Embeddings exposes the semantic index projection service (sweeps, query
+// embeds and state resolution).
+func (service *Service) Embeddings() *embedding.Service {
+	return service.embeddings
+}
+
+// Semantic exposes the semantic search channel reader.
+func (service *Service) Semantic() *retrieval.Service {
+	return service.semantic
+}
+
+// rebuildAttemptInput routes the frozen input rebuild by attempt type:
+// knowledge_extraction rebuilds the import snapshot, embedding rebuilds the
+// embedding_v1 envelope.
+func (service *Service) rebuildAttemptInput(ctx context.Context, attemptID int64) ([]byte, error) {
+	var attemptType string
+	if err := service.db.QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType); err != nil {
+		return nil, err
+	}
+	if attemptType == "embedding" {
+		return service.embeddings.RebuildInput(ctx, attemptID)
+	}
+	return service.RebuildImportInput(ctx, attemptID)
 }
 
 // Attempts exposes the typed import attempt state machine to the runtime.

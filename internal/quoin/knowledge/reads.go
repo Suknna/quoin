@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // CandidateCursor pages the candidate list: awaiting-first flag, then
@@ -339,7 +340,39 @@ func (service *Service) ListVersions(ctx context.Context, knowledgeID int64, aft
 		// The keyset boundary is the last EMITTED row.
 		next = &VersionCursor{ID: ids[len(items)-1]}
 	}
+	service.applyEmbeddingStates(ctx, items)
 	return items, next, nil
+}
+
+// applyEmbeddingStates fills each version's derived index state relative to
+// the current embedding generation (never a second eligibility authority).
+func (service *Service) applyEmbeddingStates(ctx context.Context, items []VersionSummary) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(items))
+	for index := range items {
+		ids = append(ids, parseVersionLocator(items[index].ID))
+	}
+	states, err := service.embeddings.EmbeddingStates(ctx, ids)
+	if err != nil {
+		// The index state is derived; on read failure the versions stay
+		// honestly not_configured rather than blocking the read path.
+		return
+	}
+	for index := range items {
+		if state, ok := states[parseVersionLocator(items[index].ID)]; ok {
+			items[index].EmbeddingState = state
+		}
+	}
+}
+
+func parseVersionLocator(value string) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 // GetVersion returns one immutable version detail within its knowledge.
@@ -363,7 +396,12 @@ func (service *Service) GetVersion(ctx context.Context, knowledgeID, versionID i
 	detail := VersionDetail{
 		ID: fmt.Sprintf("%d", id), VersionSeq: versionSeq, Title: title, Body: body,
 		SourceCandidateID: fmt.Sprintf("%d", sourceCandidate), CreatedAt: createdAt,
-		Eligible: eligible, RetrievalStateRowVersion: retrievalRowVersion, EmbeddingState: "not_configured",
+		Eligible: eligible, RetrievalStateRowVersion: retrievalRowVersion,
+	}
+	if state, stateErr := service.embeddings.EmbeddingState(ctx, id); stateErr == nil {
+		detail.EmbeddingState = state
+	} else {
+		detail.EmbeddingState = "not_configured"
 	}
 	if scope.Valid {
 		detail.Scope = json.RawMessage(scope.String)
