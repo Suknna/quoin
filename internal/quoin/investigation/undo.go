@@ -16,6 +16,8 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+
+	"github.com/Suknna/quoin/internal/quoin/knowledge/invalidation"
 )
 
 // ErrNoUserTurn reports an undo against a head that owns no active user
@@ -136,6 +138,30 @@ func (service *Service) Undo(ctx context.Context, principalID int64, clientComma
 		return UndoOutcome{}, err
 	}
 	withdrawn, _ := withdraw.RowsAffected()
+	// DATA-TX-011 in the same transaction: knowledge candidates sourced
+	// from the withdrawn assistant messages become SourceInvalid and every
+	// version those sources produced permanently exits retrieval.
+	withdrawnSources, sourcesErr := conn.QueryContext(ctx, `
+		SELECT id FROM investigation_messages
+		WHERE investigation_id=? AND seq>=? AND role='assistant' AND status='withdrawn'`, investigationID, userSeq)
+	if sourcesErr != nil {
+		return UndoOutcome{}, sourcesErr
+	}
+	var withdrawnMessageIDs []int64
+	for withdrawnSources.Next() {
+		var messageID int64
+		if scanErr := withdrawnSources.Scan(&messageID); scanErr != nil {
+			withdrawnSources.Close()
+			return UndoOutcome{}, scanErr
+		}
+		withdrawnMessageIDs = append(withdrawnMessageIDs, messageID)
+	}
+	if closeErr := withdrawnSources.Close(); closeErr != nil {
+		return UndoOutcome{}, closeErr
+	}
+	if _, invalidationErr := invalidation.Apply(ctx, conn, invalidation.SourceInvestigationMessage, withdrawnMessageIDs, service.nowText()); invalidationErr != nil {
+		return UndoOutcome{}, invalidationErr
+	}
 	var newHead sql.NullInt64
 	if err := conn.QueryRowContext(ctx, `
 		SELECT id FROM investigation_messages

@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/knowledge/invalidation"
 )
 
 // Target types (diagnosis_feedback.target_type CHECK).
@@ -328,51 +329,14 @@ func nullableNote(note string) any {
 	return note
 }
 
-// invalidateSource applies DATA-TX-011 for a rejected event: operable
-// candidates of the source become SourceInvalid and every version the
-// source produced exits retrieval permanently, leaving the FTS projection
-// through the schema triggers.
+// invalidateSource applies DATA-TX-011 for a rejected event through the
+// single shared invalidation authority (the same writer the investigation
+// undo path uses): operable candidates of the source become SourceInvalid
+// and every version the source produced exits retrieval permanently, with
+// the FTS projection following through the schema triggers.
 func (service *Service) invalidateSource(ctx context.Context, conn *sql.Conn, target Target, now string) error {
-	if _, err := conn.ExecContext(ctx, `
-		UPDATE knowledge_candidates
-		SET state='SourceInvalid', row_version=row_version+1
-		WHERE source_type=? AND source_id=? AND state='AwaitingConfirmation'`,
-		target.Type, target.ID); err != nil {
-		return err
-	}
-	rows, err := conn.QueryContext(ctx, `
-		SELECT v.id FROM knowledge_versions v
-		JOIN knowledge_candidates c ON c.id=v.source_candidate_id
-		WHERE c.source_type=? AND c.source_id=?`, target.Type, target.ID)
-	if err != nil {
-		return err
-	}
-	var versionIDs []int64
-	for rows.Next() {
-		var versionID int64
-		if err := rows.Scan(&versionID); err != nil {
-			rows.Close()
-			return err
-		}
-		versionIDs = append(versionIDs, versionID)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	for _, versionID := range versionIDs {
-		// The sticky-exit trigger forbids touching an already-exited row;
-		// exited=0 keeps this idempotent for repeated rejected events.
-		if _, err := conn.ExecContext(ctx, `
-			UPDATE knowledge_version_retrieval_state
-			SET exited=1, exited_at=?, exit_reason='source_rejected', updated_at=?, row_version=row_version+1
-			WHERE knowledge_version_id=? AND exited=0`, now, now, versionID); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `DELETE FROM knowledge_search_docs WHERE knowledge_version_id=?`, versionID); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := invalidation.Apply(ctx, conn, target.Type, []int64{target.ID}, now)
+	return err
 }
 
 func (service *Service) eventByID(ctx context.Context, eventID int64) (Event, error) {
