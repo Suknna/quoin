@@ -14,6 +14,52 @@ import (
 	"strings"
 )
 
+// RebuildSearchDocs reconciles the derived knowledge_search_docs projection
+// with its single authority: a document exists exactly for every current
+// version whose retrieval state has not exited. The external-content FTS
+// index follows through its triggers, so one rebuild repairs both layers
+// after any historical drift.
+
+func (service *Service) RebuildSearchDocs(ctx context.Context) error {
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `DELETE FROM knowledge_search_docs`); err != nil {
+		return err
+	}
+	// Full reload from the authority (current ∧ not exited), never a
+	// merge: a drifted row under the same version id is replaced, not kept.
+	if _, err := conn.ExecContext(ctx, `INSERT INTO knowledge_search_docs(knowledge_version_id,title,body)
+		SELECT v.id, v.title, v.body FROM reusable_knowledge k
+		JOIN knowledge_versions v ON v.id=k.current_version_id
+		JOIN knowledge_version_retrieval_state r ON r.knowledge_version_id=v.id AND r.exited=0
+	`); err != nil {
+		return err
+	}
+	// The external-content index is a second derived layer: reconcile the
+	// content rows, then rebuild knowledge_fts itself so FTS-only drift is
+	// repaired too (DATA-DERIVED-001).
+	if _, err := conn.ExecContext(ctx, `INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 // SearchHit is one KnowledgeSearchHit in one channel.
 type SearchHit struct {
 	Knowledge  KnowledgeSummary `json:"knowledge"`

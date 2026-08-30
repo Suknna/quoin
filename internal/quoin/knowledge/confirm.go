@@ -20,6 +20,11 @@ import (
 // Confirm confirms one candidate and returns the updated summary carrying
 // confirmedKnowledgeId.
 func (service *Service) Confirm(ctx context.Context, principalID int64, commandID string, candidateID, expectedRevision int64) (CandidateSummary, error) {
+	return service.ConfirmAs(ctx, MutationActor{ID: principalID}, commandID, candidateID, expectedRevision)
+}
+
+func (service *Service) ConfirmAs(ctx context.Context, actor MutationActor, commandID string, candidateID, expectedRevision int64) (CandidateSummary, error) {
+	principalID := actor.ID
 	digest := commandDigest(ledgerConfirm, map[string]any{
 		"candidateId":      candidateID,
 		"expectedRevision": expectedRevision,
@@ -43,6 +48,9 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
+		return CandidateSummary{}, err
+	}
 	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
 		return CandidateSummary{}, err
 	} else if ok {
@@ -56,10 +64,12 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 		return summary, replayErr
 	}
 	var state, sourceType string
-	var draftRevision, sourceID int64
+	var batchState sql.NullString
+	var importBatchID sql.NullInt64
+	var draftRevision, sourceID, targetKnowledgeID int64
 	var draftTitle, draftBody, draftScope sql.NullString
-	err = conn.QueryRowContext(ctx, `SELECT state, source_type, source_id, draft_revision, draft_title, draft_body, draft_scope_json FROM knowledge_candidates WHERE id=?`, candidateID).
-		Scan(&state, &sourceType, &sourceID, &draftRevision, &draftTitle, &draftBody, &draftScope)
+	err = conn.QueryRowContext(ctx, `SELECT c.state, c.source_type, c.source_id, COALESCE(c.target_knowledge_id,0), c.draft_revision, c.draft_title, c.draft_body, c.draft_scope_json, c.import_batch_id, b.state FROM knowledge_candidates c LEFT JOIN knowledge_import_batches b ON b.id=c.import_batch_id WHERE c.id=?`, candidateID).
+		Scan(&state, &sourceType, &sourceID, &targetKnowledgeID, &draftRevision, &draftTitle, &draftBody, &draftScope, &importBatchID, &batchState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, ErrNotFound)
 	}
@@ -73,6 +83,8 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, &StateConflict{State: state})
 	case state != StateAwaiting:
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, &StateConflict{State: state})
+	case batchState.Valid && batchState.String != "AwaitingConfirmation":
+		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, &StateConflict{State: batchState.String})
 	case draftRevision != expectedRevision:
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, &RevisionConflict{Current: draftRevision})
 	}
@@ -83,13 +95,21 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 		specific := draftScope.String
 		scopeValue = &specific
 	}
-	// 1. The aggregate exists first with no current pointer.
-	knowledgeInsert, err := conn.ExecContext(ctx, `INSERT INTO reusable_knowledge(created_by,created_at) VALUES(?,?)`, principalID, now)
-	if err != nil {
-		return CandidateSummary{}, err
-	}
-	knowledgeID, err := knowledgeInsert.LastInsertId()
-	if err != nil {
+	// 1. A normal candidate creates an aggregate. A knowledge_version candidate
+	// appends to its target aggregate instead — a revision can never fork a
+	// second Reusable Knowledge identity.
+	knowledgeID := targetKnowledgeID
+	versionSeq := int64(1)
+	if knowledgeID == 0 {
+		knowledgeInsert, insertErr := conn.ExecContext(ctx, `INSERT INTO reusable_knowledge(created_by,created_at) VALUES(?,?)`, principalID, now)
+		if insertErr != nil {
+			return CandidateSummary{}, insertErr
+		}
+		knowledgeID, err = knowledgeInsert.LastInsertId()
+		if err != nil {
+			return CandidateSummary{}, err
+		}
+	} else if err = conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_seq),0)+1 FROM knowledge_versions WHERE knowledge_id=?`, knowledgeID).Scan(&versionSeq); err != nil {
 		return CandidateSummary{}, err
 	}
 	// 2. The candidate flips to Confirmed bound to this knowledge (the
@@ -109,10 +129,10 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	if affected == 0 {
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerConfirm, digest, candidateID, &RevisionConflict{Current: draftRevision + 1})
 	}
-	// 3. The first immutable version (append-only; seq 1).
+	// 3. The next immutable version (append-only).
 	versionInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO knowledge_versions(knowledge_id,version_seq,title,body,scope_json,source_candidate_id,created_by,created_at)
-		VALUES(?,1,?,?,?,?,?,?)`, knowledgeID, title, body, scopeValue, candidateID, principalID, now)
+		VALUES(?,?,?,?,?,?,?,?)`, knowledgeID, versionSeq, title, body, scopeValue, candidateID, principalID, now)
 	if err != nil {
 		return CandidateSummary{}, err
 	}
@@ -120,8 +140,12 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	if err != nil {
 		return CandidateSummary{}, err
 	}
-	// 4. The current pointer advances in the same transaction
-	// (DATA-TX-008; the forward-only trigger validates seq = prev+1).
+	// 4. Retire the former current document before advancing the pointer so
+	// search remains exactly current ∧ eligible (new knowledge has NULL).
+	if _, err := conn.ExecContext(ctx, `DELETE FROM knowledge_search_docs WHERE knowledge_version_id=(SELECT current_version_id FROM reusable_knowledge WHERE id=?)`, knowledgeID); err != nil {
+		return CandidateSummary{}, err
+	}
+	// The current pointer advances in the same transaction (DATA-TX-008).
 	if _, err := conn.ExecContext(ctx, `UPDATE reusable_knowledge SET current_version_id=?, row_version=row_version+1 WHERE id=?`, versionID, knowledgeID); err != nil {
 		return CandidateSummary{}, err
 	}
@@ -133,13 +157,16 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 	if _, err := conn.ExecContext(ctx, `INSERT INTO knowledge_search_docs(knowledge_version_id,title,body) VALUES(?,?,?)`, versionID, title, body); err != nil {
 		return CandidateSummary{}, err
 	}
-	if err := recordAudit(ctx, conn, principalID, ledgerConfirm, "knowledge_candidate", candidateID, now); err != nil {
+	if err := completeImportBatchIfNoPending(ctx, conn, importBatchID); err != nil {
 		return CandidateSummary{}, err
 	}
 	// Read back through the same connection: the pool may be fully
 	// occupied while this handle is open.
 	summary, err := scanCandidateOn(ctx, conn, candidateID)
 	if err != nil {
+		return CandidateSummary{}, err
+	}
+	if err := recordAudit(ctx, conn, principalID, commandID, ledgerConfirm, "knowledge_candidate", candidateID, &summary.RowVersion, now); err != nil {
 		return CandidateSummary{}, err
 	}
 	if summary.ConfirmedKnowledgeID != fmt.Sprintf("%d", knowledgeID) {
@@ -155,6 +182,11 @@ func (service *Service) Confirm(ctx context.Context, principalID int64, commandI
 // Exclude removes an AwaitingConfirmation candidate from confirmation
 // (user decision; VersionedCommandRequest fence).
 func (service *Service) Exclude(ctx context.Context, principalID int64, commandID string, candidateID, expectedRowVersion int64) (CandidateSummary, error) {
+	return service.ExcludeAs(ctx, MutationActor{ID: principalID}, commandID, candidateID, expectedRowVersion)
+}
+
+func (service *Service) ExcludeAs(ctx context.Context, actor MutationActor, commandID string, candidateID, expectedRowVersion int64) (CandidateSummary, error) {
+	principalID := actor.ID
 	digest := commandDigest(ledgerExclude, map[string]any{
 		"candidateId":        candidateID,
 		"expectedRowVersion": expectedRowVersion,
@@ -178,6 +210,9 @@ func (service *Service) Exclude(ctx context.Context, principalID int64, commandI
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
+		return CandidateSummary{}, err
+	}
 	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
 		return CandidateSummary{}, err
 	} else if ok {
@@ -189,6 +224,16 @@ func (service *Service) Exclude(ctx context.Context, principalID int64, commandI
 			committed = true
 		}
 		return summary, replayErr
+	}
+	var importBatchID sql.NullInt64
+	var batchState sql.NullString
+	if err := conn.QueryRowContext(ctx, `SELECT c.import_batch_id,b.state FROM knowledge_candidates c LEFT JOIN knowledge_import_batches b ON b.id=c.import_batch_id WHERE c.id=?`, candidateID).Scan(&importBatchID, &batchState); errors.Is(err, sql.ErrNoRows) {
+		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerExclude, digest, candidateID, ErrNotFound)
+	} else if err != nil {
+		return CandidateSummary{}, err
+	}
+	if batchState.Valid && batchState.String != "AwaitingConfirmation" {
+		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerExclude, digest, candidateID, &StateConflict{State: batchState.String})
 	}
 	result, err := conn.ExecContext(ctx, `
 		UPDATE knowledge_candidates
@@ -205,11 +250,14 @@ func (service *Service) Exclude(ctx context.Context, principalID int64, commandI
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerExclude, digest, candidateID, service.excludeConflict(ctx, conn, candidateID))
 	}
 	now := service.nowText()
-	if err := recordAudit(ctx, conn, principalID, ledgerExclude, "knowledge_candidate", candidateID, now); err != nil {
-		return CandidateSummary{}, err
-	}
 	summary, err := scanCandidateOn(ctx, conn, candidateID)
 	if err != nil {
+		return CandidateSummary{}, err
+	}
+	if err := recordAudit(ctx, conn, principalID, commandID, ledgerExclude, "knowledge_candidate", candidateID, &summary.RowVersion, now); err != nil {
+		return CandidateSummary{}, err
+	}
+	if err := completeImportBatchIfNoPending(ctx, conn, importBatchID); err != nil {
 		return CandidateSummary{}, err
 	}
 	if err := commitCandidateCommand(ctx, conn, principalID, commandID, ledgerExclude, digest, candidateID, summary); err != nil {
@@ -252,4 +300,23 @@ func draftValues(title, body sql.NullString) (string, string) {
 		bodyValue = titleValue
 	}
 	return titleValue, bodyValue
+}
+
+// completeImportBatchIfNoPending closes an import batch once the user has
+// decided every candidate in its current generation. The caller owns the same
+// immediate transaction as the confirm/exclude command.
+func completeImportBatchIfNoPending(ctx context.Context, conn *sql.Conn, batchID sql.NullInt64) error {
+	if !batchID.Valid {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, `UPDATE knowledge_import_batches
+		SET state='Completed',row_version=row_version+1
+		WHERE id=? AND state='AwaitingConfirmation'
+		AND NOT EXISTS (
+			SELECT 1 FROM knowledge_candidates c
+			WHERE c.import_batch_id=knowledge_import_batches.id
+			AND c.generation=knowledge_import_batches.generation
+			AND c.state='AwaitingConfirmation'
+		)`, batchID.Int64)
+	return err
 }

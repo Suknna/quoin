@@ -21,6 +21,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	_ "modernc.org/sqlite"
 )
 
@@ -790,5 +791,638 @@ func TestConcurrentConfirmCreatesExactlyOneKnowledge(t *testing.T) {
 	}
 	if knowledgeCount != 1 || versionCount != 1 {
 		t.Fatalf("race produced %d knowledge / %d versions", knowledgeCount, versionCount)
+	}
+}
+
+func TestRevisionAppendsVersionAndStopReuseExitsFTS(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-revision-0", f.occurrenceID, f.analysisID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := f.service.Confirm(ctx, f.userID, "cmd-revision-1", parseID(t, created.Candidate.ID), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeID := parseID(t, confirmed.ConfirmedKnowledgeID)
+	detail, err := f.service.GetKnowledge(ctx, knowledgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, made, err := f.service.CreateRevisionCandidate(ctx, f.userID, "cmd-revision-2", knowledgeID, parseID(t, detail.CurrentVersionID), detail.RowVersion)
+	if err != nil || !made {
+		t.Fatalf("create revision = %+v made=%v err=%v", revision, made, err)
+	}
+	body := "修订后的可复用操作。"
+	if _, err = f.service.EditDraft(ctx, f.userID, "cmd-revision-3", parseID(t, revision.ID), 0, nil, &body, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.service.Confirm(ctx, f.userID, "cmd-revision-4", parseID(t, revision.ID), 1); err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.service.GetKnowledge(ctx, knowledgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.VersionCount != 2 || next.CurrentVersionSeq != 2 {
+		t.Fatalf("revision did not append: %+v", next)
+	}
+	if err = f.service.StopReuse(ctx, f.userID, "cmd-revision-5", knowledgeID, parseID(t, next.CurrentVersionID), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = f.service.Search(ctx, body, nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	var docs int
+	if err = f.db.QueryRow(`SELECT count(*) FROM knowledge_search_docs WHERE knowledge_version_id=?`, parseID(t, next.CurrentVersionID)).Scan(&docs); err != nil {
+		t.Fatal(err)
+	}
+	if docs != 0 {
+		t.Fatalf("stopped version remained searchable: %d docs", docs)
+	}
+}
+
+func TestStartImportFreezesSourceAndExtractionAttempt(t *testing.T) {
+	f := newFixture(t)
+	result, err := f.service.StartImport(context.Background(), f.userID, "cmd-import-0", "连接池告警的原始复盘。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Batch.State != "Processing" || result.AttemptID < 1 {
+		t.Fatalf("import start = %+v", result)
+	}
+	canonical, err := f.service.RebuildImportInput(context.Background(), result.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input importInput
+	if err := json.Unmarshal(canonical, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.SchemaKind != "knowledge_extraction_v1" || input.Text != "连接池告警的原始复盘。" || input.BatchID != parseID(t, result.Batch.ID) {
+		t.Fatalf("frozen import input = %+v", input)
+	}
+	var sourceCount int
+	if err = f.db.QueryRow(`SELECT count(*) FROM source_materials`).Scan(&sourceCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 1 {
+		t.Fatalf("source material count = %d", sourceCount)
+	}
+}
+
+func TestImportCancellationFencesQueuedExtraction(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	started, err := f.service.StartImport(ctx, f.userID, "cmd-kn-import-cancel-0", "连接池运行记录：请求超时。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, dispatchID, err := f.service.CancelBatch(ctx, f.userID, "cmd-kn-import-cancel-1", parseID(t, started.Batch.ID), started.Batch.RowVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatchID != 0 || cancelled.State != "Cancelled" {
+		t.Fatalf("cancel = %+v dispatch=%d", cancelled, dispatchID)
+	}
+	var state string
+	if err := f.db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, started.AttemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Cancelled" {
+		t.Fatalf("attempt state = %q, want Cancelled", state)
+	}
+	replayed, replayDispatch, err := f.service.CancelBatch(ctx, f.userID, "cmd-kn-import-cancel-2", parseID(t, started.Batch.ID), cancelled.RowVersion)
+	if err != nil || replayDispatch != 0 || replayed.State != "Cancelled" {
+		t.Fatalf("late cancel must return terminal authority: batch=%+v dispatch=%d err=%v", replayed, replayDispatch, err)
+	}
+}
+
+func TestRevisionReplacesCurrentSearchDocument(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-revision-search-0", f.occurrenceID, f.analysisID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.service.Confirm(ctx, f.userID, "cmd-kn-revision-search-1", parseID(t, created.Candidate.ID), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeID := parseID(t, first.ConfirmedKnowledgeID)
+	current, err := f.service.GetKnowledge(ctx, knowledgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, createdRevision, err := f.service.CreateRevisionCandidate(ctx, f.userID, "cmd-kn-revision-search-2", knowledgeID, parseID(t, current.CurrentVersionID), current.RowVersion)
+	if err != nil || !createdRevision {
+		t.Fatalf("revision = %+v created=%v err=%v", revision, createdRevision, err)
+	}
+	second, err := f.service.Confirm(ctx, f.userID, "cmd-kn-revision-search-3", parseID(t, revision.ID), revision.DraftRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs int
+	if err := f.db.QueryRow(`SELECT COUNT(*) FROM knowledge_search_docs WHERE knowledge_version_id IN (SELECT id FROM knowledge_versions WHERE knowledge_id=?)`, knowledgeID).Scan(&docs); err != nil {
+		t.Fatal(err)
+	}
+	if docs != 1 {
+		t.Fatalf("search docs = %d, want one current document", docs)
+	}
+	updated, err := f.service.GetKnowledge(ctx, knowledgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CurrentVersionSeq != 2 || updated.CurrentVersionID == current.CurrentVersionID || second.ConfirmedKnowledgeID != first.ConfirmedKnowledgeID {
+		t.Fatalf("revision pointer broken: before=%+v after=%+v", current, updated)
+	}
+}
+
+func TestFailedExtractionClosesBatch(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	started, err := f.service.StartImport(ctx, f.userID, "cmd-kn-import-fail-0", "连接池运行记录：请求超时。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failure proposal only terminates an in-lease attempt (RUNTIME-TASK-008):
+	// the lease must still cover the adjudication moment.
+	leaseUntil := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=?`, leaseUntil, started.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=?`, now, now, started.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.FailExtraction(ctx, started.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := f.service.GetImportBatch(ctx, parseID(t, started.Batch.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.State != "Failed" {
+		t.Fatalf("batch state = %q, want Failed", batch.State)
+	}
+	var state string
+	if err := f.db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, started.AttemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Failed" {
+		t.Fatalf("attempt state = %q, want Failed", state)
+	}
+}
+
+func TestSingleImportCandidateDecisionClosesBatch(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	seed := func(commandID string) (ImportResult, int64) {
+		t.Helper()
+		started, err := f.service.StartImport(ctx, f.userID, commandID, "单条知识导入原文。")
+		if err != nil {
+			t.Fatal(err)
+		}
+		batchID := parseID(t, started.Batch.ID)
+		if _, err := f.db.Exec(`UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=?`, batchID); err != nil {
+			t.Fatal(err)
+		}
+		candidate, err := f.db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at)
+			VALUES(?, 'source_material', (SELECT source_material_id FROM knowledge_import_batches WHERE id=?), 1, 'AwaitingConfirmation', '{"v":1}', '单条标题', '单条正文', 0, ?, ?)`, batchID, batchID, f.userID, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidateID, err := candidate.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return started, candidateID
+	}
+
+	confirmedBatch, confirmedCandidate := seed("cmd-single-import-confirm-0")
+	if _, err := f.service.Confirm(ctx, f.userID, "cmd-single-import-confirm-1", confirmedCandidate, 0); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := f.service.GetImportBatch(ctx, parseID(t, confirmedBatch.Batch.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "Completed" {
+		t.Fatalf("single confirmation left batch %q, want Completed", detail.State)
+	}
+
+	excludedBatch, excludedCandidate := seed("cmd-single-import-exclude-0")
+	if _, err := f.service.Exclude(ctx, f.userID, "cmd-single-import-exclude-1", excludedCandidate, 1); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = f.service.GetImportBatch(ctx, parseID(t, excludedBatch.Batch.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "Completed" {
+		t.Fatalf("single exclusion left batch %q, want Completed", detail.State)
+	}
+}
+
+func TestRejectedAndInterruptedExtractionCloseBatch(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	bindAssigned := func(commandID string) ImportResult {
+		t.Helper()
+		started, err := f.service.StartImport(ctx, f.userID, commandID, "连接池运行记录。")
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=?`, now, started.AttemptID); err != nil {
+			t.Fatal(err)
+		}
+		return started
+	}
+	assertClosed := func(started ImportResult, wantAttempt string) {
+		t.Helper()
+		batch, err := f.service.GetImportBatch(ctx, parseID(t, started.Batch.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch.State != "Failed" {
+			t.Fatalf("batch state = %q, want Failed", batch.State)
+		}
+		var state string
+		if err := f.db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, started.AttemptID).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		if state != wantAttempt {
+			t.Fatalf("attempt state = %q, want %s", state, wantAttempt)
+		}
+	}
+
+	rejected := bindAssigned("cmd-import-reject-0")
+	if err := f.service.RejectExtraction(ctx, rejected.AttemptID, "boot", 1, "internal"); err != nil {
+		t.Fatal(err)
+	}
+	assertClosed(rejected, "Failed")
+
+	interrupted := bindAssigned("cmd-import-interrupt-0")
+	if err := f.service.InterruptExtraction(ctx, interrupted.AttemptID, "lease_expired"); err != nil {
+		t.Fatal(err)
+	}
+	assertClosed(interrupted, "Interrupted")
+}
+func TestBatchConfirmRequiresCurrentAll(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	started, err := f.service.StartImport(ctx, f.userID, "cmd-batch-full-0", "两条知识导入原文。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID := parseID(t, started.Batch.ID)
+	if _, err := f.db.Exec(`UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=?`, batchID); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(title string) int64 {
+		t.Helper()
+		result, insertErr := f.db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at)
+			VALUES(?, 'source_material', (SELECT source_material_id FROM knowledge_import_batches WHERE id=?), 1, 'AwaitingConfirmation', '{"v":1}', ?, ?, 0, ?, ?)`, batchID, batchID, title, title+"正文", f.userID, time.Now().UTC().Format(time.RFC3339Nano))
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		id, lastErr := result.LastInsertId()
+		if lastErr != nil {
+			t.Fatal(lastErr)
+		}
+		return id
+	}
+	first, second := insert("第一条"), insert("第二条")
+	// Omitting the second candidate is a deterministic rejection, never a
+	// partial publication (DATA-KNOWLEDGE-005 确认当前全部).
+	if _, err := f.service.ConfirmBatch(ctx, f.userID, "cmd-batch-full-1", batchID, []BatchConfirmation{{CandidateID: first, ExpectedRevision: 0}}); !errors.Is(err, ErrPartialBatchConfirm) {
+		t.Fatalf("subset confirm error = %v, want ErrPartialBatchConfirm", err)
+	}
+	detail, err := f.service.GetImportBatch(ctx, batchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "AwaitingConfirmation" {
+		t.Fatalf("rejected subset confirm left batch %q", detail.State)
+	}
+	detail, err = f.service.ConfirmBatch(ctx, f.userID, "cmd-batch-full-2", batchID, []BatchConfirmation{{CandidateID: first, ExpectedRevision: 0}, {CandidateID: second, ExpectedRevision: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "Completed" {
+		t.Fatalf("full confirm left batch %q, want Completed", detail.State)
+	}
+	// DATA-AUDIT-001: the command's audit event carries the command ID and
+	// the authoritative target version.
+	var commandID string
+	var targetVersion int64
+	if err := f.db.QueryRow(`SELECT e.client_command_id,t.target_version FROM audit_events e JOIN audit_event_targets t ON t.audit_event_id=e.id WHERE e.action='knowledge_import.confirm' AND e.outcome='success' ORDER BY e.id DESC LIMIT 1`).Scan(&commandID, &targetVersion); err != nil {
+		t.Fatal(err)
+	}
+	if commandID != "cmd-batch-full-2" || targetVersion != detail.RowVersion {
+		t.Fatalf("audit command=%q version=%d, want cmd-batch-full-2/%d", commandID, targetVersion, detail.RowVersion)
+	}
+}
+
+func TestRebuildSearchDocsRestoresDerivedProjection(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	started, err := f.service.StartImport(ctx, f.userID, "cmd-rebuild-0", "重建检索投影的导入原文。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID := parseID(t, started.Batch.ID)
+	if _, err := f.db.Exec(`UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=?`, batchID); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := f.db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at)
+		VALUES(?, 'source_material', (SELECT source_material_id FROM knowledge_import_batches WHERE id=?), 1, 'AwaitingConfirmation', '{"v":1}', '重建标题', '重建正文', 0, ?, ?)`, batchID, batchID, f.userID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateID, err := candidate.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := f.service.Confirm(ctx, f.userID, "cmd-rebuild-1", candidateID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeID := parseID(t, confirmed.ConfirmedKnowledgeID)
+	var versionID int64
+	if err := f.db.QueryRow(`SELECT current_version_id FROM reusable_knowledge WHERE id=?`, knowledgeID).Scan(&versionID); err != nil {
+		t.Fatal(err)
+	}
+	docs := func() int {
+		t.Helper()
+		var count int
+		if err := f.db.QueryRow(`SELECT count(*) FROM knowledge_search_docs WHERE knowledge_version_id=?`, versionID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if docs() != 1 {
+		t.Fatalf("confirmed version has %d search docs, want 1", docs())
+	}
+	// Simulate derived-projection drift: the authority rows stay intact.
+	if _, err := f.db.Exec(`DELETE FROM knowledge_search_docs WHERE knowledge_version_id=?`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.RebuildSearchDocs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if docs() != 1 {
+		t.Fatalf("rebuild left %d search docs, want 1 restored", docs())
+	}
+	// Content drift: the derived row survives under the same version id with
+	// wrong text; only a full reload from the authority replaces it.
+	if _, err := f.db.Exec(`DELETE FROM knowledge_search_docs WHERE knowledge_version_id=?`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO knowledge_search_docs(knowledge_version_id,title,body) VALUES(?, '漂移标题', '漂移正文')`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.RebuildSearchDocs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var docTitle, docBody string
+	if err := f.db.QueryRow(`SELECT title,body FROM knowledge_search_docs WHERE knowledge_version_id=?`, versionID).Scan(&docTitle, &docBody); err != nil {
+		t.Fatal(err)
+	}
+	if docTitle != "重建标题" || docBody != "重建正文" {
+		t.Fatalf("drifted content survived rebuild: %q/%q", docTitle, docBody)
+	}
+	if err := f.service.RebuildSearchDocs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restored, _, err := f.service.Search(ctx, "重建标题", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.ExactTextMatches) != 1 {
+		t.Fatalf("FTS rebuild restored %d hits, want 1", len(restored.ExactTextMatches))
+	}
+	// A stopped version stays out of retrieval even after a rebuild.
+	var retrievalRowVersion int64
+	if err := f.db.QueryRow(`SELECT row_version FROM knowledge_version_retrieval_state WHERE knowledge_version_id=?`, versionID).Scan(&retrievalRowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.StopReuse(ctx, f.userID, "cmd-rebuild-2", knowledgeID, versionID, retrievalRowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.RebuildSearchDocs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if count := docs(); count != 0 {
+		t.Fatalf("rebuild resurrected an exited version with %d docs", count)
+	}
+}
+
+// succeededChatCall writes one trigger-complete succeeded chat model call
+// under the attempt's grant.
+func succeededChatCall(t *testing.T, f *fixture, attemptID, grantID int64, callSeq int) int64 {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	digest := strings.Repeat("2", 64)
+	call, err := f.db.Exec(`INSERT INTO model_calls(attempt_id,call_seq,retry_seq,operation,model_id,connection_grant_id,prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest,input_snapshot_digest,rendered_request_digest,context_budget_tokens,max_output_tokens,estimated_input_tokens,evicted_turn_count,status,started_at) VALUES(?,?,'0','chat','fixture-chat-1',?,'connection-probe-v1','probe-supervisor-v1',?,?,?,?,?,4096,1024,0,0,'running',?)`,
+		attemptID, callSeq, grantID, digest, digest, digest, digest, digest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID, err := call.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO model_call_input_items(model_call_id,item_seq,item_role,source_digest,synthetic_kind) VALUES(?,1,'system',?,'system_contract'),(?,2,'system',?,'tool_schema')`, callID, digest, callID, digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,'{"assistantText":"ok","finishReason":"stop","tool_calls":[]}',?,'stop',?)`, callID, digest, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
+		t.Fatal(err)
+	}
+	return callID
+}
+
+// seedRunningExtraction drives one import attempt to the Running state with a
+// live lease and one succeeded chat model call, returning a valid success
+// proposal payload.
+func seedRunningExtraction(t *testing.T, f *fixture, commandID string, lease time.Duration) (ImportResult, []byte, int64) {
+	t.Helper()
+	ctx := context.Background()
+	started, err := f.service.StartImport(ctx, f.userID, commandID, "围栏测试导入原文。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID := parseID(t, started.Batch.ID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	leaseUntil := time.Now().UTC().Add(lease).Format(time.RFC3339Nano)
+	if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=?`, leaseUntil, started.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=?`, now, now, started.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	var grantID int64
+	if err := f.db.QueryRow(`SELECT id FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id LIMIT 1`, started.AttemptID).Scan(&grantID); err != nil {
+		t.Fatal(err)
+	}
+	callID := succeededChatCall(t, f, started.AttemptID, grantID, 1)
+	payload, err := json.Marshal(map[string]any{
+		"schemaKind": "knowledge_extraction_result_v1", "attemptId": started.AttemptID, "batchId": batchID, "modelCallId": callID,
+		"items": []map[string]any{{"title": "围栏标题", "body": "围栏正文"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return started, payload, callID
+}
+
+func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// In-lease success commits; replay stays accepted after the batch is
+	// confirmed and after the lease burns down (frozen-identity replay).
+	started, payload, _ := seedRunningExtraction(t, f, "cmd-fence-success-0", time.Hour)
+	batchID := parseID(t, started.Batch.ID)
+	// A second succeeded call exists before the result commits (tool-loop
+	// runs legitimately produce several); the sealed adjudication must bind
+	// the final one.
+	var otherGrantID int64
+	if err := f.db.QueryRow(`SELECT id FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id LIMIT 1`, started.AttemptID).Scan(&otherGrantID); err != nil {
+		t.Fatal(err)
+	}
+	otherCallID := succeededChatCall(t, f, started.AttemptID, otherGrantID, 2)
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := f.service.GetImportBatch(ctx, batchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "AwaitingConfirmation" || len(detail.Candidates) != 1 {
+		t.Fatalf("committed batch state=%q candidates=%d", detail.State, len(detail.Candidates))
+	}
+	confirm := make([]BatchConfirmation, 0, len(detail.Candidates))
+	for _, candidate := range detail.Candidates {
+		confirm = append(confirm, BatchConfirmation{CandidateID: parseID(t, candidate.ID), ExpectedRevision: candidate.DraftRevision})
+	}
+	if _, err := f.service.ConfirmBatch(ctx, f.userID, "cmd-fence-success-1", batchID, confirm); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+		t.Fatalf("replay after batch confirmation rejected: %v", err)
+	}
+	if _, err := f.db.Exec(`UPDATE execution_attempts SET lease_until=?,row_version=row_version+1 WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), started.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+		t.Fatalf("replay after lease expiry rejected: %v", err)
+	}
+	// A divergent payload under the same attempt identity is a late result,
+	// never a re-acknowledged success (RUNTIME-TASK-008).
+	var divergent map[string]any
+	if err := json.Unmarshal(payload, &divergent); err != nil {
+		t.Fatal(err)
+	}
+	divergent["items"] = []map[string]any{{"title": "篡改标题", "body": "围栏正文"}}
+	divergentPayload, err := json.Marshal(divergent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, divergentPayload); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("divergent replay error = %v, want ErrLateResult", err)
+	}
+	var itemCount map[string]any
+	if err := json.Unmarshal(payload, &itemCount); err != nil {
+		t.Fatal(err)
+	}
+	itemCount["items"] = []map[string]any{{"title": "围栏标题", "body": "围栏正文"}, {"title": "多余条目", "body": "多余正文"}}
+	countPayload, err := json.Marshal(itemCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, countPayload); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("count-divergent replay error = %v, want ErrLateResult", err)
+	}
+	// Trailing data after the closed result object is a protocol violation,
+	// never silently ignored input — including a bare closing brace.
+	trailingTarget, trailingPayload, _ := seedRunningExtraction(t, f, "cmd-fence-trailing-0", time.Hour)
+	trailingObject := append(append([]byte{}, trailingPayload...), []byte("\n{\"ignored\":true}")...)
+	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingObject); !errors.Is(err, ErrInvalidExtraction) {
+		t.Fatalf("trailing-object payload error = %v, want ErrInvalidExtraction", err)
+	}
+	trailingBrace := append(append([]byte{}, trailingPayload...), '}')
+	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingBrace); !errors.Is(err, ErrInvalidExtraction) {
+		t.Fatalf("trailing-brace payload error = %v, want ErrInvalidExtraction", err)
+	}
+	// The identical clean payload still commits for this attempt.
+	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingPayload); err != nil {
+		t.Fatalf("clean payload rejected after trailing rejections: %v", err)
+	}
+	// Re-binding the same content onto another succeeded model call of the
+	// attempt is a divergent proposal: the sealed suggestion binds the final
+	// call that produced it.
+	var swap map[string]any
+	if err := json.Unmarshal(payload, &swap); err != nil {
+		t.Fatal(err)
+	}
+	swap["modelCallId"] = otherCallID
+	swapPayload, err := json.Marshal(swap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, swapPayload); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("model-call rebind replay error = %v, want ErrLateResult", err)
+	}
+
+	// An expired lease is a late result even before the sweeper runs: no
+	// candidate, no failure closure, batch and attempt stay in flight.
+	late, latePayload, _ := seedRunningExtraction(t, f, "cmd-fence-late-0", -time.Minute)
+	lateBatchID := parseID(t, late.Batch.ID)
+	if err := f.service.CommitExtraction(ctx, late.AttemptID, "boot", 1, latePayload); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("expired-lease success error = %v, want ErrLateResult", err)
+	}
+	if err := f.service.FailExtraction(ctx, late.AttemptID, "boot", 1, "provider_unavailable"); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("expired-lease failure error = %v, want ErrLateResult", err)
+	}
+	detail, err = f.service.GetImportBatch(ctx, lateBatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "Processing" || len(detail.Candidates) != 0 {
+		t.Fatalf("late result mutated batch: state=%q candidates=%d", detail.State, len(detail.Candidates))
+	}
+	var attemptState string
+	if err := f.db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, late.AttemptID).Scan(&attemptState); err != nil {
+		t.Fatal(err)
+	}
+	if attemptState != "Running" {
+		t.Fatalf("late result mutated attempt state = %q", attemptState)
+	}
+
+	// A committed failure replays its own adjudication and refuses a
+	// different payload for the same attempt.
+	failed, _, _ := seedRunningExtraction(t, f, "cmd-fence-fail-0", time.Hour)
+	failedBatchID := parseID(t, failed.Batch.ID)
+	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+		t.Fatalf("failure replay rejected: %v", err)
+	}
+	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "model_refused"); !errors.Is(err, attempt.ErrLateResult) {
+		t.Fatalf("conflicting failure replay error = %v, want ErrLateResult", err)
+	}
+	state, err := f.service.GetImportBatch(ctx, failedBatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "Failed" {
+		t.Fatalf("failed batch state = %q", state.State)
 	}
 }

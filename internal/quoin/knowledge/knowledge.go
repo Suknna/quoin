@@ -15,8 +15,33 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 )
+
+// MutationActor is the authenticated session fact rechecked inside a
+// knowledge write transaction. Revision zero is reserved for trusted in-process
+// callers used by deterministic domain tests.
+type MutationActor struct {
+	ID           int64
+	AuthRevision int64
+}
+
+func verifyMutationActorOn(ctx context.Context, conn *sql.Conn, actor MutationActor) error {
+	if actor.AuthRevision == 0 {
+		return nil
+	}
+	var enabled bool
+	var role string
+	var revision int64
+	if err := conn.QueryRowContext(ctx, `SELECT enabled,role,auth_revision FROM users WHERE id=?`, actor.ID).Scan(&enabled, &role, &revision); err != nil {
+		return ErrActorRevoked
+	}
+	if !enabled || (role != "admin" && role != "operator") || revision != actor.AuthRevision {
+		return ErrActorRevoked
+	}
+	return nil
+}
 
 // Candidate states (knowledge_candidates.state CHECK).
 const (
@@ -41,6 +66,9 @@ var (
 	ErrNotFound = errors.New("knowledge object not found")
 	// ErrCommandReused maps to 409 command_id_reused.
 	ErrCommandReused = errors.New("client command id reused with a different request")
+	// ErrActorRevoked prevents a request authenticated before a revocation from
+	// writing after that security transaction commits.
+	ErrActorRevoked = errors.New("acting user is no longer authorized")
 	// ErrSourceRejected maps to 409: the source has a rejected feedback
 	// event and can no longer create candidates (DATA-KNOWLEDGE-006).
 	ErrSourceRejected = errors.New("rejected diagnosis source cannot create a knowledge candidate")
@@ -149,14 +177,27 @@ type VersionDetail struct {
 
 // Service owns the knowledge domain writes and reads.
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	db       *sql.DB
+	now      func() time.Time
+	attempts *attempt.Service
 }
 
-// NewService builds the knowledge domain service.
+// NewService builds the knowledge domain service. Knowledge extraction owns a
+// typed Plinth attempt, so its rebuilder belongs to this aggregate rather than
+// a catch-all runtime switch.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	service := &Service{db: db, now: time.Now}
+	service.attempts = attempt.NewService(db)
+	service.attempts.SnapshotRebuilder = service.RebuildImportInput
+	return service
 }
+
+// Attempts exposes the typed import attempt state machine to the runtime.
+func (service *Service) Attempts() *attempt.Service { return service.attempts }
+
+// DB is the aggregate's sole database authority; runtime code uses it only to
+// read frozen dispatch locators and never to alter knowledge state directly.
+func (service *Service) DB() *sql.DB { return service.db }
 
 func (service *Service) nowText() string {
 	return service.now().UTC().Format(time.RFC3339Nano)
@@ -171,9 +212,21 @@ const (
 	authOutcomeRejected  = auth.OutcomeRejectedKnown
 )
 
-func recordAudit(ctx context.Context, conn *sql.Conn, actorID int64, action, targetType string, targetID int64, timestamp string) error {
-	result, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,?,'success',?,?,?)`,
-		actorID, action, targetType, targetID, timestamp)
+func recordAudit(ctx context.Context, conn *sql.Conn, actorID int64, commandID, action, targetType string, targetID int64, targetVersion *int64, timestamp string) error {
+	return recordAuditOutcome(ctx, conn, actorID, commandID, action, "success", targetType, targetID, targetVersion, timestamp)
+}
+
+func recordRejectedAudit(ctx context.Context, conn *sql.Conn, actorID int64, commandID, action, targetType string, targetID int64, targetVersion *int64, timestamp string) error {
+	return recordAuditOutcome(ctx, conn, actorID, commandID, action, "rejected", targetType, targetID, targetVersion, timestamp)
+}
+
+func recordAuditOutcome(ctx context.Context, conn *sql.Conn, actorID int64, commandID, action, outcome, targetType string, targetID int64, targetVersion *int64, timestamp string) error {
+	var nullableCommand any
+	if commandID != "" {
+		nullableCommand = commandID
+	}
+	result, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,?,?,?,?,?,?)`,
+		actorID, action, nullableCommand, outcome, targetType, targetID, timestamp)
 	if err != nil {
 		return err
 	}
@@ -181,7 +234,11 @@ func recordAudit(ctx context.Context, conn *sql.Conn, actorID int64, action, tar
 	if err != nil {
 		return err
 	}
-	_, err = conn.ExecContext(ctx, `INSERT INTO audit_event_targets(audit_event_id,target_type,target_id) VALUES(?,?,?)`, auditID, targetType, targetID)
+	var nullableVersion any
+	if targetVersion != nil {
+		nullableVersion = *targetVersion
+	}
+	_, err = conn.ExecContext(ctx, `INSERT INTO audit_event_targets(audit_event_id,target_type,target_id,target_version) VALUES(?,?,?,?)`, auditID, targetType, targetID, nullableVersion)
 	return err
 }
 

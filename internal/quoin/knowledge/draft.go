@@ -49,6 +49,11 @@ var ErrEmptyEdit = errors.New("draft edit requires title or body")
 // present) and returns the updated summary. A non-nil scope must be a
 // JSON object; an empty object clears the scope.
 func (service *Service) EditDraft(ctx context.Context, principalID int64, commandID string, candidateID, expectedRevision int64, title, body *string, scope *json.RawMessage) (CandidateSummary, error) {
+	return service.EditDraftAs(ctx, MutationActor{ID: principalID}, commandID, candidateID, expectedRevision, title, body, scope)
+}
+
+func (service *Service) EditDraftAs(ctx context.Context, actor MutationActor, commandID string, candidateID, expectedRevision int64, title, body *string, scope *json.RawMessage) (CandidateSummary, error) {
+	principalID := actor.ID
 	fields := map[string]any{"candidateId": candidateID, "expectedRevision": expectedRevision}
 	if title != nil {
 		fields["title"] = *title
@@ -85,6 +90,9 @@ func (service *Service) EditDraft(ctx context.Context, principalID int64, comman
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
+		return CandidateSummary{}, err
+	}
 	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
 		return CandidateSummary{}, err
 	} else if ok {
@@ -104,6 +112,7 @@ func (service *Service) EditDraft(ctx context.Context, principalID int64, comman
 	}
 	set := "draft_revision=draft_revision+1, row_version=row_version+1"
 	args := make([]any, 0, 5)
+	var normalizedScope *string
 	if title != nil {
 		set += ", draft_title=?"
 		args = append(args, *title)
@@ -117,10 +126,33 @@ func (service *Service) EditDraft(ctx context.Context, principalID int64, comman
 		if err != nil {
 			return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerEdit, digest, candidateID, ErrInvalidScope)
 		}
+		value := scopeValue(normalized)
+		comparison := normalized
+		if value == nil {
+			comparison = ""
+		}
+		normalizedScope = &comparison
 		set += ", draft_scope_json=?"
-		args = append(args, scopeValue(normalized))
+		args = append(args, value)
 	}
-	result, err := conn.ExecContext(ctx, `UPDATE knowledge_candidates SET `+set+` WHERE id=? AND state='AwaitingConfirmation' AND draft_revision=?`,
+	var currentTitle, currentBody, currentScope string
+	if err := conn.QueryRowContext(ctx, `SELECT draft_title,draft_body,COALESCE(draft_scope_json,'') FROM knowledge_candidates WHERE id=? AND state='AwaitingConfirmation' AND draft_revision=? AND (import_batch_id IS NULL OR EXISTS (SELECT 1 FROM knowledge_import_batches b WHERE b.id=import_batch_id AND b.state='AwaitingConfirmation'))`, candidateID, expectedRevision).Scan(&currentTitle, &currentBody, &currentScope); err == nil {
+		unchanged := (title == nil || *title == currentTitle) && (body == nil || *body == currentBody) && (normalizedScope == nil || *normalizedScope == currentScope)
+		if unchanged {
+			summary, scanErr := scanCandidateOn(ctx, conn, candidateID)
+			if scanErr != nil {
+				return CandidateSummary{}, scanErr
+			}
+			if err := commitCandidateCommand(ctx, conn, principalID, commandID, ledgerEdit, digest, candidateID, summary); err != nil {
+				return CandidateSummary{}, err
+			}
+			committed = true
+			return summary, nil
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return CandidateSummary{}, err
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE knowledge_candidates SET `+set+` WHERE id=? AND state='AwaitingConfirmation' AND draft_revision=? AND (import_batch_id IS NULL OR EXISTS (SELECT 1 FROM knowledge_import_batches b WHERE b.id=import_batch_id AND b.state='AwaitingConfirmation'))`,
 		append(args, candidateID, expectedRevision)...)
 	if err != nil {
 		return CandidateSummary{}, err
@@ -133,13 +165,13 @@ func (service *Service) EditDraft(ctx context.Context, principalID int64, comman
 		return CandidateSummary{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerEdit, digest, candidateID, service.editConflict(ctx, conn, candidateID))
 	}
 	now := service.nowText()
-	if err := recordAudit(ctx, conn, principalID, ledgerEdit, "knowledge_candidate", candidateID, now); err != nil {
-		return CandidateSummary{}, err
-	}
 	// Read back through the same connection (the pool may be fully
 	// occupied while this handle is open).
 	summary, err := scanCandidateOn(ctx, conn, candidateID)
 	if err != nil {
+		return CandidateSummary{}, err
+	}
+	if err := recordAudit(ctx, conn, principalID, commandID, ledgerEdit, "knowledge_candidate", candidateID, &summary.RowVersion, now); err != nil {
 		return CandidateSummary{}, err
 	}
 	if err := commitCandidateCommand(ctx, conn, principalID, commandID, ledgerEdit, digest, candidateID, summary); err != nil {
@@ -153,8 +185,9 @@ func (service *Service) EditDraft(ctx context.Context, principalID int64, comman
 // state or a stale expected revision.
 func (service *Service) editConflict(ctx context.Context, conn *sql.Conn, candidateID int64) error {
 	var state string
+	var batchState sql.NullString
 	var draftRevision int64
-	err := conn.QueryRowContext(ctx, `SELECT state, draft_revision FROM knowledge_candidates WHERE id=?`, candidateID).Scan(&state, &draftRevision)
+	err := conn.QueryRowContext(ctx, `SELECT c.state, c.draft_revision, b.state FROM knowledge_candidates c LEFT JOIN knowledge_import_batches b ON b.id=c.import_batch_id WHERE c.id=?`, candidateID).Scan(&state, &draftRevision, &batchState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -163,6 +196,9 @@ func (service *Service) editConflict(ctx context.Context, conn *sql.Conn, candid
 	}
 	if state != StateAwaiting {
 		return &StateConflict{State: state}
+	}
+	if batchState.Valid && batchState.String != "AwaitingConfirmation" {
+		return &StateConflict{State: batchState.String}
 	}
 	return &RevisionConflict{Current: draftRevision}
 }

@@ -26,6 +26,11 @@ type CreateResult struct {
 // CreateFromAnalysisOutput resolves the analysis' sealed first success
 // output and creates or returns its candidate.
 func (service *Service) CreateFromAnalysisOutput(ctx context.Context, principalID int64, commandID string, occurrenceID, analysisID int64) (CreateResult, error) {
+	return service.CreateFromAnalysisOutputAs(ctx, MutationActor{ID: principalID}, commandID, occurrenceID, analysisID)
+}
+
+func (service *Service) CreateFromAnalysisOutputAs(ctx context.Context, actor MutationActor, commandID string, occurrenceID, analysisID int64) (CreateResult, error) {
+	principalID := actor.ID
 	// The digest covers the semantic request fields; the resolved source is
 	// deterministic from them (HTTP-COMMAND-002).
 	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceAnalysisOutput, "occurrenceId": occurrenceID, "analysisId": analysisID})
@@ -64,12 +69,17 @@ func (service *Service) CreateFromAnalysisOutput(ctx context.Context, principalI
 		Title: deriveTitle(content),
 		Body:  content,
 	}
-	return service.createOrReturn(ctx, conn, principalID, commandID, digest, SourceAnalysisOutput, outputID, suggestion)
+	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceAnalysisOutput, outputID, suggestion)
 }
 
 // CreateFromInvestigationMessage validates the active assistant message
 // belongs to the investigation and creates or returns its candidate.
 func (service *Service) CreateFromInvestigationMessage(ctx context.Context, principalID int64, commandID string, investigationID, messageID int64) (CreateResult, error) {
+	return service.CreateFromInvestigationMessageAs(ctx, MutationActor{ID: principalID}, commandID, investigationID, messageID)
+}
+
+func (service *Service) CreateFromInvestigationMessageAs(ctx context.Context, actor MutationActor, commandID string, investigationID, messageID int64) (CreateResult, error) {
+	principalID := actor.ID
 	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceMessage, "investigationId": investigationID, "sourceId": messageID})
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -103,12 +113,17 @@ func (service *Service) CreateFromInvestigationMessage(ctx context.Context, prin
 		Title: deriveTitle(content),
 		Body:  content,
 	}
-	return service.createOrReturn(ctx, conn, principalID, commandID, digest, SourceMessage, messageID, suggestion)
+	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceMessage, messageID, suggestion)
 }
 
 // CreateFromReport resolves the run's immutable report version and
 // creates or returns its candidate.
 func (service *Service) CreateFromReport(ctx context.Context, principalID int64, commandID string, runID, reportVersion int64) (CreateResult, error) {
+	return service.CreateFromReportAs(ctx, MutationActor{ID: principalID}, commandID, runID, reportVersion)
+}
+
+func (service *Service) CreateFromReportAs(ctx context.Context, actor MutationActor, commandID string, runID, reportVersion int64) (CreateResult, error) {
+	principalID := actor.ID
 	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceReport, "runId": runID, "reportVersion": reportVersion})
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -138,13 +153,14 @@ func (service *Service) CreateFromReport(ctx context.Context, principalID int64,
 		Title: deriveTitle(content),
 		Body:  content,
 	}
-	return service.createOrReturn(ctx, conn, principalID, commandID, digest, SourceReport, reportID, suggestion)
+	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceReport, reportID, suggestion)
 }
 
 // createOrReturn is the shared create-or-return core: dedupe first (the
 // partial unique index is the authority), reject-check the source only
 // for a genuinely new candidate, then insert with the frozen suggestion.
-func (service *Service) createOrReturn(ctx context.Context, conn *sql.Conn, principalID int64, commandID, digest, sourceType string, sourceID int64, suggestion Suggestion) (CreateResult, error) {
+func (service *Service) createOrReturn(ctx context.Context, conn *sql.Conn, actor MutationActor, commandID, digest, sourceType string, sourceID int64, suggestion Suggestion) (CreateResult, error) {
+	principalID := actor.ID
 	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
 		return CreateResult{}, err
 	} else if ok {
@@ -159,6 +175,9 @@ func (service *Service) createOrReturn(ctx context.Context, conn *sql.Conn, prin
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
+		return CreateResult{}, err
+	}
 	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
 		return CreateResult{}, err
 	} else if ok {
@@ -211,7 +230,7 @@ func (service *Service) createOrReturn(ctx context.Context, conn *sql.Conn, prin
 	if err != nil {
 		return CreateResult{}, err
 	}
-	if err := recordAudit(ctx, conn, principalID, ledgerCreate, sourceType, sourceID, now); err != nil {
+	if err := recordAudit(ctx, conn, principalID, commandID, ledgerCreate, sourceType, sourceID, nil, now); err != nil {
 		return CreateResult{}, err
 	}
 	summary, err := scanCandidateOn(ctx, conn, candidateID)

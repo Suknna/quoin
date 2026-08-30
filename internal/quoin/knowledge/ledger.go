@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // commandCommandType names the ledger command types.
@@ -85,6 +86,9 @@ func rejectCandidateCommand(ctx context.Context, conn *sql.Conn, principalID int
 	if candidateID > 0 {
 		objectID = candidateID
 	}
+	if err := recordRejectedAudit(ctx, conn, principalID, commandID, commandType, "knowledge_candidate", objectID, nil, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
 	if err := recordCommand(ctx, conn, principalID, commandID, commandType, digest, authOutcomeRejected, "knowledge_candidate", objectID, string(body)); err != nil {
 		return err
 	}
@@ -111,6 +115,41 @@ func rejectionStatus(rejection error) int {
 // replayCandidateOutcome resolves a ledger hit: a committed record returns
 // its original summary; a rejected_known record reconstructs the same
 // typed rejection (HTTP-COMMAND-003/004).
+// rejectScopedCommand is the batch/version counterpart of candidate rejection:
+// deterministic outcomes must become replayable ledger facts, not rollbacks.
+func rejectScopedCommand(ctx context.Context, conn *sql.Conn, principalID int64, commandID, commandType, digest, objectType string, objectID int64, timestamp string, rejection error) error {
+	payload := rejectionPayload{Status: rejectionStatus(rejection), Description: rejection.Error()}
+	var revision *RevisionConflict
+	var rowVersion *RowVersionConflict
+	var state *StateConflict
+	switch {
+	case errors.As(rejection, &revision):
+		payload.Kind, payload.Current = "revision_conflict", revision.Current
+	case errors.As(rejection, &rowVersion):
+		payload.Kind, payload.Current = "row_version_conflict", rowVersion.Current
+	case errors.As(rejection, &state):
+		payload.Kind, payload.State = "state_conflict", state.State
+	case errors.Is(rejection, ErrNotFound):
+		payload.Kind = "not_found"
+	default:
+		payload.Kind = "unknown"
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if err := recordRejectedAudit(ctx, conn, principalID, commandID, commandType, objectType, objectID, nil, timestamp); err != nil {
+		return err
+	}
+	if err := recordCommand(ctx, conn, principalID, commandID, commandType, digest, authOutcomeRejected, objectType, objectID, string(body)); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	return rejection
+}
+
 func replayCandidateOutcome(record authRecord, digest string) (CandidateSummary, bool, error) {
 	if record.RequestDigest != digest || record.ResultObjectType != "knowledge_candidate" {
 		return CandidateSummary{}, false, ErrCommandReused

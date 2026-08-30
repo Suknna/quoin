@@ -35,9 +35,12 @@ type KnowledgeCursor struct {
 	ID        int64
 }
 
-// VersionCursor pages versions newest-first (id DESC).
+// VersionCursor pages versions newest-first (id DESC). KnowledgeID binds the
+// cursor to its path scope: a cursor minted for one knowledge is malformed
+// for another (HTTP-PAGE-001).
 type VersionCursor struct {
-	ID int64
+	KnowledgeID int64 `json:"k"`
+	ID          int64 `json:"i"`
 }
 
 // ListResult carries one page plus the next keyset cursor.
@@ -301,7 +304,7 @@ func (service *Service) ListVersions(ctx context.Context, knowledgeID int64, aft
 	}
 	query := `
 		SELECT v.id, v.version_seq, v.title, v.source_candidate_id, v.created_at,
-		       NOT EXISTS (SELECT 1 FROM knowledge_version_retrieval_state s WHERE s.knowledge_version_id=v.id AND s.exited=1),
+		       EXISTS (SELECT 1 FROM knowledge_search_docs d WHERE d.knowledge_version_id=v.id),
 		       s.row_version
 		FROM knowledge_versions v JOIN knowledge_version_retrieval_state s ON s.knowledge_version_id=v.id
 		WHERE 1=1` + where + ` ORDER BY v.id DESC LIMIT ?`
@@ -343,14 +346,15 @@ func (service *Service) ListVersions(ctx context.Context, knowledgeID int64, aft
 func (service *Service) GetVersion(ctx context.Context, knowledgeID, versionID int64) (VersionDetail, error) {
 	row := service.db.QueryRowContext(ctx, `
 		SELECT v.id, v.version_seq, v.title, v.body, v.scope_json, v.conditions_json, v.limitations_json,
-		       v.source_candidate_id, v.created_at, s.exited, s.exited_at, s.exit_reason, s.row_version
+		       v.source_candidate_id, v.created_at, EXISTS (SELECT 1 FROM knowledge_search_docs d WHERE d.knowledge_version_id=v.id), s.exited_at, s.exit_reason, s.row_version
 		FROM knowledge_versions v
 		JOIN knowledge_version_retrieval_state s ON s.knowledge_version_id=v.id
 		WHERE v.knowledge_id=? AND v.id=?`, knowledgeID, versionID)
-	var id, versionSeq, sourceCandidate, retrievalRowVersion, exited int64
+	var id, versionSeq, sourceCandidate, retrievalRowVersion int64
+	var eligible bool
 	var title, body, createdAt string
 	var scope, conditions, limitations, exitedAt, exitReason sql.NullString
-	if err := row.Scan(&id, &versionSeq, &title, &body, &scope, &conditions, &limitations, &sourceCandidate, &createdAt, &exited, &exitedAt, &exitReason, &retrievalRowVersion); err != nil {
+	if err := row.Scan(&id, &versionSeq, &title, &body, &scope, &conditions, &limitations, &sourceCandidate, &createdAt, &eligible, &exitedAt, &exitReason, &retrievalRowVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return VersionDetail{}, ErrNotFound
 		}
@@ -359,7 +363,7 @@ func (service *Service) GetVersion(ctx context.Context, knowledgeID, versionID i
 	detail := VersionDetail{
 		ID: fmt.Sprintf("%d", id), VersionSeq: versionSeq, Title: title, Body: body,
 		SourceCandidateID: fmt.Sprintf("%d", sourceCandidate), CreatedAt: createdAt,
-		Eligible: exited == 0, RetrievalStateRowVersion: retrievalRowVersion, EmbeddingState: "not_configured",
+		Eligible: eligible, RetrievalStateRowVersion: retrievalRowVersion, EmbeddingState: "not_configured",
 	}
 	if scope.Valid {
 		detail.Scope = json.RawMessage(scope.String)
