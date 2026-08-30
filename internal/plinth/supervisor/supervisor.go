@@ -59,6 +59,8 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
 		}
+	case runtimev1.AttemptType_ATTEMPT_TYPE_EMBEDDING:
+		supervisor.runEmbedding(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:
 		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:

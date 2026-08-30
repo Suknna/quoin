@@ -386,3 +386,71 @@ func DigestCanonical(body string) string {
 	sum := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(sum[:])
 }
+
+// RunEmbeddingBatch embeds an arbitrary batch of texts with the configured
+// model (the T29 supervisor embedding work mode; the fixed-sentence probe
+// above stays the connection-probe authority).
+func RunEmbeddingBatch(ctx context.Context, probe *client, modelID string, texts []string) (ActionResult, [][]float64, error) {
+	response, err := probe.post(ctx, "/v1/embeddings", map[string]any{
+		"model": modelID,
+		"input": texts,
+	}, false)
+	result := ActionResult{Action: ActionEmbedding}
+	if err != nil {
+		return result, nil, fmt.Errorf("embedding 请求失败: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return result, nil, fmt.Errorf("embedding HTTP %d", response.StatusCode)
+	}
+	result.RequestID = response.Header.Get("X-Request-Id")
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	var embedding struct {
+		Data []struct {
+			Index     *int      `json:"index"`
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+		Usage *struct {
+			PromptTokens int64 `json:"prompt_tokens"`
+			TotalTokens  int64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &embedding); err != nil {
+		return result, nil, fmt.Errorf("embedding 响应不是合法 JSON: %w", err)
+	}
+	if len(embedding.Data) == 0 {
+		return result, nil, errors.New("embedding 向量为空")
+	}
+	if embedding.Usage != nil {
+		result.Usage = usage{Input: embedding.Usage.PromptTokens, Total: embedding.Usage.TotalTokens}
+	}
+	// The provider's explicit `index` field owns the input↔vector binding;
+	// response array order is never trusted (a reordered body must not
+	// silently swap two texts' vectors), and a missing index field is a
+	// rejection rather than an implicit 0.
+	vectors := make([][]float64, len(texts))
+	seen := make([]bool, len(texts))
+	for _, item := range embedding.Data {
+		if item.Index == nil {
+			return result, nil, errors.New("embedding 向量缺少显式 index 字段")
+		}
+		if *item.Index < 0 || *item.Index >= len(texts) {
+			return result, nil, fmt.Errorf("embedding index %d 超出输入范围 %d", *item.Index, len(texts))
+		}
+		if seen[*item.Index] {
+			return result, nil, fmt.Errorf("embedding index %d 重复", *item.Index)
+		}
+		if len(item.Embedding) == 0 {
+			return result, nil, errors.New("embedding 向量为空")
+		}
+		vectors[*item.Index] = item.Embedding
+		seen[*item.Index] = true
+	}
+	for index, present := range seen {
+		if !present {
+			return result, nil, fmt.Errorf("embedding 响应缺少输入 %d 的向量", index)
+		}
+	}
+	result.OK = true
+	return result, vectors, nil
+}
