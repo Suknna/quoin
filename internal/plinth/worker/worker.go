@@ -43,6 +43,7 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 // investigation.OutputSchemaKind).
 const InvestigationOutputSchemaKind = "investigation_output_v1"
 const InspectionOutputSchemaKind = "inspection_report_result_v1"
+const KnowledgeExtractionOutputSchemaKind = "knowledge_extraction_result_v1"
 
 // maxModelRetries bounds the worker-side physical retry budget per logical
 // call (ARCH-AGENT-004: only transport-class failures with no visible
@@ -83,6 +84,18 @@ var inspectionAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInspectionMessages(input)
+	},
+}
+
+var knowledgeExtractionMode = attemptMode{
+	schemaKind: "knowledge_extraction_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: KnowledgeExtractionOutputSchemaKind,
+	prompt: agent.KnowledgeExtractionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseKnowledgeExtractionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildKnowledgeExtractionMessages(input)
 	},
 }
 
@@ -171,6 +184,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		mode = investigationMode
 	case inspectionAnalysisMode.schemaKind:
 		mode = inspectionAnalysisMode
+	case knowledgeExtractionMode.schemaKind:
+		mode = knowledgeExtractionMode
 	default:
 		return attemptMode{}, fmt.Errorf("unsupported schema_kind %q", start.GetSchemaKind())
 	}
@@ -304,6 +319,34 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 		}
 		// Final answer: no tool calls → propose the immutable output.
 		if len(prepared) == 0 {
+			if mode.schemaKind == knowledgeExtractionMode.schemaKind {
+				input, err := agent.ParseKnowledgeExtractionInput(start.GetCanonicalJson())
+				if err != nil {
+					return err
+				}
+				var modelOutput struct {
+					Items json.RawMessage `json:"items"`
+				}
+				if err := json.Unmarshal([]byte(assistantText), &modelOutput); err != nil || len(modelOutput.Items) == 0 {
+					return fmt.Errorf("knowledge extraction model output must be JSON with items")
+				}
+				canonical, err := json.Marshal(map[string]any{"schemaKind": "knowledge_extraction_result_v1", "attemptId": input.AttemptID, "batchId": input.BatchID, "modelCallId": modelCallID, "items": json.RawMessage(modelOutput.Items)})
+				if err != nil {
+					return err
+				}
+				digest := sha256.Sum256(canonical)
+				if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_WorkerResultProposal{WorkerResultProposal: &workerv1.WorkerResultProposal{SchemaKind: mode.outputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:]}}}); err != nil {
+					return err
+				}
+				ack, err := reader.Read()
+				if err != nil {
+					return err
+				}
+				if ack.GetWorkerResultAck() == nil || !ack.GetWorkerResultAck().GetAccepted() {
+					return fmt.Errorf("%w: result rejected", ErrProtocol)
+				}
+				return nil
+			}
 			if mode.schemaKind == inspectionAnalysisMode.schemaKind {
 				input, err := agent.ParseInspectionInput(start.GetCanonicalJson())
 				if err != nil {

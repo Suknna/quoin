@@ -59,7 +59,7 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
 		}
-	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS:
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:
 		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
@@ -183,6 +183,16 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
 		failureSchema = "inspection_report_result_v1"
 		systemPrompt = plinthagent.InspectionSystemPrompt
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
+		failureSchema = worker.KnowledgeExtractionOutputSchemaKind
+		systemPrompt = plinthagent.KnowledgeExtractionSystemPrompt
+	}
+	failPreAccept := func(detail string) {
+		if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
+			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INTERNAL, detail)
+			return
+		}
+		supervisor.proposeFailure(sink, attemptID, failureSchema, detail)
 	}
 	// The frozen input snapshot carries the model contract (model id and
 	// budgets, ARCH-AGENT-003); the supervisor resolves the base URL and
@@ -201,7 +211,7 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 	bearer, bearerErr := supervisor.Channel.BearerToken()
 	if bearerErr != nil {
 		grantCancel()
-		supervisor.proposeFailure(sink, attemptID, failureSchema, "读取状态卷 token 失败: "+bearerErr.Error())
+		failPreAccept("读取状态卷 token 失败: " + bearerErr.Error())
 		return
 	}
 	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
@@ -209,12 +219,12 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 	})
 	grantCancel()
 	if err != nil || payload.GetModelProvider() == nil {
-		supervisor.proposeFailure(sink, attemptID, failureSchema, "获取模型凭据 grant 失败")
+		failPreAccept("获取模型凭据 grant 失败")
 		return
 	}
 	var config plinthconnections.ModelProviderConfig
 	if err := json.Unmarshal(payload.GetRevisionConfigJson(), &config); err != nil || config.BaseURL == "" {
-		supervisor.proposeFailure(sink, attemptID, failureSchema, "模型供应商 revision 配置无法解析")
+		failPreAccept("模型供应商 revision 配置无法解析")
 		return
 	}
 	runner := &worker.Runner{

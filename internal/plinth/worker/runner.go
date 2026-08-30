@@ -56,6 +56,9 @@ type Runner struct {
 	// schema (proposeFailure must not stamp an analysis schema onto an
 	// investigation attempt).
 	failureSchemaKind string
+	// accepted fences preflight failures: only a Running Attempt may submit a
+	// terminal ResultProposal; earlier failures are AttemptReject instead.
+	accepted bool
 	// toolCalls is test-only injectable transport for the typed-tool path.
 	// Production leaves it nil and uses the outbound runtime Channel.
 	toolCalls toolCallChannel
@@ -118,16 +121,24 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 	// payload schema (RUNTIME-TASK-003: agent attempts dispatch to plinth).
 	workMode := workerv1.WorkMode_WORK_MODE_INITIAL_ANALYSIS
 	runner.failureSchemaKind = OutputSchemaKind
+	runner.accepted = false
 	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
 		workMode = workerv1.WorkMode_WORK_MODE_INVESTIGATION
 		runner.failureSchemaKind = InvestigationOutputSchemaKind
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
 		workMode = workerv1.WorkMode_WORK_MODE_INSPECTION_ANALYSIS
 		runner.failureSchemaKind = InspectionOutputSchemaKind
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
+		workMode = workerv1.WorkMode_WORK_MODE_KNOWLEDGE_EXTRACTION
+		runner.failureSchemaKind = KnowledgeExtractionOutputSchemaKind
 	}
 	workspaceDir := filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID))
 	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
-		runner.proposeFailure(attemptID, "sandbox_unavailable", "workspace create failed: "+err.Error())
+		if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
+			runner.proposeReject(attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INTERNAL)
+		} else {
+			runner.proposeFailure(attemptID, "sandbox_unavailable", "workspace create failed: "+err.Error())
+		}
 		return
 	}
 	defer func() {
@@ -138,11 +149,25 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 		}
 	}()
 	if err := runner.runWorker(ctx, attemptID, dispatch, workspaceDir, workMode); err != nil {
-		// The worker already proposed a result on the normal paths; a
-		// protocol-level exit maps to a structured technical failure.
+		// Before StartAttemptAck we have not accepted the dispatch, so a result
+		// proposal would be unfenced against an Assigned Attempt. Reject it;
+		// after acceptance runWorker's terminal defer owns the failure proposal.
 		sharedops.LogEvent("plinth", "error", "worker.run_failed", fmt.Sprintf("attempt=%d %v", attemptID, err))
-		runner.proposeFailure(attemptID, "worker_protocol_error", err.Error())
+		if !runner.accepted && dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
+			runner.proposeReject(attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INTERNAL)
+		} else if !runner.accepted {
+			runner.proposeFailure(attemptID, "worker_protocol_error", err.Error())
+		}
 	}
+}
+
+func (runner *Runner) proposeReject(attemptID int64, reason runtimev1.AttemptRejectReason) {
+	_ = runner.Sink.Send(&runtimev1.ControlEnvelope{
+		CorrelationId: uint64(attemptID),
+		Msg: &runtimev1.ControlEnvelope_AttemptReject{AttemptReject: &runtimev1.AttemptReject{
+			AttemptId: attemptID, Reason: reason,
+		}},
+	})
 }
 
 // runWorker spawns the fresh worker process and bridges its frames.
@@ -239,6 +264,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 		process.Process.Kill()
 		return err
 	}
+	runner.accepted = true
 	executor := &model.Executor{Sink: runner.Sink, Channel: runner.Channel, Client: runner.Client, Binding: runner.Binding}
 	// Bridge loop: the worker proposes; the supervisor persists via Quoin
 	// and answers; the loop ends at WorkerResultProposal or cancel.
