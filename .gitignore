@@ -6,3 +6,4 @@ web/test-results/
 .pi/
 .pi-subagents/
 .DS_Store
+.vscode/
