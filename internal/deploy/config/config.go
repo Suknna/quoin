@@ -115,8 +115,18 @@ func DigestFile(path string) (string, error) {
 }
 
 // StateDirectory is the helper-owned local state root for the Compose
-// backend: generated projection, retry state, and reports live here.
+// backend. Keep it for compatibility with the existing Compose caller.
 func StateDirectory() (string, error) {
+	return StateDirectoryFor("compose")
+}
+
+// StateDirectoryFor returns a backend-private state root. Install retry state
+// carries a backend identity, so sharing its file across backends would make a
+// completed Compose stage appear reusable by Helm (or vice versa).
+func StateDirectoryFor(backend string) (string, error) {
+	if backend != "compose" && backend != "helm" {
+		return "", fmt.Errorf("unsupported deployment backend %q", backend)
+	}
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -125,7 +135,7 @@ func StateDirectory() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "quoin", "compose"), nil
+	return filepath.Join(base, "quoin", backend), nil
 }
 
 // InstallStateKey is the frozen retry identity: retries with the same key
@@ -135,6 +145,10 @@ type InstallStateKey struct {
 	Backend        string `json:"backend"`
 	ConfigDigest   string `json:"config_digest"`
 	Command        string `json:"command"`
+	// TargetIdentity fences retry state to one concrete deployment target.
+	// Backends that do not need an external target leave it empty; Helm records
+	// the current API server, cluster UID, namespace and release.
+	TargetIdentity string `json:"target_identity,omitempty"`
 }
 
 // InstallState is the persisted last-completed-stage record. It never holds

@@ -1,0 +1,66 @@
+{{- $annotations := .Values.input.opsServiceAnnotations | default dict -}}
+{{- define "quoin.opsService" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .root.Release.Name }}-{{ .component }}-ops
+  labels: {{- include "quoin.labels" .root | nindent 4 }}
+    app.kubernetes.io/component: {{ .component }}
+  {{- with .annotations }}
+  annotations: {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  # Plinth/Lintel are intentionally Kubernetes-not-ready until Runtime
+  # registration. Their private ops listeners must remain observable by the
+  # in-cluster verifier during that bounded state.
+  publishNotReadyAddresses: true
+  selector: {{- include "quoin.selector" (dict "root" .root "component" .component) | nindent 4 }}
+  ports:
+    - { name: ops, port: 9090, targetPort: ops }
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-quoin-public
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quoin
+spec:
+  type: ClusterIP
+  selector: {{- include "quoin.selector" (dict "root" . "component" "quoin") | nindent 4 }}
+  ports:
+    - { name: public, port: 8080, targetPort: public }
+---
+# Runtime uses this fixed alias because the issued certificate SAN is "quoin".
+apiVersion: v1
+kind: Service
+metadata:
+  name: quoin
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quoin
+    quoin.io/role: runtime
+spec:
+  type: ClusterIP
+  selector: {{- include "quoin.selector" (dict "root" . "component" "quoin") | nindent 4 }}
+  ports:
+    - { name: runtime, port: 8443, targetPort: runtime }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-stele-webhook
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: stele
+spec:
+  type: ClusterIP
+  selector: {{- include "quoin.selector" (dict "root" . "component" "stele") | nindent 4 }}
+  ports:
+    - { name: webhook, port: 8080, targetPort: webhook }
+---
+{{ include "quoin.opsService" (dict "root" . "component" "quoin" "annotations" $annotations) }}
+---
+{{ include "quoin.opsService" (dict "root" . "component" "plinth" "annotations" $annotations) }}
+---
+{{ include "quoin.opsService" (dict "root" . "component" "lintel" "annotations" $annotations) }}
+---
+{{ include "quoin.opsService" (dict "root" . "component" "stele" "annotations" $annotations) }}

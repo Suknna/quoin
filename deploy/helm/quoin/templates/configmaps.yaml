@@ -1,0 +1,55 @@
+{{- $runtime := include "quoin.runtimeEndpoint" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-component-quoin
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+data:
+  component.yaml: |
+    component: quoin
+    publicOrigin: {{ .Values.input.publicOrigin }}
+    dataDirectory: /var/lib/quoin/data
+    backupDirectory: /var/lib/quoin/backups
+    rootKeyFile: /run/quoin-secrets/root-key
+    runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
+    runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
+    steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-component-plinth
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+data:
+  component.yaml: |
+    component: plinth
+    stateDirectory: /var/lib/plinth
+    workspaceDirectory: /var/lib/plinth/workspaces
+    quoinRuntimeEndpoint: {{ $runtime }}
+    quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-component-lintel
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+data:
+  component.yaml: |
+    component: lintel
+    stateDirectory: /var/lib/lintel
+    quoinRuntimeEndpoint: {{ $runtime }}
+    quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+    browserSlots: {{ .Values.input.lintelBrowserSlots }}
+    minimumShmBytes: {{ include "quoin.shmBytes" . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-component-stele
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+data:
+  component.yaml: |
+    component: stele
+    quoinRuntimeEndpoint: {{ $runtime }}
+    quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+    serviceTokenFile: /run/quoin-secrets/stele-service-token

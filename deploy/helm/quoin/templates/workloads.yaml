@@ -1,0 +1,215 @@
+{{- $root := . -}}
+{{- include "quoin.requireBootstrapComplete" . -}}
+{{- $podSecurity := `{ runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: { type: RuntimeDefault } }` | fromYaml -}}
+{{- $containerSecurity := `{ allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }` | fromYaml -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-quoin
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quoin
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: {{- include "quoin.matchLabels" (dict "root" $ "component" "quoin") | nindent 4 }}
+  template:
+    metadata:
+      labels: {{- include "quoin.selector" (dict "root" $ "component" "quoin") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {{ toYaml $podSecurity | nindent 8 }}
+      initContainers:
+        - name: volume-permissions
+          image: {{ .Values.images.plinth }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "chown 65532:65532 /var/lib/quoin/data /var/lib/quoin/backups"]
+          securityContext: {runAsNonRoot: false, runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"], add: ["CHOWN", "FOWNER"]}}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/quoin/data}
+            - {name: backups, mountPath: /var/lib/quoin/backups}
+      containers:
+        - name: quoin
+          image: {{ .Values.images.quoin | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/quoin"]
+          args: ["serve", "--config", "/etc/quoin/component.yaml"]
+          ports:
+            - { name: public, containerPort: 8080 }
+            - { name: runtime, containerPort: 8443 }
+            - { name: ops, containerPort: 9090 }
+          securityContext: {{ toYaml $containerSecurity | nindent 12 }}
+          {{- include "quoin.resources" (.Values.input.resources | default dict).quoin | nindent 10 }}
+          startupProbe: { httpGet: { path: /livez, port: ops }, periodSeconds: 5, failureThreshold: 24 }
+          readinessProbe: { httpGet: { path: /readyz, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          livenessProbe: { httpGet: { path: /livez, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true }
+            - { name: data, mountPath: /var/lib/quoin/data }
+            - { name: backups, mountPath: /var/lib/quoin/backups }
+            - { name: secrets, mountPath: /run/quoin-secrets, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: {{ .Release.Name }}-component-quoin }
+        - name: data
+          persistentVolumeClaim: { claimName: {{ .Release.Name }}-quoin-data }
+        - name: backups
+          persistentVolumeClaim: { claimName: {{ .Release.Name }}-quoin-backups }
+        - name: secrets
+          secret: { secretName: {{ include "quoin.secretName" . }} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-plinth
+  labels: {{- include "quoin.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: plinth
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: {{- include "quoin.matchLabels" (dict "root" $ "component" "plinth") | nindent 4 }}
+  template:
+    metadata:
+      labels: {{- include "quoin.selector" (dict "root" $ "component" "plinth") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {{ toYaml $podSecurity | nindent 8 }}
+      initContainers:
+        - name: volume-permissions
+          image: {{ .Values.images.plinth }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "chown 65532:65532 /var/lib/plinth"]
+          securityContext: {runAsNonRoot: false, runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"], add: ["CHOWN", "FOWNER"]}}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/plinth}
+      containers:
+        - name: plinth
+          image: {{ .Values.images.plinth | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: ops, containerPort: 9090 }
+          securityContext: {{ toYaml $containerSecurity | nindent 12 }}
+          {{- include "quoin.resources" (.Values.input.resources | default dict).plinth | nindent 10 }}
+          startupProbe: { httpGet: { path: /livez, port: ops }, periodSeconds: 5, failureThreshold: 24 }
+          readinessProbe: { httpGet: { path: /readyz, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          livenessProbe: { httpGet: { path: /livez, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true }
+            - { name: state, mountPath: /var/lib/plinth }
+            - { name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: {{ .Release.Name }}-component-plinth }
+        - name: state
+          persistentVolumeClaim: { claimName: {{ .Release.Name }}-plinth-state }
+        - name: runtime-ca
+          secret:
+            secretName: {{ include "quoin.secretName" . }}
+            items: [{ key: runtime-ca.pem, path: runtime-ca.pem }]
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-lintel
+  labels: {{- include "quoin.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: lintel
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: {{- include "quoin.matchLabels" (dict "root" $ "component" "lintel") | nindent 4 }}
+  template:
+    metadata:
+      labels: {{- include "quoin.selector" (dict "root" $ "component" "lintel") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {{ toYaml $podSecurity | nindent 8 }}
+      initContainers:
+        - name: volume-permissions
+          image: {{ .Values.images.plinth }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "chown 65532:65532 /var/lib/lintel"]
+          securityContext: {runAsNonRoot: false, runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"], add: ["CHOWN", "FOWNER"]}}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/lintel}
+      containers:
+        - name: lintel
+          image: {{ .Values.images.lintel | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: ops, containerPort: 9090 }
+          securityContext: {{ toYaml $containerSecurity | nindent 12 }}
+          {{- include "quoin.resources" (.Values.input.resources | default dict).lintel | nindent 10 }}
+          startupProbe: { httpGet: { path: /livez, port: ops }, periodSeconds: 5, failureThreshold: 24 }
+          readinessProbe: { httpGet: { path: /readyz, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          livenessProbe: { httpGet: { path: /livez, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true }
+            - { name: state, mountPath: /var/lib/lintel }
+            - { name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: config
+          configMap: { name: {{ .Release.Name }}-component-lintel }
+        - name: state
+          persistentVolumeClaim: { claimName: {{ .Release.Name }}-lintel-state }
+        - name: runtime-ca
+          secret:
+            secretName: {{ include "quoin.secretName" . }}
+            items: [{ key: runtime-ca.pem, path: runtime-ca.pem }]
+        - { name: tmp, emptyDir: {} }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: {{ include "quoin.shmBytes" . }} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-stele
+  labels: {{- include "quoin.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: stele
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: {{- include "quoin.matchLabels" (dict "root" $ "component" "stele") | nindent 4 }}
+  template:
+    metadata:
+      labels: {{- include "quoin.selector" (dict "root" $ "component" "stele") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: {{ toYaml $podSecurity | nindent 8 }}
+      containers:
+        - name: stele
+          image: {{ .Values.images.stele | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: webhook, containerPort: 8080 }
+            - { name: ops, containerPort: 9090 }
+          securityContext: {{ toYaml $containerSecurity | nindent 12 }}
+          {{- include "quoin.resources" (.Values.input.resources | default dict).stele | nindent 10 }}
+          startupProbe: { httpGet: { path: /livez, port: ops }, periodSeconds: 5, failureThreshold: 24 }
+          readinessProbe: { httpGet: { path: /readyz, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          livenessProbe: { httpGet: { path: /livez, port: ops }, initialDelaySeconds: 5, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true }
+            - { name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true }
+            - { name: stele-token, mountPath: /run/quoin-secrets/stele-service-token, subPath: stele-service-token, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap: { name: {{ .Release.Name }}-component-stele }
+        - name: runtime-ca
+          secret:
+            secretName: {{ include "quoin.secretName" . }}
+            items: [{ key: runtime-ca.pem, path: runtime-ca.pem }]
+        - name: stele-token
+          secret:
+            secretName: {{ include "quoin.secretName" . }}
+            items: [{ key: stele-service-token, path: stele-service-token }]
+        - { name: tmp, emptyDir: {} }

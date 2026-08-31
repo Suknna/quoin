@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Quoin Helm chart values (helper-derived projection of the frozen helm-install input)",
+  "description": "quoin-deploy derives these values from the schema-validated helm-install document plus the digest-pinned release manifest. Defaults are normalized by the helper before rendering: lintelShmSize=1Gi, monitorDiscovery=none, prometheusRule=false. Secret material never enters chart values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["input", "images"],
+  "properties": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publicOrigin", "publicIngress", "steleIngress", "storage", "lintelBrowserSlots", "lintelShmSize", "monitorDiscovery", "prometheusRule"],
+      "properties": {
+        "publicOrigin": { "type": "string", "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+)(?::[0-9]{1,5})?$", "maxLength": 512 },
+        "publicIngress": { "$ref": "#/$defs/ingress" },
+        "steleIngress": { "$ref": "#/$defs/ingress" },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["quoinData", "quoinBackup", "plinthState", "lintelState"],
+          "properties": {
+            "quoinData": { "$ref": "#/$defs/pvc" },
+            "quoinBackup": { "$ref": "#/$defs/pvc" },
+            "plinthState": { "$ref": "#/$defs/pvc" },
+            "lintelState": { "$ref": "#/$defs/pvc" }
+          }
+        },
+        "lintelBrowserSlots": { "type": "integer", "minimum": 1 },
+        "lintelShmSize": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
+        "monitorDiscovery": { "enum": ["none", "serviceMonitor", "podMonitor"] },
+        "prometheusRule": { "type": "boolean" },
+        "opsServiceAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quoin", "plinth", "lintel", "stele"],
+      "properties": {
+        "quoin": { "$ref": "#/$defs/digestImage" },
+        "plinth": { "$ref": "#/$defs/digestImage" },
+        "lintel": { "$ref": "#/$defs/digestImage" },
+        "stele": { "$ref": "#/$defs/digestImage" }
+      }
+    }
+  },
+  "$defs": {
+    "digestImage": {
+      "type": "string",
+      "pattern": "^[^@]+@sha256:[0-9a-f]{64}$",
+      "description": "Immutable repository@index digest reference from the release manifest; mutable tags are never accepted."
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" },
+        "host": { "type": "string", "format": "hostname" },
+        "tlsSecretName": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" }
+      },
+      "allOf": [{
+        "if": { "properties": { "enabled": { "const": true } } },
+        "then": { "required": ["className", "host", "tlsSecretName"] },
+        "else": { "not": { "anyOf": [{ "required": ["className"] }, { "required": ["host"] }, { "required": ["tlsSecretName"] }] } }
+      }]
+    },
+    "pvc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity", "accessMode"],
+      "properties": {
+        "capacity": { "type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$" },
+        "accessMode": { "enum": ["ReadWriteOncePod", "ReadWriteOnce"] },
+        "storageClassName": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quoin": { "$ref": "#/$defs/resourceRequirements" },
+        "plinth": { "$ref": "#/$defs/resourceRequirements" },
+        "lintel": { "$ref": "#/$defs/resourceRequirements" },
+        "stele": { "$ref": "#/$defs/resourceRequirements" }
+      },
+      "minProperties": 1
+    },
+    "resourceRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "cpu": { "type": "string", "minLength": 1 }, "memory": { "type": "string", "minLength": 1 } },
+          "minProperties": 1
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "cpu": { "type": "string", "minLength": 1 }, "memory": { "type": "string", "minLength": 1 } },
+          "minProperties": 1
+        }
+      },
+      "minProperties": 1
+    }
+  }
+}

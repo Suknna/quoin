@@ -48,16 +48,41 @@ func runServe(arguments []string) {
 }
 
 func runSecrets(arguments []string) {
-	config := parseConfig(arguments, "secrets bootstrap")
+	secretName, configArguments := kubernetesSecretArgument(arguments)
+	config := parseConfig(configArguments, "secrets bootstrap")
 	created, err := bootstrap.BootstrapSecrets(config)
 	if err != nil {
 		fail(err.Error())
+	}
+	if secretName != "" {
+		if err := bootstrap.PublishKubernetesSecret(config, secretName); err != nil {
+			fail(err.Error())
+		}
 	}
 	if created {
 		sharedops.LogEvent("quoin", "info", "secrets.bootstrap.created", "deployment secret set created")
 	} else {
 		sharedops.LogEvent("quoin", "info", "secrets.bootstrap.already_valid", "existing deployment secret set verified")
 	}
+}
+
+// kubernetesSecretArgument removes the bootstrap Job-only destination flag
+// before the shared strict component-config parser sees its arguments.
+func kubernetesSecretArgument(arguments []string) (string, []string) {
+	filtered := make([]string, 0, len(arguments))
+	for index := 0; index < len(arguments); index++ {
+		if arguments[index] == "--kubernetes-secret" {
+			if index+1 >= len(arguments) || arguments[index+1] == "" {
+				fail("--kubernetes-secret requires a fixed Secret name")
+			}
+			return arguments[index+1], append(filtered, arguments[index+2:]...)
+		}
+		if strings.HasPrefix(arguments[index], "--kubernetes-secret=") {
+			return strings.TrimPrefix(arguments[index], "--kubernetes-secret="), append(filtered, arguments[index+1:]...)
+		}
+		filtered = append(filtered, arguments[index])
+	}
+	return "", filtered
 }
 
 func runAdmin(arguments []string) {

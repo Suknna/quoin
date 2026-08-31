@@ -1,0 +1,5 @@
+# Deliberately incomplete: quoin-deploy derives all values from the validated
+# helm-install input and immutable release manifest. Helm lint/template callers
+# must supply an equally complete values file.
+input: {}
+images: {}

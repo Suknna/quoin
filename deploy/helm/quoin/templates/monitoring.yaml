@@ -1,0 +1,101 @@
+{{- $root := . -}}
+{{- if eq .Values.input.monitorDiscovery "serviceMonitor" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {{- include "quoin.labels" . | nindent 6 }}
+  endpoints:
+    - port: ops
+      path: /metrics
+      interval: 30s
+{{- else if eq .Values.input.monitorDiscovery "podMonitor" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quoin
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  podMetricsEndpoints:
+    - port: ops
+      path: /metrics
+      interval: 30s
+{{- end }}
+{{- if .Values.input.prometheusRule }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "quoin.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: quoin-component-readiness
+      rules:
+        {{- range $component := list "quoin" "plinth" "lintel" "stele" }}
+        - alert: Quoin{{ $component | title }}NotReady
+          expr: {{ $component }}_ready == 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: {{ $component }} has not been ready for five minutes
+        {{- end }}
+    - name: quoin-work-and-backup
+      rules:
+        - alert: QuoinNotAcceptingWork
+          expr: quoin_accepting_work == 0
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin has not been accepting work for fifteen minutes
+        - alert: QuoinBackupScheduleOverdue
+          expr: quoin_backup_schedule_overdue == 1
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin backup schedule is overdue
+        - alert: QuoinBackupActiveTooLong
+          expr: quoin_backup_active == 1 and quoin_backup_oldest_active_age_seconds > 7200
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin backup has been active for over two hours
+        - alert: QuoinBackupFailures
+          expr: increase(quoin_backup_failures_total[15m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin backup failures increased
+        - alert: QuoinRuntimeOffline
+          expr: min(quoin_runtime_connected) == 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: A Quoin Runtime slot has been offline for five minutes
+        - alert: QuoinStreamQueueOverflow
+          expr: increase(quoin_stream_queue_overflows_total[5m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin stream queue overflowed
+        - alert: QuoinStorageNotWritable
+          expr: min(quoin_storage_writable) == 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin persistent storage is not writable
+        - alert: QuoinArtifactGCOverdue
+          expr: time() - quoin_artifact_gc_last_success_timestamp_seconds > 86400
+          labels: { severity: warning }
+          annotations:
+            summary: Quoin Artifact GC has not succeeded for over 24 hours
+        - alert: QuoinSteleUnavailable
+          expr: stele_ready == 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Stele has been unavailable for five minutes
+{{- end }}
