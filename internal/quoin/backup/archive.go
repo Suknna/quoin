@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 var ErrArchiveNotReady = errors.New("backup archive is not ready")
@@ -174,27 +175,60 @@ func (s *Service) gcLocked(ctx context.Context) (result error) {
 	if err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status='succeeded' ORDER BY completed_at DESC, id DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status='succeeded'`)
 	if err != nil {
 		return err
 	}
-	var ids []int64
+	var succeededIDs []int64
 	for rows.Next() {
 		var id int64
 		if err = rows.Scan(&id); err != nil {
 			rows.Close()
 			return err
 		}
-		ids = append(ids, id)
+		succeededIDs = append(succeededIDs, id)
 	}
 	if err = rows.Close(); err != nil {
 		return err
 	}
-	keep := int(settings.RetentionCount)
-	if keep > len(ids) {
-		keep = len(ids)
+	type validRun struct {
+		id       int64
+		manifest time.Time
 	}
-	expired := ids[keep:]
+	var valid []validRun
+	var missingManifestResidue []int64
+	for _, id := range succeededIDs {
+		value, readErr := s.Get(ctx, id)
+		if readErr != nil || value.ManifestSHA256 == nil {
+			continue
+		}
+		root := filepath.Join(s.config.BackupDirectory, value.ID)
+		info, statErr := os.Stat(filepath.Join(root, "manifest.json"))
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				missingManifestResidue = append(missingManifestResidue, id)
+			}
+			continue
+		}
+		if VerifyWithManifestHash(root, *value.ManifestSHA256) != nil {
+			continue
+		}
+		valid = append(valid, validRun{id: id, manifest: info.ModTime()})
+	}
+	sort.Slice(valid, func(i, j int) bool { return valid[i].manifest.After(valid[j].manifest) })
+	keep := int(settings.RetentionCount)
+	if keep > len(valid) {
+		keep = len(valid)
+	}
+	expired := make([]int64, 0, len(valid)-keep+len(missingManifestResidue))
+	for _, run := range valid[keep:] {
+		expired = append(expired, run.id)
+	}
+	// A missing manifest can only be physical residue from a previous attempted
+	// cleanup once the retention window is already satisfied by verified sets.
+	if len(valid) >= keep {
+		expired = append(expired, missingManifestResidue...)
+	}
 	for _, id := range expired {
 		if err = s.removeAll(filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", id))); err != nil {
 			return fmt.Errorf("remove expired backup %d: %w", id, err)

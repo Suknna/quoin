@@ -57,6 +57,12 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 		return Summary{}, timestampErr
 	}
 	if runErr != nil {
+		// A terminal failed row must never coexist with a usable set. Clean both
+		// possible publish roots durably before making the Run non-active; if the
+		// filesystem cannot prove removal, retain the active row for Reconcile.
+		if cleanupErr := s.cleanupRunFiles(backupID); cleanupErr != nil {
+			return Summary{}, fmt.Errorf("cleanup failed backup before terminal state: %w", cleanupErr)
+		}
 		errorCode := "backup_failed"
 		var storageFailure *StorageFailure
 		if errors.As(runErr, &storageFailure) {
@@ -82,10 +88,7 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	if _, err = s.db.ExecContext(ctx, `UPDATE backups SET status='succeeded',stage='completed',completed_at=?,updated_at=?,db_sha256=?,manifest_sha256=?,artifact_count=?,size_bytes=?,manifest_path=?,row_version=row_version+1 WHERE id=? AND status='running'`, completed, completed, dbHash, manifestHash, count, sizeBytes, filepath.Join(finalDir, "manifest.json"), backupID); err != nil {
 		// The filesystem set was published but has no committed authority. Remove
 		// it durably before returning; otherwise Reconcile retries it next boot.
-		cleanupErr := s.removeAll(finalDir)
-		if cleanupErr == nil {
-			cleanupErr = syncDirectory(s.config.BackupDirectory)
-		}
+		cleanupErr := s.cleanupRunFiles(backupID)
 		if cleanupErr != nil {
 			return Summary{}, fmt.Errorf("commit backup run: %w (published set cleanup: %v)", err, cleanupErr)
 		}
@@ -138,6 +141,22 @@ func (s *Service) advanceRunStage(ctx context.Context, id int64, stage string) e
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE backups SET stage=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status='running'`, stage, next, id)
 	return err
+}
+
+// cleanupRunFiles removes every path a non-terminal Run can have published and
+// fsyncs the parent. Callers must not write status=failed until it succeeds.
+func (s *Service) cleanupRunFiles(id int64) error {
+	root := filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", id))
+	if filepath.Dir(root) != filepath.Clean(s.config.BackupDirectory) {
+		return errors.New("unsafe backup cleanup path")
+	}
+	if err := s.removeAll(root); err != nil {
+		return err
+	}
+	if err := s.removeAll(root + ".partial"); err != nil {
+		return err
+	}
+	return syncDirectory(s.config.BackupDirectory)
 }
 
 func (s *Service) publish(ctx context.Context, id int64) (string, string, int, string, int64, error) {

@@ -90,22 +90,18 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	// Delete and sync every non-succeeded root before changing active rows to
+	// failed. If this cannot complete, they intentionally remain active so the
+	// next Reconcile retries rather than exposing a failed recoverable set.
+	for _, id := range ids {
+		if err := s.cleanupRunFiles(id); err != nil {
+			return fmt.Errorf("cleanup interrupted backup %d: %w", id, err)
+		}
+	}
 	now := timestamp(s.now())
 	result, err := s.db.ExecContext(ctx, `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code='interrupted',retryable=1,error_detail='backup interrupted by process restart',row_version=row_version+1 WHERE status IN ('queued','running')`, now, now)
 	if err != nil {
 		return err
-	}
-	for _, id := range ids {
-		root := filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", id))
-		if filepath.Dir(root) != filepath.Clean(s.config.BackupDirectory) {
-			return fmt.Errorf("unsafe backup reconciliation path")
-		}
-		if err := s.removeAll(root); err != nil {
-			return fmt.Errorf("remove interrupted backup %d: %w", id, err)
-		}
-		if err := s.removeAll(root + ".partial"); err != nil {
-			return fmt.Errorf("remove interrupted backup staging %d: %w", id, err)
-		}
 	}
 	archives, err := filepath.Glob(filepath.Join(s.config.BackupDirectory, ".archive-*.tar"))
 	if err != nil {
