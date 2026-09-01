@@ -272,8 +272,11 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 			if enabled != 1 || role != "admin" {
 				return backup.ErrActorUnauthorized
 			}
-			if err := conn.QueryRowContext(commandContext, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil || maintenanceActive != 0 {
-				return backup.ErrActorUnauthorized
+			if err := conn.QueryRowContext(commandContext, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil {
+				return backup.ErrMaintenanceActive
+			}
+			if maintenanceActive != 0 {
+				return backup.ErrMaintenanceActive
 			}
 			return nil
 		},

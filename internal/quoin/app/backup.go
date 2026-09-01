@@ -148,7 +148,7 @@ func (application *apiServer) authorizeBackup(ctx context.Context, cookie, actio
 		return session, problem(http.StatusServiceUnavailable, "unavailable", "无法确认维护状态，请稍后重试。")
 	}
 	if active != 0 {
-		return session, problem(http.StatusServiceUnavailable, "maintenance_active", "系统维护中，暂时无法下载备份归档。")
+		return session, problem(http.StatusServiceUnavailable, "unavailable", "系统维护中，备份操作暂不可用。")
 	}
 	return session, nil
 }
@@ -286,6 +286,9 @@ func (application *apiServer) triggerBackup(ctx context.Context, input *struct {
 	if errors.Is(err, backup.ErrCommandReused) {
 		return nil, problem(http.StatusConflict, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起操作。")
 	}
+	if errors.Is(err, backup.ErrMaintenanceActive) {
+		return nil, problem(http.StatusServiceUnavailable, "unavailable", "系统维护中，备份操作暂不可用。")
+	}
 	if errors.Is(err, backup.ErrActorUnauthorized) {
 		return nil, problem(http.StatusForbidden, "forbidden", "管理员权限已变化，请重新登录。")
 	}
@@ -361,6 +364,9 @@ func (application *apiServer) updateBackupSettings(ctx context.Context, input *s
 	if errors.Is(err, backup.ErrCommandReused) {
 		return nil, problem(http.StatusConflict, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起操作。")
 	}
+	if errors.Is(err, backup.ErrMaintenanceActive) {
+		return nil, problem(http.StatusServiceUnavailable, "unavailable", "系统维护中，备份操作暂不可用。")
+	}
 	if errors.Is(err, backup.ErrActorUnauthorized) {
 		return nil, problem(http.StatusForbidden, "forbidden", "管理员权限已变化，请重新登录。")
 	}
@@ -413,6 +419,9 @@ func (application *apiServer) updateArtifactRetentionSettings(ctx context.Contex
 	value, err := service.UpdateArtifactRetentionCommand(ctx, session.User.ID, input.Body.ExpectedRowVersion, input.Body.GeneratedRetentionDays, input.Body.ClientCommandID)
 	if errors.Is(err, backup.ErrCommandReused) {
 		return nil, problem(http.StatusConflict, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起操作。")
+	}
+	if errors.Is(err, backup.ErrMaintenanceActive) {
+		return nil, problem(http.StatusServiceUnavailable, "unavailable", "系统维护中，备份操作暂不可用。")
 	}
 	if errors.Is(err, backup.ErrActorUnauthorized) {
 		return nil, problem(http.StatusForbidden, "forbidden", "管理员权限已变化，请重新登录。")

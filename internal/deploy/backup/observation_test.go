@@ -79,3 +79,20 @@ func TestObserveFailsWhenObservedActiveRunDisappearsWithoutTerminalDelta(t *test
 		t.Fatalf("observation waited %s; want two polls", clock.Sub(time.Unix(0, 0)))
 	}
 }
+
+func TestObserveRejectsProcessRestartWhileWaitingForExistingActiveRun(t *testing.T) {
+	values := []Observation{
+		{Accepting: true, Active: true, ProcessStart: 1, ManualSuccess: 10, Failures: 2},
+		{Accepting: true, Active: true, ProcessStart: 2, ManualSuccess: 10, Failures: 2},
+	}
+	clock := time.Unix(0, 0)
+	err := Observe(OnlineOptions{
+		Read: func(string) (Observation, error) { value := values[0]; values = values[1:]; return value, nil },
+		Now:  func() time.Time { return clock }, Sleep: func(duration time.Duration) { clock = clock.Add(duration) },
+		PollEvery: time.Second, ActiveWait: time.Minute,
+	})
+	var observation *ObservationError
+	if !errors.As(err, &observation) || observation.Code != "online_backup_observation_reset" {
+		t.Fatalf("error=%v; want online_backup_observation_reset", err)
+	}
+}

@@ -125,12 +125,16 @@ func Observe(options OnlineOptions) error {
 		}
 		return &ObservationError{Code: "online_backup_unavailable", Message: message, NextAction: "ensure Quoin is ready and not in maintenance, or explicitly choose --offline"}
 	}
+	processStart := baseline.ProcessStart
 	activeDeadline := options.Now().Add(options.ActiveWait)
 	for baseline.Active && options.Now().Before(activeDeadline) {
 		options.Sleep(options.PollEvery)
 		baseline, err = options.Read("backup-wait-active")
 		if err != nil || !baseline.Accepting || baseline.Maintenance {
 			return &ObservationError{Code: "online_backup_unavailable", Message: "Quoin became unavailable while waiting for the active backup", NextAction: "retry after Quoin is ready; use --offline only when Quoin is unavailable"}
+		}
+		if baseline.ProcessStart != processStart {
+			return &ObservationError{Code: "online_backup_observation_reset", Message: "Quoin restarted while waiting for the active backup", NextAction: "retry after Quoin is stably ready"}
 		}
 	}
 	if baseline.Active {

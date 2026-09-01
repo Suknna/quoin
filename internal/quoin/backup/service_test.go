@@ -337,3 +337,33 @@ func mustID(t *testing.T, value string) int64 {
 	}
 	return id
 }
+
+func TestNoOpSettingsAndRetentionCommandsRecordLedgerWithoutAudit(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", nil, nil, nil, nil); err != nil {
+		t.Fatalf("empty settings command error=%v", err)
+	}
+	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", nil, nil, nil, nil); err != nil {
+		t.Fatalf("replayed empty settings command error=%v", err)
+	}
+	if _, err := service.UpdateArtifactRetentionCommand(ctx, 1, 1, 90, "retention-noop-command"); err != nil {
+		t.Fatalf("retention no-op error=%v", err)
+	}
+	if _, err := service.UpdateArtifactRetentionCommand(ctx, 1, 1, 90, "retention-noop-command"); err != nil {
+		t.Fatalf("replayed retention no-op error=%v", err)
+	}
+
+	var commands, audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM client_commands WHERE client_command_id IN ('settings-noop-command','retention-noop-command')`).Scan(&commands); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action IN ('backup.settings.update','artifact_retention.update')`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if commands != 2 || audits != 0 {
+		t.Fatalf("commands=%d audits=%d; want two ledger rows and no state-change audits", commands, audits)
+	}
+}

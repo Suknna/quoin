@@ -26,7 +26,7 @@ func (s *Service) queueManualCommand(ctx context.Context, actor int64, commandID
 		return Summary{}, ErrInvalidCommandID
 	}
 	digest := auth.DigestCommand(commandTrigger, map[string]any{"executionMode": "online"})
-	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandTrigger, digest, "backup", func(value Summary) int64 { return mustInt(value.ID) }, func(conn *sql.Conn) (Summary, error) {
+	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandTrigger, digest, "backup", func(value Summary) int64 { return mustInt(value.ID) }, func(Summary) bool { return true }, func(conn *sql.Conn) (Summary, error) {
 		now := timestamp(s.now())
 		result, err := conn.ExecContext(ctx, `INSERT INTO backups(status,stage,trigger_kind,execution_mode,scheduled_for,row_version,created_at,updated_at,triggered_by) VALUES('queued','queued','manual','online',NULL,1,?,?,?)`, now, now, actor)
 		if err != nil {
@@ -54,16 +54,13 @@ func (s *Service) UpdateSettingsCommand(ctx context.Context, actor, expected int
 		return Settings{}, ErrInvalidCommandID
 	}
 	digest := auth.DigestCommand(commandSettings, map[string]any{"expectedRowVersion": expected, "enabled": enabled, "scheduleCron": cron, "timezone": timezone, "retentionCount": retention})
-	value, err := s.settingsCommand(ctx, actor, commandID, commandSettings, digest, func(conn *sql.Conn) (Settings, error) {
+	value, err := s.settingsCommand(ctx, actor, expected, commandID, commandSettings, digest, func(conn *sql.Conn) (Settings, error) {
 		current, err := s.settingsOn(ctx, conn)
 		if err != nil {
 			return Settings{}, err
 		}
 		if current.RowVersion != expected {
 			return Settings{}, ErrRowVersionConflict
-		}
-		if enabled == nil && cron == nil && timezone == nil && retention == nil {
-			return Settings{}, ErrNoSettingsChange
 		}
 		if retention != nil && *retention < 1 {
 			return Settings{}, fmt.Errorf("%w: retention count must be positive", ErrInvalidSettings)
@@ -116,7 +113,7 @@ func (s *Service) UpdateArtifactRetentionCommand(ctx context.Context, actor, exp
 		return ArtifactRetention{}, ErrInvalidCommandID
 	}
 	digest := auth.DigestCommand(commandRetention, map[string]any{"expectedRowVersion": expected, "generatedRetentionDays": days})
-	return s.retentionCommand(ctx, actor, commandID, commandRetention, digest, func(conn *sql.Conn) (ArtifactRetention, error) {
+	return s.retentionCommand(ctx, actor, expected, commandID, commandRetention, digest, func(conn *sql.Conn) (ArtifactRetention, error) {
 		if days < 1 {
 			return ArtifactRetention{}, fmt.Errorf("%w: retention days must be positive", ErrInvalidSettings)
 		}
@@ -147,14 +144,14 @@ func (s *Service) UpdateArtifactRetentionCommand(ctx context.Context, actor, exp
 	})
 }
 
-func (s *Service) settingsCommand(ctx context.Context, actor int64, commandID, commandType, digest string, run func(*sql.Conn) (Settings, error)) (Settings, error) {
-	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandType, digest, "backup_settings", func(Settings) int64 { return 1 }, run)
+func (s *Service) settingsCommand(ctx context.Context, actor, expected int64, commandID, commandType, digest string, run func(*sql.Conn) (Settings, error)) (Settings, error) {
+	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandType, digest, "backup_settings", func(Settings) int64 { return 1 }, func(value Settings) bool { return value.RowVersion > expected }, run)
 }
-func (s *Service) retentionCommand(ctx context.Context, actor int64, commandID, commandType, digest string, run func(*sql.Conn) (ArtifactRetention, error)) (ArtifactRetention, error) {
-	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandType, digest, "artifact_retention_settings", func(ArtifactRetention) int64 { return 1 }, run)
+func (s *Service) retentionCommand(ctx context.Context, actor, expected int64, commandID, commandType, digest string, run func(*sql.Conn) (ArtifactRetention, error)) (ArtifactRetention, error) {
+	return commandObject(ctx, s.db, s.now, s.authorizeActor, actor, commandID, commandType, digest, "artifact_retention_settings", func(ArtifactRetention) int64 { return 1 }, func(value ArtifactRetention) bool { return value.RowVersion > expected }, run)
 }
 
-func commandObject[T any](ctx context.Context, db *sql.DB, now func() time.Time, authorize func(context.Context, *sql.Conn, int64) error, actor int64, commandID, commandType, digest, objectType string, objectID func(T) int64, run func(*sql.Conn) (T, error)) (T, error) {
+func commandObject[T any](ctx context.Context, db *sql.DB, now func() time.Time, authorize func(context.Context, *sql.Conn, int64) error, actor int64, commandID, commandType, digest, objectType string, objectID func(T) int64, stateChanged func(T) bool, run func(*sql.Conn) (T, error)) (T, error) {
 	var zero T
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -219,8 +216,10 @@ func commandObject[T any](ctx context.Context, db *sql.DB, now func() time.Time,
 	if err = auth.RecordCommand(ctx, conn, actor, commandID, commandType, digest, auth.OutcomeCommitted, objectType, resolvedObjectID, string(body)); err != nil {
 		return zero, err
 	}
-	if err = recordAuditAt(ctx, conn, now, actor, commandType, commandID, objectType, resolvedObjectID); err != nil {
-		return zero, err
+	if stateChanged(value) {
+		if err = recordAuditAt(ctx, conn, now, actor, commandType, commandID, objectType, resolvedObjectID); err != nil {
+			return zero, err
+		}
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return zero, err

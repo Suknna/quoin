@@ -26,6 +26,7 @@ var ErrRowVersionConflict = errors.New("row version conflict")
 var ErrNoSettingsChange = errors.New("backup settings request makes no change")
 var ErrInvalidCommandID = errors.New("client command ID must be 8-128 ASCII letters, digits, underscores, or hyphens")
 var ErrInvalidSettings = errors.New("invalid backup settings")
+var ErrMaintenanceActive = errors.New("backup commands are unavailable during maintenance")
 
 // ActiveError identifies the already-durable active run without exposing any
 // filesystem implementation detail to HTTP callers.

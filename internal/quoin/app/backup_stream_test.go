@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -113,6 +114,12 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	application.downloadBackup(blocked, request)
 	if blocked.Code != http.StatusServiceUnavailable {
 		t.Fatalf("maintenance response=%d, want %d", blocked.Code, http.StatusServiceUnavailable)
+	}
+	var maintenanceBody struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(blocked.Body.Bytes(), &maintenanceBody); err != nil || maintenanceBody.Code != "unavailable" {
+		t.Fatalf("maintenance body=%q err=%v; want unavailable", blocked.Body.String(), err)
 	}
 }
 

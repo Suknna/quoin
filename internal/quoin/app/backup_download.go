@@ -34,8 +34,12 @@ func (application *apiServer) downloadBackup(writer http.ResponseWriter, request
 		return
 	}
 	archive, cleanup, err := service.PrepareArchive(request.Context(), id)
-	if errors.Is(err, backup.ErrNotFound) {
-		writeBackupProblem(writer, http.StatusNotFound, "not_found", "备份记录不存在", false)
+	if errors.Is(err, backup.ErrNotFound) || errors.Is(err, backup.ErrArchiveNotReady) {
+		writeBackupProblem(writer, http.StatusNotFound, "not_found", "备份归档尚不可下载", false)
+		return
+	}
+	if errors.Is(err, backup.ErrArchiveUnavailable) {
+		writeBackupProblem(writer, http.StatusGone, "backup_archive_unavailable", "备份归档不可用", false)
 		return
 	}
 	var storageFailure *backup.StorageFailure
@@ -44,7 +48,7 @@ func (application *apiServer) downloadBackup(writer http.ResponseWriter, request
 		return
 	}
 	if err != nil {
-		writeBackupProblem(writer, http.StatusGone, "backup_archive_unavailable", "备份归档不可用", false)
+		writeBackupProblem(writer, http.StatusServiceUnavailable, "storage_unavailable", "备份归档存储暂不可用，请稍后重试。", true)
 		return
 	}
 	defer cleanup()

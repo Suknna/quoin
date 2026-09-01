@@ -121,12 +121,15 @@ export function BackupPanel() {
       setBackups(current => {
         const firstPage = new Set(page.items.map(item => item.id))
         if (current && !atTopRef.current) {
+          const refreshed = new Map(page.items.map(item => [item.id, item]))
           const unseen = page.items.filter(item => !current.some(currentItem => currentItem.id === item.id))
           if (unseen.length > 0) {
             pendingHeadRef.current = page.items
             setPendingCount(unseen.length)
           }
-          return current
+          // Do not move an away-from-top reader, but always reconcile the
+          // known rows in place so an active run visibly becomes terminal.
+          return current.map(item => refreshed.get(item.id) ?? item)
         }
         return [...page.items, ...(current ?? []).filter(item => !firstPage.has(item.id))]
       })

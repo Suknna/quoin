@@ -17,6 +17,9 @@ import (
 	"time"
 )
 
+var ErrArchiveNotReady = errors.New("backup archive is not ready")
+var ErrArchiveUnavailable = errors.New("backup archive is unavailable")
+
 // PrepareArchive materializes a verified archive before HTTP commits headers.
 // This turns every structural archive failure (including a corrupt member) into
 // a normal problem response instead of a partial 200 response.
@@ -26,12 +29,12 @@ func (s *Service) PrepareArchive(ctx context.Context, id int64) (*os.File, func(
 		return nil, nil, err
 	}
 	if value.Status != "succeeded" || value.ManifestSHA256 == nil {
-		return nil, nil, errors.New("backup archive is not available")
+		return nil, nil, ErrArchiveNotReady
 	}
 	root := filepath.Join(s.config.BackupDirectory, value.ID)
 	entries, err := verifiedArchiveEntries(root, *value.ManifestSHA256)
 	if err != nil {
-		return nil, nil, fmt.Errorf("verify backup archive: %w", err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrArchiveUnavailable, err)
 	}
 	file, err := os.CreateTemp(s.config.BackupDirectory, ".archive-*.tar")
 	if err != nil {

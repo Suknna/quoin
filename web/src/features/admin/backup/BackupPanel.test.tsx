@@ -116,4 +116,29 @@ describe('BackupPanel', () => {
     expect(formatted).not.toBe('2026-01-01T00:00:00Z')
     expect(formatted).toMatch(/GMT|UTC|[+−-]\d{2}/)
   })
+
+  it('reconciles known runs while away from top but buffers only new head rows', async () => {
+    let backupReads = 0
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      const base = baseResponse(path)
+      if (base) return base
+      if (path.startsWith('/api/v1/backups?')) {
+        backupReads++
+        if (backupReads === 1) return response({ items: [{ ...run('known'), status: 'running', stage: 'snapshot' }], nextCursor: undefined })
+        return response({ items: [{ ...run('new'), status: 'queued', stage: 'queued' }, run('known')], nextCursor: undefined })
+      }
+      return response({})
+    })
+    vi.useFakeTimers()
+    render(<BackupPanel />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText(/#known.*running/)).toBeInTheDocument()
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 100 })
+    window.dispatchEvent(new Event('scroll'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(screen.getByText(/#known.*succeeded/)).toBeInTheDocument()
+    expect(screen.queryByText(/#new.*queued/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /显示 1 条新备份记录/ })).toBeInTheDocument()
+  })
 })
