@@ -53,6 +53,9 @@ func (s *Service) UpdateSettingsCommand(ctx context.Context, actor, expected int
 	if !ValidCommandID(commandID) {
 		return Settings{}, ErrInvalidCommandID
 	}
+	if enabled == nil && cron == nil && timezone == nil && retention == nil {
+		return Settings{}, ErrInvalidSettings
+	}
 	digest := auth.DigestCommand(commandSettings, map[string]any{"expectedRowVersion": expected, "enabled": enabled, "scheduleCron": cron, "timezone": timezone, "retentionCount": retention})
 	value, err := s.settingsCommand(ctx, actor, expected, commandID, commandSettings, digest, func(conn *sql.Conn) (Settings, error) {
 		current, err := s.settingsOn(ctx, conn)

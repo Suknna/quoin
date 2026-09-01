@@ -25,6 +25,9 @@ func (s *Service) RunScheduler(ctx context.Context) {
 	}
 }
 func (s *Service) runDue(ctx context.Context) {
+	// Retention cleanup is independently retryable: a failed removal cannot be
+	// hidden behind the succeeding snapshot that first exposed it.
+	_ = s.GC(ctx)
 	// Active age is derived from wall time, so refresh on every durable
 	// scheduler pass even when no run becomes due.
 	s.refreshMetrics(ctx)
@@ -150,6 +153,10 @@ func (s *Service) scheduleStart(ctx context.Context, observed sql.NullString, lo
 	return value.In(location), nil
 }
 func validateScheduleSettings(settings Settings) error {
+	// Local is a Go process-environment alias, not a durable IANA authority.
+	if settings.Timezone == "Local" {
+		return errors.New("timezone must be UTC or an IANA timezone name")
+	}
 	if _, err := time.LoadLocation(settings.Timezone); err != nil {
 		return fmt.Errorf("load backup timezone: %w", err)
 	}

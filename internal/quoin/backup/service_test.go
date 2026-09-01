@@ -343,11 +343,16 @@ func TestNoOpSettingsAndRetentionCommandsRecordLedgerWithoutAudit(t *testing.T) 
 	defer db.Close()
 	ctx := context.Background()
 
-	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", nil, nil, nil, nil); err != nil {
-		t.Fatalf("empty settings command error=%v", err)
+	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-empty-command", nil, nil, nil, nil); !errors.Is(err, ErrInvalidSettings) {
+		t.Fatalf("empty settings command error=%v; want invalid settings", err)
 	}
-	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", nil, nil, nil, nil); err != nil {
-		t.Fatalf("replayed empty settings command error=%v", err)
+	// A field that is present but unchanged is a valid, replayable no-op.
+	enabled := true
+	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", &enabled, nil, nil, nil); err != nil {
+		t.Fatalf("settings no-op error=%v", err)
+	}
+	if _, err := service.UpdateSettingsCommand(ctx, 1, 1, "settings-noop-command", &enabled, nil, nil, nil); err != nil {
+		t.Fatalf("replayed settings no-op error=%v", err)
 	}
 	if _, err := service.UpdateArtifactRetentionCommand(ctx, 1, 1, 90, "retention-noop-command"); err != nil {
 		t.Fatalf("retention no-op error=%v", err)
@@ -365,5 +370,107 @@ func TestNoOpSettingsAndRetentionCommandsRecordLedgerWithoutAudit(t *testing.T) 
 	}
 	if commands != 2 || audits != 0 {
 		t.Fatalf("commands=%d audits=%d; want two ledger rows and no state-change audits", commands, audits)
+	}
+}
+
+func TestRetentionCleanupRetriesOnSchedulerPass(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	first, err := service.RunOffline(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retention := int64(1)
+	if _, err = service.UpdateSettingsCommand(ctx, 1, 1, "retain-one", nil, nil, nil, &retention); err != nil {
+		t.Fatal(err)
+	}
+	service.removeAll = func(path string) error {
+		if path == filepath.Join(service.config.BackupDirectory, first.ID) {
+			return errors.New("simulated retained backup deletion failure")
+		}
+		return os.RemoveAll(path)
+	}
+	second, err := service.RunOffline(ctx)
+	if err == nil || second.Status != "succeeded" {
+		t.Fatalf("second backup=%+v err=%v; want succeeded run and surfaced cleanup failure", second, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, first.ID)); statErr != nil {
+		t.Fatalf("retained backup removed despite injected failure: %v", statErr)
+	}
+
+	service.removeAll = os.RemoveAll
+	service.runDue(ctx)
+	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, first.ID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("scheduler did not retry retained cleanup: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, second.ID)); statErr != nil {
+		t.Fatalf("latest backup was removed by retention retry: %v", statErr)
+	}
+}
+
+func TestRunWithFixedClockReachesSucceededTerminalState(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	fixed := time.Date(2026, 3, 1, 1, 2, 3, 0, time.UTC)
+	service.now = func() time.Time { return fixed }
+	value, err := service.RunOffline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Status != "succeeded" || value.CompletedAt == nil || *value.CompletedAt == value.CreatedAt {
+		t.Fatalf("fixed-clock run did not advance durable state: %+v", value)
+	}
+}
+
+func TestCancelledPostPublishCommitCleansManifestAndRecordsFailure(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	service.afterPublish = cancel
+	queued, err := service.QueueManual(ctx, 1, "cancel-after-publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := service.Run(ctx, queued.ID)
+	if err == nil || value.Status != "failed" {
+		t.Fatalf("post-publish cancellation value=%+v err=%v; want failed state", value, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, queued.ID, "manifest.json")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed run retained published manifest: %v", statErr)
+	}
+}
+
+func TestReconcileDeletesLeakedArchiveAndFailedPublishedDirectory(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx := context.Background()
+	queued, err := service.QueueManual(ctx, 1, "reconcile-failed-publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := mustID(t, queued.ID)
+	if _, err = db.Exec(`UPDATE backups SET status='failed',completed_at='2026-03-01T00:00:01Z',updated_at='2026-03-01T00:00:01Z',error_code='backup_failed',retryable=1,error_detail='test',row_version=row_version+1 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(service.config.BackupDirectory, queued.ID)
+	if err = os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "manifest.json"), []byte("leaked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leakedArchive := filepath.Join(service.config.BackupDirectory, ".archive-crashed.tar")
+	if err = os.WriteFile(leakedArchive, []byte("leaked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, leakedArchive} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("reconcile retained %s: %v", path, statErr)
+		}
 	}
 }

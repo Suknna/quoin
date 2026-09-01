@@ -141,4 +141,23 @@ describe('BackupPanel', () => {
     expect(screen.queryByText(/#new.*queued/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /显示 1 条新备份记录/ })).toBeInTheDocument()
   })
+  it('clears sensitive backup data and leaves the panel when polling observes revoked access', async () => {
+    let backupReads = 0
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      const base = baseResponse(path)
+      if (base) return base
+      if (path.startsWith('/api/v1/backups?')) {
+        backupReads++
+        return backupReads === 1 ? response({ items: [run('sensitive')] }) : response({ message: 'session revoked' }, 401)
+      }
+      return response({})
+    })
+    vi.useFakeTimers()
+    render(<BackupPanel />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText(/#sensitive/)).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(screen.queryByText(/#sensitive/)).not.toBeInTheDocument()
+  })
 })

@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,7 +61,10 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	// A directory becomes visible before the terminal SQL commit. Keep all
 	// non-succeeded Runs unreachable by deleting only their numeric run root;
 	// a later startup retries a failed removal instead of accepting the set.
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status IN ('queued','running') OR (status='failed' AND error_code='interrupted')`)
+	// A published directory is valid only once its Run committed succeeded.
+	// Reconciliation must therefore retry cleanup for every non-succeeded row,
+	// including failures caused after the final rename.
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status <> 'succeeded'`)
 	if err != nil {
 		return err
 	}
@@ -86,9 +90,23 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if filepath.Dir(root) != filepath.Clean(s.config.BackupDirectory) {
 			return fmt.Errorf("unsafe backup reconciliation path")
 		}
-		if err := os.RemoveAll(root); err != nil {
+		if err := s.removeAll(root); err != nil {
 			return fmt.Errorf("remove interrupted backup %d: %w", id, err)
 		}
+		if err := s.removeAll(root + ".partial"); err != nil {
+			return fmt.Errorf("remove interrupted backup staging %d: %w", id, err)
+		}
+	}
+	archives, err := filepath.Glob(filepath.Join(s.config.BackupDirectory, ".archive-*.tar"))
+	if err != nil {
+		return fmt.Errorf("list interrupted backup archives: %w", err)
+	}
+	for _, archive := range archives {
+		if err := os.Remove(archive); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove interrupted backup archive: %w", err)
+		}
+	}
+	if len(ids) > 0 || len(archives) > 0 {
 		if err := syncDirectory(s.config.BackupDirectory); err != nil {
 			return fmt.Errorf("sync interrupted backup cleanup: %w", err)
 		}

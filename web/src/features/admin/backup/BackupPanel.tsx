@@ -140,6 +140,14 @@ export function BackupPanel() {
       else { setRetention(nextRetention); setRetentionDraft(nextRetention.generatedRetentionDays) }
       setError('')
     } catch (reason) {
+      if (reason instanceof RequestError && (reason.status === 401 || reason.status === 403)) {
+        // Do not leave previously fetched backup metadata visible after the
+        // authenticated session or its Admin role was revoked.
+        setBackups(null); setSettings(null); setRetention(null)
+        setSettingsDraftValue(null); setRetentionDraft(null)
+        window.location.assign('/')
+        return
+      }
       setError(reason instanceof Error ? reason.message : '无法读取备份设置。')
     }
   }, [])

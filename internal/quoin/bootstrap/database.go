@@ -173,7 +173,7 @@ func initializeDatabase(ctx context.Context, db *sql.DB, rootKey []byte) error {
 		{`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`, nil},
 		{`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?),('lintel','unregistered',1,?)`, []any{now, now}},
 		{`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,?)`, []any{now}},
-		{`INSERT INTO backup_settings(id,enabled,timezone,retention_count,schedule_enabled_at,row_version,updated_at) VALUES(1,1,'UTC',30,?,1,?)`, []any{now, now}},
+		{`INSERT INTO backup_settings(id,enabled,schedule_cron,timezone,retention_count,schedule_enabled_at,row_version,updated_at) VALUES(1,1,'0 0 * * *','UTC',30,?,1,?)`, []any{now, now}},
 		{`INSERT INTO artifact_retention_settings(id,generated_retention_days,row_version,updated_at) VALUES(1,90,1,?)`, []any{now}},
 	}
 	for _, statement := range statements {

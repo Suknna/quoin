@@ -184,9 +184,16 @@ func (s *Service) gcLocked(ctx context.Context) error {
 	if keep > len(valid) {
 		keep = len(valid)
 	}
+	deleted := false
 	for _, backup := range valid[keep:] {
-		if err = os.RemoveAll(filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", backup.id))); err != nil {
-			return err
+		if err = s.removeAll(filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", backup.id))); err != nil {
+			return fmt.Errorf("remove expired backup %d: %w", backup.id, err)
+		}
+		deleted = true
+	}
+	if deleted {
+		if err = syncDirectory(s.config.BackupDirectory); err != nil {
+			return fmt.Errorf("sync expired backup cleanup: %w", err)
 		}
 	}
 	return nil

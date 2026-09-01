@@ -58,6 +58,8 @@ type Service struct {
 	artifactStore     *artifact.Store
 	capacity          capacityFunc
 	probeDirectory    func(string) error
+	removeAll         func(string) error
+	afterPublish      func()
 	scheduleAdmission func() bool
 	authorizeActor    func(context.Context, *sql.Conn, int64) error
 }
@@ -115,8 +117,8 @@ func NewService(db *sql.DB, config Config) (*Service, error) {
 		db: db, config: config, artifactStore: store,
 		now:      func() time.Time { return now().UTC() },
 		capacity: filesystemCapacity, probeDirectory: durableDirectoryProbe,
-		scheduleAdmission: admission,
-		authorizeActor:    config.AuthorizeActor,
+		removeAll: os.RemoveAll, scheduleAdmission: admission,
+		authorizeActor: config.AuthorizeActor,
 	}, nil
 }
 func (s *Service) SetMetrics(metrics *sharedops.BackupMetrics) {
