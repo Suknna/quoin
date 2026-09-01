@@ -96,6 +96,13 @@ type Store struct {
 	// It prevents a second digest-equivalent upload from referencing a link before
 	// the installing writer has durably synced the parent directory.
 	blobMu sync.Mutex
+	// gcSuccess projects only successful bounded GC passes to the frozen ops
+	// metric. It is injected by the application so the storage package does not
+	// own an HTTP/Prometheus dependency.
+	gcSuccess func(float64)
+	// gcOrphanCursor makes physical orphan cleanup bounded even though expired
+	// Artifact history retains the blob reference for auditability.
+	gcOrphanCursor string
 }
 
 // NewStore builds the store on the product database and blob directory.
@@ -108,6 +115,9 @@ func NewStore(db *sql.DB, directory string) (*Store, error) {
 	}
 	return &Store{db: db, dir: directory, now: func() time.Time { return time.Now().UTC() }, uploadLeases: make(map[string]chan struct{})}, nil
 }
+
+// SetGCSuccessProjector supplies the process-owned metric projection.
+func (store *Store) SetGCSuccessProjector(project func(float64)) { store.gcSuccess = project }
 
 func (store *Store) stagingPath(uploadID string) string {
 	return filepath.Join(store.dir, "staging", uploadID+".part")
@@ -478,10 +488,13 @@ func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, stage
 	// failure cleanup could then delete a blob already referenced by another
 	// upload. Link provides non-replacing installation: either our sealed staging
 	// inode becomes the blob, or an equal digest blob already owns the path.
+	// Keep blobMu through the reference commit. GC takes the same lock only
+	// after reserving its DB connection, so an unreferenced existing digest
+	// cannot be unlinked between installation and its first durable reference.
 	store.blobMu.Lock()
 	installErr := store.installVerifiedBlob(header, blobPath)
-	store.blobMu.Unlock()
 	if installErr != nil {
+		store.blobMu.Unlock()
 		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, installErr
@@ -492,6 +505,7 @@ func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, stage
 	// is safe and collectible; deleting shared content is not.
 	_ = os.Remove(store.stagingPath(header.UploadID))
 	artifactID, err := store.commitReferences(ctx, conn, header)
+	store.blobMu.Unlock()
 	if err != nil {
 		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
@@ -657,8 +671,13 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 	}
 	expiresAt := sql.NullString{}
 	if header.RetentionKind == "generated" {
-		// Default generated retention: 90 days (ARCH-OUTPUT-002).
-		expiresAt = sql.NullString{String: store.now().Add(90 * 24 * time.Hour).Format(time.RFC3339Nano), Valid: true}
+		// Retention is resolved once at creation and then frozen on the logical
+		// artifact row; later setting changes never rewrite historical expiry.
+		var days int
+		if err := conn.QueryRowContext(ctx, `SELECT generated_retention_days FROM artifact_retention_settings WHERE id=1`).Scan(&days); err != nil {
+			return 0, fmt.Errorf("read generated artifact retention: %w", err)
+		}
+		expiresAt = sql.NullString{String: store.now().Add(time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano), Valid: true}
 	}
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO artifacts(blob_id,kind,media_type,sensitive,retention_kind,owner_type,owner_id,expires_at,created_at)

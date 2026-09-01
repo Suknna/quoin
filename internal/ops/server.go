@@ -37,12 +37,14 @@ type Readiness struct {
 }
 
 type Server struct {
-	httpServer *http.Server
-	mu         sync.RWMutex
-	state      Readiness
-	registry   *prometheus.Registry
-	readyGauge prometheus.Gauge
-	accepting  prometheus.Gauge
+	httpServer      *http.Server
+	mu              sync.RWMutex
+	state           Readiness
+	registry        *prometheus.Registry
+	readyGauge      prometheus.Gauge
+	accepting       prometheus.Gauge
+	collectors      map[string]prometheus.Collector
+	storageWritable map[string]bool
 }
 
 func New(component, address string, reason Reason) (*Server, error) {
@@ -55,6 +57,10 @@ func New(component, address string, reason Reason) (*Server, error) {
 		AcceptingWork: ready, Reason: reason,
 	}
 	registry := prometheus.NewRegistry()
+	// The deployment backup observer fences a metrics sampling window by the
+	// standard process start timestamp. It is an upstream collector, not part
+	// of the frozen custom metrics catalog.
+	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	server := &Server{state: state, registry: registry}
 	collectors, err := registerCatalogMetrics(registry, component)
 	if err != nil {
@@ -66,6 +72,10 @@ func New(component, address string, reason Reason) (*Server, error) {
 	}
 	server.readyGauge = readyGauge
 	server.readyGauge.Set(float64(boolValue(ready)))
+	server.collectors = collectors
+	if component == "quoin" {
+		server.storageWritable = map[string]bool{"data": true, "backup": true}
+	}
 	if component == "quoin" {
 		accepting, ok := collectors["quoin_accepting_work"].(prometheus.Gauge)
 		if !ok {
@@ -84,7 +94,7 @@ func New(component, address string, reason Reason) (*Server, error) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.Header().Set("Cache-Control", "no-store")
 		current := server.Readiness()
-		if current.Reason != Ready && current.Mode != "maintenance" {
+		if current.Reason == StorageUnavailable || (current.Reason != Ready && current.Mode != "maintenance") {
 			writer.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(writer).Encode(current)
@@ -154,6 +164,116 @@ func (server *Server) Run(ctx context.Context) error {
 	}
 }
 
+// BackupMetrics exposes only the already-registered Quoin backup collectors.
+// It is intentionally a typed accessor, not a mutable registry escape hatch.
+type BackupMetrics struct {
+	Active, RunningSince, LastSuccess, LastOnlineManualSuccess, LastFailure, ScheduleOverdue, OldestActiveAge prometheus.Gauge
+	Failures                                                                                                  prometheus.Counter
+	Duration                                                                                                  prometheus.Observer
+	Storage                                                                                                   *StorageHealth
+}
+
+// StorageHealth projects the two Quoin persistence targets and folds a failed
+// target into the effective readiness state without overwriting maintenance or
+// drain state. A later successful durable probe restores that prior state.
+type StorageHealth struct {
+	server *Server
+	gauges map[string]prometheus.Gauge
+}
+
+func (health *StorageHealth) Set(target string, writable bool) {
+	gauge, ok := health.gauges[target]
+	if !ok {
+		return
+	}
+	if writable {
+		gauge.Set(1)
+	} else {
+		gauge.Set(0)
+	}
+	server := health.server
+	server.mu.Lock()
+	previous := server.effectiveReadinessLocked()
+	server.storageWritable[target] = writable
+	current := server.effectiveReadinessLocked()
+	server.projectReadinessLocked(previous, current)
+	server.mu.Unlock()
+}
+
+func (server *Server) BackupMetrics() (*BackupMetrics, error) {
+	if server.state.Component != "quoin" {
+		return nil, errors.New("backup metrics belong to quoin only")
+	}
+	gauge := func(name string) (prometheus.Gauge, error) {
+		value, ok := server.collectors[name].(prometheus.Gauge)
+		if !ok {
+			return nil, fmt.Errorf("metrics catalog is missing gauge %s", name)
+		}
+		return value, nil
+	}
+	active, err := gauge("quoin_backup_active")
+	if err != nil {
+		return nil, err
+	}
+	running, err := gauge("quoin_backup_running_since_timestamp_seconds")
+	if err != nil {
+		return nil, err
+	}
+	success, err := gauge("quoin_backup_last_success_timestamp_seconds")
+	if err != nil {
+		return nil, err
+	}
+	manual, err := gauge("quoin_backup_last_online_manual_success_timestamp_seconds")
+	if err != nil {
+		return nil, err
+	}
+	failure, err := gauge("quoin_backup_last_failure_timestamp_seconds")
+	if err != nil {
+		return nil, err
+	}
+	overdue, err := gauge("quoin_backup_schedule_overdue")
+	if err != nil {
+		return nil, err
+	}
+	oldest, err := gauge("quoin_backup_oldest_active_age_seconds")
+	if err != nil {
+		return nil, err
+	}
+	failures, ok := server.collectors["quoin_backup_failures_total"].(prometheus.Counter)
+	if !ok {
+		return nil, errors.New("metrics catalog is missing quoin_backup_failures_total")
+	}
+	duration, ok := server.collectors["quoin_backup_duration_seconds"].(prometheus.Observer)
+	if !ok {
+		return nil, errors.New("metrics catalog is missing quoin_backup_duration_seconds")
+	}
+	storage, ok := server.collectors["quoin_storage_writable"].(*prometheus.GaugeVec)
+	if !ok {
+		return nil, errors.New("metrics catalog is missing quoin_storage_writable")
+	}
+	return &BackupMetrics{
+		Active: active, RunningSince: running, LastSuccess: success,
+		LastOnlineManualSuccess: manual, LastFailure: failure, ScheduleOverdue: overdue,
+		OldestActiveAge: oldest, Failures: failures, Duration: duration,
+		Storage: &StorageHealth{server: server, gauges: map[string]prometheus.Gauge{
+			"data": storage.WithLabelValues("data"), "backup": storage.WithLabelValues("backup"),
+		}},
+	}, nil
+}
+
+// ArtifactGCSuccessProjector exposes the catalog-owned GC health gauge without
+// leaking the registry to artifact storage code.
+func (server *Server) ArtifactGCSuccessProjector() (func(float64), error) {
+	if server.state.Component != "quoin" {
+		return nil, errors.New("artifact GC metrics belong to quoin only")
+	}
+	metric, ok := server.collectors["quoin_artifact_gc_last_success_timestamp_seconds"].(prometheus.Gauge)
+	if !ok {
+		return nil, errors.New("metrics catalog is missing quoin_artifact_gc_last_success_timestamp_seconds")
+	}
+	return metric.Set, nil
+}
+
 func (server *Server) Handler() http.Handler {
 	return server.httpServer.Handler
 }
@@ -161,28 +281,41 @@ func (server *Server) Handler() http.Handler {
 func (server *Server) Readiness() Readiness {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	return server.state
+	return server.effectiveReadinessLocked()
+}
+
+func (server *Server) effectiveReadinessLocked() Readiness {
+	state := server.state
+	if state.Component == "quoin" && (!server.storageWritable["data"] || !server.storageWritable["backup"]) {
+		state.Reason = StorageUnavailable
+		state.AcceptingWork = false
+	}
+	return state
 }
 
 func (server *Server) SetReadiness(state Readiness) {
 	server.mu.Lock()
-	previous := server.state
+	previous := server.effectiveReadinessLocked()
 	server.state = state
+	current := server.effectiveReadinessLocked()
+	server.projectReadinessLocked(previous, current)
 	server.mu.Unlock()
+}
+
+func (server *Server) projectReadinessLocked(previous, state Readiness) {
 	if state.Reason != previous.Reason {
 		LogEvent(state.Component, "info", "readiness.changed", "reason="+string(state.Reason))
 	}
-	if state.Reason == Ready || state.Mode == "maintenance" {
-		server.readyGauge.Set(1)
-	} else {
-		server.readyGauge.Set(0)
+	ready := state.Reason == Ready || (state.Mode == "maintenance" && state.Reason != StorageUnavailable)
+	// On a transition to non-accepting, publish accepting=0 before exposing the
+	// not-ready state. A scraper can therefore never observe accepting=1 after
+	// the effective state became storage-unavailable. Restore in reverse order.
+	if server.accepting != nil && !state.AcceptingWork {
+		server.accepting.Set(0)
 	}
-	if server.accepting != nil {
-		if state.AcceptingWork {
-			server.accepting.Set(1)
-		} else {
-			server.accepting.Set(0)
-		}
+	server.readyGauge.Set(float64(boolValue(ready)))
+	if server.accepting != nil && state.AcceptingWork {
+		server.accepting.Set(1)
 	}
 }
 

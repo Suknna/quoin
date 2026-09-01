@@ -88,7 +88,7 @@ spec:
           annotations:
             summary: Quoin persistent storage is not writable
         - alert: QuoinArtifactGCOverdue
-          expr: time() - quoin_artifact_gc_last_success_timestamp_seconds > 86400
+          expr: quoin_artifact_gc_last_success_timestamp_seconds > 0 and time() - quoin_artifact_gc_last_success_timestamp_seconds > 86400
           labels: { severity: warning }
           annotations:
             summary: Quoin Artifact GC has not succeeded for over 24 hours

@@ -108,6 +108,9 @@ func judgeMetrics(component, exposition string) *verifyError {
 		} else if index := strings.Index(line, " "); index >= 0 {
 			name = line[:index]
 		}
+		if strings.HasPrefix(name, "process_") || strings.HasPrefix(name, "go_") {
+			continue
+		}
 		if _, ok := expected[name]; !ok {
 			mapped := false
 			for _, suffix := range []string{"_bucket", "_sum", "_count"} {

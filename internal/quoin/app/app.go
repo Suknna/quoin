@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime"
 	"net"
@@ -33,6 +34,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
@@ -75,7 +77,10 @@ type apiServer struct {
 	investigationUpload          *appinvestigation.Handler
 	configHandler                *appconfig.Handler
 	artifacts                    *artifact.Store
+	backups                      *backup.Service
 	rootKey                      func() ([]byte, error)
+	backupCopy                   func(io.Writer, io.Reader) (int64, error)
+	backupAuthorize              func(context.Context, string, string) (auth.Session, error)
 	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
 	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
 	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
@@ -242,6 +247,50 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 	application.artifacts = artifactStore
+	gcProjector, err := serverSet.ops.ArtifactGCSuccessProjector()
+	if err != nil {
+		return err
+	}
+	artifactStore.SetGCSuccessProjector(gcProjector)
+	// Generated-artifact expiry is a real storage lifecycle, not merely an
+	// Admin setting. The bounded in-process collector retains metadata while
+	// making expired bodies unavailable.
+	go artifactStore.RunGC(ctx)
+	backupService, err := backup.NewService(database.SQL, backup.Config{
+		DataDirectory: config.DataDirectory, BackupDirectory: config.BackupDirectory,
+		ArtifactDirectory: filepath.Join(config.DataDirectory, "artifacts"), ArtifactStore: artifactStore,
+		ScheduleAdmission: func() bool {
+			state := serverSet.ops.Readiness()
+			return state.Mode == "normal" && state.AcceptingWork && state.Reason == sharedops.Ready
+		},
+		AuthorizeActor: func(commandContext context.Context, conn *sql.Conn, actorID int64) error {
+			var enabled, maintenanceActive int
+			var role string
+			if err := conn.QueryRowContext(commandContext, `SELECT enabled, role FROM users WHERE id=?`, actorID).Scan(&enabled, &role); err != nil {
+				return backup.ErrActorUnauthorized
+			}
+			if enabled != 1 || role != "admin" {
+				return backup.ErrActorUnauthorized
+			}
+			if err := conn.QueryRowContext(commandContext, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil || maintenanceActive != 0 {
+				return backup.ErrActorUnauthorized
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("open backup service: %w", err)
+	}
+	backupMetrics, err := serverSet.ops.BackupMetrics()
+	if err != nil {
+		return err
+	}
+	backupService.SetMetrics(backupMetrics)
+	if err := backupService.Reconcile(ctx); err != nil {
+		return fmt.Errorf("reconcile backups: %w", err)
+	}
+	application.SetBackupService(backupService)
+	go backupService.RunScheduler(ctx)
 	// T14: investigation attachment staging streams through the same
 	// content-addressed store; the deployment boundary (default 10 MiB,
 	// HTTP-FILE-002) is environment-tunable.
@@ -351,6 +400,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
 	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
+	mux.HandleFunc("GET /api/v1/backups/{backupId}/download", application.downloadBackup)
 	// The attachment upload streams multipart parts into staging without
 	// whole-body buffering (HTTP-FILE-001); it also owns its response head.
 	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
@@ -382,6 +432,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	application.registerAnalysisRoutes(api)
 	application.registerTaskSnapshot(api)
 	application.registerEvidenceRoutes(api)
+	application.registerBackupRoutes(api)
 	investigationHandler := &appinvestigation.Handler{
 		Service: application.investigations,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {

@@ -142,6 +142,27 @@ func TestTicket11UploadInterruptionMetadataConflict(t *testing.T) {
 // body_expired=1, the blob file remains (a single live reference forbids
 // physical collection), and every read/grep path answers the structured
 // ErrBodyExpired instead of serving or deleting the bytes.
+func TestGeneratedArtifactRetentionExpiresBodyAndCollectsUnreferencedBlob(t *testing.T) {
+	db := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return time.Now().UTC().Add(-91 * 24 * time.Hour) }
+	attemptID, toolCallID := seedToolOwner(t, db)
+	artifactID, shaHex := uploadText(t, store, context.Background(), attemptID, toolCallID, "expired generated body")
+	sealToolResult(t, db, store, attemptID, toolCallID, artifactID)
+	store.now = func() time.Time { return time.Now().UTC() }
+	store.RunGarbageCollection(context.Background())
+	meta, err := store.Metadata(context.Background(), artifactID)
+	if err != nil || !meta.BodyExpired {
+		t.Fatalf("meta=%+v err=%v", meta, err)
+	}
+	if _, err := os.Stat(filepath.Join(store.dir, "blobs", shaHex+".blob")); !os.IsNotExist(err) {
+		t.Fatalf("expired unreferenced body stat err=%v, want not exist", err)
+	}
+}
+
 func TestTicket11ExpiredBodyReadFence(t *testing.T) {
 	db := newTestDB(t)
 	store, err := NewStore(db, t.TempDir())

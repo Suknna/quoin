@@ -4270,6 +4270,8 @@ paths:
                       $ref: '#/components/schemas/BackupSummary'
                   nextCursor:
                     $ref: '#/components/schemas/Cursor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -8814,6 +8816,7 @@ components:
         - dbSha256
         - manifestSha256
         - artifactCount
+        - sizeBytes
         - errorCode
         - retryable
         - errorDetail
@@ -8863,6 +8866,11 @@ components:
         artifactCount:
           type: [integer, 'null']
           minimum: 0
+        sizeBytes:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: 成功备份的 archive-set 成员字节总和（manifest.json、quoin.db 与 manifest 列出的 Artifact，排除 tar framing）；未完成或失败 Run 为 0。
         errorCode:
           type: [string, 'null']
           minLength: 1
@@ -8904,6 +8912,7 @@ components:
               dbSha256: { type: 'null' }
               manifestSha256: { type: 'null' }
               artifactCount: { type: 'null' }
+              sizeBytes: { const: 0 }
               errorCode: { type: 'null' }
               retryable: { type: 'null' }
               errorDetail: { type: 'null' }
@@ -8919,6 +8928,7 @@ components:
               dbSha256: { type: 'null' }
               manifestSha256: { type: 'null' }
               artifactCount: { type: 'null' }
+              sizeBytes: { const: 0 }
               errorCode: { type: 'null' }
               retryable: { type: 'null' }
               errorDetail: { type: 'null' }
@@ -8934,6 +8944,7 @@ components:
               dbSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
               manifestSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
               artifactCount: { type: integer, minimum: 0 }
+              sizeBytes: { type: integer, minimum: 1 }
               errorCode: { type: 'null' }
               retryable: { type: 'null' }
               errorDetail: { type: 'null' }
@@ -8948,12 +8959,13 @@ components:
               dbSha256: { type: 'null' }
               manifestSha256: { type: 'null' }
               artifactCount: { type: 'null' }
+              sizeBytes: { const: 0 }
               errorCode: { type: string, minLength: 1, maxLength: 128 }
               retryable: { type: boolean }
               errorDetail: { type: string, minLength: 1, maxLength: 4096 }
     BackupSettings:
       type: object
-      required: [enabled, timezone, retentionCount, rowVersion]
+      required: [enabled, timezone, backupTarget, retentionCount, rowVersion]
       properties:
         enabled:
           type: boolean
@@ -8962,6 +8974,11 @@ components:
           description: 缺省表示仅手动触发。
         timezone:
           type: string
+        backupTarget:
+          type: string
+          minLength: 1
+          readOnly: true
+          description: Quoin 进程可见的独立备份挂载目标；不得为宿主机路径。
         retentionCount:
           type: integer
           minimum: 1

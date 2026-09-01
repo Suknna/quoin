@@ -22,6 +22,10 @@ func main() {
 	client := &http.Client{Timeout: 3 * time.Second}
 	response, err := client.Get(flag.Arg(0))
 	if err != nil {
+		// This is a typed, terminal observation from the verifier itself. Deployment
+		// helpers may use it to authorize the disruptive offline fallback; they must
+		// never infer that authority from Docker/Kubernetes launcher error text.
+		fmt.Fprintln(os.Stdout, `{"kind":"quoin_ops_unavailable","source":"quoin-healthcheck","version":1}`)
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

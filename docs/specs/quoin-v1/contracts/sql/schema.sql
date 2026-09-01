@@ -2196,10 +2196,13 @@ CREATE TABLE backup_settings (
   enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   schedule_cron   TEXT,
   timezone        TEXT NOT NULL DEFAULT 'UTC',
-  retention_count INTEGER NOT NULL DEFAULT 30 CHECK (retention_count >= 1),
-  row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 设置更新并发前提（DATA-BACKUP-008）
-  updated_by      INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  updated_at      TEXT NOT NULL
+  retention_count      INTEGER NOT NULL DEFAULT 30 CHECK (retention_count >= 1),
+  -- 唯一的 durable catch-up anchor；只在 enabled 状态转换时变更（OPS-BACKUP-002）。
+  schedule_enabled_at  TEXT,
+  row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 设置更新并发前提（DATA-BACKUP-008）
+  updated_by           INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  updated_at           TEXT NOT NULL,
+  CHECK ((enabled = 1 AND schedule_enabled_at IS NOT NULL) OR (enabled = 0 AND schedule_enabled_at IS NULL))
 ) STRICT;
 
 -- Backup Run 是可恢复的受限状态机：HTTP 202 先插入 queued，执行器再推进 running，
@@ -2222,6 +2225,9 @@ CREATE TABLE backups (
   db_sha256       TEXT CHECK (db_sha256 IS NULL OR length(db_sha256) = 64),
   manifest_sha256 TEXT CHECK (manifest_sha256 IS NULL OR length(manifest_sha256) = 64),
   artifact_count  INTEGER CHECK (artifact_count IS NULL OR artifact_count >= 0),
+  -- Sum of every manifest-listed archive-set member (manifest.json, quoin.db,
+  -- and copied artifacts), excluding tar framing; zero before successful publication.
+  size_bytes      INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
   manifest_path   TEXT,
   error_code      TEXT CHECK (error_code IS NULL OR (length(error_code) BETWEEN 1 AND 128)),
   retryable       INTEGER CHECK (retryable IS NULL OR retryable IN (0,1)),
@@ -2240,20 +2246,20 @@ CREATE TABLE backups (
   ),
   CHECK (
     (status = 'queued' AND stage = 'queued' AND started_at IS NULL AND completed_at IS NULL
-      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND manifest_path IS NULL
+      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND size_bytes = 0 AND manifest_path IS NULL
       AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
     OR
     (status = 'running' AND stage IN ('preflight','database_snapshot','artifact_copy','manifest_publish')
       AND started_at IS NOT NULL AND completed_at IS NULL
-      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND manifest_path IS NULL
+      AND db_sha256 IS NULL AND manifest_sha256 IS NULL AND artifact_count IS NULL AND size_bytes = 0 AND manifest_path IS NULL
       AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
     OR
     (status = 'succeeded' AND stage = 'completed' AND started_at IS NOT NULL AND completed_at IS NOT NULL
-      AND db_sha256 IS NOT NULL AND manifest_sha256 IS NOT NULL AND artifact_count IS NOT NULL AND manifest_path IS NOT NULL
+      AND db_sha256 IS NOT NULL AND manifest_sha256 IS NOT NULL AND artifact_count IS NOT NULL AND size_bytes > 0 AND manifest_path IS NOT NULL
       AND error_code IS NULL AND retryable IS NULL AND error_detail IS NULL)
     OR
     (status = 'failed' AND stage <> 'completed' AND completed_at IS NOT NULL AND db_sha256 IS NULL AND manifest_sha256 IS NULL
-      AND artifact_count IS NULL AND manifest_path IS NULL AND error_code IS NOT NULL AND retryable IS NOT NULL AND error_detail IS NOT NULL)
+      AND artifact_count IS NULL AND size_bytes = 0 AND manifest_path IS NULL AND error_code IS NOT NULL AND retryable IS NOT NULL AND error_detail IS NOT NULL)
   )
 ) STRICT;
 CREATE INDEX idx_backups_created ON backups (created_at);
@@ -3236,6 +3242,11 @@ BEGIN SELECT RAISE(ABORT, 'reusable_knowledge row_version must increase exactly 
 CREATE TRIGGER trg_backup_settings_row_version_increment BEFORE UPDATE ON backup_settings
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'backup_settings row_version must increase exactly by 1'); END;
+CREATE TRIGGER trg_backup_settings_schedule_enabled_at_transition BEFORE UPDATE ON backup_settings
+WHEN (NEW.enabled = OLD.enabled AND NEW.schedule_enabled_at IS NOT OLD.schedule_enabled_at)
+  OR (OLD.enabled = 1 AND NEW.enabled = 0 AND NEW.schedule_enabled_at IS NOT NULL)
+  OR (OLD.enabled = 0 AND NEW.enabled = 1 AND NEW.schedule_enabled_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'backup_settings schedule_enabled_at must follow enabled transitions'); END;
 CREATE TRIGGER trg_artifact_retention_settings_row_version_increment BEFORE UPDATE ON artifact_retention_settings
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'artifact_retention_settings row_version must increase exactly by 1'); END;

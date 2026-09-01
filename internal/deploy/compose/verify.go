@@ -230,6 +230,11 @@ func judgeMetrics(component, exposition string) *PlatformError {
 		} else if index := strings.Index(line, " "); index >= 0 {
 			name = line[:index]
 		}
+		if strings.HasPrefix(name, "process_") || strings.HasPrefix(name, "go_") {
+			// Prometheus upstream runtime/process collectors are intentionally
+			// outside contracts/metrics.yaml (OPS-METRIC-001).
+			continue
+		}
 		if _, ok := expected[name]; !ok {
 			mapped := false
 			for _, suffix := range []string{"_bucket", "_sum", "_count"} {

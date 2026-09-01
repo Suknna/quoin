@@ -28,8 +28,11 @@ func Main(command string, arguments []string) {
 			ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath,
 			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
 		}))
+	case "backup":
+		flags := Parse("helm backup", arguments)
+		os.Exit(deployhelm.Backup(deployhelm.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags.Offline))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|verify> --config <path> --release-manifest <path> [--report <path>]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|verify|backup> --config <path> --release-manifest <path> [--report <path>] [--offline]")
 		os.Exit(2)
 	}
 }
@@ -39,6 +42,7 @@ type Flags struct {
 	ConfigPath          string
 	ReleaseManifestPath string
 	ReportPath          string
+	Offline             bool
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -49,10 +53,11 @@ func Parse(name string, arguments []string) Flags {
 	configPath := flags.String("config", "", "strict helm-install YAML")
 	releaseManifestPath := flags.String("release-manifest", "", "release-manifest.json with the digest-pinned images and OCI chart")
 	reportPath := flags.String("report", "", "where the atomic verification-report.json is written")
+	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
 	parseErr := flags.Parse(arguments)
 	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline}
 	}
 	brief := report.New("helm", fmt.Sprintf("%s/%s", os.Getenv("GOOS"), os.Getenv("GOARCH")), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")

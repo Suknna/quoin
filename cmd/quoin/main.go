@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: quoin serve|secrets bootstrap|admin create")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -33,8 +33,10 @@ func main() {
 			fail("usage: quoin admin create --config <path>")
 		}
 		runAdmin(os.Args[3:])
+	case "backup":
+		runBackup(os.Args[2:])
 	default:
-		fail("usage: quoin serve|secrets bootstrap|admin create")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline")
 	}
 }
 
