@@ -108,12 +108,10 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	}
 	s.refreshMetrics(ctx)
 	if err == nil {
-		if gcErr := s.gcLocked(ctx); gcErr != nil {
-			// A published snapshot remains valid. Retention reconciliation has its
-			// own retry/health projection and must not reclassify this Run as a
-			// backup failure.
-			return value, fmt.Errorf("backup retention cleanup: %w", gcErr)
-		}
+		// Retention cleanup has an independent durable health projection. A
+		// deletion failure must not turn a fully published newest snapshot into a
+		// failed Backup Run.
+		_ = s.gcLocked(ctx)
 	}
 	return value, err
 }

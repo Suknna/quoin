@@ -149,7 +149,7 @@ describe('BackupPanel', () => {
       if (base) return base
       if (path.startsWith('/api/v1/backups?')) {
         backupReads++
-        return backupReads === 1 ? response({ items: [run('sensitive')] }) : response({ message: 'session revoked' }, 401)
+        return backupReads === 1 ? response({ items: [run('sensitive')], latestSuccess: run('latest-sensitive'), retentionHealth: { lastAttemptAt: '2026-01-01T00:01:00Z', lastFailureAt: '2026-01-01T00:01:00Z', errorDetail: 'sensitive cleanup error' } }) : response({ message: 'session revoked' }, 401)
       }
       return response({})
     })
@@ -157,7 +157,10 @@ describe('BackupPanel', () => {
     render(<BackupPanel />)
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(screen.getByText(/#sensitive/)).toBeInTheDocument()
+    expect(screen.getByText(/最近成功：/)).toHaveTextContent('最近成功：')
+    expect(screen.getByText(/旧备份清理失败/)).toBeInTheDocument()
     await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
     expect(screen.queryByText(/#sensitive/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/旧备份清理失败/)).not.toBeInTheDocument()
   })
 })

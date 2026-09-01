@@ -167,10 +167,10 @@ func (server *Server) Run(ctx context.Context) error {
 // BackupMetrics exposes only the already-registered Quoin backup collectors.
 // It is intentionally a typed accessor, not a mutable registry escape hatch.
 type BackupMetrics struct {
-	Active, RunningSince, LastSuccess, LastOnlineManualSuccess, LastFailure, ScheduleOverdue, OldestActiveAge prometheus.Gauge
-	Failures                                                                                                  prometheus.Counter
-	Duration                                                                                                  prometheus.Observer
-	Storage                                                                                                   *StorageHealth
+	Active, RunningSince, LastSuccess, LastOnlineManualSuccess, LastFailure, ScheduleOverdue, OldestActiveAge, RetentionCleanupHealthy, RetentionCleanupLastFailure prometheus.Gauge
+	Failures                                                                                                                                                        prometheus.Counter
+	Duration                                                                                                                                                        prometheus.Observer
+	Storage                                                                                                                                                         *StorageHealth
 }
 
 // StorageHealth projects the two Quoin persistence targets and folds a failed
@@ -231,6 +231,14 @@ func (server *Server) BackupMetrics() (*BackupMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	retentionHealthy, err := gauge("quoin_backup_retention_cleanup_healthy")
+	if err != nil {
+		return nil, err
+	}
+	retentionFailure, err := gauge("quoin_backup_retention_cleanup_last_failure_timestamp_seconds")
+	if err != nil {
+		return nil, err
+	}
 	overdue, err := gauge("quoin_backup_schedule_overdue")
 	if err != nil {
 		return nil, err
@@ -254,7 +262,7 @@ func (server *Server) BackupMetrics() (*BackupMetrics, error) {
 	return &BackupMetrics{
 		Active: active, RunningSince: running, LastSuccess: success,
 		LastOnlineManualSuccess: manual, LastFailure: failure, ScheduleOverdue: overdue,
-		OldestActiveAge: oldest, Failures: failures, Duration: duration,
+		OldestActiveAge: oldest, RetentionCleanupHealthy: retentionHealthy, RetentionCleanupLastFailure: retentionFailure, Failures: failures, Duration: duration,
 		Storage: &StorageHealth{server: server, gauges: map[string]prometheus.Gauge{
 			"data": storage.WithLabelValues("data"), "backup": storage.WithLabelValues("backup"),
 		}},

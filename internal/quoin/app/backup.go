@@ -101,10 +101,17 @@ type backupCursor struct {
 	BeforeID     int64  `json:"beforeId"`
 }
 
+type retentionHealth struct {
+	LastAttemptAt *string `json:"lastAttemptAt"`
+	LastFailureAt *string `json:"lastFailureAt"`
+	ErrorDetail   *string `json:"errorDetail"`
+}
 type backupPageOutput struct {
 	Body struct {
-		Items      []backupSummary `json:"items"`
-		NextCursor string          `json:"nextCursor,omitempty"`
+		Items           []backupSummary `json:"items"`
+		LatestSuccess   *backupSummary  `json:"latestSuccess"`
+		RetentionHealth retentionHealth `json:"retentionHealth"`
+		NextCursor      string          `json:"nextCursor,omitempty"`
 	} `json:"body"`
 }
 type backupOutput struct {
@@ -195,14 +202,23 @@ func (application *apiServer) listBackups(ctx context.Context, input *struct {
 		}
 		beforeID = cursor.BeforeID
 	}
-	values, next, err := service.ListPage(ctx, beforeID, limit)
+	values, next, latestSuccess, err := service.ListPageWithLatest(ctx, beforeID, limit)
 	if err != nil {
 		return nil, problem(http.StatusInternalServerError, "unavailable", "无法读取备份记录。")
 	}
+	health, healthErr := service.RetentionHealth(ctx)
+	if healthErr != nil {
+		return nil, problem(http.StatusInternalServerError, "unavailable", "无法读取备份保留状态。")
+	}
 	out := &backupPageOutput{}
+	out.Body.RetentionHealth = retentionHealth{LastAttemptAt: health.LastAttemptAt, LastFailureAt: health.LastFailureAt, ErrorDetail: health.ErrorDetail}
 	out.Body.Items = make([]backupSummary, 0, len(values))
 	for _, value := range values {
 		out.Body.Items = append(out.Body.Items, projectBackup(value))
+	}
+	if latestSuccess != nil {
+		value := projectBackup(*latestSuccess)
+		out.Body.LatestSuccess = &value
 	}
 	if next != nil {
 		cursor, encodeErr := application.encodeBackupCursor(backupCursor{OperationID: "listBackups", Sort: backupCursorSort, FilterDigest: backupCursorFilterDigest, BeforeID: *next})

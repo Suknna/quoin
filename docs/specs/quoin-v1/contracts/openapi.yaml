@@ -4268,6 +4268,14 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/BackupSummary'
+                  latestSuccess:
+                    oneOf:
+                      - $ref: '#/components/schemas/BackupSummary'
+                      - type: 'null'
+                    readOnly: true
+                    description: 在同一 SQLite 快照中计算的最近成功 Backup Run；即使当前页没有成功 Run 也准确。
+                  retentionHealth:
+                    $ref: '#/components/schemas/BackupRetentionHealth'
                   nextCursor:
                     $ref: '#/components/schemas/Cursor'
         '400':
@@ -8798,6 +8806,14 @@ components:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
         - $ref: '#/components/schemas/ExpectedRowVersion'
+    BackupRetentionHealth:
+      type: object
+      additionalProperties: false
+      required: [lastAttemptAt, lastFailureAt, errorDetail]
+      properties:
+        lastAttemptAt: { oneOf: [ { $ref: '#/components/schemas/Timestamp' }, { type: 'null' } ] }
+        lastFailureAt: { oneOf: [ { $ref: '#/components/schemas/Timestamp' }, { type: 'null' } ] }
+        errorDetail: { type: [string, 'null'], maxLength: 4096 }
     BackupSummary:
       type: object
       additionalProperties: false

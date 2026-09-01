@@ -253,6 +253,16 @@ families:
     help: Unix timestamp of the latest failed Backup Run, or zero when no failure exists.
     labels: []
     preinitialize: true
+  - name: quoin_backup_retention_cleanup_healthy
+    type: gauge
+    help: Whether old Backup Run retention cleanup is currently healthy; zero after a durable cleanup failure until a later pass succeeds.
+    labels: []
+    preinitialize: true
+  - name: quoin_backup_retention_cleanup_last_failure_timestamp_seconds
+    type: gauge
+    help: Unix timestamp of the latest backup retention cleanup failure, or zero when none is active.
+    labels: []
+    preinitialize: true
   - name: quoin_backup_schedule_overdue
     type: gauge
     help: Whether an enabled backup schedule has an elapsed due instant not covered by a succeeding scheduled Backup Run.

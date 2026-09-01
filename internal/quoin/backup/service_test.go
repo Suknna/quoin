@@ -393,8 +393,12 @@ func TestRetentionCleanupRetriesOnSchedulerPass(t *testing.T) {
 		return os.RemoveAll(path)
 	}
 	second, err := service.RunOffline(ctx)
-	if err == nil || second.Status != "succeeded" {
-		t.Fatalf("second backup=%+v err=%v; want succeeded run and surfaced cleanup failure", second, err)
+	if err != nil || second.Status != "succeeded" {
+		t.Fatalf("second backup=%+v err=%v; want succeeded run despite cleanup failure", second, err)
+	}
+	health, err := service.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt == nil || health.ErrorDetail == nil {
+		t.Fatalf("retention health=%+v err=%v; want durable cleanup failure", health, err)
 	}
 	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, first.ID)); statErr != nil {
 		t.Fatalf("retained backup removed despite injected failure: %v", statErr)
@@ -407,6 +411,10 @@ func TestRetentionCleanupRetriesOnSchedulerPass(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(service.config.BackupDirectory, second.ID)); statErr != nil {
 		t.Fatalf("latest backup was removed by retention retry: %v", statErr)
+	}
+	health, err = service.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt != nil || health.ErrorDetail != nil {
+		t.Fatalf("retention health=%+v err=%v; want cleared after retry", health, err)
 	}
 }
 
@@ -472,5 +480,96 @@ func TestReconcileDeletesLeakedArchiveAndFailedPublishedDirectory(t *testing.T) 
 		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("reconcile retained %s: %v", path, statErr)
 		}
+	}
+}
+
+func TestListPageWithLatestReturnsSuccessOutsideCurrentPage(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx := context.Background()
+	base := time.Now().UTC()
+	insert := func(status, stage string, completed time.Time) {
+		t.Helper()
+		at := completed.Format(time.RFC3339Nano)
+		if status == "succeeded" {
+			_, err := db.Exec(`INSERT INTO backups(status,stage,trigger_kind,execution_mode,db_sha256,manifest_sha256,artifact_count,size_bytes,manifest_path,row_version,created_at,updated_at,started_at,completed_at,triggered_by) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?,?,1)`, status, stage, "manual", "online", strings.Repeat("a", 64), strings.Repeat("b", 64), 0, 1, "backup/manifest.json", at, at, at, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		_, err := db.Exec(`INSERT INTO backups(status,stage,trigger_kind,execution_mode,row_version,created_at,updated_at,started_at,completed_at,triggered_by,error_code,retryable,error_detail) VALUES(?,?,?,?,1,?,?,?,?,1,'failed',1,'test')`, status, stage, "manual", "online", at, at, at, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("succeeded", "completed", base)
+	for i := 0; i < 30; i++ {
+		insert("failed", "preflight", base.Add(time.Duration(i+1)*time.Second))
+	}
+	page, next, latest, err := service.ListPageWithLatest(ctx, 0, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 30 || next == nil {
+		t.Fatalf("page=%d next=%v, want 30 rows and cursor", len(page), next)
+	}
+	if latest == nil || latest.Status != "succeeded" {
+		t.Fatalf("latest=%+v, want older succeeded run", latest)
+	}
+}
+
+func TestRetentionCleanupPreservesFailureOnCancelledPassAndRetriesMissingManifestResidue(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	ctx := context.Background()
+	first, err := service.RunOffline(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retention := int64(1)
+	if _, err = service.UpdateSettingsCommand(ctx, 1, 1, "retain-one-partial", nil, nil, nil, &retention); err != nil {
+		t.Fatal(err)
+	}
+	firstRoot := filepath.Join(service.config.BackupDirectory, first.ID)
+	partial := true
+	service.removeAll = func(path string) error {
+		if path == firstRoot && partial {
+			partial = false
+			if removeErr := os.Remove(filepath.Join(path, "manifest.json")); removeErr != nil {
+				return removeErr
+			}
+			return errors.New("simulated partial deletion")
+		}
+		return os.RemoveAll(path)
+	}
+	if _, err = service.RunOffline(ctx); err != nil {
+		t.Fatalf("new backup must remain succeeded despite retention failure: %v", err)
+	}
+	health, err := service.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt == nil {
+		t.Fatalf("health after partial deletion=%+v err=%v", health, err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err = service.GC(cancelled); err == nil {
+		t.Fatal("cancelled cleanup unexpectedly succeeded")
+	}
+	health, err = service.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt == nil {
+		t.Fatalf("cancelled cleanup cleared known failure: %+v err=%v", health, err)
+	}
+
+	service.removeAll = os.RemoveAll
+	if err = service.GC(ctx); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if _, err = os.Stat(firstRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("residue after missing manifest was not removed: %v", err)
+	}
+	health, err = service.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt != nil || health.ErrorDetail != nil {
+		t.Fatalf("successful durable retry did not clear health: %+v err=%v", health, err)
 	}
 }

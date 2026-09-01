@@ -2215,6 +2215,16 @@ CREATE TABLE artifact_retention_settings (
   updated_at               TEXT NOT NULL
 ) STRICT;
 
+-- Singleton, independent of Backup Run lifecycle: retention failures preserve a
+-- valid newest snapshot but remain durable, visible and retryable.
+CREATE TABLE backup_retention_health (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  last_attempt_at TEXT,
+  last_failure_at TEXT,
+  error_detail    TEXT CHECK (error_detail IS NULL OR (length(error_detail) BETWEEN 1 AND 4096)),
+  CHECK ((last_failure_at IS NULL AND error_detail IS NULL) OR (last_failure_at IS NOT NULL AND error_detail IS NOT NULL))
+) STRICT;
+
 CREATE TABLE backups (
   id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   status          TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed')),

@@ -27,7 +27,8 @@ interface Settings {
 }
 
 interface Retention { generatedRetentionDays: number; rowVersion: number }
-interface BackupPage { items: Backup[]; nextCursor?: string }
+interface RetentionHealth { lastAttemptAt: string | null; lastFailureAt: string | null; errorDetail: string | null }
+interface BackupPage { items: Backup[]; latestSuccess: Backup | null; retentionHealth: RetentionHealth; nextCursor?: string }
 type SettingsDraft = Pick<Settings, 'enabled' | 'scheduleCron' | 'timezone' | 'retentionCount'>
 type Conflict = 'settings' | 'retention' | null
 
@@ -103,6 +104,8 @@ export function BackupPanel() {
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [latestSuccess, setLatestSuccess] = useState<Backup | null>(null)
+  const [retentionHealth, setRetentionHealth] = useState<RetentionHealth | null>(null)
   const loadedContinuation = useRef(false)
   const settingsDirtyRef = useRef(false)
   const retentionDirtyRef = useRef(false)
@@ -133,7 +136,9 @@ export function BackupPanel() {
         }
         return [...page.items, ...(current ?? []).filter(item => !firstPage.has(item.id))]
       })
-      if (!loadedContinuation.current) setNextCursor(page.nextCursor ?? null)
+       if (!loadedContinuation.current) setNextCursor(page.nextCursor ?? null)
+       setLatestSuccess(page.latestSuccess)
+       setRetentionHealth(page.retentionHealth)
       if (settingsDirtyRef.current) setIncomingSettings(nextSettings)
       else { setSettings(nextSettings); setSettingsDraftValue(settingsDraft(nextSettings)) }
       if (retentionDirtyRef.current) setIncomingRetention(nextRetention)
@@ -144,6 +149,7 @@ export function BackupPanel() {
         // Do not leave previously fetched backup metadata visible after the
         // authenticated session or its Admin role was revoked.
         setBackups(null); setSettings(null); setRetention(null)
+        setLatestSuccess(null); setRetentionHealth(null)
         setSettingsDraftValue(null); setRetentionDraft(null)
         window.location.assign('/')
         return
@@ -296,11 +302,11 @@ export function BackupPanel() {
     atTopRef.current = true
   }
 
-  const latestSuccess = backups?.find(item => item.status === 'succeeded')
   return <div className="detail-content">
     <header className="detail-header"><div><p className="eyebrow">管理</p><h1>备份与保留</h1></div><button disabled={busy} onClick={() => void trigger()}>{busy ? '正在创建…' : '立即备份'}</button></header>
     <p className="detail-muted">备份目标：{settings?.backupTarget ?? '正在读取…'}。最近成功：{latestSuccess ? formatBackupTimestamp(latestSuccess.completedAt) : '尚无'}。恢复必须在 Quoin 停机时使用部署命令完成。</p>
     {error && <div className="error-summary" role="alert">{error}</div>}
+    {retentionHealth?.lastFailureAt && <div className="error-summary" role="alert">旧备份清理失败，将自动重试：{retentionHealth.errorDetail ?? '无详情'}</div>}
     {notice && <p className="admin-notice" role="status">{notice}</p>}
     {conflict === 'settings' && <p className="error-summary" role="alert">远端备份设置已更新；当前草稿未被覆盖。<button onClick={() => void acceptIncomingSettings()}>重新加载远端设置</button></p>}
     {conflict === 'retention' && <p className="error-summary" role="alert">远端产物保留设置已更新；当前草稿未被覆盖。<button onClick={() => void acceptIncomingRetention()}>重新加载远端设置</button></p>}

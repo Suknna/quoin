@@ -38,6 +38,16 @@ func (s *Service) refreshMetrics(ctx context.Context) {
 		s.metrics.OldestActiveAge.Set(0)
 	}
 	s.metrics.ScheduleOverdue.Set(float64(s.scheduleOverdue(ctx)))
+	health, err := s.RetentionHealth(ctx)
+	if err != nil || health.LastFailureAt != nil {
+		s.metrics.RetentionCleanupHealthy.Set(0)
+		if err == nil && health.LastFailureAt != nil {
+			s.metrics.RetentionCleanupLastFailure.Set(unixTime(sql.NullString{String: *health.LastFailureAt, Valid: true}))
+		}
+	} else {
+		s.metrics.RetentionCleanupHealthy.Set(1)
+		s.metrics.RetentionCleanupLastFailure.Set(0)
+	}
 }
 func parseTimestamp(value string) time.Time {
 	parsed, err := time.Parse(time.RFC3339Nano, value)

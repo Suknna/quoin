@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 var ErrArchiveNotReady = errors.New("backup archive is not ready")
@@ -141,57 +139,70 @@ func (s *Service) recordDownloadAudit(ctx context.Context, actorID, backupID int
 	return tx.Commit()
 }
 
+func (s *Service) recordRetentionAttempt(ctx context.Context, cleanupErr error) error {
+	now := timestamp(s.now())
+	if cleanupErr == nil {
+		_, err := s.db.ExecContext(ctx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_failure_at=NULL,error_detail=NULL`, now)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_failure_at=excluded.last_failure_at,error_detail=excluded.error_detail`, now, now, truncate(cleanupErr.Error(), 4096))
+	return err
+}
+
 func (s *Service) GC(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gcLocked(ctx)
 }
-func (s *Service) gcLocked(ctx context.Context) error {
+
+// gcLocked removes every succeeded Run outside the durable retention window.
+// Selection is by immutable completed order, never by a readable manifest: a
+// failed earlier deletion may already have removed the manifest while leaving
+// descendants behind, and that physical residue must remain a retry target.
+func (s *Service) gcLocked(ctx context.Context) (result error) {
+	defer func() {
+		// Retention health is its own durable outcome. Never clear a known
+		// failure merely because this pass was cancelled or could not inspect
+		// settings; only a complete, synced cleanup clears it.
+		if recordErr := s.recordRetentionAttempt(context.Background(), result); recordErr != nil && result == nil {
+			result = fmt.Errorf("record retention cleanup outcome: %w", recordErr)
+		}
+		s.refreshMetrics(context.Background())
+	}()
+
 	settings, err := s.Settings(ctx)
 	if err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,manifest_sha256 FROM backups WHERE status='succeeded'`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status='succeeded' ORDER BY completed_at DESC, id DESC`)
 	if err != nil {
 		return err
 	}
-	type retainedBackup struct {
-		id       int64
-		modified time.Time
-	}
-	var valid []retainedBackup
+	var ids []int64
 	for rows.Next() {
 		var id int64
-		var manifestSHA sql.NullString
-		if err = rows.Scan(&id, &manifestSHA); err != nil {
+		if err = rows.Scan(&id); err != nil {
 			rows.Close()
 			return err
 		}
-		root := filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", id))
-		if !manifestSHA.Valid || VerifyWithManifestHash(root, manifestSHA.String) != nil {
-			continue
-		}
-		info, statErr := os.Stat(filepath.Join(root, "manifest.json"))
-		if statErr == nil {
-			valid = append(valid, retainedBackup{id: id, modified: info.ModTime()})
-		}
+		ids = append(ids, id)
 	}
 	if err = rows.Close(); err != nil {
 		return err
 	}
-	sort.Slice(valid, func(i, j int) bool { return valid[i].modified.After(valid[j].modified) })
 	keep := int(settings.RetentionCount)
-	if keep > len(valid) {
-		keep = len(valid)
+	if keep > len(ids) {
+		keep = len(ids)
 	}
-	deleted := false
-	for _, backup := range valid[keep:] {
-		if err = s.removeAll(filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", backup.id))); err != nil {
-			return fmt.Errorf("remove expired backup %d: %w", backup.id, err)
+	expired := ids[keep:]
+	for _, id := range expired {
+		if err = s.removeAll(filepath.Join(s.config.BackupDirectory, fmt.Sprintf("%d", id))); err != nil {
+			return fmt.Errorf("remove expired backup %d: %w", id, err)
 		}
-		deleted = true
 	}
-	if deleted {
+	// Even when a prior partial delete has already made a root disappear, a
+	// successful retry must sync the parent before health can become healthy.
+	if len(expired) > 0 {
 		if err = syncDirectory(s.config.BackupDirectory); err != nil {
 			return fmt.Errorf("sync expired backup cleanup: %w", err)
 		}

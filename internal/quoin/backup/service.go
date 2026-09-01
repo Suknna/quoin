@@ -86,6 +86,11 @@ type Settings struct {
 	RetentionCount, RowVersion int64
 }
 type ArtifactRetention struct{ GeneratedRetentionDays, RowVersion int64 }
+type RetentionHealth struct {
+	LastAttemptAt *string
+	LastFailureAt *string
+	ErrorDetail   *string
+}
 
 func NewService(db *sql.DB, config Config) (*Service, error) {
 	if db == nil || config.DataDirectory == "" || config.BackupDirectory == "" || config.ArtifactDirectory == "" {
@@ -162,6 +167,21 @@ func (s *Service) Settings(ctx context.Context) (Settings, error) {
 	}
 	return value, err
 }
+func (s *Service) RetentionHealth(ctx context.Context) (RetentionHealth, error) {
+	var value RetentionHealth
+	var attempt, failure, detail sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT last_attempt_at,last_failure_at,error_detail FROM backup_retention_health WHERE id=1`).Scan(&attempt, &failure, &detail)
+	if attempt.Valid {
+		value.LastAttemptAt = pointer(attempt.String)
+	}
+	if failure.Valid {
+		value.LastFailureAt = pointer(failure.String)
+	}
+	if detail.Valid {
+		value.ErrorDetail = pointer(detail.String)
+	}
+	return value, err
+}
 func (s *Service) ArtifactRetention(ctx context.Context) (ArtifactRetention, error) {
 	var value ArtifactRetention
 	err := s.db.QueryRowContext(ctx, `SELECT generated_retention_days,row_version FROM artifact_retention_settings WHERE id=1`).Scan(&value.GeneratedRetentionDays, &value.RowVersion)
@@ -218,8 +238,47 @@ func (s *Service) List(ctx context.Context, limit int) ([]Summary, error) {
 	return items, err
 }
 
+// ListPageWithLatest reads the page and latest successful Run in one SQLite
+// read transaction so the admin summary cannot contradict its list snapshot.
+func (s *Service) ListPageWithLatest(ctx context.Context, beforeID int64, limit int) ([]Summary, *int64, *Summary, error) {
+	transaction, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer transaction.Rollback()
+	items, next, err := s.listPageOn(ctx, transaction, beforeID, limit)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var latestID int64
+	err = transaction.QueryRowContext(ctx, `SELECT id FROM backups WHERE status='succeeded' ORDER BY completed_at DESC, id DESC LIMIT 1`).Scan(&latestID)
+	var latest *Summary
+	if err == nil {
+		value, readErr := scanSummary(ctx, transaction, latestID)
+		if readErr != nil {
+			return nil, nil, nil, readErr
+		}
+		latest = &value
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil, err
+	}
+	if err = transaction.Commit(); err != nil {
+		return nil, nil, nil, err
+	}
+	return items, next, latest, nil
+}
+
 // ListPage implements keyset pagination in immutable Backup Run ID order.
 func (s *Service) ListPage(ctx context.Context, beforeID int64, limit int) ([]Summary, *int64, error) {
+	return s.listPageOn(ctx, s.db, beforeID, limit)
+}
+
+type backupPageReader interface {
+	summaryReader
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func (s *Service) listPageOn(ctx context.Context, reader backupPageReader, beforeID int64, limit int) ([]Summary, *int64, error) {
 	if limit < 1 {
 		limit = 50
 	}
@@ -227,7 +286,7 @@ func (s *Service) ListPage(ctx context.Context, beforeID int64, limit int) ([]Su
 		return nil, nil, fmt.Errorf("backup page limit exceeds 200")
 	}
 	query := `SELECT id FROM backups WHERE (? = 0 OR id < ?) ORDER BY id DESC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, beforeID, beforeID, limit+1)
+	rows, err := reader.QueryContext(ctx, query, beforeID, beforeID, limit+1)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -253,7 +312,7 @@ func (s *Service) ListPage(ctx context.Context, beforeID int64, limit int) ([]Su
 	// before querying each summary or List can deadlock against itself.
 	out := make([]Summary, 0, len(ids))
 	for _, id := range ids {
-		value, err := s.Get(ctx, id)
+		value, err := scanSummary(ctx, reader, id)
 		if err != nil {
 			return nil, nil, err
 		}
