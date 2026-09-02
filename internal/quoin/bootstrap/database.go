@@ -143,7 +143,7 @@ func initializeDatabase(ctx context.Context, db *sql.DB, rootKey []byte) error {
 	}
 	digest := sha256.Sum256([]byte(gen.SchemaSQL))
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	nonce, ciphertext, err := sealVerifier(rootKey, 1)
+	nonce, ciphertext, err := SealRootKeyVerifier(rootKey, 1)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func verifyDatabase(ctx context.Context, db *sql.DB, rootKey []byte) error {
 	if err := db.QueryRowContext(ctx, `SELECT binding_revision,verifier_nonce,verifier_ciphertext FROM root_key_state WHERE id=1`).Scan(&revision, &nonce, &ciphertext); err != nil {
 		return fmt.Errorf("read root key binding: %w", err)
 	}
-	if err := openVerifier(rootKey, revision, nonce, ciphertext); err != nil {
+	if err := VerifyRootKeyVerifier(rootKey, revision, nonce, ciphertext); err != nil {
 		return fmt.Errorf("root key does not authenticate the database binding")
 	}
 	return nil
@@ -232,7 +232,10 @@ func verifyPragmas(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func sealVerifier(key []byte, revision int) ([]byte, []byte, error) {
+// SealRootKeyVerifier is the canonical root-binding verifier constructor.
+// Bootstrap and the offline rebind command share it so their cryptographic
+// format cannot drift into competing authorities.
+func SealRootKeyVerifier(key []byte, revision int) ([]byte, []byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, err
@@ -249,7 +252,8 @@ func sealVerifier(key []byte, revision int) ([]byte, []byte, error) {
 	return nonce, ciphertext, nil
 }
 
-func openVerifier(key []byte, revision int, nonce, ciphertext []byte) error {
+// VerifyRootKeyVerifier authenticates the canonical root-binding verifier.
+func VerifyRootKeyVerifier(key []byte, revision int, nonce, ciphertext []byte) error {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err

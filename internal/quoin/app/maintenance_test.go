@@ -17,6 +17,51 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
+func TestRootKeyRebindAllowsOwnPasswordChangeWithoutRestoreChecklist(t *testing.T) {
+	root := t.TempDir()
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), SteleServiceTokenFile: filepath.Join(root, "secrets", "stele")}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authService, err := auth.NewService(database.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authService.CreateFirstAdmin(context.Background(), "admin", "Root Key Admin", "original-password-123"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='RootKeyRebind',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1`, now); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newMaintenanceHandler(NewMaintenanceAPIServer(authService, database.SQL, ""), config.PublicOrigin, "RootKeyRebind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"admin","password":"original-password-123"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", config.PublicOrigin)
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	change := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", bytes.NewBufferString(`{"currentPassword":"original-password-123","newPassword":"root-rebind-password-789"}`))
+	change.Header.Set("Content-Type", "application/json")
+	change.Header.Set("Origin", config.PublicOrigin)
+	change.AddCookie(loginResponse.Result().Cookies()[0])
+	changeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(changeResponse, change)
+	if changeResponse.Code != http.StatusNoContent {
+		t.Fatalf("RootKeyRebind password change status=%d body=%s", changeResponse.Code, changeResponse.Body.String())
+	}
+}
+
 func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	root := t.TempDir()
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), SteleServiceTokenFile: filepath.Join(root, "secrets", "stele")}
@@ -154,6 +199,37 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Errorf("%s %s status=%d body=%s, want OpenAPI trust-rebuild allow", route.method, route.path, response.Code, response.Body.String())
 		}
+	}
+	rootRebindHandler, err := newMaintenanceHandler(NewMaintenanceAPIServer(authService, database.SQL, ""), config.PublicOrigin, "RootKeyRebind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/users"},
+		{http.MethodGet, "/api/v1/runtime"},
+		{http.MethodGet, "/api/v1/alert-sources"},
+	} {
+		request := httptest.NewRequest(route.method, route.path, nil)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		rootRebindHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"unavailable"`) {
+			t.Errorf("RootKeyRebind %s %s status=%d body=%s, want 503 unavailable", route.method, route.path, response.Code, response.Body.String())
+		}
+	}
+	rootRebindAudit := httptest.NewRequest(http.MethodGet, "/api/v1/audit-events", nil)
+	rootRebindAudit.AddCookie(cookie)
+	rootRebindAuditResponse := httptest.NewRecorder()
+	rootRebindHandler.ServeHTTP(rootRebindAuditResponse, rootRebindAudit)
+	if rootRebindAuditResponse.Code != http.StatusOK {
+		t.Errorf("RootKeyRebind audit list status=%d body=%s, want allowed", rootRebindAuditResponse.Code, rootRebindAuditResponse.Body.String())
+	}
+	rootRebindConnection := httptest.NewRequest(http.MethodGet, "/api/v1/connections", nil)
+	rootRebindConnection.AddCookie(cookie)
+	rootRebindConnectionResponse := httptest.NewRecorder()
+	rootRebindHandler.ServeHTTP(rootRebindConnectionResponse, rootRebindConnection)
+	if rootRebindConnectionResponse.Code != http.StatusOK {
+		t.Errorf("RootKeyRebind connection list status=%d body=%s, want allowed", rootRebindConnectionResponse.Code, rootRebindConnectionResponse.Body.String())
 	}
 	missingCredentials := httptest.NewRequest(http.MethodGet, "/api/v1/alert-sources/missing/credentials", nil)
 	missingCredentials.AddCookie(cookie)

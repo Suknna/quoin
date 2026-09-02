@@ -245,12 +245,13 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("no administrator exists; run attached Admin bootstrap first")
 	}
 	var maintenanceActive int
-	if err := database.SQL.QueryRowContext(ctx, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil {
+	var maintenanceReason sql.NullString
+	if err := database.SQL.QueryRowContext(ctx, `SELECT active,reason FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive, &maintenanceReason); err != nil {
 		return fmt.Errorf("read maintenance state: %w", err)
 	}
 	if maintenanceActive == 1 {
 		application := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
-		serverSet, err := newMaintenanceServers(application, config)
+		serverSet, err := newMaintenanceServers(application, config, maintenanceReason.String)
 		if err != nil {
 			return err
 		}
@@ -396,8 +397,8 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	return serverSet.run(ctx, config)
 }
 
-func newMaintenanceServers(application *apiServer, config contract.QuoinConfig) (*servers, error) {
-	public, err := newMaintenanceHandler(application, config.PublicOrigin)
+func newMaintenanceServers(application *apiServer, config contract.QuoinConfig, maintenanceReason string) (*servers, error) {
+	public, err := newMaintenanceHandler(application, config.PublicOrigin, maintenanceReason)
 	if err != nil {
 		return nil, err
 	}

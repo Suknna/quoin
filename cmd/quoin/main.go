@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -41,8 +41,13 @@ func main() {
 		} else {
 			runRestore(os.Args[2:])
 		}
+	case "root-key":
+		if len(os.Args) < 3 || os.Args[2] != "rebind" {
+			fail("usage: quoin root-key rebind --config <path>")
+		}
+		runRootKeyRebind(os.Args[3:])
 	default:
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind")
 	}
 }
 

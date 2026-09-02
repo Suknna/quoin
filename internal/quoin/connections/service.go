@@ -493,21 +493,66 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 	return service.Get(ctx, name)
 }
 
-// Disable blocks new dispatches; already accepted attempts finish.
+// Disable blocks new dispatches; already accepted attempts finish. During a
+// RootKeyRebind it is the explicit choice to retain the connection disabled.
 func (service *Service) Disable(ctx context.Context, name string, expectedRowVersion int64) (Summary, error) {
-	result, err := service.db.ExecContext(ctx, `UPDATE connections SET enabled=0,row_version=row_version+1 WHERE name=? AND row_version=?`, name, expectedRowVersion)
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return Summary{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	result, err := conn.ExecContext(ctx, `UPDATE connections SET enabled=0,row_version=row_version+1 WHERE name=? AND row_version=?`, name, expectedRowVersion)
 	if err != nil {
 		return Summary{}, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		var current int64
-		err := service.db.QueryRowContext(ctx, `SELECT row_version FROM connections WHERE name=?`, name).Scan(&current)
+		err := conn.QueryRowContext(ctx, `SELECT row_version FROM connections WHERE name=?`, name).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
 			return Summary{}, ErrNotFound
 		}
 		return Summary{}, &RowVersionError{Current: current}
 	}
+	if err := markRootKeyRebindConnectionSafe(ctx, conn, name, "disabled"); err != nil {
+		return Summary{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return Summary{}, err
+	}
+	committed = true
+	if err := conn.Close(); err != nil {
+		return Summary{}, err
+	}
 	return service.Get(ctx, name)
+}
+
+func markRootKeyRebindConnectionSafe(ctx context.Context, conn *sql.Conn, name, detailCode string) error {
+	var active int
+	var reason string
+	var revision int64
+	if err := conn.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &revision); err != nil {
+		return err
+	}
+	if active == 0 || reason != "RootKeyRebind" {
+		return nil
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET safe_state='Safe',detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='Connection' AND object_key=? AND safe_state='Blocking'`, detailCode, time.Now().UTC().Format(time.RFC3339Nano), revision, name)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("root key rebind checklist item missing or already completed for connection %q", name)
+	}
+	return nil
 }
 
 // OpenGeneration decrypts the current credential generation for the
@@ -652,7 +697,12 @@ func (service *Service) Rotate(ctx context.Context, name string, expectedRowVers
 	if _, err := conn.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,enabled=?,revalidation_required=1,row_version=row_version+1 WHERE id=?`, revisionID, generationID, nextEnabled, id); err != nil {
 		return Summary{}, err
 	}
-	committed = true
+	// Re-entry under the current root binding closes only this frozen
+	// RootKeyRebind checklist item. The connection remains revalidation-required
+	// until the later normal-mode verification/enable path succeeds.
+	if err := markRootKeyRebindConnectionSafe(ctx, conn, name, "reentered_with_current_root_key"); err != nil {
+		return Summary{}, err
+	}
 	summary, summaryErr := service.getOn(ctx, conn, name)
 	if summaryErr != nil {
 		return Summary{}, summaryErr
@@ -661,12 +711,16 @@ func (service *Service) Rotate(ctx context.Context, name string, expectedRowVers
 	if err != nil {
 		return Summary{}, err
 	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,'connection.rotate',?,'success','connection',?,?)`, createdBy, clientCommandID, id, now); err != nil {
+		return Summary{}, err
+	}
 	if err := auth.RecordCommand(ctx, conn, createdBy, clientCommandID, "connection.rotate", digest, "committed", "connection", id, string(projection)); err != nil {
 		return Summary{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return Summary{}, err
 	}
+	committed = true
 	conn.Close()
 	return service.Get(ctx, name)
 }
