@@ -10,6 +10,7 @@ import (
 	"runtime"
 
 	"github.com/Suknna/quoin/cmd/quoin-deploy/install"
+	recovery "github.com/Suknna/quoin/cmd/quoin-deploy/recover_lintel"
 	"github.com/Suknna/quoin/cmd/quoin-deploy/verify"
 	deploycompose "github.com/Suknna/quoin/internal/deploy/compose"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
@@ -32,8 +33,11 @@ func Main(command string, arguments []string) {
 	case "restore":
 		flags := Parse("compose restore", arguments)
 		os.Exit(deploycompose.Restore(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags.BackupID))
+	case "recover-lintel":
+		flags := recovery.Parse("compose recover-lintel", arguments)
+		os.Exit(deploycompose.RecoverLintel(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|verify|backup|restore> --config <path> [--release-manifest <path>] [--report <path>] [--offline] [--backup <backup-id>]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|verify|backup|restore|recover-lintel> --config <path> [--release-manifest <path>] [--report <path>] [--offline] [--backup <backup-id>]")
 		os.Exit(2)
 	}
 }
