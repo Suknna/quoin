@@ -292,3 +292,15 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
 .confirm-dialog { width: min(100%, 560px); padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: 0 18px 50px rgba(14, 18, 16, .28); }
 .confirm-dialog p { margin: 0; line-height: 1.55; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+
+.maintenance-page { min-height: 100vh; padding: 2rem; background: var(--surface-soft); }
+.maintenance-page-header { max-width: 72rem; margin: 0 auto 1.5rem; display: flex; gap: .75rem; align-items: center; }
+.maintenance-page-header .text-button { margin-left: auto; }
+.maintenance-page-header h1 { margin: 0; }
+.maintenance-page-card, .root-key-rebind-notice { border: 1px solid var(--line); border-radius: .75rem; padding: 1.25rem; background: var(--paper); }
+.maintenance-page-card { max-width: 72rem; margin: 0 auto; }
+.root-key-rebind-notice { margin: 1rem 0; border-color: var(--warn-ink); background: var(--warn-soft); }
+.root-key-rebind-notice ul, .maintenance-checklist { padding: 0; list-style: none; }
+.root-key-rebind-notice li, .maintenance-checklist li { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+.root-key-rebind-safe { color: var(--ok-ink); }
+.root-key-rebind-blocking { color: var(--danger-ink); }

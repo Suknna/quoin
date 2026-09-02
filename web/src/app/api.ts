@@ -5,6 +5,8 @@ import type {
   UserSummary,
 } from '../api/generated/types'
 
+export interface MaintenanceState { active: boolean; reason?: 'Restore' | 'Upgrade' | 'RootKeyRebind'; rowVersion: number; items: { kind: string; objectKey: string; safeState: 'Safe' | 'Blocking'; detailCode: string }[] }
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -48,4 +50,10 @@ export const api = {
     }),
   logout: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
   runtime: () => request<RuntimeStatus>('/api/v1/runtime'),
+  maintenance: async (): Promise<MaintenanceState | null> => {
+    try { return await request<MaintenanceState>('/api/v1/maintenance') } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
 }

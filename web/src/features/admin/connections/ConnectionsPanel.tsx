@@ -8,6 +8,8 @@ import {
   createConnection,
   disableConnection,
   enableConnection,
+  exitMaintenance,
+  fetchMaintenanceState,
   fetchConnection,
   fetchProbeAttempt,
   listConnections,
@@ -15,6 +17,7 @@ import {
   probeConnection,
   type ConnectionDetailView,
   type ConnectionSummaryView,
+  type MaintenanceStateView,
   type CreateConnectionInput,
   type ProbeAttemptView,
   type ProbeResultView,
@@ -43,7 +46,7 @@ const stateLabels: Record<ProbeAttemptView['state'], string> = {
 
 const activeStates: ProbeAttemptView['state'][] = ['Queued', 'Assigned', 'Running', 'Cancelling']
 
-export function ConnectionsPanel() {
+export function ConnectionsPanel({ maintenanceMode = false }: { maintenanceMode?: boolean }) {
   const [connections, setConnections] = useState<ConnectionSummaryView[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<ConnectionDetailView | null>(null)
@@ -55,10 +58,12 @@ export function ConnectionsPanel() {
   const [form, setForm] = useState({ name: '', baseUrl: '', username: '', password: '', kubeconfig: '', defaultNamespace: '' })
   const [providerForm, setProviderForm] = useState<ModelProviderFormValue>({ baseUrl: '', apiKey: '', chatModelId: '', embeddingModelId: '', contextBudgetTokens: '8192', maxOutputTokens: '1024' })
   const [rotating, setRotating] = useState(false)
+  const [maintenance, setMaintenance] = useState<MaintenanceStateView | null>(null)
 
   const reload = useCallback(async (selection = selected) => {
     try {
-      const items = await listConnections()
+      const [items, maintenanceState] = await Promise.all([listConnections(), fetchMaintenanceState()])
+      setMaintenance(maintenanceState)
       setConnections(items)
       if (selection && items.some((item) => item.name === selection)) {
         const [nextDetail, nextResults] = await Promise.all([fetchConnection(selection), listProbeResults(selection)])
@@ -198,6 +203,30 @@ export function ConnectionsPanel() {
     }
   }
 
+  async function finishRootKeyRebind() {
+    if (!maintenance || maintenance.reason !== 'RootKeyRebind') return
+    try {
+      await exitMaintenance(maintenance.rowVersion)
+      setMaintenance(null)
+      setNotice('维护状态已退出。请重启 Quoin 以恢复普通服务。')
+    } catch (reason) {
+      setError(reason instanceof ConnectionsApiError ? reason.message : '退出维护失败，请刷新后重试。')
+      await reload()
+    }
+  }
+
+  async function confirmDisabled() {
+    if (!detail) return
+    try {
+      const updated = await disableConnection(detail.name, detail.rowVersion)
+      setNotice(`已确认 ${updated.name} 保持停用。`)
+      await reload(updated.name)
+    } catch (reason) {
+      setError(reason instanceof ConnectionsApiError ? reason.message : '暂时无法确认停用，请刷新后重试。')
+      await reload()
+    }
+  }
+
   async function toggleEnabled() {
     if (!detail) {
       return
@@ -233,11 +262,19 @@ export function ConnectionsPanel() {
     <div className="detail-content admin-connections">
       <header className="admin-connections-head">
         <h2>连接</h2>
-        <button className="text-button compact" onClick={() => setCreating(true)}>新建连接</button>
+        {!maintenanceMode && <button className="text-button compact" onClick={() => setCreating(true)}>新建连接</button>}
       </header>
       {notice && <p className="admin-notice" role="status">{notice}</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {creating && (
+      {maintenance?.active && maintenance.reason === 'RootKeyRebind' && (
+        <section className="root-key-rebind-notice" aria-labelledby="root-key-rebind-title">
+          <h3 id="root-key-rebind-title">正在更换根密钥</h3>
+          <p>旧凭据已不可读取。逐一重新输入凭据，或明确停用不再使用的连接。</p>
+          <ul role="list">{maintenance.items.filter((item) => item.kind === 'Connection').map((item) => <li key={item.objectKey}><strong>{item.objectKey}</strong><span className={item.safeState === 'Safe' ? 'root-key-rebind-safe' : 'root-key-rebind-blocking'}>{item.safeState === 'Safe' ? (item.detailCode === 'disabled' ? '已停用' : '已重新输入凭据') : '需要处理'}</span></li>)}</ul>
+          {maintenance.items.some((item) => item.safeState === 'Blocking') ? <p>完成全部清单项目后才能退出维护。</p> : <button onClick={finishRootKeyRebind}>退出维护</button>}
+        </section>
+      )}
+      {!maintenanceMode && creating && (
         <form className="admin-create-form admin-reset-form" onSubmit={submitCreation}>
           <h3>新建连接</h3>
           <label>
@@ -305,7 +342,7 @@ export function ConnectionsPanel() {
             </button>
           </li>
         ))}
-        {connections.length === 0 && <li className="admin-muted">还没有连接。点击“新建连接”创建第一个。</li>}
+        {connections.length === 0 && <li className="admin-muted">{maintenanceMode ? '没有需要重新处理的连接。' : '还没有连接。点击“新建连接”创建第一个。'}</li>}
       </ul>
       {detail && (
         <section className="connection-detail-card" aria-labelledby="connection-detail-title">
@@ -317,16 +354,15 @@ export function ConnectionsPanel() {
             <span>凭据 × {detail.generationCount}</span>
           </div>
           <div className="admin-action-row">
-            <button onClick={runProbe}>运行探测</button>
+            {!maintenanceMode && <button onClick={runProbe}>运行探测</button>}
+            {maintenanceMode && !detail.enabled && <button className="text-button" onClick={confirmDisabled}>确认保持停用</button>}
             {detail.activeProbeAttempt ? (
               <button className="text-button" onClick={cancelActive}>
                 取消探测（{stateLabels[detail.activeProbeAttempt.state]}）
               </button>
-            ) : (
-              <button className="text-button" onClick={toggleEnabled}>
-                {detail.enabled ? '停用' : '启用'}
-              </button>
-            )}
+            ) : (detail.enabled || !maintenanceMode) ? (
+              <button className="text-button" onClick={toggleEnabled}>{detail.enabled ? '停用' : '启用'}</button>
+            ) : null}
             <button className="text-button" onClick={() => setRotating(!rotating)}>轮换凭据</button>
           </div>
           {rotating && (

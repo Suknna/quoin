@@ -42,6 +42,9 @@ export interface ProbeResultView {
   details: Record<string, unknown>
 }
 
+export interface MaintenanceItemView { kind: string; objectKey: string; safeState: 'Safe' | 'Blocking'; detailCode: string }
+export interface MaintenanceStateView { active: boolean; reason?: 'Restore' | 'Upgrade' | 'RootKeyRebind'; rowVersion: number; items: MaintenanceItemView[] }
+
 export class ConnectionsApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
     super(message)
@@ -60,6 +63,19 @@ async function failure(response: Response, fallback: string): Promise<Connection
 export function newClientCommandId(): string {
   const raw = crypto.getRandomValues(new Uint8Array(18))
   return Array.from(raw, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export async function fetchMaintenanceState(): Promise<MaintenanceStateView | null> {
+  const response = await fetch('/api/v1/maintenance', { credentials: 'include' })
+  if (response.status === 404) return null
+  if (!response.ok) throw await failure(response, '暂时无法读取维护状态。')
+  return (await response.json()) as MaintenanceStateView
+}
+
+export async function exitMaintenance(expectedRowVersion: number): Promise<MaintenanceStateView> {
+  const response = await fetch('/api/v1/maintenance/exit', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedReason: 'RootKeyRebind', expectedRowVersion }) })
+  if (!response.ok) throw await failure(response, '暂时无法退出维护。')
+  return (await response.json()) as MaintenanceStateView
 }
 
 export async function listConnections(): Promise<ConnectionSummaryView[]> {

@@ -33,6 +33,20 @@ if [ "$browser_ticket" = "1" ]; then
   export QUOIN_IMAGE_NAMESPACE="quoin-$ticket_slug"
 fi
 export QUOIN_COMPOSE_PROJECT="$compose_project"
+if [ "$ticket" = "T34" ]; then
+  # Playwright does not run globalTeardown when webServer bootstrap never
+  # reaches readiness. T34 owns a destructive stopped-service transition, so
+  # close the normal-compose cleanup gap on every bootstrap failure.
+  cleanup_failed_t34_bootstrap() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+      QUOIN_TICKET="$ticket" QUOIN_TEARDOWN_PHASE=bootstrap-exit QUOIN_EVIDENCE_DIR="${QUOIN_EVIDENCE_DIR:-$repo_root/.artifacts/tickets/$ticket}" node test/e2e/compose/teardown.mjs || exit 70
+    fi
+    exit "$status"
+  }
+  trap cleanup_failed_t34_bootstrap EXIT
+fi
 if [ "$browser_ticket" = "1" ] && [ "${QUOIN_BROWSER_E2E_LOCK_HELD:-}" != "1" ]; then
 # Browser tickets use the same loopback TLS port and fixed browser fixture
 # names. Serialize direct script invocations as well as Playwright runs so
@@ -503,6 +517,30 @@ printf '%s\n' "$REVEAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); p
 curl -s -H "$CJ" -H "$ORIGIN" -H 'Content-Type: application/json' -X POST \
   -d '{"clientCommandId":"e2e-t07-create-1","name":"main-thanos","connection":{"type":"thanos","baseUrl":"http://quoin-t07-thanos:9090","password":"e2e-thanos-secret"}}' \
   "$BASE/api/v1/connections" >>"$evidence/playwright-server.log"
+
+# T34 replaces the host-mounted root key only while Quoin is stopped, then
+# drives the same image's attached-TTY offline command. It deliberately
+# retains the existing UI-visible Connection so Chromium can observe the
+# required re-entry checklist through the running maintenance API.
+if [ "$ticket" = "T34" ]; then
+  compose_file="$stack/state/quoin/compose/generated/compose.yaml"
+  docker compose --project-name "$compose_project" --file "$compose_file" stop quoin >>"$evidence/playwright-server.log" 2>&1
+  openssl rand 32 >"$stack/secrets/root-key"
+  chmod 600 "$stack/secrets/root-key"
+  rebind_command="docker compose --project-name $compose_project --file $compose_file run --rm --no-deps quoin root-key rebind --config /etc/quoin/component.yaml"
+  printf 'REBIND\n' | script -qec "$rebind_command" /dev/null >>"$evidence/playwright-server.log" 2>&1
+  docker compose --project-name "$compose_project" --file "$compose_file" start quoin >>"$evidence/playwright-server.log" 2>&1
+  for _ in $(seq 1 60); do
+    if curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/maintenance" | grep -q 'RootKeyRebind'; then break; fi
+    sleep 1
+  done
+  if ! curl -sf -H "$CJ" -H "$ORIGIN" "$BASE/api/v1/maintenance" | grep -q 'RootKeyRebind'; then
+    echo 'FATAL: T34 did not enter RootKeyRebind maintenance' | tee -a "$evidence/playwright-server.log" >&2
+    exit 1
+  fi
+  start_ready_server
+  exec docker compose --project-name "$compose_project" --file "$compose_file" logs -f quoin plinth lintel stele 2>&1 | tee -a "$evidence/runtime-process.log"
+fi
 
 # The UI analysis ticket fixtures are maintained separately so this bootstrap
 # stays focused on stack lifecycle and shared runtime setup.
