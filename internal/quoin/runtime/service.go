@@ -76,6 +76,10 @@ type registrationToken struct {
 	session    [32]byte // creating admin session digest
 	expiresAt  time.Time
 	consumed   bool
+	// recoveryRevision is non-zero only for the helper-owned Lintel recovery
+	// token (T35): it binds the one-time token to the exact LintelRecovery
+	// maintenance revision and routes Register into the recovery rotation.
+	recoveryRevision int64
 }
 
 // connection is the transient control-stream projection (RUNTIME-CTRL-001).

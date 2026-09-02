@@ -67,6 +67,20 @@ func (service *Service) Register(ctx context.Context, slotName, oneTimeToken str
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	if token.recoveryRevision != 0 {
+		// Helper-owned Lintel recovery (T35): rotate the current credential
+		// through the frozen pending→confirmed→current/retiring protocol
+		// instead of the unregistered/revoked registration window.
+		longTerm, err := service.registerLintelRecoveryRotation(ctx, conn, token)
+		if err != nil {
+			return "", 0, err
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return "", 0, err
+		}
+		committed = true
+		return longTerm, token.generation, nil
+	}
 	var state string
 	if err := conn.QueryRowContext(ctx, `SELECT state FROM runtime_slots WHERE slot=?`, slotName).Scan(&state); err != nil {
 		return "", 0, err
@@ -115,6 +129,81 @@ func (service *Service) Register(ctx context.Context, slotName, oneTimeToken str
 	}
 	committed = true
 	return base64.RawURLEncoding.EncodeToString(longRaw), generation, nil
+}
+
+// registerLintelRecoveryRotation executes the schema-owned two-phase
+// rotation for the recovery registration: insert the confirmed replacement,
+// set pending, then atomically promote it to current while the predecessor
+// becomes retiring (DATA-RUNTIME-001b). The caller owns the open transaction;
+// the slot stays registered the whole time — revocation is never used, so
+// the old credential survives until the offline finalizer retires it after
+// the replacement's first authenticated Hello.
+func (service *Service) registerLintelRecoveryRotation(ctx context.Context, conn *sql.Conn, token *registrationToken) (string, error) {
+	if token.slot != SlotLintel {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "recovery registration is lintel-only"}
+	}
+	var active int
+	var reason string
+	var revision int64
+	if err := conn.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &revision); err != nil {
+		return "", err
+	}
+	if active != 1 || reason != "LintelRecovery" || revision != token.recoveryRevision {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "lintel recovery maintenance revision changed"}
+	}
+	var state string
+	var currentID sql.NullInt64
+	var pendingID, retiringID sql.NullInt64
+	if err := conn.QueryRowContext(ctx, `SELECT state,current_credential_id,pending_credential_id,retiring_credential_id FROM runtime_slots WHERE slot=?`, SlotLintel).Scan(&state, &currentID, &pendingID, &retiringID); err != nil {
+		return "", err
+	}
+	if state != string(StateRegistered) || !currentID.Valid || pendingID.Valid || retiringID.Valid {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "lintel slot is not in the recovery rotation window"}
+	}
+	var exists int
+	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM runtime_credentials WHERE slot=? AND generation=?`, SlotLintel, token.generation).Scan(&exists); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if exists == 1 {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "generation already exists"}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	longRaw := make([]byte, 32)
+	if _, err := rand.Read(longRaw); err != nil {
+		return "", err
+	}
+	longDigest := sha256.Sum256(longRaw)
+	insert, err := conn.ExecContext(ctx, `INSERT INTO runtime_credentials(slot,generation,token_digest,row_version,created_at) VALUES(?,?,?,1,?)`,
+		SlotLintel, token.generation, longDigest[:], now)
+	if err != nil {
+		return "", err
+	}
+	replacementID, err := insert.LastInsertId()
+	if err != nil {
+		return "", err
+	}
+	// The frozen two-phase sequence (DATA-RUNTIME-001b): pending pointer,
+	// then the runtime-persisted confirmation, then the atomic promotion.
+	pending, err := conn.ExecContext(ctx, `UPDATE runtime_slots SET pending_credential_id=?,row_version=row_version+1 WHERE slot=? AND state='registered' AND current_credential_id=? AND pending_credential_id IS NULL AND retiring_credential_id IS NULL`,
+		replacementID, SlotLintel, currentID.Int64)
+	if err != nil {
+		return "", err
+	}
+	if rows, _ := pending.RowsAffected(); rows != 1 {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "lintel slot is not in the recovery rotation window"}
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE runtime_credentials SET confirmed_at=?,row_version=row_version+1 WHERE id=? AND confirmed_at IS NULL`, now, replacementID); err != nil {
+		return "", err
+	}
+	promote, err := conn.ExecContext(ctx, `UPDATE runtime_slots SET current_credential_id=?,pending_credential_id=NULL,retiring_credential_id=?,row_version=row_version+1 WHERE slot=? AND state='registered' AND current_credential_id=? AND pending_credential_id=? AND retiring_credential_id IS NULL`,
+		replacementID, currentID.Int64, SlotLintel, currentID.Int64, replacementID)
+	if err != nil {
+		return "", err
+	}
+	if rows, _ := promote.RowsAffected(); rows != 1 {
+		return "", &RegisterError{Status: "FAILED_PRECONDITION", Detail: "lintel slot is not in the recovery rotation window"}
+	}
+	return base64.RawURLEncoding.EncodeToString(longRaw), nil
 }
 
 // consumeToken atomically matches and consumes the in-memory registration

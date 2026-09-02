@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -46,8 +46,13 @@ func main() {
 			fail("usage: quoin root-key rebind --config <path>")
 		}
 		runRootKeyRebind(os.Args[3:])
+	case "maintenance":
+		if len(os.Args) < 3 || os.Args[2] != "recover-lintel" {
+			fail("usage: quoin maintenance recover-lintel --phase <issue|await|finalize|hold> --config <path>")
+		}
+		runLintelRecovery(os.Args[3:])
 	default:
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel")
 	}
 }
 
