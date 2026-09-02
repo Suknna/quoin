@@ -19,13 +19,14 @@ import (
 // The T31 acceptance mirrors the T01/T30 recorder contract: every command,
 // artifact and observation lands under QUOIN_EVIDENCE_DIR with digests.
 
-const (
-	registryName = "t31-registry"
-	registryHost = "127.0.0.1:5000"
-	mainRelease  = "t31"
-	mainNs       = "quoin-t31"
-	retryRelease = "t31r"
-	retryNs      = "quoin-t31r"
+var (
+	registryName       = "t31-registry"
+	registryHost       = "127.0.0.1:5000"
+	registryRepository = "t31"
+	mainRelease        = "t31"
+	mainNs             = "quoin-t31"
+	retryRelease       = "t31r"
+	retryNs            = "quoin-t31r"
 )
 
 type evidence struct {
@@ -40,9 +41,10 @@ type evidence struct {
 }
 
 type commandRecord struct {
-	Name     string `json:"name"`
-	ExitCode int    `json:"exitCode"`
-	Duration string `json:"duration"`
+	Name     string   `json:"name"`
+	Args     []string `json:"args"`
+	ExitCode int      `json:"exitCode"`
+	Duration string   `json:"duration"`
 }
 
 type artifactRecord struct {
@@ -104,12 +106,12 @@ func (recorder *evidence) run(name string, env []string, stdin io.Reader, wantEx
 	command.Stdout = &combined
 	command.Stderr = &combined
 	_ = command.Run()
-	exitCode := 0
+	exitCode := -1
 	if command.ProcessState != nil {
 		exitCode = command.ProcessState.ExitCode()
 	}
 	_ = os.WriteFile(logPath, combined.Bytes(), 0o644)
-	recorder.commands = append(recorder.commands, commandRecord{Name: name, ExitCode: exitCode, Duration: time.Since(started).Round(time.Millisecond).String()})
+	recorder.commands = append(recorder.commands, commandRecord{Name: name, Args: append([]string(nil), argv...), ExitCode: exitCode, Duration: time.Since(started).Round(time.Millisecond).String()})
 	recorder.artifacts = append(recorder.artifacts, artifactRecord{Path: logPath, SHA256: sha256Hex(combined.Bytes()), Bytes: combined.Len()})
 	if wantExit >= 0 && exitCode != wantExit {
 		recorder.t.Fatalf("%s: exit=%d want=%d output:\n%s", name, exitCode, wantExit, combined.String())
@@ -134,19 +136,19 @@ func (recorder *evidence) observe(name string, value any) {
 // environmentBaseline snapshots the cluster surfaces this ticket touches so
 // cleanup can prove pre-existing resources stayed untouched.
 type environmentBaseline struct {
-	namespaces   string
-	pvcs         string
-	helmReleases string
-	containers   string
+	Namespaces   string `json:"namespaces"`
+	PVCs         string `json:"pvcs"`
+	HelmReleases string `json:"helmReleases"`
+	Containers   string `json:"containers"`
 }
 
 func captureEnvironmentBaseline(t *testing.T, recorder *evidence) environmentBaseline {
 	t.Helper()
 	baseline := environmentBaseline{
-		namespaces:   strings.TrimSpace(recorder.output("kubectl", "get", "namespaces", "--no-headers", "-o", "custom-columns=NAME:.metadata.name")),
-		pvcs:         strings.TrimSpace(recorder.output("kubectl", "get", "pvc", "--all-namespaces", "--no-headers", "-o", "custom-columns=NS:.metadata.namespace,NAME:.metadata.name")),
-		helmReleases: strings.TrimSpace(recorder.output("helm", "list", "--all-namespaces", "--output", "json")),
-		containers:   strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}")),
+		Namespaces:   strings.TrimSpace(recorder.output("kubectl", "get", "namespaces", "--no-headers", "-o", "custom-columns=NAME:.metadata.name")),
+		PVCs:         strings.TrimSpace(recorder.output("kubectl", "get", "pvc", "--all-namespaces", "--no-headers", "-o", "custom-columns=NS:.metadata.namespace,NAME:.metadata.name")),
+		HelmReleases: strings.TrimSpace(recorder.output("helm", "list", "--all-namespaces", "--output", "json")),
+		Containers:   strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}")),
 	}
 	recorder.note("baseline.json", mustJSON(t, baseline))
 	return baseline

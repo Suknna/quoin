@@ -18,7 +18,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -35,8 +35,14 @@ func main() {
 		runAdmin(os.Args[3:])
 	case "backup":
 		runBackup(os.Args[2:])
+	case "restore":
+		if len(os.Args) >= 3 && os.Args[2] == "finalize" {
+			runRestoreFinalize(os.Args[3:])
+		} else {
+			runRestore(os.Args[2:])
+		}
 	default:
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline")
+		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>")
 	}
 }
 
@@ -172,7 +178,13 @@ func promptPassword(label string) string {
 	if err != nil {
 		fail("could not read password from attached TTY")
 	}
-	return string(value)
+	return trimTerminalPassword(value)
+}
+
+// trimTerminalPassword removes only the Enter sequence supplied by a terminal;
+// spaces remain part of a password and must not be silently normalized.
+func trimTerminalPassword(value []byte) string {
+	return strings.TrimRight(string(value), "\r\n")
 }
 
 func fail(message string) {

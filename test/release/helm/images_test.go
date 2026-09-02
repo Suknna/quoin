@@ -65,7 +65,7 @@ func buildAndPushReleaseImages(t *testing.T, recorder *evidence, workRoot string
 		{"lintel", "build/package/Dockerfile", "lintel", false},
 	}
 	for _, build := range builds {
-		entry := &releaseImages{Repository: registryHost + "/t31/" + build.component}
+		entry := &releaseImages{Repository: registryHost + "/" + registryRepository + "/" + build.component}
 		for _, platform := range []string{"amd64", "arm64"} {
 			tag := entry.Repository + ":" + platform
 			arguments := []string{"build", "-f", build.dockerfile, "--platform", "linux/" + platform}
@@ -189,7 +189,7 @@ func pushChartOCI(t *testing.T, recorder *evidence, workRoot string) (digest, sh
 	// helm push appends the chart name to the OCI path: pushing to
 	// oci://…/t31/charts stores the chart in t31/charts/quoin.
 	recorder.run("chart-package", nil, nil, 0, "helm", "package", "deploy/helm/quoin", "--destination", packageDir)
-	pushed := recorder.run("chart-push", nil, nil, 0, "helm", "push", filepath.Join(packageDir, "quoin-0.1.0.tgz"), "oci://"+registryHost+"/t31/charts")
+	pushed := recorder.run("chart-push", nil, nil, 0, "helm", "push", filepath.Join(packageDir, "quoin-0.1.0.tgz"), "oci://"+registryHost+"/"+registryRepository+"/charts")
 	for _, line := range strings.Split(pushed, "\n") {
 		if strings.HasPrefix(line, "Digest: ") {
 			digest = strings.TrimSpace(strings.TrimPrefix(line, "Digest: "))
@@ -230,7 +230,7 @@ func writeReleaseManifest(t *testing.T, recorder *evidence, workRoot string, ima
 			"chromium_revision":  inputs.Playwright.ChromiumRevision,
 			"artifacts":          inputs.Playwright.Artifacts,
 		},
-		"helm":    map[string]any{"oci_repository": registryHost + "/t31/charts/quoin", "oci_digest": chartDigest, "tgz_asset_name": "quoin-0.1.0.tgz", "tgz_sha256": chartSHA},
+		"helm":    map[string]any{"oci_repository": registryHost + "/" + registryRepository + "/charts/quoin", "oci_digest": chartDigest, "tgz_asset_name": "quoin-0.1.0.tgz", "tgz_sha256": chartSHA},
 		"compose": map[string]any{"asset_name": "quoin-compose-v0.1.0-t31.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{
 			"linux/amd64": map[string]any{"asset_name": "quoin-deploy-linux-amd64", "sha256": strings.Repeat("30", 32)},

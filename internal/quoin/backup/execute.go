@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Suknna/quoin/internal/buildinfo"
 )
 
 type manifest struct {
 	Version   int         `json:"version"`
+	Release   string      `json:"release"`
 	Database  fileEntry   `json:"database"`
 	Artifacts []fileEntry `json:"artifacts"`
 	CreatedAt string      `json:"createdAt"`
@@ -199,7 +202,7 @@ func (s *Service) publish(ctx context.Context, id int64) (string, string, int, s
 	if err = s.advanceRunStage(ctx, id, "manifest_publish"); err != nil {
 		return fail(err)
 	}
-	body, err := json.Marshal(manifest{Version: 1, Database: fileEntry{Path: "quoin.db", SHA256: dbHash, SizeBytes: dbSize}, Artifacts: entries, CreatedAt: timestamp(s.now())})
+	body, err := json.Marshal(manifest{Version: 1, Release: buildinfo.Release, Database: fileEntry{Path: "quoin.db", SHA256: dbHash, SizeBytes: dbSize}, Artifacts: entries, CreatedAt: timestamp(s.now())})
 	if err != nil {
 		return fail(err)
 	}

@@ -29,8 +29,11 @@ func Main(command string, arguments []string) {
 	case "backup":
 		flags := Parse("compose backup", arguments)
 		os.Exit(deploycompose.Backup(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags.Offline))
+	case "restore":
+		flags := Parse("compose restore", arguments)
+		os.Exit(deploycompose.Restore(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags.BackupID))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|verify|backup> --config <path> [--release-manifest <path>] [--report <path>] [--offline]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|verify|backup|restore> --config <path> [--release-manifest <path>] [--report <path>] [--offline] [--backup <backup-id>]")
 		os.Exit(2)
 	}
 }
@@ -43,6 +46,7 @@ type Flags struct {
 	ReleaseManifestPath string
 	ReportPath          string
 	Offline             bool
+	BackupID            string
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -55,10 +59,11 @@ func Parse(name string, arguments []string) Flags {
 	releaseManifestPath := flags.String("release-manifest", "", "release-manifest.json with the digest-pinned four-component artifacts")
 	reportPath := flags.String("report", "", "where the atomic verification-report.json is written")
 	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
+	backupID := flags.String("backup", "", "published backup identifier for restore")
 	parseErr := flags.Parse(arguments)
 	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID}
 	}
 	brief := report.New("compose", fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")

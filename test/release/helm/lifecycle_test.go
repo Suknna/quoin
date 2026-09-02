@@ -252,6 +252,23 @@ func proveRetainedState(t *testing.T, recorder *evidence, workRoot, helper, conf
 // cleanupTicketResources removes every object, container, image and fixture
 // this acceptance created and proves pre-existing resources are untouched; a
 // cleanup failure fails the ticket even when behavior assertions passed.
+func assertBaselineContainersPreserved(t *testing.T, before, after string) {
+	t.Helper()
+	afterIDs := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(after), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			afterIDs[fields[0]] = true
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(before), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && !afterIDs[fields[0]] {
+			t.Fatalf("cleanup removed pre-existing container %q", line)
+		}
+	}
+}
+
 func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registryRef string, baseline environmentBaseline, passwords ...string) {
 	t.Helper()
 	dispositions := map[string]string{}
@@ -264,7 +281,7 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 	dispositions["fixture:"+registryName] = "registry container removed; pushed test digests removed with it"
 	images := []string{}
 	for _, component := range []string{"quoin", "stele", "plinth", "lintel"} {
-		images = append(images, registryHost+"/t31/"+component+":amd64", registryHost+"/t31/"+component+":arm64")
+		images = append(images, registryHost+"/"+registryRepository+"/"+component+":amd64", registryHost+"/"+registryRepository+"/"+component+":arm64")
 	}
 	recorder.run("cleanup-images", nil, nil, 0, append([]string{"docker", "rmi", "-f"}, images...)...)
 	dispositions["images"] = "locally built test images force-removed"
@@ -277,19 +294,18 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 			t.Fatalf("cleanup left namespace %s behind", namespace)
 		}
 	}
-	if current := strings.TrimSpace(recorder.output("kubectl", "get", "namespaces", "--no-headers", "-o", "custom-columns=NAME:.metadata.name")); current != strings.TrimSpace(baseline.namespaces) {
-		t.Fatalf("namespace inventory changed beyond ticket-owned namespaces:\nbefore:\n%s\nafter:\n%s", baseline.namespaces, current)
+	if current := strings.TrimSpace(recorder.output("kubectl", "get", "namespaces", "--no-headers", "-o", "custom-columns=NAME:.metadata.name")); current != strings.TrimSpace(baseline.Namespaces) {
+		t.Fatalf("namespace inventory changed beyond ticket-owned namespaces:\nbefore:\n%s\nafter:\n%s", baseline.Namespaces, current)
 	}
-	if after := strings.TrimSpace(recorder.output("kubectl", "get", "pvc", "--all-namespaces", "--no-headers", "-o", "custom-columns=NS:.metadata.namespace,NAME:.metadata.name")); after != strings.TrimSpace(baseline.pvcs) {
-		t.Fatalf("cluster PVC inventory changed beyond ticket-owned PVCs:\nbefore:\n%s\nafter:\n%s", baseline.pvcs, after)
+	if after := strings.TrimSpace(recorder.output("kubectl", "get", "pvc", "--all-namespaces", "--no-headers", "-o", "custom-columns=NS:.metadata.namespace,NAME:.metadata.name")); after != strings.TrimSpace(baseline.PVCs) {
+		t.Fatalf("cluster PVC inventory changed beyond ticket-owned PVCs:\nbefore:\n%s\nafter:\n%s", baseline.PVCs, after)
 	}
-	if releases := strings.TrimSpace(recorder.output("helm", "list", "--all-namespaces", "--output", "json")); strings.Contains(releases, mainRelease) || strings.Contains(releases, retryRelease) {
-		t.Fatalf("cleanup left a ticket-owned Helm release:\n%s", releases)
+	if releases := strings.TrimSpace(recorder.output("helm", "list", "--all-namespaces", "--output", "json")); releases != baseline.HelmReleases {
+		t.Fatalf("Helm release inventory changed beyond ticket-owned releases:\nbefore:\n%s\nafter:\n%s", baseline.HelmReleases, releases)
 	}
-	// This shared Kubernetes host legitimately creates unrelated system
-	// containers concurrently. Prove the owned registry is absent rather than
-	// falsely treating another controller's activity as a ticket leak.
-	if containers := recorder.output("docker", "ps", "-a", "--format", "{{.Names}}"); strings.Contains(containers, registryName) {
+	containers := strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}"))
+	assertBaselineContainersPreserved(t, baseline.Containers, containers)
+	if strings.Contains(containers, registryName) {
 		t.Fatalf("cleanup left ticket-owned registry container %q", registryName)
 	}
 	if err := os.RemoveAll(workRoot); err != nil {

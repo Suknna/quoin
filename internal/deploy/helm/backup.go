@@ -79,7 +79,7 @@ func offlineBackup(req Request, r *runner, rep *report.Report, stage int, namesp
 	// offline helper opens Quoin's data PVC. Waiting only for Quoin leaves a
 	// still-running Runtime or browser component outside the proven stop fence.
 	for _, component := range deployconfig.Components {
-		selector := "app.kubernetes.io/name=" + component + ",app.kubernetes.io/instance=" + release + ",app.kubernetes.io/component=" + component
+		selector := componentSelector(release, component)
 		if output, err := r.run(stage, "backup-wait-"+component+"-terminated", kubectl(namespace, "wait", "--for=delete", "pod", "--selector="+selector, "--timeout=90s")...); err != nil {
 			return backupFailure(rep, stage, "offline_backup_workload_still_running", strings.TrimSpace(output), "wait until every release workload is gone and its data lock is released before retrying offline backup")
 		}

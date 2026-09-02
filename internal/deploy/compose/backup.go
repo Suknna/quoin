@@ -38,7 +38,7 @@ func (helper *runner) onlineBackup(req Request, loaded *loadedRequest) int {
 	if err != nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "verifier_overlay_invalid", Message: err.Error(), NextAction: "fix the deployment projection, then retry"})
 	}
-	arguments := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-deps", "quoin-verifier", "http://quoin:9090/metrics")
+	arguments := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-TTY", "--no-deps", "quoin-verifier", "http://quoin:9090/metrics")
 	read := func(name string) (deploybackup.Observation, error) {
 		body, err := helper.run(stage, name, dockerize(arguments)...)
 		if err != nil {
@@ -68,7 +68,7 @@ func (helper *runner) offlineBackup(req Request, loaded *loadedRequest) int {
 	if err != nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "offline_backup_unavailability_unproven", Message: err.Error(), NextAction: "repair the verifier projection and prove Quoin unavailable before retrying"})
 	}
-	probe := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-deps", "quoin-verifier", "http://quoin:9090/metrics")
+	probe := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-TTY", "--no-deps", "quoin-verifier", "http://quoin:9090/metrics")
 	if output, probeErr := helper.run(stage, "backup-prove-quoin-unavailable", dockerize(probe)...); probeErr == nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "offline_backup_requires_unavailable", Message: "Quoin remains reachable through its ops listener", NextAction: "use online backup while Quoin is reachable; --offline is only for an unavailable Quoin"})
 	} else if !deploybackup.UnavailabilityProven(output, probeErr) {

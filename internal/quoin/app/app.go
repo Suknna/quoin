@@ -44,6 +44,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
+	"github.com/Suknna/quoin/internal/quoin/maintenance"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
@@ -78,6 +79,7 @@ type apiServer struct {
 	configHandler                *appconfig.Handler
 	artifacts                    *artifact.Store
 	backups                      *backup.Service
+	maintenance                  *maintenance.Service
 	rootKey                      func() ([]byte, error)
 	backupCopy                   func(io.Writer, io.Reader) (int64, error)
 	backupAuthorize              func(context.Context, string, string) (auth.Session, error)
@@ -111,6 +113,25 @@ func attachmentLimitBytes() int64 {
 // rootKeyFile feeds the credential envelope codec (T07); pass an empty
 // string only in tests that never touch connections.
 func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
+	application := newAPIServer(service, db, rootKeyFile)
+	// Derived projections reconcile at boot: the knowledge search docs are
+	// rebuilt from their authority (current ∧ not exited) so a torn history
+	// cannot silently hide confirmed knowledge from retrieval.
+	rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := application.knowledgeService.RebuildSearchDocs(rebuildCtx); err != nil {
+		sharedops.LogEvent("quoin", "error", "knowledge.search_docs_rebuild_failed", err.Error())
+	}
+	rebuildCancel()
+	return application
+}
+
+// NewMaintenanceAPIServer constructs only durable domain authorities. It does
+// not reconcile derived data, dispatch work, start GC, or start schedulers.
+func NewMaintenanceAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
+	return newAPIServer(service, db, rootKeyFile)
+}
+
+func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
 	application := &apiServer{
 		auth:             service,
 		db:               db,
@@ -126,6 +147,7 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
+		maintenance:      maintenance.NewService(db),
 		browserTunnels:   newBrowserTunnelHub(),
 	}
 	application.rootKey = func() ([]byte, error) {
@@ -135,14 +157,6 @@ func NewAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		return os.ReadFile(rootKeyFile)
 	}
 	application.connections = connections.NewService(db, application.rootKey)
-	// Derived projections reconcile at boot: the knowledge search docs are
-	// rebuilt from their authority (current ∧ not exited) so a torn history
-	// cannot silently hide confirmed knowledge from retrieval.
-	rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := application.knowledgeService.RebuildSearchDocs(rebuildCtx); err != nil {
-		sharedops.LogEvent("quoin", "error", "knowledge.search_docs_rebuild_failed", err.Error())
-	}
-	rebuildCancel()
 	connections.SetReleaseVersion(buildinfo.Release)
 	attempt.SetReleaseVersion(buildinfo.Release)
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
@@ -229,6 +243,18 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	if !hasUsers {
 		return fmt.Errorf("no administrator exists; run attached Admin bootstrap first")
+	}
+	var maintenanceActive int
+	if err := database.SQL.QueryRowContext(ctx, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil {
+		return fmt.Errorf("read maintenance state: %w", err)
+	}
+	if maintenanceActive == 1 {
+		application := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+		serverSet, err := newMaintenanceServers(application, config)
+		if err != nil {
+			return err
+		}
+		return serverSet.runMaintenance(ctx)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
 	serverSet, err := application.newServers(config)
@@ -368,6 +394,19 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	go controlService.RunResourceRefreshScheduler(ctx)
 	go controlService.RunInspectionScheduler(ctx)
 	return serverSet.run(ctx, config)
+}
+
+func newMaintenanceServers(application *apiServer, config contract.QuoinConfig) (*servers, error) {
+	public, err := newMaintenanceHandler(application, config.PublicOrigin)
+	if err != nil {
+		return nil, err
+	}
+	opsServer, err := sharedops.New("quoin", ":9090", sharedops.Maintenance)
+	if err != nil {
+		return nil, err
+	}
+	opsServer.SetReadiness(sharedops.Readiness{Component: "quoin", Release: buildinfo.Release, Mode: "maintenance", AcceptingWork: false, Reason: sharedops.Maintenance})
+	return &servers{public: &http.Server{Addr: ":8080", Handler: public, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer}, nil
 }
 
 func (application *apiServer) newServers(config contract.QuoinConfig) (*servers, error) {
@@ -702,6 +741,30 @@ func (application *apiServer) registerStatic(mux *http.ServeMux) {
 		writer.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		_, _ = writer.Write(data)
 	})
+}
+
+// runMaintenance starts only the HTTP maintenance allowlist and ops readiness
+// surface. Restore containment is already committed before Quoin is started;
+// Runtime, browser and task control streams stay unavailable until maintenance
+// exits, so no recovered identity can resume work.
+func (serverSet *servers) runMaintenance(ctx context.Context) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- serverSet.public.ListenAndServe() }()
+	opsDone := make(chan error, 1)
+	go func() { opsDone <- serverSet.ops.Run(ctx) }()
+	select {
+	case <-ctx.Done():
+		opsErr := <-opsDone
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = serverSet.public.Shutdown(shutdownCtx)
+		return opsErr
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) error {

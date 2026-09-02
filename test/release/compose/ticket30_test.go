@@ -16,16 +16,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	mainProject    = "quoin-t30main"
-	retryProject   = "quoin-t30retry"
-	mismatchProj   = "quoin-t30mismatch"
-	registryName   = "t30-registry"
-	registryHost   = "127.0.0.1:5000"
-	mainQuoinPort  = 19180
-	mainStelePort  = 19181
-	retryQuoinPort = 19190
-	retryStelePort = 19191
+var (
+	mainProject        = "quoin-t30main"
+	retryProject       = "quoin-t30retry"
+	mismatchProj       = "quoin-t30mismatch"
+	registryName       = "t30-registry"
+	registryRepository = "t30"
+	registryHost       = "127.0.0.1:5000"
+	mainQuoinPort      = 19180
+	mainStelePort      = 19181
+	retryQuoinPort     = 19190
+	retryStelePort     = 19191
 )
 
 // TestTicket30 proves the hardened formal Compose install end to end: minimal
@@ -173,7 +174,7 @@ func buildAndPushReleaseImages(t *testing.T, recorder *evidence, workRoot string
 		{"lintel", "build/package/Dockerfile", "lintel", false},
 	}
 	for _, build := range builds {
-		entry := &releaseImages{Repository: registryHost + "/t30/" + build.component}
+		entry := &releaseImages{Repository: registryHost + "/" + registryRepository + "/" + build.component}
 		for _, platform := range []string{"amd64", "arm64"} {
 			tag := entry.Repository + ":" + platform
 			arguments := []string{"build", "-f", build.dockerfile, "--platform", "linux/" + platform}

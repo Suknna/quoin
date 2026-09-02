@@ -37,7 +37,13 @@ func UnavailabilityProven(output string, runErr error) bool {
 			Source  string `json:"source"`
 			Version int    `json:"version"`
 		}{}
-		if json.Unmarshal([]byte(strings.TrimSpace(line)), &proof) == nil && proof.Kind == "quoin_ops_unavailable" && proof.Source == "quoin-healthcheck" && proof.Version == 1 {
+		// Docker may decorate a PTY-attached child's stdout. Parse the complete
+		// JSON object emitted by quoin-healthcheck, never generic error text.
+		start, end := strings.IndexByte(line, '{'), strings.LastIndexByte(line, '}')
+		if start < 0 || end < start {
+			continue
+		}
+		if json.Unmarshal([]byte(line[start:end+1]), &proof) == nil && proof.Kind == "quoin_ops_unavailable" && proof.Source == "quoin-healthcheck" && proof.Version == 1 {
 			return true
 		}
 	}

@@ -91,7 +91,7 @@ func (helper *runner) execute(stage int, name string, command *exec.Cmd) (string
 	command.Stderr = io.MultiWriter(&combined, helper.stderr)
 	started := time.Now()
 	runErr := command.Run()
-	exitCode := 0
+	exitCode := -1
 	if command.ProcessState != nil {
 		exitCode = command.ProcessState.ExitCode()
 	}

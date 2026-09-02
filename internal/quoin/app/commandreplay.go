@@ -22,8 +22,9 @@ type commandReplay struct {
 const maxReplayEntries = 1024
 
 type commandResult struct {
-	digest string
-	result alerts.CreateSourceResult
+	digest     string
+	result     alerts.CreateSourceResult
+	credential *alerts.CredentialSummary
 }
 
 func newCommandReplay() *commandReplay {
@@ -54,4 +55,11 @@ func (replay *commandReplay) remember(principalID int64, commandID, digest strin
 		delete(replay.items, oldestKey)
 	}
 	replay.items[replay.key(principalID, commandID)] = commandResult{digest: digest, result: result}
+}
+
+func (replay *commandReplay) rememberCredential(principalID int64, commandID, digest string, credential alerts.CredentialSummary) {
+	replay.mu.Lock()
+	defer replay.mu.Unlock()
+	copy := credential
+	replay.items[replay.key(principalID, commandID)] = commandResult{digest: digest, credential: &copy}
 }

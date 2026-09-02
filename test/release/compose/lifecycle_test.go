@@ -313,8 +313,8 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 	images := []string{}
 	for _, component := range []string{"quoin", "stele", "plinth", "lintel"} {
 		images = append(images,
-			registryHost+"/t30/"+component+":amd64",
-			registryHost+"/t30/"+component+":arm64",
+			registryHost+"/"+registryRepository+"/"+component+":amd64",
+			registryHost+"/"+registryRepository+"/"+component+":arm64",
 		)
 	}
 	recorder.run("cleanup-images", nil, nil, 0, append([]string{"docker", "rmi", "-f"}, images...)...)
@@ -322,12 +322,14 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 
 	if remaining := strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}")); remaining != "" {
 		for _, line := range strings.Split(remaining, "\n") {
-			if strings.Contains(line, "t30") {
+			owned := strings.Contains(line, mainProject) || strings.Contains(line, retryProject) || strings.Contains(line, mismatchProj) || strings.Contains(line, registryName)
+			if owned {
 				t.Fatalf("cleanup left a ticket-owned container: %s", line)
 			}
 		}
 	}
-	if strings.Contains(recorder.run("cleanup-post-projects", nil, nil, 0, "docker", "compose", "ls", "--all", "--format", "json"), "t30") {
+	projectsAfterCleanup := recorder.run("cleanup-post-projects", nil, nil, 0, "docker", "compose", "ls", "--all", "--format", "json")
+	if strings.Contains(projectsAfterCleanup, mainProject) || strings.Contains(projectsAfterCleanup, retryProject) || strings.Contains(projectsAfterCleanup, mismatchProj) {
 		t.Fatal("cleanup left a ticket-owned compose project")
 	}
 	if current := strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}}")); current != preExistingContainers {

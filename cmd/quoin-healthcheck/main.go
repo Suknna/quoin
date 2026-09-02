@@ -25,7 +25,11 @@ func main() {
 		// This is a typed, terminal observation from the verifier itself. Deployment
 		// helpers may use it to authorize the disruptive offline fallback; they must
 		// never infer that authority from Docker/Kubernetes launcher error text.
-		fmt.Fprintln(os.Stdout, `{"kind":"quoin_ops_unavailable","source":"quoin-healthcheck","version":1}`)
+		// Emit the signed-by-contract proof on stderr with the terminal failure.
+		// Container launchers can relay a failed process's stdout separately from
+		// the captured error stream; separating these lines would make a genuine
+		// Quoin-unavailable proof indistinguishable from a launcher failure.
+		fmt.Fprintln(os.Stderr, `{"kind":"quoin_ops_unavailable","source":"quoin-healthcheck","version":1}`)
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

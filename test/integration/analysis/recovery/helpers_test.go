@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Suknna/quoin/test/support"
 )
 
 // fireAlertFunc delivers one real Alertmanager alert and returns the
@@ -161,100 +163,17 @@ func waitQuoinHTTP(t *testing.T, base, origin string) {
 func prepareProviderAndRuntime(t *testing.T, evidence *ticketEvidence, client *http.Client, base, origin, composeFile string) {
 	t.Helper()
 	gateway := gatewayIP(t, composeFile)
-	plinthRow := httpGet(t, client, base+"/api/v1/runtime", origin)
-	var runtimeView struct {
-		Plinth struct {
-			RowVersion int64 `json:"rowVersion"`
-		} `json:"plinth"`
-	}
-	if err := json.Unmarshal([]byte(plinthRow), &runtimeView); err != nil {
-		t.Fatalf("runtime view parse: %v\n%s", err, plinthRow)
-	}
-	prepare := httpPost(t, client, base+"/api/v1/runtime-slots/plinth/registration/prepare", origin, fmt.Sprintf(`{"clientCommandId":"t12-prepare-%s","expectedRowVersion":%d}`, randomSecret(t, 8), runtimeView.Plinth.RowVersion))
-	var prepareObj struct {
-		RegistrationTokenHandle string `json:"registrationTokenHandle"`
-	}
-	if err := json.Unmarshal([]byte(prepare), &prepareObj); err != nil {
-		t.Fatalf("prepare parse: %v\n%s", err, prepare)
-	}
-	reveal := httpPost(t, client, base+"/api/v1/runtime-slots/registration-token/reveal", origin, fmt.Sprintf(`{"registrationTokenHandle":"%s"}`, prepareObj.RegistrationTokenHandle))
-	var revealObj struct {
-		Slot              string `json:"slot"`
-		Generation        int64  `json:"generation"`
-		RegistrationToken string `json:"registrationToken"`
-	}
-	if err := json.Unmarshal([]byte(reveal), &revealObj); err != nil {
-		t.Fatalf("reveal parse: %v\n%s", err, reveal)
-	}
-	tokenJSON := mustJSON(t, map[string]any{"slot": revealObj.Slot, "generation": revealObj.Generation, "token": revealObj.RegistrationToken})
-	registerCmd := exec.Command("docker", "compose", "--project-name", projectName, "--file", composeFile, "run", "--rm", "--no-deps", "-i", "-T", "plinth", "register", "--config", "/etc/quoin/component.yaml")
-	registerCmd.Stdin = strings.NewReader(tokenJSON + "\n")
-	var registerOutput bytes.Buffer
-	registerCmd.Stdout = &registerOutput
-	registerCmd.Stderr = &registerOutput
-	if err := registerCmd.Run(); err != nil {
-		t.Fatalf("plinth register failed (%v):\n%s", err, registerOutput.String())
-	}
-	evidence.note(t, "plinth-register-output.txt", registerOutput.String())
-	evidence.logCommand(t, "plinth-register", registerCmd)
-
-	// Connection + real probe + enable.
-	httpPost(t, client, base+"/api/v1/connections", origin, fmt.Sprintf(`{"clientCommandId":"t12-create-conn-1","name":"t12-provider","connection":{"type":"model_provider","baseUrl":"http://%s:18443","chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}`, gateway))
-	httpPost(t, client, base+"/api/v1/connections/t12-provider/probe", origin, `{"clientCommandId":"t12-probe-1"}`)
-	probeResultID := ""
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		listBody := httpGet(t, client, base+"/api/v1/connections/t12-provider/probe-results", origin)
-		var listObj struct {
-			Items []struct {
-				ID      string `json:"id"`
-				Outcome string `json:"outcome"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal([]byte(listBody), &listObj); err == nil {
-			for _, item := range listObj.Items {
-				if item.Outcome == "passed" {
-					probeResultID = item.ID
-				}
-			}
-		}
-		if probeResultID != "" {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if probeResultID == "" {
-		t.Fatal("t12-provider never qualified")
-	}
-	connDetail := httpGet(t, client, base+"/api/v1/connections/t12-provider", origin)
-	var connObj struct {
-		RowVersion int64 `json:"rowVersion"`
-	}
-	if err := json.Unmarshal([]byte(connDetail), &connObj); err != nil {
-		t.Fatalf("connection detail parse: %v\n%s", err, connDetail)
-	}
-	httpPost(t, client, base+"/api/v1/connections/t12-provider/enable", origin, fmt.Sprintf(`{"clientCommandId":"t12-enable-1","expectedRowVersion":%d,"qualifiedProbeResultId":"%s"}`, connObj.RowVersion, probeResultID))
+	support.PrepareProviderAndRuntime(t, client, base, origin, composeFile, projectName, "http://"+gateway+":18443", "t12")
+	evidence.note(t, "plinth-register-output.txt", "registered through test/support.PrepareProviderAndRuntime")
 }
 
 // createAlertSource creates the Stele-authorized source and reveals its
 // bearer (the bearer travels only in request bodies / env vars).
 func createAlertSource(t *testing.T, evidence *ticketEvidence, client *http.Client, base, origin string) string {
 	t.Helper()
-	metadata := httpPost(t, client, base+"/api/v1/alert-sources", origin, `{"key":"t12-alertmanager","protocol":"alertmanager","clientCommandId":"t12-source-1"}`)
-	var metadataObj struct {
-		RevealHandle string `json:"revealHandle"`
-	}
-	if err := json.Unmarshal([]byte(metadata), &metadataObj); err != nil {
-		t.Fatalf("create source parse: %v\n%s", err, metadata)
-	}
-	revealResp := httpPost(t, client, base+"/api/v1/alert-sources/credentials/reveal", origin, fmt.Sprintf(`{"revealHandle":"%s"}`, metadataObj.RevealHandle))
-	var bearerObj struct {
-		BearerToken string `json:"bearerToken"`
-	}
-	if err := json.Unmarshal([]byte(revealResp), &bearerObj); err != nil {
-		t.Fatalf("reveal bearer parse: %v\n%s", err, revealResp)
-	}
-	return bearerObj.BearerToken
+	bearer := support.CreateAlertSource(t, client, base, origin, "t12-alertmanager", "t12-source-1")
+	evidence.note(t, "alert-source-create.txt", "created through test/support.CreateAlertSource")
+	return bearer
 }
 
 // startAlertmanager boots the forwarder + Alertmanager pair on the

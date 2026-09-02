@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Suknna/quoin/internal/buildinfo"
 )
 
 func TestVerifyRejectsExtraArchiveMember(t *testing.T) {
@@ -21,6 +23,22 @@ func TestVerifyRejectsExtraArchiveMember(t *testing.T) {
 	}
 	if err = Verify(filepath.Join(service.config.BackupDirectory, value.ID)); err == nil {
 		t.Fatal("archive with an extra member verified")
+	}
+}
+
+func TestVerifyReleaseRejectsACompleteForeignRelease(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	value, err := service.RunOffline(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(service.config.BackupDirectory, value.ID)
+	if err := VerifyRelease(archive, buildinfo.Release); err != nil {
+		t.Fatalf("matching release rejected: %v", err)
+	}
+	if err := VerifyRelease(archive, "v999.0.0"); err == nil {
+		t.Fatal("foreign release accepted")
 	}
 }
 

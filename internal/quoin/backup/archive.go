@@ -246,6 +246,23 @@ func (s *Service) gcLocked(ctx context.Context) (result error) {
 
 func Verify(directory string) error { return VerifyWithManifestHash(directory, "") }
 
+// VerifyRelease rejects a complete but foreign-release archive before any
+// snapshot is staged. Release identity is an integrity boundary, not a hint.
+func VerifyRelease(directory, expectedRelease string) error {
+	body, err := os.ReadFile(filepath.Join(directory, "manifest.json"))
+	if err != nil {
+		return err
+	}
+	var value manifest
+	if err := json.Unmarshal(body, &value); err != nil {
+		return err
+	}
+	if expectedRelease == "" || value.Release != expectedRelease {
+		return fmt.Errorf("backup release %q does not match running release %q", value.Release, expectedRelease)
+	}
+	return nil
+}
+
 func VerifyWithManifestHash(directory, expectedManifestSHA256 string) error {
 	_, err := verifiedArchiveEntries(directory, expectedManifestSHA256)
 	return err

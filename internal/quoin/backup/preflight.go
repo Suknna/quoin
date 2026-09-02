@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"golang.org/x/sys/unix"
 )
@@ -116,6 +117,7 @@ func (s *Service) preflightRequirement(ctx context.Context) (preflightRequiremen
 	databaseBytes := uint64(pageCount) * uint64(pageSize)
 	body, err := json.Marshal(manifest{
 		Version:   1,
+		Release:   buildinfo.Release,
 		Database:  fileEntry{Path: "quoin.db", SHA256: strings.Repeat("0", 64), SizeBytes: int64(databaseBytes)},
 		Artifacts: entries,
 		CreatedAt: timestamp(s.now()),
@@ -203,7 +205,7 @@ func (s *Service) preflightCopiedSet(databaseBytes int64, files []artifact.Snaps
 		entries = append(entries, fileEntry{Path: "artifacts/" + file.SHA256 + ".blob", SHA256: file.SHA256, SizeBytes: file.SizeBytes})
 	}
 	body, err := json.Marshal(manifest{
-		Version: 1, Database: fileEntry{Path: "quoin.db", SHA256: strings.Repeat("0", 64), SizeBytes: databaseBytes},
+		Version: 1, Release: buildinfo.Release, Database: fileEntry{Path: "quoin.db", SHA256: strings.Repeat("0", 64), SizeBytes: databaseBytes},
 		Artifacts: entries, CreatedAt: timestamp(s.now()),
 	})
 	if err != nil {

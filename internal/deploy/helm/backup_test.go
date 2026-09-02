@@ -43,3 +43,9 @@ func TestParseHelmBackupObservationRequiresMetricSet(t *testing.T) {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
 }
+
+func TestComponentSelectorMatchesChartIdentity(t *testing.T) {
+	if got, want := componentSelector("release", "plinth"), "app.kubernetes.io/name=quoin,app.kubernetes.io/instance=release,app.kubernetes.io/component=plinth"; got != want {
+		t.Fatalf("componentSelector=%q want=%q", got, want)
+	}
+}

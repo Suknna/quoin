@@ -2,6 +2,7 @@ package helm
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,24 @@ func (r *runner) run(stage int, name string, arguments ...string) (string, error
 
 // runInput executes one external command with the given stdin, recording it
 // under the stage.
+func (r *runner) runInteractive(stage int, name string, stdin io.Reader, stdout, stderr io.Writer, arguments ...string) (string, error) {
+	if len(arguments) == 0 {
+		return "", fmt.Errorf("empty command %q", name)
+	}
+	started := time.Now()
+	command := exec.Command(arguments[0], arguments[1:]...)
+	command.Stdin = stdin
+	// kubectl attach detects terminal support from its own stdout file descriptor.
+	// A MultiWriter turns that descriptor into a pipe, silently preventing the
+	// remote TTY from forwarding restore prompts. Preserve the attached terminal
+	// instead of capturing an interactive credential session in helper memory.
+	command.Stdout = stdout
+	command.Stderr = stderr
+	runErr := command.Run()
+	r.report.RecordCommand(stage, report.Command{Argv: reportArguments(arguments), ExitCode: exitCode(runErr), Duration: time.Since(started).Round(time.Millisecond).String()})
+	return "", runErr
+}
+
 func (r *runner) runInput(stage int, name string, stdin string, arguments ...string) (string, error) {
 	if len(arguments) == 0 {
 		return "", fmt.Errorf("empty command %q", name)
@@ -98,4 +117,9 @@ func reportArguments(arguments []string) []string {
 		}
 	}
 	return redacted
+}
+
+// componentSelector is the Chart's stable identity selector for one release workload.
+func componentSelector(release, component string) string {
+	return "app.kubernetes.io/name=quoin,app.kubernetes.io/instance=" + release + ",app.kubernetes.io/component=" + component
 }

@@ -43,6 +43,8 @@ func TestUnavailabilityProvenAcceptsOnlyTypedVerifierProof(t *testing.T) {
 		want         bool
 	}{
 		{"typed", `{"kind":"quoin_ops_unavailable","source":"quoin-healthcheck","version":1}`, errors.New("exit status 1"), true},
+		{"typed-followed-by-dns-error", "{\"kind\":\"quoin_ops_unavailable\",\"source\":\"quoin-healthcheck\",\"version\":1}\nGet \"http://quoin:9090/metrics\": dial tcp: lookup quoin on 127.0.0.11:53: server misbehaving", errors.New("exit status 1"), true},
+		{"typed-with-terminal-decoration", "\x1b[31m{\"kind\":\"quoin_ops_unavailable\",\"source\":\"quoin-healthcheck\",\"version\":1}\x1b[0m", errors.New("exit status 1"), true},
 		{"refused-text", "curl: (7) connection refused", errors.New("exit status 7"), false},
 		{"timeout-text", "curl: (28) connection timed out", errors.New("exit status 28"), false},
 		{"daemon", "Cannot connect to the Docker daemon", errors.New("exit status 1"), false},

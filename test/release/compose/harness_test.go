@@ -33,9 +33,10 @@ type evidence struct {
 }
 
 type commandRecord struct {
-	Name     string `json:"name"`
-	ExitCode int    `json:"exitCode"`
-	Duration string `json:"duration"`
+	Name     string   `json:"name"`
+	Args     []string `json:"args"`
+	ExitCode int      `json:"exitCode"`
+	Duration string   `json:"duration"`
 }
 
 type artifactRecord struct {
@@ -92,12 +93,12 @@ func (recorder *evidence) run(name string, env []string, stdin io.Reader, wantEx
 	command.Stdout = &combined
 	command.Stderr = &combined
 	_ = command.Run()
-	exitCode := 0
+	exitCode := -1
 	if command.ProcessState != nil {
 		exitCode = command.ProcessState.ExitCode()
 	}
 	_ = os.WriteFile(logPath, combined.Bytes(), 0o644)
-	recorder.commands = append(recorder.commands, commandRecord{Name: name, ExitCode: exitCode, Duration: time.Since(started).Round(time.Millisecond).String()})
+	recorder.commands = append(recorder.commands, commandRecord{Name: name, Args: append([]string(nil), argv...), ExitCode: exitCode, Duration: time.Since(started).Round(time.Millisecond).String()})
 	recorder.artifacts = append(recorder.artifacts, artifactRecord{Path: logPath, SHA256: sha256Hex(combined.Bytes()), Bytes: combined.Len()})
 	if wantExit >= 0 && exitCode != wantExit {
 		recorder.t.Fatalf("%s: exit=%d want=%d output:\n%s", name, exitCode, wantExit, combined.String())
