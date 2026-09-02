@@ -284,7 +284,10 @@ type environmentBaseline struct {
 func captureEnvironmentBaseline(t *testing.T, recorder *evidence) environmentBaseline {
 	t.Helper()
 	return environmentBaseline{
-		containers: strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}}")),
+		// IDs prove removals; names let cleanup distinguish live-cluster
+		// churn (the shared host's k8s infra containers start/stop during a
+		// real acceptance run) from ticket-owned resources.
+		containers: strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}")),
 		projects:   recorder.run("baseline-projects", nil, nil, 0, "docker", "compose", "ls", "--all", "--format", "json"),
 	}
 }
@@ -332,8 +335,47 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 	if strings.Contains(projectsAfterCleanup, mainProject) || strings.Contains(projectsAfterCleanup, retryProject) || strings.Contains(projectsAfterCleanup, mismatchProj) {
 		t.Fatal("cleanup left a ticket-owned compose project")
 	}
-	if current := strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}}")); current != preExistingContainers {
-		t.Fatalf("cleanup touched pre-existing containers:\nbefore:\n%s\nafter:\n%s", preExistingContainers, current)
+	if current := strings.TrimSpace(recorder.output("docker", "ps", "-a", "--format", "{{.ID}} {{.Names}}")); current != preExistingContainers {
+		// A live cluster host legitimately starts/stops unrelated infra
+		// containers during a real run; the protective invariant is that the
+		// ticket never removes a pre-existing container and never leaves an
+		// owned one behind. New non-owned containers are recorded as
+		// environment churn evidence, not failures.
+		baselineIDs := map[string]string{}
+		for _, line := range strings.Split(preExistingContainers, "\n") {
+			fields := strings.SplitN(strings.TrimSpace(line), " ", 2)
+			if len(fields) == 2 {
+				baselineIDs[fields[0]] = fields[1]
+			}
+		}
+		currentIDs := map[string]string{}
+		for _, line := range strings.Split(current, "\n") {
+			fields := strings.SplitN(strings.TrimSpace(line), " ", 2)
+			if len(fields) == 2 {
+				currentIDs[fields[0]] = fields[1]
+			}
+		}
+		removed := []string{}
+		added := []string{}
+		for id, name := range baselineIDs {
+			if _, ok := currentIDs[id]; !ok {
+				removed = append(removed, name+"("+id+")")
+			}
+		}
+		for id, name := range currentIDs {
+			if _, ok := baselineIDs[id]; !ok {
+				added = append(added, name+"("+id+")")
+			}
+		}
+		for _, name := range added {
+			if strings.Contains(name, mainProject) || strings.Contains(name, retryProject) || strings.Contains(name, mismatchProj) || strings.Contains(name, registryName) {
+				t.Fatalf("cleanup left a ticket-owned container: %s", name)
+			}
+		}
+		if len(removed) > 0 {
+			t.Fatalf("cleanup removed pre-existing containers: %v (environment churn additions were tolerated: %v)", removed, added)
+		}
+		recorder.note("environment-churn.json", mustJSON(t, map[string]any{"addedContainers": added}))
 	}
 	if after := recorder.run("cleanup-post-projects2", nil, nil, 0, "docker", "compose", "ls", "--all", "--format", "json"); after != preExistingProjects {
 		t.Fatalf("compose project inventory changed beyond ticket-owned projects:\nbefore:\n%s\nafter:\n%s", preExistingProjects, after)
