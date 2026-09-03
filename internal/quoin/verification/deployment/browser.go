@@ -128,7 +128,7 @@ func nullabl(value any, nullify bool) any {
 }
 
 func insertItemResult(ctx context.Context, conn *sql.Conn, itemID int64, inputDigest, resultDigest, producer, outcome, category, observedAt string) (int64, error) {
-	committedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	committedAt := observedAt
 	insert, err := conn.ExecContext(ctx, `INSERT INTO verification_item_results(item_id,input_digest,result_digest,producer_type,outcome,category,observed_at,committed_at,evidence_index_digest)
 		VALUES(?,?,?,?,?,?,?,?,?)`, itemID, inputDigest, resultDigest, producer, outcome, category, observedAt, committedAt, resultDigest)
 	if err != nil {

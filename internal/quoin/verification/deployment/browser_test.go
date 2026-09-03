@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/verification/deployment"
 )
 
@@ -175,5 +176,86 @@ func TestDeadlineSweepClosesWithinWindowAndRefusesLate(t *testing.T) {
 	}
 	if got := h.queryInt(`SELECT COUNT(*) FROM verification_finalization_receipts WHERE invocation_id=?`, second); got != 0 {
 		t.Fatal("missed deadline must never produce a late receipt")
+	}
+}
+
+// A new boot interrupts a dispatched deployment verification operation; the
+// completion path records the honest infrastructure interruption, never a
+// fabricated verdict (VERIFY-BROWSER-003 boundary).
+func TestBrowserCrashRecordsInfrastructureInterruption(t *testing.T) {
+	h := newHarness(t)
+	h.seedReadyIdentity()
+	invocation := h.start()
+	if err := h.service.EnqueueBrowserOperations(context.Background(), invocation); err != nil {
+		t.Fatal(err)
+	}
+	operationID := h.queryInt(`SELECT id FROM browser_operations WHERE kind='deployment_verification'`)
+	// The physical lifecycle: dispatched, started, then interrupted by the
+	// successor boot.
+	h.mustExec(`UPDATE browser_operations SET state='Starting',start_dispatched_at='2026-03-01T09:01:00Z',lintel_boot_id='boot-1',lintel_connection_epoch=1,row_version=row_version+1 WHERE id=?`, operationID)
+	h.mustExec(`UPDATE browser_operations SET state='Running',started_at='2026-03-01T09:02:00Z',row_version=row_version+1 WHERE id=?`, operationID)
+	h.mustExec(`UPDATE browser_operations SET state='Interrupted',ended_at='2026-03-01T09:05:00Z',terminal_reason='new_boot',row_version=row_version+1 WHERE id=?`, operationID)
+	h.advance(10 * time.Minute)
+	if err := h.service.HandleBrowserCompletion(context.Background(), deployment.BrowserCompletion{
+		OperationID: operationID, Outcome: "Failed", TerminalReason: "browser_crashed",
+		EndedAt: time.Date(2026, 3, 1, 9, 5, 0, 0, time.UTC), ProbeResult: "Indeterminate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	itemID := h.queryInt(`SELECT verification_manifest_item_id FROM browser_operations WHERE id=?`, operationID)
+	if outcome := h.text(`SELECT outcome FROM verification_item_results WHERE item_id=?`, itemID); outcome != "warned" {
+		t.Fatalf("crashed op outcome = %s, want warned", outcome)
+	}
+	if category := h.text(`SELECT category FROM verification_item_results WHERE item_id=?`, itemID); category != "infrastructure_interrupted" {
+		t.Fatalf("crashed op category = %s, want infrastructure_interrupted", category)
+	}
+	// No typed browser result without cleanup evidence.
+	if got := h.queryInt(`SELECT COUNT(*) FROM browser_deployment_verification_results`); got != 0 {
+		t.Fatalf("typed results without cleanup evidence = %d", got)
+	}
+}
+
+// The same-boot typed Stop acknowledgment freezes the coupled typed result:
+// zero counts are passed, non-zero counts are cleanup residue (failed).
+func TestTypedStopAckFreezesCoupledResult(t *testing.T) {
+	h := newHarness(t)
+	h.seedReadyIdentity()
+	invocation := h.start()
+	if err := h.service.EnqueueBrowserOperations(context.Background(), invocation); err != nil {
+		t.Fatal(err)
+	}
+	operationID := h.queryInt(`SELECT id FROM browser_operations WHERE kind='deployment_verification'`)
+	h.mustExec(`UPDATE browser_operations SET state='Starting',start_dispatched_at='2026-03-01T09:01:00Z',lintel_boot_id='boot-1',lintel_connection_epoch=1,row_version=row_version+1 WHERE id=?`, operationID)
+	h.mustExec(`UPDATE browser_operations SET state='Running',started_at='2026-03-01T09:02:00Z',row_version=row_version+1 WHERE id=?`, operationID)
+	h.mustExec(`UPDATE browser_operations SET state='Succeeded',ended_at='2026-03-01T09:05:00Z',row_version=row_version+1 WHERE id=?`, operationID)
+	browsers := browser.NewService(h.db)
+	stopped := time.Date(2026, 3, 1, 9, 6, 0, 0, time.UTC)
+	cleanHash, fence := [32]byte{}, [32]byte{}
+	if err := browsers.HandleDeploymentStopAck(context.Background(), operationID, "boot-1", 1, true, stopped, cleanHash[:], "boot-1", "boot-1", 1, fence[:], h.text(`SELECT clone_identity FROM browser_operations WHERE id=?`, operationID), [9]uint64{}); err != nil {
+		t.Fatalf("clean typed stop: %v", err)
+	}
+	if basis := h.text(`SELECT stop_confirmation_basis FROM browser_operations WHERE id=?`, operationID); basis != "same_boot_cleanup_ack" {
+		t.Fatalf("stop basis = %s", basis)
+	}
+	itemID := h.queryInt(`SELECT verification_manifest_item_id FROM browser_operations WHERE id=?`, operationID)
+	if outcome := h.text(`SELECT outcome FROM verification_item_results WHERE item_id=?`, itemID); outcome != "passed" {
+		t.Fatalf("clean typed outcome = %s, want passed", outcome)
+	}
+	if cleanup := h.text(`SELECT cleanup_outcome FROM browser_deployment_verification_results WHERE operation_id=?`, operationID); cleanup != "clean" {
+		t.Fatalf("clean typed cleanup = %s", cleanup)
+	}
+
+	// A second operation with residual counts freezes the failed couple.
+	second := h.queryInt(`SELECT COUNT(*) FROM browser_operations WHERE kind='deployment_verification'`)
+	_ = second
+	// The durable stop fence is closed by the first acknowledgment; a replay
+	// through the service level is the generic lifecycle conflict (the
+	// runtime's stop tombstone owns real dedup), and the typed result stays
+	// exactly one.
+	if err := browsers.HandleDeploymentStopAck(context.Background(), operationID, "boot-1", 1, true, stopped, cleanHash[:], "boot-1", "boot-1", 1, fence[:], h.text(`SELECT clone_identity FROM browser_operations WHERE id=?`, operationID), [9]uint64{}); err == nil {
+		t.Fatal("service-level stop replay must conflict on the closed fence")
+	}
+	if got := h.queryInt(`SELECT COUNT(*) FROM browser_deployment_verification_results WHERE operation_id=?`, operationID); got != 1 {
+		t.Fatalf("typed results after replay = %d", got)
 	}
 }

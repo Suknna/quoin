@@ -157,6 +157,9 @@ func (application *apiServer) startDeploymentVerification(ctx context.Context, i
 	if err := application.verifications.EnqueueBrowserOperations(ctx, invocationID); err != nil {
 		return nil, mapVerificationError(err)
 	}
+	// Product-executed items (connection probes, config verification runs)
+	// start immediately; disconnected runtimes retry through the sweeper.
+	_ = application.verifications.EnqueueExecution(ctx, invocationID)
 	if application.browserOperationsDispatchFunc != nil {
 		go application.browserOperationsDispatchFunc(context.Background())
 	}
@@ -401,6 +404,8 @@ func (application *apiServer) deploymentDeadlineSweeper(ctx context.Context) {
 	}
 	rows.Close()
 	for _, invocationID := range invocations {
+		_ = application.verifications.ReconcileResults(ctx, invocationID)
+		_ = application.verifications.EnqueueExecution(ctx, invocationID)
 		_ = application.verifications.SweepDeadline(ctx, invocationID)
 	}
 }

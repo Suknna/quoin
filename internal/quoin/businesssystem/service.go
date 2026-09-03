@@ -61,6 +61,10 @@ func NewService(db *sql.DB) *Service {
 	return &Service{db: db, now: time.Now}
 }
 
+// UseClock binds a deterministic clock (test seam; production keeps
+// time.Now from NewService).
+func (service *Service) UseClock(now func() time.Time) { service.now = now }
+
 // DB exposes the product database to the runtime dispatcher for read-only
 // attempt routing. Domain mutations remain on Service methods.
 func (service *Service) DB() *sql.DB { return service.db }

@@ -308,6 +308,18 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	application.artifacts = artifactStore
 	application.WireVerificationArtifacts(artifactStore)
+	application.verifications.SetExecutionHooks(deployment.ExecutionHooks{
+		StartConnectionProbe: func(ctx context.Context, connectionName string) error {
+			if _, err := application.connections.StartProbe(ctx, connectionName, application.runtime, application.dispatchProbe); err != nil {
+				return err
+			}
+			return nil
+		},
+		RunConfigVerification: func(ctx context.Context, principalID, systemID, versionID, contractVersionID, manifestItemID int64) error {
+			_, err := application.systems.RunDeploymentAcceptanceVerification(ctx, principalID, systemID, versionID, contractVersionID, manifestItemID)
+			return err
+		},
+	})
 	go application.runDeploymentDeadlineSweeper(ctx)
 	gcProjector, err := serverSet.ops.ArtifactGCSuccessProjector()
 	if err != nil {
