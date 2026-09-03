@@ -75,9 +75,6 @@ func runCommand(args []string) error {
 	output := flags.String("output", "", "invocation output directory (required)")
 	repoRoot := flags.String("repo-root", "", "working directory for catalog phase commands (default repository root)")
 	invocationID := flags.String("invocation-id", "", "stable invocation id (default generated)")
-	subjectName := flags.String("subject-name", "", "subject name override (default git HEAD source binding)")
-	subjectDigest := flags.String("subject-digest", "", "subject sha256 override (64 hex chars)")
-	toolVersion := flags.String("tool-version", "quoin-verify/dev", "runner tool identity recorded in evidence")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -99,7 +96,7 @@ func runCommand(args []string) error {
 	if *layer != catalog.LayerContractGate {
 		return fmt.Errorf("layer %q execution is owned by its closure ticket; this build runs the contract gate", *layer)
 	}
-	subject, err := resolveSubject(root, *subjectName, *subjectDigest)
+	subject, err := resolveSubject(root)
 	if err != nil {
 		return err
 	}
@@ -115,7 +112,7 @@ func runCommand(args []string) error {
 		Layer:        *layer,
 		InvocationID: *invocationID,
 		Subject:      subject,
-		ToolVersion:  *toolVersion + " (" + goVersion(root) + ")",
+		ToolVersion:  "quoin-verify/dev (" + goVersion(root) + ")",
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "quoin-verify:", err)
@@ -142,13 +139,7 @@ func runCommand(args []string) error {
 // resolveSubject binds the invocation to the immutable source revision: the
 // git commit plus the dirty-state digest. A clean tree and a dirty tree can
 // never share a subject digest.
-func resolveSubject(root, name, digest string) (runner.SubjectBinding, error) {
-	if name != "" || digest != "" {
-		if name == "" || digest == "" || len(digest) != 64 {
-			return runner.SubjectBinding{}, fmt.Errorf("--subject-name and --subject-digest (64 hex) must be provided together")
-		}
-		return runner.SubjectBinding{Name: name, Digest: digest}, nil
-	}
+func resolveSubject(root string) (runner.SubjectBinding, error) {
 	commit, err := gitOutput(root, "rev-parse", "HEAD")
 	if err != nil {
 		return runner.SubjectBinding{}, fmt.Errorf("subject resolution needs git HEAD: %w", err)
