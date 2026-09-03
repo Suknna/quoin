@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,9 +26,9 @@ import (
 	"sort"
 	"strings"
 	"time"
-)
 
-const factsSchemaKind = "quoin-verify-facts-v1"
+	"github.com/Suknna/quoin/internal/verification/runner"
+)
 
 type group struct {
 	Name string
@@ -46,6 +47,16 @@ type cellPlan struct {
 type plan struct {
 	Name  string
 	Cells map[string]cellPlan // catalog cell id -> plan
+}
+
+// pendingRootsByHarness documents, per harness, validation roots the frozen
+// catalog assigns to its scenario but whose adversarial corpus belongs to a
+// later ticket's implementation. The contract gate still proves the
+// scenario's declared assertions; the pending marker travels with the
+// structured-result attachment so no evidence consumer mistakes the corpus
+// for complete.
+var pendingRootsByHarness = map[string][]string{
+	"interleavings": {"DATA-VALIDATION-008: deployment-acceptance manifest adversarial corpus owned by the Deployment Acceptance closure ticket"},
 }
 
 // plans is the frozen execution table of the contract-gate layer.
@@ -178,6 +189,12 @@ type actionResults struct {
 	Cell    string        `json:"cell"`
 	Started string        `json:"started"`
 	Groups  []groupResult `json:"groups"`
+	// PendingRoots names validation roots the frozen catalog assigns to a
+	// scenario whose covering corpus is owned by a later closure ticket.
+	// Recording them here keeps the partiality machine-visible in every
+	// invocation's structured-result evidence instead of living only in
+	// comments.
+	PendingRoots []string `json:"pending_roots,omitempty"`
 }
 
 func main() {
@@ -205,7 +222,7 @@ func main() {
 			fatal(err)
 		}
 	case "action":
-		if err := runAction(root, cellPlans); err != nil {
+		if err := runAction(root, name, cellPlans); err != nil {
 			fatal(err)
 		}
 	case "assert":
@@ -237,7 +254,7 @@ func runSetup(root string, selected cellPlan) error {
 	return cmd.Run()
 }
 
-func runAction(root string, selected cellPlan) error {
+func runAction(root string, harnessName string, selected cellPlan) error {
 	workdir := os.Getenv("QUOIN_VERIFY_WORKDIR")
 	if workdir == "" {
 		return fmt.Errorf("QUOIN_VERIFY_WORKDIR not set")
@@ -246,7 +263,11 @@ func runAction(root string, selected cellPlan) error {
 	if err := os.MkdirAll(logs, 0o755); err != nil {
 		return err
 	}
-	results := actionResults{Cell: os.Getenv("QUOIN_VERIFY_CELL"), Started: time.Now().UTC().Format(time.RFC3339Nano)}
+	results := actionResults{
+		Cell:         os.Getenv("QUOIN_VERIFY_CELL"),
+		Started:      time.Now().UTC().Format(time.RFC3339Nano),
+		PendingRoots: pendingRootsByHarness[harnessName],
+	}
 	for _, grp := range selected.Groups {
 		args := []string{"test", "-count=1", "-timeout=25m"}
 		if grp.Run != "" {
@@ -308,7 +329,7 @@ func runAssert(selected cellPlan) error {
 		}
 	}
 	facts := map[string]any{
-		"schema_kind": factsSchemaKind,
+		"schema_kind": runner.FactsSchemaKind,
 		"assertions":  map[string]any{},
 		"checks":      []any{},
 	}
@@ -354,8 +375,11 @@ func runAssert(selected cellPlan) error {
 	return nil
 }
 
-// expectedVocabulary is the closed per-assertion state vocabulary frozen by
-// the catalog cells (before/at/after boundary states, boolean fault facts).
+// expectedVocabulary names the boundary state each assertion id reports. It
+// is the executor-side observation vocabulary for group outcomes only: the
+// reported actual says "the groups proving this state passed"; the runner
+// still compares it against the catalog's own frozen expected value, which
+// stays the single comparison authority.
 func expectedVocabulary(assertionID string) any {
 	switch assertionID {
 	case "before-boundary":
@@ -374,18 +398,10 @@ func exitOf(err error) int {
 		return 0
 	}
 	var exitError *exec.ExitError
-	if errorsAs(err, &exitError) {
+	if errors.As(err, &exitError) {
 		return exitError.ExitCode()
 	}
 	return -1
-}
-
-func errorsAs(err error, target **exec.ExitError) bool {
-	if e, ok := err.(*exec.ExitError); ok {
-		*target = e
-		return true
-	}
-	return false
 }
 
 func repoRoot() (string, error) {
