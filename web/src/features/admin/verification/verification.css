@@ -1,0 +1,27 @@
+.verification-panel { max-width: 1120px; }
+.verification-list-row { display: grid; gap: .25rem; width: 100%; border: 0; background: transparent; color: inherit; padding: .15rem 0; text-align: left; cursor: pointer; }
+.verification-list-row:hover strong, .verification-list-row:focus-visible strong { text-decoration: underline; }
+.verification-table-wrap { overflow-x: auto; }
+.verification-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.verification-table th, .verification-table td { padding: .65rem; border-bottom: 1px solid var(--border, #d4d4d8); vertical-align: top; text-align: left; }
+.verification-table th { color: var(--muted-foreground, #52525b); font-weight: 600; }
+.verification-table code { overflow-wrap: anywhere; }
+.verification-digests { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .55rem 1rem; }
+.verification-digests div { display: grid; gap: .15rem; }
+.verification-digests dt { color: var(--muted-foreground, #52525b); font-size: .8rem; }
+.verification-digests dd { margin: 0; display: flex; gap: .35rem; align-items: center; }
+.verification-digests code { overflow-wrap: anywhere; }
+.verification-facts { margin: 0; padding-left: 1.2rem; display: grid; gap: .4rem; }
+.verification-outcome.passed { background: #dcfce7; color: #166534; }
+.verification-outcome.warned { background: #fef3c7; color: #92400e; }
+.verification-outcome.failed { background: #fee2e2; color: #b91c1c; }
+.verification-outcome.waiting { background: #e4e4e7; color: #3f3f46; }
+.result-category, .locator-summary { display: grid; gap: .2rem; margin-top: .25rem; }
+.observation-form { display: grid; gap: .5rem; min-width: 280px; }
+.observation-form fieldset { display: grid; gap: .3rem; border: 0; padding: 0; margin: 0; }
+.observation-form legend { font-weight: 600; margin-bottom: .25rem; }
+.observation-form textarea { width: 100%; min-height: 4rem; resize: vertical; }
+.observation-choice { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.observation-choice > span { min-width: 4.5rem; }
+.file-label { display: inline-flex; align-items: center; gap: .4rem; }
+@media (prefers-color-scheme: dark) { .verification-outcome.passed { background: #14532d; color: #dcfce7; } .verification-outcome.warned { background: #78350f; color: #fef3c7; } .verification-outcome.failed { background: #7f1d1d; color: #fee2e2; } }

@@ -41,3 +41,92 @@ export interface UserSummary {
   rowVersion: number
   username: string
 }
+
+export interface ArtifactSummary {
+  bodyExpired: boolean
+  createdAt: string
+  expiresAt?: string
+  id: string
+  kind: "attachment" | "screenshot" | "trace" | "tool_result" | "report_file" | "verification_bundle" | "verification_attachment"
+  ownerId: string
+  ownerType: "investigation_message" | "evidence" | "tool_call" | "browser_operation" | "inspection_report" | "backup" | "source_material" | "verification_invocation"
+  retentionKind: "long_term" | "generated"
+  sensitive: boolean
+  sha256: string
+  sizeBytes: number
+}
+
+export interface DeploymentVerificationSummary {
+  applicableSetDigest: string
+  catalogDigest: string
+  deadlineAt: string
+  deploymentConfigDigest: string
+  id: string
+  itemCount: number
+  itemSetDigest: string
+  manifestDigest: string
+  progress: unknown
+  publicOriginDigest: string
+  receipt?: DeploymentVerificationReceipt
+  releaseSubjectDigest: string
+  resultProfileDigest: string
+  startedAt: string
+}
+
+export interface VerificationInvocationItem {
+  cellId: string
+  id: string
+  inputDigest: string
+  itemSeq: number
+  locator?: unknown
+  objectKind: "deployment" | "connection" | "config" | "browser_identity" | "ui_observation"
+  scenarioId: string
+}
+
+export interface VerificationItemResult {
+  artifact?: ArtifactSummary
+  category: "passed" | "functional_assertion_failed" | "cleanup_residue" | "verifier_conflict" | "subject_drift" | "environment_unavailable" | "operator_cancelled" | "infrastructure_interrupted" | "cleanup_indeterminate" | "not_run" | "verifier_invariant_violation"
+  committedAt: string
+  evidenceIndexDigest: string
+  id: string
+  inputDigest: string
+  itemId: string
+  observedAt: string
+  outcome: "passed" | "warned" | "failed"
+  producerType: "quoin" | "runtime" | "deployment_helper" | "admin_observation"
+  resultDigest: string
+}
+
+export interface VerificationResultConflict {
+  conflictingResultId: string
+  createdAt: string
+  firstResultId: string
+  id: string
+  itemId: string
+}
+
+export interface VerificationSubjectDrift {
+  currentDigest: string
+  driftField: "release_subject_digest" | "deployment_config_digest" | "public_origin_digest" | "connection_revision" | "credential_generation" | "root_binding_revision" | "probe_contract_digest" | "config_version" | "label_contract_version" | "browser_identity_revision" | "browser_profile_generation" | "browser_inventory_observation" | "browser_artifact_digest" | "browser_artifact_version"
+  frozenDigest: string
+  itemId: string
+  objectKind: "deployment" | "connection" | "config" | "browser_identity" | "ui_observation"
+  observedAt: string
+}
+
+export interface DeploymentVerificationReceipt {
+  applicableSetDigest: string
+  canonicalArtifactId: string
+  conflictSetDigest: string
+  finalResultDigest: string
+  finalizedAt: string
+  helperImportSetDigest: string
+  id: string
+  itemSetDigest: string
+  manifestDigest: string
+  overallOutcome: "passed" | "warned" | "failed"
+  resultSetDigest: string
+  snapshotAt: string
+  subjectDriftDigest: string
+  typedObservationSetDigest: string
+}
