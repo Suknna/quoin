@@ -104,6 +104,12 @@ func decodeCursor(token string, dest any) *problemError {
 	return nil
 }
 
+// RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
+// cancel operation (openapi x-quoin-maintenance-access: upgrade-drain).
+func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches/{batchId}/cancel", OperationID: "cancelKnowledgeImportBatch"}, handler.cancelImportBatch)
+}
+
 // Register mounts every T27 route on the Huma API.
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/feedback", OperationID: "appendDiagnosisFeedback", DefaultStatus: http.StatusCreated}, handler.appendDiagnosisFeedback)
@@ -124,7 +130,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/import-batches", OperationID: "listKnowledgeImportBatches"}, handler.listImportBatches)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/knowledge/import-batches/{batchId}", OperationID: "getKnowledgeImportBatch"}, handler.getImportBatch)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches/{batchId}/confirm", OperationID: "confirmKnowledgeBatch"}, handler.confirmImportBatch)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/import-batches/{batchId}/cancel", OperationID: "cancelKnowledgeImportBatch"}, handler.cancelImportBatch)
+	handler.RegisterUpgradeDrain(api)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/items/{knowledgeId}/versions", OperationID: "createKnowledgeRevisionCandidate", DefaultStatus: http.StatusCreated}, handler.createRevisionCandidate)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/knowledge/items/{knowledgeId}/versions/{versionId}/stop-reuse", OperationID: "stopKnowledgeReuse", DefaultStatus: http.StatusNoContent}, handler.stopReuse)
 }

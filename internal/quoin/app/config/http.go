@@ -39,6 +39,12 @@ type Handler struct {
 	DispatchConfigVerification func(ctx context.Context)
 }
 
+// RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
+// cancel operation (openapi x-quoin-maintenance-access: upgrade-drain).
+func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel", OperationID: "cancelConfigVerificationRun"}, handler.cancelConfigVerificationRun)
+}
+
 // Register mounts the huma-owned routes; the two multipart uploads and the
 // YAML template own their response heads and are mounted by the app package
 // on the raw mux.
@@ -54,7 +60,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "listConfigVerificationRuns"}, handler.listConfigVerificationRuns)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "runConfigVerificationRun"}, handler.runConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", OperationID: "getConfigVerificationRun"}, handler.getConfigVerificationRun)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel", OperationID: "cancelConfigVerificationRun"}, handler.cancelConfigVerificationRun)
+	handler.RegisterUpgradeDrain(api)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/resources:refresh", OperationID: "startResourceRefresh"}, handler.startResourceRefresh)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)

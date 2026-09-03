@@ -387,6 +387,12 @@ func (handler *Handler) runScope(ctx context.Context, rawRunID string) (int64, s
 	return runID, systemKey, nil
 }
 
+// RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
+// cancel operation (openapi x-quoin-maintenance-access: upgrade-drain).
+func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs/{runId}/cancel", OperationID: "cancelInspectionRun"}, handler.cancelRun)
+}
+
 // Register mounts the manual inspection routes (HTTP-INSPECT surface, T24).
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs", OperationID: "listInspectionRuns"}, handler.listRuns)
@@ -394,7 +400,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}", OperationID: "getInspectionRun"}, handler.getRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}/reports", OperationID: "listInspectionReports"}, handler.listReports)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}/reports/{reportVersion}", OperationID: "getInspectionReport"}, handler.getReport)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs/{runId}/cancel", OperationID: "cancelInspectionRun"}, handler.cancelRun)
+	handler.RegisterUpgradeDrain(api)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs/{runId}/analyze", OperationID: "retryInspectionAnalysis"}, handler.reanalyzeRun)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs/{runId}/rerun", OperationID: "rerunInspection"}, handler.rerunInspection)
 }

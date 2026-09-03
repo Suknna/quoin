@@ -228,6 +228,15 @@ func (service *RuntimeService) RunInspectionScheduler(ctx context.Context) {
 			Lintel: lintelErr == nil && lintel.Connected && lintel.ConnectionEpoch != nil,
 		}
 	}
+	if blocking := service.MaintenanceBlocking; blocking != nil {
+		inner := availability
+		availability = func(ctx context.Context) inspection.RuntimeAvailability {
+			if blocking(ctx) {
+				return inspection.RuntimeAvailability{}
+			}
+			return inner(ctx)
+		}
+	}
 	scheduler.New(service.Inspections, availability).AfterTick(service.dispatchQueuedInspections).Run(ctx, func(err error) {
 		sharedops.LogEvent("quoin", "error", "inspection.schedule", err.Error())
 	})

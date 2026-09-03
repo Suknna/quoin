@@ -56,6 +56,11 @@ type RuntimeService struct {
 	Artifacts *artifact.Store
 	// Browsers owns durable Browser Identity/Operation authority (T20).
 	Browsers *browser.Service
+	// MaintenanceBlocking gates scheduling admission while any maintenance
+	// revision is active: due boundaries then record their durable
+	// runtime_unavailable outcome instead of creating dispatchable work
+	// (OPS-UPGRADE-003). Nil admits normally.
+	MaintenanceBlocking func(ctx context.Context) bool
 	// Inspections owns manual Inspection Runs: run_check PromQL children and
 	// inspection_analysis report attempts (T24); nil keeps the handshake-only
 	// behaviour for tests that do not exercise it.

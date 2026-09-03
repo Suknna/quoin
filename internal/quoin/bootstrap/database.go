@@ -120,6 +120,28 @@ func PeekHasUsers(dataDirectory string) bool {
 	return count > 0
 }
 
+// PeekSchemaState reads the persisted schema identity through a read-only
+// connection that never takes the data-directory write lock, mirroring
+// PeekHasUsers. `quoin migrate preflight` uses it to give the first-release
+// schema gate's unsupported-version rejection its stable code before any
+// exclusive lock is attempted.
+func PeekSchemaState(dataDirectory string) (version, digest string, ok bool) {
+	databasePath := filepath.Join(dataDirectory, "quoin.db")
+	if _, err := os.Stat(databasePath); err != nil {
+		return "", "", false
+	}
+	dsn := (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return "", "", false
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT schema_version,schema_digest FROM schema_state WHERE id=1`).Scan(&version, &digest); err != nil {
+		return "", "", false
+	}
+	return version, digest, true
+}
+
 func (database *Database) Close() error {
 	if database == nil {
 		return nil

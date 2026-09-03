@@ -88,6 +88,11 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 	case "Restore":
 		huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 		application.registerMaintenanceTrustRebuildRoutes(api)
+	case "Upgrade":
+		// The continue/re-arm command plus the frozen drain allowlist
+		// (HTTP-MAINT-005); every other product operation stays denied.
+		huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
+		application.registerUpgradeDrainRoutes(api)
 	}
 	application.registerStatic(staticMux)
 	root := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -220,12 +225,19 @@ func (application *apiServer) exitMaintenance(ctx context.Context, input *exitMa
 	if err != nil {
 		return nil, err
 	}
+	exitingUpgrade := false
+	if state, stateErr := application.maintenance.State(ctx); stateErr == nil && state.Active && state.Reason == "Upgrade" {
+		exitingUpgrade = true
+	}
 	state, err := application.maintenance.Exit(ctx, maintenance.ExitRequest{ActorID: session.User.ID, ClientCommandID: input.Body.ClientCommandID, ExpectedReason: input.Body.ExpectedReason, ExpectedRowVersion: input.Body.ExpectedRowVersion})
 	if err != nil {
 		if errors.Is(err, maintenance.ErrConflict) || errors.Is(err, maintenance.ErrCommandReused) {
 			return nil, problem(http.StatusConflict, "maintenance_conflict", "维护状态或安全清单已变化，请刷新后重试。")
 		}
 		return nil, huma.Error500InternalServerError("暂时无法退出维护", err)
+	}
+	if exitingUpgrade && application.onUpgradeMaintenanceExit != nil {
+		application.onUpgradeMaintenanceExit()
 	}
 	return &maintenanceOutput{CacheControl: "no-store", Body: maintenanceResponse(state)}, nil
 }

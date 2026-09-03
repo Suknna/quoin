@@ -37,6 +37,12 @@ type Handler struct {
 	CancelDispatch func(ctx context.Context, attemptID int64) error
 }
 
+// RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
+// cancel operation (openapi x-quoin-maintenance-access: upgrade-drain).
+func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/cancel", OperationID: "cancelInvestigationAttempt"}, handler.cancelInvestigationAttempt)
+}
+
 // Register mounts the investigation routes (T13 core + T14 attachments +
 // T15 head concurrency: undo, stop, retry).
 func (handler *Handler) Register(api huma.API) {
@@ -49,7 +55,7 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts", OperationID: "listInvestigationAttempts"}, handler.listInvestigationAttempts)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/tool-calls", OperationID: "listAttemptToolCalls"}, handler.listAttemptToolCalls)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/undo", OperationID: "undoInvestigationMessage"}, handler.undoInvestigationMessage)
-	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/cancel", OperationID: "cancelInvestigationAttempt"}, handler.cancelInvestigationAttempt)
+	handler.RegisterUpgradeDrain(api)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/retry", OperationID: "retryInvestigationAttempt", DefaultStatus: 202}, handler.retryInvestigationAttempt)
 	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigation-attachments/{attachmentId}", OperationID: "getInvestigationAttachment"}, handler.getInvestigationAttachment)
 }

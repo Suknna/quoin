@@ -282,6 +282,53 @@ func (server *Server) ArtifactGCSuccessProjector() (func(float64), error) {
 	return metric.Set, nil
 }
 
+// SetMaintenanceReason projects the per-reason quoin_maintenance gauge from
+// the SQL maintenance authority. Empty reason resets every series to 0.
+func (server *Server) SetMaintenanceReason(reason string, active bool) {
+	vec, ok := server.collectors["quoin_maintenance"].(*prometheus.GaugeVec)
+	if !ok {
+		return
+	}
+	value := float64(boolValue(active))
+	if reason == "" {
+		for _, candidate := range []string{"restore", "root_key_rebind", "upgrade", "lintel_recovery"} {
+			vec.WithLabelValues(candidate).Set(0)
+		}
+		return
+	}
+	vec.WithLabelValues(maintenanceReasonLabel(reason)).Set(value)
+}
+
+func maintenanceReasonLabel(reason string) string {
+	switch reason {
+	case "Restore":
+		return "restore"
+	case "RootKeyRebind":
+		return "root_key_rebind"
+	case "LintelRecovery":
+		return "lintel_recovery"
+	default:
+		return "upgrade"
+	}
+}
+
+// UpgradePreparedProjector exposes the catalog-owned quoin_upgrade_prepared
+// gauge so the upgrade state authority can project the only values the frozen
+// contract allows: 1 exactly when the current Upgrade revision is fully safe
+// with a succeeded pre-upgrade backup, 0 otherwise.
+func (server *Server) UpgradePreparedProjector() (func(bool), error) {
+	if server.state.Component != "quoin" {
+		return nil, errors.New("upgrade metrics belong to quoin only")
+	}
+	metric, ok := server.collectors["quoin_upgrade_prepared"].(prometheus.Gauge)
+	if !ok {
+		return nil, errors.New("metrics catalog is missing quoin_upgrade_prepared")
+	}
+	return func(prepared bool) {
+		metric.Set(float64(boolValue(prepared)))
+	}, nil
+}
+
 func (server *Server) Handler() http.Handler {
 	return server.httpServer.Handler
 }

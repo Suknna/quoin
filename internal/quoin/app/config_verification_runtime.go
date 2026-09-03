@@ -132,6 +132,12 @@ func (service *RuntimeService) RunResourceRefreshScheduler(ctx context.Context) 
 		return
 	}
 	run := func() {
+		if service.MaintenanceBlocking != nil && service.MaintenanceBlocking(ctx) {
+			// A maintenance revision is exactly a scheduling outage: due
+			// boundaries record their durable unavailability and are never
+			// backfilled (OPS-UPGRADE-003).
+			return
+		}
 		if _, err := service.BusinessSystems.StartDueResourceRefreshes(ctx); err != nil {
 			sharedops.LogEvent("quoin", "error", "resource_refresh.schedule", err.Error())
 		}

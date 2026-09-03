@@ -47,6 +47,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
+	"github.com/Suknna/quoin/internal/quoin/upgrade"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"google.golang.org/grpc"
@@ -56,6 +57,7 @@ type servers struct {
 	public         *http.Server
 	ops            *sharedops.Server
 	relay          *grpc.Server
+	upgradeGate    *upgradeGate
 	beforeShutdown func()
 }
 
@@ -95,6 +97,15 @@ type apiServer struct {
 	browserPublishDispatchFunc   func(ctx context.Context, request browser.PublishRequest) error
 	browserStopDispatchFunc      func(ctx context.Context, operationID int64) error
 	browserTunnels               *browserTunnelHub
+	// Upgrade maintenance authorities (T36): the prepare command, the drain
+	// reconciler, and the live HTTP surface swap hooks.
+	upgradeService             *upgrade.Service
+	upgradeReconciler          *upgrade.Reconciler
+	upgradeGate                *upgradeGate
+	setReadiness               func(sharedops.Readiness)
+	setMaintenanceReason       func(string, bool)
+	onUpgradeMaintenanceEntered func()
+	onUpgradeMaintenanceExit    func()
 }
 
 // attachmentLimitBytes resolves the deployment message-level attachment
@@ -148,6 +159,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
 		maintenance:      maintenance.NewService(db),
+		upgradeService:   upgrade.NewService(db),
 		browserTunnels:   newBrowserTunnelHub(),
 	}
 	application.rootKey = func() ([]byte, error) {
@@ -255,7 +267,22 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		if err != nil {
 			return err
 		}
-		return serverSet.runMaintenance(ctx)
+		serverSet.ops.SetMaintenanceReason(maintenanceReason.String, true)
+		if maintenanceReason.String == "Upgrade" {
+			// A restart inside Upgrade maintenance keeps converging durably:
+			// the reconciler projects the frozen checklist and runs the
+			// pre-upgrade backup, while a dispatch-free lease sweeper closes
+			// attempts whose runtime disappeared with the previous process.
+			if err := application.startUpgradeMaintenanceRuntime(ctx, config, serverSet); err != nil {
+				return err
+			}
+			// Exiting the aborted upgrade stops this maintenance-shaped process;
+				// the deployment's restart policy boots the normal surface.
+			stop := make(chan struct{})
+			application.onUpgradeMaintenanceExit = func() { close(stop) }
+			return serverSet.runMaintenance(ctx, stop)
+		}
+		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
 	serverSet, err := application.newServers(config)
@@ -321,6 +348,16 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	application.SetBackupService(backupService)
 	go backupService.RunScheduler(ctx)
+	// T36: the upgrade reconciler owns the drain checklist projection, the
+	// verified pre-upgrade backup and the quoin_upgrade_prepared gauge.
+	upgradeBackups := &backupUpgradeRunner{service: backupService}
+	application.upgradeReconciler = upgrade.NewReconciler(database.SQL, upgradeBackups)
+	if projector, projectorErr := serverSet.ops.UpgradePreparedProjector(); projectorErr == nil {
+		application.upgradeReconciler.SetPrepared(projector)
+	} else {
+		return projectorErr
+	}
+	go application.upgradeReconciler.Run(ctx)
 	// T14: investigation attachment staging streams through the same
 	// content-addressed store; the deployment boundary (default 10 MiB,
 	// HTTP-FILE-002) is environment-tunable.
@@ -332,6 +369,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
+	// Scheduling admission stops inside any maintenance revision: missed
+	// boundaries record their durable runtime_unavailable tombstone instead
+	// of creating dispatchable work (OPS-UPGRADE-003).
+	controlService.MaintenanceBlocking = maintenanceAdmissionChecker(ctx, database.SQL)
 	controlService.BusinessSystems = application.systems
 	controlService.Inspections = application.inspections
 	controlService.Analyses = application.analyses
@@ -394,6 +435,11 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	go controlService.RunLeaseSweeper(ctx)
 	go controlService.RunResourceRefreshScheduler(ctx)
 	go controlService.RunInspectionScheduler(ctx)
+	application.upgradeGate = serverSet.upgradeGate
+	application.setReadiness = serverSet.ops.SetReadiness
+	application.setMaintenanceReason = serverSet.ops.SetMaintenanceReason
+	application.onUpgradeMaintenanceEntered = func() { application.enterUpgradeMaintenance(config.PublicOrigin) }
+	application.onUpgradeMaintenanceExit = application.exitUpgradeMaintenance
 	return serverSet.run(ctx, config)
 }
 
@@ -415,11 +461,16 @@ func (application *apiServer) newServers(config contract.QuoinConfig) (*servers,
 	if err != nil {
 		return nil, err
 	}
+	// The live upgrade gate wraps the complete normal surface; entering
+	// Upgrade maintenance swaps it to the maintenance allowlist without
+	// touching the Runtime control plane or the sweeps.
+	gate := newUpgradeGate(public)
+	application.upgradeGate = gate
 	opsServer, err := sharedops.New("quoin", ":9090", sharedops.Ready)
 	if err != nil {
 		return nil, err
 	}
-	return &servers{public: &http.Server{Addr: ":8080", Handler: public, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer}, nil
+	return &servers{public: &http.Server{Addr: ":8080", Handler: gate, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer, upgradeGate: gate}, nil
 }
 
 // NewHandler builds the same-origin public surface: the real Huma API plus the
@@ -466,6 +517,9 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword", DefaultStatus: http.StatusNoContent}, application.changePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout", DefaultStatus: http.StatusNoContent}, application.logout)
+	// T36: the maintenance projection and the coordinated-upgrade entry.
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/maintenance", OperationID: "getMaintenanceState"}, application.getMaintenanceState)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
@@ -747,25 +801,24 @@ func (application *apiServer) registerStatic(mux *http.ServeMux) {
 // runMaintenance starts only the HTTP maintenance allowlist and ops readiness
 // surface. Restore containment is already committed before Quoin is started;
 // Runtime, browser and task control streams stay unavailable until maintenance
-// exits, so no recovered identity can resume work.
-func (serverSet *servers) runMaintenance(ctx context.Context) error {
+// exits, so no recovered identity can resume work. An Upgrade boot passes a
+// stop channel: a successful exitMaintenance ends the process so the
+// deployment's restart policy boots the normal surface.
+func (serverSet *servers) runMaintenance(ctx context.Context, stop <-chan struct{}) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- serverSet.public.ListenAndServe() }()
 	opsDone := make(chan error, 1)
 	go func() { opsDone <- serverSet.ops.Run(ctx) }()
 	select {
 	case <-ctx.Done():
-		opsErr := <-opsDone
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = serverSet.public.Shutdown(shutdownCtx)
-		return opsErr
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
+	case <-stop:
+		sharedops.LogEvent("quoin", "info", "maintenance.exited", "upgrade maintenance exited by administrator; restarting into normal mode")
 	}
+	opsErr := <-opsDone
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = serverSet.public.Shutdown(shutdownCtx)
+	return opsErr
 }
 
 func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) error {
