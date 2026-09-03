@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
+# Contract-gate entrypoint for scenario contracts.machine. Without phase
+# arguments it stays the plain PR gate (run the frozen contract verifier and
+# exit with its code). When the verification runner drives it with
+# --phase action|assert it additionally writes the machine facts document
+# the runner compares declared assertions against.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-exec go run ./ci/contracts/verify
+status=0
+go run ./ci/contracts/verify || status=$?
+if [ -n "${QUOIN_VERIFY_FACTS:-}" ] && [ "${1:-}" = "--phase" ] && { [ "${2:-}" = "action" ] || [ "${2:-}" = "assert" ]; }; then
+  result=failed
+  if [ "$status" -eq 0 ]; then
+    result=passed
+  fi
+  printf '{"schema_kind":"quoin-verify-facts-v1","assertions":{},"checks":[{"name":"verify-contracts","result":"%s"}]}' "$result" > "$QUOIN_VERIFY_FACTS"
+fi
+exit $status
