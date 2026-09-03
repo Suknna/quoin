@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -453,5 +454,193 @@ func TestBrowserCrashCompletionWaitsForAcceptedStartAck(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("crash completion did not follow StartAck release")
+	}
+}
+
+// Deployment verification stops carry the typed resource-zero evidence: the
+// frozen clone/start-boot binding is echoed, this cleanup boot and epoch are
+// bound, and a failed stop reports a still-running process instead of a
+// fabricated zero (VERIFY-BROWSER-003).
+func TestDeploymentVerificationStopAckCarriesTypedEvidence(t *testing.T) {
+	directory := t.TempDir()
+	manager, err := browser.NewManager(browser.Config{StateDirectory: directory, Capacity: 1, ChromiumBinary: "/bin/true", XvfbBinary: "/bin/true", X0VNCBinary: "/bin/true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := &Channel{bootID: "boot-successor", epoch: 3, browser: manager, Config: ChannelConfig{StateDirectory: directory},
+		started: map[int64]*runtimev1.StartBrowserOperation{}, stopAcks: map[int64]*runtimev1.StopBrowserOperationAck{}, completed: map[int64]*runtimev1.CompleteBrowserOperation{}}
+	committed := timestamppb.New(time.Now())
+	request := &runtimev1.StopBrowserOperation{
+		OperationId: 77, CloneIdentity: "deployment-verification-1-9",
+		OriginalStartBootId: "boot-origin", CommittedAt: committed,
+	}
+	ack := channel.stopResponse(&runtimev1.ControlEnvelope{}, request).GetStopBrowserOperationAck()
+	if ack.GetCloneIdentity() != "deployment-verification-1-9" || ack.GetOriginalStartBootId() != "boot-origin" {
+		t.Fatalf("typed binding not echoed: %#v", ack)
+	}
+	if ack.GetCleanupBootId() != "boot-successor" || ack.GetCleanupConnectionEpoch() != 3 {
+		t.Fatalf("cleanup boot binding missing: %#v", ack)
+	}
+	if len(ack.GetStopFenceDigest()) != 32 || len(ack.GetCleanupStateHash()) != 32 {
+		t.Fatalf("typed digests missing: %#v", ack)
+	}
+	// The manager's Stop succeeds against a never-started operation (no
+	// process to leak), so the typed counts report zeros.
+	if ack.GetOperationProcessCount() != 0 || ack.GetCloneNamespaceCount() != 0 {
+		t.Fatalf("clean stop must report zero counts: %#v", ack)
+	}
+	if ack.GetCleanupOutcome() != runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED {
+		t.Fatalf("clean stop outcome: %#v", ack)
+	}
+	// Replay of the identical Stop replays the exact typed tombstone.
+	replay := channel.stopResponse(&runtimev1.ControlEnvelope{}, request).GetStopBrowserOperationAck()
+	if replay.GetCloneIdentity() != ack.GetCloneIdentity() || replay.GetCleanupConnectionEpoch() != ack.GetCleanupConnectionEpoch() {
+		t.Fatalf("typed tombstone replay diverged: %#v", replay)
+	}
+}
+
+// TestDeploymentVerificationRunsProbeAgainstCloneAndStopsClean drives the
+// complete Deployment Acceptance browser path with the real manager and a
+// scripted Chromium: profile publish, deployment_verification Start from the
+// published generation clone, the frozen URL-prefix probe completion, and the
+// typed resource-zero Stop acknowledgment (VERIFY-BROWSER-001..003).
+func TestDeploymentVerificationRunsProbeAgainstCloneAndStopsClean(t *testing.T) {
+	pageURL := "https://app.example/login"
+	websocketURL := ""
+	closeFile := filepath.Join(t.TempDir(), "browser-close")
+	server := httptest.NewServer(fakeBrowserDevTools(&pageURL, &websocketURL, func() {
+		if err := os.WriteFile(closeFile, []byte("close"), 0o600); err != nil {
+			t.Errorf("record Browser.close: %v", err)
+		}
+	}))
+	defer server.Close()
+	websocketURL = "ws" + strings.TrimPrefix(server.URL, "http") + "/devtools/page/start"
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_DEVTOOLS_PORT", parsed.Port())
+	t.Setenv("TEST_CLOSE_FILE", closeFile)
+	fake := func(name, body string) string {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	idle := fake("idle", "#!/bin/sh\nexec sleep 300\n")
+	chromium := fake("chromium", "#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) d=${arg#*=};; esac; done\nprintf '%s\\n/devtools/browser/test\\n' \"$TEST_DEVTOOLS_PORT\" > \"$d/DevToolsActivePort\"\nwhile [ ! -e \"$TEST_CLOSE_FILE\" ]; do sleep 0.01; done\nexit 0\n")
+	stateDirectory := t.TempDir()
+	manager, err := browser.NewManager(browser.Config{StateDirectory: stateDirectory, Capacity: 1, ChromiumBinary: chromium, XvfbBinary: idle, X0VNCBinary: idle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := profile.NewStore(stateDirectory)
+	channel := &Channel{Config: ChannelConfig{StateDirectory: stateDirectory, ChromiumRevision: "Chromium-test"}, bootID: "boot", epoch: 1, browser: manager, profiles: store,
+		started: map[int64]*runtimev1.StartBrowserOperation{}, startAcks: map[int64]*runtimev1.StartBrowserOperationAck{}, stopAcks: map[int64]*runtimev1.StopBrowserOperationAck{},
+		completed: map[int64]*runtimev1.CompleteBrowserOperation{}, completing: map[int64]bool{}, published: map[int64]*runtimev1.PublishBrowserProfileResult{}, tunnelCancels: map[int64]context.CancelFunc{}, startAckFences: map[int64]chan struct{}{}}
+
+	// Publish a real generation through the authenticated manual-login path.
+	loginInput, err := json.Marshal(map[string]any{"schemaKind": "manual_login_v1", "operationId": 30, "identity": map[string]any{"identityId": 4, "identityRevisionId": 8, "startUrl": "https://app.example/login"}, "actorUserId": 11, "actorSessionId": 12, "authenticationProbe": map[string]any{"id": "authentication.url-prefix.v1", "version": 1, "params": map[string]any{"authenticatedUrlPrefix": "https://app.example/authenticated"}, "catalog": map[string]any{"digest": catalog.Digest(), "version": catalog.Version}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginDigest := sha256.Sum256(loginInput)
+	loginStart := &runtimev1.StartBrowserOperation{OperationId: 30, Kind: runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN, IdentityId: 4, IdentityRevisionId: 8, JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version, Input: &runtimev1.BrowserOperationInput{SchemaKind: "manual_login_v1", CanonicalJson: loginInput, ContentDigest: loginDigest[:]}}
+	if ack := channel.startResponse(&runtimev1.ControlEnvelope{MessageId: 1}, loginStart).GetStartBrowserOperationAck(); !ack.GetAccepted() {
+		t.Fatalf("manual login start rejected: %#v", ack)
+	}
+	pageURL = "https://app.example/authenticated"
+	publish := channel.publishResponse(&runtimev1.ControlEnvelope{MessageId: 2}, &runtimev1.PublishBrowserProfile{OperationId: 30, IdentityId: 4, IdentityRevisionId: 8, NewGeneration: 1, CommandId: "publish-command"}).GetPublishBrowserProfileResult()
+	if !publish.GetAccepted() {
+		t.Fatalf("publish rejected: %#v", publish)
+	}
+
+	// The scripted Chromium exits once the close marker exists; the publish
+	// path set it for operation 30, so clear it before the clone launches.
+	// The clone reconciles its start page first, so the DevTools view must
+	// report the login page at launch and only then flip to the
+	// authenticated prefix for the probe.
+	if err := os.Remove(closeFile); err != nil {
+		t.Fatal(err)
+	}
+	pageURL = "https://app.example/login"
+
+	// Deployment verification Start from the published generation clone.
+	input, err := json.Marshal(map[string]any{
+		"schemaKind": "deployment_verification_v1", "operationId": 31,
+		"identity":                     map[string]any{"identityId": 4, "identityRevisionId": 8, "profileGenerationId": 1, "profileGeneration": 1, "startUrl": "https://app.example/login"},
+		"verificationInvocationItemId": 9, "cloneIdentity": "deployment-verification-1-9",
+		"probe": map[string]any{"id": "authentication.url-prefix.v1", "version": 1, "params": map[string]any{"authenticatedUrlPrefix": "https://app.example/authenticated"}, "catalog": map[string]any{"digest": catalog.Digest(), "version": catalog.Version}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputSum := sha256.Sum256(input)
+	start := &runtimev1.StartBrowserOperation{OperationId: 31, Kind: runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION,
+		IdentityId: 4, IdentityRevisionId: 8, ProfileGenerationId: 1, JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version,
+		VerificationInvocationItemId: 9, CloneIdentity: "deployment-verification-1-9",
+		Input: &runtimev1.BrowserOperationInput{SchemaKind: "deployment_verification_v1", CanonicalJson: input, ContentDigest: inputSum[:]}}
+	if err := validateStartInput(start); err != nil {
+		t.Fatalf("valid deployment input rejected by frozen validator: %v", err)
+	}
+	ack := channel.startResponse(&runtimev1.ControlEnvelope{MessageId: 3}, start).GetStartBrowserOperationAck()
+	if !ack.GetAccepted() {
+		t.Fatalf("deployment start rejected: %#v", ack)
+	}
+	// The probe observes the authenticated page: flip the DevTools view only
+	// after the clone's start reconciliation completed.
+	pageURL = "https://app.example/authenticated"
+	// The frozen probe runs against the live clone; wait for its typed completion.
+	channel.completeRevisionProbe(start)
+	deadline := time.Now().Add(15 * time.Second)
+	var completion *runtimev1.CompleteBrowserOperation
+	for {
+		channel.operationMu.Lock()
+		completion = channel.completed[31]
+		channel.operationMu.Unlock()
+		if completion != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if completion == nil {
+		if _, running := manager.VNCAddress(31); !running {
+			t.Fatal("deployment clone browser is not running")
+		}
+		t.Fatal("probe completion missing")
+	}
+	if completion.GetOutcome() != runtimev1.BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_SUCCEEDED {
+		t.Fatalf("probe completion outcome=%s terminal=%s probes=%#v", completion.GetOutcome(), completion.GetTerminalReason(), completion.GetProbeResults())
+	}
+	found := false
+	for _, probe := range completion.GetProbeResults() {
+		if probe.GetResult() == runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_AUTHENTICATED && probe.GetJourneyId() == "authentication.url-prefix.v1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("authenticated probe observation missing: %#v", completion)
+	}
+	// Publishing from a deployment verification operation is rejected.
+	rejected := channel.publishResponse(&runtimev1.ControlEnvelope{MessageId: 4}, &runtimev1.PublishBrowserProfile{OperationId: 31, IdentityId: 4, IdentityRevisionId: 8, NewGeneration: 2, CommandId: "dep-publish"}).GetPublishBrowserProfileResult()
+	if rejected.GetAccepted() {
+		t.Fatal("deployment verification operation must not publish profiles")
+	}
+	// The typed Stop acknowledgment proves resource zero.
+	stopAck := channel.stopResponse(&runtimev1.ControlEnvelope{MessageId: 5}, &runtimev1.StopBrowserOperation{OperationId: 31, CloneIdentity: "deployment-verification-1-9", OriginalStartBootId: "boot", CommittedAt: timestamppb.New(time.Now())}).GetStopBrowserOperationAck()
+	if stopAck.GetCleanupOutcome() != runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED {
+		t.Fatalf("typed stop outcome: %#v", stopAck)
+	}
+	if stopAck.GetCloneIdentity() != "deployment-verification-1-9" || stopAck.GetOriginalStartBootId() != "boot" || stopAck.GetCleanupBootId() != "boot" {
+		t.Fatalf("typed binding echo: %#v", stopAck)
+	}
+	for name, value := range map[string]uint64{
+		"operationProcess": stopAck.GetOperationProcessCount(), "chromium": stopAck.GetChromiumProcessCount(),
+		"cloneNamespace": stopAck.GetCloneNamespaceCount(), "temporaryFiles": stopAck.GetTemporaryFileCount(),
+	} {
+		if value != 0 {
+			t.Fatalf("clean typed stop reported %s=%d", name, value)
+		}
 	}
 }
