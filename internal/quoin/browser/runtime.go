@@ -2,7 +2,9 @@ package browser
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -22,6 +24,10 @@ type DispatchInput struct {
 	BootID                              string
 	Epoch                               uint64
 	CanonicalJSON                       []byte
+	// Deployment verification only: the frozen manifest item and the
+	// deterministic clone identity the Start envelope must carry.
+	VerificationInvocationItemID int64
+	CloneIdentity                string
 }
 
 type PublishRequest struct {
@@ -182,6 +188,17 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 	if (input.Kind == "authentication_probe" || input.Kind == "exploration" || input.Kind == "journey") && (input.ActorUserID != nil || input.ActorSessionID != nil || !profileGeneration.Valid) {
 		return DispatchInput{}, ErrInvalid
 	}
+	if input.Kind == "deployment_verification" {
+		// SQL froze actor_user_id NULL + actor_session_id + manifest item +
+		// clone identity + current profile generation at INSERT; recheck the
+		// same closure before the physical Start fence.
+		if err := conn.QueryRowContext(ctx, `SELECT verification_manifest_item_id,COALESCE(clone_identity,'') FROM browser_operations WHERE id=?`, operationID).Scan(&input.VerificationInvocationItemID, &input.CloneIdentity); err != nil {
+			return DispatchInput{}, err
+		}
+		if input.ActorUserID != nil || input.ActorSessionID == nil || input.VerificationInvocationItemID == 0 || input.CloneIdentity == "" || !profile.Valid || !profileGeneration.Valid {
+			return DispatchInput{}, ErrInvalid
+		}
+	}
 	input.Probe.Params = json.RawMessage(params)
 	input.BootID, input.Epoch = bootID, epoch
 	input.CanonicalJSON, err = json.Marshal(struct {
@@ -217,6 +234,12 @@ func (service *Service) prepareDispatch(ctx context.Context, operationID int64, 
 		input.CanonicalJSON, err = json.Marshal(map[string]any{"schemaKind": "exploration_v1", "operationId": operationID, "identity": identity, "authenticationProbe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}}})
 	} else if input.Kind == "journey" {
 		input.CanonicalJSON, err = service.buildJourneyOperationInput(ctx, conn, input, identity)
+	} else if input.Kind == "deployment_verification" {
+		input.CanonicalJSON, err = json.Marshal(map[string]any{
+			"schemaKind": "deployment_verification_v1", "operationId": operationID, "identity": identity,
+			"verificationInvocationItemId": input.VerificationInvocationItemID, "cloneIdentity": input.CloneIdentity,
+			"probe": map[string]any{"id": input.Probe.JourneyID, "version": input.Probe.Version, "params": json.RawMessage(input.Probe.Params), "catalog": map[string]any{"digest": input.CatalogDigest, "version": input.CatalogVersion}},
+		})
 	} else {
 		err = ErrInvalid
 	}
@@ -445,4 +468,114 @@ func (service *Service) PreparePublish(ctx context.Context, systemKey string, op
 	committed = true
 	r.CommandID = commandID
 	return r, nil
+}
+
+// HandleDeploymentStopAck commits the deployment verification stop fence and
+// its coupled typed result in one transaction: the same-boot cleanup
+// acknowledgment releases the identity/slot fence only with the full typed
+// cleanup evidence (basis same_boot_cleanup_ack + state hash).
+func (service *Service) HandleDeploymentStopAck(ctx context.Context, operationID int64, bootID string, epoch uint64, clean bool, stoppedAt time.Time, cleanupHash []byte, originalBoot, cleanupBoot string, cleanupEpoch uint64, stopFenceDigest []byte, cloneIdentity string, counts [9]uint64) error {
+	if operationID < 1 || bootID == "" || epoch == 0 || !clean || stoppedAt.IsZero() || len(cleanupHash) != 32 || cloneIdentity == "" {
+		return ErrInvalid
+	}
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	result, err := conn.ExecContext(ctx, `UPDATE browser_operations SET stop_confirmed_at=?,stop_confirmation_basis='same_boot_cleanup_ack',cleanup_state_hash=?,row_version=row_version+1
+		WHERE id=? AND kind='deployment_verification' AND clone_identity=? AND lintel_boot_id=? AND lintel_connection_epoch=?
+		AND state IN ('Succeeded','Failed','Cancelled','Interrupted') AND stop_confirmed_at IS NULL`,
+		stoppedAt.UTC().Format(time.RFC3339Nano), cleanupHash, operationID, cloneIdentity, originalBoot, epoch)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return ErrConflict
+	}
+	if err := service.insertDeploymentTypedResult(ctx, conn, operationID, originalBoot, cleanupBoot, cleanupEpoch, cleanupHash, stopFenceDigest, cloneIdentity, counts, stoppedAt); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// insertDeploymentTypedResult writes the coupled verification item result and
+// browser typed result after the stop fence committed in the same
+// transaction. The functional verdict comes from the terminal probe; the
+// cleanup verdict from the typed counts.
+func (service *Service) insertDeploymentTypedResult(ctx context.Context, conn *sql.Conn, operationID int64, originalBoot, cleanupBoot string, cleanupEpoch uint64, cleanupHash, stopFenceDigest []byte, cloneIdentity string, counts [9]uint64, stoppedAt time.Time) error {
+	var itemID int64
+	var state string
+	var terminalReason sql.NullString
+	if err := conn.QueryRowContext(ctx, `SELECT verification_manifest_item_id,state,terminal_reason FROM browser_operations WHERE id=?`, operationID).Scan(&itemID, &state, &terminalReason); err != nil {
+		return err
+	}
+	if itemID == 0 {
+		return ErrInvalid
+	}
+	var inputDigest string
+	if err := conn.QueryRowContext(ctx, `SELECT input_digest FROM verification_invocation_items WHERE id=?`, itemID).Scan(&inputDigest); err != nil {
+		return err
+	}
+	functional, outcome, category := "warned", "warned", "infrastructure_interrupted"
+	switch {
+	case state == "Succeeded" && !terminalReason.Valid:
+		functional, outcome, category = "passed", "passed", "passed"
+	case state == "Failed":
+		functional, outcome, category = "failed", "failed", "functional_assertion_failed"
+	}
+	nonZero := false
+	for _, count := range counts {
+		if count > 0 {
+			nonZero = true
+		}
+	}
+	cleanup := "clean"
+	if nonZero {
+		cleanup = "residue"
+		outcome, category = "failed", "cleanup_residue"
+	}
+	observedAt := stoppedAt.UTC().Format(time.RFC3339Nano)
+	encoded, err := json.Marshal(map[string]any{
+		"operationId": operationID, "functionalOutcome": functional, "cleanupOutcome": cleanup,
+		"cleanupStateHash": hex.EncodeToString(cleanupHash), "cloneIdentity": cloneIdentity,
+	})
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(encoded)
+	resultDigest := hex.EncodeToString(sum[:])
+	insert, err := conn.ExecContext(ctx, `INSERT INTO verification_item_results(item_id,input_digest,result_digest,producer_type,outcome,category,observed_at,committed_at,evidence_index_digest)
+		VALUES(?,?,?,'runtime',?,?,?,?,?)`, itemID, inputDigest, resultDigest, outcome, category, observedAt, observedAt, resultDigest)
+	if err != nil {
+		return err
+	}
+	resultID, err := insert.LastInsertId()
+	if err != nil {
+		return err
+	}
+	committedAt := observedAt
+	_, err = conn.ExecContext(ctx, `INSERT INTO browser_deployment_verification_results(
+		operation_id,verification_result_id,functional_outcome,functional_evidence_digest,cleanup_outcome,
+		original_boot_id,cleanup_boot_id,cleanup_epoch,cleanup_state_hash,stop_fence_digest,clone_identity,
+		operation_process_count,cgroup_process_count,chromium_process_count,x0vnc_process_count,novnc_tunnel_count,
+		clone_namespace_count,temporary_file_count,runtime_handle_count,slot_lease_count,result_digest,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		operationID, resultID, functional, resultDigest, cleanup,
+		originalBoot, cleanupBoot, cleanupEpoch, hex.EncodeToString(cleanupHash), hex.EncodeToString(stopFenceDigest), cloneIdentity,
+		counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], resultDigest, committedAt)
+	return err
 }

@@ -48,6 +48,7 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
+	"github.com/Suknna/quoin/internal/quoin/verification/deployment"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"google.golang.org/grpc"
@@ -62,48 +63,51 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth                         *auth.Service
-	db                           *sql.DB
-	alerts                       *alerts.Service
-	reveals                      *secrets.Store
-	commands                     *commandReplay
-	runtime                      *qruntime.Service
-	connections                  *connections.Service
-	analyses                     *analysis.Service
-	investigations               *investigation.Service
-	systems                      *businesssystem.Service
-	inspections                  *inspection.Service
-	contracts                    *labelcontract.Service
-	feedbackService              *feedback.Service
-	knowledgeService             *knowledge.Service
-	browsers                     *browser.Service
-	investigationUpload          *appinvestigation.Handler
-	configHandler                *appconfig.Handler
-	artifacts                    *artifact.Store
-	backups                      *backup.Service
-	maintenance                  *maintenance.Service
-	rootKey                      func() ([]byte, error)
-	backupCopy                   func(io.Writer, io.Reader) (int64, error)
-	backupAuthorize              func(context.Context, string, string) (auth.Session, error)
-	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
-	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
-	knowledgeDispatchFunc        func(ctx context.Context, attemptID int64) error
-	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
-	resourceRefreshDispatchFunc  func(ctx context.Context)
-	verificationDispatchFunc     func(ctx context.Context)
-	inspectionDispatchFunc       func(ctx context.Context)
-	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
-	browserPublishDispatchFunc   func(ctx context.Context, request browser.PublishRequest) error
-	browserStopDispatchFunc      func(ctx context.Context, operationID int64) error
-	browserTunnels               *browserTunnelHub
+	auth                          *auth.Service
+	db                            *sql.DB
+	alerts                        *alerts.Service
+	reveals                       *secrets.Store
+	commands                      *commandReplay
+	runtime                       *qruntime.Service
+	connections                   *connections.Service
+	analyses                      *analysis.Service
+	investigations                *investigation.Service
+	systems                       *businesssystem.Service
+	inspections                   *inspection.Service
+	contracts                     *labelcontract.Service
+	feedbackService               *feedback.Service
+	knowledgeService              *knowledge.Service
+	browsers                      *browser.Service
+	verifications                 *deployment.Service
+	verificationAdapter           verificationArtifacts
+	investigationUpload           *appinvestigation.Handler
+	configHandler                 *appconfig.Handler
+	artifacts                     *artifact.Store
+	backups                       *backup.Service
+	maintenance                   *maintenance.Service
+	rootKey                       func() ([]byte, error)
+	backupCopy                    func(io.Writer, io.Reader) (int64, error)
+	backupAuthorize               func(context.Context, string, string) (auth.Session, error)
+	probeDispatchFunc             func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc            func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc          func(ctx context.Context, attemptID int64) error
+	knowledgeDispatchFunc         func(ctx context.Context, attemptID int64) error
+	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
+	resourceRefreshDispatchFunc   func(ctx context.Context)
+	verificationDispatchFunc      func(ctx context.Context)
+	inspectionDispatchFunc        func(ctx context.Context)
+	browserOperationsDispatchFunc func(ctx context.Context)
+	inspectionCancelDispatchFunc  func(ctx context.Context, attemptID int64) error
+	browserPublishDispatchFunc    func(ctx context.Context, request browser.PublishRequest) error
+	browserStopDispatchFunc       func(ctx context.Context, operationID int64) error
+	browserTunnels                *browserTunnelHub
 	// Upgrade maintenance authorities (T36): the prepare command, the drain
 	// reconciler, and the live HTTP surface swap hooks.
-	upgradeService             *upgrade.Service
-	upgradeReconciler          *upgrade.Reconciler
-	upgradeGate                *upgradeGate
-	setReadiness               func(sharedops.Readiness)
-	setMaintenanceReason       func(string, bool)
+	upgradeService              *upgrade.Service
+	upgradeReconciler           *upgrade.Reconciler
+	upgradeGate                 *upgradeGate
+	setReadiness                func(sharedops.Readiness)
+	setMaintenanceReason        func(string, bool)
 	onUpgradeMaintenanceEntered func()
 	onUpgradeMaintenanceExit    func()
 }
@@ -158,6 +162,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
+		verifications:    deployment.NewService(db, time.Now, nil, ""),
 		maintenance:      maintenance.NewService(db),
 		upgradeService:   upgrade.NewService(db),
 		browserTunnels:   newBrowserTunnelHub(),
@@ -277,7 +282,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 				return err
 			}
 			// Exiting the aborted upgrade stops this maintenance-shaped process;
-				// the deployment's restart policy boots the normal surface.
+			// the deployment's restart policy boots the normal surface.
 			stop := make(chan struct{})
 			application.onUpgradeMaintenanceExit = func() { close(stop) }
 			return serverSet.runMaintenance(ctx, stop)
@@ -285,6 +290,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
+	application.verifications = deployment.NewService(database.SQL, time.Now, config.DeploymentBinding, config.PublicOrigin)
 	serverSet, err := application.newServers(config)
 	if err != nil {
 		return err
@@ -301,6 +307,8 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 	application.artifacts = artifactStore
+	application.WireVerificationArtifacts(artifactStore)
+	go application.runDeploymentDeadlineSweeper(ctx)
 	gcProjector, err := serverSet.ops.ArtifactGCSuccessProjector()
 	if err != nil {
 		return err
@@ -369,6 +377,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
+	controlService.Verifications = application.verifications
 	// Scheduling admission stops inside any maintenance revision: missed
 	// boundaries record their durable runtime_unavailable tombstone instead
 	// of creating dispatchable work (OPS-UPGRADE-003).
@@ -421,6 +430,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		controlService.dispatchQueuedBrowserOperations(ctx)
 		controlService.dispatchReadyJourneyAttempts(ctx)
 	}
+	application.browserOperationsDispatchFunc = controlService.dispatchQueuedBrowserOperations
 	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
 	application.inspectionCancelDispatchFunc = controlService.dispatchInspectionCancellation
@@ -503,6 +513,8 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	mux.HandleFunc("POST /api/v1/business-systems", configHandler.ServeBusinessSystemUpload)
 	mux.HandleFunc("POST /api/v1/label-contracts", configHandler.ServeLabelContractUpload)
 	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
+	// The helper request is a deterministic YAML download and owns its head.
+	mux.HandleFunc("GET /api/v1/deployment-verifications/{invocationId}/helper-request", application.serveDeploymentVerificationHelperRequest)
 	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
@@ -563,6 +575,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			return application.cancelDispatchFunc(ctx, attemptID)
 		},
 	}
+	application.registerVerificationRoutes(api)
 	investigationHandler.Register(api)
 	configHandler := &appconfig.Handler{
 		Systems:   application.systems,

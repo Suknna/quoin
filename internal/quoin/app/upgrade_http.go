@@ -80,9 +80,9 @@ func (application *apiServer) prepareUpgrade(ctx context.Context, input *prepare
 }
 
 type maintenanceUpgradeOutput struct {
-	Status      int                    `exclude:"true"`
-	CacheControl string                 `header:"Cache-Control"`
-	Body        maintenanceStateResponse `json:"body"`
+	Status       int                      `exclude:"true"`
+	CacheControl string                   `header:"Cache-Control"`
+	Body         maintenanceStateResponse `json:"body"`
 }
 
 // enterUpgradeMaintenance converges the live process onto the maintenance

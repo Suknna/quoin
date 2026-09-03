@@ -10,6 +10,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
+	"github.com/Suknna/quoin/internal/quoin/verification/deployment"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -68,11 +69,13 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION
 	case "journey":
 		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY
+	case "deployment_verification":
+		kind = runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION
 	default:
 		return browser.ErrInvalid
 	}
 	digest := sha256.Sum256(input.CanonicalJSON)
-	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: input.BootID, ConnectionEpoch: input.Epoch, CorrelationId: uint64(input.OperationID), Msg: &runtimev1.ControlEnvelope_StartBrowserOperation{StartBrowserOperation: &runtimev1.StartBrowserOperation{OperationId: input.OperationID, Kind: kind, IdentityId: input.IdentityID, IdentityRevisionId: input.RevisionID, ProfileGenerationId: input.ProfileGenerationID, Input: &runtimev1.BrowserOperationInput{SchemaKind: browserOperationSchemaKind(input.Kind), CanonicalJson: input.CanonicalJSON, ContentDigest: digest[:]}, RequestedAt: timestamppb.New(requested), JourneyCatalogDigest: input.CatalogDigest, JourneyCatalogVersion: input.CatalogVersion}}})
+	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: input.BootID, ConnectionEpoch: input.Epoch, CorrelationId: uint64(input.OperationID), Msg: &runtimev1.ControlEnvelope_StartBrowserOperation{StartBrowserOperation: &runtimev1.StartBrowserOperation{OperationId: input.OperationID, Kind: kind, IdentityId: input.IdentityID, IdentityRevisionId: input.RevisionID, ProfileGenerationId: input.ProfileGenerationID, Input: &runtimev1.BrowserOperationInput{SchemaKind: browserOperationSchemaKind(input.Kind), CanonicalJson: input.CanonicalJSON, ContentDigest: digest[:]}, RequestedAt: timestamppb.New(requested), JourneyCatalogDigest: input.CatalogDigest, JourneyCatalogVersion: input.CatalogVersion, VerificationInvocationItemId: input.VerificationInvocationItemID, CloneIdentity: input.CloneIdentity}}})
 }
 
 // reconcileLintelPhysicalOperations compares Lintel's boot-scoped physical
@@ -129,6 +132,8 @@ func browserOperationSchemaKind(kind string) string {
 		return "exploration_v1"
 	case "journey":
 		return "inspection_collection_v1"
+	case "deployment_verification":
+		return "deployment_verification_v1"
 	default:
 		return ""
 	}
@@ -185,9 +190,25 @@ func (service *RuntimeService) handleBrowserStopAck(ctx context.Context, envelop
 		return
 	}
 	clean := ack.GetCleanupOutcome() == runtimev1.BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED && ack.GetProcessStopped() && ack.GetTunnelClosed() && ack.GetTraceStagingDeleted() && ack.GetTemporaryProfileDeleted() && ack.GetFailureCode() == runtimev1.BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED
-	if service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
+	// Deployment verification owns its stop fence: the typed same-boot
+	// cleanup acknowledgment (basis + hash + coupled result) is one
+	// transaction in the verification service, not the generic stop path.
+	if service.isDeploymentVerificationOperation(ctx, ack.GetOperationId()) && ack.GetCloneIdentity() != "" {
+		stopErr := service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
+			return service.Browsers.HandleDeploymentStopAck(ctx, ack.GetOperationId(), envelope.GetBootId(), envelope.GetConnectionEpoch(),
+				clean, ack.GetStoppedAt().AsTime(), ack.GetCleanupStateHash(), ack.GetOriginalStartBootId(), ack.GetCleanupBootId(),
+				ack.GetCleanupConnectionEpoch(), ack.GetStopFenceDigest(), ack.GetCloneIdentity(), deploymentCleanupCounts(ack))
+		})
+		if stopErr != nil {
+			return
+		}
+		service.afterBrowserStopConvergence(ctx, ack.GetOperationId())
+		return
+	}
+	stopErr := service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
 		return service.Browsers.HandleStopAck(ctx, ack.GetOperationId(), envelope.GetBootId(), envelope.GetConnectionEpoch(), clean, ack.GetStoppedAt().AsTime(), ack.GetCleanupStateHash())
-	}) == nil {
+	})
+	if stopErr == nil {
 		// A parent cancellation waits through terminal cleanup so a delayed Start
 		// never outlives its only owner. A successful normal close is already
 		// terminally committed and must not invoke cancellation convergence: doing
@@ -280,6 +301,9 @@ func (service *RuntimeService) handleBrowserCompletion(ctx context.Context, enve
 	}
 	_ = service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{BootId: envelope.GetBootId(), ConnectionEpoch: envelope.GetConnectionEpoch(), CorrelationId: envelope.GetMessageId(), Msg: &runtimev1.ControlEnvelope_CompleteBrowserOperationAck{CompleteBrowserOperationAck: ack}})
 	if err == nil {
+		if service.isDeploymentVerificationOperation(ctx, result.GetOperationId()) {
+			service.recordDeploymentVerificationCompletion(ctx, envelope, result)
+		}
 		go func() { _ = service.dispatchBrowserStop(context.Background(), result.GetOperationId()) }()
 	}
 }
@@ -411,4 +435,84 @@ func (service *RuntimeService) dispatchQueuedBrowserOperations(ctx context.Conte
 			return
 		}
 	}
+}
+
+// isDeploymentVerificationOperation reports whether the operation owns a
+// Deployment Acceptance manifest item.
+func (service *RuntimeService) isDeploymentVerificationOperation(ctx context.Context, operationID int64) bool {
+	if service.Verifications == nil || service.Browsers == nil || operationID == 0 {
+		return false
+	}
+	var itemID int64
+	err := service.Browsers.DB().QueryRowContext(ctx, `SELECT verification_manifest_item_id FROM browser_operations WHERE id=? AND kind='deployment_verification'`, operationID).Scan(&itemID)
+	return err == nil && itemID > 0
+}
+
+// recordDeploymentVerificationCompletion persists the functional side of a
+// deployment verification completion after the generic terminalization.
+func (service *RuntimeService) recordDeploymentVerificationCompletion(ctx context.Context, envelope *runtimev1.ControlEnvelope, result *runtimev1.CompleteBrowserOperation) {
+	if service.Verifications == nil {
+		return
+	}
+	outcome := ""
+	switch result.GetOutcome() {
+	case runtimev1.BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_SUCCEEDED:
+		outcome = "Succeeded"
+	case runtimev1.BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_FAILED:
+		outcome = "Failed"
+	default:
+		return
+	}
+	terminal := ""
+	switch result.GetTerminalReason() {
+	case runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED:
+		terminal = "authentication_required"
+	case runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED:
+		terminal = "browser_crashed"
+	case runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR:
+		terminal = "protocol_error"
+	}
+	probe := ""
+	for _, observed := range result.GetProbeResults() {
+		if observed == nil || observed.GetObservedAt() == nil || !observed.GetObservedAt().IsValid() {
+			continue
+		}
+		switch observed.GetResult() {
+		case runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_AUTHENTICATED:
+			probe = "Authenticated"
+		case runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED:
+			probe = "Unauthenticated"
+		case runtimev1.AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_INDETERMINATE:
+			probe = "Indeterminate"
+		}
+	}
+	_ = service.Verifications.HandleBrowserCompletion(ctx, deployment.BrowserCompletion{
+		OperationID: result.GetOperationId(), Outcome: outcome, TerminalReason: terminal,
+		ResultDigest: result.GetResultDigest(), EndedAt: result.GetEndedAt().AsTime(),
+		ProbeResult: probe, ProbeObservedAt: probeObservedAt(result),
+	})
+}
+
+// deploymentCleanupCounts projects the typed resource-zero counts.
+func deploymentCleanupCounts(ack *runtimev1.StopBrowserOperationAck) [9]uint64 {
+	return [9]uint64{
+		ack.GetOperationProcessCount(), ack.GetCgroupProcessCount(), ack.GetChromiumProcessCount(),
+		ack.GetX0VncProcessCount(), ack.GetNovncTunnelCount(), ack.GetCloneNamespaceCount(),
+		ack.GetTemporaryFileCount(), ack.GetRuntimeHandleCount(), ack.GetSlotLeaseCount(),
+	}
+}
+
+// afterBrowserStopConvergence runs the shared post-stop reconciliation.
+func (service *RuntimeService) afterBrowserStopConvergence(ctx context.Context, operationID int64) {
+	go service.reconcilePendingAttemptTerminals(context.Background())
+	go service.dispatchQueuedBrowserOperations(context.Background())
+}
+
+func probeObservedAt(result *runtimev1.CompleteBrowserOperation) string {
+	for _, observed := range result.GetProbeResults() {
+		if observed.GetObservedAt() != nil && observed.GetObservedAt().IsValid() {
+			return observed.GetObservedAt().AsTime().UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return result.GetEndedAt().AsTime().UTC().Format(time.RFC3339Nano)
 }

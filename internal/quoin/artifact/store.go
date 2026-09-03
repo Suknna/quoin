@@ -597,6 +597,61 @@ func (store *Store) MaterializeEvidenceTransaction(ctx context.Context, conn *sq
 	return insert.LastInsertId()
 }
 
+// CommitInlineArtifact durably stores non-runtime canonical bytes (the
+// Deployment Acceptance helper report and finalization bundle) as a
+// content-addressed artifact on the caller's open transaction connection:
+// the blob file is installed first, then the blob/artifact rows join the
+// caller's transaction. It follows the evidence materialization discipline
+// exactly; kind/owner/retention are validated by the schema triggers.
+func (store *Store) CommitInlineArtifact(ctx context.Context, conn *sql.Conn, kind, mediaType, retentionKind, ownerType string, ownerID int64, body []byte, createdAt time.Time) (int64, string, error) {
+	if createdAt.IsZero() {
+		createdAt = store.now()
+	}
+	sum := sha256.Sum256(body)
+	shaHex := hex.EncodeToString(sum[:])
+	staged, err := os.CreateTemp(filepath.Join(store.dir, "staging"), "inline-*.part")
+	if err != nil {
+		return 0, "", err
+	}
+	stagingPath := staged.Name()
+	defer os.Remove(stagingPath)
+	if _, err = staged.Write(body); err != nil {
+		staged.Close()
+		return 0, "", err
+	}
+	if err = staged.Sync(); err != nil {
+		staged.Close()
+		return 0, "", err
+	}
+	if err = staged.Close(); err != nil {
+		return 0, "", err
+	}
+	store.blobMu.Lock()
+	err = store.installVerifiedBlobFrom(stagingPath, UploadHeader{SizeBytes: int64(len(body)), SHA256: sum[:]}, store.blobPath(shaHex))
+	store.blobMu.Unlock()
+	if err != nil {
+		return 0, "", err
+	}
+	var blobID int64
+	err = conn.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		insert, insertErr := conn.ExecContext(ctx, `INSERT INTO artifact_blobs(sha256,size_bytes,storage_key,created_at) VALUES(?,?,?,?)`, shaHex, len(body), "blobs/"+shaHex+".blob", createdAt.Format(time.RFC3339Nano))
+		if insertErr != nil {
+			return 0, "", insertErr
+		}
+		blobID, err = insert.LastInsertId()
+	} else if err != nil {
+		return 0, "", err
+	}
+	insert, err := conn.ExecContext(ctx, `INSERT INTO artifacts(blob_id,kind,media_type,sensitive,retention_kind,owner_type,owner_id,created_at) VALUES(?,?,?,0,?,?,?,?)`,
+		blobID, kind, mediaType, retentionKind, ownerType, ownerID, createdAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, "", err
+	}
+	artifactID, err := insert.LastInsertId()
+	return artifactID, shaHex, err
+}
+
 func verifyBlob(path string, expectedSize int64, expectedHash []byte) error {
 	info, err := os.Stat(path)
 	if err != nil {
