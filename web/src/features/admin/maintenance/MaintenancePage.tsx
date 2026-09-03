@@ -1,6 +1,8 @@
 import { ConnectionsPanel } from '../connections/ConnectionsPanel'
 import type { UserSummary } from '../../../api/generated/types'
 import type { MaintenanceState } from '../../../app/api'
+import { UpgradeMaintenancePanel } from './UpgradeMaintenancePanel'
+import type { MaintenanceStateView } from './api'
 
 const labels: Record<NonNullable<MaintenanceState['reason']>, string> = { Restore: '恢复后信任重建', Upgrade: '升级协调', RootKeyRebind: '根密钥更换' }
 
@@ -10,7 +12,7 @@ const labels: Record<NonNullable<MaintenanceState['reason']>, string> = { Restor
 export function MaintenancePage({ user, state, onLogout }: { user: UserSummary; state: MaintenanceState; onLogout: () => void }) {
   return <main className="maintenance-page" aria-labelledby="maintenance-title">
     <header className="maintenance-page-header"><div className="brand-mark">Q</div><div><p className="eyebrow">维护中</p><h1 id="maintenance-title">{state.reason ? labels[state.reason] : '维护'}</h1></div><button className="text-button" onClick={onLogout}>退出登录</button></header>
-    <section className="maintenance-page-card"><p>普通业务入口已暂停。系统会在退出维护时重新核验清单，不能跳过。</p>{state.reason === 'RootKeyRebind' ? <ConnectionsPanel maintenanceMode /> : <MaintenanceChecklist state={state} user={user} />}</section>
+    <section className="maintenance-page-card"><p>普通业务入口已暂停。系统会在退出维护时重新核验清单，不能跳过。</p>{state.reason === 'RootKeyRebind' ? <ConnectionsPanel maintenanceMode /> : state.reason === 'Upgrade' ? <UpgradeMaintenancePanel user={user} initialState={state as MaintenanceStateView} /> : <MaintenanceChecklist state={state} user={user} />}</section>
   </main>
 }
 

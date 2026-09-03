@@ -9,6 +9,7 @@ import { ConnectionsPanel } from '../admin/connections/ConnectionsPanel'
 import { AdminUsersPanel } from '../admin/users/AdminUsersPanel'
 import { RuntimesPanel } from '../admin/runtimes/RuntimesPanel'
 import { BackupPanel } from '../admin/backup/BackupPanel'
+import { PrepareUpgradeCard } from '../admin/maintenance/UpgradeMaintenancePanel'
 import { BusinessSystemsList } from '../admin/business-systems/BusinessSystemsList'
 import { BusinessSystemDetailPage } from '../admin/business-systems/BusinessSystemDetail'
 import { ConfigVersionPage } from '../admin/business-systems/ConfigVersionDetail'
@@ -128,7 +129,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
   const [openAnalysisId, setOpenAnalysisId] = useState<string | null>(null)
   const [alertSegment, setAlertSegment] = useState<AlertSegment>(() => alertRouteFromPath().segment)
   const [alertSystemFilter, setAlertSystemFilter] = useState<string>(() => alertRouteFromPath().businessSystemKey)
-  const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes' | 'backup'>('users')
+  const [adminSegment, setAdminSegment] = useState<'users' | 'connections' | 'runtimes' | 'backup' | 'maintenance'>('users')
 	const [investigationView, setInvestigationView] = useState<InvestigationView>(investigationViewFromPath)
 	const [businessSystemView, setBusinessSystemView] = useState<BusinessSystemView>(businessSystemViewFromPath)
   const [inspectionView, setInspectionView] = useState<InspectionView>(inspectionViewFromPath)
@@ -386,6 +387,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
             <button aria-selected={adminSegment === 'connections'} onClick={() => setAdminSegment('connections')}>连接</button>
             <button aria-selected={adminSegment === 'runtimes'} onClick={() => setAdminSegment('runtimes')}>运行组件</button>
              <button aria-selected={adminSegment === 'backup'} onClick={() => setAdminSegment('backup')}>备份与保留</button>
+            <button aria-selected={adminSegment === 'maintenance'} onClick={() => setAdminSegment('maintenance')}>维护与升级</button>
           </div>
           <section className="runtime-summary" aria-labelledby="runtime-title">
             <h2 id="runtime-title">运行组件</h2>
@@ -433,7 +435,7 @@ export function Workbench({ user, onLogout }: WorkbenchProps) {
       </aside>
       <main className="detail-pane" tabIndex={-1}>
         {active === 'admin' && user.role === 'admin' ? (
-          adminSegment === 'runtimes' ? <RuntimesPanel /> : adminSegment === 'connections' ? <ConnectionsPanel /> : adminSegment === 'backup' ? <BackupPanel /> : <AdminUsersPanel currentUser={user} />
+          adminSegment === 'runtimes' ? <RuntimesPanel /> : adminSegment === 'connections' ? <ConnectionsPanel /> : adminSegment === 'backup' ? <BackupPanel /> : adminSegment === 'maintenance' ? <PrepareUpgradeCard onPrepared={() => window.location.reload()} /> : <AdminUsersPanel currentUser={user} />
         ) : active === 'alerts' && selectedOccurrence ? (
           <AlertDetail
             occurrenceId={selectedOccurrence}
