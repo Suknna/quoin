@@ -26,6 +26,7 @@ type Service struct {
 	publicOrigin     string
 	artifacts        artifactStore
 	browserCanceller func(ctx context.Context, invocationID int64)
+	execution        ExecutionHooks
 }
 
 // artifactStore is the narrow surface the finalizer/helper import need from
