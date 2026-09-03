@@ -10,9 +10,10 @@ import (
 	"runtime"
 
 	"github.com/Suknna/quoin/cmd/quoin-deploy/install"
-	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
 	recovery "github.com/Suknna/quoin/cmd/quoin-deploy/recover_lintel"
+	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
 	"github.com/Suknna/quoin/cmd/quoin-deploy/verify"
+	"github.com/Suknna/quoin/internal/deploy/acceptance"
 	deploycompose "github.com/Suknna/quoin/internal/deploy/compose"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
 	"github.com/Suknna/quoin/internal/deploy/report"
@@ -27,6 +28,15 @@ func Main(command string, arguments []string) {
 		install.Run(flags.ConfigPath, flags.ReleaseManifestPath, flags.ReportPath)
 	case "verify":
 		flags := Parse("compose verify", arguments)
+		if flags.HelperRequestPath != "" {
+			os.Exit(acceptance.Run(acceptance.RunRequest{
+				Backend: "compose", ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath,
+				HelperRequestPath: flags.HelperRequestPath, ReportPath: flags.ReportPath, Stdout: os.Stdout, Stderr: os.Stderr,
+				Verify: func(genericReportPath string) int {
+					return deploycompose.Verify(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: genericReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr})
+				},
+			}))
+		}
 		verify.Run(flags.ConfigPath, flags.ReleaseManifestPath, flags.ReportPath)
 	case "backup":
 		flags := Parse("compose backup", arguments)
@@ -44,7 +54,7 @@ func Main(command string, arguments []string) {
 		flags := recovery.Parse("compose recover-lintel", arguments)
 		os.Exit(deploycompose.RecoverLintel(deploycompose.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|upgrade|verify|backup|restore|recover-lintel> --config <path> [--release-manifest <path>] [--report <path>] [--offline] [--backup <backup-id>]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy compose <install|upgrade|verify|backup|restore|recover-lintel> --config <path> [--release-manifest <path>] [--report <path>] [--helper-request <path>] [--offline] [--backup <backup-id>]")
 		os.Exit(2)
 	}
 }
@@ -58,6 +68,7 @@ type Flags struct {
 	ReportPath          string
 	Offline             bool
 	BackupID            string
+	HelperRequestPath   string
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -71,10 +82,11 @@ func Parse(name string, arguments []string) Flags {
 	reportPath := flags.String("report", "", "where the atomic verification-report.json is written")
 	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
 	backupID := flags.String("backup", "", "published backup identifier for restore")
+	helperRequestPath := flags.String("helper-request", "", "Deployment Acceptance helper request YAML")
 	parseErr := flags.Parse(arguments)
 	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath}
 	}
 	brief := report.New("compose", fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")

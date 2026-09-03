@@ -23,6 +23,6 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: quoin-deploy <compose|helm> <install|upgrade|verify|backup|restore|recover-lintel> --config <path> [--release-manifest <path>] [--report <path>]")
+	fmt.Fprintln(os.Stderr, "usage: quoin-deploy <compose|helm> <install|upgrade|verify|backup|restore|recover-lintel> --config <path> [--release-manifest <path>] [--report <path>] [--helper-request <path>]")
 	os.Exit(2)
 }

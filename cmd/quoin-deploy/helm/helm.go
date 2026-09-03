@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
 	recovery "github.com/Suknna/quoin/cmd/quoin-deploy/recover_lintel"
+	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
+	"github.com/Suknna/quoin/internal/deploy/acceptance"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
 	deployhelm "github.com/Suknna/quoin/internal/deploy/helm"
 	"github.com/Suknna/quoin/internal/deploy/report"
@@ -26,6 +27,15 @@ func Main(command string, arguments []string) {
 		}))
 	case "verify":
 		flags := Parse("helm verify", arguments)
+		if flags.HelperRequestPath != "" {
+			os.Exit(acceptance.Run(acceptance.RunRequest{
+				Backend: "kubernetes", ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath,
+				HelperRequestPath: flags.HelperRequestPath, ReportPath: flags.ReportPath, Stdout: os.Stdout, Stderr: os.Stderr,
+				Verify: func(genericReportPath string) int {
+					return deployhelm.Verify(deployhelm.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: genericReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr})
+				},
+			}))
+		}
 		os.Exit(deployhelm.Verify(deployhelm.Request{
 			ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath,
 			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
@@ -46,7 +56,7 @@ func Main(command string, arguments []string) {
 		flags := recovery.Parse("helm recover-lintel", arguments)
 		os.Exit(deployhelm.RecoverLintel(deployhelm.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|upgrade|verify|backup|restore|recover-lintel> --config <path> --release-manifest <path> [--report <path>] [--offline] [--backup <backup-id>]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|upgrade|verify|backup|restore|recover-lintel> --config <path> --release-manifest <path> [--report <path>] [--helper-request <path>] [--offline] [--backup <backup-id>]")
 		os.Exit(2)
 	}
 }
@@ -58,6 +68,7 @@ type Flags struct {
 	ReportPath          string
 	Offline             bool
 	BackupID            string
+	HelperRequestPath   string
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -70,10 +81,11 @@ func Parse(name string, arguments []string) Flags {
 	reportPath := flags.String("report", "", "where the atomic verification-report.json is written")
 	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
 	backupID := flags.String("backup", "", "published backup identifier for restore")
+	helperRequestPath := flags.String("helper-request", "", "Deployment Acceptance helper request YAML")
 	parseErr := flags.Parse(arguments)
 	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath}
 	}
 	brief := report.New("helm", fmt.Sprintf("%s/%s", os.Getenv("GOOS"), os.Getenv("GOARCH")), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")
