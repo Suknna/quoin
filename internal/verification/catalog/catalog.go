@@ -29,6 +29,15 @@ var layerRank = map[string]int{
 	LayerDeploymentAcceptance: 2,
 }
 
+// Scenario lifecycle and requirement vocabulary frozen by the catalog
+// schema; Go code must not re-freeze these strings ad hoc.
+const (
+	StatusActive          = "active"
+	StatusRetired         = "retired"
+	RequirementRequired   = "required"
+	RequirementDiagnostic = "diagnostic"
+)
+
 // Target is the deployment context applicability modes resolve against. The
 // contract-gate layer runs without one, so only `always` cells apply.
 type Target struct {

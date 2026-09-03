@@ -91,7 +91,7 @@ func Run(opts Options) (*RunReport, error) {
 func (state *invocation) executeLayer() error {
 	for _, scenarioID := range catalog.ExecutionOrder(state.catalog, state.opts.Layer) {
 		scenario := state.catalog.Scenario(scenarioID)
-		if scenario.Requirement != "required" {
+		if scenario.Requirement != catalog.RequirementRequired {
 			continue
 		}
 		if err := state.executeScenario(scenario); err != nil {
@@ -158,7 +158,7 @@ func (state *invocation) executeDiagnostics() error {
 	}
 	for _, scenarioID := range catalog.ExecutionOrder(state.catalog, state.opts.Layer) {
 		scenario := state.catalog.Scenario(scenarioID)
-		if scenario.Requirement != "diagnostic" || scenario.Status != "active" {
+		if scenario.Requirement != catalog.RequirementDiagnostic || scenario.Status != catalog.StatusActive {
 			continue
 		}
 		triggered := false
@@ -211,7 +211,7 @@ func (state *invocation) finalize() (*RunReport, error) {
 	var required []evidence.Item
 	for i := range state.items {
 		scenario := state.catalog.Scenario(state.items[i].ScenarioID)
-		if scenario != nil && scenario.Requirement == "diagnostic" {
+		if scenario != nil && scenario.Requirement == catalog.RequirementDiagnostic {
 			continue
 		}
 		required = append(required, state.items[i])

@@ -22,7 +22,16 @@ import (
 // assert phase writes it to $QUOIN_VERIFY_FACTS; the runner compares the
 // reported actuals against the catalog expectations and never accepts an
 // executor's self-declared result.
-const factsSchemaKind = "quoin-verify-facts-v1"
+// FactsSchemaKind is the frozen discriminator of the executor facts document.
+const FactsSchemaKind = "quoin-verify-facts-v1"
+
+// Phase names shared by the execution order and the outcome bookkeeping.
+const (
+	phaseSetup    = "setup"
+	phaseAction   = "action"
+	phaseAssert   = "assert"
+	phaseTeardown = "teardown"
+)
 
 type factValue struct {
 	Actual any `json:"actual"`
@@ -55,7 +64,7 @@ func (state *invocation) notRunItem(scenario *catalog.Scenario, cell catalog.Cel
 		ScenarioID: scenario.ID, CellID: cell.ID,
 		InputDigest:  state.inputDigest(scenario, cell),
 		ResultDigest: "",
-		Outcome:      "warned", Category: "not_run",
+		Outcome:      state.profile.Outcome("not_run"), Category: "not_run",
 		StartedAt: started, FinishedAt: started,
 		AuthoritativeRecordedAt: started,
 		AuthoritativeTimeSource: "ci_runner_clock",
@@ -86,23 +95,23 @@ func (state *invocation) executeCell(scenario *catalog.Scenario, cell *catalog.C
 	parameters, _ := json.Marshal(cell.Parameters)
 	factsPath := filepath.Join(workdir, "facts.json")
 
-	phases := []struct{ name, command string }{
-		{"setup", scenario.Phases.Setup},
-		{"action", scenario.Phases.Action},
-		{"assert", scenario.Phases.Assert},
+	phaseCommands := []struct{ name, command string }{
+		{phaseSetup, scenario.Phases.Setup},
+		{phaseAction, scenario.Phases.Action},
+		{phaseAssert, scenario.Phases.Assert},
 	}
 	results := map[string]*phaseOutcome{}
-	for _, phase := range phases {
+	for _, phase := range phaseCommands {
 		outcome := state.runPhase(phase.name, phase.command, scenario, cell, workdir, factsPath, string(parameters), deadline)
 		results[phase.name] = outcome
 	}
-	assertPhase := results["assert"]
+	assertPhase := results[phaseAssert]
 
 	// Teardown always executes, even after setup/action/assert failures
 	// (VERIFY-VERDICT-003); it gets its own full budget so a burned-down
 	// execution window can never skip it.
 	teardownBudget := time.Now().Add(time.Duration(scenario.TimeoutSeconds) * time.Second)
-	teardown := state.runPhase("teardown", scenario.Phases.Teardown, scenario, cell, workdir, factsPath, string(parameters), teardownBudget)
+	teardown := state.runPhase(phaseTeardown, scenario.Phases.Teardown, scenario, cell, workdir, factsPath, string(parameters), teardownBudget)
 
 	facts, factsValid := readFacts(factsPath)
 
@@ -215,7 +224,7 @@ func (state *invocation) runPhase(name, command string, scenario *catalog.Scenar
 }
 
 func phaseInterruption(results map[string]*phaseOutcome) bool {
-	for _, name := range []string{"setup", "action", "assert"} {
+	for _, name := range []string{phaseSetup, phaseAction, phaseAssert} {
 		outcome := results[name]
 		if outcome == nil {
 			return true
@@ -230,6 +239,10 @@ func phaseInterruption(results map[string]*phaseOutcome) bool {
 func cleanupOutcome(scenario *catalog.Scenario, teardown *phaseOutcome) evidence.Cleanup {
 	cleanup := evidence.Cleanup{Required: scenario.Cleanup.Required, Assertions: []evidence.Assertion{}}
 	switch {
+	case teardown.command == "no-op" || teardown.command == "":
+		// A declared no-op records that cleanup never ran; a synthetic
+		// zero exit must not masquerade as an executed clean teardown.
+		cleanup.Outcome = "not_run"
 	case teardown.timedOut || teardown.failed:
 		if scenario.Cleanup.Required {
 			cleanup.Outcome = "residue"
@@ -238,8 +251,6 @@ func cleanupOutcome(scenario *catalog.Scenario, teardown *phaseOutcome) evidence
 		}
 	case teardown.exitCode != nil && *teardown.exitCode == 0:
 		cleanup.Outcome = "clean"
-	case teardown.command == "no-op" || teardown.command == "":
-		cleanup.Outcome = "not_run"
 	default:
 		if scenario.Cleanup.Required {
 			cleanup.Outcome = "residue"
@@ -316,7 +327,7 @@ func readFacts(path string) (*factsDocument, bool) {
 	if err := json.Unmarshal(body, &document); err != nil {
 		return nil, false
 	}
-	if document.SchemaKind != factsSchemaKind {
+	if document.SchemaKind != FactsSchemaKind {
 		return nil, false
 	}
 	for _, check := range document.Checks {
@@ -378,7 +389,7 @@ func (state *invocation) resultDigest(item evidence.Item) string {
 
 func argvOf(results map[string]*phaseOutcome, teardown *phaseOutcome) []string {
 	argv := make([]string, 0, 5)
-	for _, name := range []string{"setup", "action", "assert"} {
+	for _, name := range []string{phaseSetup, phaseAction, phaseAssert} {
 		if outcome := results[name]; outcome != nil && outcome.command != "" {
 			argv = append(argv, outcome.command)
 		}
@@ -392,7 +403,7 @@ func argvOf(results map[string]*phaseOutcome, teardown *phaseOutcome) []string {
 func (state *invocation) writeAttachments(scenario *catalog.Scenario, cell *catalog.Cell, workdir string, results map[string]*phaseOutcome, teardown *phaseOutcome, factsPath string, factsValid bool) ([]evidence.Attachment, error) {
 	root := filepath.Join(state.opts.OutputDir, "cells", scenario.ID, cell.ID)
 	var stdout, stderr bytes.Buffer
-	for _, name := range []string{"setup", "action", "assert"} {
+	for _, name := range []string{phaseSetup, phaseAction, phaseAssert} {
 		outcome := results[name]
 		if outcome == nil {
 			continue
@@ -400,8 +411,8 @@ func (state *invocation) writeAttachments(scenario *catalog.Scenario, cell *cata
 		fmt.Fprintf(&stdout, "=== %s ===\n%s", name, outcome.stdout.String())
 		fmt.Fprintf(&stderr, "=== %s ===\n%s", name, outcome.stderr.String())
 	}
-	fmt.Fprintf(&stdout, "=== teardown ===\n%s", teardown.stdout.String())
-	fmt.Fprintf(&stderr, "=== teardown ===\n%s", teardown.stderr.String())
+	fmt.Fprintf(&stdout, "=== %s ===\n%s", phaseTeardown, teardown.stdout.String())
+	fmt.Fprintf(&stderr, "=== %s ===\n%s", phaseTeardown, teardown.stderr.String())
 
 	attachments := []evidence.Attachment{}
 	for _, attachment := range scenario.Evidence.Attachments {
@@ -419,7 +430,7 @@ func (state *invocation) writeAttachments(scenario *catalog.Scenario, cell *cata
 			}
 			attachments = append(attachments, written)
 		case evidence.AttachmentStructuredResult:
-			body := []byte(`{"schema_kind":"` + factsSchemaKind + `","error":"facts not written"}`)
+			body := []byte(`{"schema_kind":"` + FactsSchemaKind + `","error":"facts not written"}`)
 			if factsValid {
 				if raw, err := os.ReadFile(factsPath); err == nil {
 					body = raw

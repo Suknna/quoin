@@ -104,7 +104,7 @@ func (c *Catalog) rootCoverageViolations() []Violation {
 	covered := map[string]bool{}
 	for i := range c.Scenarios {
 		scenario := &c.Scenarios[i]
-		if scenario.Requirement != "required" {
+		if scenario.Requirement != RequirementRequired {
 			continue
 		}
 		for _, root := range scenario.ValidationRoots {
@@ -132,7 +132,7 @@ func (c *Catalog) applicabilityClosureViolations() []Violation {
 	var violations []Violation
 	for i := range c.Scenarios {
 		scenario := &c.Scenarios[i]
-		if scenario.Status != "active" {
+		if scenario.Status != StatusActive {
 			continue
 		}
 		for _, dependency := range scenario.DependsOn {
@@ -156,20 +156,18 @@ func (c *Catalog) applicabilityClosureViolations() []Violation {
 
 func layerTargetUniverse(layer string) []*Target {
 	switch layer {
-	case LayerReleaseQualification:
-		return []*Target{
-			{Backend: "compose", Architecture: "linux/amd64"},
-			{Backend: "compose", Architecture: "linux/arm64"},
-			{Backend: "kubernetes", Architecture: "linux/amd64"},
-			{Backend: "kubernetes", Architecture: "linux/arm64"},
+	case LayerReleaseQualification, LayerDeploymentAcceptance:
+		// Both native layers enumerate the same backend/architecture
+		// matrix; deployment acceptance additionally freezes each site's
+		// current objects into the target.
+		withObjects := layer == LayerDeploymentAcceptance
+		universe := make([]*Target, 0, 4)
+		for _, backend := range []string{"compose", "kubernetes"} {
+			for _, architecture := range []string{"linux/amd64", "linux/arm64"} {
+				universe = append(universe, &Target{Backend: backend, Architecture: architecture, CurrentObject: withObjects})
+			}
 		}
-	case LayerDeploymentAcceptance:
-		return []*Target{
-			{Backend: "compose", Architecture: "linux/amd64", CurrentObject: true},
-			{Backend: "compose", Architecture: "linux/arm64", CurrentObject: true},
-			{Backend: "kubernetes", Architecture: "linux/amd64", CurrentObject: true},
-			{Backend: "kubernetes", Architecture: "linux/arm64", CurrentObject: true},
-		}
+		return universe
 	default:
 		return []*Target{nil}
 	}
@@ -253,12 +251,11 @@ func ApplicableCells(scenario *Scenario, target *Target) []Cell {
 // active scenarios. The catalog gate has already rejected cycles; here ties
 // break alphabetically so repeated invocations plan identically.
 func ExecutionOrder(c *Catalog, layer string) []string {
-	ready := map[string]bool{}
 	var order []string
 	remaining := map[string]*Scenario{}
 	for i := range c.Scenarios {
 		scenario := &c.Scenarios[i]
-		if scenario.Layer == layer && scenario.Status == "active" {
+		if scenario.Layer == layer && scenario.Status == StatusActive {
 			remaining[scenario.ID] = scenario
 		}
 	}
@@ -289,10 +286,8 @@ func ExecutionOrder(c *Catalog, layer string) []string {
 		sort.Strings(candidates)
 		for _, id := range candidates {
 			order = append(order, id)
-			ready[id] = true
 			delete(remaining, id)
 		}
 	}
-	_ = ready
 	return order
 }
