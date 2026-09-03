@@ -73,6 +73,8 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 		kind = "exploration_v1"
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY:
 		kind = "inspection_collection_v1"
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION:
+		kind = "deployment_verification_v1"
 	default:
 		return errors.New("unsupported browser operation kind")
 	}
@@ -97,6 +99,21 @@ func validateStartInput(request *runtimev1.StartBrowserOperation) error {
 	bindingName := "probe"
 	if kind == "manual_login_v1" || kind == "exploration_v1" || kind == "inspection_collection_v1" {
 		bindingName = "authenticationProbe"
+	}
+	if kind == "deployment_verification_v1" {
+		var deployment struct {
+			VerificationInvocationItemID int64  `json:"verificationInvocationItemId"`
+			CloneIdentity                string `json:"cloneIdentity"`
+		}
+		if err := json.Unmarshal(canonical, &deployment); err != nil {
+			return fmt.Errorf("parse deployment verification binding: %w", err)
+		}
+		if deployment.VerificationInvocationItemID != request.GetVerificationInvocationItemId() || deployment.VerificationInvocationItemID == 0 {
+			return errors.New("deployment verification manifest item binding does not match control envelope")
+		}
+		if deployment.CloneIdentity == "" || deployment.CloneIdentity != request.GetCloneIdentity() {
+			return errors.New("deployment verification clone identity does not match control envelope")
+		}
 	}
 	binding, ok := value[bindingName].(map[string]any)
 	if !ok {

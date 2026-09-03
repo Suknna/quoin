@@ -144,7 +144,7 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 	switch request.GetKind() {
 	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN:
 		_, err = channel.browser.Start(context.Background(), request.GetOperationId(), input.Identity.StartURL)
-	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY:
+	case runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY, runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION:
 		if request.GetProfileGenerationId() < 1 || input.Identity.ProfileGeneration == 0 {
 			ack.RejectReason, ack.Detail = runtimev1.BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE, "frozen profile generation is missing"
 			return channel.startAckReply(envelope, ack)
@@ -163,6 +163,12 @@ func (channel *Channel) startResponse(envelope *runtimev1.ControlEnvelope, reque
 		}
 		if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION {
 			_, err = channel.browser.StartExplorationWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
+		} else if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION {
+			// The manager's isolated writable copy of the current published
+			// profile IS the deterministic disposable clone (VERIFY-BROWSER-002):
+			// the original generation bytes stay immutable, the clone is never
+			// published, and Stop owns its removal with typed evidence.
+			_, err = channel.browser.StartWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
 		} else {
 			_, err = channel.browser.StartWithProfile(context.Background(), request.GetOperationId(), input.Identity.StartURL, path)
 		}
@@ -277,6 +283,10 @@ func (channel *Channel) publishResponse(envelope *runtimev1.ControlEnvelope, req
 		result.RejectReason, result.Detail = runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR, "operation binding mismatch"
 		return reply()
 	}
+	if start.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION {
+		result.RejectReason, result.Detail = runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR, "deployment verification operations cannot publish profiles"
+		return reply()
+	}
 	var input struct {
 		AuthenticationProbe struct {
 			ID      string `json:"id"`
@@ -385,6 +395,26 @@ func (channel *Channel) stopResponse(envelope *runtimev1.ControlEnvelope, reques
 	traceDeleted := traceErr == nil
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%t:%t", request.GetOperationId(), err == nil, traceDeleted)))
 	ack := &runtimev1.StopBrowserOperationAck{OperationId: request.GetOperationId(), StoppedAt: timestamppb.Now(), CleanupOutcome: outcome, ProcessStopped: err == nil, TunnelClosed: err == nil, TraceStagingDeleted: traceDeleted, TemporaryProfileDeleted: err == nil, CleanupStateHash: sum[:], FailureCode: failure}
+	if request.GetCloneIdentity() != "" {
+		// Deployment verification stops carry the typed resource-zero proof:
+		// echo the frozen clone/start-boot binding, bind this cleanup boot and
+		// epoch, digest the exact Stop fence, and report per-resource counts.
+		// The manager stops process/tunnel/profile atomically; a failed Stop
+		// is reported as a still-running operation process, never a fabricated
+		// zero (VERIFY-BROWSER-003).
+		fence := sha256.Sum256([]byte(fmt.Sprintf("stop:%d:%s:%s:%d", request.GetOperationId(), request.GetCloneIdentity(), request.GetOriginalStartBootId(), request.GetCommittedAt().AsTime().UnixNano())))
+		ack.OriginalStartBootId = request.GetOriginalStartBootId()
+		ack.CleanupBootId = channel.bootID
+		ack.CleanupConnectionEpoch = channel.epoch
+		ack.StopFenceDigest = fence[:]
+		ack.CloneIdentity = request.GetCloneIdentity()
+		if err != nil {
+			ack.OperationProcessCount = 1
+		}
+		if !traceDeleted {
+			ack.CloneNamespaceCount = 1
+		}
+	}
 	channel.operationMu.Lock()
 	channel.recordStopTombstoneLocked(request.GetOperationId(), ack)
 	completionPending := channel.completed[request.GetOperationId()] != nil

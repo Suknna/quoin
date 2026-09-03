@@ -215,6 +215,11 @@ func (channel *Channel) handleStartRequest(send func(*runtimev1.ControlEnvelope)
 		go channel.openBrowserTunnel(request)
 	} else if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE {
 		go channel.completeRevisionProbe(request)
+	} else if request.GetKind() == runtimev1.BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION {
+		// Deployment verification runs the frozen URL-prefix probe against the
+		// disposable clone and reports the typed completion; Stop then owns the
+		// typed cleanup evidence (VERIFY-BROWSER-001..003).
+		go channel.completeRevisionProbe(request)
 	}
 	return nil
 }
