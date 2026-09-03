@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
 	recovery "github.com/Suknna/quoin/cmd/quoin-deploy/recover_lintel"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
 	deployhelm "github.com/Suknna/quoin/internal/deploy/helm"
@@ -35,11 +36,17 @@ func Main(command string, arguments []string) {
 	case "restore":
 		flags := Parse("helm restore", arguments)
 		os.Exit(deployhelm.Restore(deployhelm.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags.BackupID))
+	case "upgrade":
+		flags := deployupgrade.Parse("helm upgrade", arguments)
+		os.Exit(deployhelm.Upgrade(deployhelm.Request{
+			ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath,
+			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		}, flags))
 	case "recover-lintel":
 		flags := recovery.Parse("helm recover-lintel", arguments)
 		os.Exit(deployhelm.RecoverLintel(deployhelm.Request{ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath, ReportPath: flags.ReportPath, Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}, flags))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|verify|backup|restore|recover-lintel> --config <path> --release-manifest <path> [--report <path>] [--offline] [--backup <backup-id>]")
+		fmt.Fprintln(os.Stderr, "usage: quoin-deploy helm <install|upgrade|verify|backup|restore|recover-lintel> --config <path> --release-manifest <path> [--report <path>] [--offline] [--backup <backup-id>]")
 		os.Exit(2)
 	}
 }
