@@ -114,3 +114,53 @@ func TestRenderWithPinnedImagesAndVerifyOverlay(t *testing.T) {
 		t.Fatalf("verifier entrypoint must be the healthcheck binary: %v", verifier.Entrypoint)
 	}
 }
+
+func TestRenderDeploymentBinding(t *testing.T) {
+	root := t.TempDir()
+	input := contract.ComposeInstall{Document: "compose-install", PublicOrigin: "https://quoin.test", PublishMode: "loopback", QuoinPublicHostPort: 18080, SteleWebhookHostPort: 18081, SecretDirectory: filepath.Join(root, "secrets"), LintelBrowserSlots: 1, LintelShmSizeBytes: 1 << 30}
+	binding := &contract.DeploymentBinding{
+		ReleaseVersion:          "v1.2.3",
+		ReleaseSubjectDigest:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DeploymentConfigDigest:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Backend:                 "compose",
+		Architecture:            "linux/amd64",
+		BrowserChromiumRevision: "1200.0.6099.109",
+	}
+	projection, err := compose.RenderWithOptions(input, filepath.Join(root, "state"), compose.Options{DeploymentBinding: binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoin, err := os.ReadFile(filepath.Join(projection.Directory, "quoin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered contract.QuoinConfig
+	if err := contract.Decode(quoin, &rendered); err != nil {
+		t.Fatalf("rendered quoin config must validate: %v\n%s", err, quoin)
+	}
+	if rendered.DeploymentBinding == nil || rendered.DeploymentBinding.ReleaseSubjectDigest != binding.ReleaseSubjectDigest || rendered.DeploymentBinding.Backend != "compose" || rendered.DeploymentBinding.BrowserChromiumRevision != binding.BrowserChromiumRevision {
+		t.Fatalf("rendered quoin config lost the deployment binding: %s", quoin)
+	}
+
+	// A local development projection (no release manifest) keeps the same
+	// generated file shape without a binding; Deployment Acceptance is simply
+	// unavailable there.
+	projection, err = compose.Render(input, filepath.Join(root, "state2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoin, err = os.ReadFile(filepath.Join(projection.Directory, "quoin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(quoin), "deploymentBinding") {
+		t.Fatalf("development projection must not claim a release subject:\n%s", quoin)
+	}
+	var plain contract.QuoinConfig
+	if err := contract.Decode(quoin, &plain); err != nil {
+		t.Fatal(err)
+	}
+	if plain.DeploymentBinding != nil {
+		t.Fatalf("development projection decoded a binding: %+v", plain.DeploymentBinding)
+	}
+}

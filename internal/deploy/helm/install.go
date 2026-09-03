@@ -10,6 +10,7 @@ import (
 	"time"
 
 	deploycompose "github.com/Suknna/quoin/deploy/compose"
+	"github.com/Suknna/quoin/internal/contract"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
 	"github.com/Suknna/quoin/internal/deploy/report"
 	"golang.org/x/term"
@@ -46,7 +47,7 @@ func helmChartRef(manifest *deployconfig.ReleaseManifest) (string, error) {
 
 // chartValues projects the validated input and the digest-pinned images into
 // chart values. Secret material never enters this file.
-func chartValues(input installInput, images map[string]string) ([]byte, error) {
+func chartValues(input installInput, images map[string]string, binding *contract.DeploymentBinding) ([]byte, error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -56,7 +57,11 @@ func chartValues(input installInput, images map[string]string) ([]byte, error) {
 		return nil, err
 	}
 	delete(projected, "document")
-	return yaml.Marshal(map[string]any{"input": projected, "images": images})
+	values := map[string]any{"input": projected, "images": images}
+	if binding != nil {
+		values["deploymentBinding"] = binding
+	}
+	return yaml.Marshal(values)
 }
 
 // stackRunning reports whether the long-lived Quoin workload already exists.
@@ -267,7 +272,7 @@ func Install(req Request) (exitCode int) {
 
 	// Long-lived workloads from the immutable OCI chart digest.
 	stage = rep.BeginStage(stageWorkloads)
-	values, valuesErr := chartValues(loaded.input, loaded.images)
+	values, valuesErr := chartValues(loaded.input, loaded.images, loaded.binding)
 	if valuesErr != nil {
 		return failStage(stage, "values_render_failed", valuesErr.Error(), "fix deployment input")
 	}

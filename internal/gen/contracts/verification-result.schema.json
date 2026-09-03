@@ -1,0 +1,351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/verification-result.schema.json",
+  "title": "Quoin in-toto Test Result Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "_type",
+    "subject",
+    "predicateType",
+    "predicate"
+  ],
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1"
+    },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/subject"
+      }
+    },
+    "predicateType": {
+      "const": "https://in-toto.io/attestation/test-result/v0.1"
+    },
+    "predicate": {
+      "$ref": "#/$defs/predicate"
+    }
+  },
+  "$defs": {
+    "nonEmpty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scenarioId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?:/[a-z0-9][a-z0-9._-]*)?$"
+    },
+    "scenarioSet": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/scenarioId"
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "digest"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "digest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "resourceDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "digest"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "mediaType": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "digest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "matrixDigest",
+        "cellCount"
+      ],
+      "properties": {
+        "matrixDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "cellCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "evidenceIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "mediaType",
+        "sizeBytes"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mediaType": {
+          "const": "application/vnd.quoin.verification-evidence.v1+json"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "observationWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt"],
+      "properties": {
+        "startedAt": { "$ref": "#/$defs/dateTime" },
+        "endedAt": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "observationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requiredCells",
+        "passedCells",
+        "warnedCells",
+        "failedCells"
+      ],
+      "properties": {
+        "requiredCells": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedCells": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnedCells": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedCells": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "deploymentAcceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseSubjectDigest",
+        "backend",
+        "architecture",
+        "deploymentConfigDigest",
+        "publicOrigin",
+        "helperReportDigest",
+        "observationWindow",
+        "snapshotAt",
+        "finalizedAt",
+        "manifestDigest",
+        "finalizationReceiptId",
+        "artifactLocator"
+      ],
+      "properties": {
+        "releaseSubjectDigest": { "$ref": "#/$defs/sha256" },
+        "backend": { "enum": ["compose", "kubernetes"] },
+        "architecture": { "enum": ["linux/amd64", "linux/arm64"] },
+        "deploymentConfigDigest": { "$ref": "#/$defs/sha256" },
+        "publicOrigin": { "type": "string", "format": "uri" },
+        "helperReportDigest": { "$ref": "#/$defs/sha256" },
+        "observationWindow": { "$ref": "#/$defs/observationWindow" },
+        "snapshotAt": { "$ref": "#/$defs/dateTime" },
+        "finalizedAt": { "$ref": "#/$defs/dateTime" },
+        "manifestDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "finalizationReceiptId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "artifactLocator": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "quoinExtension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileVersion",
+        "invocationId",
+        "layer",
+        "startedAt",
+        "finishedAt",
+        "environment",
+        "evidenceIndex"
+      ],
+      "properties": {
+        "profileVersion": {
+          "const": 1
+        },
+        "invocationId": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "layer": {
+          "enum": [
+            "contract_gate",
+            "release_qualification",
+            "deployment_acceptance"
+          ]
+        },
+        "startedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "evidenceIndex": {
+          "$ref": "#/$defs/evidenceIndex"
+        },
+        "observationSummary": {
+          "$ref": "#/$defs/observationSummary"
+        },
+        "deploymentAcceptance": {
+          "$ref": "#/$defs/deploymentAcceptance"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "layer": {
+                "const": "deployment_acceptance"
+              }
+            },
+            "required": [
+              "layer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "deploymentAcceptance": {
+                "$ref": "#/$defs/deploymentAcceptance"
+              }
+            },
+            "required": [
+              "deploymentAcceptance"
+            ]
+          },
+          "else": {
+            "properties": {
+              "deploymentAcceptance": false
+            }
+          }
+        }
+      ]
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "configuration",
+        "passedTests",
+        "warnedTests",
+        "failedTests",
+        "quoin"
+      ],
+      "properties": {
+        "result": {
+          "enum": [
+            "PASSED",
+            "WARNED",
+            "FAILED"
+          ]
+        },
+        "configuration": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/resourceDescriptor"
+          }
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "passedTests": {
+          "$ref": "#/$defs/scenarioSet"
+        },
+        "warnedTests": {
+          "$ref": "#/$defs/scenarioSet"
+        },
+        "failedTests": {
+          "$ref": "#/$defs/scenarioSet"
+        },
+        "quoin": {
+          "$ref": "#/$defs/quoinExtension"
+        }
+      }
+    }
+  },
+  "x-quoin-contract-version": 1
+}

@@ -14,6 +14,15 @@ data:
     runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
     runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
     steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+{{- if .Values.deploymentBinding }}
+    deploymentBinding:
+      releaseVersion: {{ .Values.deploymentBinding.releaseVersion }}
+      releaseSubjectDigest: {{ .Values.deploymentBinding.releaseSubjectDigest }}
+      deploymentConfigDigest: {{ .Values.deploymentBinding.deploymentConfigDigest }}
+      backend: {{ .Values.deploymentBinding.backend }}
+      architecture: {{ .Values.deploymentBinding.architecture }}
+      browserChromiumRevision: {{ .Values.deploymentBinding.browserChromiumRevision }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

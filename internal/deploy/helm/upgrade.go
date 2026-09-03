@@ -185,7 +185,7 @@ func rollReleaseImages(req Request, r *runner, rep *report.Report, loaded *loade
 	if err != nil {
 		return verifyFail("upgrade_chart_ref_invalid", "%s", err.Error())
 	}
-	values, valuesErr := chartValues(loaded.input, loaded.images)
+	values, valuesErr := chartValues(loaded.input, loaded.images, loaded.binding)
 	if valuesErr != nil {
 		return verifyFail("upgrade_values_render_failed", "%s", valuesErr.Error())
 	}

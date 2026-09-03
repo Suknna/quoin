@@ -80,6 +80,7 @@ type loadedRequest struct {
 	input            contract.ComposeInstall
 	manifest         *deployconfig.ReleaseManifest
 	images           map[string]string
+	binding          *contract.DeploymentBinding
 	stateDir         string
 	projection       deploycompose.Projection
 	composeArguments []string
@@ -104,6 +105,11 @@ func load(req Request) (*loadedRequest, error) {
 			return nil, &InputError{err.Error()}
 		}
 		loaded.manifest = manifest
+		binding, err := deployconfig.DeploymentBinding(manifest, req.ConfigPath, req.ReleaseManifestPath, "compose")
+		if err != nil {
+			return nil, &InputError{err.Error()}
+		}
+		loaded.binding = binding
 		for _, component := range deployconfig.Components {
 			reference, err := manifest.ImageReference(component)
 			if err != nil {
@@ -112,7 +118,7 @@ func load(req Request) (*loadedRequest, error) {
 			loaded.images[component] = reference
 		}
 	}
-	projection, err := deploycompose.RenderWithOptions(input, stateDir, deploycompose.Options{Images: loaded.images})
+	projection, err := deploycompose.RenderWithOptions(input, stateDir, deploycompose.Options{Images: loaded.images, DeploymentBinding: loaded.binding})
 	if err != nil {
 		return nil, &InputError{err.Error()}
 	}

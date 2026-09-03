@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
+	"github.com/Suknna/quoin/internal/contract"
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -112,6 +114,40 @@ func DigestFile(path string) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// DeploymentBinding freezes what this deployment was installed from: the
+// release manifest bytes as the site acceptance subject, the deployment input
+// bytes, and the concrete backend/architecture. Install/upgrade compute it and
+// render it into the generated Quoin component configuration; the running
+// product only reads it.
+func DeploymentBinding(manifest *ReleaseManifest, configPath, releaseManifestPath, backend string) (*contract.DeploymentBinding, error) {
+	subjectDigest, err := DigestFile(releaseManifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("release subject digest: %w", err)
+	}
+	configDigest, err := DigestFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("deployment config digest: %w", err)
+	}
+	return &contract.DeploymentBinding{
+		ReleaseVersion:          manifest.ReleaseVersion,
+		ReleaseSubjectDigest:    subjectDigest,
+		DeploymentConfigDigest:  configDigest,
+		Backend:                 backend,
+		Architecture:            fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		BrowserChromiumRevision: chromiumRevision(manifest),
+	}, nil
+}
+
+// chromiumRevision freezes the release-locked Playwright Chromium revision.
+// It is the only browser version authority the release manifest carries.
+func chromiumRevision(manifest *ReleaseManifest) string {
+	var browser struct {
+		ChromiumRevision string `json:"chromium_revision"`
+	}
+	_ = json.Unmarshal(manifest.Browser, &browser)
+	return browser.ChromiumRevision
 }
 
 // StateDirectory is the helper-owned local state root for the Compose

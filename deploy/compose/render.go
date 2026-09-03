@@ -29,6 +29,10 @@ type Projection struct {
 // expression so existing harnesses are unchanged.
 type Options struct {
 	Images map[string]string
+	// DeploymentBinding freezes the release/deployment identity into the
+	// generated Quoin component configuration. nil keeps the local development
+	// projection unchanged (no Deployment Acceptance subject).
+	DeploymentBinding *contract.DeploymentBinding
 }
 
 type renderData struct {
@@ -93,7 +97,7 @@ func RenderWithOptions(input contract.ComposeInstall, stateDirectory string, opt
 	containerSecrets := "/run/quoin-secrets"
 	quoinRuntimeEndpoint := "https://quoin:8443"
 	configs := map[string]any{
-		quoinPath:  contract.QuoinConfig{Component: "quoin", PublicOrigin: input.PublicOrigin, DataDirectory: "/var/lib/quoin/data", BackupDirectory: "/var/lib/quoin/backups", RootKeyFile: containerSecrets + "/root-key", RuntimeTLSCertificateFile: containerSecrets + "/runtime-tls.crt", RuntimeTLSPrivateKeyFile: containerSecrets + "/runtime-tls.key", SteleServiceTokenFile: containerSecrets + "/stele-service-token"},
+		quoinPath:  contract.QuoinConfig{Component: "quoin", PublicOrigin: input.PublicOrigin, DataDirectory: "/var/lib/quoin/data", BackupDirectory: "/var/lib/quoin/backups", RootKeyFile: containerSecrets + "/root-key", RuntimeTLSCertificateFile: containerSecrets + "/runtime-tls.crt", RuntimeTLSPrivateKeyFile: containerSecrets + "/runtime-tls.key", SteleServiceTokenFile: containerSecrets + "/stele-service-token", DeploymentBinding: options.DeploymentBinding},
 		plinthPath: contract.PlinthConfig{Component: "plinth", StateDirectory: "/var/lib/plinth", WorkspaceDirectory: "/var/lib/plinth/workspaces", QuoinRuntimeEndpoint: quoinRuntimeEndpoint, QuoinRuntimeCAFile: containerSecrets + "/runtime-ca.pem"},
 		lintelPath: contract.LintelConfig{Component: "lintel", StateDirectory: "/var/lib/lintel", QuoinRuntimeEndpoint: quoinRuntimeEndpoint, QuoinRuntimeCAFile: containerSecrets + "/runtime-ca.pem", BrowserSlots: input.LintelBrowserSlots, MinimumShmBytes: input.LintelShmSizeBytes},
 		stelePath:  contract.SteleConfig{Component: "stele", QuoinRuntimeEndpoint: quoinRuntimeEndpoint, QuoinRuntimeCAFile: containerSecrets + "/runtime-ca.pem", ServiceTokenFile: containerSecrets + "/stele-service-token"},

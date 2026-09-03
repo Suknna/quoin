@@ -35,6 +35,22 @@ type QuoinConfig struct {
 	RuntimeTLSCertificateFile string `json:"runtimeTlsCertificateFile" yaml:"runtimeTlsCertificateFile"`
 	RuntimeTLSPrivateKeyFile  string `json:"runtimeTlsPrivateKeyFile" yaml:"runtimeTlsPrivateKeyFile"`
 	SteleServiceTokenFile     string `json:"steleServiceTokenFile" yaml:"steleServiceTokenFile"`
+	// DeploymentBinding is frozen by install/upgrade from the release
+	// manifest and deployment input bytes. It is absent for local development
+	// projections; Deployment Acceptance is then simply unavailable.
+	DeploymentBinding *DeploymentBinding `json:"deploymentBinding,omitempty" yaml:"deploymentBinding,omitempty"`
+}
+
+// DeploymentBinding is the immutable runtime authority for what this process
+// was deployed from: the release manifest bytes (site acceptance subject), the
+// deployment input bytes, and the deployment platform. Quoin only reads it.
+type DeploymentBinding struct {
+	ReleaseVersion          string `json:"releaseVersion" yaml:"releaseVersion"`
+	ReleaseSubjectDigest    string `json:"releaseSubjectDigest" yaml:"releaseSubjectDigest"`
+	DeploymentConfigDigest  string `json:"deploymentConfigDigest" yaml:"deploymentConfigDigest"`
+	Backend                 string `json:"backend" yaml:"backend"`
+	Architecture            string `json:"architecture" yaml:"architecture"`
+	BrowserChromiumRevision string `json:"browserChromiumRevision" yaml:"browserChromiumRevision"`
 }
 
 type PlinthConfig struct {

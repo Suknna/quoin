@@ -161,6 +161,19 @@
         }
       ]
     },
+    "deploymentBinding": {
+      "description": "安装/升级时冻结的不可变部署绑定；Quoin 启动时校验并只读，Deployment Acceptance 以它作为站点 release subject 与部署配置的权威绑定。本地开发投影省略该字段，此时 Deployment Acceptance 不可用。",
+      "additionalProperties": false,
+      "required": ["releaseVersion", "releaseSubjectDigest", "deploymentConfigDigest", "backend", "architecture", "browserChromiumRevision"],
+      "properties": {
+        "releaseVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "releaseSubjectDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "deploymentConfigDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "backend": { "enum": ["compose", "kubernetes"] },
+        "architecture": { "enum": ["linux/amd64", "linux/arm64"] },
+        "browserChromiumRevision": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
     "quoinConfig": {
       "$anchor": "quoinConfig",
       "type": "object",
@@ -174,7 +187,8 @@
         "rootKeyFile": { "$ref": "#/$defs/absolutePath" },
         "runtimeTlsCertificateFile": { "$ref": "#/$defs/absolutePath" },
         "runtimeTlsPrivateKeyFile": { "$ref": "#/$defs/absolutePath" },
-        "steleServiceTokenFile": { "$ref": "#/$defs/absolutePath" }
+        "steleServiceTokenFile": { "$ref": "#/$defs/absolutePath" },
+        "deploymentBinding": { "$ref": "#/$defs/deploymentBinding" }
       }
     },
     "plinthConfig": {

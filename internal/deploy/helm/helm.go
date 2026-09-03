@@ -70,6 +70,7 @@ type loadedRequest struct {
 	manifest *deployconfig.ReleaseManifest
 	stateDir string
 	images   map[string]string
+	binding  *contract.DeploymentBinding
 }
 
 func (loaded *loadedRequest) release() string {
@@ -103,6 +104,11 @@ func load(req Request) (*loadedRequest, error) {
 		return nil, fmt.Errorf("load release manifest: %w", err)
 	}
 	loaded.manifest = manifest
+	binding, err := deployconfig.DeploymentBinding(manifest, req.ConfigPath, req.ReleaseManifestPath, "kubernetes")
+	if err != nil {
+		return nil, err
+	}
+	loaded.binding = binding
 	for _, component := range deployconfig.Components {
 		reference, err := manifest.ImageReference(component)
 		if err != nil {

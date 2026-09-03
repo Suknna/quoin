@@ -88,7 +88,7 @@ func Upgrade(req Request, flags deployupgrade.Flags) int {
 	helper.report.CompleteStage(stage, "deployed-image offline verification passed: Upgrade maintenance, checklist and pre-upgrade backup digest")
 
 	stage = helper.report.BeginStage("upgrade-migrate")
-	if _, err := deploycompose.RenderWithOptions(loaded.input, loaded.stateDir, deploycompose.Options{Images: loaded.images}); err != nil {
+	if _, err := deploycompose.RenderWithOptions(loaded.input, loaded.stateDir, deploycompose.Options{Images: loaded.images, DeploymentBinding: loaded.binding}); err != nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "upgrade_reprojection_failed", Message: err.Error(), NextAction: "workloads are stopped; fix the projection and rerun the upgrade command"})
 	}
 	// The re-projection rewrites the same canonical generated compose.yaml, so
