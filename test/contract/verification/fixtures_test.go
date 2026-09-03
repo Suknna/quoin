@@ -128,7 +128,13 @@ func writeTimeoutFixture(t *testing.T) string {
 
 func writeRunnableFixture(t *testing.T, scripts map[string]string, dependent string, timeout int) string {
 	t.Helper()
-	dir := t.TempDir()
+	// Runnable fixtures own their lifecycle: the ticket's cleanup proof
+	// removes them itself and verifies the disposition, instead of racing
+	// the testing framework's TempDir cleanup ordering.
+	dir, err := os.MkdirTemp("", "t37-fixture-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)

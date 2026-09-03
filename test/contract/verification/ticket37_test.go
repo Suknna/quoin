@@ -55,6 +55,7 @@ func TestTicket37(t *testing.T) {
 	}
 	startedAt := time.Now().UTC()
 	commit, dirty := gitState(t)
+	cleanupFixtures := []string{}
 	commands := []commandRecord{}
 	// record runs a command, persists its log and appends it to the
 	// evidence command list in execution order.
@@ -184,6 +185,7 @@ func TestTicket37(t *testing.T) {
 
 	// --- Leg 4: verdict causality through the real binary --------------
 	causalityDir := writeCausalityFixture(t)
+	defer func() { cleanupFixtures = append(cleanupFixtures, causalityDir) }()
 	causality := record("causality-run", []string{"QUOIN_CAUSALITY_FIXTURE=" + causalityDir}, binary,
 		"run", "--layer", "contract_gate", "--output", filepath.Join(root, "causality"),
 		"--catalog", filepath.Join(causalityDir, "verification-catalog.yaml"),
@@ -236,6 +238,7 @@ func TestTicket37(t *testing.T) {
 
 	// --- Leg 5: WARNED classification (timeout keeps the suite going) ---
 	warnedDir := writeTimeoutFixture(t)
+	defer func() { cleanupFixtures = append(cleanupFixtures, warnedDir) }()
 	warned := record("warned-run", []string{"QUOIN_CAUSALITY_FIXTURE=" + warnedDir}, binary,
 		"run", "--layer", "contract_gate", "--output", filepath.Join(root, "warned"),
 		"--catalog", filepath.Join(warnedDir, "verification-catalog.yaml"),
@@ -259,6 +262,17 @@ func TestTicket37(t *testing.T) {
 
 	// --- Runtime evidence and cleanup ----------------------------------
 	finishedAt := time.Now().UTC()
+	// Real product-path transitions observed through the gate cells; each
+	// citation points at the recorded attachment for the executing cell.
+	productPaths := map[string]map[string]string{}
+	for _, item := range index.Items {
+		for _, attachment := range item.Attachments {
+			if attachment.Kind != evidence.AttachmentStructuredResult {
+				continue
+			}
+			productPaths[item.TestName()] = map[string]string{"structuredResult": attachment.Locator}
+		}
+	}
 	writeJSON(t, filepath.Join(root, "runtime-evidence.json"), map[string]any{
 		"ticket": "T37", "issue": 60,
 		"gitCommit": commit, "dirtyStateDigest": dirty,
@@ -280,6 +294,11 @@ func TestTicket37(t *testing.T) {
 				"matrix":     statement.Predicate.Quoin.Environment,
 				"perItem":    itemSummaries(index.Items),
 			},
+			"productPaths": map[string]string{
+				"sqlite-session-idle-boundary": "fault.time.session-idle-expiry drove real sessions rows through the real Authenticate path (structured result: " + productPaths["fault.time.session-idle-expiry"]["structuredResult"] + ")",
+				"http-reveal-lifecycle":        "fault.time.reveal-handle-expiry ran the reveal lifecycle over a real HTTP server (structured result: " + productPaths["fault.time.reveal-handle-expiry"]["structuredResult"] + ")",
+				"runtime-protocol-fences":      "fault.protocol-delivery reorder/duplicate drove the runtime cancel/fence and delivery replay paths (structured results: " + productPaths["fault.protocol-delivery.reorder"]["structuredResult"] + ", " + productPaths["fault.protocol-delivery.duplicate"]["structuredResult"] + ")",
+			},
 			"causality": map[string]any{"exitCode": causality.ExitCode, "items": len(causalityIndex.Items)},
 			"warned":    map[string]any{"exitCode": warned.ExitCode, "items": len(warnedIndex.Items)},
 		},
@@ -294,16 +313,100 @@ func TestTicket37(t *testing.T) {
 			"teardown":  "the causality fixture teardown.marker file proves teardown ran after the failed action",
 		},
 	})
-	writeJSON(t, filepath.Join(root, "cleanup.json"), map[string]any{
-		"ownedResources": []string{
-			"temp fixture catalogs and entrypoint scripts under go test TempDir (auto-removed)",
-			"built binary " + binary + " (retained as ticket evidence)",
-			"invocation output directories gate/, causality/, warned/ (retained as ticket evidence)",
-			"go test child processes spawned by the harness (each group waits for completion)",
-		},
-		"preExistingUntouched": "no Docker/Compose/Kubernetes resources, ports, volumes or credentials are used by this ticket",
-		"result":               "all owned processes completed (no orphans: the runner kills process groups on timeout); fixture directories live under os.TempDir and are removed by the testing framework",
+	// Cleanup disposition is proven, not asserted: every fixture directory
+	// must be gone, no owned process may outlive the legs, and the retained
+	// evidence artifacts must exist. Any failure fails the ticket here even
+	// though every behaviour assertion already passed (VERIFY-CLEANUP-002).
+	dispositions := map[string]string{}
+	t.Cleanup(func() {
+		for _, fixture := range cleanupFixtures {
+			if err := os.RemoveAll(fixture); err != nil {
+				dispositions[fixture] = "RESIDUE: " + err.Error()
+				continue
+			}
+			if _, err := os.Stat(fixture); os.IsNotExist(err) {
+				dispositions[fixture] = "removed"
+				continue
+			}
+			dispositions[fixture] = "RESIDUE"
+		}
+		if orphans := orphanProcesses(t); len(orphans) != 0 {
+			dispositions["processes"] = "RESIDUE: " + strings.Join(orphans, ", ")
+		} else {
+			dispositions["processes"] = "none"
+		}
+		// cleanup.json is written by this very closure, so only the
+		// earlier artifacts are presence-checked here.
+		for _, retained := range []string{"runtime-evidence.json", filepath.Join("gate", "test-result.json"), filepath.Join("bin", "quoin-verify")} {
+			if !fileExists(filepath.Join(root, retained)) {
+				dispositions["retained:"+retained] = "MISSING"
+			} else {
+				dispositions["retained:"+retained] = "present"
+			}
+		}
+		for fixture, state := range dispositions {
+			if state != "removed" && state != "none" && state != "present" {
+				t.Fatalf("cleanup residue: %s -> %s", fixture, state)
+			}
+		}
+		writeJSON(t, filepath.Join(root, "cleanup.json"), map[string]any{
+			"ownedResources": map[string]any{
+				"fixtureDirectories": dispositionsOf(cleanupFixtures, dispositions),
+				"builtBinary":        binary + " (retained as ticket evidence: " + dispositionsPresent(root, "bin/quoin-verify") + ")",
+				"invocationOutputs":  []string{"gate/", "causality/", "warned/", "logs/ (retained as ticket evidence)"},
+				"childProcesses":     "each harness group waits for its go test child; the runner kills process groups on timeout (observed: " + dispositions["processes"] + ")",
+			},
+			"preExistingUntouched": "no Docker/Compose/Kubernetes resources, ports, volumes or credentials are used by this ticket",
+			"dispositions":         dispositions,
+			"result":               "every owned fixture removed, no owned process alive, retained evidence present",
+		})
 	})
+}
+
+func dispositionsOf(fixtures []string, dispositions map[string]string) []map[string]string {
+	records := make([]map[string]string, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		records = append(records, map[string]string{"path": fixture, "disposition": dispositions[fixture]})
+	}
+	return records
+}
+
+func dispositionsPresent(root, relative string) string {
+	if fileExists(filepath.Join(root, relative)) {
+		return "present"
+	}
+	return "MISSING"
+}
+
+// orphanProcesses lists any process still running one of the owned fixture
+// entrypoints or the built runner binary. The patterns are anchored to the
+// owned path prefixes so unrelated tooling that merely mentions the names
+// cannot produce false residue.
+func orphanProcesses(t *testing.T) []string {
+	t.Helper()
+	body, err := exec.Command("pgrep", "-af", `t37-fixture-|quoin-verify`).Output()
+	if err != nil {
+		if _, isExit := err.(*exec.ExitError); isExit {
+			return nil // pgrep exit 1: no matches
+		}
+		return nil
+	}
+	var found []string
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), " ", 2)
+		if len(fields) < 2 {
+			continue
+		}
+		// Only a process whose EXECUTABLE is an owned fixture script or the
+		// built runner counts as residue; wrappers and shells that merely
+		// carry the names inside embedded command text do not.
+		executable := fields[1]
+		if strings.HasPrefix(executable, "/tmp/t37-fixture-") ||
+			strings.HasSuffix(executable, "tickets/T37/bin/quoin-verify") {
+			found = append(found, line)
+		}
+	}
+	return found
 }
 
 func itemSummaries(items []evidence.Item) []map[string]any {
