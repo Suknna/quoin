@@ -166,6 +166,13 @@ type rowQueryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
+// StateOn reads the SQL-authoritative state and frozen-revision checklist
+// through an already-open connection so sister domain commands can return
+// the same projection inside their own transaction boundary.
+func StateOn(ctx context.Context, queryer rowQueryer) (State, error) {
+	return stateOn(ctx, queryer)
+}
+
 func stateOn(ctx context.Context, queryer rowQueryer) (State, error) {
 	var state State
 	var active int
