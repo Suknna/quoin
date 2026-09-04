@@ -44,6 +44,11 @@ packages:
     versions: { linux/amd64: "14.1.1-1+b4", linux/arm64: "14.1.1-1+b4" }
   - name: diffutils
     versions: { linux/amd64: "1:3.10-4", linux/arm64: "1:3.10-4" }
+  # Outbound public TLS trust store for the supervisor (model providers,
+  # Thanos, Kubernetes APIs); folded into the machine lock by the T39
+  # amendment (was pinned in the Dockerfile outside the catalog).
+  - name: ca-certificates
+    versions: { linux/amd64: "20250419", linux/arm64: "20250419" }
 
 executable_paths:
   - /bin/bash

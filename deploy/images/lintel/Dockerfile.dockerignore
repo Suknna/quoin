@@ -1,0 +1,14 @@
+# The formal Lintel image context mirrors the other components; the web/pnpm
+# and source trees the build stages COPY are relevant.
+**
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!deploy/
+!web/package.json
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+**/*.test
+**/*_test.go
