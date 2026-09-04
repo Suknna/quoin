@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Release-subject build entrypoint (T39, OPS-SUPPLY-001/002). Drives the Go
+# builder over the current source checkout; used by the release-subjects
+# workflow on the native matrix and by local qualification runs.
+#
+# Required environment:
+#   QUOIN_RELEASE_VERSION  v-prefixed SemVer of the tag being built
+#   QUOIN_REGISTRY         image registry namespace (e.g. ghcr.io/suknna)
+#   QUOIN_CHART_OCI        chart OCI namespace (e.g. ghcr.io/suknna/charts)
+# Optional environment:
+#   QUOIN_STAGE           all | images | assemble (default: all)
+#   QUOIN_BUILDER          buildx builder name (default: release-subjects)
+#   QUOIN_PLATFORMS        comma list linux/<arch>=<native|emulated>
+#                          (default: native platform of the runner)
+#   QUOIN_WORK             work directory (default: .artifacts/release-subjects)
+#   QUOIN_OUT              inventory output path
+# With "verify" as first argument runs the offline pre-qualification gate
+# instead; see `go run ./internal/release/build verify` flags.
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+version=${QUOIN_RELEASE_VERSION:?QUOIN_RELEASE_VERSION is required}
+registry=${QUOIN_REGISTRY:?QUOIN_REGISTRY is required}
+chart_oci=${QUOIN_CHART_OCI:?QUOIN_CHART_OCI is required}
+builder=${QUOIN_BUILDER:-release-subjects}
+work=${QUOIN_WORK:-"$repo_root/.artifacts/release-subjects"}
+out=${QUOIN_OUT:-"$work/subjects-inventory.json"}
+
+if [ "${1:-}" = "verify" ]; then
+  shift
+  exec go run ./internal/release/build verify \
+    -inventory "$out" \
+    -bundles "${QUOIN_BUNDLES_DIR:?QUOIN_BUNDLES_DIR is required}" \
+    -trust-root "${QUOIN_TRUST_ROOT:?QUOIN_TRUST_ROOT is required}" \
+    -identity "${QUOIN_SIGN_IDENTITY:?QUOIN_SIGN_IDENTITY is required}" \
+    -issuer "${QUOIN_SIGN_ISSUER:?QUOIN_SIGN_ISSUER is required}"
+fi
+
+mkdir -p "$work/logs"
+
+platform_args=()
+if [ -n "${QUOIN_PLATFORMS:-}" ]; then
+  IFS=',' read -ra platforms <<< "$QUOIN_PLATFORMS"
+  for platform in "${platforms[@]}"; do
+    platform_args+=(-platform "$platform")
+  done
+else
+  machine=$(uname -m)
+  case "$machine" in
+    x86_64) platform_args=(-platform linux/amd64=native) ;;
+    aarch64) platform_args=(-platform linux/arm64=native) ;;
+    *) echo "unsupported native machine $machine; set QUOIN_PLATFORMS" >&2; exit 2 ;;
+  esac
+fi
+
+stage=${QUOIN_STAGE:-all}
+
+exec go run ./internal/release/build \
+  -registry "$registry" \
+  -version "$version" \
+  -chart-oci "$chart_oci" \
+  -builder "$builder" \
+  -work "$work" \
+  -out "$out" \
+  -stage "$stage" \
+  "${platform_args[@]}"

@@ -1,0 +1,257 @@
+# Release-subject pipeline (T39, OPS-SUPPLY-001/002). One annotated SemVer
+# tag builds the four component images on native runners (linux/amd64 and
+# linux/arm64 — no QEMU), assembles the merged OCI indexes, Chart, Compose
+# bundle and static helpers, signs every subject with cosign keyless OIDC and
+# runs the offline pre-qualification gate. The final evidence-referencing
+# Release manifest and offline archive belong to the release-closure ticket.
+name: release-subjects
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "v-prefixed release version to build"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  QUOIN_RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+  QUOIN_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  QUOIN_CHART_OCI: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  build-native:
+    name: Build ${{ matrix.platform }} on a native runner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Create BuildKit builder
+        run: docker buildx create --name release-subjects --driver docker-container --bootstrap --use
+      - name: Build and push per-platform subjects
+        env:
+          QUOIN_STAGE: images
+          QUOIN_PLATFORMS: ${{ matrix.platform }}=native
+          QUOIN_WORK: ${{ github.workspace }}/.work
+        run: ./ci/build-release-subjects
+      - name: Upload platform fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ matrix.arch }}
+          path: |
+            .work/images-${{ matrix.arch }}.json
+            .work/logs/
+          retention-days: 14
+
+  assemble:
+    name: Assemble indexes, chart, compose bundle and helpers
+    needs: build-native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Download platform fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: images-*
+          path: .work
+          merge-multiple: true
+      - name: Assemble subjects
+        env:
+          QUOIN_STAGE: assemble
+          QUOIN_WORK: ${{ github.workspace }}/.work
+          QUOIN_OUT: ${{ github.workspace }}/.work/subjects-inventory.json
+        run: ./ci/build-release-subjects
+      - name: Upload subject assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: subject-assets
+          path: |
+            .work/subjects-inventory.json
+            .work/quoin-*.tgz
+            .work/quoin-compose-*.tar.gz
+            .work/quoin-deploy-linux-*
+            .work/logs/
+          retention-days: 14
+
+  sign:
+    name: Sign every subject with cosign keyless
+    needs: assemble
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: subject-assets
+          path: .work
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.5.3
+      - name: Log in to GHCR (manifest reads)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Sign image indexes and per-platform manifests
+        run: |
+          set -euo pipefail
+          mkdir -p .work/bundles .work/payloads
+          for component in quoin plinth lintel stele; do
+            index=$(jq -r --arg c "$component" '.images[$c].index_digest' .work/subjects-inventory.json)
+            docker buildx imagetools inspect --raw "${QUOIN_REGISTRY}/$component@$index" \
+              > ".work/payloads/$component-index"
+            cosign sign-blob --yes --output-certificate ".work/payloads/$component-index.crt" \
+              --output-signature ".work/payloads/$component-index.sig" \
+              ".work/payloads/$component-index"
+            cosign bundle create --artifact ".work/payloads/$component-index" \
+              --signature ".work/payloads/$component-index.sig" \
+              --certificate ".work/payloads/$component-index.crt" \
+              > ".work/bundles/$component-index.sigstore.json"
+            cp ".work/payloads/$component-index" ".work/bundles/$component-index.sigstore.json.payload"
+            for arch in amd64 arm64; do
+              digest=$(jq -r --arg c "$component" --arg p "linux/$arch" '.images[$c].platforms[$p]' .work/subjects-inventory.json)
+              docker buildx imagetools inspect --raw "${QUOIN_REGISTRY}/$component@$digest" \
+                > ".work/payloads/$component-manifest-$arch"
+              cosign sign-blob --yes --output-certificate ".work/payloads/$component-manifest-$arch.crt" \
+                --output-signature ".work/payloads/$component-manifest-$arch.sig" \
+                ".work/payloads/$component-manifest-$arch"
+              cosign bundle create --artifact ".work/payloads/$component-manifest-$arch" \
+                --signature ".work/payloads/$component-manifest-$arch.sig" \
+                --certificate ".work/payloads/$component-manifest-$arch.crt" \
+                > ".work/bundles/$component-manifest-$arch.sigstore.json"
+              cp ".work/payloads/$component-manifest-$arch" ".work/bundles/$component-manifest-$arch.sigstore.json.payload"
+            done
+          done
+      - name: Sign chart, compose bundle and helpers
+        run: |
+          set -euo pipefail
+          chart_digest=$(jq -r '.chart.oci_digest' .work/subjects-inventory.json)
+          docker buildx imagetools inspect --raw "${QUOIN_CHART_OCI}/quoin@$chart_digest" \
+            > .work/payloads/quoin-chart-oci
+          cosign sign-blob --yes --output-certificate .work/payloads/quoin-chart-oci.crt \
+            --output-signature .work/payloads/quoin-chart-oci.sig \
+            .work/payloads/quoin-chart-oci
+          cosign bundle create --artifact .work/payloads/quoin-chart-oci \
+            --signature .work/payloads/quoin-chart-oci.sig \
+            --certificate .work/payloads/quoin-chart-oci.crt \
+            > .work/bundles/quoin-chart-oci.sigstore.json
+          cp .work/payloads/quoin-chart-oci .work/bundles/quoin-chart-oci.sigstore.json.payload
+          compose=$(jq -r '.compose.asset_name' .work/subjects-inventory.json)
+          cosign sign-blob --yes --output-certificate .work/payloads/compose.crt \
+            --output-signature .work/payloads/compose.sig ".work/$compose"
+          cosign bundle create --artifact ".work/$compose" \
+            --signature .work/payloads/compose.sig --certificate .work/payloads/compose.crt \
+            > .work/bundles/quoin-compose-bundle.sigstore.json
+          cp ".work/$compose" .work/bundles/quoin-compose-bundle.sigstore.json.payload
+          for arch in amd64 arm64; do
+            cosign sign-blob --yes --output-certificate ".work/payloads/helper-$arch.crt" \
+              --output-signature ".work/payloads/helper-$arch.sig" \
+              ".work/quoin-deploy-linux-$arch"
+            cosign bundle create --artifact ".work/quoin-deploy-linux-$arch" \
+              --signature ".work/payloads/helper-$arch.sig" \
+              --certificate ".work/payloads/helper-$arch.crt" \
+              > ".work/bundles/quoin-deploy-linux-$arch.sigstore.json"
+            cp ".work/quoin-deploy-linux-$arch" ".work/bundles/quoin-deploy-linux-$arch.sigstore.json.payload"
+          done
+      - name: Export the current Fulcio trust roots
+        run: |
+          set -euo pipefail
+          mkdir -p .work/trust
+          cosign initialize
+          trusted=$(find ~/.sigstore/root -name trusted_root.json | head -1)
+          test -n "$trusted"
+          python3 - "$trusted" <<'PY'
+          import base64, json, sys
+          document = json.load(open(sys.argv[1]))
+          count = 0
+          with open(".work/trust/fulcio-roots.pem", "wb") as out:
+              for authority in document.get("certificateAuthorities", []):
+                  for certificate in authority.get("certChain", {}).get("certificates", []):
+                      der = base64.b64decode(certificate["rawBytes"])
+                      out.write(b"-----BEGIN CERTIFICATE-----\n")
+                      encoded = base64.encodebytes(der)
+                      out.write(encoded)
+                      out.write(b"-----END CERTIFICATE-----\n")
+                      count += 1
+          if count == 0:
+              raise SystemExit("no Fulcio roots extracted")
+          print(f"wrote {count} roots")
+          PY
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: subject-bundles
+          path: .work/bundles/
+          retention-days: 14
+      - name: Upload trust roots
+        uses: actions/upload-artifact@v4
+        with:
+          name: trust-roots
+          path: .work/trust/
+          retention-days: 14
+
+  verify:
+    name: Offline pre-qualification gate
+    needs: sign
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: subject-assets
+          path: .work
+      - uses: actions/download-artifact@v4
+        with:
+          name: subject-bundles
+          path: .work/bundles
+      - uses: actions/download-artifact@v4
+        with:
+          name: trust-roots
+          path: .work/trust
+      - name: Log in to GHCR (attestation reads)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Verify bundles and attestations offline
+        env:
+          QUOIN_BUNDLES_DIR: ${{ github.workspace }}/.work/bundles
+          QUOIN_TRUST_ROOT: ${{ github.workspace }}/.work/trust/fulcio-roots.pem
+          QUOIN_SIGN_IDENTITY: ^https://github\.com/${{ github.repository }}/
+          QUOIN_SIGN_ISSUER: https://token.actions.githubusercontent.com
+          QUOIN_OUT: ${{ github.workspace }}/.work/subjects-inventory.json
+        run: ./ci/build-release-subjects verify
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-evidence
+          path: .work/bundles/
+          retention-days: 14
