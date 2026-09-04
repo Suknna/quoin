@@ -6,12 +6,21 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/release/subjects"
 )
 
 // RegistryReader reads raw OCI distribution manifests from one registry.
 type RegistryReader struct {
 	Host   string
 	Client *http.Client
+	// Username and Password authenticate reads from private registries
+	// (exchanged for a scoped bearer token where the registry requires it;
+	// plain basic auth is the fallback). Empty credentials read anonymously.
+	Username string
+	Password string
+
+	tokens map[string]string
 }
 
 func (reader RegistryReader) client() *http.Client {
@@ -126,7 +135,7 @@ func (reader RegistryReader) VerifyImageAttestations(repository string, expected
 		return nil, fmt.Errorf("index %s: %w", repository, err)
 	}
 	results := make([]AttestationSubjects, 0, len(expectedPlatforms))
-	for _, platform := range []string{"linux/amd64", "linux/arm64"} {
+	for _, platform := range subjects.Platforms {
 		manifestDigest, ok := expectedPlatforms[platform]
 		if !ok {
 			return nil, fmt.Errorf("platform %s missing from expectations", platform)
@@ -239,4 +248,41 @@ func (reader RegistryReader) fetchBlob(repository, digest string) ([]byte, error
 		return nil, fmt.Errorf("registry blob %s/%s: status %d", repository, digest, response.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(response.Body, 1<<26))
+}
+
+// authorize attaches credentials to one registry request, exchanging them
+// for a repository-scoped bearer token the first time a repository is read
+// (the GHCR pattern) and falling back to direct basic auth.
+func (reader RegistryReader) authorize(request *http.Request, repository string) {
+	if reader.Username == "" && reader.Password == "" {
+		return
+	}
+	if reader.tokens == nil {
+		reader.tokens = map[string]string{}
+	}
+	if token, ok := reader.tokens[repository]; ok {
+		request.Header.Set("Authorization", "Bearer "+token)
+		return
+	}
+	tokenURL := fmt.Sprintf("%s://%s/token?service=%s&scope=repository:%s:pull",
+		reader.scheme(), reader.Host, reader.Host, repository)
+	tokenRequest, err := http.NewRequest(http.MethodGet, tokenURL, nil)
+	if err == nil {
+		tokenRequest.SetBasicAuth(reader.Username, reader.Password)
+		if response, err := reader.client().Do(tokenRequest); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				var document struct {
+					Token string `json:"token"`
+				}
+				if json.Unmarshal(body, &document) == nil && document.Token != "" {
+					reader.tokens[repository] = document.Token
+					request.Header.Set("Authorization", "Bearer "+document.Token)
+					return
+				}
+			}
+		}
+	}
+	request.SetBasicAuth(reader.Username, reader.Password)
 }

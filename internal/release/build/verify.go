@@ -122,7 +122,7 @@ func verifyMode(arguments []string) error {
 	}
 
 	host := registryHostOf(inventory.Images["quoin"].Repository)
-	reader := supplychain.RegistryReader{Host: host}
+	reader := supplychain.RegistryReader{Host: host, Username: os.Getenv("QUOIN_REGISTRY_USER"), Password: os.Getenv("QUOIN_REGISTRY_TOKEN")}
 	attestationResults := map[string][]supplychain.AttestationSubjects{}
 	for _, component := range subjects.Components {
 		image := inventory.Images[component]

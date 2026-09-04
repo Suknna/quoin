@@ -21,12 +21,20 @@ permissions:
   packages: write
   id-token: write
 
-env:
-  QUOIN_RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
-  QUOIN_REGISTRY: ghcr.io/${{ github.repository_owner }}
-  QUOIN_CHART_OCI: ghcr.io/${{ github.repository_owner }}/charts
-
 jobs:
+  context:
+    name: Resolve lowercase registry paths
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Export registry environment
+        env:
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          # Docker references must be lowercase; the GitHub owner may not be.
+          echo "QUOIN_REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+          echo "QUOIN_CHART_OCI=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts" >> "$GITHUB_ENV"
+          echo "QUOIN_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+
   build-native:
     name: Build ${{ matrix.platform }} on a native runner
     strategy:
@@ -66,7 +74,7 @@ jobs:
 
   assemble:
     name: Assemble indexes, chart, compose bundle and helpers
-    needs: build-native
+    needs: [context, build-native]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +109,7 @@ jobs:
 
   sign:
     name: Sign every subject with cosign keyless
-    needs: assemble
+    needs: [context, assemble]
     runs-on: ubuntu-24.04
     permissions:
       id-token: write
@@ -219,7 +227,7 @@ jobs:
 
   verify:
     name: Offline pre-qualification gate
-    needs: sign
+    needs: [context, sign]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -247,6 +255,8 @@ jobs:
           QUOIN_SIGN_IDENTITY: ^https://github\.com/${{ github.repository }}/
           QUOIN_SIGN_ISSUER: https://token.actions.githubusercontent.com
           QUOIN_OUT: ${{ github.workspace }}/.work/subjects-inventory.json
+          QUOIN_REGISTRY_USER: ${{ github.actor }}
+          QUOIN_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./ci/build-release-subjects verify
       - name: Upload gate evidence
         if: always()

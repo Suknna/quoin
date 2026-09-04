@@ -213,80 +213,91 @@ func (lock Lock) BuildArgs(component string) ([]string, error) {
 // the lintel browser runtime packages (OPS-IMAGE-006: digest-pinned base,
 // --no-install-recommends and per-package name=version installs).
 func (lock Lock) LintelAPTSpecs(arch string) ([]string, error) {
-	specs := make([]string, 0, len(lock.LintelRuntime.Packages))
-	for _, entry := range lock.LintelRuntime.Packages {
-		version, ok := entry.Versions["linux/"+arch]
-		if !ok || version == "" {
-			return nil, fmt.Errorf("lintel package %s has no linux/%s version", entry.Name, arch)
-		}
-		specs = append(specs, entry.Name+"="+version)
-	}
-	sort.Strings(specs)
-	return specs, nil
+	return lock.aptSpecs("lintel", arch)
 }
 
 // PlinthAPTSpecs returns the per-architecture name=version apt arguments for
 // the plinth worker tools.
 func (lock Lock) PlinthAPTSpecs(arch string) ([]string, error) {
-	specs := make([]string, 0, len(lock.PlinthTools.Packages))
-	for _, entry := range lock.PlinthTools.Packages {
-		version, ok := entry.Versions["linux/"+arch]
-		if !ok || version == "" {
-			return nil, fmt.Errorf("plinth tool %s has no linux/%s version", entry.Name, arch)
-		}
-		specs = append(specs, entry.Name+"="+version)
+	return lock.aptSpecs("plinth", arch)
+}
+
+// aptSpecs projects one component's locked packages into sorted name=version
+// arguments for one architecture.
+func (lock Lock) aptSpecs(component, arch string) ([]string, error) {
+	specs, err := lock.DebianSpecs(component)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(specs)
-	return specs, nil
+	perArch, ok := specs["linux/"+arch]
+	if !ok {
+		return nil, fmt.Errorf("component %s has no linux/%s package set", component, arch)
+	}
+	arguments := make([]string, 0, len(perArch))
+	for _, name := range sortedNames(perArch) {
+		arguments = append(arguments, name+"="+perArch[name])
+	}
+	return arguments, nil
+}
+
+func sortedNames(mapping map[string]string) []string {
+	names := make([]string, 0, len(mapping))
+	for name := range mapping {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // DebianSpecs returns the per-architecture name=version apt pin map of one
 // Debian-based component; the image mirror checks and the builder consume the
 // same projection.
 func (lock Lock) DebianSpecs(component string) (map[string]map[string]string, error) {
-	var versions map[string]map[string]string
+	var packages map[string]map[string]string
 	switch component {
 	case "plinth":
-		versions = map[string]map[string]string{}
+		packages = make(map[string]map[string]string, len(lock.PlinthTools.Packages))
 		for _, entry := range lock.PlinthTools.Packages {
-			perArch, err := perArchVersions("plinth", entry.Name, entry.Versions)
-			if err != nil {
-				return nil, err
-			}
-			versions[entry.Name] = perArch
+			packages[entry.Name] = entry.Versions
 		}
 	case "lintel":
-		versions = map[string]map[string]string{}
+		packages = make(map[string]map[string]string, len(lock.LintelRuntime.Packages))
 		for _, entry := range lock.LintelRuntime.Packages {
-			perArch, err := perArchVersions("lintel", entry.Name, entry.Versions)
-			if err != nil {
-				return nil, err
-			}
-			versions[entry.Name] = perArch
+			packages[entry.Name] = entry.Versions
 		}
 	default:
 		return nil, fmt.Errorf("component %q has no Debian package lock", component)
 	}
-	if len(versions) == 0 {
-		return nil, fmt.Errorf("component %q has an empty package lock", component)
-	}
 	specs := map[string]map[string]string{"linux/amd64": {}, "linux/arm64": {}}
-	for name, perArch := range versions {
+	for name, versions := range packages {
 		for platform := range specs {
-			specs[platform][name] = perArch[platform]
+			version, ok := versions[platform]
+			if !ok || version == "" {
+				return nil, fmt.Errorf("%s package %s has no %s version", component, name, platform)
+			}
+			specs[platform][name] = version
 		}
+	}
+	if len(packages) == 0 {
+		return nil, fmt.Errorf("component %q has an empty package lock", component)
 	}
 	return specs, nil
 }
 
-func perArchVersions(component, name string, versions map[string]string) (map[string]string, error) {
-	perArch := map[string]string{}
-	for _, arch := range []string{"amd64", "arm64"} {
-		version, ok := versions["linux/"+arch]
-		if !ok || version == "" {
-			return nil, fmt.Errorf("%s package %s has no linux/%s version", component, name, arch)
-		}
-		perArch["linux/"+arch] = version
+// ChromiumBuildArgs returns the docker build arguments that pin the lintel
+// Chromium download to the locked Playwright artifacts (OPS-IMAGE-002).
+func (lock Lock) ChromiumBuildArgs() []string {
+	arguments := []string{}
+	for arch, argument := range map[string][2]string{
+		"amd64": {"CHROMIUM_AMD64_URL", "CHROMIUM_AMD64_SHA256"},
+		"arm64": {"CHROMIUM_ARM64_URL", "CHROMIUM_ARM64_SHA256"},
+	} {
+		artifact := lock.Playwright.Artifacts["linux/"+arch]
+		arguments = append(arguments,
+			argument[0]+"="+artifact.URL,
+			argument[1]+"="+artifact.SHA256,
+		)
 	}
-	return perArch, nil
+	sort.Strings(arguments)
+	return arguments
 }

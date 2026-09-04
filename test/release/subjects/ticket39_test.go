@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,7 +115,7 @@ func TestTicket39(t *testing.T) {
 func requireTools(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"docker", "go", "helm", "git"} {
-		if _, err := lookPath(name); err != nil {
+		if _, err := exec.LookPath(name); err != nil {
 			t.Skipf("%s is not available: %v", name, err)
 		}
 	}
@@ -122,10 +123,6 @@ func requireTools(t *testing.T) {
 	if _, err := os.Stat("/proc/sys/fs/binfmt_misc/qemu-aarch64"); err != nil {
 		t.Skipf("linux/arm64 build emulation is not available (enable binfmt, e.g. docker run --privileged tonistiigi/binfmt --install arm64): %v", err)
 	}
-}
-
-func lookPath(name string) (string, error) {
-	return execLookPath(name)
 }
 
 // captureEnvironmentBaseline snapshots the pre-existing docker inventory so

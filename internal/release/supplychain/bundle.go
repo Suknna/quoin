@@ -288,10 +288,6 @@ func verifyChain(document *bundle, compiled *compiledTrust) (*x509.Certificate, 
 	return leaf, certificates[1:], result, nil
 }
 
-func base64DecodeStd(value string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(value)
-}
-
 // verifyDSSE checks the envelope's first signature over the DSSE PAE with the
 // leaf key and returns the decoded payload.
 func verifyDSSE(envelope *dsseEnvelope, publicKey *ecdsa.PublicKey) ([]byte, error) {
@@ -364,12 +360,6 @@ func subjectDigests(payloadType string, payload []byte) ([]string, string, error
 	default:
 		return nil, "", fmt.Errorf("unsupported dsse payload type %q", payloadType)
 	}
-}
-
-// SHA256Hex is the shared subject digest helper.
-func SHA256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func sha256Of(data []byte) []byte {

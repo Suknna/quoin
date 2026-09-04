@@ -79,9 +79,9 @@ func TestFormalImagesEqualMachineLocks(t *testing.T) {
 		for _, pin := range pattern.FindAllStringSubmatch(branch, -1) {
 			pins[pin[1]] = strings.TrimSuffix(pin[2], ";")
 		}
-	if len(pins) != len(tools.Packages) {
-		t.Fatalf("%s branch pins %d packages, want exactly the %d locked tools: %v", platform, len(pins), len(tools.Packages), pins)
-	}
+		if len(pins) != len(tools.Packages) {
+			t.Fatalf("%s branch pins %d packages, want exactly the %d locked tools: %v", platform, len(pins), len(tools.Packages), pins)
+		}
 		for _, entry := range tools.Packages {
 			version := entry.Versions[platform]
 			if version == "" {

@@ -28,7 +28,3 @@ func unmarshalIssuerExtension(value []byte, issuer *string) error {
 	*issuer = string(value)
 	return nil
 }
-
-func base64Decode(value string) ([]byte, error) {
-	return base64DecodeStd(value)
-}

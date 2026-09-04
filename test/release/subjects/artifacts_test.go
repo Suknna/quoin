@@ -1,7 +1,6 @@
 package subjects_test
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -87,5 +86,3 @@ func runArtifactAssertions(t *testing.T, recorder *evidence, inventory *subjects
 	}
 	return assertions
 }
-
-var _ = fmt.Sprintf

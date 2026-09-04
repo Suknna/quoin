@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,10 +19,6 @@ import (
 	"github.com/Suknna/quoin/internal/release/subjects"
 	"github.com/Suknna/quoin/internal/release/supplychain"
 )
-
-func execLookPath(name string) (string, error) {
-	return exec.LookPath(name)
-}
 
 func execRemoveContainer(name string) error {
 	return exec.Command("docker", "rm", "-f", name).Run()
@@ -206,27 +204,27 @@ func tamperBundleSubject(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	var document map[string]any
-	if err := jsonUnmarshal(raw, &document); err != nil {
+	if err := json.Unmarshal(raw, &document); err != nil {
 		t.Fatal(err)
 	}
 	envelope := document["dsseEnvelope"].(map[string]any)
-	payload, err := base64DecodeString(envelope["payload"].(string))
+	payload, err := base64.StdEncoding.DecodeString(envelope["payload"].(string))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var statement map[string]any
-	if err := jsonUnmarshal(payload, &statement); err != nil {
+	if err := json.Unmarshal(payload, &statement); err != nil {
 		t.Fatal(err)
 	}
 	subjects := statement["subject"].([]any)
 	entry := subjects[0].(map[string]any)
 	entry["digest"].(map[string]any)["sha256"] = strings.Repeat("de", 32)
-	encoded, err := jsonMarshal(statement)
+	encoded, err := json.Marshal(statement)
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope["payload"] = base64EncodeString(encoded)
-	rewritten, err := jsonMarshal(document)
+	envelope["payload"] = base64.StdEncoding.EncodeToString(encoded)
+	rewritten, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,4 +369,17 @@ func removeNewAnonymousVolumes(recorder *evidence, baselineVolumes string) []str
 		removed = append(removed, volume)
 	}
 	return removed
+}
+
+// httpGet fetches one URL with bounded size and redirects.
+func httpGet(url string) ([]byte, error) {
+	response, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: status %d", url, response.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(response.Body, 8<<20))
 }

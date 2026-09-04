@@ -1,9 +1,12 @@
 package subjects_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -45,6 +48,16 @@ func TestFormalImagesEqualMachineLocks(t *testing.T) {
 		}
 		assertText(t, component, "non-root user", dockerfile, "USER 65532:65532")
 
+		if component == "lintel" {
+			// The Chromium download pins are part of the mirror contract:
+			// the Dockerfile ARG defaults must equal the locked Playwright
+			// artifacts exactly (OPS-IMAGE-002).
+			for _, argument := range lock.ChromiumBuildArgs() {
+				name, value, _ := strings.Cut(argument, "=")
+				assertText(t, component, "chromium lock ARG "+name, dockerfile, "ARG "+name+"="+value)
+			}
+		}
+
 		if component != "plinth" && component != "lintel" {
 			continue
 		}
@@ -64,7 +77,12 @@ func TestFormalImagesEqualMachineLocks(t *testing.T) {
 		amd64Branch := dockerfile[amd64Start:amd64End]
 		for platform, branch := range map[string]string{"linux/amd64": amd64Branch, "linux/arm64": arm64Branch} {
 			pins := aptPins(branch)
-			for _, name := range sortedKeys(specs[platform]) {
+			names := make([]string, 0, len(specs[platform]))
+			for name := range specs[platform] {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
 				if pins[name] != specs[platform][name] {
 					t.Fatalf("%s %s pins %s=%q but the machine lock says %q", component, platform, name, pins[name], specs[platform][name])
 				}
@@ -83,21 +101,6 @@ func aptPins(branch string) map[string]string {
 		pins[pin[1]] = pin[2]
 	}
 	return pins
-}
-
-func sortedKeys(mapping map[string]string) []string {
-	keys := make([]string, 0, len(mapping))
-	for key := range mapping {
-		keys = append(keys, key)
-	}
-	for index := range keys {
-		for next := index + 1; next < len(keys); next++ {
-			if keys[next] < keys[index] {
-				keys[index], keys[next] = keys[next], keys[index]
-			}
-		}
-	}
-	return keys
 }
 
 func assertText(t *testing.T, component, what, haystack, needle string) {
@@ -140,13 +143,49 @@ func runLockEqualityAssertion(t *testing.T, recorder *evidence, inventory *subje
 		}
 		actual[platform] = subject.SHA256
 	}
+	verifyPlaywrightUpstreamLocks(t, recorder, lock)
 	recorder.observe("browser-locks.json", map[string]any{
 		"playwright_version": lock.Playwright.Version,
 		"chromium_revision":  lock.Playwright.ChromiumRevision,
 		"artifacts":          actual,
 	})
 	return map[string]any{
-		"expected": "formal Dockerfiles equal release-inputs/plinth-worker-tools locks; baked Chromium artifacts equal the locked SHA-256 hashes",
+		"expected": "formal Dockerfiles equal release-inputs/plinth-worker-tools locks; baked Chromium artifacts equal the locked SHA-256 hashes; the pinned upstream Playwright sources still hash to the lock",
 		"actual":   "mirror check passed; both architecture artifacts match the lock",
+	}
+}
+
+// verifyPlaywrightUpstreamLocks re-fetches the two pinned upstream Playwright
+// sources at the frozen tag and proves both SHA-256 hashes and the artifact
+// URL mapping still equal the machine lock (OPS-IMAGE-002: the release
+// verifier derives the platform URLs from the pinned upstream files).
+func verifyPlaywrightUpstreamLocks(t *testing.T, recorder *evidence, lock inputs.Lock) {
+	t.Helper()
+	const upstream = "https://raw.githubusercontent.com/microsoft/playwright/"
+	for _, pinned := range []struct {
+		label string
+		file  inputs.SourceFile
+	}{
+		{"browsers.json", lock.Playwright.BrowsersJSON},
+		{"registry-source", lock.Playwright.RegistrySource},
+	} {
+		response, err := httpGet(upstream + lock.Playwright.SourceTag + "/" + pinned.file.Path)
+		if err != nil {
+			t.Fatalf("upstream %s: %v", pinned.label, err)
+		}
+		sum := sha256.Sum256(response)
+		actual := hex.EncodeToString(sum[:])
+		if actual != pinned.file.SHA256 {
+			t.Fatalf("upstream %s sha256 %s does not equal the lock %s", pinned.label, actual, pinned.file.SHA256)
+		}
+		recorder.observe("upstream-"+pinned.label+".sha256", map[string]string{"path": pinned.file.Path, "sha256": actual})
+	}
+	amd64 := lock.Playwright.Artifacts["linux/amd64"].URL
+	arm64 := lock.Playwright.Artifacts["linux/arm64"].URL
+	if !strings.Contains(amd64, lock.Playwright.ChromiumVersion) {
+		t.Fatalf("amd64 artifact URL %s does not carry the locked chromium version %s", amd64, lock.Playwright.ChromiumVersion)
+	}
+	if !strings.Contains(arm64, lock.Playwright.ChromiumRevision) {
+		t.Fatalf("arm64 artifact URL %s does not carry the locked chromium revision %s", arm64, lock.Playwright.ChromiumRevision)
 	}
 }

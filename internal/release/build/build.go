@@ -344,7 +344,7 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 			Mode:     platform.Mode,
 			Images:   map[string]fragmentImage{},
 		}
-		for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+		for _, component := range inputs.Components {
 			repository := options.registry + "/" + component
 			baseArgs, err := lock.BuildArgs(component)
 			if err != nil {
@@ -355,7 +355,14 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 				"--sbom=true", "--provenance=mode=min",
 				"-f", "deploy/images/" + component + "/Dockerfile",
 			}
-			for _, argument := range baseArgs {
+			lockArgs := append([]string{}, baseArgs...)
+			if component == "lintel" {
+				// The Chromium download pins come from the lock exactly like
+				// the base digests: the Dockerfile ARG defaults are the same
+				// authority and the mirror check proves text equality.
+				lockArgs = append(lockArgs, lock.ChromiumBuildArgs()...)
+			}
+			for _, argument := range lockArgs {
 				arguments = append(arguments, "--build-arg", argument)
 			}
 			arguments = append(arguments, "--build-arg", "GOPROXY="+goproxy, "-t", repository+":"+platform.Arch, "--push", ".")
@@ -405,7 +412,7 @@ func mergeImageFragments(options *options, inventory *subjects.Inventory) error 
 		}
 		fragments[fragment.Platform] = fragment
 	}
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range inputs.Components {
 		repository := options.registry + "/" + component
 		subject := subjects.ImageSubject{
 			Repository:     repository,

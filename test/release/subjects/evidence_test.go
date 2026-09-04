@@ -195,12 +195,3 @@ func tail(text string, lines int) string {
 	}
 	return strings.Join(all[len(all)-lines:], "\n")
 }
-
-func mustJSONDocument(t *testing.T, value any) string {
-	t.Helper()
-	encoded, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(encoded)
-}

@@ -183,13 +183,6 @@ func TestVerifyBundleRejectsForeignIdentityIssuerRoot(t *testing.T) {
 	if _, err := VerifyBundle(bundle, "sha256:"+repeatHex("cd"), badIssuer); err == nil {
 		t.Fatal("issuer mismatch must fail")
 	}
-
-	// Tampered payload: recompute over modified bytes.
-	tampered := statementFor("subject", "sha256:"+repeatHex("ff"))
-	if _, err := VerifyBundle(signer.signStatement(t, "application/vnd.in-toto+json", statementFor("subject", "sha256:"+repeatHex("cd"))), "sha256:"+repeatHex("cd"), signer.trust()); err != nil {
-		t.Fatal(err)
-	}
-	_ = tampered
 }
 
 func TestVerifyBundleRejectsTamperedSignature(t *testing.T) {
