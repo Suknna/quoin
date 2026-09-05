@@ -167,6 +167,13 @@ type metricsExpectation struct {
 	isLabeled bool
 }
 
+// composeProgressPattern matches the decoration lines the docker
+// compose CLI interleaves with command output (for example
+// " Container proj-secret-bootstrap-1 Started"). Compose v5 prints them
+// even with -T and --no-log-prefix; they are transport dressing of the
+// CLI, never metric samples, so the judge skips them before parsing.
+var composeProgressPattern = regexp.MustCompile(`^\s*(✔|✓)?\s*(Container|Network|Volume|Image|Service|Config|Secret|Pulling)\s+\S+.*$`)
+
 func judgeMetrics(component, exposition string) *PlatformError {
 	expectedFamilies, err := sharedops.CatalogFamiliesFor(component)
 	if err != nil {
@@ -199,8 +206,11 @@ func judgeMetrics(component, exposition string) *PlatformError {
 	observedHelps := map[string]string{}
 	observedTypes := map[string]string{}
 	for _, line := range strings.Split(exposition, "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(ansiPattern.ReplaceAllString(line, ""))
 		if line == "" {
+			continue
+		}
+		if composeProgressPattern.MatchString(line) {
 			continue
 		}
 		if strings.HasPrefix(line, "# HELP ") {

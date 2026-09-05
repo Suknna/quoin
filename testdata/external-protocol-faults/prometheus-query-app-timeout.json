@@ -1,0 +1,5 @@
+{
+  "id": "prometheus-query-app-timeout",
+  "protocol": "http",
+  "behavior": "app_timeout"
+}

@@ -28,6 +28,12 @@ func Main(command string, arguments []string) {
 		install.Run(flags.ConfigPath, flags.ReleaseManifestPath, flags.ReportPath)
 	case "verify":
 		flags := Parse("compose verify", arguments)
+		if flags.Suite != "" {
+			os.Exit(verify.RunSuite("compose", verify.SuiteFlags{
+				Suite: flags.Suite, Phase: flags.Phase,
+				Config: flags.ConfigPath, Manifest: flags.ReleaseManifestPath,
+			}))
+		}
 		if flags.HelperRequestPath != "" {
 			os.Exit(acceptance.Run(acceptance.RunRequest{
 				Backend: "compose", ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath,
@@ -61,7 +67,9 @@ func Main(command string, arguments []string) {
 
 // Flags carries the stable helper flag set shared by the Compose
 // subcommands: --config and --report form the primary invocation surface;
-// --release-manifest selects the digest-pinned formal release artifacts.
+// --release-manifest selects the digest-pinned formal release artifacts;
+// --suite/--phase select one Release Qualification suite cell phase
+// (T40) instead of the operational verify.
 type Flags struct {
 	ConfigPath          string
 	ReleaseManifestPath string
@@ -69,6 +77,8 @@ type Flags struct {
 	Offline             bool
 	BackupID            string
 	HelperRequestPath   string
+	Suite               string
+	Phase               string
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -83,10 +93,16 @@ func Parse(name string, arguments []string) Flags {
 	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
 	backupID := flags.String("backup", "", "published backup identifier for restore")
 	helperRequestPath := flags.String("helper-request", "", "Deployment Acceptance helper request YAML")
+	suite := flags.String("suite", "", "release-qualification suite (production-transport|release-qualification|monitoring-stack|storage-faults|network-faults)")
+	phase := flags.String("phase", "", "suite phase (setup|action|assert|teardown)")
 	parseErr := flags.Parse(arguments)
-	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
+	// The suite phase commands from the frozen catalog carry no
+	// --config: a qualification invocation transports the deployment
+	// inputs through the QUOIN_SUITE_* environment instead.
+	configFromEnv := *suite != "" && *configPath == "" && os.Getenv("QUOIN_SUITE_CONFIG") != ""
+	invalid := parseErr != nil || (*configPath == "" && !configFromEnv) || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath, Suite: *suite, Phase: *phase}
 	}
 	brief := report.New("compose", fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")

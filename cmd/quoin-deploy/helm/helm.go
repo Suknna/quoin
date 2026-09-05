@@ -10,6 +10,7 @@ import (
 
 	recovery "github.com/Suknna/quoin/cmd/quoin-deploy/recover_lintel"
 	deployupgrade "github.com/Suknna/quoin/cmd/quoin-deploy/upgrade"
+	"github.com/Suknna/quoin/cmd/quoin-deploy/verify"
 	"github.com/Suknna/quoin/internal/deploy/acceptance"
 	deployconfig "github.com/Suknna/quoin/internal/deploy/config"
 	deployhelm "github.com/Suknna/quoin/internal/deploy/helm"
@@ -27,6 +28,12 @@ func Main(command string, arguments []string) {
 		}))
 	case "verify":
 		flags := Parse("helm verify", arguments)
+		if flags.Suite != "" {
+			os.Exit(verify.RunSuite("kubernetes", verify.SuiteFlags{
+				Suite: flags.Suite, Phase: flags.Phase,
+				Config: flags.ConfigPath, Manifest: flags.ReleaseManifestPath,
+			}))
+		}
 		if flags.HelperRequestPath != "" {
 			os.Exit(acceptance.Run(acceptance.RunRequest{
 				Backend: "kubernetes", ConfigPath: flags.ConfigPath, ReleaseManifestPath: flags.ReleaseManifestPath,
@@ -61,7 +68,8 @@ func Main(command string, arguments []string) {
 	}
 }
 
-// Flags carries the stable helper flag set shared by the Helm subcommands.
+// Flags carries the stable helper flag set shared by the Helm subcommands;
+// --suite/--phase select one Release Qualification suite cell phase (T40).
 type Flags struct {
 	ConfigPath          string
 	ReleaseManifestPath string
@@ -69,6 +77,8 @@ type Flags struct {
 	Offline             bool
 	BackupID            string
 	HelperRequestPath   string
+	Suite               string
+	Phase               string
 }
 
 // Parse returns the parsed flags, exiting 2 on malformed invocations. Every
@@ -82,10 +92,16 @@ func Parse(name string, arguments []string) Flags {
 	offline := flags.Bool("offline", false, "stop workloads and run offline fallback")
 	backupID := flags.String("backup", "", "published backup identifier for restore")
 	helperRequestPath := flags.String("helper-request", "", "Deployment Acceptance helper request YAML")
+	suite := flags.String("suite", "", "release-qualification suite (production-transport|release-qualification|monitoring-stack|storage-faults|network-faults)")
+	phase := flags.String("phase", "", "suite phase (setup|action|assert|teardown)")
 	parseErr := flags.Parse(arguments)
-	invalid := parseErr != nil || *configPath == "" || flags.NArg() != 0
+	// Suite phases may carry their deployment inputs through the
+	// QUOIN_SUITE_* environment (frozen catalog phase commands carry no
+	// --config).
+	configFromEnv := *suite != "" && *configPath == "" && os.Getenv("QUOIN_SUITE_CONFIG") != ""
+	invalid := parseErr != nil || (*configPath == "" && !configFromEnv) || flags.NArg() != 0
 	if !invalid {
-		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath}
+		return Flags{ConfigPath: *configPath, ReleaseManifestPath: *releaseManifestPath, ReportPath: *reportPath, Offline: *offline, BackupID: *backupID, HelperRequestPath: *helperRequestPath, Suite: *suite, Phase: *phase}
 	}
 	brief := report.New("helm", fmt.Sprintf("%s/%s", os.Getenv("GOOS"), os.Getenv("GOARCH")), name, *configPath, "")
 	brief.MarkFailed("invalid_invocation", "malformed command line", "fix the command line; no deployment side effect has occurred")

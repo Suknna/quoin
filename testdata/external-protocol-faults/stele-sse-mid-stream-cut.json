@@ -1,0 +1,9 @@
+{
+  "id": "stele-sse-mid-stream-cut",
+  "protocol": "sse",
+  "behavior": "mid_stream_cut",
+  "events": [
+    "data: {\"objectType\":\"task\",\"id\":\"fixture-1\",\"seq\":1}",
+    "data: {\"objectType\":\"task\",\"id\":\"fixture-1\",\"seq\":2}"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "stele-sse-malformed-frame",
+  "protocol": "sse",
+  "behavior": "malformed_frame",
+  "events": [
+    "data: {\"objectType\":\"task\",\"id\":\"fixture-1\",\"seq\":1}",
+    "data: {not-json(\"objectType\"}",
+    "data: [DONE]"
+  ]
+}

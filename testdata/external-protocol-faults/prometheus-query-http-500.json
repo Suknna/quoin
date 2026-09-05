@@ -1,0 +1,8 @@
+{
+  "id": "prometheus-query-http-500",
+  "protocol": "http",
+  "behavior": "error_status",
+  "status": 503,
+  "body": "{\"status\":\"error\",\"errorType\":\"internal\",\"error\":\"fixture: storage backend unavailable\"}",
+  "headers": {"Content-Type": "application/json"}
+}

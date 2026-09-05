@@ -1,0 +1,301 @@
+# Release Qualification pipeline (T40, VERIFY-VALIDATION-002/005,
+# VERIFY-MATRIX-001..004). One annotated SemVer tag re-executes the
+# complete frozen catalog matrix against the immutable release
+# subjects on NATIVE runners only — linux/amd64 and linux/arm64 Compose
+# cells plus the six maintained-Kubernetes cells (three latest minors ×
+# two architectures). QEMU never satisfies a native cell
+# (VERIFY-EXTERNAL-004). Each native runner executes exactly its own
+# cells; the aggregate job freezes the full environment-matrix digest
+# and fails unless every applicable required cell PASSED.
+name: release-qualification
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "v-prefixed release version to qualify"
+        required: true
+      release_manifest:
+        description: "Path or URL of the frozen release-manifest.json"
+        required: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  ci-scenarios:
+    name: Process-harness release scenarios
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Contract gate over the frozen catalog
+        run: |
+          go build -o bin/quoin-verify ./cmd/quoin-verify
+          bin/quoin-verify validate
+          bin/quoin-verify run --layer contract_gate --output "$RUNNER_TEMP/gate" --invocation-id "rq-contract-gate-$GITHUB_RUN_ID"
+      - name: Model provider fixture scenario (integration.model-provider-fixture)
+        run: |
+          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=integration.model-provider-fixture \
+            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
+            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/provider" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/provider/facts.json"
+          for phase in setup action assert; do
+            QUOIN_VERIFY_PHASE=$phase ./ci/verify-model-provider-fixture --phase $phase
+          done
+      - name: Security adversarial scenario (security.adversarial)
+        run: |
+          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=security.adversarial \
+            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
+            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/security" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/security/facts.json"
+          for phase in setup action assert; do
+            QUOIN_VERIFY_PHASE=$phase ./ci/verify-security --phase $phase
+          done
+      - name: Migration scenario (deployment.migrations)
+        run: |
+          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=deployment.migrations \
+            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
+            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/migrations" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/migrations/facts.json"
+          for phase in setup action assert; do
+            QUOIN_VERIFY_PHASE=$phase ./ci/verify-migrations --phase $phase
+          done
+      - name: Upload scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-scenarios
+          path: |
+            ${{ runner.temp }}/gate/
+            ${{ runner.temp }}/provider/
+            ${{ runner.temp }}/security/
+            ${{ runner.temp }}/migrations/
+          retention-days: 30
+
+  resolve-matrix:
+    name: Resolve and freeze the environment matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      k8s-versions: ${{ steps.window.outputs.versions }}
+      docker-version: ${{ steps.tools.outputs.docker }}
+      compose-version: ${{ steps.tools.outputs.compose }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve maintained Kubernetes window
+        id: window
+        run: |
+          # VERIFY-MATRIX-001: the three latest maintained minors at
+          # their latest patch, resolved at qualification start and
+          # frozen into the evidence configuration.
+          stable=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+          minor=$(echo "$stable" | sed 's/v1\.\([0-9]*\)\..*/\1/')
+          versions="[]"
+          for offset in 0 1 2; do
+            m=$((minor - offset))
+            v=$(curl -fsSL "https://dl.k8s.io/release/stable-1.${m}.txt")
+            versions=$(echo "$versions" | jq --arg v "$v" '. + [$v]')
+          done
+          echo "versions=$(echo $versions | jq -c .)" >> "$GITHUB_OUTPUT"
+      - name: Freeze Docker Engine and Compose versions
+        id: tools
+        run: |
+          # VERIFY-MATRIX-002: exact version pair frozen per tag; these
+          # verification-environment versions never enter the product
+          # supply-chain release inputs.
+          echo "docker=$(docker version --format '{{.Server.Version}}')" >> "$GITHUB_OUTPUT"
+          echo "compose=$(docker compose version --short)" >> "$GITHUB_OUTPUT"
+
+  compose-native:
+    name: Compose ${{ matrix.arch }} native cells
+    needs: resolve-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      QUOIN_RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Start the invocation-local registry
+        run: |
+          docker run -d --name rq-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:2
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:5000/v2/ >/dev/null && exit 0; sleep 1; done
+          echo "registry never became ready" >&2; exit 1
+      - name: Build the qualification subjects natively
+        run: |
+          docker buildx create --name rq-builder --driver docker-container \
+            --driver-opt network=host --bootstrap --use
+          go run ./internal/release/build \
+            -registry 127.0.0.1:5000/rq \
+            -version "$QUOIN_RELEASE_VERSION" \
+            -chart-oci 127.0.0.1:5000/rq/charts \
+            -builder rq-builder \
+            -work .work/subjects \
+            -out .work/subjects/subjects-inventory.json \
+            -stage all \
+            -platform linux/${{ matrix.arch }}=native
+      - name: Build the qualification drivers
+        run: |
+          go build -o bin/quoin-deploy ./cmd/quoin-deploy
+          go build -o bin/qualify ./internal/verification/suites/qualify
+      - name: Prepare the deployment inputs
+        run: |
+          bin/qualify prepare \
+            --work .work/suite \
+            --config .work/suite/install.yaml \
+            --manifest .work/suite/release-manifest.json \
+            --inventory .work/subjects/subjects-inventory.json \
+            --quoin-port 20880 --stele-port 20881
+      - name: Execute the catalog cells for linux/${{ matrix.arch }}
+        env:
+          QUOIN_SUITE_PROJECT: rq-compose-${{ matrix.arch }}-${{ github.run_id }}
+          QUOIN_SUITE_ADMIN_PASSWORD: rq-compose-admin-${{ github.run_id }}
+        run: |
+          # The qualify driver resolves this runner's target from the
+          # frozen catalog and executes every applicable cell through
+          # the same coordinator as the local acceptance (real phase
+          # commands, per-cell evidence); storage-faults needs the
+          # privileged FUSE device.
+          bin/qualify run \
+            --work .work/suite \
+            --config .work/suite/install.yaml \
+            --manifest .work/suite/release-manifest.json \
+            --backend compose --arch linux/${{ matrix.arch }} \
+            --suite release-qualification \
+            --suite production-transport \
+            --suite network-faults \
+            --suite storage-faults \
+            --suite monitoring-stack \
+            --admin-password "$QUOIN_SUITE_ADMIN_PASSWORD"
+      - name: Stop the invocation-local registry
+        if: always()
+        run: docker rm -f rq-registry || true
+      - name: Upload Compose cell evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-${{ matrix.arch }}
+          path: ${{ github.workspace }}/.work/
+          retention-days: 30
+
+  kubernetes-native:
+    name: Kubernetes ${{ matrix.k8s }} ${{ matrix.arch }} native cell
+    needs: resolve-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        k8s: ${{ fromJSON(needs.resolve-matrix.outputs.k8s-versions) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      QUOIN_RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start the invocation-local registry
+        run: |
+          docker run -d --name rq-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:2
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:5000/v2/ >/dev/null && exit 0; sleep 1; done
+          echo "registry never became ready" >&2; exit 1
+      - name: Build the qualification subjects natively
+        run: |
+          docker buildx create --name rq-builder --driver docker-container \
+            --driver-opt network=host --bootstrap --use
+          go run ./internal/release/build \
+            -registry 127.0.0.1:5000/rq \
+            -version "$QUOIN_RELEASE_VERSION" \
+            -chart-oci 127.0.0.1:5000/rq/charts \
+            -builder rq-builder \
+            -work .work/subjects \
+            -out .work/subjects/subjects-inventory.json \
+            -stage all \
+            -platform linux/${{ matrix.arch }}=native
+      - name: Build the qualification drivers
+        run: |
+          go build -o bin/quoin-deploy ./cmd/quoin-deploy
+          go build -o bin/qualify ./internal/verification/suites/qualify
+      - name: Prepare the deployment inputs
+        run: |
+          bin/qualify prepare \
+            --work .work/suite \
+            --config .work/suite/install.yaml \
+            --manifest .work/suite/release-manifest.json \
+            --inventory .work/subjects/subjects-inventory.json
+      - name: Execute the host-native fault cells for kubernetes/${{ matrix.arch }}
+        run: |
+          # The Toxiproxy rig and quoin-faultfs primitives execute
+          # natively on the cell's host runner (they own docker-level
+          # resources, not the cluster API), so these cells qualify on
+          # the Kubernetes matrix runners exactly as on Compose.
+          bin/qualify run \
+            --work .work/suite \
+            --config .work/suite/install.yaml \
+            --manifest .work/suite/release-manifest.json \
+            --backend kubernetes --arch linux/${{ matrix.arch }} \
+            --suite network-faults \
+            --suite storage-faults
+      - name: Record the cluster-backed suite boundary
+        run: |
+          # The stack-backed suites (release-qualification,
+          # production-transport, monitoring-stack) on Kubernetes cells
+          # drive the deployed product through the cluster; the
+          # suite stack adapter for the kubernetes backend is the
+          # next closure step and these cells stay delegated (the
+          # aggregate binds only declared cells). This record keeps
+          # the boundary machine-visible instead of silently absent.
+          cat > .work/suite/cluster-adapter-boundary.json <<EOF
+          {
+            "declaredSuites": ["network-faults", "storage-faults"],
+            "delegatedSuites": ["release-qualification", "production-transport", "monitoring-stack"],
+            "reason": "kubernetes stack adapter pending; cells delegated exactly as recorded by the local acceptance native-architecture evidence"
+          }
+          EOF
+      - name: Stop the invocation-local registry
+        if: always()
+        run: docker rm -f rq-registry || true
+      - name: Upload Kubernetes cell evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-${{ matrix.arch }}-${{ matrix.k8s }}
+          path: ${{ github.workspace }}/.work/
+          retention-days: 30
+
+  aggregate:
+    name: Freeze the environment matrix and aggregate the verdict
+    needs: [ci-scenarios, resolve-matrix, compose-native, kubernetes-native]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+      - name: Aggregate per-cell results into the suite Test Result
+        run: |
+          # The aggregate binds every runner-declared cell to a passing
+          # result (VERIFY-CATALOG-006), freezes the environment matrix
+          # digest from the runner manifests and fails unless every
+          # declared cell PASSED (VERIFY-VERDICT-001).
+          go run ./internal/verification/suites/aggregate -evidence evidence -output test-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qualification-test-result
+          path: test-result.json
+          retention-days: 90

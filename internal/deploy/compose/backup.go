@@ -38,7 +38,10 @@ func (helper *runner) onlineBackup(req Request, loaded *loadedRequest) int {
 	if err != nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "verifier_overlay_invalid", Message: err.Error(), NextAction: "fix the deployment projection, then retry"})
 	}
-	arguments := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-TTY", "--no-deps", "quoin-verifier", "http://quoin:9090/metrics")
+	// The metrics exposition is a 200 body the healthcheck must accept
+	// (without --status it demands the literal "ok" body of /livez and
+	// every observation would fail its own transport check).
+	arguments := append(append([]string{}, loaded.composeArguments...), "--file", overlay, "run", "--rm", "--no-TTY", "--no-deps", "quoin-verifier", "--status", "200", "http://quoin:9090/metrics")
 	read := func(name string) (deploybackup.Observation, error) {
 		body, err := helper.run(stage, name, dockerize(arguments)...)
 		if err != nil {
