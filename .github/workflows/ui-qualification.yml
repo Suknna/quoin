@@ -1,0 +1,198 @@
+#UI qualification pipeline (T41, VERIFY-OBSERVATION-001..003). One
+#annotated SemVer tag closes the fixed 24-cell UI matrix on NATIVE
+#runners only: linux/amd64 executes the Playwright-locked Chromium
+#artifact cells plus the qualification-resolved branded Chrome cells,
+#linux/arm64 executes the arm64 Chromium artifact cells. The typed
+#observation recordings bind the runner's GitHub Actions OIDC identity
+#as the observer; cells without a matching typed observation stay
+#not_run and WARN the aggregate instead of passing silently.
+name: ui-qualification
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "v-prefixed release version to qualify"
+        required: true
+      observation_submission:
+        description: "Base64 typed observation submission json (observer field is overwritten with the runner OIDC identity)"
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  QUOIN_UI_SITE_ORIGIN: "https://127.0.0.1:18480"
+
+jobs:
+  ui-matrix:
+    name: UI ${{ matrix.arch }} native cells
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      QUOIN_RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - name: Install the web toolchain
+        run: pnpm --dir web install --frozen-lockfile
+      - name: Execute the ui.automated cells for linux/${{ matrix.arch }}
+        run: |
+          #Every phase of every cell goes through the frozen catalog
+          #entrypoint; the first action boots the Compose-qualified site
+          #once and later cells reuse the recorded per-cell results. A
+          #failed cell records its code and the loop continues with the
+          #independent cells (VERIFY-VERDICT-003); the step fails after
+          #every local cell produced its outcome.
+          export QUOIN_UI_MATRIX_DIR="$PWD/.work/ui-matrix"
+          export QUOIN_UI_INVOCATION="uiq-${{ github.run_id }}-${{ matrix.arch }}"
+          export QUOIN_UI_SITE="$QUOIN_UI_SITE_ORIGIN"
+          exit_code=0
+          for cell in $(go run ./internal/verification/observation/harness cells \
+              --scenario ui.automated | jq -r --arg arch "linux/${{ matrix.arch }}" \
+              '.cells[] | select(.architecture == $arch) | .cell_id'); do
+            export QUOIN_VERIFY_SCENARIO=ui.automated \
+              QUOIN_VERIFY_CELL="$cell" \
+              QUOIN_VERIFY_PARAMETERS='{}' \
+              QUOIN_VERIFY_WORKDIR="$PWD/.work/cells/$cell" \
+              QUOIN_VERIFY_FACTS="$PWD/.work/cells/$cell/facts.json"
+            for phase in setup action assert; do
+              if ! QUOIN_VERIFY_PHASE=$phase ./ci/verify-ui-automation --phase $phase; then
+                echo "cell $cell phase $phase failed" >> .work/ui-failures.txt
+                exit_code=1
+                break
+              fi
+            done
+          done
+          exit $exit_code
+      - name: Generate the typed observation forms for linux/${{ matrix.arch }}
+        run: |
+          export QUOIN_UI_MATRIX_DIR="$PWD/.work/ui-matrix"
+          export QUOIN_OBSERVATION_INVOCATION="uiq-${{ github.run_id }}-${{ matrix.arch }}" \
+            QUOIN_OBSERVATION_TAG="$QUOIN_RELEASE_VERSION" \
+            QUOIN_OBSERVATION_RELEASE_DIGEST="$(git rev-parse HEAD)" \
+            QUOIN_OBSERVATION_ORIGIN_DIGEST="$(printf '%s' "$QUOIN_UI_SITE_ORIGIN" | sha256sum | cut -d' ' -f1)" \
+            QUOIN_OBSERVATION_SUBJECTS="$PWD/.work/ui-matrix/subjects" \
+            QUOIN_OBSERVATION_BRANDED="$PWD/.work/ui-matrix/branded-chrome-resolution.json" \
+            QUOIN_OBSERVATION_ARCHITECTURE="linux/${{ matrix.arch }}" \
+          for cell in $(go run ./internal/verification/observation/harness cells \
+              --scenario ui.manual-observation | jq -r --arg arch "linux/${{ matrix.arch }}" \
+              '.cells[] | select(.architecture == $arch) | .cell_id'); do
+            export QUOIN_VERIFY_SCENARIO=ui.manual-observation \
+              QUOIN_VERIFY_CELL="$cell" \
+              QUOIN_VERIFY_WORKDIR="$PWD/.work/observation-cells/$cell" \
+              QUOIN_VERIFY_FACTS="$PWD/.work/observation-cells/$cell/facts.json"
+            QUOIN_VERIFY_PHASE=setup ./ci/record-ui-observation --phase setup
+          done
+      - name: Record the typed observations under the runner OIDC observer
+        run: |
+          export QUOIN_UI_MATRIX_DIR="$PWD/.work/ui-matrix"
+          export QUOIN_OBSERVATION_INVOCATION="uiq-${{ github.run_id }}-${{ matrix.arch }}"
+          if [ -n "${{ inputs.observation_submission }}" ]; then
+            #The observer identity comes from the GitHub Actions OIDC
+            #token of this runner, never from the submitted document:
+            #the submission observer fields are overwritten before the
+            #recorder ever sees them.
+            oidc_token=$(curl -fsSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              -H "Accept: application/json; api-version=2.0" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=quoin-ui-qualification" | jq -r .value)
+            observer="ci-oidc:$(printf '%s' "$oidc_token" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r .sub)"
+            printf '%s' "${{ inputs.observation_submission }}" | base64 -d > .work/observation-submission.json
+            jq --arg observer "$observer" \
+              '.observer = $observer | .observations = (.observations | map(.observer = $observer))' \
+              .work/observation-submission.json > .work/observation-submission-bound.json
+            export QUOIN_OBSERVATION_SUBMISSION="$PWD/.work/observation-submission-bound.json"
+            export QUOIN_OBSERVATION_EXPECTED_OBSERVER="$observer"
+            exit_code=0
+            for cell in $(go run ./internal/verification/observation/harness cells \
+                --scenario ui.manual-observation | jq -r --arg arch "linux/${{ matrix.arch }}" \
+                '.cells[] | select(.architecture == $arch) | .cell_id'); do
+              export QUOIN_VERIFY_SCENARIO=ui.manual-observation \
+                QUOIN_VERIFY_CELL="$cell" \
+                QUOIN_VERIFY_WORKDIR="$PWD/.work/observation-cells/$cell" \
+                QUOIN_VERIFY_FACTS="$PWD/.work/observation-cells/$cell/facts.json"
+              if ! QUOIN_VERIFY_PHASE=action ./ci/record-ui-observation --phase action; then
+                echo "observation record $cell failed" >> .work/ui-failures.txt
+                exit_code=1
+                continue
+              fi
+              QUOIN_VERIFY_PHASE=assert ./ci/record-ui-observation --phase assert || exit_code=1
+            done
+            exit $exit_code
+          else
+            #No typed submission means the observation cells stay not_run;
+            #record the machine-visible boundary instead of passing them.
+            echo '{"delegated":"typed observation submission absent; observation cells not_run and WARN"}' \
+              > .work/observation-boundary.json
+          fi
+      - name: Summarize the matrix for the aggregate
+        run: |
+          go run ./internal/verification/observation/harness summarize \
+            --invocation "uiq-${{ github.run_id }}-${{ matrix.arch }}" \
+            --results .work/ui-matrix/matrix-results.json \
+            --subjects .work/ui-matrix/subjects \
+            --ledger .work/ui-matrix/observation-ledger.json \
+            --out .work/ui-matrix/ui-matrix-summary.json
+      - name: Upload UI cell evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-${{ matrix.arch }}
+          path: ${{ github.workspace }}/.work/
+          retention-days: 30
+
+  aggregate:
+    name: Freeze the UI matrix verdict
+    needs: [ui-matrix]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+      - name: Fail unless every automated and observed cell PASSED
+        run: |
+          #The aggregate binds only the cells the native runners
+          #recorded: exact per-architecture counts (16 automated cells on
+          #amd64, 8 on arm64; observations likewise), every recorded cell
+          #passed, and no missing typed observations. PASSED requires the
+          #complete 24+24 closure across the native runners.
+          jq -e '
+            .["ui.automated"] and .["ui.manual-observation"] and
+            (.["ui.automated"] | length == 16) and
+            (.["ui.manual-observation"] | length == 16) and
+            ([.["ui.automated"][]] | all(. == "passed")) and
+            ([.["ui.manual-observation"][]] | all(. == "passed"))
+          ' evidence/ui-amd64/ui-matrix/ui-matrix-summary.json > /dev/null
+          jq -e '
+            (.["ui.automated"] | length == 8) and
+            (.["ui.manual-observation"] | length == 8) and
+            ([.["ui.automated"][]] | all(. == "passed")) and
+            ([.["ui.manual-observation"][]] | all(. == "passed"))
+          ' evidence/ui-arm64/ui-matrix/ui-matrix-summary.json > /dev/null
+          cat evidence/ui-*/ui-matrix/ui-matrix-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-qualification-summary
+          path: evidence/
+          retention-days: 90

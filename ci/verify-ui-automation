@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+#ci/verify-ui-automation is the frozen catalog entrypoint of the
+#ui.automated scenario (VERIFY-OBSERVATION-003). It drives the REAL
+#release browser artifacts directly through Playwright: the two Playwright
+#Chromium architectures use their locked release artifacts and branded
+#Chrome amd64 uses the qualification-resolved, digest-frozen branded
+#build. Never via the Lintel runtime, versioned Journeys or the Explorer
+#path.
+#
+#Environment contract, set by the verification coordinator or workflow:
+#QUOIN_VERIFY_PHASE    setup | action | assert
+#QUOIN_VERIFY_CELL     catalog cell id of the ui.automated matrix
+#QUOIN_VERIFY_PARAMETERS  JSON with browser_artifact, viewport_width_css_px
+#                         and motion_mode
+#QUOIN_VERIFY_FACTS    facts json path the assert phase writes
+#QUOIN_VERIFY_WORKDIR  per-cell work directory
+#QUOIN_UI_MATRIX_DIR   optional invocation-shared matrix directory holding
+#                       subjects, results and the branded freeze; defaults
+#                       to the cell workdir so an isolated cell still runs
+#QUOIN_UI_BROWSER_CACHE optional content-addressed download cache under
+#                       .artifacts/ui-browser-cache by default
+#QUOIN_UI_SITE         optional qualification site origin the tests drive,
+#                       http://127.0.0.1:18080 by default; the Playwright
+#                       webServer boots the Compose fixture itself
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+phase="${QUOIN_VERIFY_PHASE:-}"
+if [ -z "$phase" ]; then
+  #The coordinator exports QUOIN_VERIFY_PHASE; a manual invocation may
+  #pass it as the classic --phase <name> argument pair instead.
+  phase=setup
+  for phase_arg in "$@"; do
+    case "$phase_arg" in
+      setup|action|assert) phase="$phase_arg" ;;
+    esac
+  done
+fi
+cell="${QUOIN_VERIFY_CELL:?QUOIN_VERIFY_CELL is required}"
+workdir="${QUOIN_VERIFY_WORKDIR:?QUOIN_VERIFY_WORKDIR is required}"
+facts_path="${QUOIN_VERIFY_FACTS:?QUOIN_VERIFY_FACTS is required}"
+matrix="${QUOIN_UI_MATRIX_DIR:-$workdir/matrix}"
+cache="${QUOIN_UI_BROWSER_CACHE:-$repo_root/.artifacts/ui-browser-cache}"
+site="${QUOIN_UI_SITE:-https://127.0.0.1:18480}"
+catalog_path="docs/specs/quoin-v1/contracts/verification-catalog.yaml"
+branded_freeze="$matrix/branded-chrome-resolution.json"
+mkdir -p "$matrix" "$cache/extracted" "$workdir"
+
+harness() { go run ./internal/verification/observation/harness "$@"; }
+
+case "$(uname -m)" in
+  x86_64) host_arch=amd64 ;;
+  aarch64|arm64) host_arch=arm64 ;;
+  *) echo "unsupported host architecture $(uname -m)" >&2; exit 1 ;;
+esac
+
+#freeze_branded resolves the current branded Chrome stable build once per
+#invocation and freezes version, URL and digest; upstream publishes no
+#digest, so the locally computed SHA-256 is the frozen authority
+#per VERIFY-MATRIX-003 branded chrome stays amd64-only.
+freeze_branded() {
+  if [ -s "$branded_freeze" ]; then return 0; fi
+  local tmp resolution_url version
+  tmp=$(mktemp -d)
+  curl -fsSL --max-time 120 \
+    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" \
+    -o "$tmp/versions.json"
+  read -r version resolution_url < <(python3 - "$tmp/versions.json" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1]))
+stable = document["channels"]["Stable"]
+for entry in stable["downloads"]["chrome"]:
+    if entry["platform"] == "linux64":
+        print(stable["version"], entry["url"])
+        break
+else:
+    raise SystemExit("no linux64 branded chrome download in the stable channel")
+PY
+  )
+  if [ ! -s "$cache/branded-chrome-$version.zip" ]; then
+    curl -fsSL --max-time 1800 -o "$cache/branded-chrome-$version.zip" "$resolution_url"
+  fi
+  local digest bytes
+  digest=$(sha256sum "$cache/branded-chrome-$version.zip" | cut -d' ' -f1)
+  bytes=$(stat -c '%s' "$cache/branded-chrome-$version.zip")
+  python3 - "$branded_freeze" "$version" "$resolution_url" "$digest" "$bytes" <<'PY'
+import json, sys, datetime
+path, version, url, digest, size = sys.argv[1:6]
+with open(path, "w") as handle:
+    json.dump({
+        "schema": "quoin-branded-chrome-resolution-v1",
+        "resolved_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "channel": "Stable",
+        "version": version,
+        "url": url,
+        "sha256": digest,
+        "bytes": int(size),
+    }, handle, indent=2)
+    handle.write("\n")
+PY
+  echo "branded chrome resolved and frozen: $version ($digest)" >&2
+}
+
+#ensure_subject downloads, digest-verifies, extracts and freeze-completes
+#one cell browser subject. The artifact cache is content-addressed by the
+#frozen digest, so a cached hit is by definition the verified bytes.
+ensure_subject() {
+  local target_cell="$1"
+  local subject_dir="$matrix/subjects/$target_cell"
+  local subject_path="$subject_dir/browser-subject.json"
+  if [ -s "$subject_path" ] && python3 -c '
+import json, sys
+subject = json.load(open(sys.argv[1]))
+sys.exit(0 if subject.get("build") and subject.get("executable") else 1)
+' "$subject_path"; then return 0; fi
+  mkdir -p "$subject_dir"
+  #The subject vocabulary comes from the cell id itself: the ensure loop
+  #covers every local cell, so QUOIN_VERIFY_PARAMETERS (bound to the
+  #coordinator current cell) must never decide other cells' subjects.
+  local browser_subject
+  case "$target_cell" in
+    branded-chrome-*) browser_subject=branded_chrome ;;
+    *) browser_subject=playwright_chromium ;;
+  esac
+  if [ "$browser_subject" = "branded_chrome" ]; then
+    freeze_branded
+    harness subject --cell "$target_cell" --branded-resolution "$branded_freeze" --out "$subject_path"
+  else
+    harness subject --cell "$target_cell" --out "$subject_path"
+  fi
+  local url digest zip
+  url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$subject_path")
+  digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$subject_path")
+  zip_path="$cache/$digest.zip"
+  if [ ! -s "$zip_path" ]; then
+    echo "downloading $url" >&2
+    curl -fsSL --max-time 1800 -o "$zip_path.part" "$url"
+    mv "$zip_path.part" "$zip_path"
+  fi
+  local observed
+  observed=$(sha256sum "$zip_path" | cut -d' ' -f1)
+  if [ "$observed" != "$digest" ]; then
+    echo "artifact digest mismatch for $target_cell: got $observed want $digest" >&2
+    exit 1
+  fi
+  if [ ! -d "$cache/extracted/$digest" ]; then
+    unzip -q -o "$zip_path" -d "$cache/extracted/$digest.part"
+    mv "$cache/extracted/$digest.part" "$cache/extracted/$digest"
+  fi
+  local executable
+  executable=$(find "$cache/extracted/$digest" -maxdepth 2 -type f \( -name chrome -o -name chromium \) | head -1)
+  if [ -z "$executable" ]; then
+    echo "no browser executable found in artifact for $target_cell" >&2
+    exit 1
+  fi
+  local build
+  build=$("$executable" --version)
+  harness subject-complete --subject "$subject_path" --sha256 "$observed" --build "$build" --executable "$executable"
+  echo "subject $target_cell ready: $build ($digest)" >&2
+}
+
+#local_cells lists the matrix cells executable on this host architecture,
+#enumerated from the frozen catalog and never a second copied list. The
+#harness JSON goes through a file: a heredoc would own stdin, so a pipe
+#would read EOF instead of the document.
+local_cells() {
+  harness cells --catalog "$catalog_path" > "$matrix/.catalog-cells.json"
+  python3 - "$matrix/.catalog-cells.json" "$host_arch" <<'PY'
+import json, sys
+cells = json.load(open(sys.argv[1]))["cells"]
+host = sys.argv[2]
+for cell in cells:
+    if cell["architecture"] == "linux/" + host:
+        print(cell["cell_id"])
+PY
+}
+
+#write_local_subject_index projects every locally runnable cell with its
+#completed subject for the Playwright matrix spec.
+write_local_subject_index() {
+  local cell_list
+  cell_list=$(mktemp)
+  local_cells > "$cell_list"
+  python3 - "$cell_list" "$matrix/subjects" "$matrix/local-subjects.json" <<'PY'
+import json, os, sys
+cell_list, cells_dir, out = sys.argv[1:4]
+index = []
+for cell_id in open(cell_list).read().split():
+    path = os.path.join(cells_dir, cell_id, "browser-subject.json")
+    subject = json.load(open(path))
+    if not subject.get("build") or not subject.get("executable"):
+        raise SystemExit("subject for %s is not completed" % cell_id)
+    parts = cell_id.rsplit("-", 2)
+    index.append({
+        "cell_id": cell_id,
+        "browser_subject": subject["browser_subject"],
+        "architecture": subject["architecture"],
+        "sha256": subject["sha256"],
+        "build": subject["build"],
+        "executable": subject["executable"],
+        "viewport_css_px": int(parts[1]),
+        "motion_mode": parts[2],
+    })
+with open(out, "w") as handle:
+    json.dump(index, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+case "$phase" in
+  setup)
+    ensure_subject "$cell"
+    ;;
+  action)
+    results="$matrix/matrix-results.json"
+    if [ -s "$results" ] && python3 -c '
+import json, sys
+document = json.load(open(sys.argv[1]))
+cells = {entry["cell_id"] for entry in document.get("cells", [])}
+sys.exit(0 if sys.argv[2] in cells else 1)
+' "$results" "$cell"; then
+      echo "cell $cell already executed in this invocation; reusing recorded results" >&2
+      exit 0
+    fi
+    #One Playwright invocation executes every locally native cell against
+    #the Compose-qualified site, because the webServer boots the real
+    #stack once; later cells reuse the recorded per-cell results.
+    for target_cell in $(local_cells); do
+      ensure_subject "$target_cell"
+    done
+    write_local_subject_index
+    if [ ! -x web/node_modules/.bin/playwright ]; then
+      pnpm --dir web install --frozen-lockfile
+    fi
+    QUOIN_UI_MATRIX_DIR="$matrix" QUOIN_UI_SITE="$site" \
+    QUOIN_UI_INVOCATION="${QUOIN_UI_INVOCATION:-}" \
+      pnpm --dir web exec playwright test --grep '@ticket-41' --project=chromium
+    ;;
+  assert)
+    harness assert-automation \
+      --catalog "$catalog_path" \
+      --results "$matrix/matrix-results.json" \
+      --subject "$matrix/subjects/$cell/browser-subject.json" \
+      --facts "$facts_path"
+    ;;
+  *)
+    echo "unknown phase $phase, expected setup or action or assert" >&2
+    exit 2
+    ;;
+esac

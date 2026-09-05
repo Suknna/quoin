@@ -141,6 +141,12 @@ h1 { margin: 0; font: 650 30px/1.16 Georgia, "Noto Serif SC", serif; letter-spac
   .drawer-scrim { position: fixed; z-index: 40; inset: 0; display: block; border: 0; background: rgba(13,18,15,.44); }
   .object-list { min-height: calc(100vh - 58px); border-right: 0; }
   .detail-pane { display: none; }
+  /* Narrow workbench contract: once an object is selected, the list and
+     the workbench each render full-screen (the detail carries its own
+     back-to-list control at the top). :has() swaps the panes without a
+     JS layout mode; browsers without :has keep the list-only fallback. */
+  .workbench:has(.detail-pane .detail-content):not(:has(.detail-pane .empty-state)) .object-list { display: none; }
+  .workbench:has(.detail-pane .detail-content):not(:has(.detail-pane .empty-state)) .detail-pane { display: grid; padding-top: 58px; }
   .list-heading { padding: 20px 18px 16px; }
   .inline-status, .runtime-summary { margin-left: 12px; margin-right: 12px; }
   .auth-card { padding: 28px 22px; border-radius: 15px; }
