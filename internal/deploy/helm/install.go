@@ -284,8 +284,21 @@ func Install(req Request) (exitCode int) {
 	// Kubernetes-not-ready until the operator performs their separate Runtime
 	// registration with a revealed one-time token (OPS-RUNTIME-REG-001).
 	// awaitHealthy below waits for the closed install-ready state instead.
+	//
+	// Helm 3 cannot resolve an OCI chart by digest (helm/helm#10619), so
+	// the digest-faithful path fetches the exact pinned chart bytes first
+	// (verified by SHA-256, loopback registries over plain HTTP) and
+	// installs the verified local tgz; helm never resolves a tag and the
+	// release manifest digest stays the sole chart authority
+	// (OPS-RELEASE-003).
+	chartHost, chartRepository := splitChartReference(chartRef)
+	chartDigest := chartDigestOf(chartRef)
+	localChart := filepath.Join(loaded.stateDir, "chart", "pinned.tgz")
+	if _, fetchErr := fetchChartByDigest(chartHost, chartRepository, chartDigest, localChart); fetchErr != nil {
+		return failStage(stage, "workloads_not_started", fetchErr.Error(), "the chart must be pullable at the digest pinned by the release manifest; check the registry")
+	}
 	if output, runErr := r.run(stage, "helm-upgrade-install",
-		"helm", "upgrade", "--install", release, chartRef,
+		"helm", "upgrade", "--install", release, localChart,
 		"--namespace", namespace, "--create-namespace",
 		"--values", valuesPath); runErr != nil {
 		return failStage(stage, "workloads_not_started", strings.TrimSpace(output), "inspect the Helm release (`helm status`, `kubectl describe`), then rerun the same command")
@@ -380,6 +393,25 @@ func shortDigest(digest string) string {
 const healthyTimeout = 5 * time.Minute
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// splitChartReference splits "oci://host/path" into host and repository.
+func splitChartReference(chartRef string) (string, string) {
+	rest := strings.TrimPrefix(chartRef, "oci://")
+	rest = strings.SplitN(rest, "@", 2)[0]
+	index := strings.Index(rest, "/")
+	if index < 0 {
+		return rest, ""
+	}
+	return rest[:index], rest[index+1:]
+}
+
+// chartDigestOf extracts the sha256: digest from an oci reference.
+func chartDigestOf(chartRef string) string {
+	if _, reference, found := strings.Cut(chartRef, "@"); found {
+		return reference
+	}
+	return ""
+}
 
 // helmNamespace selects the deployment namespace (stable override surface).
 func helmNamespace() string {

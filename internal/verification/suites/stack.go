@@ -1,7 +1,6 @@
 package suites
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -9,10 +8,10 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,24 +32,32 @@ type Stack struct {
 	StelePort      int
 	Stdout, Stderr io.Writer
 
+	// Backend selects the implementation ("compose"|"kubernetes";
+	// empty means compose — the long-standing default).
+	Backend string
+	// Namespace and ReleaseName carry the Kubernetes deployment
+	// identity (the compose project's counterparts); both default to
+	// "quoin" exactly like the helm helper's own override surface.
+	Namespace   string
+	ReleaseName string
+
 	// SharesInvocationCredential marks the invocation's primary
 	// deployment: its first-login password change publishes the formal
 	// credential for the dependent suite processes. Disposable clones
 	// keep their own bootstrap credential.
 	SharesInvocationCredential bool
 
-	composeFile string
+	composeFile  string
+	backendImpl  stackBackend
+	backendOnce  sync.Once
+	forwards     []*portForward
+	forwardsOnce sync.Once
 }
 
-// ComposeEnv is the isolated per-invocation environment
-// (VERIFY-MATRIX-004: unique project and state per invocation).
+// ComposeEnv is the compose project environment (the historical name
+// legs use); it delegates to the backend's helper environment.
 func (stack *Stack) ComposeEnv() []string {
-	return append(os.Environ(),
-		"XDG_STATE_HOME="+filepath.Join(stack.WorkRoot, stack.Project, "state"),
-		"QUOIN_COMPOSE_PROJECT="+stack.Project,
-		"QUOIN_DEPLOY_SCRIPTED=1",
-		"DOCKER_CLI_HINTS=false",
-	)
+	return stack.HelperEnv()
 }
 
 // BaseURL is the public Quoin origin base. A qualification cell
@@ -68,27 +75,7 @@ func (stack *Stack) BaseURL() string {
 // with the admin bootstrap answers on stdin, then waits for the public
 // listener. It returns the install report path.
 func (stack *Stack) EnsureInstalled() (string, error) {
-	helper, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	report := filepath.Join(stack.WorkRoot, stack.Project, "install-report.json")
-	install := exec.Command(helper, "compose", "install", "--config", stack.ConfigPath,
-		"--release-manifest", stack.ManifestPath, "--report", report)
-	install.Env = stack.ComposeEnv()
-	install.Dir = workDirOf(helper)
-	install.Stdout, install.Stderr = stack.Stdout, stack.Stderr
-	if stack.AdminPassword != "" {
-		install.Stdin = strings.NewReader(strings.Join([]string{"admin", "Ticket 40 Admin", stack.AdminPassword, stack.AdminPassword}, "\n") + "\n")
-	}
-	if err := install.Run(); err != nil {
-		return report, fmt.Errorf("compose install: %w", err)
-	}
-	stack.composeFile = filepath.Join(stack.WorkRoot, stack.Project, "state", "quoin", "compose", "generated", "compose.yaml")
-	if err := stack.awaitPublic(300 * time.Second); err != nil {
-		return report, err
-	}
-	return report, nil
+	return stack.backend().ensureInstalled(stack)
 }
 
 // awaitPublic polls the public listener until the product answers.
@@ -111,59 +98,26 @@ func (stack *Stack) awaitPublic(timeout time.Duration) error {
 
 // Exec runs a one-shot command inside one component container.
 func (stack *Stack) Exec(component string, arguments ...string) (string, int, error) {
-	full := append([]string{"compose", "--project-name", stack.Project, "--file", stack.composeFile,
-		"exec", "-T", component}, arguments...)
-	return stack.docker(full...)
+	return stack.backend().execCommand(stack, component, arguments)
 }
 
-// RunService runs a one-shot service container (the registration
-// command's vehicle) with a stdin payload and returns its exit code.
+// RunService runs the one-shot registration vehicle with a stdin
+// payload and returns its exit code.
 func (stack *Stack) RunService(component string, arguments []string, stdinPayload string) (string, int, error) {
-	full := append([]string{"compose", "--project-name", stack.Project, "--file", stack.composeFile,
-		"run", "--rm", "--no-deps", "-i", "-T", component}, arguments...)
-	command := exec.Command("docker", full...)
-	command.Dir = workDirOf(stack.ConfigPath)
-	command.Env = stack.ComposeEnv()
-	command.Stdin = strings.NewReader(stdinPayload + "\n")
-	var combined bytes.Buffer
-	command.Stdout, command.Stderr = &combined, &combined
-	err := command.Run()
-	code := 0
-	if command.ProcessState != nil {
-		code = command.ProcessState.ExitCode()
-	}
-	return combined.String(), code, err
+	return stack.backend().runService(stack, component, arguments, stdinPayload)
 }
 
 // Logs drains one component's recent logs.
 func (stack *Stack) Logs(component string) (string, error) {
-	output, _, err := stack.docker("compose", "--project-name", stack.Project, "--file", stack.composeFile,
-		"logs", "--no-log-prefix", "--tail", "300", component)
-	return output, err
-}
-
-func (stack *Stack) docker(arguments ...string) (string, int, error) {
-	command := exec.Command("docker", arguments...)
-	command.Env = stack.ComposeEnv()
-	var combined bytes.Buffer
-	command.Stdout, command.Stderr = &combined, &combined
-	err := command.Run()
-	code := 0
-	if command.ProcessState != nil {
-		code = command.ProcessState.ExitCode()
-	}
-	return combined.String(), code, err
+	return stack.backend().logs(stack, component)
 }
 
 // Down removes the deployment (volumes included when dataRemoval is
-// set) and returns the combined output.
+// set), kills every transport the backend created, and returns the
+// combined output.
 func (stack *Stack) Down(dataRemoval bool) (string, error) {
-	arguments := []string{"compose", "--project-name", stack.Project, "down", "--remove-orphans", "--timeout", "45"}
-	if dataRemoval {
-		arguments = append(arguments, "-v")
-	}
-	output, _, err := stack.docker(arguments...)
-	return output, err
+	stack.CloseTransports()
+	return stack.backend().down(stack, dataRemoval)
 }
 
 // Session is one authenticated admin HTTP session against the public

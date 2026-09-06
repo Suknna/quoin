@@ -41,7 +41,11 @@ func Backup(req Request, offline bool) int {
 func onlineBackup(r *runner, rep *report.Report, stage int, namespace, release string, loaded *loadedRequest) int {
 	service := fmt.Sprintf("%s-quoin-ops", release)
 	read := func(label string) (deploybackup.Observation, error) {
-		body, err := verifyProbe(r, stage, namespace, release, "quoin", label, loaded.images["quoin"], "", fmt.Sprintf("http://%s:9090/metrics", service))
+		// The metrics exposition is a 200 body the healthcheck must
+		// accept (the compose counterpart's exact contract); without
+		// --status the healthcheck would apply its ok-newline liveness
+		// contract to a metrics body and always fail.
+		body, err := verifyProbe(r, stage, namespace, release, "quoin", label, loaded.images["quoin"], "200", fmt.Sprintf("http://%s:9090/metrics", service))
 		if err != nil {
 			return deploybackup.Observation{}, err
 		}

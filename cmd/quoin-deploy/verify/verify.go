@@ -58,7 +58,8 @@ func RunSuite(backend string, flags SuiteFlags) int {
 	request := suites.DeploymentRequest{
 		Backend: backend, Suite: flags.Suite, Phase: flags.Phase,
 		Scenario: os.Getenv("QUOIN_VERIFY_SCENARIO"), Cell: os.Getenv("QUOIN_VERIFY_CELL"),
-		Workdir: workdir, FactsPath: os.Getenv("QUOIN_VERIFY_FACTS"),
+		AssertionIDs: cellAssertionIDs(backend),
+		Workdir:      workdir, FactsPath: os.Getenv("QUOIN_VERIFY_FACTS"),
 		ConfigPath: flags.Config, ReleaseManifestPath: flags.Manifest,
 		RepoRoot: repoRoot(), Stdout: os.Stdout, Stderr: os.Stderr,
 	}
@@ -110,4 +111,20 @@ func Run(configPath, releaseManifestPath, reportPath string) {
 		Stdout:              os.Stdout,
 		Stderr:              os.Stderr,
 	}))
+}
+
+// cellAssertionIDs reads the executing cell's frozen assertion list from
+// the catalog (the applicability authority for suite legs).
+func cellAssertionIDs(backend string) []string {
+	scenarioID := os.Getenv("QUOIN_VERIFY_SCENARIO")
+	cellID := os.Getenv("QUOIN_VERIFY_CELL")
+	if scenarioID == "" || cellID == "" {
+		return nil
+	}
+	loaded, err := suites.LoadCatalogAssertionIDs(repoRoot())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "quoin-deploy: load frozen catalog: %v\n", err)
+		os.Exit(2)
+	}
+	return loaded[scenarioID+"/"+cellID]
 }

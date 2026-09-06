@@ -125,7 +125,16 @@ func verifyProbe(r *runner, stage int, namespace, release, component, probe, ima
 	// the readiness judge.
 	phase, waitErr := waitVerifierTerminal(r, stage, namespace, name, probe+"-"+component)
 	if waitErr != nil {
-		return phase, waitErr
+		return phase + " " + verifierDiagnostics(r, stage, namespace, name), waitErr
+	}
+	if phase == "Failed" {
+		// The failed verifier's own output is the actionable fact; carry
+		// it inside the error so operators see why the probe failed (the
+		// pod is cleaned up right after and its logs are unreachable).
+		if logs, logsErr := r.run(stage, "verify-logs-"+probe+"-"+component,
+			kubectl(namespace, "logs", "pod/"+name, "--tail=40")...); logsErr == nil {
+			return logs, fmt.Errorf("verifier pod phase=%s: %s", phase, strings.TrimSpace(lastLines(logs, 4)))
+		}
 	}
 	exit, exitErr := r.run(stage, "verify-exit-"+probe+"-"+component, kubectl(namespace, "get", "pod", name, "--output", "jsonpath={.status.containerStatuses[0].state.terminated.exitCode}")...)
 	// Collect the response body even for a non-zero healthcheck. In
@@ -251,4 +260,23 @@ func verifyEventually(r *runner, stage int, namespace, release, component, probe
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// verifierDiagnostics drains a verifier pod's logs for failure messages.
+func verifierDiagnostics(r *runner, stage int, namespace, name string) string {
+	logs, _ := r.run(stage, "verify-diag-"+name, kubectl(namespace, "logs", "pod/"+name, "--tail=20")...)
+	return strings.TrimSpace(logs)
+}
+
+// lastLines keeps the trailing non-empty lines of a log body.
+func lastLines(body string, count int) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	kept := make([]string, 0, count)
+	for index := len(lines) - 1; index >= 0 && len(kept) < count; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line != "" {
+			kept = append([]string{line}, kept...)
+		}
+	}
+	return strings.Join(kept, " | ")
 }

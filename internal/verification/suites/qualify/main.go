@@ -59,15 +59,19 @@ func usage() {
 func prepareCommand(arguments []string) {
 	flags := flag.NewFlagSet("prepare", flag.ContinueOnError)
 	work := flags.String("work", "", "qualification work root")
+	backend := flags.String("backend", "compose", "compose | kubernetes")
 	configOut := flags.String("config", "", "where the install config is written")
 	manifestOut := flags.String("manifest", "", "where the release manifest is written")
 	inventoryPath := flags.String("inventory", "", "subjects inventory from the release builder")
 	release := flags.String("release", "v0.1.0-dev", "release version of the built subjects")
 	quoinPort := flags.Int("quoin-port", 20880, "published Quoin loopback port")
 	stelePort := flags.Int("stele-port", 20881, "published Stele loopback port")
+	chartRepo := flags.String("chart-repo", "", "measured chart OCI repository (Kubernetes installs need it)")
+	chartDigest := flags.String("chart-digest", "", "measured chart OCI digest (sha256:...)")
 	if err := flags.Parse(arguments); err != nil || *work == "" || *inventoryPath == "" {
 		usage()
 	}
+	chart := suites.ChartSubject{OCIRepository: *chartRepo, OCIDigest: *chartDigest}
 	body, err := os.ReadFile(*inventoryPath)
 	if err != nil {
 		fatal(err)
@@ -99,12 +103,18 @@ func prepareCommand(arguments []string) {
 	if err := os.MkdirAll(*work, 0o755); err != nil {
 		fatal(err)
 	}
-	configPath, err := suites.WriteInstallConfig(*work, suites.InstallPorts{Quoin: *quoinPort, Stele: *stelePort})
-	if err != nil {
-		fatal(err)
+	var configPath string
+	var configErr error
+	if strings.EqualFold(*backend, "kubernetes") {
+		configPath, configErr = suites.WriteHelmInstallConfig(*work)
+	} else {
+		configPath, configErr = suites.WriteInstallConfig(*work, suites.InstallPorts{Quoin: *quoinPort, Stele: *stelePort})
+	}
+	if configErr != nil {
+		fatal(configErr)
 	}
 	commit, _ := execOutput("git", "rev-parse", "HEAD")
-	manifestPath, err := suites.WriteReleaseManifest(*work, version, strings.TrimSpace(commit), images)
+	manifestPath, err := suites.WriteReleaseManifest(*work, version, strings.TrimSpace(commit), images, chart)
 	if err != nil {
 		fatal(err)
 	}

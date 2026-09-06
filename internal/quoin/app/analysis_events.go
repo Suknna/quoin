@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -138,6 +139,14 @@ func (stream *taskEventStream) serve(writer http.ResponseWriter, request *http.R
 	writer.WriteHeader(http.StatusOK)
 	if canFlush {
 		flusher.Flush()
+	}
+	// The public server's WriteTimeout bounds ordinary responses; a
+	// change stream is long-lived and must clear it (the same
+	// ResponseController pattern as the sensitive-download path) or the
+	// server force-cuts every quiet stream at the write deadline
+	// (HTTP-SSE-002, HTTP-VALIDATION-004's ingress idle-timeout proof).
+	if err := http.NewResponseController(writer).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return
 	}
 	poll := time.NewTicker(stream.pollInterval)
 	defer poll.Stop()

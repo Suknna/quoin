@@ -129,20 +129,20 @@ func sendArtifactHeader(ctx context.Context, client runtimev1.ArtifactServiceCli
 	}
 	if err := stream.Send(&runtimev1.ArtifactUploadFrame{Frame: &runtimev1.ArtifactUploadFrame_Header{Header: header}}); err != nil {
 		// A stream the server rejected after its first frame surfaces the
-		// typed status only at CloseAndRecv; an early Send error alone is an
-		// EOF race, not the verdict.
+		// typed status only at CloseAndRecv; the Send error is the EOF
+		// race of the rejected stream, never the verdict itself.
 		result, closeErr := stream.CloseAndRecv()
 		if closeErr != nil {
 			return nil, closeErr
 		}
-		return result, err
+		return result, nil
 	}
 	if err := stream.Send(&runtimev1.ArtifactUploadFrame{Frame: &runtimev1.ArtifactUploadFrame_End{End: &runtimev1.ArtifactUploadEnd{}}}); err != nil {
 		result, closeErr := stream.CloseAndRecv()
 		if closeErr != nil {
 			return nil, closeErr
 		}
-		return result, err
+		return result, nil
 	}
 	return stream.CloseAndRecv()
 }

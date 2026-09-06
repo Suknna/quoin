@@ -11,6 +11,7 @@ package suites
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/Suknna/quoin/internal/verification/catalog"
@@ -61,7 +62,13 @@ var CIHarnessScenarios = map[string]string{
 // otherwise reach bash literally, so a template that still carries one
 // after resolution is an error, not a silent skip.
 func ResolvePhase(command, backend string) (string, error) {
-	resolved := strings.ReplaceAll(command, "<compose|helm>", backend)
+	// The catalog placeholder names the two helper backends; the
+	// kubernetes deployment helper verb is "helm".
+	verb := backend
+	if strings.EqualFold(backend, BackendKubernetes) {
+		verb = "helm"
+	}
+	resolved := strings.ReplaceAll(command, "<compose|helm>", verb)
 	if strings.Contains(resolved, "<") && strings.Contains(resolved, ">") {
 		return "", fmt.Errorf("phase command %q still carries an unresolved placeholder", command)
 	}
@@ -113,4 +120,24 @@ func CellsFor(loaded *catalog.Catalog, suite string, target Target) ([]catalog.C
 		}
 	}
 	return selected, nil
+}
+
+// LoadCatalogAssertionIDs maps "<scenario>/<cell>" to the frozen
+// assertion IDs of that cell, from the frozen verification catalog.
+func LoadCatalogAssertionIDs(repoRoot string) (map[string][]string, error) {
+	loaded, err := catalog.LoadAndValidate(filepath.Join(repoRoot, "docs", "specs", "quoin-v1", "contracts", "verification-catalog.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	index := map[string][]string{}
+	for _, scenario := range loaded.Scenarios {
+		for _, cell := range scenario.Cells {
+			ids := make([]string, 0, len(cell.Assertions))
+			for _, assertion := range cell.Assertions {
+				ids = append(ids, assertion.ID)
+			}
+			index[scenario.ID+"/"+cell.ID] = ids
+		}
+	}
+	return index, nil
 }

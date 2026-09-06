@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -292,7 +293,15 @@ func queryPrometheusError(network, container string, detail map[string]string) b
 // forwards a posted alert to a real HTTP receiver.
 func driveAlertmanagerWebhook(request DeploymentRequest, network, digest string, detail map[string]string) bool {
 	catcher := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
+	// The receiver must answer on the network's gateway address (what
+	// containers dial), so it binds a gateway-reachable listener instead
+	// of httptest's loopback-only default.
+	listener, listenErr := net.Listen("tcp", "0.0.0.0:0")
+	if listenErr != nil {
+		detail["alertmanager-receiver"] = listenErr.Error()
+		return false
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		// Alertmanager retries on failure; a second delivery must never
 		// block the handler while the first payload is still queued.
@@ -302,10 +311,15 @@ func driveAlertmanagerWebhook(request DeploymentRequest, network, digest string,
 		}
 		writer.WriteHeader(http.StatusOK)
 	}))
+	server.Listener = listener
+	server.Start()
 	defer server.Close()
-	// The receiver must be reachable from the container: route it
-	// through the host gateway alias Docker provides.
-	receiver := strings.Replace(server.URL, "127.0.0.1", "host.docker.internal", 1)
+	// The receiver must be reachable from the container: it answers on
+	// the wildcard listener at the custom network's own gateway IP (a
+	// 0.0.0.0 listener's URL reports [::], so the address is composed
+	// from the gateway and the real port instead of server.URL).
+	gateway := networkGateway(network)
+	receiver := fmt.Sprintf("http://%s:%d", gateway, listener.Addr().(*net.TCPAddr).Port)
 	config := filepath.Join(request.Workdir, "alertmanager.yml")
 	if writeErr := os.WriteFile(config, []byte(fmt.Sprintf("route:\n  group_by: [alertname]\n  group_interval: 1s\n  receiver: t40\nreceivers:\n  - name: t40\n    webhook_configs:\n      - url: %q\n", receiver)), 0o644); writeErr != nil {
 		detail["alertmanager-config"] = writeErr.Error()
@@ -314,7 +328,6 @@ func driveAlertmanagerWebhook(request DeploymentRequest, network, digest string,
 	name := network + "-alertmanager"
 	removeContainers(name)
 	output, err := exec.Command("docker", "run", "-d", "--rm", "--name", name, "--network", network,
-		"--add-host", "host.docker.internal:host-gateway",
 		"-v", config+":/etc/alertmanager/alertmanager.yml:ro", digest).CombinedOutput()
 	if err != nil {
 		detail["alertmanager-run"] = firstLine(string(output))
@@ -377,4 +390,20 @@ func lastWords(text string, count int) string {
 		fields = fields[len(fields)-count:]
 	}
 	return strings.Join(fields, " ")
+}
+
+// networkGateway reads the gateway IP Docker assigned to one network;
+// a container on that network reaches a host listener through exactly
+// this address.
+func networkGateway(network string) string {
+	output, err := exec.Command("docker", "network", "inspect", network,
+		"--format", "{{(index .IPAM.Config 0).Gateway}}").Output()
+	if err != nil {
+		return "host.docker.internal"
+	}
+	address := strings.TrimSpace(string(output))
+	if address == "" {
+		return "host.docker.internal"
+	}
+	return address
 }

@@ -56,8 +56,8 @@ func runDeploymentSuite(request DeploymentRequest) error {
 // connection credentials — the admin bootstrap password is the
 // operator-supplied installer answer, transported out-of-band).
 func stackFromEnvironment(request DeploymentRequest) (*Stack, string, error) {
-	if request.Backend != "compose" {
-		return nil, "", fmt.Errorf("suite %q on backend %q requires the cluster-backed adapter (compose cells execute this path natively)", request.Suite, request.Backend)
+	if request.Backend != BackendCompose && request.Backend != BackendKubernetes {
+		return nil, "", fmt.Errorf("suite %q on unknown backend %q", request.Suite, request.Backend)
 	}
 	workRoot := os.Getenv("QUOIN_SUITE_WORK_ROOT")
 	project := os.Getenv("QUOIN_SUITE_PROJECT")
@@ -76,8 +76,11 @@ func stackFromEnvironment(request DeploymentRequest) (*Stack, string, error) {
 	if shared, err := os.ReadFile(filepath.Join(os.TempDir(), "quoin-suite-"+project+"-admin-password")); err == nil && len(shared) > 0 {
 		password = string(shared)
 	}
-	return &Stack{
+	stack := &Stack{
+		Backend:                    request.Backend,
 		Project:                    project,
+		Namespace:                  envOr("QUOIN_SUITE_NAMESPACE", ""),
+		ReleaseName:                envOr("QUOIN_SUITE_RELEASE", project),
 		WorkRoot:                   workRoot,
 		ConfigPath:                 request.ConfigPath,
 		ManifestPath:               request.ReleaseManifestPath,
@@ -87,8 +90,11 @@ func stackFromEnvironment(request DeploymentRequest) (*Stack, string, error) {
 		StelePort:                  stelePort,
 		Stdout:                     request.Stdout,
 		Stderr:                     request.Stderr,
-		composeFile:                filepath.Join(workRoot, project, "state", "quoin", "compose", "generated", "compose.yaml"),
-	}, password, nil
+	}
+	if request.Backend == BackendCompose {
+		stack.composeFile = filepath.Join(workRoot, project, "state", "quoin", "compose", "generated", "compose.yaml")
+	}
+	return stack, password, nil
 }
 
 func envOr(key, fallback string) string {

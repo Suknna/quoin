@@ -397,7 +397,7 @@ func runReleaseSuiteCell(t *testing.T, recorder *ticketEvidence, evidenceRoot, w
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestPath, err := suites.WriteReleaseManifest(suiteRoot, releaseVersion42, gitCommit(), images)
+	manifestPath, err := suites.WriteReleaseManifest(suiteRoot, releaseVersion42, gitCommit(), images, suites.ChartSubject{})
 	if err != nil {
 		t.Fatal(err)
 	}

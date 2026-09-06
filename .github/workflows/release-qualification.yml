@@ -154,11 +154,22 @@ jobs:
           go build -o bin/qualify ./internal/verification/suites/qualify
       - name: Prepare the deployment inputs
         run: |
+          # The chart is measured into the invocation-local registry so
+          # the Kubernetes install pulls the exact digest-pinned chart.
+          chart_root=.work/chart && mkdir -p "$chart_root"
+          chart_version=$(jq -r '.release_version | ltrimstr("v")' .work/subjects/subjects-inventory.json)
+          helm package deploy/helm/quoin --version "$chart_version" --destination "$chart_root"
+          chart_digest=$(helm push "$chart_root/quoin-$chart_version.tgz" \
+            "oci://127.0.0.1:5000/rq/charts" 2>&1 | awk '/Digest:/ {print $2}')
+          test -n "$chart_digest"
           bin/qualify prepare \
             --work .work/suite \
-            --config .work/suite/install.yaml \
+            --backend kubernetes \
+            --config .work/suite/helm-install.yaml \
             --manifest .work/suite/release-manifest.json \
             --inventory .work/subjects/subjects-inventory.json \
+            --chart-repo "127.0.0.1:5000/rq/charts/quoin" \
+            --chart-digest "$chart_digest" \
             --quoin-port 20880 --stele-port 20881
       - name: Execute the catalog cells for linux/${{ matrix.arch }}
         env:
@@ -208,6 +219,33 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Provision the matrix Kubernetes cluster
+        run: |
+          # Each matrix leg owns a real cluster at exactly ${{ matrix.k8s }}:
+          # a kind node image pinned to the resolved maintained version,
+          # verified from the API server before any suite runs.
+          go install sigs.k8s.io/kind@v0.29.0
+          kind create cluster --name rq-cell \
+            --image "kindest/node:${{ matrix.k8s }}" \
+            --config - <<'KIND'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                # socat is present on kind nodes; port-forwards work.
+                - containerPort: 0
+                  hostPort: 0
+          KIND
+          server=$(kubectl version -o json | jq -r .serverVersion.gitVersion)
+          echo "server=$server want=v${{ matrix.k8s }}"
+          case "$server" in
+            "v${{ matrix.k8s }}"*) ;;
+            *) echo "cluster version drift: $server" >&2; exit 1 ;;
+          esac
+          # Record the frozen cell identity into the evidence root.
+          mkdir -p .work/cell
+          printf '{"kubernetes":"%s","architecture":"%s"}\n' "${{ matrix.k8s }}" "${{ matrix.arch }}" > .work/cell/identity.json
       - name: Start the invocation-local registry
         run: |
           docker run -d --name rq-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:2
@@ -226,49 +264,60 @@ jobs:
             -out .work/subjects/subjects-inventory.json \
             -stage all \
             -platform linux/${{ matrix.arch }}=native
+      - name: Load the release subjects into the cluster node
+        run: |
+          # kind nodes cannot pull from the host loopback registry: load
+          # the built images onto the node digest-intact.
+          for component in quoin plinth lintel stele; do
+            docker push "127.0.0.1:5000/rq/$component:native" >/dev/null
+            digest=$(docker buildx imagetools inspect "127.0.0.1:5000/rq/$component:native" 2>/dev/null | awk '/Digest:/ {print $2; exit}')
+            docker pull "127.0.0.1:5000/rq/$component@$digest" >/dev/null
+            kind load docker-image "127.0.0.1:5000/rq/$component@$digest" --name rq-cell
+          done
       - name: Build the qualification drivers
         run: |
           go build -o bin/quoin-deploy ./cmd/quoin-deploy
           go build -o bin/qualify ./internal/verification/suites/qualify
       - name: Prepare the deployment inputs
         run: |
+          # The chart is measured into the invocation-local registry so
+          # the Kubernetes install pulls the exact digest-pinned chart.
+          chart_root=.work/chart && mkdir -p "$chart_root"
+          chart_version=$(jq -r '.release_version | ltrimstr("v")' .work/subjects/subjects-inventory.json)
+          helm package deploy/helm/quoin --version "$chart_version" --destination "$chart_root"
+          chart_digest=$(helm push "$chart_root/quoin-$chart_version.tgz" \
+            "oci://127.0.0.1:5000/rq/charts" 2>&1 | awk '/Digest:/ {print $2}')
+          test -n "$chart_digest"
           bin/qualify prepare \
             --work .work/suite \
-            --config .work/suite/install.yaml \
+            --backend kubernetes \
+            --config .work/suite/helm-install.yaml \
             --manifest .work/suite/release-manifest.json \
-            --inventory .work/subjects/subjects-inventory.json
-      - name: Execute the host-native fault cells for kubernetes/${{ matrix.arch }}
+            --inventory .work/subjects/subjects-inventory.json \
+            --chart-repo "127.0.0.1:5000/rq/charts/quoin" \
+            --chart-digest "$chart_digest"
+      - name: Execute every suite natively for kubernetes/${{ matrix.arch }}
         run: |
-          # The Toxiproxy rig and quoin-faultfs primitives execute
-          # natively on the cell's host runner (they own docker-level
-          # resources, not the cluster API), so these cells qualify on
-          # the Kubernetes matrix runners exactly as on Compose.
+          # The Kubernetes stack adapter (T43) drives the stack-backed
+          # suites through the real cluster: helm install of the
+          # digest-pinned chart, invocation-owned port-forwards, kubectl
+          # exec registration and the disposable second release.
           bin/qualify run \
             --work .work/suite \
-            --config .work/suite/install.yaml \
+            --config .work/suite/helm-install.yaml \
             --manifest .work/suite/release-manifest.json \
             --backend kubernetes --arch linux/${{ matrix.arch }} \
+            --suite release-qualification \
+            --suite production-transport \
             --suite network-faults \
-            --suite storage-faults
-      - name: Record the cluster-backed suite boundary
-        run: |
-          # The stack-backed suites (release-qualification,
-          # production-transport, monitoring-stack) on Kubernetes cells
-          # drive the deployed product through the cluster; the
-          # suite stack adapter for the kubernetes backend is the
-          # next closure step and these cells stay delegated (the
-          # aggregate binds only declared cells). This record keeps
-          # the boundary machine-visible instead of silently absent.
-          cat > .work/suite/cluster-adapter-boundary.json <<EOF
-          {
-            "declaredSuites": ["network-faults", "storage-faults"],
-            "delegatedSuites": ["release-qualification", "production-transport", "monitoring-stack"],
-            "reason": "kubernetes stack adapter pending; cells delegated exactly as recorded by the local acceptance native-architecture evidence"
-          }
-          EOF
+            --suite storage-faults \
+            --suite monitoring-stack
       - name: Stop the invocation-local registry
         if: always()
         run: docker rm -f rq-registry || true
+      - name: Delete the matrix cluster
+        if: always()
+        run: kind delete cluster --name rq-cell || true
       - name: Upload Kubernetes cell evidence
         if: always()
         uses: actions/upload-artifact@v4

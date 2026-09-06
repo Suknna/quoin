@@ -20,31 +20,11 @@ import (
 // drives the real deployment helper as a subprocess.
 func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPassword string, detail map[string]string) (backup, offlineBackup, restoreIsolation, restoredIdentities, missingSecretFailClosed, bootstrapGates, bootstrapRetry, prewriteRollback bool) {
 	helper, _ := os.Executable()
-	// The disposable clone deploys its own ports, secret directory and
-	// project name so it never collides with the live matrix stack
-	// (VERIFY-MATRIX-004: unique project and independent business
-	// volumes per invocation-owned deployment).
-	disposableRoot := filepath.Join(stack.WorkRoot, stack.Project+"-disp-root")
-	_ = os.MkdirAll(filepath.Join(disposableRoot, "secrets"), 0o700)
-	disposableConfig := filepath.Join(disposableRoot, "install.yaml")
-	configBody, _ := os.ReadFile(stack.ConfigPath)
-	replaced := string(configBody)
-	replaced = strings.ReplaceAll(replaced, fmt.Sprintf("quoinPublicHostPort: %d", stack.QuoinPort), fmt.Sprintf("quoinPublicHostPort: %d", stack.QuoinPort+20))
-	replaced = strings.ReplaceAll(replaced, fmt.Sprintf("steleWebhookHostPort: %d", stack.StelePort), fmt.Sprintf("steleWebhookHostPort: %d", stack.StelePort+20))
-	secretDirectory := ""
-	for _, line := range strings.Split(replaced, "\n") {
-		if strings.HasPrefix(line, "secretDirectory:") {
-			secretDirectory = strings.TrimSpace(strings.TrimPrefix(line, "secretDirectory:"))
-		}
-	}
-	replaced = strings.ReplaceAll(replaced, secretDirectory, filepath.Join(disposableRoot, "secrets"))
-	_ = os.WriteFile(disposableConfig, []byte(replaced), 0o600)
-	disposable := &Stack{
-		Project: stack.Project + "-disp", WorkRoot: stack.WorkRoot,
-		ConfigPath: disposableConfig, ManifestPath: stack.ManifestPath,
-		AdminPassword: RandomPassword(), QuoinPort: stack.QuoinPort + 20, StelePort: stack.StelePort + 20,
-		Stdout: stack.Stdout, Stderr: stack.Stderr,
-	}
+	// The disposable clone is a second, fully-isolated deployment of the
+	// same subject: its own identity, data and loopback ports
+	// (VERIFY-MATRIX-004). The backend owns how isolation is realized.
+	disposableRoot := stack.LifecycleCloneRoot()
+	disposable := stack.LifecycleClone()
 	defer func() {
 		_, _ = disposable.Down(true)
 		_ = os.RemoveAll(disposableRoot)
@@ -53,16 +33,16 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// A tampered manifest must be refused before any write: the
 	// prewrite rollback mechanism (the N-1 image exchange itself is
 	// executed by the CI matrix job carrying two real manifests).
-	tampered := filepath.Join(disposable.WorkRoot, disposable.Project, "tampered-manifest.json")
+	tampered := filepath.Join(disposable.DeploymentRoot(), "tampered-manifest.json")
 	if body, err := os.ReadFile(stack.ManifestPath); err == nil {
 		tamperedBody := strings.Replace(string(body), "sha256:", "sha256:0", 3)
 		if tamperedBody == string(body) {
 			tamperedBody = strings.Replace(string(body), `"version"`, `"version-tampered"`, 1)
 		}
 		_ = os.WriteFile(tampered, []byte(tamperedBody), 0o600)
-		code := runHelper(helper, disposable.ComposeEnv(), "compose", "upgrade",
+		code := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "upgrade",
 			"--config", disposable.ConfigPath, "--release-manifest", tampered,
-			"--report", filepath.Join(disposable.WorkRoot, disposable.Project, "tampered-report.json"))
+			"--report", filepath.Join(disposable.DeploymentRoot(), "tampered-report.json"))
 		prewriteRollback = code == 2
 		detail["upgrade-refusal-exit"] = fmt.Sprint(code)
 	}
@@ -70,8 +50,8 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// Admin bootstrap failure then retry: a wrong password confirmation
 	// must fail the bootstrap without ever starting workloads, and the
 	// retry must then complete the install.
-	failedReport := filepath.Join(disposable.WorkRoot, disposable.Project, "failed-report.json")
-	install := exec.Command(helper, "compose", "install", "--config", disposable.ConfigPath,
+	failedReport := filepath.Join(disposable.DeploymentRoot(), "failed-report.json")
+	install := exec.Command(helper, disposable.HelperVerb(), "install", "--config", disposable.ConfigPath,
 		"--release-manifest", disposable.ManifestPath, "--report", failedReport)
 	install.Env = disposable.ComposeEnv()
 	install.Dir = envWorkdir(disposable.ComposeEnv())
@@ -81,18 +61,7 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	if install.ProcessState != nil {
 		failedCode = install.ProcessState.ExitCode()
 	}
-	workloadContainers := func() int {
-		output, _ := exec.Command("docker", "compose", "--project-name", disposable.Project,
-			"ps", "--status", "running", "--format", "{{.Name}}").Output()
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-			if strings.Contains(line, "plinth") || strings.Contains(line, "lintel") {
-				count++
-			}
-		}
-		return count
-	}
-	bootstrapRetry = failedCode != 0 && workloadContainers() == 0
+	bootstrapRetry = failedCode != 0 && disposable.RunningWorkloadCount() == 0
 	detail["bootstrap-failure-exit"] = fmt.Sprint(failedCode)
 
 	if report, err := disposable.EnsureInstalled(); err != nil {
@@ -112,7 +81,7 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// /metrics while an Admin triggers 立即备份 through the public API
 	// (POST /api/v1/backups); the driver plays that Admin
 	// concurrently with the helper.
-	backupReport := filepath.Join(disposable.WorkRoot, disposable.Project, "backup-report.json")
+	backupReport := filepath.Join(disposable.DeploymentRoot(), "backup-report.json")
 	backupExit := runObservedBackup(helper, disposable, backupReport, detail)
 	backup = backupExit == 0
 	detail["backup-exit"] = fmt.Sprint(backupExit)
@@ -120,9 +89,9 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// Offline fallback: the helper only accepts --offline for an
 	// unreachable Quoin, so stop the workload first, take the offline
 	// backup, and bring the deployment back for the restore leg.
-	if _, _, stopErr := disposable.docker("compose", "--project-name", disposable.Project, "stop", "--timeout", "40", "quoin"); stopErr == nil {
-		offlineReport := filepath.Join(disposable.WorkRoot, disposable.Project, "offline-report.json")
-		offlineExit := runHelper(helper, disposable.ComposeEnv(), "compose", "backup", "--offline",
+	if stopErr := disposable.StopQuoin(); stopErr == nil {
+		offlineReport := filepath.Join(disposable.DeploymentRoot(), "offline-report.json")
+		offlineExit := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "backup", "--offline",
 			"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath, "--report", offlineReport)
 		offlineBackup = offlineExit == 0
 		detail["offline-backup-exit"] = fmt.Sprint(offlineExit)
@@ -179,11 +148,14 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	if backupID != "" && cookieToInvalidate != nil {
 		_, _ = disposable.Down(true)
 		if _, err := disposable.EnsureInstalled(); err == nil {
-			restoreReport := filepath.Join(disposable.WorkRoot, disposable.Project, "restore-report.json")
+			restoreReport := filepath.Join(disposable.DeploymentRoot(), "restore-report.json")
 			code := runRestoreInteractively(helper, disposable, backupID, restoreReport, detail)
 			detail["restore-exit"] = fmt.Sprint(code)
 			if code == 0 {
 				restoreIsolation = true
+				if refreshErr := disposable.RefreshTransports(); refreshErr != nil {
+					detail["restore-transports"] = refreshErr.Error()
+				}
 				// Drain the restored deployment's public listener, then
 				// prove the pre-restore cookie no longer authorizes.
 				deadline := time.Now().Add(180 * time.Second)
@@ -212,7 +184,7 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 
 	// Keep the disposable helper reports as ticket evidence: the
 	// backup/restore legs' failure details live there.
-	reportsSource := filepath.Join(disposable.WorkRoot, disposable.Project, "state", "quoin", "compose", "reports")
+	reportsSource := disposable.ReportsDir()
 	if entries, err := os.ReadDir(reportsSource); err == nil {
 		for _, entry := range entries {
 			if body, err := os.ReadFile(filepath.Join(reportsSource, entry.Name())); err == nil && len(body) > 0 {
@@ -225,23 +197,21 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 		}
 	}
 
-	// Existing data without secrets must fail closed: remove the
-	// DISPOSABLE clone's secret directory (never the live matrix
-	// stack's) and reinstall over the retained data.
-	secretsDir := secretDirectoryOf(disposable.ConfigPath)
-	if secretsDir == "" {
-		secretsDir = filepath.Join(disposableRoot, "secrets")
+	// Existing data without secrets must fail closed: the DISPOSABLE
+	// clone's secret authority is removed through the backend seam
+	// (directory on compose, release-scoped Secret on kubernetes —
+	// never the live matrix stack's) and the reinstall runs over the
+	// retained data.
+	_, _ = disposable.Down(true)
+	if err := disposable.RemoveSecretAuthority(); err != nil {
+		detail["missing-secret-removal"] = err.Error()
+		return
 	}
-	if secretsDir != "" {
-		_, _ = disposable.Down(true)
-		// Retain the data volume tree by removing only the secrets.
-		_ = os.RemoveAll(secretsDir)
-		code := runHelper(helper, disposable.ComposeEnv(), "compose", "install",
-			"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath,
-			"--report", filepath.Join(disposable.WorkRoot, disposable.Project, "nosecret-report.json"))
-		missingSecretFailClosed = code == 2
-		detail["missing-secret-exit"] = fmt.Sprint(code)
-	}
+	code := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "install",
+		"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath,
+		"--report", filepath.Join(disposable.DeploymentRoot(), "nosecret-report.json"))
+	missingSecretFailClosed = code == 2
+	detail["missing-secret-exit"] = fmt.Sprint(code)
 	return
 }
 
@@ -285,7 +255,7 @@ func secretDirectoryOf(configPath string) string {
 // Admin backup through the public API until the helper observation
 // completes; it returns the helper exit code.
 func runObservedBackup(helper string, disposable *Stack, report string, detail map[string]string) int {
-	command := exec.Command(helper, "compose", "backup",
+	command := exec.Command(helper, disposable.HelperVerb(), "backup",
 		"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath, "--report", report)
 	command.Env = disposable.ComposeEnv()
 	command.Dir = envWorkdir(disposable.ComposeEnv())
@@ -368,7 +338,7 @@ func lastLines(text string, count int) string {
 // confirmation, the recovery administrator's temporary password, and
 // the isolation checklist completion.
 func runRestoreInteractively(helper string, disposable *Stack, backupID, report string, detail map[string]string) int {
-	command := exec.Command(helper, "compose", "restore", "--backup", backupID,
+	command := exec.Command(helper, disposable.HelperVerb(), "restore", "--backup", backupID,
 		"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath, "--report", report)
 	command.Env = disposable.ComposeEnv()
 	command.Dir = envWorkdir(disposable.ComposeEnv())
@@ -424,12 +394,37 @@ func runRestoreInteractively(helper string, disposable *Stack, backupID, report 
 		return false
 	}
 	recoveryPassword := RandomPassword()
-	ok := step("Type RESTORE", "RESTORE\n", 60*time.Second) &&
-		step("Recovery administrator username", "admin\n", 45*time.Second) &&
+	// The Kubernetes attach relay does not replay output that predates
+	// the attach: the pod's username prompt prints before kubectl attach
+	// joins, so it never appears in the transcript. A username is not
+	// secret — the helm admin bootstrap answers it blind for the same
+	// reason — while the password prompts print after the attach and are
+	// answered strictly after their markers (same as compose).
+	ok := step("Type RESTORE", "RESTORE\n", 60*time.Second)
+	if ok {
+		deadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(deadline) && !seen("All commands and output from this session") {
+			select {
+			case <-done:
+				ok = false
+			case <-time.After(time.Second):
+			}
+		}
+		if ok {
+			_, _ = terminal.WriteString("admin\n")
+		}
+	}
+	ok = ok &&
 		step("Temporary password", recoveryPassword+"\n", 45*time.Second) &&
 		step("Confirm temporary password", recoveryPassword+"\n", 45*time.Second)
 	if !ok {
-		detail["restore-interactive"] = "prompt sequence incomplete"
+		mu.Lock()
+		transcriptTail := transcript.String()
+		mu.Unlock()
+		if len(transcriptTail) > 1200 {
+			transcriptTail = transcriptTail[len(transcriptTail)-1200:]
+		}
+		detail["restore-interactive"] = "prompt sequence incomplete; transcript tail: " + transcriptTail
 		_ = command.Process.Kill()
 		<-done
 		return 1

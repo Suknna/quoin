@@ -139,11 +139,10 @@ func boolWord(value bool) string {
 func driveReleaseLegs(request DeploymentRequest, stack *Stack, adminPassword string) (releaseLegs, error) {
 	legs := releaseLegs{Cell: request.Cell, Detail: map[string]string{}}
 	helper, _ := os.Executable()
-	env := stack.ComposeEnv()
 
 	// Legs proven by the helper's own install and verify reports: the
 	// staged bootstrap gates and the operational surface.
-	reportPath := filepath.Join(stack.WorkRoot, stack.Project, "install-report.json")
+	reportPath := filepath.Join(stack.DeploymentRoot(), "install-report.json")
 	if body, err := os.ReadFile(reportPath); err == nil {
 		var report struct {
 			Checks []struct {
@@ -165,8 +164,8 @@ func driveReleaseLegs(request DeploymentRequest, stack *Stack, adminPassword str
 			legs.Detail["install-report-checks"] = fmt.Sprint(len(report.Checks))
 		}
 	}
-	verifyReport := filepath.Join(stack.WorkRoot, stack.Project, "verify-report.json")
-	if code := runHelper(helper, env, "compose", "verify", "--config", stack.ConfigPath, "--release-manifest", stack.ManifestPath, "--report", verifyReport); code == 0 {
+	verifyReport := filepath.Join(stack.DeploymentRoot(), "verify-report.json")
+	if code := runHelper(helper, stack.HelperEnv(), stack.HelperVerb(), "verify", "--config", stack.ConfigPath, "--release-manifest", stack.ManifestPath, "--report", verifyReport); code == 0 {
 		legs.LiveReadyMetricsScraped = true
 		legs.ReleaseManifestSigstoreAndWorkloadShape = manifestCarriesSigstore(stack.ManifestPath)
 	}
@@ -398,24 +397,18 @@ func driveSigtermLeg(stack *Stack, detail map[string]string) bool {
 	// the full timeout only when it must SIGKILL. A stop completing
 	// quickly with a non-SIGKILL exit code is the drained fact
 	// (OPS-SHUTDOWN-001); the logs corroborate.
-	started := time.Now()
-	if _, _, err := stack.docker("compose", "--project-name", stack.Project, "--file", stack.composeFile, "stop", "--timeout", "40", "stele"); err != nil {
+	code, elapsed, err := stack.StopComponent("stele", 40*time.Second)
+	if err != nil {
 		detail["sigterm"] = "stop: " + err.Error()
 		return false
 	}
-	elapsed := time.Since(started)
-	psOutput, _, _ := stack.docker("ps", "-a", "--filter", "name="+stack.Project+"-stele", "--format", "{{.Status}}")
-	detail["sigterm-ps"] = strings.TrimSpace(psOutput)
-	code := ""
-	// The status reads "Exited (N)" for a stopped container; the drain
-	// is graceful exactly when the exit is not the SIGKILL code.
-	if matches := exitStatusPattern.FindStringSubmatch(strings.TrimSpace(psOutput)); matches != nil {
-		code = matches[1]
-	}
-	if upOutput, _, upErr := stack.docker("compose", "--project-name", stack.Project, "--file", stack.composeFile, "up", "-d", "--no-deps", "stele"); upErr != nil {
-		detail["sigterm-restore"] = firstLine(upOutput)
+	detail["sigterm-exit"] = code
+	if startErr := stack.StartComponent("stele"); startErr != nil {
+		detail["sigterm-restore"] = startErr.Error()
 	}
 	detail["sigterm"] = fmt.Sprintf("exit=%s elapsed=%s", code, elapsed.Round(time.Second))
+	// The drain is graceful exactly when the exit is observed and is not
+	// the SIGKILL code within the stop window.
 	return code != "137" && code != "" && elapsed < 40*time.Second
 }
 

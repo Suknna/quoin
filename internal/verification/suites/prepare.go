@@ -40,13 +40,23 @@ type SubjectImage struct {
 	Platforms  map[string]string
 }
 
+// ChartSubject is the measured chart the qualification deployment
+// installs on the Kubernetes backend: the OCI reference is the only
+// chart authority the helper accepts (digest-pinned, never a tag).
+type ChartSubject struct {
+	OCIRepository string
+	OCIDigest     string
+}
+
 // WriteReleaseManifest projects the built subjects into the deployment
 // helper's release-manifest shape. The schema freezes the dual-platform
 // form; on a single-architecture qualification build the unexecuted
 // foreign platform carries this cell's digest and the native-architecture
 // evidence records the delegation (the local manifest is a qualification
-// input, never a published release subject).
-func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images map[string]SubjectImage) (string, error) {
+// input, never a published release subject). The chart section carries
+// the measured OCI reference when the qualification recorded one, so
+// the Kubernetes install pulls the exact packaged chart.
+func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images map[string]SubjectImage, chart ChartSubject) (string, error) {
 	manifest := map[string]any{
 		"manifest_version": 1,
 		"release_version":  releaseVersion,
@@ -57,7 +67,7 @@ func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images 
 				"linux/amd64": map[string]any{"sha256": strings.Repeat("60", 32), "bytes": 1},
 				"linux/arm64": map[string]any{"sha256": strings.Repeat("61", 32), "bytes": 1},
 			}},
-		"helm":    map[string]any{"oci_repository": "t40/charts", "oci_digest": "sha256:" + strings.Repeat("10", 32), "tgz_asset_name": "quoin-0.1.0-t40.tgz", "tgz_sha256": strings.Repeat("10", 32)},
+		"helm":    map[string]any{"oci_repository": chart.OCIRepository, "oci_digest": chart.OCIDigest, "tgz_asset_name": "quoin-" + strings.TrimPrefix(releaseVersion, "v") + "-qualification.tgz", "tgz_sha256": strings.Repeat("10", 32)},
 		"compose": map[string]any{"asset_name": "quoin-compose-" + releaseVersion + "-t40.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{
 			"linux/amd64": map[string]any{"asset_name": "quoin-deploy-linux-amd64", "sha256": strings.Repeat("30", 32)},
@@ -116,4 +126,35 @@ func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images 
 	}
 	path := filepath.Join(workRoot, "release-manifest.json")
 	return path, os.WriteFile(path, body, 0o600)
+}
+
+// WriteHelmInstallConfig renders the strict helm-install input the
+// Kubernetes cells consume: no ingresses (the compose loopback-parity
+// rule — the suite reaches the cluster only through invocation-owned
+// port-forwards), modest local-path-provisioned capacities, and the
+// same frozen public origin.
+func WriteHelmInstallConfig(workRoot string) (string, error) {
+	path := filepath.Join(workRoot, "helm-install.yaml")
+	content := `document: helm-install
+publicOrigin: https://quoin.example.com
+publicIngress:
+  enabled: false
+steleIngress:
+  enabled: false
+storage:
+  quoinData:
+    capacity: 20Gi
+    accessMode: ReadWriteOnce
+  quoinBackup:
+    capacity: 20Gi
+    accessMode: ReadWriteOnce
+  plinthState:
+    capacity: 10Gi
+    accessMode: ReadWriteOnce
+  lintelState:
+    capacity: 20Gi
+    accessMode: ReadWriteOnce
+lintelBrowserSlots: 2
+`
+	return path, os.WriteFile(path, []byte(content), 0o600)
 }

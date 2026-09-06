@@ -15,11 +15,14 @@ import (
 // code through the deployment helper; the acceptance coordinator and
 // the CI workflow invoke the same entrypoint.
 type DeploymentRequest struct {
-	Backend             string
-	Suite               string
-	Phase               string
-	Scenario            string
-	Cell                string
+	Backend  string
+	Suite    string
+	Phase    string
+	Scenario string
+	Cell     string
+	// AssertionIDs are the frozen catalog assertions of this cell; legs
+	// derive applicability from them (never from the backend name).
+	AssertionIDs        []string
 	Workdir             string
 	FactsPath           string
 	ConfigPath          string

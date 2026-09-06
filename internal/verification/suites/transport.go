@@ -2,11 +2,18 @@ package suites
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,6 +33,7 @@ type transportLegs struct {
 	NoVNCAttach               bool              `json:"novncAttach"`
 	NoVNCReconnectWithinGrace bool              `json:"novncReconnectWithinGrace"`
 	NoVNCIdentityReleased     bool              `json:"novncIdentityReleased"`
+	IngressTransport          bool              `json:"ingressTransport"`
 	Detail                    map[string]string `json:"detail"`
 }
 
@@ -56,11 +64,18 @@ func RunTransportPhase(request DeploymentRequest, stack *Stack, adminPassword st
 		passed := legs.SSEFraming && legs.SSEResume && legs.SSEExpiredCursorBoundary &&
 			legs.GRPCRegistrationConnected && legs.GRPCTokenReplayRejected && legs.GRPCReplacementFenced &&
 			legs.NoVNCOperationAccepted && legs.NoVNCAttach && legs.NoVNCReconnectWithinGrace && legs.NoVNCIdentityReleased
-		if err := request.writeFacts(map[string]any{
+		facts := map[string]any{
 			"sse-resume-and-timeout":               map[bool]string{true: "passed", false: "failed"}[legs.SSEFraming && legs.SSEResume && legs.SSEExpiredCursorBoundary],
 			"grpc-cancel-and-fence":                map[bool]string{true: "passed", false: "failed"}[legs.GRPCRegistrationConnected && legs.GRPCTokenReplayRejected && legs.GRPCReplacementFenced],
 			"novnc-reconnect-and-identity-release": map[bool]string{true: "passed", false: "failed"}[legs.NoVNCOperationAccepted && legs.NoVNCAttach && legs.NoVNCReconnectWithinGrace && legs.NoVNCIdentityReleased],
-		}, checksOf(passed)); err != nil {
+		}
+		// The ingress-level fact exists exactly where the frozen cell
+		// demanded the ingress leg (catalog-derived applicability).
+		if cellRequires(request.AssertionIDs, "ingress-buffering-compression-idle-timeout") {
+			facts["ingress-buffering-compression-idle-timeout"] = map[bool]string{true: "passed", false: "failed"}[legs.IngressTransport]
+			passed = passed && legs.IngressTransport
+		}
+		if err := request.writeFacts(facts, checksOf(passed)); err != nil {
 			return err
 		}
 		if !passed {
@@ -96,7 +111,7 @@ func driveTransportLegs(request DeploymentRequest, stack *Stack, adminPassword s
 	// --- SSE framing, resume and the expired-cursor boundary ---------
 	// The stream only carries events when work happens: drive a real
 	// task change (a browser-login operation creation) while reading.
-	lastID, framed := observeSSEFraming(session)
+	lastID, framed := observeSSEFraming(session, stack.OpsBaseURL())
 	legs.SSEFraming = framed
 	legs.Detail["sse-last-id"] = lastID
 	if first, ok := sseDebug.Load().(string); ok {
@@ -123,14 +138,296 @@ func driveTransportLegs(request DeploymentRequest, stack *Stack, adminPassword s
 	for key, value := range novncDetail {
 		legs.Detail["novnc-"+key] = value
 	}
+
+	// Cells whose frozen assertion list demands the ingress transport
+	// path prove it: event buffering, compression handling and
+	// idle-timeout survival through the deployment's real ingress
+	// controller (applicability derives from the catalog, never from
+	// the backend name).
+	if cellRequires(request.AssertionIDs, "ingress-buffering-compression-idle-timeout") {
+		var ingressDetail map[string]string
+		legs.IngressTransport, ingressDetail = observeIngressTransport(stack, session)
+		for key, value := range ingressDetail {
+			legs.Detail["ingress-"+key] = value
+		}
+	}
 	return legs, nil
+}
+
+// cellRequires reports whether the frozen cell declares one assertion.
+func cellRequires(assertionIDs []string, wanted string) bool {
+	for _, id := range assertionIDs {
+		if id == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+// observeIngressTransport drives the three ingress-level transport facts
+// through the cluster's ingress controller: the SSE stream must arrive
+// unbuffered (an event within a bounded window after a real task
+// change), a compressed request must not corrupt any answer the product
+// serves, and an idle stream must survive a bounded quiet window
+// without being cut. The probe goes through the real controller service
+// with the deployment's public origin as the Host — the exact path a
+// site's ingress front door uses.
+func observeIngressTransport(stack *Stack, session *Session) (bool, map[string]string) {
+	detail := map[string]string{}
+	ingressName := stack.releaseName() + "-transport-probe"
+	manifest := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: quoin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %s-quoin-public
+                port: { name: public }
+`, ingressName, stack.namespace(), stack.releaseName())
+	if _, _, err := stack.kubectlInput(manifest, "apply", "-f", "-"); err != nil {
+		detail["apply"] = err.Error()
+		return false, detail
+	}
+	defer func() {
+		_, _, _ = stack.kubectl("--namespace", stack.namespace(), "delete", "--ignore-not-found=true", "ingress", ingressName)
+	}()
+	// The controller's data path on this cluster: the traefik service
+	// (k3s's default controller) reached through an ephemeral forward.
+	controllerNamespace, controllerService := ingressControllerService()
+	forward := startPlainForward(stack, controllerNamespace, controllerService, 80, stack.QuoinPort+40)
+	if forward == nil {
+		detail["controller-forward"] = "ingress controller service unreachable"
+		return false, detail
+	}
+	defer stopPlainForward(forward)
+	base := fmt.Sprintf("http://127.0.0.1:%d", stack.QuoinPort+40)
+	const ingressHost = "quoin.example.com"
+	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	// The controller needs a bounded window to publish the new route;
+	// probe until the answer stops being the controller's own 404.
+	routeReady := false
+	for attempt := 0; attempt < 30 && !routeReady; attempt++ {
+		if request, err := http.NewRequest(http.MethodGet, base+"/api/v1/auth/me", nil); err == nil {
+			request.Host = ingressHost
+			request.Header.Set("Origin", publicOrigin)
+			if response, err := client.Do(request); err == nil {
+				routeReady = response.StatusCode != http.StatusNotFound
+				response.Body.Close()
+			}
+		}
+		if !routeReady {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if !routeReady {
+		detail["route"] = "ingress route never answered beyond the controller 404"
+		return false, detail
+	}
+
+	// Compression: a gzip-negotiated request through the ingress must
+	// serve the authenticated identity body intact — identity or a
+	// VALID gzip payload that decodes (a corrupt compressed body is a
+	// failure, never a pass).
+	compressed := false
+	if request, err := http.NewRequest(http.MethodGet, base+"/api/v1/auth/me", nil); err == nil {
+		request.Host = ingressHost
+		request.Header.Set("Origin", publicOrigin)
+		request.Header.Set("Accept-Encoding", "gzip")
+		if session.Cookie != nil {
+			request.AddCookie(session.Cookie)
+		}
+		if response, err := client.Do(request); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			response.Body.Close()
+			encoding := response.Header.Get("Content-Encoding")
+			detail["compression-encoding"] = encoding
+			payload := body
+			decodeFailed := false
+			switch encoding {
+			case "", "identity":
+			case "gzip":
+				decoder, decodeErr := gzip.NewReader(bytes.NewReader(body))
+				if decodeErr != nil {
+					decodeFailed = true
+					detail["compression"] = "gzip payload undecodable"
+				} else {
+					decoded, readErr := io.ReadAll(io.LimitReader(decoder, 1<<20))
+					if readErr != nil {
+						decodeFailed = true
+						detail["compression"] = "gzip payload truncated"
+					}
+					payload = decoded
+				}
+			default:
+				decodeFailed = true
+				detail["compression"] = "unexpected content-encoding " + encoding
+			}
+			// The authenticated identity body carries the username
+			// field; an unauthorized body means the ingress path broke
+			// the session, which is also a failure.
+			compressed = !decodeFailed && response.StatusCode == http.StatusOK &&
+				strings.Contains(string(payload), "\"username\"")
+			detail["compression-status"] = fmt.Sprint(response.StatusCode)
+		} else {
+			detail["compression"] = err.Error()
+		}
+	}
+
+	// Buffering + idle survival: the stream opens AFTER the current
+	// high-water cursor (replayed history can never satisfy the
+	// buffering window), a real task change is driven through the
+	// authenticated session (an operation creation), and the event's
+	// id must exceed the captured cursor inside the window — then the
+	// same idle stream holds through the quiet window.
+	unbuffered, idleSurvived := false, false
+	cursor := currentTaskCursor(session)
+	if cursor == "" {
+		cursor = "0"
+	}
+	if request, err := http.NewRequest(http.MethodGet, base+"/api/v1/tasks/events?after="+cursor, nil); err == nil {
+		request.Host = ingressHost
+		request.Header.Set("Origin", publicOrigin)
+		request.Header.Set("Accept", "text/event-stream")
+		request.Header.Set("Accept-Encoding", "identity")
+		if session.Cookie != nil {
+			request.AddCookie(session.Cookie)
+		}
+		if response, err := client.Do(request); err == nil {
+			defer response.Body.Close()
+			if strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
+				sawEvent := make(chan string, 1)
+				go func() {
+					reader := bufio.NewReader(response.Body)
+					deadline := time.After(45 * time.Second)
+					currentID := ""
+					for {
+						line, readErr := reader.ReadString('\n')
+						trimmed := strings.TrimSpace(line)
+						if strings.HasPrefix(trimmed, "id:") {
+							currentID = strings.TrimSpace(strings.TrimPrefix(trimmed, "id:"))
+						}
+						if strings.HasPrefix(trimmed, "data:") {
+							sawEvent <- currentID
+							return
+						}
+						if readErr != nil {
+							sawEvent <- ""
+							return
+						}
+						select {
+						case <-deadline:
+							sawEvent <- ""
+							return
+						default:
+						}
+					}
+				}()
+				// The task change: a real browser-login operation
+				// creation on a fresh identity emits a task event with
+				// an id strictly beyond the captured cursor.
+				go func() {
+					time.Sleep(2 * time.Second)
+					seedOperation(session, stack)
+				}()
+				unbuffered = awaitEventPast(sawEvent, cursor, 50*time.Second)
+				detail["buffering"] = map[bool]string{true: "event observed through ingress", false: "no event within window"}[unbuffered]
+				// Idle survival on the still-open stream: quiet for the
+				// window and the connection must not be cut.
+				quiet := time.After(40 * time.Second)
+				cut := make(chan bool, 1)
+				go func() {
+					reader := bufio.NewReader(response.Body)
+					one := make([]byte, 1)
+					for {
+						if _, err := reader.Read(one); err != nil {
+							cut <- true
+							return
+						}
+					}
+				}()
+				select {
+				case <-quiet:
+					idleSurvived = true
+				case <-cut:
+					idleSurvived = false
+				}
+				detail["idle"] = map[bool]string{true: "stream survived quiet window", false: "stream cut during quiet window"}[idleSurvived]
+			} else {
+				detail["buffering"] = "non-SSE content type through ingress: " + response.Header.Get("Content-Type")
+			}
+		} else {
+			detail["buffering"] = err.Error()
+		}
+	}
+	return compressed && unbuffered && idleSurvived, detail
+}
+
+// ingressControllerService names the cluster's ingress controller data
+// path. k3s ships traefik as its default controller; kind-based CI
+// matrices install the standard nginx ingress — both are probed by name.
+func ingressControllerService() (string, string) {
+	if output, err := exec.Command("kubectl", "-n", "ingress-nginx", "get", "svc", "ingress-nginx-controller").CombinedOutput(); err == nil || strings.Contains(string(output), "Found") {
+		if err == nil {
+			return "ingress-nginx", "ingress-nginx-controller"
+		}
+	}
+	return "kube-system", "traefik"
+}
+
+// startPlainForward brings one service port to this process's loopback
+// on the given local port (the ingress probe's own transport; separate
+// from the stack's managed forwards).
+func startPlainForward(stack *Stack, namespace, service string, port, local int) *exec.Cmd {
+	logFile, err := os.CreateTemp("", "ingress-forward-*.log")
+	if err != nil {
+		return nil
+	}
+	command := exec.Command("kubectl", "--namespace", namespace, "port-forward", "service/"+service,
+		"--address", "127.0.0.1", fmt.Sprintf("%d:%d", local, port))
+	command.Stdout, command.Stderr = logFile, logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		return nil
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if probe, probeErr := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/", local), nil); probeErr == nil {
+			client := &http.Client{Timeout: 2 * time.Second}
+			if response, doErr := client.Do(probe); doErr == nil {
+				response.Body.Close()
+				return command
+			}
+		}
+		if command.ProcessState != nil {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	return nil
+}
+
+func stopPlainForward(command *exec.Cmd) {
+	if command.Process != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
+	_, _ = command.Process.Wait()
 }
 
 // observeSSEFraming opens the task stream, drives one real task change
 // through the public API (a browser-login operation creation) and
 // returns the highest event id observed plus whether framed events
 // arrived.
-func observeSSEFraming(session *Session) (string, bool) {
+func observeSSEFraming(session *Session, opsBase string) (string, bool) {
 	suffix := time.Now().UnixNano()
 	// Seed one disabled system + identity so an operation can start.
 	contractYAML := "label_contract:\n  business_system_label: business_system\n"
@@ -143,7 +440,7 @@ func observeSSEFraming(session *Session) (string, bool) {
 		return "", false
 	}
 	identityBody, status, err := session.Post(fmt.Sprintf("/api/v1/business-systems/%s/browser-identity", systemKey),
-		fmt.Sprintf(`{"clientCommandId":"t40-sse-identity-%d","name":"T40 SSE 账号","startUrl":"http://quoin:9090/livez","authenticationProbe":{"journeyId":"authentication.url-prefix.v1","journeyVersion":1,"params":{"authenticatedUrlPrefix":"http://quoin:9090/"}}}`, suffix))
+		fmt.Sprintf(`{"clientCommandId":"t40-sse-identity-%d","name":"T40 SSE 账号","startUrl":"%s/livez","authenticationProbe":{"journeyId":"authentication.url-prefix.v1","journeyVersion":1,"params":{"authenticatedUrlPrefix":"%s/"}}}`, suffix, opsBase, opsBase))
 	if err != nil || (status != http.StatusAccepted && status != http.StatusOK) {
 		return "", false
 	}
@@ -366,7 +663,25 @@ func rotateSlot(stack *Stack, session *Session, slot string) (bool, bool, map[st
 	}
 	previousGeneration, _ := view["currentGeneration"].(float64)
 	rowVersion, _ := view["rowVersion"].(float64)
-	token, err := session.PrepareAndReveal(slot, int64(rowVersion))
+	// A cancelled browser operation keeps its runtime slot busy until
+	// the stop is confirmed (the SSE leg cancels one right before this
+	// corpus runs); the prepare retries that transient busy window.
+	var token RegistrationToken
+	for attempt := 0; attempt < 20; attempt++ {
+		var prepareErr error
+		token, prepareErr = session.PrepareAndReveal(slot, int64(rowVersion))
+		err = prepareErr
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "active_conflict") {
+			break
+		}
+		if attempt == 0 {
+			detail[slot+"-prepare-retried"] = "active_conflict"
+		}
+		time.Sleep(3 * time.Second)
+	}
 	if err != nil {
 		detail["prepare"] = err.Error()
 		return false, false, detail
@@ -418,7 +733,7 @@ func driveNoVNCLifecycle(session *Session, stack *Stack) (bool, bool, bool, bool
 		return false, false, false, false, detail
 	}
 	identityBody, status, err := session.Post(fmt.Sprintf("/api/v1/business-systems/%s/browser-identity", systemKey),
-		fmt.Sprintf(`{"clientCommandId":"t40-identity-%d","name":"T40 只读账号","startUrl":"http://quoin:9090/livez","authenticationProbe":{"journeyId":"authentication.url-prefix.v1","journeyVersion":1,"params":{"authenticatedUrlPrefix":"http://quoin:9090/"}}}`, suffix))
+		fmt.Sprintf(`{"clientCommandId":"t40-identity-%d","name":"T40 只读账号","startUrl":"%s/livez","authenticationProbe":{"journeyId":"authentication.url-prefix.v1","journeyVersion":1,"params":{"authenticatedUrlPrefix":"%s/"}}}`, suffix, stack.OpsBaseURL(), stack.OpsBaseURL()))
 	if err != nil || (status != http.StatusAccepted && status != http.StatusOK) {
 		detail["seed"] = fmt.Sprintf("identity status=%d %s", status, firstLine(identityBody))
 		return false, false, false, false, detail
@@ -479,6 +794,11 @@ func driveNoVNCLifecycle(session *Session, stack *Stack) (bool, bool, bool, bool
 	for attempt := 0; attempt < 40 && !attached; attempt++ {
 		attached = attachNoVNC(session, wsBase, systemKey, fmt.Sprint(operationID), detail, "attach")
 		if !attached {
+			// The failed attach's Lintel-side browser boot log is the
+			// actionable fact for the tunnel diagnosis.
+			if logs, logsErr := stack.Logs("lintel"); logsErr == nil {
+				detail["novnc-lintel-logs"] = lastLinesOf(logs, 12)
+			}
 			time.Sleep(3 * time.Second)
 		}
 	}
@@ -603,4 +923,64 @@ func uploadYAML(session *Session, path, filename, content, commandID, extraField
 		return fmt.Errorf("upload %s status=%d %s", path, response.StatusCode, body)
 	}
 	return nil
+}
+
+// currentTaskCursor reads the authenticated task snapshot's frozen
+// high-water seq (the only legal SSE entry point per HTTP-SSE-003).
+func currentTaskCursor(session *Session) string {
+	body, status, err := session.Get("/api/v1/tasks/snapshot")
+	if err != nil || status != http.StatusOK {
+		return ""
+	}
+	var snapshot struct {
+		SnapshotSeq string `json:"snapshotSeq"`
+	}
+	if json.Unmarshal([]byte(body), &snapshot) != nil {
+		return ""
+	}
+	return snapshot.SnapshotSeq
+}
+
+// seedOperation creates one browser-login operation on a fresh disabled
+// business system — a real task change guaranteed to emit a stream
+// event with an id beyond any previously observed cursor.
+func seedOperation(session *Session, stack *Stack) {
+	suffix := time.Now().UnixNano()
+	systemKey := fmt.Sprintf("t43-ingress-%d", suffix)
+	systemYAML := fmt.Sprintf("system_key: %s\ndisplay_name: T43 Ingress\nenabled: false\ntimezone: UTC\nresource_refresh_interval_seconds: 300\nresource_discoveries: []\ninspection_plans: []\n", systemKey)
+	_ = uploadYAML(session, "/api/v1/business-systems", "system.yaml", systemYAML, fmt.Sprintf("t43-ingress-system-%d", suffix), "targetLabelContractVersion=1")
+	identityBody, _, _ := session.Post(fmt.Sprintf("/api/v1/business-systems/%s/browser-identity", systemKey),
+		fmt.Sprintf(`{"clientCommandId":"t43-ingress-identity-%d","name":"T43 ingress","startUrl":"%s/livez","authenticationProbe":{"journeyId":"authentication.url-prefix.v1","journeyVersion":1,"params":{"authenticatedUrlPrefix":"%s/"}}}`, suffix, stack.OpsBaseURL(), stack.OpsBaseURL()))
+	var identityView struct {
+		RowVersion int64 `json:"rowVersion"`
+	}
+	_ = json.Unmarshal([]byte(identityBody), &identityView)
+	if identityView.RowVersion < 1 {
+		identityView.RowVersion = 1
+	}
+	_, _, _ = session.Post(fmt.Sprintf("/api/v1/browser-login/%s/operations", systemKey),
+		fmt.Sprintf(`{"clientCommandId":"t43-ingress-op-%d","expectedRowVersion":%d}`, suffix, identityView.RowVersion))
+}
+
+// awaitEventPast accepts an event only when its id strictly exceeds the
+// captured cursor (replayed history never satisfies the window).
+func awaitEventPast(events <-chan string, cursor string, window time.Duration) bool {
+	deadline := time.After(window)
+	select {
+	case id := <-events:
+		if id == "" {
+			return false
+		}
+		observed, err := strconv.ParseUint(id, 10, 64)
+		if err != nil {
+			return false
+		}
+		low, err := strconv.ParseUint(cursor, 10, 64)
+		if err != nil {
+			low = 0
+		}
+		return observed > low
+	case <-deadline:
+		return false
+	}
 }

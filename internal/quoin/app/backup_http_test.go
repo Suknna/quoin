@@ -3,10 +3,13 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/app"
@@ -55,6 +58,11 @@ func TestBackupCommandsOverSameOriginHandler(t *testing.T) {
 	mustDo(t, server, http.MethodPut, merge(headers, map[string]string{"Cookie": cookie}), "/api/v1/auth/password", `{"currentPassword":"Correct horse battery staple 2026!","newPassword":"A better personal passphrase 2027!"}`, http.StatusNoContent)
 	first := mustPost(t, server, merge(headers, map[string]string{"Cookie": cookie}), "/api/v1/backups", `{"clientCommandId":"backup-http-command"}`, http.StatusAccepted)
 	replay := mustPost(t, server, merge(headers, map[string]string{"Cookie": cookie}), "/api/v1/backups", `{"clientCommandId":"backup-http-command"}`, http.StatusAccepted)
+	// The accepted POST runs the backup asynchronously; the staging
+	// directory keeps moving until the run reaches a terminal state.
+	// Waiting for it here keeps t.TempDir's RemoveAll from racing the
+	// run goroutine's final writes (a "directory not empty" flake).
+	waitBackupTerminal(t, backupService, first.body)
 	var a, b struct {
 		ID string `json:"id"`
 	}
@@ -180,5 +188,30 @@ func TestBackupSettingsScheduleCronJSONPresenceAndNull(t *testing.T) {
 	settings, err = backupService.Settings(ctx)
 	if err != nil || settings.ScheduleCron != nil {
 		t.Fatalf("null cron did not clear settings=%+v err=%v", settings, err)
+	}
+}
+
+// waitBackupTerminal polls the asynchronous run's persisted state to a
+// terminal value so the test's TempDir cleanup never races the
+// runner's final writes (a "directory not empty" flake under load).
+func waitBackupTerminal(t *testing.T, service *backup.Service, accepted string) {
+	t.Helper()
+	var created struct {
+		ID any `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(accepted), &created); err != nil {
+		return
+	}
+	id, err := strconv.ParseInt(fmt.Sprint(created.ID), 10, 64)
+	if err != nil {
+		return
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		summary, err := service.Get(context.Background(), id)
+		if err == nil && (summary.Status == "succeeded" || summary.Status == "failed") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
