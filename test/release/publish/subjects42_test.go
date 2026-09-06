@@ -138,11 +138,9 @@ func buildSubjects42(t *testing.T, recorder *ticketEvidence, workRoot string) *s
 		recorder.observe("formal-images-fallback.json", map[string]any{
 			"exitCode": recorder.exitCodeOf("builder-images-formal"),
 			"tail":     tailOf(formal, 25),
-			"route":    "per-component formal buildx recipes + lintel development recipe (T30/T40-proven)",
+			"route":    "per-component formal buildx recipes (identical deploy/images sources, retried individually)",
 		})
 		buildSubjectsManually(t, recorder, work, goproxy)
-	} else {
-		substituteLintelDevelopmentRecipe(t, recorder, work, goproxy)
 	}
 	recorder.run(t, "builder-assemble", nil, 0,
 		"go", "run", "./internal/release/build",
@@ -163,9 +161,12 @@ func buildSubjects42(t *testing.T, recorder *ticketEvidence, workRoot string) *s
 }
 
 // buildSubjectsManually reproduces the builder's images stage per
-// component when the all-formal run fails: formal buildx recipes for
-// quoin/stele/plinth (cross-compiling build stages; the emulated final
-// stage needs only binfmt), the development recipe for lintel.
+// component when the aggregate formal run fails: the same formal buildx
+// recipes for all four components (cross-compiling build stages; the
+// emulated final stage needs only binfmt). The fallback exists purely
+// to retry a transient aggregate-stage failure — every component,
+// including lintel, is built from its formal deploy/images recipe so
+// the release subject is never a development substitute.
 func buildSubjectsManually(t *testing.T, recorder *ticketEvidence, work, goproxy string) {
 	t.Helper()
 	for _, platform := range []string{"amd64", "arm64"} {
@@ -178,7 +179,7 @@ func buildSubjectsManually(t *testing.T, recorder *ticketEvidence, work, goproxy
 			"mode":     mode,
 			"images":   map[string]any{},
 		}
-		for _, component := range []string{"quoin", "stele", "plinth"} {
+		for _, component := range []string{"quoin", "stele", "plinth", "lintel"} {
 			repository := t42RegistryHost + "/" + t42Namespace + "/" + component
 			tag := repository + ":" + platform
 			recorder.run(t, "build-"+component+"-"+platform, nil, 0, "docker", "buildx", "build",
@@ -189,18 +190,6 @@ func buildSubjectsManually(t *testing.T, recorder *ticketEvidence, work, goproxy
 				"-t", tag, "--push", ".")
 			measureFragment(t, fragment, component, repository, platform)
 		}
-		// The lintel development recipe (T30-proven on this network: the
-		// formal recipe's frozen Chromium lock is drifted).
-		repository := t42RegistryHost + "/" + t42Namespace + "/lintel"
-		tag := repository + ":" + platform
-		arguments := []string{
-			"build", "--platform", "linux/" + platform,
-			"-f", "build/package/Dockerfile", "--build-arg", "GOPROXY=" + goproxy,
-			"-t", tag, "--target", "lintel", ".",
-		}
-		recorder.run(t, "build-lintel-"+platform, nil, 0, append([]string{"docker"}, arguments...)...)
-		recorder.run(t, "push-lintel-"+platform, nil, 0, "docker", "push", tag)
-		measureFragment(t, fragment, "lintel", repository, platform)
 		body, err := json.MarshalIndent(fragment, "", "  ")
 		if err != nil {
 			t.Fatal(err)
@@ -272,60 +261,4 @@ func portOf(hostPort string) string {
 func execOutput(argv ...string) (string, error) {
 	output, err := exec.Command(argv[0], argv[1:]...).Output()
 	return string(output), err
-}
-
-// substituteLintelDevelopmentRecipe replaces the formal lintel subjects
-// with the canonical development recipe before the assemble stage. The
-// formal image carries a recorded runtime defect — its debian:13-slim
-// base has no passwd entry for the uid the compose projection runs
-// (1000), so TigerVNC's x0vncserver perl wrapper aborts with "I do not
-// know who you are" and the noVNC/RFB tunnel never opens (issue #65
-// comment; the T30/T40 development recipe passed incidentally through
-// the node base image's uid-1000 user). The substitution is
-// machine-visible in the evidence; the formal-image fix belongs to the
-// image authority follow-up.
-func substituteLintelDevelopmentRecipe(t *testing.T, recorder *ticketEvidence, work, goproxy string) {
-	t.Helper()
-	repository := t42RegistryHost + "/" + t42Namespace + "/lintel"
-	for _, platform := range []string{"amd64", "arm64"} {
-		tag := repository + ":" + platform
-		// The same buildx builder and attestation flags as the formal
-		// recipes: the pre-qualification gate demands SPDX SBOM and SLSA
-		// provenance on every platform manifest.
-		arguments := []string{"docker", "buildx", "build", "--builder", t42Builder,
-			"--platform", "linux/" + platform,
-			"--sbom=true", "--provenance=mode=min",
-			"-f", "build/package/Dockerfile", "--build-arg", "GOPROXY=" + goproxy,
-			"-t", tag, "--target", "lintel", "--push", "."}
-		recorder.run(t, "substitute-lintel-"+platform, nil, 0, arguments...)
-		rewriteLintelFragment(t, work, platform)
-	}
-	recorder.observe("lintel-substitution.json", map[string]any{
-		"formalDefect": "x0vncserver perl wrapper needs a passwd entry for the compose-run uid 1000; debian:13-slim base has none",
-		"substitute":   "build/package/Dockerfile lintel target (node:24-bookworm-slim base defines uid 1000)",
-		"disclosure":   "issue #65 comment; formal-image fix is the image-authority follow-up",
-	})
-}
-
-// rewriteLintelFragment re-measures the substituted lintel per-arch tag
-// into the platform fragment the assemble stage consumes.
-func rewriteLintelFragment(t *testing.T, work, platform string) {
-	t.Helper()
-	path := filepath.Join(work, "images-"+platform+".json")
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("fragment %s missing: %v", platform, err)
-	}
-	var fragment map[string]any
-	if err := json.Unmarshal(body, &fragment); err != nil {
-		t.Fatal(err)
-	}
-	measureFragment(t, fragment, "lintel", t42RegistryHost+"/"+t42Namespace+"/lintel", platform)
-	encoded, err := json.MarshalIndent(fragment, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, encoded, 0o644); err != nil {
-		t.Fatal(err)
-	}
 }

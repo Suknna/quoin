@@ -99,7 +99,14 @@ func NewManager(config Config) (*Manager, error) {
 		config.XvfbBinary = "Xvfb"
 	}
 	if config.X0VNCBinary == "" {
-		config.X0VNCBinary = "x0vncserver"
+		// The real TigerVNC server binary, not the /usr/bin/x0vncserver
+		// perl wrapper: the wrapper resolves getpwuid for the runtime uid
+		// and aborts with "I do not know who you are" when the uid has
+		// no passwd entry — Compose runs Lintel as the installing user's
+		// dynamic uid and Helm as 65532, neither of which the image
+		// carries. The real binary needs no passwd entry and is the
+		// foreground process this manager assumes.
+		config.X0VNCBinary = "X0tigervnc"
 	}
 	for _, binary := range []string{config.ChromiumBinary, config.XvfbBinary, config.X0VNCBinary} {
 		if _, err := exec.LookPath(binary); err != nil {
@@ -288,8 +295,10 @@ func (manager *Manager) start(ctx context.Context, operationID int64, startURL, 
 	}
 	// RFB is intentionally unauthenticated only on this loopback socket: the
 	// authenticated Quoin BrowserTunnel is its sole transport boundary. TigerVNC
-	// otherwise looks for an interactive password helper and exits.
-	op.vnc = managedCommand(ctx, manager.config.X0VNCBinary, "-fg", "-display", display, "-localhost", "-SecurityTypes", "None", "-rfbport", address[stringsLastColon(address)+1:])
+	// otherwise looks for an interactive password helper and exits. No -fg:
+	// that is a wrapper-level flag; the real X0tigervnc binary is a plain
+	// foreground process and rejects unknown flags with a usage dump.
+	op.vnc = managedCommand(ctx, manager.config.X0VNCBinary, "-display", display, "-localhost", "-SecurityTypes", "None", "-rfbport", address[stringsLastColon(address)+1:])
 	op.vnc.Env = append(os.Environ(),
 		"HOME="+profileDirectory,
 		"XDG_CONFIG_HOME="+profileDirectory,
@@ -298,7 +307,7 @@ func (manager *Manager) start(ctx context.Context, operationID int64, startURL, 
 	if err := op.vnc.Start(); err != nil {
 		manager.kill(op)
 		_ = os.RemoveAll(filepath.Dir(profileDirectory))
-		return "", fmt.Errorf("start x0vncserver: %w", err)
+		return "", fmt.Errorf("start X0tigervnc: %w", err)
 	}
 	if err := openOperationPidfds(op); err != nil {
 		manager.kill(op)
@@ -824,7 +833,6 @@ func navigateStartPage(ctx context.Context, port uint16, page devtoolsPage, star
 			}
 		}
 	}
-
 }
 
 // operationDevToolsURL only permits the operation-private loopback CDP endpoint.

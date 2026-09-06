@@ -140,7 +140,7 @@ RUN apt-get update \
         xvfb=2:21.1.16-1.3+deb13u3; \
     fi \
     && rm -rf /var/lib/apt/lists/* \
-    && test -x /usr/bin/Xvfb && test -x /usr/bin/x0vncserver && test -x /usr/bin/node
+    && test -x /usr/bin/Xvfb && test -x /usr/bin/X0tigervnc && test -x /usr/bin/node
 COPY --from=chromium /browser /usr/lib/quoin/chromium
 RUN entry=$(find /usr/lib/quoin/chromium -maxdepth 2 -type f \( -name chrome -o -name chromium \) | head -n 1) \
     && test -n "$entry" \
