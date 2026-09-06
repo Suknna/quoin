@@ -1,0 +1,440 @@
+name: release
+# Release closure (T42, OPS-RELEASE-001/002/003, OPS-SUPPLY-001/002,
+# OPS-OFFLINE-001/002, OPS-VERIFY-003). This workflow is the designated
+# closure vehicle of the release.native-matrix scenario: it re-runs the
+# qualification legs against the release-subjects inventory of this exact
+# tag (statements bind the release subject through the qualification
+# manifest projected from that inventory), derives the final Release
+# manifest, packs the offline archive, signs the two closure assets with
+# keyless cosign, runs the publish gate including the real offline import
+# with digest readback, and publishes the GitHub Release. Partial local
+# sub-proofs stay ticket evidence; only this closure publishes. The
+# maintained-Kubernetes release cells close when the kubernetes stack
+# adapter lands (the boundary release-qualification.yml records); until
+# then the evidence job fails closed instead of publishing an incomplete
+# release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+env:
+  QUOIN_RELEASE_VERSION: ${{ github.ref_name }}
+
+jobs:
+  context:
+    name: Resolve release context
+    runs-on: ubuntu-24.04
+    outputs:
+      registry: ${{ steps.paths.outputs.registry }}
+      chart-oci: ${{ steps.paths.outputs.chart-oci }}
+      identity: ${{ steps.paths.outputs.identity }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export lowercase registry paths
+        id: paths
+        run: |
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
+          echo "chart-oci=ghcr.io/${repo}/charts" >> "$GITHUB_OUTPUT"
+          echo "identity=^https://github\.com/${repo}/" >> "$GITHUB_OUTPUT"
+
+  collect:
+    name: Collect the signed release subjects of this tag
+    needs: context
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for the release-subjects workflow of this tag
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The subjects builder runs on the same tag push; poll until its
+          # run for this commit completes, then fail if it did not succeed.
+          for i in $(seq 1 120); do
+            conclusion=$(gh api \
+              "repos/${{ github.repository }}/actions/runs?event=push&head_sha=${{ github.sha }}" \
+              --jq '.workflow_runs[] | select(.name == "release-subjects") | .conclusion' | head -1)
+            if [ "$conclusion" = "success" ]; then
+              echo "done=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if [ -n "$conclusion" ] && [ "$conclusion" != "null" ]; then
+              echo "release-subjects concluded $conclusion" >&2; exit 1
+            fi
+            sleep 30
+          done
+          echo "release-subjects never completed" >&2; exit 1
+      - name: Download the subject artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/bundles .release/trust
+          run_id=$(gh api \
+            "repos/${{ github.repository }}/actions/runs?event=push&head_sha=${{ github.sha }}" \
+            --jq '.workflow_runs[] | select(.name == "release-subjects") | .id' | head -1)
+          gh run download "$run_id" --repo ${{ github.repository }} \
+            --name subject-assets --dir .release/assets
+          gh run download "$run_id" --repo ${{ github.repository }} \
+            --name subject-bundles --dir .release/bundles
+          gh run download "$run_id" --repo ${{ github.repository }} \
+            --name trust-roots --dir .release/trust
+          test -s .release/assets/subjects-inventory.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-subjects
+          path: .release/
+          retention-days: 14
+
+  contracts:
+    name: Contract gate over the frozen catalog
+    needs: collect
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run the contract gate
+        run: |
+          set -euo pipefail
+          go build -o bin/quoin-verify ./cmd/quoin-verify
+          bin/quoin-verify run --layer contract_gate \
+            --output .work/contract-gate \
+            --invocation-id "release-contracts-$QUOIN_RELEASE_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence-contracts
+          path: .work/contract-gate/
+          retention-days: 14
+
+  qualify:
+    name: Qualify the release subjects on ${{ matrix.leg }}
+    needs: collect
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [compose-linux-amd64, compose-linux-arm64]
+    runs-on: ${{ matrix.leg == 'compose-linux-arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-subjects
+          path: .release
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+      - name: Mirror the release subjects into the invocation-local registry
+        run: |
+          set -euo pipefail
+          docker run -d --name rel-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:2
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:5000/v2/ >/dev/null && break; sleep 1; done
+          # The release images already live in ghcr; copy them digest-pinned
+          # into the loopback registry the deployment consumes (digests are
+          # preserved; the repository location is transport only).
+          for component in quoin plinth lintel stele; do
+            index=$(jq -r --arg c "$component" \
+              '.images[$c].index_digest' .release/assets/subjects-inventory.json)
+            repository=$(jq -r --arg c "$component" \
+              '.images[$c].repository' .release/assets/subjects-inventory.json)
+            skopeo copy --all \
+              --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              "docker://$repository@$index" \
+              --dest-tls-verify=false \
+              "docker://127.0.0.1:5000/rel/$component"
+          done
+      - name: Build the qualification drivers
+        run: |
+          go build -o bin/quoin-deploy ./cmd/quoin-deploy
+          go build -o bin/qualify ./internal/verification/suites/qualify
+      - name: Project the inventory into the deployment inputs
+        run: |
+          # prepare consumes the release inventory with the loopback mirror
+          # repositories and projects the qualification manifest whose
+          # digest the suite statement binds as its subject.
+          python3 - <<'PY'
+          import json
+          inventory = json.load(open('.release/assets/subjects-inventory.json'))
+          for image in inventory['images'].values():
+              image['repository'] = '127.0.0.1:5000/rel/' + image['repository'].rsplit('/', 1)[1]
+          json.dump({'release': inventory['release_version'], 'images': inventory['images']},
+                    open('.release/mirror-inventory.json', 'w'), indent=2)
+          PY
+          bin/qualify prepare --work .work/suite \
+            --inventory .release/mirror-inventory.json \
+            --release "$QUOIN_RELEASE_VERSION"
+          cp .release/assets/subjects-inventory.json .work/suite/release-inventory.json
+      - name: Execute the release suite cells for this architecture
+        env:
+          QUOIN_SUITE_PROJECT: rel-qualify-${{ github.run_id }}
+          QUOIN_SUITE_ADMIN_PASSWORD: rel-qualify-admin-${{ github.run_id }}
+        run: |
+          arch=$(case "${{ matrix.leg }}" in *amd64) echo amd64;; *) echo arm64;; esac)
+          bin/qualify run \
+            --work .work/suite \
+            --config .work/suite/install.yaml \
+            --manifest .work/suite/release-manifest.json \
+            --backend compose --arch "linux/$arch" \
+            --suite release-qualification \
+            --admin-password "$QUOIN_SUITE_ADMIN_PASSWORD"
+      - name: Stop the invocation-local registry
+        if: always()
+        run: docker rm -f rel-registry || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-${{ matrix.leg }}
+          path: .work/suite/
+          retention-days: 14
+
+  evidence:
+    name: Assemble and sign the categorized evidence bundles
+    needs: [context, collect, contracts, qualify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-subjects
+          path: .release
+      - uses: actions/download-artifact@v4
+        with:
+          name: evidence-contracts
+          path: .evidence/contracts
+      - uses: actions/download-artifact@v4
+        with:
+          name: evidence-compose-linux-amd64
+          path: .evidence/compose-amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: evidence-compose-linux-arm64
+          path: .evidence/compose-arm64
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.5.3
+      - name: Sign each categorized bundle
+        run: |
+          set -euo pipefail
+          mkdir -p .out
+          sign () {
+            local name="$1" payload="$2"
+            cosign sign-blob --yes --output-certificate ".out/$name.crt" \
+              --output-signature ".out/$name.sig" "$payload"
+            cosign bundle create --artifact "$payload" \
+              --signature ".out/$name.sig" --certificate ".out/$name.crt" \
+              > ".out/$name.bundle.json"
+            cp "$payload" ".out/$name.payload"
+          }
+          # contracts: the contract-gate Test Result of this tag's source.
+          sign contracts .evidence/contracts/test-result.json
+          # Qualification categories: each leg's suite statement, with the
+          # qualification manifest bytes riding as the transitive binding
+          # companion (statement subject = that manifest's digest).
+          for arch in amd64 arm64; do
+            sign "compose_linux_$arch" ".evidence/compose-$arch/test-result.json"
+            cp ".evidence/compose-$arch/release-manifest.json" ".out/compose_linux_$arch.companion"
+          done
+      - name: Close on the Kubernetes statements or fail closed
+        run: |
+          # The six maintained-Kubernetes release cells execute when the
+          # kubernetes stack adapter lands (cluster-adapter-boundary.json
+          # in release-qualification.yml records the boundary). When the
+          # native legs upload their statements they are signed exactly
+          # like the compose legs; until then the release refuses to
+          # close: no partial release is ever published.
+          if [ -f .evidence/k8s-amd64/test-result.json ] && [ -f .evidence/k8s-arm64/test-result.json ]; then
+            for arch in amd64 arm64; do
+              name="kubernetes_linux_$arch"
+              cosign sign-blob --yes --output-certificate ".out/$name.crt" \
+                --output-signature ".out/$name.sig" ".evidence/k8s-$arch/test-result.json"
+              cosign bundle create --artifact ".evidence/k8s-$arch/test-result.json" \
+                --signature ".out/$name.sig" --certificate ".out/$name.crt" \
+                > ".out/$name.bundle.json"
+              cp ".evidence/k8s-$arch/test-result.json" ".out/$name.payload"
+              cp ".evidence/k8s-$arch/release-manifest.json" ".out/$name.companion"
+            done
+            exit 0
+          fi
+          echo "kubernetes_linux_amd64 / kubernetes_linux_arm64 have no native statements yet:" \
+            "the maintained-Kubernetes stack adapter is the recorded pending boundary." >&2
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence
+          path: .out/
+          retention-days: 14
+
+  finalize:
+    name: Derive the manifest and pack the offline archive
+    needs: [context, evidence]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-subjects
+          path: .release
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-evidence
+          path: .evidence
+      - name: Install skopeo and zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo zstd
+      - name: Log in to GHCR (layout pulls)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Finalize the release
+        env:
+          QUOIN_INVENTORY: .release/assets/subjects-inventory.json
+          QUOIN_EVIDENCE_DIR: .evidence
+          QUOIN_ASSETS_DIR: .release/assets
+          QUOIN_BUNDLES_DIR: .release/bundles
+          QUOIN_TRUST_ROOT: .release/trust/fulcio-roots.pem
+          QUOIN_SIGN_IDENTITY: ${{ needs.context.outputs.identity }}
+          QUOIN_SIGN_ISSUER: https://token.actions.githubusercontent.com
+          QUOIN_RELEASE_DIR: .release/final
+        run: ./ci/finalize-release finalize
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-final
+          path: .release/final/
+          retention-days: 14
+
+  sign:
+    name: Sign the manifest and offline archive keyless
+    needs: [context, finalize]
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-final
+          path: .release/final
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.5.3
+      - name: Sign the two closure assets
+        run: |
+          set -euo pipefail
+          cd .release/final
+          cosign sign-blob --yes --output-certificate manifest.crt \
+            --output-signature manifest.sig release-manifest.json
+          cosign bundle create --artifact release-manifest.json \
+            --signature manifest.sig --certificate manifest.crt \
+            > bundles/release-manifest.sigstore.json
+          cp release-manifest.json bundles/release-manifest.sigstore.json.payload
+          archive=$(ls quoin-offline-*.tar.zst)
+          cosign sign-blob --yes --output-certificate offline.crt \
+            --output-signature offline.sig "$archive"
+          cosign bundle create --artifact "$archive" \
+            --signature offline.sig --certificate offline.crt \
+            > "bundles/$archive.sigstore.json"
+          cp "$archive" "bundles/$archive.sigstore.json.payload"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-signed
+          path: .release/final/
+          retention-days: 14
+
+  verify:
+    name: Publish gate with offline import
+    needs: [context, sign]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-signed
+          path: .release/final
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-subjects
+          path: .release
+      - name: Install skopeo and zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo zstd
+      - name: Start the fresh import registry
+        run: |
+          docker run -d --name rel-import -p 127.0.0.1:5099:5000 docker.io/library/registry:2
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:5099/v2/ >/dev/null && exit 0; sleep 1; done
+          echo "import registry never became ready" >&2; exit 1
+      - name: Run the publish gate
+        env:
+          QUOIN_RELEASE_DIR: .release/final
+          QUOIN_TRUST_ROOT: .release/trust/fulcio-roots.pem
+          QUOIN_SIGN_IDENTITY: ${{ needs.context.outputs.identity }}
+          QUOIN_SIGN_ISSUER: https://token.actions.githubusercontent.com
+          QUOIN_IMPORT_REGISTRY: 127.0.0.1:5099/rel-import
+          QUOIN_REGISTRY_INSECURE: "1"
+          QUOIN_REPORT: publish-gate-report.json
+        run: ./ci/finalize-release verify
+      - name: Stop the import registry
+        if: always()
+        run: docker rm -f rel-import || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publish-gate-report
+          path: publish-gate-report.json
+          retention-days: 90
+
+  publish:
+    name: Publish the GitHub Release
+    needs: [context, verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-signed
+          path: .release/final
+      - uses: actions/download-artifact@v4
+        with:
+          name: publish-gate-report
+          path: .report
+      - name: Render the release notes from the gate report
+        run: |
+          python3 - <<'PY'
+          import json
+          report = json.load(open('.report/publish-gate-report.json'))
+          checks = len(report.get('checks', []))
+          with open('release-notes.md', 'w') as out:
+              out.write(f"Publish gate: {report.get('result')} over {checks} structured checks.\n")
+              out.write("See the publish-gate-report artifact for the full checklist.\n")
+          PY
+      - name: Create the release with every closure asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd .release/final
+          gh release create "$QUOIN_RELEASE_VERSION" --repo ${{ github.repository }} \
+            --title "Quoin $QUOIN_RELEASE_VERSION" \
+            --notes-file "$GITHUB_WORKSPACE/release-notes.md" \
+            release-manifest.json \
+            assets/* \
+            quoin-deploy-linux-amd64 quoin-deploy-linux-arm64 \
+            quoin-offline-*.tar.zst \
+            bundles/*.sigstore.json \
+            verification/*

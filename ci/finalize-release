@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Release finalize/publish-gate entrypoint (T42, OPS-RELEASE-001,
+# OPS-SUPPLY-001/002, OPS-OFFLINE-001/002, OPS-VERIFY-003). Derives the
+# final Release manifest from the qualified subjects and evidence, packs
+# the offline archive, and runs the publish gate. Signing (keyless cosign)
+# runs between the two stages and is not part of this script.
+#
+# Usage:
+#   ci/finalize-release finalize   (assemble manifest + offline archive)
+#   ci/finalize-release verify     (publish gate incl. offline import)
+#
+# Required environment:
+#   QUOIN_INVENTORY        subjects inventory path (T39 assemble output)
+#   QUOIN_EVIDENCE_DIR     seven categorized signed evidence bundles
+#   QUOIN_ASSETS_DIR       T39 assemble work dir (chart/, compose, helpers)
+#   QUOIN_BUNDLES_DIR      the sixteen subject Sigstore bundles
+#   QUOIN_TRUST_ROOT       Fulcio-shaped trust root PEM
+#   QUOIN_SIGN_IDENTITY    certificate identity regexp
+#   QUOIN_SIGN_ISSUER      certificate issuer URL
+#   QUOIN_RELEASE_DIR      assembled release directory
+# Optional environment:
+#   QUOIN_CONTRACTS_DIR      frozen contracts dir (default: docs/specs/quoin-v1/contracts)
+#   QUOIN_WORK               scratch dir for image layouts
+#   QUOIN_IMPORT_REGISTRY    fresh target registry for the offline import proof
+#   QUOIN_REGISTRY_INSECURE  set to 1 for loopback HTTP registries
+#   QUOIN_REPORT             gate report path (default: publish-gate-report.json)
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+
+stage=${1:?usage: ci/finalize-release <finalize|verify>}
+contracts=${QUOIN_CONTRACTS_DIR:-"$repo_root/docs/specs/quoin-v1/contracts"}
+insecure=()
+if [ "${QUOIN_REGISTRY_INSECURE:-0}" = "1" ]; then
+  insecure+=(-registry-insecure)
+fi
+
+case "$stage" in
+  finalize)
+    exec go run ./internal/release/publish finalize \
+      -inventory "${QUOIN_INVENTORY:?QUOIN_INVENTORY is required}" \
+      -evidence "${QUOIN_EVIDENCE_DIR:?QUOIN_EVIDENCE_DIR is required}" \
+      -contracts "$contracts" \
+      -assets "${QUOIN_ASSETS_DIR:?QUOIN_ASSETS_DIR is required}" \
+      -bundles "${QUOIN_BUNDLES_DIR:?QUOIN_BUNDLES_DIR is required}" \
+      -trust-root "${QUOIN_TRUST_ROOT:?QUOIN_TRUST_ROOT is required}" \
+      -identity "${QUOIN_SIGN_IDENTITY:?QUOIN_SIGN_IDENTITY is required}" \
+      -issuer "${QUOIN_SIGN_ISSUER:?QUOIN_SIGN_ISSUER is required}" \
+      -out "${QUOIN_RELEASE_DIR:?QUOIN_RELEASE_DIR is required}" \
+      -work "${QUOIN_WORK:-$repo_root/.artifacts/finalize-release}" \
+      "${insecure[@]}"
+    ;;
+  verify)
+    import_args=()
+    if [ -n "${QUOIN_IMPORT_REGISTRY:-}" ]; then
+      import_args+=(-import-registry "$QUOIN_IMPORT_REGISTRY")
+    fi
+    exec go run ./internal/release/publish verify \
+      -release "${QUOIN_RELEASE_DIR:?QUOIN_RELEASE_DIR is required}" \
+      -contracts "$contracts" \
+      -trust-root "${QUOIN_TRUST_ROOT:?QUOIN_TRUST_ROOT is required}" \
+      -identity "${QUOIN_SIGN_IDENTITY:?QUOIN_SIGN_IDENTITY is required}" \
+      -issuer "${QUOIN_SIGN_ISSUER:?QUOIN_SIGN_ISSUER is required}" \
+      -report "${QUOIN_REPORT:-publish-gate-report.json}" \
+      "${import_args[@]}" \
+      "${insecure[@]}"
+    ;;
+  *)
+    echo "unknown stage $stage" >&2
+    exit 2
+    ;;
+esac
