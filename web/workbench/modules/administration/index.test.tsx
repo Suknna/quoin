@@ -1,0 +1,6 @@
+import "@testing-library/jest-dom/vitest";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { useAdministrationModule } from "./index";
+function View({ role = "operator", route = "/administration/users" }: { role?: "admin" | "operator"; route?: string }) { const view = useAdministrationModule({ user: { id: "1", username: "a", displayName: "A", role, passwordChangeRequired: false, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 }, route, navigate: vi.fn(), suspended: false, openEvidence: vi.fn() }); return <>{view.list}{view.content}</>; }
+describe("administration module", () => { it("keeps administration inaccessible to operators", () => { render(<View />); expect(screen.getByRole("alert")).toHaveTextContent("仅向管理员开放"); }); it("resolves an absolute administration route and exposes its real alert source form", async () => { vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) })); render(<View role="admin" route="/administration/alerts" />); expect(await screen.findByText("告警源与凭据")).toBeInTheDocument(); expect(screen.getByLabelText("告警源键")).toBeInTheDocument(); expect(screen.getByRole("button", { name: "创建告警源" })).toBeInTheDocument(); }); });

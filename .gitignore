@@ -7,3 +7,9 @@ web/test-results/
 .pi-subagents/
 .DS_Store
 .vscode/
+.env
+.env.*
+!.env.example
+!.env.sample
+/.local-lab/
+/.zcode/

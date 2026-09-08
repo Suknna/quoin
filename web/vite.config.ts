@@ -1,21 +1,21 @@
-import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vitest/config'
+import { fileURLToPath } from "node:url";
+import { defineConfig, mergeConfig } from "vitest/config";
+import workbench from "./vite.workbench.config.ts";
 
-export default defineConfig({
-  plugins: [react()],
-  build: {
-    outDir: '../internal/gen/web/dist',
-    emptyOutDir: true,
-    sourcemap: false,
-    manifest: true,
-  },
-  server: {
-    port: 5173,
-    strictPort: true,
-  },
-  test: {
-    // Vitest owns unit tests only; Playwright owns the e2e specs under e2e/.
-    include: ['src/**/*.test.{ts,tsx}'],
-    environment: 'jsdom',
-  },
-})
+export default mergeConfig(
+	workbench,
+	defineConfig({
+		build: {
+			outDir: fileURLToPath(
+				new URL("../internal/gen/web/dist", import.meta.url),
+			),
+			emptyOutDir: true,
+			sourcemap: false,
+			manifest: true,
+		},
+		test: {
+			include: ["**/*.test.{ts,tsx}", "../src/**/*.test.{ts,tsx}"],
+			environment: "jsdom",
+		},
+	}),
+);

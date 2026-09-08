@@ -1,0 +1,9 @@
+kind: official-component-composition
+source: https://ui.shadcn.com/r/styles/new-york-v4/empty.json
+cli: shadcn@4.21.0
+snapshot: sources/empty.json
+sha256: 2c377f47c4e661d73a565d37c0678d2445edfdcae5446e5b79f23ccda9b80f1d
+generated_file: ../templates/components/ui/empty.tsx
+composition: [Empty, Button]
+license: MIT
+license_source: ../templates/sources/LICENSE.md

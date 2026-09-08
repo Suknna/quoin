@@ -1,0 +1,14 @@
+kind: official-component-composition
+cli: shadcn@4.21.0
+components:
+  - name: command
+    source: https://ui.shadcn.com/r/styles/new-york-v4/command.json
+    snapshot: sources/command.json
+    sha256: c1f02d0805a0c5c55428e3350214ca8150a4ce98a40ec962118ec66709f60038
+  - name: popover
+    source: https://ui.shadcn.com/r/styles/new-york-v4/popover.json
+    snapshot: sources/popover.json
+    sha256: 78793171b536e0c335ad51b1313619e533566b514d3503ef60c94dc9d3ccfbef
+backend_contract_changed: false
+embedding_model_required: true
+live_provider_authorized: false

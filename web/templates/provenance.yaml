@@ -1,0 +1,65 @@
+stage: official-template-baseline
+cli: shadcn@4.21.0
+package_manager: pnpm@10.30.3
+captured_at: 2026-09-08T08:45:31.180967+00:00
+business_api_connected: false
+deployment_changed: false
+sources:
+  - name: sidebar-09
+    url: https://ui.shadcn.com/r/styles/new-york-v4/sidebar-09.json
+    snapshot: sources/sidebar-09.json
+    sha256: e552d5b8df3f83ade04600b9b71b8620f5fdfd85182e84fc54628e3a73e0e4f8
+  - name: login-02
+    url: https://ui.shadcn.com/r/styles/new-york-v4/login-02.json
+    snapshot: sources/login-02.json
+    sha256: a3448a5bf2398316428befc01c4aee03cacaf5e221ac3acf8c3e792a6d5e7402
+  - name: index
+    url: https://ui.shadcn.com/r/styles/new-york-v4/index.json
+    snapshot: sources/index.json
+    sha256: f6b9ca539b8312f381ba91edb1b809c74e48cdb0a935f1838c52f412d13d964a
+  - name: official-v4-global-theme
+    url: https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/app/globals.css
+    snapshot: sources/globals.css
+    sha256: cbae6d633c38be59fc036d1e5cf60203ae7619ea6af9b4cdd8d632a211ccffa9
+license:
+  url: https://github.com/shadcn-ui/ui/blob/main/LICENSE.md
+  snapshot: sources/LICENSE.md
+  identifier: MIT
+assets:
+  - path: public/placeholder.svg
+    url: https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/public/placeholder.svg
+    sha256: 64badf7aabda0b9630b87020ffb6095cb858ccbcf66b355c2aa08b1063954d3b
+  - path: public/avatars/shadcn.jpg
+    url: https://raw.githubusercontent.com/shadcn-ui/ui/main/apps/v4/public/avatars/shadcn.jpg
+    sha256: c080d627acdedca5ba0b7d8e30ddf4ddcc15aa56c896f67037c273233cde18c3
+dependencies:
+  "class-variance-authority": "0.7.1"
+  "cn": "0.2.6"
+  "lucide-react": "1.42.0"
+  "radix-ui": "1.6.7"
+  "react": "19.2.8"
+  "react-dom": "19.2.8"
+  "@tailwindcss/vite": "4.3.3"
+  "shadcn": "4.21.0"
+  "tailwindcss": "4.3.3"
+  "tw-animate-css": "1.4.0"
+generated_files:
+  - components/app-sidebar.tsx
+  - components/login-form.tsx
+  - components/nav-user.tsx
+  - components/ui/avatar.tsx
+  - components/ui/breadcrumb.tsx
+  - components/ui/button.tsx
+  - components/ui/collapsible.tsx
+  - components/ui/dropdown-menu.tsx
+  - components/ui/field.tsx
+  - components/ui/input.tsx
+  - components/ui/label.tsx
+  - components/ui/separator.tsx
+  - components/ui/sheet.tsx
+  - components/ui/sidebar.tsx
+  - components/ui/skeleton.tsx
+  - components/ui/switch.tsx
+  - components/ui/tooltip.tsx
+  - hooks/use-mobile.ts
+  - lib/utils.ts

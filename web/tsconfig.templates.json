@@ -1,0 +1,9 @@
+{
+	"extends": "./tsconfig.app.json",
+	"compilerOptions": {
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.templates.tsbuildinfo",
+		"baseUrl": ".",
+		"paths": { "@/*": ["./templates/*"] }
+	},
+	"include": ["templates", "vite.templates.config.ts"]
+}
