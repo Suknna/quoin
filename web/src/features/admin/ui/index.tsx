@@ -7,7 +7,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { newClientCommandId } from "@/api/workbench";
-import { createAlertSource, revealCredential, type AlertSourceCredentialMetadata } from "@/features/alerts/api";
+import { acknowledgeIntakeIssue, createAlertSource, fetchIntakeIssues, revealCredential, type AlertSourceCredentialMetadata, type IntakeIssue } from "@/features/alerts/api";
 import { Backups } from "./Backups";
 import { Journeys } from "./Journeys";
 import { LabelContracts } from "./LabelContracts";
@@ -29,13 +29,22 @@ export function useAdministrationModule(props: WorkspaceModuleProps): WorkspaceM
  // Routes are absolute (`/administration/users`); module selection starts after its prefix.
  const routeParts = props.route.split("/").filter(Boolean);
  const path = routeParts[0] === "administration" || routeParts[0] === "admin" ? routeParts[1] ?? "users" : routeParts[0] ?? "users";
- const labels: Record<string, string> = { users: "用户", connections: "连接", alerts: "告警源", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", labels: "标签契约", journeys: "Journey" };
+ const labels: Record<string, string> = { users: "用户", connections: "连接", alerts: "告警源", "alert-intake-issues": "告警接入问题", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", labels: "标签契约", journeys: "Journey" };
  const list = <div className="space-y-1 p-3">{Object.entries(labels).map(([key, label]) => <Button key={key} variant={path === key ? "secondary" : "ghost"} className="w-full justify-start" onClick={() => props.navigate(`/admin/${key}`)}>{label}</Button>)}</div>;
  if (props.user.role !== "admin") return { title: "管理", list, content: <Alert variant="destructive"><AlertDescription>管理功能仅向管理员开放。</AlertDescription></Alert> };
- const content = path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "runtimes" ? <Runtimes suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "maintenance" ? <Maintenance authenticationSuspended={props.authenticationSuspended} /> : path === "audit" ? <AuditLog /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : <Journeys />;
+ const content = path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "alert-intake-issues" ? <AlertIntakeIssues suspended={props.suspended} /> : path === "runtimes" ? <Runtimes suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "maintenance" ? <Maintenance authenticationSuspended={props.authenticationSuspended} /> : path === "audit" ? <AuditLog /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : <Journeys />;
  return { title: labels[path] ?? "管理", list, content };
 }
 
+
+/** Keeps ingestion facts in the administrator module without changing their API contract. */
+function AlertIntakeIssues({ suspended }: { suspended: boolean }) {
+ const [items, setItems] = useState<IntakeIssue[]>([]); const [error, setError] = useState(""); const [busy, setBusy] = useState<string>(); const [loading, setLoading] = useState(true);
+ const load = async () => { if (suspended) { setLoading(false); return; } try { setLoading(true); setError(""); setItems((await fetchIntakeIssues()).items); } catch (reason) { setError(failure(reason)); } finally { setLoading(false); } };
+ useEffect(() => { void load(); }, [suspended]);
+ async function acknowledge(item: IntakeIssue) { if (suspended) return; try { setBusy(item.id); setError(""); await acknowledgeIntakeIssue(item.id, item.rowVersion); await load(); } catch (reason) { setError(failure(reason)); } finally { setBusy(undefined); } }
+ return <section className="space-y-4"><div><h2 className="text-xl font-semibold">告警接入问题</h2><p className="mt-1 text-sm text-muted-foreground">查看上游接收异常并确认已处理的问题。</p></div>{loading ? <p role="status" className="text-sm text-muted-foreground">正在加载…</p> : <>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{!error && items.length === 0 ? <p className="text-sm text-muted-foreground">没有待处理接入问题。</p> : <Table><TableHeader><TableRow><TableHead>类型</TableHead><TableHead>问题键</TableHead><TableHead>出现次数</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.map((item) => <TableRow key={item.id}><TableCell>{item.kind}</TableCell><TableCell>{item.issueKey}</TableCell><TableCell>{item.occurrenceCount}</TableCell><TableCell><Button size="sm" variant="outline" disabled={suspended || busy === item.id} onClick={() => void acknowledge(item)}>{busy === item.id ? "正在确认…" : "确认"}</Button></TableCell></TableRow>)}</TableBody></Table>}</>}</section>;
+}
 
 function AlertSources({ suspended }: { suspended: boolean }) {
  const [items, setItems] = useState<AlertSource[]>([]); const [error, setError] = useState(""); const [reveal, setReveal] = useState(""); const [key, setKey] = useState(""); const [credentials, setCredentials] = useState<Record<string, AlertCredential[]>>({}); const epoch = useRef(0);

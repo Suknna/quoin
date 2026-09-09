@@ -36,7 +36,7 @@ test("route matrix renders actual data without unhandled APIs or external transp
 	await expect(page.getByRole("button", { name: /演示管理员 admin/ })).toBeVisible();
 
 	const routes = [
-		["/alerts", "当前告警", "CheckoutLatencyHigh"],
+		["/alerts/list", "当前告警", "CheckoutLatencyHigh"],
 		["/investigations", "调查", "结算延迟调查"],
 		["/inspections", "巡检", "选择已发布系统的历史 Run"],
 		["/business-systems", "结算系统", "结算健康检查"],
@@ -50,11 +50,12 @@ test("route matrix renders actual data without unhandled APIs or external transp
 		await expectHealthy(page, guard);
 	}
 
-	await page.goto("/alerts");
+	await page.goto("/alerts/list");
 	await page.getByText("CheckoutLatencyHigh").first().click();
+	await expect(page).toHaveURL(/\/alerts\/list\?.*id=alert-checkout-latency/);
 	await expect(page.getByRole("heading", { name: "CheckoutLatencyHigh" })).toBeVisible();
-	await expect(page.getByText("观测时间线", { exact: false })).toBeVisible();
-	await page.locator("button").filter({ hasText: "已完成" }).click();
+	await expect(page.getByRole("tab", { name: "时间线" })).toBeVisible();
+	await page.getByRole("tab", { name: "AI 分析" }).click();
 	await page.getByRole("button", { name: "证据 evidence-latency" }).click();
 	await expect(page.getByRole("dialog", { name: "证据阅读" })).toBeVisible();
 	await expectHealthy(page, guard);
@@ -126,7 +127,7 @@ test("operator controls are absent and conflict reports a failed write", async (
 
 test("MSW serves local EventSource and blocks business WebSocket escape", async ({ page }) => {
 	const guard = protectOffline(page);
-	await page.goto("/alerts");
+	await page.goto("/alerts/list");
 	await expect(page.getByText("CheckoutLatencyHigh")).toBeVisible();
 	const event = await page.evaluate(() => new Promise<string>((resolve, reject) => {
 		const source = new EventSource("/api/v1/alerts/events?after=10");

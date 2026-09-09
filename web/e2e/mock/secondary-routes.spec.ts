@@ -17,9 +17,9 @@ async function expectClean(page: import("@playwright/test").Page, state: ReturnT
 test("secondary and detail routes render their declared projections without fallback APIs", async ({ page }) => {
 	const state = guard(page);
 	const routes = [
-		["/alerts?view=history", "CatalogErrors"],
-		["/alerts?view=intake", "delivery_truncated"],
-		["/alerts/alert-checkout-latency?view=current", "CheckoutLatencyHigh"],
+		["/alerts/list?view=history", "CatalogErrors"],
+		["/alerts/list?id=alert-checkout-latency", "CheckoutLatencyHigh"],
+		["/postmortems", "能力建设中"],
 		["/investigations/investigation-checkout", "结算延迟调查"],
 		["/inspections/inspection-run-1", "checkout-health"],
 		["/knowledge/items/knowledge-1", "结算延迟排查"],
@@ -29,6 +29,7 @@ test("secondary and detail routes render their declared projections without fall
 		["/admin/users", "用户"],
 		["/admin/connections", "添加连接"],
 		["/admin/alerts", "告警源与凭据"],
+		["/admin/alert-intake-issues", "delivery_truncated"],
 		["/admin/runtimes", "运行时"],
 		["/admin/backups", "备份与保留"],
 		["/admin/maintenance", "维护"],

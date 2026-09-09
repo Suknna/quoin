@@ -54,6 +54,19 @@ export async function createAnalysis(occurrenceId: string, clientCommandId: stri
   return (await response.json()) as InitialAnalysisDetail
 }
 
+export async function retryAnalysis(occurrenceId: string, analysisId: string, clientCommandId: string): Promise<InitialAnalysisDetail> {
+  const response = await fetch(`/api/v1/alerts/${occurrenceId}/analyses/${analysisId}/retry`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId }),
+  })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(problem?.detail ?? '暂时无法重试初步分析')
+  }
+  return (await response.json()) as InitialAnalysisDetail
+}
+
 export async function cancelAnalysis(occurrenceId: string, analysisId: string, expectedRowVersion: number, clientCommandId: string): Promise<InitialAnalysisDetail> {
   const response = await fetch(`/api/v1/alerts/${occurrenceId}/analyses/${analysisId}/cancel`, {
     method: 'POST', credentials: 'include',

@@ -22,7 +22,7 @@ export function legacyHashTarget(hash: string): string | undefined {
 }
 
 export function normalizeWorkspacePath(pathname: string): string {
-	if (!pathname || pathname === "/") return "/alerts";
+	if (!pathname || pathname === "/") return "/alerts/list";
 	return pathname.startsWith("/") ? pathname : `/${pathname}`;
 }
 

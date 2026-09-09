@@ -26,7 +26,7 @@ export function RouteHosts({ components, props, onLogout }: { components: RouteH
 	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
 	const routeIsConnections = pathname === "/admin/connections" || pathname.startsWith("/admin/connections/");
 	const Host = routeIsConnections ? components.connections
-		: pathname === "/alerts" || pathname.startsWith("/alerts/") ? components.alerts
+		: pathname === "/alerts" || pathname.startsWith("/alerts/") || pathname === "/postmortems" ? components.alerts
 		: pathname.startsWith("/investigations") ? components.investigations
 		: pathname.startsWith("/inspections") ? components.inspections
 		: pathname.startsWith("/business-systems") ? components.systems
