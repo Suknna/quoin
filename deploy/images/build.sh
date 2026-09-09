@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds selected independently publishable application images. The frontend
-# target compiles its own assets inside Docker, so backend image builds never
-# need host Node tooling or an existing frontend dist directory.
+# compiles its own assets inside Docker, so backend image builds never need host
+# Node tooling or an existing frontend dist directory.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
@@ -27,14 +27,14 @@ IFS=',' read -ra selected <<< "$components"
 for target in "${selected[@]}"; do
   case "$target" in frontend|quoin|plinth|lintel|stele) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
   image="$image_namespace/$target:$(component_tag "$target")"
-  if [ "$target" = frontend ]; then
-    docker build -f build/package/Dockerfile --target web \
-      ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
-      -t "$image" .
-  else
-    docker build -f build/package/Dockerfile --target "$target" \
-      --build-arg "RELEASE_VERSION=$(component_tag "$target")" \
-      ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
-      -t "$image" .
+  dockerfile="deploy/images/$target/Dockerfile"
+  arguments=(docker build -f "$dockerfile")
+  if [ "$target" != frontend ]; then
+    arguments+=(--build-arg "RELEASE_VERSION=$(component_tag "$target")")
   fi
+  if [ -n "${QUOIN_IMAGE_GOPROXY:-}" ]; then
+    arguments+=(--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY")
+  fi
+  arguments+=(-t "$image" .)
+  "${arguments[@]}"
 done

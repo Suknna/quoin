@@ -53,4 +53,4 @@ jobs:
         env:
           QUOIN_IMAGE_COMPONENTS: ${{ matrix.component }}
           QUOIN_IMAGE_TAG: ci-${{ github.sha }}
-        run: bash build/package/images.sh
+        run: bash deploy/images/build.sh

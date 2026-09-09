@@ -166,7 +166,7 @@ func playwrightRunnerPath() string {
 		return "/web/journey-runner.mjs"
 	}
 	// Source-tree execution is only for local Go tests; production images always
-	// use the fixed /web path copied by build/package/Dockerfile.
+	// use the fixed /web path copied by deploy/images/lintel/Dockerfile.
 	return "internal/lintel/browser/journey/playwright-runner.mjs"
 }
 

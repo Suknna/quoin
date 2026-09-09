@@ -23,7 +23,7 @@ web-build:
 	pnpm --dir web build
 
 images:
-	bash build/package/images.sh
+	bash deploy/images/build.sh
 
 ticket-01:
 	bash test/integration/compose/acceptance.sh

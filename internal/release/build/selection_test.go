@@ -40,13 +40,23 @@ func TestSelectBuildSubjects(t *testing.T) {
 			want:    []string{"frontend"},
 		},
 		{
-			name:    "shared package Docker inputs rebuild every application",
-			changed: []string{"build/package/web-caddy.yaml"},
-			want:    []string{"frontend", "lintel", "plinth", "quoin", "stele"},
+			name:    "frontend image inputs rebuild only the frontend",
+			changed: []string{"deploy/images/frontend/web-caddy.yaml"},
+			want:    []string{"frontend"},
 		},
 		{
-			name:    "shared Dockerfile rebuilds every application",
-			changed: []string{"build/package/Dockerfile"},
+			name:    "frontend Dockerfile rebuilds only the frontend",
+			changed: []string{"deploy/images/frontend/Dockerfile"},
+			want:    []string{"frontend"},
+		},
+		{
+			name:    "backend Dockerfile rebuilds its component",
+			changed: []string{"deploy/images/lintel/Dockerfile"},
+			want:    []string{"lintel"},
+		},
+		{
+			name:    "shared image build script rebuilds every application",
+			changed: []string{"deploy/images/build.sh"},
 			want:    []string{"frontend", "lintel", "plinth", "quoin", "stele"},
 		},
 		{
@@ -90,7 +100,8 @@ func TestSelectModeOutputsPolicySelection(t *testing.T) {
 		want    []byte
 	}{
 		{"deploy/caddy/Caddyfile", []byte(`"components":[]`)},
-		{"build/package/web-caddy.yaml", []byte(`"components":["frontend","lintel","plinth","quoin","stele"]`)},
+		{"deploy/images/frontend/web-caddy.yaml", []byte(`"components":["frontend"]`)},
+		{"deploy/images/build.sh", []byte(`"components":["frontend","lintel","plinth","quoin","stele"]`)},
 		{"pnpm-lock.yaml", []byte(`"components":["frontend","lintel"]`)},
 		{"internal/lintel/catalog/catalog.go", []byte(`"components":["lintel","quoin"]`)},
 	} {

@@ -47,6 +47,14 @@ func selectBuildSubjects(changed []string) []string {
 			selected["lintel"] = true
 			continue
 		}
+		if strings.HasPrefix(file, "deploy/images/frontend/") {
+			selected["frontend"] = true
+			continue
+		}
+		if file == "deploy/images/build.sh" {
+			selectAll(selected)
+			continue
+		}
 		for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
 			if strings.HasPrefix(file, "cmd/"+component+"/") || strings.HasPrefix(file, "internal/"+component+"/") ||
 				strings.HasPrefix(file, "deploy/images/"+component+"/") {
@@ -85,12 +93,11 @@ func selectBackends(selected map[string]bool) {
 	}
 }
 
-// isAllApplicationBuildInput lists sources used by both backend and frontend
-// Docker targets. In particular, the shared Dockerfile and its Caddy YAML
-// configuration change the frontend runtime as well as backend build stages.
+// isAllApplicationBuildInput lists sources used by every application image.
+// The component Dockerfiles are isolated, but all Go builds resolve the shared
+// module definition from the repository root.
 func isAllApplicationBuildInput(file string) bool {
-	return strings.HasPrefix(file, "build/package/") ||
-		file == "go.mod" || file == "go.sum"
+	return file == "go.mod" || file == "go.sum"
 }
 
 // isAllBackendBuildInput names source inputs available to all Go binaries but

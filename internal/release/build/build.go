@@ -373,11 +373,9 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 			repository := options.registry + "/" + component
 			baseArgs := []string{}
 			dockerfile := "deploy/images/" + component + "/Dockerfile"
-			target := ""
 			if component == "frontend" {
-				// The web image is a stock Caddy static runtime assembled by
-				// the frontend target; it has no backend base-image lock.
-				dockerfile, target = "build/package/Dockerfile", "web"
+				// The standalone Caddy image has no backend base-image lock.
+				dockerfile = "deploy/images/frontend/Dockerfile"
 			} else {
 				var err error
 				baseArgs, err = lock.BuildArgs(component)
@@ -389,9 +387,6 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 				"--platform", platform.Platform,
 				"--sbom=true", "--provenance=mode=min",
 				"-f", dockerfile,
-			}
-			if target != "" {
-				arguments = append(arguments, "--target", target)
 			}
 			lockArgs := append([]string{}, baseArgs...)
 			if component == "lintel" {

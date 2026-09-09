@@ -1,0 +1,15 @@
+# This Dockerfile-specific ignore file applies only to the repository-root
+# frontend build context. It takes precedence over a root .dockerignore.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!web
+!web/package.json
+!web/**
+web/node_modules
+web/dist
+!deploy
+!deploy/images
+!deploy/images/frontend
+!deploy/images/frontend/web-caddy.yaml
