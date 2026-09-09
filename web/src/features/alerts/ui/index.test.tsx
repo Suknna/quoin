@@ -5,13 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 import { useAlertsModule } from "./index";
 
-function View({ route, navigate = vi.fn() }: { route: string; navigate?: (route: string) => void }) {
+function View({ route, navigate = vi.fn(), openEvidence = vi.fn() }: { route: string; navigate?: (route: string) => void; openEvidence?: (id: string) => void }) {
   const view = useAlertsModule({
     user: { id: "1", username: "admin", displayName: "Admin", role: "admin", passwordChangeRequired: false, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 },
     route,
     navigate,
     suspended: false,
-    openEvidence: vi.fn(),
+    openEvidence,
   });
   return <>{view.content}</>;
 }
@@ -23,7 +23,8 @@ describe("alerts module", () => {
     expect(await screen.findByRole("heading", { name: "告警历史" })).toBeInTheDocument();
   });
 
-  it("starts analysis only after its tab opens and does not create when reading fails", async () => {
+
+	it("starts analysis only after its tab opens and does not create when reading fails", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
       if (input.includes("/observations")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
@@ -100,7 +101,43 @@ describe("alerts module", () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes("new-failure/retry") && (init as RequestInit).method === "POST")).toBe(true));
   });
 
-  it("closing and reopening does not cancel or duplicate an active analysis", async () => {
+	it("uses semantic drawer primitives for overview, timeline, evidence, and collapsed execution records", async () => {
+		const openEvidence = vi.fn();
+		const fetchMock = vi.fn().mockImplementation((input: string) => {
+			if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+			if (input.includes("/observations")) return Promise.resolve({ ok: true, json: async () => ({ items: [{ id: "observation-1", observedState: "firing", effect: "initial_firing", startsAt: "2026-01-01T00:00:00Z", receivedAt: "2026-01-01T00:00:00Z", committedAt: "2026-01-01T00:01:00Z" }] }) });
+			if (input.includes("/attempts")) return Promise.resolve({ ok: true, json: async () => ({ items: [{ id: "attempt-1", type: "initial", state: "Succeeded", terminationReason: "completed" }] }) });
+			if (input.endsWith("/analyses")) return Promise.resolve({ ok: true, json: async () => ({ items: [{ id: "analysis-1", state: "Succeeded", rowVersion: 1, createdAt: "2026-01-01T00:00:00Z" }] }) });
+			if (input.includes("/analyses/")) return Promise.resolve({ ok: true, json: async () => ({ id: "analysis-1", state: "Succeeded", rowVersion: 1, createdAt: "2026-01-01T00:00:00Z", attemptCount: 1, output: { id: "output", modelId: "demo", content: "确认结论", evidenceIds: ["evidence-1"], createdAt: "2026-01-01T00:00:00Z" } }) });
+			return Promise.resolve({ ok: true, json: async () => ({ id: "alert-1", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Example", instance: "node-1", severity: "critical" }, annotations: { description: "Readable description", runbook: "https://runbook.invalid/long-path" } }) });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		render(<View route="/alerts/list?id=alert-1" openEvidence={openEvidence} />);
+		await screen.findByRole("heading", { name: "Example" });
+		expect(screen.getByText("node-1")).toHaveClass("font-mono");
+		expect(screen.getByText("critical")).toHaveClass("bg-destructive");
+		expect(screen.getByText("Firing")).toHaveClass("bg-destructive");
+		fireEvent.mouseDown(screen.getByRole("tab", { name: "时间线" }));
+		fireEvent.click(screen.getByRole("tab", { name: "时间线" }));
+		expect(await screen.findByRole("list", { name: "观察记录时间线" })).toBeInTheDocument();
+		expect(screen.getByText("firing")).toBeInTheDocument();
+		fireEvent.mouseDown(screen.getByRole("tab", { name: "AI 分析" }));
+		fireEvent.click(screen.getByRole("tab", { name: "AI 分析" }));
+		await screen.findByText("确认结论");
+		const evidence = screen.getByRole("button", { name: "证据 evidence-1 查看证据" });
+		expect(evidence).toHaveClass("w-full");
+		fireEvent.click(evidence);
+		expect(openEvidence).toHaveBeenCalledWith("evidence-1");
+		const executionRecords = screen.getByRole("button", { name: "执行记录" });
+		expect(executionRecords).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByText("initial")).not.toBeInTheDocument();
+		fireEvent.click(executionRecords);
+		expect(executionRecords).toHaveAttribute("aria-expanded", "true");
+		expect(await screen.findByText("initial")).toBeInTheDocument();
+		expect(screen.getByText("Succeeded")).toBeInTheDocument();
+	});
+
+	it("closing and reopening does not cancel or duplicate an active analysis", async () => {
     const navigate = vi.fn();
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });

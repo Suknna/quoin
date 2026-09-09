@@ -51,9 +51,9 @@ const firing = {
 const resolved = { ...firing, state: 'Resolved', rowVersion: 2, resolvedAt: '2026-08-18T10:05:00Z' }
 
 /** Minimal observer for the public hook result; it deliberately asserts no UI. */
-function LiveAlertsHarness({ view, businessSystemKey = '' }: { view: 'Firing' | 'Resolved'; businessSystemKey?: string }) {
-  const alerts = useLiveAlerts(view, businessSystemKey)
-  return <output data-testid="projection">{alerts.items.map((item) => `${item.id}:${item.state}:${item.rowVersion}`).join(',')}</output>
+function LiveAlertsHarness({ view, businessSystemKey = '', enabled = true }: { view: 'Firing' | 'Resolved'; businessSystemKey?: string; enabled?: boolean }) {
+  const alerts = useLiveAlerts(view, businessSystemKey, enabled)
+  return <><output data-testid="projection">{alerts.items.map((item) => `${item.id}:${item.state}:${item.rowVersion}`).join(',')}</output><button type="button" onClick={alerts.refresh}>refresh</button></>
 }
 
 function VersionsHarness() {
@@ -128,6 +128,25 @@ describe('alert realtime hook projection', () => {
     await act(async () => { await Promise.resolve() })
 
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === '/api/v1/alerts/7')).toHaveLength(0)
+  })
+
+  it('does not start or reconcile its projection while locally paused', async () => {
+    render(<LiveAlertsHarness view="Firing" enabled={false} />)
+    await act(async () => { await Promise.resolve() })
+    expect(stub.started).toEqual([])
+
+    act(() => stub.emit({ seq: '6', type: 'created', occurrenceId: '7', rowVersion: 2 }))
+    expect(screen.getByTestId('projection')).toBeEmptyDOMElement()
+  })
+
+  it('allows a paused list to take a manual snapshot without starting SSE', async () => {
+    render(<LiveAlertsHarness view="Firing" enabled={false} />)
+    await act(async () => { await Promise.resolve() })
+    expect(stub.started).toEqual([])
+
+    await act(async () => { screen.getByRole('button', { name: 'refresh' }).click() })
+    await waitFor(() => expect(screen.getByTestId('projection')).toHaveTextContent('7:Firing:1'))
+    expect(stub.started).toEqual([])
   })
 
   it('rebuilds from a new snapshot following a resync request', async () => {

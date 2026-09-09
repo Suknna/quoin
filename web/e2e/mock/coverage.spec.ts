@@ -55,6 +55,8 @@ test("route matrix renders actual data without unhandled APIs or external transp
 	await expect(page).toHaveURL(/\/alerts\/list\?.*id=alert-checkout-latency/);
 	await expect(page.getByRole("heading", { name: "CheckoutLatencyHigh" })).toBeVisible();
 	await expect(page.getByRole("tab", { name: "时间线" })).toBeVisible();
+	await page.getByRole("tab", { name: "时间线" }).click();
+	await expect(page.getByRole("list", { name: "观察记录时间线" })).toBeVisible();
 	await page.getByRole("tab", { name: "AI 分析" }).click();
 	await page.getByRole("button", { name: "证据 evidence-latency" }).click();
 	await expect(page.getByRole("dialog", { name: "证据阅读" })).toBeVisible();

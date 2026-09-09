@@ -14,7 +14,7 @@ const appApiState = vi.hoisted(() => ({
 	unauthorized: undefined as (() => void) | undefined,
 }));
 vi.mock("@/features/evidence/ui", () => ({
-	EvidenceReader: ({ onClose }: { onClose: () => void }) => <button type="button" onClick={onClose}>关闭证据</button>,
+	EvidenceReader: () => <p>证据正文</p>,
 }));
 
 vi.mock("@/api/workbench", async (importOriginal) => {
@@ -27,21 +27,26 @@ vi.mock("@/api/workbench", async (importOriginal) => {
 	};
 });
 
-import { WorkbenchApiError, workbenchApi } from "@/api/workbench";
 import { authUser, modelProviderDetail, otherUser } from "@/api/fixtures";
+import { WorkbenchApiError, workbenchApi } from "@/api/workbench";
 import { App } from "./App";
 
 beforeEach(() => {
-  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+	vi.stubGlobal(
+		"ResizeObserver",
+		class {
+			observe() {}
+			unobserve() {}
+			disconnect() {}
+		},
+	);
 	vi.stubGlobal(
 		"matchMedia",
-		vi
-			.fn()
-			.mockReturnValue({
-				matches: false,
-				addEventListener: vi.fn(),
-				removeEventListener: vi.fn(),
-			}),
+		vi.fn().mockReturnValue({
+			matches: false,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+		}),
 	);
 	vi.stubGlobal("scrollTo", vi.fn());
 	window.history.replaceState(null, "", "/admin/connections/new");
@@ -158,8 +163,12 @@ describe("authentication workflow", () => {
 		act(() => appApiState.unauthorized?.());
 		await screen.findByRole("dialog");
 		const dialog = screen.getByRole("dialog");
-		fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "admin" } });
-		fireEvent.change(within(dialog).getByLabelText("密码"), { target: { value: "a password long enough" } });
+		fireEvent.change(within(dialog).getByLabelText("用户名"), {
+			target: { value: "admin" },
+		});
+		fireEvent.change(within(dialog).getByLabelText("密码"), {
+			target: { value: "a password long enough" },
+		});
 		fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
 		await screen.findByLabelText("名称");
 		expect(await screen.findByLabelText("名称")).toHaveValue("same-user-draft");
@@ -172,11 +181,17 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		vi.spyOn(workbenchApi, "login").mockResolvedValue(otherUser);
 		render(<App />);
-		fireEvent.change(await screen.findByLabelText("名称"), { target: { value: "old-user-draft" } });
+		fireEvent.change(await screen.findByLabelText("名称"), {
+			target: { value: "old-user-draft" },
+		});
 		act(() => appApiState.unauthorized?.());
 		const dialog = await screen.findByRole("dialog");
-		fireEvent.change(within(dialog).getByLabelText("用户名"), { target: { value: "operator" } });
-		fireEvent.change(within(dialog).getByLabelText("密码"), { target: { value: "a password long enough" } });
+		fireEvent.change(within(dialog).getByLabelText("用户名"), {
+			target: { value: "operator" },
+		});
+		fireEvent.change(within(dialog).getByLabelText("密码"), {
+			target: { value: "a password long enough" },
+		});
 		fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
 		await waitFor(() => expect(screen.getByLabelText("名称")).toHaveValue(""));
 	});
@@ -185,19 +200,45 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
-		const discover = vi.spyOn(workbenchApi, "discoverProviderModels")
-			.mockResolvedValueOnce({ available: false, items: [], detail: "未返回模型" })
-			.mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ available: true, items: [{ id: "stale-model" }] }), 20)));
+		const discover = vi
+			.spyOn(workbenchApi, "discoverProviderModels")
+			.mockResolvedValueOnce({
+				available: false,
+				items: [],
+				detail: "未返回模型",
+			})
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) =>
+						setTimeout(
+							() =>
+								resolve({ available: true, items: [{ id: "stale-model" }] }),
+							20,
+						),
+					),
+			);
 		render(<App />);
-		fireEvent.click(await screen.findByRole("button", { name: "新建模型提供方" }));
-		fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://provider.invalid" } });
-		fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+		fireEvent.click(
+			await screen.findByRole("button", { name: "新建模型提供方" }),
+		);
+		fireEvent.change(screen.getByLabelText("Base URL"), {
+			target: { value: "https://provider.invalid" },
+		});
+		fireEvent.change(screen.getByLabelText("API Key"), {
+			target: { value: "secret" },
+		});
 		fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
-		expect(await screen.findByRole("status")).toHaveTextContent("可以直接手工填写模型 ID");
-		fireEvent.change(screen.getByLabelText("对话模型 ID"), { target: { value: "manual-chat" } });
+		expect(await screen.findByRole("status")).toHaveTextContent(
+			"可以直接手工填写模型 ID",
+		);
+		fireEvent.change(screen.getByLabelText("对话模型 ID"), {
+			target: { value: "manual-chat" },
+		});
 		expect(screen.getByLabelText("对话模型 ID")).toHaveValue("manual-chat");
 		fireEvent.click(screen.getByRole("button", { name: "发现模型" }));
-		fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://changed.invalid" } });
+		fireEvent.change(screen.getByLabelText("Base URL"), {
+			target: { value: "https://changed.invalid" },
+		});
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		expect(screen.queryByText("stale-model")).not.toBeInTheDocument();
 		expect(discover).toHaveBeenCalledTimes(2);
@@ -209,7 +250,9 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		fireEvent.click(await screen.findByRole("button", { name: "新建模型提供方" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "新建模型提供方" }),
+		);
 		const apiKey = screen.getByLabelText("API Key");
 		fireEvent.change(apiKey, { target: { value: "provider-secret" } });
 		act(() => appApiState.unauthorized?.());
@@ -227,17 +270,25 @@ describe("authentication workflow", () => {
 		const name = await screen.findByLabelText("名称");
 		fireEvent.change(name, { target: { value: "preserved-draft" } });
 		await screen.findByLabelText("API Key");
-		window.history.pushState(null, "", "/evidence/e-1?from=%2Fadmin%2Fconnections%2Fnew%3Ftype%3Dmodel_provider");
+		window.history.pushState(
+			null,
+			"",
+			"/evidence/e-1?from=%2Fadmin%2Fconnections%2Fnew%3Ftype%3Dmodel_provider",
+		);
 		window.dispatchEvent(new PopStateEvent("popstate"));
-		expect(await screen.findByRole("dialog")).toHaveTextContent("关闭证据");
-		fireEvent.click(screen.getByRole("button", { name: "关闭证据" }));
+		const dialog = await screen.findByRole("dialog", { name: "证据阅读" });
+		expect(dialog).toHaveTextContent("证据正文");
+		expect(within(dialog).getAllByRole("button")).toHaveLength(1);
+		fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
 		const restoredName = await screen.findByLabelText("名称");
 		expect(restoredName).toHaveValue("preserved-draft");
 		expect(screen.getByLabelText("API Key")).toBeInTheDocument();
 	});
 
 	it("opens the expired-session dialog when a focus reconciliation returns 401", async () => {
-		vi.spyOn(workbenchApi, "currentUser").mockResolvedValueOnce(authUser).mockRejectedValueOnce(new WorkbenchApiError(401, "expired"));
+		vi.spyOn(workbenchApi, "currentUser")
+			.mockResolvedValueOnce(authUser)
+			.mockRejectedValueOnce(new WorkbenchApiError(401, "expired"));
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
@@ -249,29 +300,86 @@ describe("authentication workflow", () => {
 	it("enables a model provider using only the newest matching passed probe result", async () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
-		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([modelProviderDetail]);
-		vi.spyOn(workbenchApi, "fetchConnection").mockResolvedValue(modelProviderDetail);
+		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([
+			modelProviderDetail,
+		]);
+		vi.spyOn(workbenchApi, "fetchConnection").mockResolvedValue(
+			modelProviderDetail,
+		);
 		vi.spyOn(workbenchApi, "listProbeResults").mockResolvedValue([
-			{ id: "old", attemptId: "1", connectionType: "model_provider", connectionRevisionId: "11", credentialGenerationId: "12", rootBindingRevision: 1, actionSetId: "model", actionSetVersion: 1, probeContractDigest: "x", outcome: "passed", resultDigest: "x", startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:00Z", details: {} },
-			{ id: "new", attemptId: "2", connectionType: "model_provider", connectionRevisionId: "11", credentialGenerationId: "12", rootBindingRevision: 1, actionSetId: "model", actionSetVersion: 1, probeContractDigest: "x", outcome: "passed", resultDigest: "x", startedAt: "2026-01-02T00:00:00Z", finishedAt: "2026-01-02T00:00:00Z", details: {} },
-			{ id: "wrong", attemptId: "3", connectionType: "model_provider", connectionRevisionId: "other", credentialGenerationId: "12", rootBindingRevision: 1, actionSetId: "model", actionSetVersion: 1, probeContractDigest: "x", outcome: "passed", resultDigest: "x", startedAt: "2026-01-03T00:00:00Z", finishedAt: "2026-01-03T00:00:00Z", details: {} },
+			{
+				id: "old",
+				attemptId: "1",
+				connectionType: "model_provider",
+				connectionRevisionId: "11",
+				credentialGenerationId: "12",
+				rootBindingRevision: 1,
+				actionSetId: "model",
+				actionSetVersion: 1,
+				probeContractDigest: "x",
+				outcome: "passed",
+				resultDigest: "x",
+				startedAt: "2026-01-01T00:00:00Z",
+				finishedAt: "2026-01-01T00:00:00Z",
+				details: {},
+			},
+			{
+				id: "new",
+				attemptId: "2",
+				connectionType: "model_provider",
+				connectionRevisionId: "11",
+				credentialGenerationId: "12",
+				rootBindingRevision: 1,
+				actionSetId: "model",
+				actionSetVersion: 1,
+				probeContractDigest: "x",
+				outcome: "passed",
+				resultDigest: "x",
+				startedAt: "2026-01-02T00:00:00Z",
+				finishedAt: "2026-01-02T00:00:00Z",
+				details: {},
+			},
+			{
+				id: "wrong",
+				attemptId: "3",
+				connectionType: "model_provider",
+				connectionRevisionId: "other",
+				credentialGenerationId: "12",
+				rootBindingRevision: 1,
+				actionSetId: "model",
+				actionSetVersion: 1,
+				probeContractDigest: "x",
+				outcome: "passed",
+				resultDigest: "x",
+				startedAt: "2026-01-03T00:00:00Z",
+				finishedAt: "2026-01-03T00:00:00Z",
+				details: {},
+			},
 		]);
 		vi.spyOn(workbenchApi, "listRevisions").mockResolvedValue([]);
-    vi.spyOn(workbenchApi, "listCredentialGenerations").mockResolvedValue([]);
-    const enable = vi.spyOn(workbenchApi, "enableConnection").mockResolvedValue({ ...modelProviderDetail, enabled: true });
+		vi.spyOn(workbenchApi, "listCredentialGenerations").mockResolvedValue([]);
+		const enable = vi
+			.spyOn(workbenchApi, "enableConnection")
+			.mockResolvedValue({ ...modelProviderDetail, enabled: true });
 		window.location.hash = "connection/models%2Fmain";
 		render(<App />);
-		await waitFor(() => expect(screen.getByRole("button", { name: "启用连接" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "启用连接" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认启用" }));
-		await waitFor(() => expect(enable).toHaveBeenCalledWith("models/main", 3, "new"));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "启用连接" })).toBeEnabled(),
+		);
+		fireEvent.click(screen.getByRole("button", { name: "启用连接" }));
+		fireEvent.click(await screen.findByRole("button", { name: "确认启用" }));
+		await waitFor(() =>
+			expect(enable).toHaveBeenCalledWith("models/main", 3, "new"),
+		);
 	});
 
 	it("returns to login after logout receives an already-expired 401", async () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
-		vi.spyOn(workbenchApi, "logout").mockRejectedValue(new WorkbenchApiError(401, "expired"));
+		vi.spyOn(workbenchApi, "logout").mockRejectedValue(
+			new WorkbenchApiError(401, "expired"),
+		);
 		render(<App />);
 		const accountMenu = await screen.findByRole("button", { name: /Admin/ });
 		fireEvent.pointerDown(accountMenu);
@@ -284,13 +392,17 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
-		vi.spyOn(workbenchApi, "logout").mockRejectedValue(new WorkbenchApiError(503, "退出服务不可用"));
+		vi.spyOn(workbenchApi, "logout").mockRejectedValue(
+			new WorkbenchApiError(503, "退出服务不可用"),
+		);
 		render(<App />);
 		const accountMenu = await screen.findByRole("button", { name: /Admin/ });
 		fireEvent.pointerDown(accountMenu);
 		fireEvent.click(accountMenu);
 		fireEvent.click(await screen.findByText("退出登录"));
-		expect(await screen.findByRole("alert")).toHaveTextContent("退出服务不可用");
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"退出服务不可用",
+		);
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
 	});
 });

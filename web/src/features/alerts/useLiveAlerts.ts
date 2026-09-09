@@ -15,10 +15,16 @@ export interface LiveAlerts {
   pendingNew: number
   mergePending: () => void
   setAtTop: (value: boolean) => void
+  /** Explicit snapshot re-read for user refresh and recoverable list errors. */
+  refresh: () => void
 }
 
-export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = ''): LiveAlerts {
+export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '', enabled = true): LiveAlerts {
   const stream = useAlertEventStream()
+  // `enabled` pauses reconciliation for this list only; another consumer may
+  // still own the shared SSE stream for its independent projection.
+  const enabledRef = useRef(enabled)
+  enabledRef.current = enabled
   const [items, setItems] = useState<AlertOccurrenceSummary[]>([])
   const [pending, setPending] = useState<AlertOccurrenceSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -50,11 +56,18 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
   }
 
   const loadSnapshot = useCallback(
-    async (snapshotView: 'Firing' | 'Resolved', snapshotBusinessSystemKey: string, clearVisibleProjection: boolean) => {
+    async (snapshotView: 'Firing' | 'Resolved', snapshotBusinessSystemKey: string, clearVisibleProjection: boolean, allowPaused = false) => {
+      // A manual refresh keeps a healthy projection live until the replacement
+      // snapshot succeeds. Route/filter changes instead invalidate immediately.
+      const replacingProjection = clearVisibleProjection || !projectionReadyRef.current
+      // Every request owns a generation, including a manual refresh, so an
+      // older slow snapshot cannot overwrite a newer explicit refresh.
       const generation = generationRef.current + 1
       generationRef.current = generation
-      projectionReadyRef.current = false
-      versions.current = new Map()
+      if (replacingProjection) {
+        projectionReadyRef.current = false
+        versions.current = new Map()
+      }
       if (clearVisibleProjection) {
         setItems([])
         setPending([])
@@ -62,7 +75,7 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
       setLoading(true)
       try {
         const snapshot = await fetchAlerts(snapshotView, snapshotBusinessSystemKey)
-        if (generation !== generationRef.current) return
+        if ((!enabledRef.current && !allowPaused) || generation !== generationRef.current) return
         versions.current = new Map(snapshot.items.map((item) => [item.id, item.rowVersion]))
         lastSeqRef.current = snapshot.snapshotSeq
         setItems(snapshot.items)
@@ -71,8 +84,10 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
         // Every snapshot, including a view/filter switch, owns a fresh SSE
         // boundary. Closing the old source before start makes a delayed old
         // event structurally unable to advance this projection's cursor.
-        projectionReadyRef.current = true
-        stream.start(snapshot.snapshotSeq)
+        // A paused list may still take a manual snapshot, but it must not
+        // re-enable real-time reconciliation or restart the shared stream.
+        projectionReadyRef.current = enabledRef.current
+        if (enabledRef.current) stream.start(snapshot.snapshotSeq)
       } catch (reason) {
         if (generation !== generationRef.current) return
         setError(reason instanceof Error ? reason.message : '告警列表加载失败')
@@ -84,21 +99,28 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
   )
 
   useEffect(() => {
-    void loadSnapshot(view, businessSystemKey, true)
-  }, [loadSnapshot, view, businessSystemKey])
+    if (enabled) void loadSnapshot(view, businessSystemKey, true)
+    else {
+      // Invalidate every in-flight snapshot before it can start/restart this
+      // shared stream. Other consumers retain their own subscriptions.
+      generationRef.current += 1
+      projectionReadyRef.current = false
+      setLoading(false)
+    }
+  }, [enabled, loadSnapshot, view, businessSystemKey])
 
   useEffect(() => {
     return stream.onResync(() => {
       // Silent full re-read (UI-ERROR-001): cursor expiry and terminal SSE
       // failures heal through a fresh snapshot rather than a stale retry.
-      void loadSnapshot(viewRef.current, filterRef.current, false)
+      if (enabledRef.current) void loadSnapshot(viewRef.current, filterRef.current, false)
     })
   }, [stream, loadSnapshot])
 
   useEffect(() => {
     let cancelled = false
     const applyEvent = async (event: { seq: string; type: 'created' | 'state_changed'; occurrenceId: string; rowVersion: number }, eventGeneration: number, sourceGeneration: number) => {
-      if (!projectionReadyRef.current || eventGeneration !== generationRef.current || sourceGeneration !== stream.generation) return
+      if (!enabledRef.current || !projectionReadyRef.current || eventGeneration !== generationRef.current || sourceGeneration !== stream.generation) return
       const seq = Number(event.seq)
       if (seq <= lastSeqRef.current) return
       if ((versions.current.get(event.occurrenceId) ?? 0) >= event.rowVersion) {
@@ -186,12 +208,18 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
       setItems((previous) => [...buffered, ...previous.filter((item) => !buffered.some((pendingItem) => pendingItem.id === item.id))])
       setPending([])
     }
-    window.scrollTo({ top: 0 })
+    // Merging is explicit but never changes the reader's viewport.
   }, [])
 
   const setAtTop = useCallback((value: boolean) => {
     atTopRef.current = value
   }, [])
 
-  return { items, loading, error, pendingNew: pending.length, mergePending, setAtTop }
+  const refresh = useCallback(() => {
+    // Manual refresh is intentionally available while automatic list updates
+    // are paused; it is a one-shot HTTP snapshot, not a stream restart.
+    void loadSnapshot(viewRef.current, filterRef.current, false, true)
+  }, [loadSnapshot])
+
+  return { items, loading, error, pendingNew: pending.length, mergePending, setAtTop, refresh }
 }
