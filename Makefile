@@ -1,13 +1,7 @@
 # Quoin v1 development entry points. The ticket acceptance script is the
 # authoritative verification path; these targets are conveniences.
 
-.PHONY: contract-gen verify-contracts test vet web-typecheck web-lint web-test web-build images ticket-01 acceptance clean
-
-contract-gen:
-	go run ./ci/contracts/generate
-
-verify-contracts:
-	./ci/verify-contracts
+.PHONY: test vet web-typecheck web-lint web-test web-build images ticket-01 acceptance clean
 
 test:
 	go test ./... -count=1

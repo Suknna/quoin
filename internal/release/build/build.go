@@ -1,4 +1,4 @@
-// Command build is the release-subject builder behind ci/build-release-subjects
+// Command build is the release-subject builder used by release-subject workflows
 // (T39). From one source checkout and one release version it builds, per
 // native or explicitly-declared emulated platform:
 //

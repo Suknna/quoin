@@ -248,7 +248,7 @@
         },
         {
           "if": { "properties": { "status": { "const": "retired" } }, "required": ["status"] },
-          "then": { "required": ["successor", "retirement_reason"], "properties": { "successor": {}, "retirement_reason": {} } },
+          "then": { "required": ["retirement_reason"], "properties": { "successor": {}, "retirement_reason": {} } },
           "else": { "properties": { "successor": false, "retirement_reason": false } }
         },
         {

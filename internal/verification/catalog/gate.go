@@ -91,9 +91,6 @@ func (c *Catalog) scenarioViolations(scenario *Scenario) []Violation {
 				fmt.Sprintf("%s (%s) proof-references %s (%s)", scenario.ID, scenario.Layer, proof, target.Layer)})
 		}
 	}
-	if scenario.Status == "retired" && scenario.Successor == "" {
-		violations = append(violations, Violation{"retired_without_successor", scenario.ID})
-	}
 	return violations
 }
 

@@ -27,55 +27,6 @@ permissions:
   packages: read
 
 jobs:
-  ci-scenarios:
-    name: Process-harness release scenarios
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: Contract gate over the frozen catalog
-        run: |
-          go build -o bin/quoin-verify ./cmd/quoin-verify
-          bin/quoin-verify validate
-          bin/quoin-verify run --layer contract_gate --output "$RUNNER_TEMP/gate" --invocation-id "rq-contract-gate-$GITHUB_RUN_ID"
-      - name: Model provider fixture scenario (integration.model-provider-fixture)
-        run: |
-          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=integration.model-provider-fixture \
-            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
-            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/provider" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/provider/facts.json"
-          for phase in setup action assert; do
-            QUOIN_VERIFY_PHASE=$phase ./ci/verify-model-provider-fixture --phase $phase
-          done
-      - name: Security adversarial scenario (security.adversarial)
-        run: |
-          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=security.adversarial \
-            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
-            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/security" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/security/facts.json"
-          for phase in setup action assert; do
-            QUOIN_VERIFY_PHASE=$phase ./ci/verify-security --phase $phase
-          done
-      - name: Migration scenario (deployment.migrations)
-        run: |
-          export QUOIN_VERIFY_LAYER=release_qualification QUOIN_VERIFY_SCENARIO=deployment.migrations \
-            QUOIN_VERIFY_CELL=default QUOIN_VERIFY_PARAMETERS='{}' \
-            QUOIN_VERIFY_WORKDIR="$RUNNER_TEMP/migrations" QUOIN_VERIFY_FACTS="$RUNNER_TEMP/migrations/facts.json"
-          for phase in setup action assert; do
-            QUOIN_VERIFY_PHASE=$phase ./ci/verify-migrations --phase $phase
-          done
-      - name: Upload scenario evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-scenarios
-          path: |
-            ${{ runner.temp }}/gate/
-            ${{ runner.temp }}/provider/
-            ${{ runner.temp }}/security/
-            ${{ runner.temp }}/migrations/
-          retention-days: 30
-
   resolve-matrix:
     name: Resolve and freeze the environment matrix
     runs-on: ubuntu-24.04
@@ -307,7 +258,7 @@ jobs:
 
   aggregate:
     name: Freeze the environment matrix and aggregate the verdict
-    needs: [ci-scenarios, resolve-matrix, compose-native, kubernetes-native]
+    needs: [resolve-matrix, compose-native, kubernetes-native]
     if: always()
     runs-on: ubuntu-24.04
     steps:

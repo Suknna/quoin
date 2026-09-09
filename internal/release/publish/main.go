@@ -1,4 +1,4 @@
-// Command publish is the release-closure driver behind ci/finalize-release
+// Command publish is the release-closure driver used by release workflows
 // (T42). The finalize stage derives the final Release manifest from the
 // validated subject inventory, the frozen contracts and the categorized
 // signed qualification evidence, stages the release directory and packs the

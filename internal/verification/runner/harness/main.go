@@ -1,11 +1,11 @@
-// Command harness is the deterministic executor behind the ci/verify-*
+// Command harness is the deterministic executor used by the retired CI verification entrypoints
 // contract-gate entrypoints. Each entrypoint maps to a frozen table of real
 // `go test` groups selected per catalog cell; the harness runs them as real
 // subprocesses, records per-group outcomes, and projects the catalog's cell
 // assertions into machine facts for the runner to compare. It never derives
 // a verdict: the runner owns verdicts (VERIFY-VERDICT-004).
 //
-// Phase contract (invoked by the runner through the ci/verify-* scripts):
+// Phase contract (invoked by the runner through configured scenario commands):
 //
 //	--phase setup   go vet the union of every group's packages
 //	--phase action  run each group's go test set, persist results in $QUOIN_VERIFY_WORKDIR

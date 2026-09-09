@@ -297,7 +297,7 @@ func (re *ecmaRegexp) String() string {
 }
 
 // compileECMAScriptRegexp matches the engine the frozen contract gate
-// (ci/verify-contracts) uses, so both gates accept the same patterns.
+// uses, so all catalog validation paths accept the same patterns.
 func compileECMAScriptRegexp(pattern string) (jsonschema.Regexp, error) {
 	re, err := regexp2.Compile(pattern, regexp2.ECMAScript)
 	if err != nil {

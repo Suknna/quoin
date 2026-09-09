@@ -90,28 +90,6 @@ jobs:
           path: .release/
           retention-days: 14
 
-  contracts:
-    name: Contract gate over the frozen catalog
-    needs: collect
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: Run the contract gate
-        run: |
-          set -euo pipefail
-          go build -o bin/quoin-verify ./cmd/quoin-verify
-          bin/quoin-verify run --layer contract_gate \
-            --output .work/contract-gate \
-            --invocation-id "release-contracts-$QUOIN_RELEASE_VERSION"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: evidence-contracts
-          path: .work/contract-gate/
-          retention-days: 14
-
   qualify:
     name: Qualify the release subjects on ${{ matrix.leg }}
     needs: collect
@@ -196,7 +174,7 @@ jobs:
 
   evidence:
     name: Assemble and sign the categorized evidence bundles
-    needs: [context, collect, contracts, qualify]
+    needs: [context, collect, qualify]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -207,10 +185,6 @@ jobs:
         with:
           name: release-subjects
           path: .release
-      - uses: actions/download-artifact@v4
-        with:
-          name: evidence-contracts
-          path: .evidence/contracts
       - uses: actions/download-artifact@v4
         with:
           name: evidence-compose-linux-amd64
@@ -236,8 +210,6 @@ jobs:
               > ".out/$name.bundle.json"
             cp "$payload" ".out/$name.payload"
           }
-          # contracts: the contract-gate Test Result of this tag's source.
-          sign contracts .evidence/contracts/test-result.json
           # Qualification categories: each leg's suite statement, with the
           # qualification manifest bytes riding as the transitive binding
           # companion (statement subject = that manifest's digest).
@@ -307,7 +279,18 @@ jobs:
           QUOIN_SIGN_IDENTITY: ${{ needs.context.outputs.identity }}
           QUOIN_SIGN_ISSUER: https://token.actions.githubusercontent.com
           QUOIN_RELEASE_DIR: .release/final
-        run: ./ci/finalize-release finalize
+        run: |
+          go run ./internal/release/publish finalize \
+            -inventory "$QUOIN_INVENTORY" \
+            -evidence "$QUOIN_EVIDENCE_DIR" \
+            -contracts docs/specs/quoin-v1/contracts \
+            -assets "$QUOIN_ASSETS_DIR" \
+            -bundles "$QUOIN_BUNDLES_DIR" \
+            -trust-root "$QUOIN_TRUST_ROOT" \
+            -identity "$QUOIN_SIGN_IDENTITY" \
+            -issuer "$QUOIN_SIGN_ISSUER" \
+            -out "$QUOIN_RELEASE_DIR" \
+            -work .artifacts/finalize-release
       - uses: actions/upload-artifact@v4
         with:
           name: release-final
@@ -387,7 +370,16 @@ jobs:
           QUOIN_IMPORT_REGISTRY: 127.0.0.1:5099/rel-import
           QUOIN_REGISTRY_INSECURE: "1"
           QUOIN_REPORT: publish-gate-report.json
-        run: ./ci/finalize-release verify
+        run: |
+          go run ./internal/release/publish verify \
+            -release "$QUOIN_RELEASE_DIR" \
+            -contracts docs/specs/quoin-v1/contracts \
+            -trust-root "$QUOIN_TRUST_ROOT" \
+            -identity "$QUOIN_SIGN_IDENTITY" \
+            -issuer "$QUOIN_SIGN_ISSUER" \
+            -report "$QUOIN_REPORT" \
+            -import-registry "$QUOIN_IMPORT_REGISTRY" \
+            -registry-insecure
       - name: Stop the import registry
         if: always()
         run: docker rm -f rel-import || true

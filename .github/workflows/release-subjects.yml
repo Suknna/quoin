@@ -68,7 +68,15 @@ jobs:
           QUOIN_STAGE: images
           QUOIN_PLATFORMS: ${{ matrix.platform }}=native
           QUOIN_WORK: ${{ github.workspace }}/.work
-        run: ./ci/build-release-subjects
+        run: |
+          go run ./internal/release/build \
+            -registry "$QUOIN_REGISTRY" \
+            -version "$QUOIN_RELEASE_VERSION" \
+            -builder release-subjects \
+            -work "$QUOIN_WORK" \
+            -out "$QUOIN_WORK/subjects-inventory.json" \
+            -stage images \
+            -platform "${{ matrix.platform }}=native"
       - name: Upload platform fragment
         uses: actions/upload-artifact@v4
         with:
@@ -103,7 +111,14 @@ jobs:
           QUOIN_STAGE: assemble
           QUOIN_WORK: ${{ github.workspace }}/.work
           QUOIN_OUT: ${{ github.workspace }}/.work/subjects-inventory.json
-        run: ./ci/build-release-subjects
+        run: |
+          go run ./internal/release/build \
+            -registry "$QUOIN_REGISTRY" \
+            -version "$QUOIN_RELEASE_VERSION" \
+            -builder release-subjects \
+            -work "$QUOIN_WORK" \
+            -out "$QUOIN_OUT" \
+            -stage assemble
       - name: Upload subject assets
         uses: actions/upload-artifact@v4
         with:
@@ -265,7 +280,13 @@ jobs:
           QUOIN_OUT: ${{ github.workspace }}/.work/subjects-inventory.json
           QUOIN_REGISTRY_USER: ${{ github.actor }}
           QUOIN_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./ci/build-release-subjects verify
+        run: |
+          go run ./internal/release/build verify \
+            -inventory "$QUOIN_OUT" \
+            -bundles "$QUOIN_BUNDLES_DIR" \
+            -trust-root "$QUOIN_TRUST_ROOT" \
+            -identity "$QUOIN_SIGN_IDENTITY" \
+            -issuer "$QUOIN_SIGN_ISSUER"
       - name: Upload gate evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -13,7 +13,7 @@ import (
 )
 
 // contractRoot resolves the repository's frozen contract directory from the
-// package directory, so the fixture reads the same files ci/verify-contracts
+// package directory, so the fixture reads the same frozen contract files
 // owns rather than a copied fixture.
 func contractRoot(t *testing.T) string {
 	t.Helper()

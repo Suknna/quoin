@@ -39,7 +39,7 @@ func validIndex() evidence.Index {
 				CapabilityIDs:   []string{"environment.contract-harness"},
 			},
 			ToolVersion:   "quoin-verify/test",
-			ArgvSanitized: []string{"ci/verify-contracts", "--phase", "assert"},
+			ArgvSanitized: []string{"retired", "--phase", "assert"},
 			ExitCode:      &exit,
 			Assertions: []evidence.Assertion{
 				{ID: "command-exit-zero", Kind: "exit_code", Expected: 0, Actual: 0, Result: "passed"},

@@ -16,7 +16,7 @@ import (
 // TestProbeProviderFixtureAgainstRealBinary runs the real fixture
 // process (go run ./test/fixtures/model-provider) with a completion
 // delay and drives every black-box leg against it. This is the same
-// pairing ci/verify-model-provider-fixture executes.
+// pairing verifier formerly executed.
 func TestProbeProviderFixtureAgainstRealBinary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("fixture process launch is skipped in short mode")

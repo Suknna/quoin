@@ -58,11 +58,11 @@ scenarios:
     status: active
     layer: contract_gate
     requirement: required
-    executor: {kind: ci, entrypoint: ci/verify-alpha}
+    executor: {kind: ci, entrypoint: fixture/verify-alpha}
     phases:
-      setup: ci/verify-alpha --phase setup
-      action: ci/verify-alpha --phase action
-      assert: ci/verify-alpha --phase assert
+      setup: fixture/verify-alpha --phase setup
+      action: fixture/verify-alpha --phase action
+      assert: fixture/verify-alpha --phase assert
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -90,11 +90,11 @@ scenarios:
     status: active
     layer: contract_gate
     requirement: required
-    executor: {kind: ci, entrypoint: ci/verify-beta}
+    executor: {kind: ci, entrypoint: fixture/verify-beta}
     phases:
-      setup: ci/verify-beta --phase setup
-      action: ci/verify-beta --phase action
-      assert: ci/verify-beta --phase assert
+      setup: fixture/verify-beta --phase setup
+      action: fixture/verify-beta --phase action
+      assert: fixture/verify-beta --phase assert
       teardown: no-op
     depends_on: [alpha.base]
     proof_refs: []
@@ -260,8 +260,8 @@ func TestDeploymentTargetCellsNeedTarget(t *testing.T) {
 }
 
 func TestRetiredScenariosStayOutOfExecution(t *testing.T) {
-	body := strings.Replace(validFixture(), "    status: active\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: ci/verify-alpha}",
-		"    status: retired\n    successor: alpha.dependent\n    retirement_reason: superseded\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: ci/verify-alpha}", 1)
+	body := strings.Replace(validFixture(), "    status: active\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: fixture/verify-alpha}",
+		"    status: retired\n    successor: alpha.dependent\n    retirement_reason: superseded\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: fixture/verify-alpha}", 1)
 	// The retired scenario still owns its validation root so the catalog
 	// stays covered; retired scenarios are skipped by execution only.
 	body = strings.Replace(body, "validation_roots: [HTTP-VALIDATION-001]", "validation_roots: [ARCH-VALIDATION-001, HTTP-VALIDATION-001]", 1)
@@ -274,8 +274,23 @@ func TestRetiredScenariosStayOutOfExecution(t *testing.T) {
 	}
 }
 
+func TestRetiredScenarioMayHaveNoSuccessor(t *testing.T) {
+	body := strings.Replace(validFixture(), "    status: active\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: fixture/verify-alpha}",
+		"    status: retired\n    retirement_reason: verifier removed\n    layer: contract_gate\n    requirement: required\n    executor: {kind: ci, entrypoint: retired}", 1)
+	// Retirement without a replacement retains its coverage record while
+	// keeping the removed scenario out of execution.
+	body = strings.Replace(body, "validation_roots: [HTTP-VALIDATION-001]", "validation_roots: [ARCH-VALIDATION-001, HTTP-VALIDATION-001]", 1)
+	loaded, err := catalog.LoadAndValidate(writeCatalog(t, body))
+	if err != nil {
+		t.Fatalf("successorless retirement rejected: %v", err)
+	}
+	if got := catalog.ExecutionOrder(loaded, catalog.LayerContractGate); len(got) != 1 || got[0] != "alpha.dependent" {
+		t.Fatalf("successorless retirement scheduled: %+v", got)
+	}
+}
+
 func TestDiagnosticScenariosRequireTriggerCategories(t *testing.T) {
-	body := strings.Replace(validFixture(), "    requirement: required\n    executor: {kind: ci, entrypoint: ci/verify-beta}", "    requirement: diagnostic\n    diagnostic_trigger_categories: [failed]\n    executor: {kind: ci, entrypoint: ci/verify-beta}", 1)
+	body := strings.Replace(validFixture(), "    requirement: required\n    executor: {kind: ci, entrypoint: fixture/verify-beta}", "    requirement: diagnostic\n    diagnostic_trigger_categories: [failed]\n    executor: {kind: ci, entrypoint: fixture/verify-beta}", 1)
 	// Diagnostics do not cover roots, so the remaining required scenario
 	// (alpha.base) must own both roots.
 	body = strings.Replace(body, "validation_roots: [ARCH-VALIDATION-001]", "validation_roots: [ARCH-VALIDATION-001, HTTP-VALIDATION-001]", 1)

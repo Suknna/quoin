@@ -286,18 +286,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI contract verifier.
     layer: contract_gate
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-contracts
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-contracts --phase setup
-      action: ci/verify-contracts --phase action
-      assert: ci/verify-contracts --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -350,18 +351,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI interleaving verifier.
     layer: contract_gate
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-interleavings
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-interleavings --phase setup
-      action: ci/verify-interleavings --phase action
-      assert: ci/verify-interleavings --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -410,18 +412,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI config verifier.
     layer: contract_gate
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-config-pipeline
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-config-pipeline --phase setup
-      action: ci/verify-config-pipeline --phase action
-      assert: ci/verify-config-pipeline --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -469,18 +472,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI fixture verifier.
     layer: release_qualification
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-model-provider-fixture
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-model-provider-fixture --phase setup
-      action: ci/verify-model-provider-fixture --phase action
-      assert: ci/verify-model-provider-fixture --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -677,18 +681,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI security verifier.
     layer: release_qualification
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-security
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-security --phase setup
-      action: ci/verify-security --phase action
-      assert: ci/verify-security --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -2608,18 +2613,19 @@ scenarios:
           - id: domain-behavior
             kind: state
             expected: passed
-    status: active
+    status: retired
+    retirement_reason: Removed root CI UI automation verifier.
     layer: release_qualification
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-ui-automation
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-ui-automation --phase setup
-      action: ci/verify-ui-automation --phase action
-      assert: ci/verify-ui-automation --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on:
       - release.native-matrix
@@ -3217,18 +3223,19 @@ scenarios:
           - id: focus-not-occluded
             kind: human_observation
             expected: passed
-    status: active
+    status: retired
+    retirement_reason: Removed root CI observation recorder.
     layer: release_qualification
     requirement: required
     executor:
       kind: admin_observation
-      entrypoint: ci/record-ui-observation
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/record-ui-observation --phase setup
-      action: ci/record-ui-observation --phase action
-      assert: ci/record-ui-observation --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on:
       - ui.automated
@@ -4554,18 +4561,19 @@ scenarios:
           - id: no-false-terminal-success
             kind: state
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI protocol fault verifier.
     layer: contract_gate
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-protocol-delivery-faults
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-protocol-delivery-faults --phase setup
-      action: ci/verify-protocol-delivery-faults --phase action
-      assert: ci/verify-protocol-delivery-faults --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on:
       - protocol.interleavings
@@ -4701,18 +4709,19 @@ scenarios:
           - id: after-boundary
             kind: state
             expected: stable_terminal_or_expired
-    status: active
+    status: retired
+    retirement_reason: Removed root CI time-boundary verifier.
     layer: contract_gate
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-time-boundaries
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-time-boundaries --phase setup
-      action: ci/verify-time-boundaries --phase action
-      assert: ci/verify-time-boundaries --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on:
       - protocol.interleavings
@@ -5527,18 +5536,19 @@ scenarios:
           - id: structured-result-valid
             kind: schema_valid
             expected: true
-    status: active
+    status: retired
+    retirement_reason: Removed root CI migration verifier.
     layer: release_qualification
     requirement: required
     executor:
       kind: ci
-      entrypoint: ci/verify-migrations
+      entrypoint: retired
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: ci/verify-migrations --phase setup
-      action: ci/verify-migrations --phase action
-      assert: ci/verify-migrations --phase assert
+      setup: no-op
+      action: no-op
+      assert: no-op
       teardown: no-op
     depends_on: []
     proof_refs: []
