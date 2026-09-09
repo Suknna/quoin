@@ -1,0 +1,17 @@
+import { useEffect, useRef, useState } from "react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { fetchRuntimeStatus, formatRuntimeTime, prepareRegistration, revealRegistrationToken, retireRuntimeCredential, type RuntimeSlotView } from "@/features/admin/runtimes/api";
+import { ConfirmAction } from "./controls";
+
+/** In-memory secrets are epoch-fenced so a reveal resolving after suspension cannot restore them. */
+export function Runtimes({ suspended }: { suspended: boolean }) {
+ const [items, setItems] = useState<RuntimeSlotView[]>([]); const [secret, setSecret] = useState(""); const [error, setError] = useState(""); const epoch = useRef(0);
+ const load = async () => { try { const status = await fetchRuntimeStatus(); setItems([status.plinth, status.lintel]); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法读取运行时状态。"); } };
+ useEffect(() => { void load(); }, []); useEffect(() => { if (suspended) { epoch.current += 1; setSecret(""); } }, [suspended]);
+ async function prepare(slot: RuntimeSlotView) { try { const prepared = await prepareRegistration(slot.slot, slot.rowVersion); if (!prepared.registrationTokenAvailable || !prepared.registrationTokenHandle) throw new Error("注册令牌不可用。"); const requestEpoch = epoch.current; const revealed = await revealRegistrationToken(prepared.registrationTokenHandle); if (!suspended && requestEpoch === epoch.current) setSecret(revealed.registrationToken); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法准备注册。"); } }
+ async function retire(slot: RuntimeSlotView) { try { await retireRuntimeCredential(slot.slot, slot.rowVersion); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法退休凭据。"); } }
+ return <section className="space-y-4"><h2 className="text-xl font-semibold">运行时</h2>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{secret && <Alert><AlertDescription>一次性注册令牌：<code>{secret}</code>。页面挂起或关闭后立即清除，系统不会再次显示。</AlertDescription></Alert>}<Table><TableHeader><TableRow><TableHead>槽位</TableHead><TableHead>状态</TableHead><TableHead>凭据代</TableHead><TableHead>连接</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.map(item => <TableRow key={item.slot}><TableCell>{item.slot}</TableCell><TableCell><Badge variant={item.state === "registered" ? "default" : "secondary"}>{item.state}</Badge></TableCell><TableCell>当前 {item.currentGeneration}{item.pendingGeneration !== undefined && <> · 待注册 {item.pendingGeneration}</>}{item.retiringGeneration !== undefined && <> · 待退休 {item.retiringGeneration}</>}<small className="block text-muted-foreground">{item.retirementState ?? ""}</small></TableCell><TableCell>{item.connected ? `已连接 ${formatRuntimeTime(item.lastSeenAt)}` : "未连接"}</TableCell><TableCell className="space-x-2"><Button size="sm" disabled={suspended} onClick={() => void prepare(item)}>准备替代注册</Button><ConfirmAction title={`退休 ${item.slot} 的待退休凭据？`} description="只会退休服务端已经标记为待退休的凭据代；当前凭据不会被此命令退休。" disabled={suspended || item.retirementState !== "PendingRetirement" || item.retiringGeneration === undefined} onConfirm={() => void retire(item)}>退休凭据</ConfirmAction></TableCell></TableRow>)}</TableBody></Table></section>;
+}

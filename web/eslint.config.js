@@ -9,11 +9,7 @@ export default tseslint.config(
 	js.configs.recommended,
 	...tseslint.configs.recommended,
 	{
-		files: [
-			"src/**/*.{ts,tsx}",
-			"templates/**/*.{ts,tsx}",
-			"workbench/**/*.{ts,tsx}",
-		],
+		files: ["src/**/*.{ts,tsx}"],
 		languageOptions: {
 			ecmaVersion: 2023,
 			globals: globals.browser,
@@ -31,26 +27,19 @@ export default tseslint.config(
 		},
 	},
 	{
-		files: ["workbench/**/*.{ts,tsx}"],
+		// The app shell owns screen composition and upstream UI files retain mixed exports.
+		files: [
+			"src/app/**/*.{ts,tsx}",
+			"src/components/ui/{button,badge,tabs,sidebar}.tsx",
+		],
 		rules: {
-			// The standalone entrypoint intentionally defines its local screen components together.
 			"react-refresh/only-export-components": "off",
 			"react-hooks/exhaustive-deps": "off",
 		},
 	},
 	{
-		// Preserve upstream mixed exports for exact template comparison.
-		files: [
-			"templates/components/ui/button.tsx",
-			"templates/components/ui/badge.tsx",
-			"templates/components/ui/tabs.tsx",
-			"templates/components/ui/sidebar.tsx",
-		],
-		rules: { "react-refresh/only-export-components": "off" },
-	},
-	{
-		// The upstream randomized skeleton is unused by sidebar-09.
-		files: ["templates/components/ui/sidebar.tsx"],
+		// The upstream randomized skeleton is unused by the application sidebar.
+		files: ["src/components/ui/sidebar.tsx"],
 		rules: { "react-hooks/purity": "off" },
 	},
 );

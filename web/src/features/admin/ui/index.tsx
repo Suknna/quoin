@@ -1,0 +1,50 @@
+/* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
+import { useEffect, useRef, useState } from "react";
+import type { WorkspaceModuleProps, WorkspaceModuleView } from "@/app/module-contract";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { newClientCommandId } from "@/api/workbench";
+import { createAlertSource, revealCredential, type AlertSourceCredentialMetadata } from "@/features/alerts/api";
+import { Backups } from "./Backups";
+import { Journeys } from "./Journeys";
+import { LabelContracts } from "./LabelContracts";
+import { Maintenance } from "./Maintenance";
+import { Runtimes } from "./Runtimes";
+import { Users } from "./Users";
+import { ConfirmAction } from "./controls";
+
+type Page<T> = { items?: T[]; nextCursor?: string };
+type AlertSource = { key: string; protocol: "alertmanager"; enabled: boolean; rowVersion: number };
+type AlertCredential = { id: string; rowVersion: number; state?: string; createdAt?: string };
+type Audit = { id: string; actorType: string; actorId: string; action: string; outcome: string; createdAt: string; domainRefType?: string; domainRefId?: string };
+const failure = (reason: unknown) => reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
+async function request<T>(path: string, init?: RequestInit): Promise<T> { const response = await fetch(path, { credentials: "include", headers: init?.body ? { "Content-Type": "application/json", ...init.headers } : init?.headers, ...init }); if (!response.ok) { const body = await response.json().catch(() => null) as { message?: string; detail?: string } | null; throw new Error(body?.message ?? body?.detail ?? "暂时无法完成操作，请重试。"); } return response.status === 204 ? undefined as T : response.json() as Promise<T>; }
+const command = (body: object) => JSON.stringify({ clientCommandId: newClientCommandId(), ...body });
+
+/** Administration projects API-backed surfaces only; Connections and system configuration remain coordinator-owned. */
+export function useAdministrationModule(props: WorkspaceModuleProps): WorkspaceModuleView {
+ // Routes are absolute (`/administration/users`); module selection starts after its prefix.
+ const routeParts = props.route.split("/").filter(Boolean);
+ const path = routeParts[0] === "administration" || routeParts[0] === "admin" ? routeParts[1] ?? "users" : routeParts[0] ?? "users";
+ const labels: Record<string, string> = { users: "用户", connections: "连接", alerts: "告警源", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", labels: "标签契约", journeys: "Journey" };
+ const list = <div className="space-y-1 p-3">{Object.entries(labels).map(([key, label]) => <Button key={key} variant={path === key ? "secondary" : "ghost"} className="w-full justify-start" onClick={() => props.navigate(`/admin/${key}`)}>{label}</Button>)}</div>;
+ if (props.user.role !== "admin") return { title: "管理", list, content: <Alert variant="destructive"><AlertDescription>管理功能仅向管理员开放。</AlertDescription></Alert> };
+ const content = path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "runtimes" ? <Runtimes suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "maintenance" ? <Maintenance authenticationSuspended={props.authenticationSuspended} /> : path === "audit" ? <AuditLog /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : <Journeys />;
+ return { title: labels[path] ?? "管理", list, content };
+}
+
+
+function AlertSources({ suspended }: { suspended: boolean }) {
+ const [items, setItems] = useState<AlertSource[]>([]); const [error, setError] = useState(""); const [reveal, setReveal] = useState(""); const [key, setKey] = useState(""); const [credentials, setCredentials] = useState<Record<string, AlertCredential[]>>({}); const epoch = useRef(0);
+ const load = async () => { try { setItems((await request<Page<AlertSource>>("/api/v1/alert-sources?limit=50")).items ?? []); } catch (reason) { setError(failure(reason)); } };
+ useEffect(() => { queueMicrotask(() => { void load(); }); }, []); useEffect(() => { if (!suspended) return; epoch.current += 1; const clear = window.setTimeout(() => setReveal(""), 0); return () => window.clearTimeout(clear); }, [suspended]);
+ async function showOnce(result: AlertSourceCredentialMetadata) { if (!result.revealAvailable || !result.revealHandle) return; const requestEpoch = epoch.current; const secret = await revealCredential(result.revealHandle); if (!suspended && requestEpoch === epoch.current) setReveal(secret.bearerToken); }
+ async function create() { try { const result = await createAlertSource({ key, protocol: "alertmanager", clientCommandId: newClientCommandId() }); setKey(""); await showOnce(result); await load(); } catch (reason) { setError(failure(reason)); } }
+ async function rotate(source: AlertSource) { try { const result = await request<AlertSourceCredentialMetadata>(`/api/v1/alert-sources/${encodeURIComponent(source.key)}/rotate`, { method: "POST", body: command({}) }); await showOnce(result); await load(); } catch (reason) { setError(failure(reason)); } }
+ async function loadCredentials(sourceKey: string) { try { const page = await request<Page<AlertCredential>>(`/api/v1/alert-sources/${encodeURIComponent(sourceKey)}/credentials?limit=50`); setCredentials(current => ({ ...current, [sourceKey]: page.items ?? [] })); } catch (reason) { setError(failure(reason)); } }
+ return <section className="space-y-4"><h2 className="text-xl font-semibold">告警源与凭据</h2>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{reveal && <Alert><AlertDescription>一次性显示的 Bearer 凭据：<code>{reveal}</code>。关闭或挂起后清除，系统不会再次回显。</AlertDescription></Alert>}<Field><FieldLabel htmlFor="alert-source-key">告警源键</FieldLabel><Input id="alert-source-key" value={key} onChange={event => setKey(event.target.value)} disabled={suspended}/><FieldDescription>将创建 Alertmanager 来源并只显示一次初始 Bearer 凭据。</FieldDescription></Field><Button disabled={suspended || !key.trim()} onClick={() => void create()}>创建告警源</Button><Table><TableHeader><TableRow><TableHead>来源</TableHead><TableHead>协议</TableHead><TableHead>状态</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.map(item => <TableRow key={item.key}><TableCell>{item.key}</TableCell><TableCell>{item.protocol}</TableCell><TableCell>{item.enabled ? "已启用" : "已停用"}</TableCell><TableCell className="space-x-2"><Button size="sm" disabled={suspended || !item.enabled} onClick={() => void rotate(item)}>轮换并显示一次</Button><Button size="sm" variant="outline" onClick={() => void loadCredentials(item.key)}>凭据</Button><ConfirmAction title={`停用 ${item.key}？`} description="停用后该来源不再接收告警。" disabled={suspended || !item.enabled} onConfirm={() => void request(`/api/v1/alert-sources/${encodeURIComponent(item.key)}/disable`, { method: "POST", body: command({ expectedRowVersion: item.rowVersion }) }).then(load).catch(reason => setError(failure(reason)))}>停用</ConfirmAction>{(credentials[item.key] ?? []).map(credential => <ConfirmAction key={credential.id} title="退休此凭据？" description="退休的凭据无法恢复。" disabled={suspended} onConfirm={() => void request(`/api/v1/alert-sources/${encodeURIComponent(item.key)}/credentials/${credential.id}/retire`, { method: "POST", body: command({ expectedRowVersion: credential.rowVersion }) }).then(() => loadCredentials(item.key)).catch(reason => setError(failure(reason)))}>退休凭据 {credential.id}</ConfirmAction>)}</TableCell></TableRow>)}</TableBody></Table></section>; }
+
+function AuditLog() { const [items, setItems] = useState<Audit[]>([]); const [cursor, setCursor] = useState<string>(); const [action, setAction] = useState(""); const [actorType, setActorType] = useState(""); const [error, setError] = useState(""); const load = async (more = false) => { try { const q = new URLSearchParams({ limit: "50" }); if (action) q.set("action", action); if (actorType) q.set("actorType", actorType); if (more && cursor) q.set("cursor", cursor); const page = await request<Page<Audit>>(`/api/v1/audit-events?${q}`); setItems(value => more ? [...value, ...(page.items ?? [])] : page.items ?? []); setCursor(page.nextCursor); } catch (reason) { setError(failure(reason)); } }; useEffect(() => { queueMicrotask(() => { void load(); }); }, []); return <section className="space-y-4"><h2 className="text-xl font-semibold">审计</h2><div className="flex gap-2"><Input aria-label="操作筛选" placeholder="操作" value={action} onChange={e => setAction(e.target.value)}/><Input aria-label="主体类型筛选" placeholder="主体类型" value={actorType} onChange={e => setActorType(e.target.value)}/><Button variant="secondary" onClick={() => void load()}>应用筛选</Button></div>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}<Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>主体</TableHead><TableHead>操作</TableHead><TableHead>结果</TableHead></TableRow></TableHeader><TableBody>{items.map(item => <TableRow key={item.id}><TableCell>{item.createdAt}</TableCell><TableCell>{item.actorType} · {item.actorId}</TableCell><TableCell>{item.action}<small className="block text-muted-foreground">{item.domainRefType} {item.domainRefId}</small></TableCell><TableCell>{item.outcome}</TableCell></TableRow>)}</TableBody></Table>{cursor && <Button variant="outline" onClick={() => void load(true)}>加载更多</Button>}</section>; }

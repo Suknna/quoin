@@ -1,0 +1,44 @@
+# Canonical archive index after the frontend root consolidation.
+# Source snapshots retain their captured bytes; documentation path updates do not alter them.
+archive_root: docs/frontend
+canonical_runtime:
+  html_root: web/index.html
+  entry: web/src/main.tsx
+  app: web/src/app
+  components: web/src/components/ui
+  hooks: web/src/hooks
+  lib: web/src/lib
+  styles: web/src/styles
+  public: web/public
+  feature_ui: web/src/features/<domain>/ui
+  generated_api: web/src/api/generated
+archives:
+  templates:
+    provenance: templates/provenance.yaml
+    license:
+      path: templates/sources/LICENSE.md
+      sha256: 1564074e13439397221ffd522e2e504d56561994a23d371aa5e3ad43e4f5423f
+    sources:
+      - path: templates/sources/sidebar-09.json
+        sha256: e552d5b8df3f83ade04600b9b71b8620f5fdfd85182e84fc54628e3a73e0e4f8
+      - path: templates/sources/login-02.json
+        sha256: a3448a5bf2398316428befc01c4aee03cacaf5e221ac3acf8c3e792a6d5e7402
+      - path: templates/sources/index.json
+        sha256: f6b9ca539b8312f381ba91edb1b809c74e48cdb0a935f1838c52f412d13d964a
+      - path: templates/sources/globals.css
+        sha256: cbae6d633c38be59fc036d1e5cf60203ae7619ea6af9b4cdd8d632a211ccffa9
+  workbench:
+    documentation:
+      - workbench/README.md
+      - workbench/REBUILD-DELIVERY.md
+      - workbench/LAB-VALIDATION.md
+    provenance:
+      - workbench/error-state-source.yaml
+      - workbench/model-provider-source.yaml
+    sources:
+      - path: workbench/sources/empty.json
+        sha256: 2c377f47c4e661d73a565d37c0678d2445edfdcae5446e5b79f23ccda9b80f1d
+      - path: workbench/sources/command.json
+        sha256: c1f02d0805a0c5c55428e3350214ca8150a4ce98a40ec962118ec66709f60038
+      - path: workbench/sources/popover.json
+        sha256: 78793171b536e0c335ad51b1313619e533566b514d3503ef60c94dc9d3ccfbef
