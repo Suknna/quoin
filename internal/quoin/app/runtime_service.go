@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
@@ -34,7 +35,10 @@ import (
 // RuntimeService adapts the runtime.Service authority to the gRPC surface.
 type RuntimeService struct {
 	runtimev1.UnimplementedRuntimeControlServer
-	Slots          *qruntime.Service
+	Slots *qruntime.Service
+	// ReleaseVersion records Quoin's own build provenance when it creates
+	// browser-exploration attempts; peer releases come from the live Hello.
+	// It never participates in RPC admission.
 	ReleaseVersion string
 	// Connections owns connection_probe attempts and credential grants
 	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
@@ -131,7 +135,7 @@ func (service *RuntimeService) Register(ctx context.Context, request *runtimev1.
 	if slot == "" {
 		return nil, status.Error(codes.InvalidArgument, "slot must be plinth or lintel")
 	}
-	token, generation, err := service.Slots.Register(ctx, slot, request.GetOneTimeToken(), int64(request.GetGeneration()), request.GetBootId(), request.GetReleaseVersion(), service.ReleaseVersion)
+	token, generation, err := service.Slots.Register(ctx, slot, request.GetOneTimeToken(), int64(request.GetGeneration()), request.GetBootId(), request.GetContractFingerprint(), contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		return nil, registerStatus(err)
 	}
@@ -170,7 +174,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if slot == qruntime.SlotLintel && hello.GetBrowserCapacitySlots() == 0 {
 		return status.Error(codes.InvalidArgument, "lintel browser capacity must be positive")
 	}
-	decision, err := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion(), service.ReleaseVersion, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+	decision, err := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "runtime.hello_failed", err.Error())
 		return status.Error(codes.Internal, "handshake failed")
@@ -203,7 +207,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		}
 		return stream.Send(proto)
 	}
-	closing := service.Slots.AttachStreamWithSender(slot, hello.GetBootId(), hello.GetConnectionEpoch(), sender)
+	closing := service.Slots.AttachStreamWithSenderVersion(slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion(), sender)
 	if slot == qruntime.SlotLintel {
 		if err := service.Slots.SetBrowserCapacity(slot, hello.GetBootId(), hello.GetConnectionEpoch(), uint64(hello.GetBrowserCapacitySlots())); err != nil {
 			return status.Error(codes.Internal, "bind lintel browser capacity")
@@ -506,8 +510,8 @@ func mapRejectReason(reason string) string {
 		return "HELLO_REJECT_REASON_TOKEN_INVALID"
 	case "SLOT_REVOKED":
 		return "HELLO_REJECT_REASON_SLOT_REVOKED"
-	case "VERSION_MISMATCH":
-		return "HELLO_REJECT_REASON_VERSION_MISMATCH"
+	case "CONTRACT_MISMATCH":
+		return "HELLO_REJECT_REASON_CONTRACT_MISMATCH"
 	case "EPOCH_STALE":
 		return "HELLO_REJECT_REASON_EPOCH_STALE"
 	case "CATALOG_MISMATCH":

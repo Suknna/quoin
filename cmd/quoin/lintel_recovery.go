@@ -24,7 +24,7 @@ func runLintelRecovery(arguments []string) {
 	flags.SetOutput(os.Stderr)
 	configPath := flags.String("config", "/etc/quoin/component.yaml", "strict generated component configuration")
 	phase := flags.String("phase", "", "issue | await | finalize | hold")
-	backend := flags.String("backend", "", "compose | helm")
+	backend := flags.String("backend", "", "compose | kubernetes")
 	disposition := flags.String("storage-disposition", "", "exclusively_reattached | retired")
 	dispositionDigest := flags.String("disposition-digest", "", "sha256 of the storage disposition evidence report")
 	fenceReportDigest := flags.String("fence-report-digest", "", "sha256 of the workload fence report")

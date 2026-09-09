@@ -10,14 +10,14 @@
 
 **Non-normative：** 计划中的规范性文档按以下顺序阅读：
 
-1. `architecture.md`：系统边界、四组件职责、跨组件不变量和全局状态模型。
+1. `architecture.md`：系统边界、五个应用与入口职责、跨组件不变量和全局状态模型。
 2. `persistence.md`：SQLite 数据模型、聚合关系、唯一约束、事务、迁移、Artifact 与派生索引。
 3. `http-api.md`：Huma HTTP API、认证授权、命令幂等、错误、分页、快照、SSE 与对话流。
-4. `runtime-protocol.md`：Quoin、Plinth、Lintel、Stele 的身份、版本握手、控制流、任务、lease、fencing、浏览器会话、文件上传与告警接入。
+4. `runtime-protocol.md`：Quoin、Plinth、Lintel、Stele 的身份、Proto 契约指纹握手、控制流、任务、lease、fencing、浏览器会话、文件上传与告警接入。
 5. `inspection-config.md`：业务系统 YAML、Label Contract、Resource Discovery、Inspection Plan/Check 与 Journey Catalog。
 6. `frontend.md`：三栏工作台、URL、核心流程、状态反馈、可访问性和可执行 UI 验收场景。
 7. `security.md`：威胁路径、用户与服务身份、Session、CSRF、权限、秘密、审计和恢复后的信任重建。
-8. `operations.md`：Compose、Helm、存储卷、锁、健康检查、备份恢复、保留、升级、配置与可观测性。
+8. `operations.md`：Kubernetes YAML 与 Compose、存储卷、锁、健康检查、备份恢复、保留、升级、配置与可观测性。
 9. `verification.md`：端到端验收矩阵、故障注入、证据要求与验证边界。
 
 - **SPEC-STRUCTURE-001 —** 规格文件 **MUST** 在首次产生真实内容时创建，且 **MUST NOT** 创建空占位文件。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）
@@ -52,18 +52,18 @@ contracts/
 | 路径 | 拥有的机器契约 |
 | --- | --- |
 | `contracts/openapi.yaml` | HTTP 路由、方法、输入输出结构、状态码和可机械表达的 HTTP 契约 |
-| `contracts/runtime.proto` | 四组件 gRPC service、RPC、message、stream 与 wire-level 枚举 |
+| `contracts/runtime.proto` | Quoin、Plinth、Lintel、Stele 的 gRPC service、RPC、message、stream 与 wire-level 枚举 |
 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | Plinth supervisor ↔ worker 本地 stdio framed protobuf message 与 wire-level 枚举 |
-| `contracts/metrics.yaml` | 四组件 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
+| `contracts/metrics.yaml` | Quoin、Plinth、Lintel、Stele 的 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
 | `contracts/plinth-worker-tools.yaml` | Plinth worker 的 Bash 调用、固定工具包/版本、可执行路径与 Landlock 只读运行时路径 |
 | `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 |
 | `contracts/verification-catalog.yaml` | Scenario ID、验证层、cell/capability、依赖、低层证明引用、实现绑定、故障原语、证据与 cleanup 要求 |
 | `contracts/verification-result-profile.yaml` | PASSED/WARNED/FAILED 分类、冲突与聚合规则的唯一机器权威 |
 | `contracts/connection-probes.yaml` | Model Provider、Thanos 与 Kubernetes Connection Probe 的 action-set/version 和封闭机械动作 |
-| `contracts/examples/` | 由相应 JSON Schema 校验的最少 Helm/Compose 安装输入与 Deployment Acceptance helper request/report 示例，不是独立权威源 |
-| `contracts/schemas/deployment-config.schema.json` | 四组件启动配置字段、类型、默认值边界与跨平台投影结构 |
-| `contracts/schemas/release-manifest.schema.json` | Release 四镜像/双架构 digest、浏览器、Chart/Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
-| `contracts/schemas/readiness-response.schema.json` | 四组件 `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
+| `contracts/examples/` | 历史部署输入示例与 Deployment Acceptance helper request/report 示例；当前部署交付以普通 Kubernetes YAML 和简单 Compose 为准，不是独立权威源 |
+| `contracts/schemas/deployment-config.schema.json` | 历史生成式部署配置契约；已由 ADR-0001 替换，不得作为当前 Kubernetes 或 Compose 交付要求 |
+| `contracts/schemas/release-manifest.schema.json` | Release 应用镜像/双架构 digest、浏览器、Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
+| `contracts/schemas/readiness-response.schema.json` | Quoin、Plinth、Lintel、Stele `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
 | `contracts/schemas/verification-catalog.schema.json` | Scenario catalog、cell、capability、fault primitive 与 execution profile 的文档形状 |
 | `contracts/schemas/verification-result.schema.json` | in-toto Statement v1 + Test Result v0.1 的严格 Quoin profile |
 | `contracts/schemas/verification-result-profile.schema.json` | 验证结果分类与聚合 profile 的严格文档形状 |
@@ -83,15 +83,15 @@ contracts/
 | HTTP 字段、类型、路由和状态码 | `contracts/openapi.yaml` | `http-api.md` 解释跨请求语义、事务和状态转换 |
 | 跨组件 gRPC service、message、字段、枚举与 stream 形状 | `contracts/runtime.proto` | `runtime-protocol.md` 解释握手、lease、fencing、重连和调和 |
 | Plinth supervisor ↔ worker 本地 stdio message、字段与枚举 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | `architecture.md` 解释 framing、sandbox、执行顺序和故障语义 |
-| 四组件 Prometheus family/type/help/bucket/label 与枚举投影 | `contracts/metrics.yaml` | `contracts/schemas/metrics.schema.json` 校验目录；`operations.md` 解释可达性、语义、告警与验证 |
+| Quoin、Plinth、Lintel、Stele Prometheus family/type/help/bucket/label 与枚举投影 | `contracts/metrics.yaml` | `contracts/schemas/metrics.schema.json` 校验目录；`operations.md` 解释可达性、语义、告警与验证 |
 | Plinth worker 本地 Bash/Debian package/工具路径与只读运行时路径 | `contracts/plinth-worker-tools.yaml` | `contracts/schemas/plinth-worker-tools.schema.json` 校验目录；`architecture.md` 与 `operations.md` 解释执行和镜像边界 |
-| Helm/Compose 最少安装输入与四组件生成配置 | `contracts/schemas/deployment-config.schema.json` | `contracts/examples/*-install.yaml` 给出可校验最小输入；`operations.md` 解释启动、拒绝与投影 |
+| 历史生成式部署输入 | `contracts/schemas/deployment-config.schema.json` | 仅保留为历史机器资产；当前普通 Kubernetes YAML 与 Compose 交付由 `operations.md` 定义 |
 | 基础镜像、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 | `contracts/release-inputs.yaml` | `contracts/schemas/release-inputs.schema.json` 校验锁；`operations.md` 解释镜像与供应链边界 |
 | Scenario、验证层、环境 cell/capability、依赖/证明引用、实现绑定、故障与 cleanup 要求 | `contracts/verification-catalog.yaml` | `contracts/schemas/verification-catalog.schema.json` 校验目录；`verification.md` 解释执行与聚合语义 |
 | Connection Probe 的三类 action-set/version 与机械动作 | `contracts/connection-probes.yaml` | `contracts/schemas/connection-probes.schema.json` 校验目录；架构、持久化、HTTP 与 Runtime 规格引用 digest，不复制动作正文 |
 | Release/Deployment 验证证据与 helper 交换文档形状 | `contracts/schemas/verification-result.schema.json`、`verification-evidence.schema.json`、`deployment-verification.schema.json` | `verification.md` 解释签名、幂等、时间闭包和证据保留；helper request/report 不另建平行 Schema |
 | Release digest、在线/离线资产名、工件、Sigstore bundle 映射、契约版本与验收摘要 | `contracts/schemas/release-manifest.schema.json` | `operations.md` 解释发布、离线包、升级与回滚 |
-| 四组件 `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
+| Quoin、Plinth、Lintel、Stele `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
 | 其他 YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | 对应主题 Markdown 解释发布、兼容、运行和错误语义 |
 | SQLite 表、列、索引、外键和数据库约束 | `contracts/sql/schema.sql` | `persistence.md` 解释聚合、事务、生命周期和迁移约束 |
 | 跨协议不变量、事务边界、状态转换、权限、运行行为和无法由单份机器契约表达的约束 | 对应主题 Markdown | 机器契约只承载其可机械表达部分 |

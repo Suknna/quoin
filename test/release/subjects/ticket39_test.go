@@ -17,7 +17,6 @@ const (
 	releaseVersion = "v0.1.0-dev"
 	registryName   = "t39-registry"
 	builderName    = "t39-release-subjects"
-	chartVersion   = "0.1.0-dev"
 )
 
 var registryHost = fmt.Sprintf("127.0.0.1:%s", envOr("QUOIN_T39_REGISTRY_PORT", "5099"))
@@ -30,11 +29,11 @@ func envOr(key, fallback string) string {
 }
 
 // TestTicket39 proves the T39 release-subject path end to end through real
-// tooling: one buildx docker-container builder produces the four component
+// tooling: one buildx docker-container builder produces the five application
 // images for linux/amd64 (native) and linux/arm64 (binfmt build evidence
 // only, never a runtime claim), with BuildKit SBOM and SLSA provenance
-// attestations; the merged OCI indexes, the packaged Helm chart, the
-// digest-pinned Compose bundle and both static quoin-deploy helpers land in a
+// attestations; the merged OCI indexes, checksum-bound Kubernetes and
+// Compose bundles and both static quoin-deploy helpers land in a
 // real local registry / work tree; every subject is signed by a local
 // Fulcio-shaped qualification authority and the offline gate verifies
 // subject digests, certificate identity/issuer and attestation subjects.
@@ -74,7 +73,6 @@ func TestTicket39(t *testing.T) {
 		"go", "run", "./internal/release/build",
 		"-registry", registryHost+"/t39",
 		"-version", releaseVersion,
-		"-chart-oci", registryHost+"/t39/charts",
 		"-builder", builderName,
 		"-work", work,
 		"-out", inventoryPath,
@@ -114,7 +112,7 @@ func TestTicket39(t *testing.T) {
 
 func requireTools(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"docker", "go", "helm", "git"} {
+	for _, name := range []string{"docker", "go", "git"} {
 		if _, err := exec.LookPath(name); err != nil {
 			t.Skipf("%s is not available: %v", name, err)
 		}
@@ -239,13 +237,13 @@ func runInventoryAssertions(t *testing.T, recorder *evidence, inventory *subject
 		// asserted by subjects.Parse; here the registry namespace is pinned.
 		assertions["images/"+component] = entry
 	}
-	if inventory.Chart.TgzAssetName != names.ChartTgz || inventory.Compose.AssetName != names.Compose {
-		t.Fatalf("asset names drifted: chart=%q compose=%q", inventory.Chart.TgzAssetName, inventory.Compose.AssetName)
+	if inventory.Kubernetes.AssetName != names.Kubernetes || inventory.Compose.AssetName != names.Compose {
+		t.Fatalf("asset names drifted: kubernetes=%q compose=%q", inventory.Kubernetes.AssetName, inventory.Compose.AssetName)
 	}
 	assertions["asset-names"] = map[string]any{
-		"expected": map[string]string{"chart": names.ChartTgz, "compose": names.Compose,
+		"expected": map[string]string{"kubernetes": names.Kubernetes, "compose": names.Compose,
 			"helperAmd64": names.Helper["linux/amd64"], "helperArm64": names.Helper["linux/arm64"]},
-		"actual": map[string]string{"chart": inventory.Chart.TgzAssetName, "compose": inventory.Compose.AssetName,
+		"actual": map[string]string{"kubernetes": inventory.Kubernetes.AssetName, "compose": inventory.Compose.AssetName,
 			"helperAmd64": inventory.Helpers["linux/amd64"].AssetName, "helperArm64": inventory.Helpers["linux/arm64"].AssetName},
 	}
 	if strings.Contains(string(rawInventory), "latest") {
@@ -256,6 +254,7 @@ func runInventoryAssertions(t *testing.T, recorder *evidence, inventory *subject
 		"actual":   "absent",
 	}
 	for path, subject := range map[string]subjects.BlobSubject{
+		work + "/" + names.Kubernetes:            inventory.Kubernetes,
 		work + "/" + names.Compose:               inventory.Compose,
 		work + "/" + names.Helper["linux/amd64"]: inventory.Helpers["linux/amd64"],
 		work + "/" + names.Helper["linux/arm64"]: inventory.Helpers["linux/arm64"],
@@ -263,10 +262,6 @@ func runInventoryAssertions(t *testing.T, recorder *evidence, inventory *subject
 		if err := assertFileSHA256(path, subject.SHA256); err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-	}
-	chartTgz := work + "/chart/" + inventory.Chart.TgzAssetName
-	if err := assertFileSHA256(chartTgz, inventory.Chart.TgzSHA256); err != nil {
-		t.Fatalf("chart tgz: %v", err)
 	}
 	assertions["blob-sha256"] = map[string]any{
 		"expected": "compose bundle and both helpers match their recorded SHA-256",

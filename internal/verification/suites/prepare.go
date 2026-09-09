@@ -35,17 +35,10 @@ func WriteInstallConfig(workRoot string, ports InstallPorts) (string, error) {
 
 // SubjectImage is one digest-pinned release subject.
 type SubjectImage struct {
+	Version    string
 	Repository string
 	Index      string
 	Platforms  map[string]string
-}
-
-// ChartSubject is the measured chart the qualification deployment
-// installs on the Kubernetes backend: the OCI reference is the only
-// chart authority the helper accepts (digest-pinned, never a tag).
-type ChartSubject struct {
-	OCIRepository string
-	OCIDigest     string
 }
 
 // WriteReleaseManifest projects the built subjects into the deployment
@@ -53,10 +46,8 @@ type ChartSubject struct {
 // form; on a single-architecture qualification build the unexecuted
 // foreign platform carries this cell's digest and the native-architecture
 // evidence records the delegation (the local manifest is a qualification
-// input, never a published release subject). The chart section carries
-// the measured OCI reference when the qualification recorded one, so
-// the Kubernetes install pulls the exact packaged chart.
-func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images map[string]SubjectImage, chart ChartSubject) (string, error) {
+// input, never a published release subject).
+func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images map[string]SubjectImage) (string, error) {
 	manifest := map[string]any{
 		"manifest_version": 1,
 		"release_version":  releaseVersion,
@@ -67,22 +58,23 @@ func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images 
 				"linux/amd64": map[string]any{"sha256": strings.Repeat("60", 32), "bytes": 1},
 				"linux/arm64": map[string]any{"sha256": strings.Repeat("61", 32), "bytes": 1},
 			}},
-		"helm":    map[string]any{"oci_repository": chart.OCIRepository, "oci_digest": chart.OCIDigest, "tgz_asset_name": "quoin-" + strings.TrimPrefix(releaseVersion, "v") + "-qualification.tgz", "tgz_sha256": strings.Repeat("10", 32)},
-		"compose": map[string]any{"asset_name": "quoin-compose-" + releaseVersion + "-t40.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
+		"kubernetes": map[string]any{"asset_name": "quoin-kubernetes-" + releaseVersion + ".tar.gz", "bundle_sha256": strings.Repeat("10", 32)},
+		"compose":    map[string]any{"asset_name": "quoin-compose-" + releaseVersion + "-t40.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{
 			"linux/amd64": map[string]any{"asset_name": "quoin-deploy-linux-amd64", "sha256": strings.Repeat("30", 32)},
 			"linux/arm64": map[string]any{"asset_name": "quoin-deploy-linux-arm64", "sha256": strings.Repeat("31", 32)},
 		}},
 		"offline": map[string]any{"asset_name": "quoin-offline-" + releaseVersion + "-t40.tar.zst"},
 		"sigstore_bundles": map[string]any{
-			"image_indexes": map[string]any{"quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json"},
+			"image_indexes": map[string]any{"quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json", "frontend": "f.sigstore.json"},
 			"image_manifests": map[string]any{
-				"quoin":  map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
-				"plinth": map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
-				"lintel": map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
-				"stele":  map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
+				"quoin":    map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
+				"plinth":   map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
+				"lintel":   map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
+				"stele":    map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
+				"frontend": map[string]any{"linux/amd64": "fa.sigstore.json", "linux/arm64": "fb.sigstore.json"},
 			},
-			"helm_oci": "h.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
+			"kubernetes": "k.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
 			"deployment_helper": map[string]any{"linux/amd64": "da.sigstore.json", "linux/arm64": "db.sigstore.json"},
 			"offline":           "o.sigstore.json",
 		},
@@ -110,7 +102,7 @@ func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images 
 			}
 		}
 		projected[component] = map[string]any{
-			"repository": image.Repository, "index_digest": image.Index, "platforms": platforms,
+			"version": image.Version, "repository": image.Repository, "index_digest": image.Index, "platforms": platforms,
 		}
 	}
 	manifest["images"] = projected
@@ -126,35 +118,4 @@ func WriteReleaseManifest(workRoot, releaseVersion, sourceCommit string, images 
 	}
 	path := filepath.Join(workRoot, "release-manifest.json")
 	return path, os.WriteFile(path, body, 0o600)
-}
-
-// WriteHelmInstallConfig renders the strict helm-install input the
-// Kubernetes cells consume: no ingresses (the compose loopback-parity
-// rule — the suite reaches the cluster only through invocation-owned
-// port-forwards), modest local-path-provisioned capacities, and the
-// same frozen public origin.
-func WriteHelmInstallConfig(workRoot string) (string, error) {
-	path := filepath.Join(workRoot, "helm-install.yaml")
-	content := `document: helm-install
-publicOrigin: https://quoin.example.com
-publicIngress:
-  enabled: false
-steleIngress:
-  enabled: false
-storage:
-  quoinData:
-    capacity: 20Gi
-    accessMode: ReadWriteOnce
-  quoinBackup:
-    capacity: 20Gi
-    accessMode: ReadWriteOnce
-  plinthState:
-    capacity: 10Gi
-    accessMode: ReadWriteOnce
-  lintelState:
-    capacity: 20Gi
-    accessMode: ReadWriteOnce
-lintelBrowserSlots: 2
-`
-	return path, os.WriteFile(path, []byte(content), 0o600)
 }

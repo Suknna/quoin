@@ -3,9 +3,8 @@
   "$id": "https://github.com/Suknna/quoin/schemas/deployment-config.schema.json",
   "x-quoin-contract-version": 1,
   "title": "Quoin v1 deployment inputs and component configuration",
-  "description": "OPS-CONFIG-001..004 的唯一机器权威。根 oneOf 同时校验 Helm/Compose 人类最少输入与四组件生成配置；不包含 Admin Web UI 设置、镜像版本、replica/HPA、内部监听地址或内部端口。",
+  "description": "OPS-CONFIG-001..004 的唯一机器权威。根 oneOf 校验四组件进程配置及 Compose 验证辅助输入；Kubernetes 直接使用普通 YAML；不包含 Admin Web UI 设置、镜像版本、replica/HPA、内部监听地址或内部端口。",
   "oneOf": [
-    { "$ref": "#/$defs/helmInstallInput" },
     { "$ref": "#/$defs/composeInstallInput" },
     { "$ref": "#/$defs/quoinConfig" },
     { "$ref": "#/$defs/plinthConfig" },
@@ -31,106 +30,7 @@
       "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+):[0-9]{1,5}$",
       "maxLength": 512
     },
-    "dnsLabel": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 63,
-      "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$"
-    },
     "hostPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
-    "kubernetesQuantity": {
-      "type": "string",
-      "pattern": "^[1-9][0-9]*(?:Mi|Gi|Ti)$"
-    },
-    "pvcInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["capacity", "accessMode"],
-      "properties": {
-        "capacity": { "$ref": "#/$defs/kubernetesQuantity" },
-        "accessMode": { "enum": ["ReadWriteOncePod", "ReadWriteOnce"] },
-        "storageClassName": { "$ref": "#/$defs/dnsLabel" }
-      }
-    },
-    "ingressInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "className": { "$ref": "#/$defs/dnsLabel" },
-        "host": { "type": "string", "format": "hostname" },
-        "tlsSecretName": { "$ref": "#/$defs/dnsLabel" }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "enabled": { "const": true } } },
-          "then": { "required": ["className", "host", "tlsSecretName"] },
-          "else": { "not": { "anyOf": [{ "required": ["className"] }, { "required": ["host"] }, { "required": ["tlsSecretName"] }] } }
-        }
-      ]
-    },
-    "resourceQuantityPair": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cpu": { "type": "string", "minLength": 1 },
-        "memory": { "type": "string", "minLength": 1 }
-      },
-      "minProperties": 1
-    },
-    "resourceRequirements": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "requests": { "$ref": "#/$defs/resourceQuantityPair" },
-        "limits": { "$ref": "#/$defs/resourceQuantityPair" }
-      },
-      "minProperties": 1
-    },
-    "componentResources": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "quoin": { "$ref": "#/$defs/resourceRequirements" },
-        "plinth": { "$ref": "#/$defs/resourceRequirements" },
-        "lintel": { "$ref": "#/$defs/resourceRequirements" },
-        "stele": { "$ref": "#/$defs/resourceRequirements" }
-      },
-      "minProperties": 1
-    },
-    "helmInstallInput": {
-      "$anchor": "helmInstallInput",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["document", "publicOrigin", "publicIngress", "steleIngress", "storage", "lintelBrowserSlots"],
-      "properties": {
-        "document": { "const": "helm-install" },
-        "publicOrigin": { "$ref": "#/$defs/publicOrigin" },
-        "publicIngress": { "$ref": "#/$defs/ingressInput" },
-        "steleIngress": { "$ref": "#/$defs/ingressInput" },
-        "storage": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["quoinData", "quoinBackup", "plinthState", "lintelState"],
-          "properties": {
-            "quoinData": { "$ref": "#/$defs/pvcInput" },
-            "quoinBackup": { "$ref": "#/$defs/pvcInput" },
-            "plinthState": { "$ref": "#/$defs/pvcInput" },
-            "lintelState": { "$ref": "#/$defs/pvcInput" }
-          }
-        },
-        "lintelBrowserSlots": { "type": "integer", "minimum": 1 },
-        "lintelShmSize": { "$ref": "#/$defs/kubernetesQuantity", "default": "1Gi" },
-        "opsServiceAnnotations": {
-          "type": "object",
-          "additionalProperties": { "type": "string" }
-        },
-        "monitorDiscovery": { "enum": ["none", "serviceMonitor", "podMonitor"], "default": "none" },
-        "prometheusRule": { "type": "boolean", "default": false },
-        "resources": { "$ref": "#/$defs/componentResources" }
-      }
-    },
     "composeInstallInput": {
       "$anchor": "composeInstallInput",
       "type": "object",
@@ -215,7 +115,7 @@
         "quoinRuntimeEndpoint": { "$ref": "#/$defs/quoinRuntimeEndpoint" },
         "quoinRuntimeCaFile": { "$ref": "#/$defs/absolutePath" },
         "browserSlots": { "type": "integer", "minimum": 1, "description": "固定浏览器容量；同一 boot 不得变化。" },
-        "minimumShmBytes": { "type": "integer", "minimum": 67108864, "description": "由 Helm lintelShmSize 或 Compose lintelShmSizeBytes 机械投影；Lintel 启动时据此验证 /dev/shm。" }
+        "minimumShmBytes": { "type": "integer", "minimum": 67108864, "description": "与 Kubernetes emptyDir 或 Compose shm_size 的配置容量一致；Lintel 启动时据此验证 /dev/shm。" }
       }
     },
     "steleConfig": {

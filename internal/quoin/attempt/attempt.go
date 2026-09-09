@@ -151,19 +151,23 @@ func (service *Service) Get(ctx context.Context, attemptID int64) (View, error) 
 // BindToStream moves one Queued attempt to Assigned against the live Plinth
 // binding (RUNTIME-TASK-001/002). The row-version increment and the WHERE
 // fence happen in one UPDATE statement (DATA-ATTEMPT-006).
-func (service *Service) BindToStream(ctx context.Context, attemptID int64, bootID string, epoch uint64, lease time.Duration) error {
-	return service.BindToSlot(ctx, attemptID, "plinth", bootID, epoch, lease)
+func (service *Service) BindToStream(ctx context.Context, attemptID int64, bootID string, epoch uint64, lease time.Duration, peerReleaseVersion ...string) error {
+	return service.BindToSlot(ctx, attemptID, "plinth", bootID, epoch, lease, peerReleaseVersion...)
 }
 
 // BindToSlot is the slot-parameterized dispatch binding: config verification
 // browser children bind to lintel (CFG-VERIFYRUN-002), every other caller
 // keeps the Plinth supervisor binding.
-func (service *Service) BindToSlot(ctx context.Context, attemptID int64, slot, bootID string, epoch uint64, lease time.Duration) error {
+func (service *Service) BindToSlot(ctx context.Context, attemptID int64, slot, bootID string, epoch uint64, lease time.Duration, peerReleaseVersion ...string) error {
+	version := releaseVersion
+	if len(peerReleaseVersion) > 0 && peerReleaseVersion[0] != "" {
+		version = peerReleaseVersion[0]
+	}
 	result, err := service.db.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Assigned', runtime_slot=?, boot_id=?, connection_epoch=?,
 		    lease_until=?, runtime_release_version=?, row_version=row_version+1
-		WHERE id=? AND state='Queued'`, slot, bootID, epoch, service.now().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID)
+		WHERE id=? AND state='Queued'`, slot, bootID, epoch, service.now().Add(lease).Format(time.RFC3339Nano), version, attemptID)
 	if err != nil {
 		return err
 	}

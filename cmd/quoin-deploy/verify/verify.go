@@ -1,4 +1,4 @@
-// Package verify runs `quoin-deploy compose|helm verify`: the
+// Package verify runs `quoin-deploy compose verify`: the
 // read-only, repeatable operational-surface verifier
 // (OPS-HELPER-004, OPS-VERIFY-003) and, with --suite, one Release
 // Qualification suite cell phase (T40). The suite mode executes the

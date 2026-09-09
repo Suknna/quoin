@@ -88,7 +88,7 @@ type Document struct {
 	GeneratedAt      string                `json:"generated_at"`
 	Images           map[string]ImageEntry `json:"images"`
 	Browser          BrowserEntry          `json:"browser"`
-	Helm             HelmEntry             `json:"helm"`
+	Kubernetes       ComposeEntry          `json:"kubernetes"`
 	Compose          ComposeEntry          `json:"compose"`
 	DeploymentHelper struct {
 		Artifacts map[string]BlobEntry `json:"artifacts"`
@@ -99,7 +99,7 @@ type Document struct {
 	SigstoreBundles struct {
 		ImageIndexes     map[string]string            `json:"image_indexes"`
 		ImageManifests   map[string]map[string]string `json:"image_manifests"`
-		HelmOCI          string                       `json:"helm_oci"`
+		Kubernetes       string                       `json:"kubernetes"`
 		ReleaseManifest  string                       `json:"release_manifest"`
 		Compose          string                       `json:"compose"`
 		DeploymentHelper map[string]string            `json:"deployment_helper"`
@@ -110,6 +110,7 @@ type Document struct {
 }
 
 type ImageEntry struct {
+	Version     string            `json:"version"`
 	Repository  string            `json:"repository"`
 	IndexDigest string            `json:"index_digest"`
 	Platforms   map[string]string `json:"platforms"`
@@ -124,13 +125,6 @@ type BrowserEntry struct {
 	PlaywrightVersion string                     `json:"playwright_version"`
 	ChromiumRevision  string                     `json:"chromium_revision"`
 	Artifacts         map[string]BrowserArtifact `json:"artifacts"`
-}
-
-type HelmEntry struct {
-	OCIRepository string `json:"oci_repository"`
-	OCIDigest     string `json:"oci_digest"`
-	TgzAssetName  string `json:"tgz_asset_name"`
-	TgzSHA256     string `json:"tgz_sha256"`
 }
 
 type ComposeEntry struct {
@@ -208,6 +202,7 @@ func Build(inputs Inputs) (*Document, error) {
 	for _, component := range subjects.Components {
 		image := inputs.Inventory.Images[component]
 		document.Images[component] = ImageEntry{
+			Version:     image.Version,
 			Repository:  image.Repository,
 			IndexDigest: image.IndexDigest,
 			Platforms:   image.Platforms,
@@ -218,12 +213,7 @@ func Build(inputs Inputs) (*Document, error) {
 		return nil, err
 	}
 	document.Browser = browser
-	document.Helm = HelmEntry{
-		OCIRepository: inputs.Inventory.Chart.OCIRepository,
-		OCIDigest:     inputs.Inventory.Chart.OCIDigest,
-		TgzAssetName:  inputs.Inventory.Chart.TgzAssetName,
-		TgzSHA256:     inputs.Inventory.Chart.TgzSHA256,
-	}
+	document.Kubernetes = ComposeEntry{AssetName: inputs.Inventory.Kubernetes.AssetName, BundleSHA256: inputs.Inventory.Kubernetes.SHA256}
 	document.Compose = ComposeEntry{AssetName: inputs.Inventory.Compose.AssetName, BundleSHA256: inputs.Inventory.Compose.SHA256}
 	for _, platform := range subjects.Platforms {
 		helper := inputs.Inventory.Helpers[platform]
@@ -232,7 +222,7 @@ func Build(inputs Inputs) (*Document, error) {
 	document.Offline.AssetName = "quoin-offline-" + inputs.Inventory.ReleaseVersion + ".tar.zst"
 	document.SigstoreBundles.ImageIndexes = bundleNames.ImageIndexes
 	document.SigstoreBundles.ImageManifests = bundleNames.ImageManifests
-	document.SigstoreBundles.HelmOCI = bundleNames.HelmOCI
+	document.SigstoreBundles.Kubernetes = bundleNames.Kubernetes
 	document.SigstoreBundles.ReleaseManifest = signing.ManifestBundleName()
 	document.SigstoreBundles.Compose = bundleNames.Compose
 	document.SigstoreBundles.DeploymentHelper = bundleNames.DeploymentHelper

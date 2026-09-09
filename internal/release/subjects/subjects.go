@@ -1,6 +1,6 @@
 // Package subjects owns the immutable subject inventory of one source/tag
-// build: the four multi-platform OCI image digests, the Chart, the Compose
-// bundle and the two static deployment helpers, each with the deterministic
+// build: five multi-platform application image digests, the Kubernetes and
+// Compose bundles, and the two static deployment helpers, each with the deterministic
 // asset names and digests the final Release manifest will later reference
 // (OPS-RELEASE-001/002/003). The inventory is a build fact document, never
 // the evidence-referencing Release manifest itself.
@@ -19,12 +19,16 @@ const Schema = "quoin-release-subjects-v1"
 // Platforms is the closed platform set.
 var Platforms = []string{"linux/amd64", "linux/arm64"}
 
-// Components is the closed component set.
-var Components = []string{"lintel", "plinth", "quoin", "stele"}
+// Components is the closed set of independently published application images.
+// Caddy is a pinned upstream image, so it deliberately is not a build subject.
+var Components = []string{"frontend", "lintel", "plinth", "quoin", "stele"}
 
 // ImageSubject records one component's measured index and per-platform
 // manifest digests.
 type ImageSubject struct {
+	// Version is the component's independently releasable version. It is
+	// provenance only; runtime admission compares the Proto fingerprint.
+	Version     string            `json:"version"`
 	Repository  string            `json:"repository"`
 	IndexDigest string            `json:"index_digest"`
 	Platforms   map[string]string `json:"platforms"`
@@ -51,19 +55,12 @@ type Inventory struct {
 	SourceCommit   string                  `json:"source_commit"`
 	GeneratedAt    string                  `json:"generated_at"`
 	Images         map[string]ImageSubject `json:"images"`
-	Chart          ChartSubject            `json:"chart"`
-	Compose        BlobSubject             `json:"compose"`
-	Helpers        map[string]BlobSubject  `json:"deployment_helper"`
-	Bundles        map[string]string       `json:"sigstore_bundles"`
-	Browser        BrowserSubjects         `json:"browser"`
-}
-
-// ChartSubject records the packaged Helm chart and its OCI push result.
-type ChartSubject struct {
-	OCIRepository string `json:"oci_repository"`
-	OCIDigest     string `json:"oci_digest"`
-	TgzAssetName  string `json:"tgz_asset_name"`
-	TgzSHA256     string `json:"tgz_sha256"`
+	// Kubernetes is the digest-checked native deployment bundle.
+	Kubernetes BlobSubject            `json:"kubernetes"`
+	Compose    BlobSubject            `json:"compose"`
+	Helpers    map[string]BlobSubject `json:"deployment_helper"`
+	Bundles    map[string]string      `json:"sigstore_bundles"`
+	Browser    BrowserSubjects        `json:"browser"`
 }
 
 // BrowserSubjects records the measured locked browser artifacts baked into
@@ -74,38 +71,32 @@ type BrowserSubjects struct {
 	Artifacts         map[string]BlobSubject `json:"artifacts"`
 }
 
-// ChartVersion derives the Helm chart version from the release version: the
-// full SemVer after removing the single leading "v" (OPS-RELEASE-001).
-func ChartVersion(releaseVersion string) (string, error) {
-	if !strings.HasPrefix(releaseVersion, "v") {
-		return "", fmt.Errorf("release version %q must start with v", releaseVersion)
+// ValidateReleaseVersion accepts the v-prefixed SemVer used to name a signed
+// release closure. Component versions use the same syntax independently.
+func ValidateReleaseVersion(releaseVersion string) error {
+	if !strings.HasPrefix(releaseVersion, "v") || !semVerPattern.MatchString(strings.TrimPrefix(releaseVersion, "v")) {
+		return fmt.Errorf("release version %q is not v-prefixed SemVer", releaseVersion)
 	}
-	chartVersion := releaseVersion[1:]
-	if !semVerPattern.MatchString(chartVersion) {
-		return "", fmt.Errorf("release version %q is not v-prefixed SemVer", releaseVersion)
-	}
-	return chartVersion, nil
+	return nil
 }
 
 var semVerPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 
 // AssetNames derives the deterministic asset names of one release version.
 type AssetNames struct {
-	ChartTgz string
-	Compose  string
-	Helper   map[string]string
+	Kubernetes string
+	Compose    string
+	Helper     map[string]string
 }
 
-// Names derives all non-image asset names. Compose keeps the full
-// "v<version>"; the chart tgz strips the single leading "v".
+// Names derives all non-image asset names from one signed release closure.
 func Names(releaseVersion string) (AssetNames, error) {
-	chartVersion, err := ChartVersion(releaseVersion)
-	if err != nil {
+	if err := ValidateReleaseVersion(releaseVersion); err != nil {
 		return AssetNames{}, err
 	}
 	return AssetNames{
-		ChartTgz: "quoin-" + chartVersion + ".tgz",
-		Compose:  "quoin-compose-" + releaseVersion + ".tar.gz",
+		Kubernetes: "quoin-kubernetes-" + releaseVersion + ".tar.gz",
+		Compose:    "quoin-compose-" + releaseVersion + ".tar.gz",
 		Helper: map[string]string{
 			"linux/amd64": "quoin-deploy-linux-amd64",
 			"linux/arm64": "quoin-deploy-linux-arm64",
@@ -119,7 +110,7 @@ func Names(releaseVersion string) (AssetNames, error) {
 type BundleNames struct {
 	ImageIndexes     map[string]string
 	ImageManifests   map[string]map[string]string
-	HelmOCI          string
+	Kubernetes       string
 	Compose          string
 	DeploymentHelper map[string]string
 }
@@ -127,7 +118,7 @@ type BundleNames struct {
 func NamesForBundles() BundleNames {
 	indexes := map[string]string{}
 	manifests := map[string]map[string]string{}
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range Components {
 		indexes[component] = component + "-index.sigstore.json"
 		perPlatform := map[string]string{}
 		for _, platform := range Platforms {
@@ -138,7 +129,7 @@ func NamesForBundles() BundleNames {
 	return BundleNames{
 		ImageIndexes:   indexes,
 		ImageManifests: manifests,
-		HelmOCI:        "quoin-chart-oci.sigstore.json",
+		Kubernetes:     "quoin-kubernetes-bundle.sigstore.json",
 		Compose:        "quoin-compose-bundle.sigstore.json",
 		DeploymentHelper: map[string]string{
 			"linux/amd64": "quoin-deploy-linux-amd64.sigstore.json",
@@ -174,6 +165,9 @@ func (inventory *Inventory) Validate() error {
 		if !ok {
 			return fmt.Errorf("image subject %s missing", component)
 		}
+		if !semVerPattern.MatchString(strings.TrimPrefix(image.Version, "v")) || !strings.HasPrefix(image.Version, "v") {
+			return fmt.Errorf("%s version %q is not v-prefixed SemVer", component, image.Version)
+		}
 		if !repositoryPattern.MatchString(image.Repository) || strings.Contains(image.Repository, ":") && !regexpHostPort(image.Repository) {
 			return fmt.Errorf("%s repository %q is not a bare repository", component, image.Repository)
 		}
@@ -204,17 +198,11 @@ func (inventory *Inventory) Validate() error {
 			}
 		}
 	}
-	if inventory.Chart.TgzAssetName != names.ChartTgz {
-		return fmt.Errorf("chart asset %q want %q", inventory.Chart.TgzAssetName, names.ChartTgz)
+	if inventory.Kubernetes.AssetName != names.Kubernetes {
+		return fmt.Errorf("kubernetes asset %q want %q", inventory.Kubernetes.AssetName, names.Kubernetes)
 	}
-	if err := checkBareSHA256(inventory.Chart.TgzSHA256); err != nil {
-		return fmt.Errorf("chart tgz: %w", err)
-	}
-	if err := checkOCIDigest(inventory.Chart.OCIDigest); err != nil {
-		return fmt.Errorf("chart oci: %w", err)
-	}
-	if !repositoryPattern.MatchString(inventory.Chart.OCIRepository) {
-		return fmt.Errorf("chart oci repository %q", inventory.Chart.OCIRepository)
+	if err := checkBareSHA256(inventory.Kubernetes.SHA256); err != nil {
+		return fmt.Errorf("kubernetes bundle: %w", err)
 	}
 	if inventory.Compose.AssetName != names.Compose {
 		return fmt.Errorf("compose asset %q want %q", inventory.Compose.AssetName, names.Compose)
@@ -236,7 +224,7 @@ func (inventory *Inventory) Validate() error {
 	}
 	bundles := NamesForBundles()
 	expected := map[string]string{
-		"helm_oci": bundles.HelmOCI, "compose": bundles.Compose,
+		"kubernetes": bundles.Kubernetes, "compose": bundles.Compose,
 		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
 		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
 	}

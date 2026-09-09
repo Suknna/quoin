@@ -48,7 +48,7 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 			return err
 		}
 		if attemptView.State == "Queued" {
-			if err := service.attemptsService().BindToSlot(ctx, attemptID, qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+			if err := service.attemptsService().BindToSlot(ctx, attemptID, qruntime.SlotLintel, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 				return err
 			}
 		} else if attemptView.State != "Assigned" || attemptView.RuntimeSlot == nil || *attemptView.RuntimeSlot != qruntime.SlotLintel || attemptView.BootID == nil || *attemptView.BootID != view.BootID {

@@ -7,8 +7,12 @@
 !pnpm-workspace.yaml
 !web
 !web/package.json
+!web/**
+web/node_modules
+web/dist
 !cmd
 !cmd/**
 !internal
 !internal/**
 !build/package/Dockerfile
+!build/package/web-caddy.yaml

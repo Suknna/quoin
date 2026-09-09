@@ -108,7 +108,7 @@ func verifyMode(arguments []string) error {
 			}
 		}
 	}
-	if err := verifyBlob("helm_oci", inventory.Bundles["helm_oci"], inventory.Chart.OCIDigest); err != nil {
+	if err := verifyBlob("kubernetes", inventory.Bundles["kubernetes"], "sha256:"+inventory.Kubernetes.SHA256); err != nil {
 		return err
 	}
 	if err := verifyBlob("compose", inventory.Bundles["compose"], "sha256:"+inventory.Compose.SHA256); err != nil {

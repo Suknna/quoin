@@ -24,7 +24,7 @@ import (
 // are computed by the helper from its own backend observations; the database
 // only ever sees the digests, never report bodies or secrets.
 type LintelRecoveryFence struct {
-	Backend           string // compose | helm
+	Backend           string // compose | kubernetes
 	Disposition       string // exclusively_reattached | retired
 	DispositionDigest string
 	FenceReportDigest string
@@ -64,8 +64,8 @@ func validDigest(value string) bool {
 }
 
 func (fence LintelRecoveryFence) validate() error {
-	if fence.Backend != "compose" && fence.Backend != "helm" {
-		return fmt.Errorf("%w: backend must be compose or helm", ErrLintelRecoveryFence)
+	if fence.Backend != "compose" && fence.Backend != "kubernetes" {
+		return fmt.Errorf("%w: backend must be compose or kubernetes", ErrLintelRecoveryFence)
 	}
 	if fence.Disposition != "exclusively_reattached" && fence.Disposition != "retired" {
 		return fmt.Errorf("%w: storage disposition must be exclusively_reattached or retired", ErrLintelRecoveryFence)

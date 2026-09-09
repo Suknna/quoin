@@ -1,0 +1,5 @@
+component: plinth
+stateDirectory: /var/lib/plinth
+workspaceDirectory: /var/lib/plinth/workspaces
+quoinRuntimeEndpoint: https://quoin:8443
+quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem

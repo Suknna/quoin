@@ -148,21 +148,21 @@ func fixtureContents(t *testing.T, root string) (offline.Contents, offline.Expec
 		return hex.EncodeToString(sum[:])
 	}
 	contents := offline.Contents{
-		Manifest:     manifest,
-		ChartName:    "quoin-0.1.0-dev.tgz",
-		Chart:        chart,
-		ComposeName:  "quoin-compose-v0.1.0-dev.tar.gz",
-		Compose:      compose,
-		Helpers:      map[string][]byte{"quoin-deploy-linux-amd64": helperAmd, "quoin-deploy-linux-arm64": helperArm},
-		Verification: map[string][]byte{"subjects-inventory.json": []byte(`{"schema":"quoin-release-subjects-v1"}`)},
-		ImageLayouts: layouts,
+		Manifest:       manifest,
+		KubernetesName: "quoin-0.1.0-dev.tgz",
+		Kubernetes:     chart,
+		ComposeName:    "quoin-compose-v0.1.0-dev.tar.gz",
+		Compose:        compose,
+		Helpers:        map[string][]byte{"quoin-deploy-linux-amd64": helperAmd, "quoin-deploy-linux-arm64": helperArm},
+		Verification:   map[string][]byte{"subjects-inventory.json": []byte(`{"schema":"quoin-release-subjects-v1"}`)},
+		ImageLayouts:   layouts,
 	}
 	expected := offline.Expected{
-		Manifest:      manifest,
-		ChartName:     contents.ChartName,
-		ChartSHA256:   sha(chart),
-		ComposeName:   contents.ComposeName,
-		ComposeSHA256: sha(compose),
+		Manifest:         manifest,
+		KubernetesName:   contents.KubernetesName,
+		KubernetesSHA256: sha(chart),
+		ComposeName:      contents.ComposeName,
+		ComposeSHA256:    sha(compose),
 		HelperNames: map[string]string{
 			"quoin-deploy-linux-amd64": sha(helperAmd),
 			"quoin-deploy-linux-arm64": sha(helperArm),

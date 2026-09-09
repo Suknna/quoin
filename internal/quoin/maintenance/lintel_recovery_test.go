@@ -59,7 +59,7 @@ func t35Begin(t *testing.T, fixture *t35Fixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	longTerm, _, err := fixture.service.Register(context.Background(), "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", t35Release, t35Release)
+	longTerm, _, err := fixture.service.Register(context.Background(), "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func t35Begin(t *testing.T, fixture *t35Fixture) {
 
 func t35FirstHello(t *testing.T, fixture *t35Fixture) {
 	t.Helper()
-	decision, err := fixture.service.Adjudicate(context.Background(), fixture.replacementLong, "lintel", "boot-new", 1, t35Release, t35Release, catalog.Digest(), catalog.Digest())
+	decision, err := fixture.service.Adjudicate(context.Background(), fixture.replacementLong, "lintel", "boot-new", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest())
 	if err != nil || !decision.Accepted || !decision.MarkedFirstAuthenticated {
 		t.Fatalf("replacement hello: decision=%+v err=%v", decision, err)
 	}
@@ -114,11 +114,11 @@ func newT35Fixture(t *testing.T, disposition string) *t35Fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldLong, _, err := fixture.service.Register(ctx, "lintel", raw, generation, "boot-old", t35Release, t35Release)
+	oldLong, _, err := fixture.service.Register(ctx, "lintel", raw, generation, "boot-old", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := fixture.service.Adjudicate(ctx, oldLong, "lintel", "boot-old", 1, t35Release, t35Release, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
+	if decision, err := fixture.service.Adjudicate(ctx, oldLong, "lintel", "boot-old", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
 		t.Fatalf("old hello: %+v %v", decision, err)
 	}
 	return fixture
@@ -220,11 +220,11 @@ func TestTicket35FinalizeSequentialRecoveriesOnSameDatabase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		first, _, err := service.Register(ctx, "lintel", raw, generation, "boot-seed", t35Release, t35Release)
+		first, _, err := service.Register(ctx, "lintel", raw, generation, "boot-seed", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decision, err := service.Adjudicate(ctx, first, "lintel", "boot-seed", 1, t35Release, t35Release, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
+		if decision, err := service.Adjudicate(ctx, first, "lintel", "boot-seed", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
 			t.Fatalf("seed hello: %+v %v", decision, err)
 		}
 		if err := database.Close(); err != nil {
@@ -246,11 +246,11 @@ func TestTicket35FinalizeSequentialRecoveriesOnSameDatabase(t *testing.T) {
 		if !begin.NeedsRegistration {
 			t.Fatalf("cycle %d expected a fresh registration", cycle+1)
 		}
-		longTerm, _, err := service.Register(context.Background(), "lintel", begin.RegistrationToken, begin.ReplacementGeneration, fmt.Sprintf("boot-%d", cycle), t35Release, t35Release)
+		longTerm, _, err := service.Register(context.Background(), "lintel", begin.RegistrationToken, begin.ReplacementGeneration, fmt.Sprintf("boot-%d", cycle), contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 		if err != nil {
 			t.Fatalf("cycle %d register: %v", cycle+1, err)
 		}
-		if decision, err := service.Adjudicate(context.Background(), longTerm, "lintel", fmt.Sprintf("boot-%d", cycle), 1, t35Release, t35Release, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted || !decision.MarkedFirstAuthenticated {
+		if decision, err := service.Adjudicate(context.Background(), longTerm, "lintel", fmt.Sprintf("boot-%d", cycle), 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted || !decision.MarkedFirstAuthenticated {
 			t.Fatalf("cycle %d hello: %+v %v", cycle+1, decision, err)
 		}
 		if err := database.Close(); err != nil {

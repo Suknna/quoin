@@ -2,11 +2,11 @@ package main
 
 import (
 	"crypto/sha256"
-	"strings"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Suknna/quoin/internal/release/manifest"
 	"github.com/Suknna/quoin/internal/release/offline"
@@ -154,7 +154,7 @@ func verifyMode(arguments []string) error {
 	// The staged assets equal their pinned digests.
 	names, _ := subjects.Names(document.ReleaseVersion)
 	for asset, digest := range map[string]string{
-		"assets/" + names.ChartTgz:                                   document.Helm.TgzSHA256,
+		"assets/" + names.Kubernetes:                                 document.Kubernetes.BundleSHA256,
 		"assets/" + names.Compose:                                    document.Compose.BundleSHA256,
 		document.DeploymentHelper.Artifacts["linux/amd64"].AssetName: document.DeploymentHelper.Artifacts["linux/amd64"].SHA256,
 		document.DeploymentHelper.Artifacts["linux/arm64"].AssetName: document.DeploymentHelper.Artifacts["linux/arm64"].SHA256,
@@ -191,11 +191,11 @@ func verifyMode(arguments []string) error {
 	// digests, verification materials, content-addressed layouts and no
 	// signature sidecar inside (no hash self-reference).
 	archiveReport, err := offline.Verify(archivePath, offline.Expected{
-		Manifest:      manifestBytes,
-		ChartName:     names.ChartTgz,
-		ChartSHA256:   document.Helm.TgzSHA256,
-		ComposeName:   names.Compose,
-		ComposeSHA256: document.Compose.BundleSHA256,
+		Manifest:         manifestBytes,
+		KubernetesName:   names.Kubernetes,
+		KubernetesSHA256: document.Kubernetes.BundleSHA256,
+		ComposeName:      names.Compose,
+		ComposeSHA256:    document.Compose.BundleSHA256,
 		HelperNames: map[string]string{
 			document.DeploymentHelper.Artifacts["linux/amd64"].AssetName: document.DeploymentHelper.Artifacts["linux/amd64"].SHA256,
 			document.DeploymentHelper.Artifacts["linux/arm64"].AssetName: document.DeploymentHelper.Artifacts["linux/arm64"].SHA256,

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
@@ -171,11 +172,11 @@ func (channel *Channel) RunRegister(ctx context.Context, stdin *os.File, stdout 
 	defer connection.Close()
 	client := runtimev1.NewRuntimeControlClient(connection)
 	response, err := client.Register(metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+parsed.Token)), &runtimev1.RegisterRuntimeRequest{
-		Slot:           runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
-		OneTimeToken:   parsed.Token,
-		Generation:     uint64(parsed.Generation),
-		BootId:         channel.bootID,
-		ReleaseVersion: buildinfo.Release,
+		Slot:                runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
+		OneTimeToken:        parsed.Token,
+		Generation:          uint64(parsed.Generation),
+		BootId:              channel.bootID,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	})
 	if err != nil {
 		return fmt.Errorf("注册失败: %w", err)
@@ -257,10 +258,11 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	channel.cancelled = make(map[int64]struct{})
 	channel.cancelMu.Unlock()
 	hello := &runtimev1.Hello{
-		Slot:            runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
-		BootId:          channel.bootID,
-		ConnectionEpoch: channel.epoch,
-		ReleaseVersion:  buildinfo.Release,
+		Slot:                runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
+		BootId:              channel.bootID,
+		ConnectionEpoch:     channel.epoch,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+		ReleaseVersion:      buildinfo.Release,
 	}
 	channel.outboundMu.Lock()
 	channel.sendStream = stream

@@ -154,13 +154,13 @@ func tailOf(text string, lines int) string {
 // requireNativeCell42 proves the executing environment is the native
 // Linux closure cell: docker reachable, the emulation handler present
 // (arm64 builds are emulated build evidence), and the OCI/archive
-// toolchain (skopeo, zstd, helm) available.
+// toolchain (skopeo and zstd) available.
 func requireNativeCell42(t *testing.T) {
 	t.Helper()
 	if _, err := os.Stat("/proc/self/ns"); err != nil {
 		t.Skipf("closure runs inside the native Linux cell (Linux required): %v", err)
 	}
-	for _, tool := range []string{"docker", "go", "git", "bash", "helm", "skopeo", "zstd"} {
+	for _, tool := range []string{"docker", "go", "git", "bash", "skopeo", "zstd"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s unavailable in the closure cell: %v", tool, err)
 		}

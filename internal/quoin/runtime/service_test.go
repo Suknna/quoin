@@ -88,11 +88,11 @@ func TestPrepareRevealRegisterSingleConsumption(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Register consumes the token once; replay is rejected.
-	longTerm, gen, err := service.Register(ctx, "plinth", raw, generation, "boot-1", release, release)
+	longTerm, gen, err := service.Register(ctx, "plinth", raw, generation, "boot-1", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil || longTerm == "" || gen != 1 {
 		t.Fatalf("register: %v %q %d", err, longTerm, gen)
 	}
-	if _, _, err := service.Register(ctx, "plinth", raw, generation, "boot-2", release, release); err == nil {
+	if _, _, err := service.Register(ctx, "plinth", raw, generation, "boot-2", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint); err == nil {
 		t.Fatal("token replay must fail")
 	}
 	view, err = service.View(ctx, "plinth")
@@ -110,31 +110,31 @@ func TestHandshakeRejectionMatrix(t *testing.T) {
 	var session [32]byte
 	digest := catalog.Digest()
 	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
-	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", release, release)
+	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name       string
-		bearer     string
-		slot       string
-		release    string
-		catalog    string
-		wantReason string
+		name        string
+		bearer      string
+		slot        string
+		fingerprint string
+		catalog     string
+		wantReason  string
 	}{
-		{"valid lintel handshake", longTerm, "lintel", release, digest, ""},
-		{"unknown bearer", "AAAA", "lintel", release, digest, "TOKEN_INVALID"},
-		{"version mismatch", longTerm, "lintel", "v0.0.1-other", digest, "VERSION_MISMATCH"},
-		{"catalog mismatch", longTerm, "lintel", release, "deadbeef", "CATALOG_MISMATCH"},
+		{"valid lintel handshake", longTerm, "lintel", contract.ProtoAuthorityFingerprint, digest, ""},
+		{"unknown bearer", "AAAA", "lintel", contract.ProtoAuthorityFingerprint, digest, "TOKEN_INVALID"},
+		{"contract mismatch", longTerm, "lintel", "not-a-valid-fingerprint", digest, "CONTRACT_MISMATCH"},
+		{"catalog mismatch", longTerm, "lintel", contract.ProtoAuthorityFingerprint, "deadbeef", "CATALOG_MISMATCH"},
 		// A plinth bearer against the lintel slot points at a slot that is not
 		// registered for this token: slot-state rejection wins.
-		{"cross-slot token", longTerm, "plinth", release, "", "SLOT_REVOKED"},
+		{"cross-slot token", longTerm, "plinth", contract.ProtoAuthorityFingerprint, "", "SLOT_REVOKED"},
 	}
 	// Each case uses its own boot so the epoch monotonicity bookkeeping
 	// from an accepted case cannot stale-out a later rejected case.
 	for index, testCase := range cases {
 		boot := "boot-case-" + strconv.Itoa(index)
-		decision, err := service.Adjudicate(ctx, testCase.bearer, testCase.slot, boot, 7, testCase.release, release, digest, testCase.catalog)
+		decision, err := service.Adjudicate(ctx, testCase.bearer, testCase.slot, boot, 7, testCase.fingerprint, contract.ProtoAuthorityFingerprint, digest, testCase.catalog)
 		if err != nil {
 			t.Fatalf("%s: %v", testCase.name, err)
 		}
@@ -150,15 +150,15 @@ func TestHandshakeRejectionMatrix(t *testing.T) {
 	// Same-boot epoch monotonicity (RUNTIME-CTRL-004): replaying the
 	// accepted epoch is stale; a higher epoch on the same boot is accepted
 	// (the accepted matrix case attached boot-case-0 at epoch 7).
-	if decision, _ := service.Adjudicate(ctx, longTerm, "lintel", "boot-case-0", 7, release, release, digest, digest); decision.Accepted {
+	if decision, _ := service.Adjudicate(ctx, longTerm, "lintel", "boot-case-0", 7, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, digest, digest); decision.Accepted {
 		t.Fatal("same-epoch reconnect must be EPOCH_STALE")
 	}
-	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-case-0", 8, release, release, digest, digest)
+	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-case-0", 8, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, digest, digest)
 	if err != nil || !decision.Accepted {
 		t.Fatalf("higher epoch must be accepted: err=%v accepted=%v reason=%s", err, decision.Accepted, decision.Reason)
 	}
 	// A NEW boot may restart at epoch 1.
-	newBoot, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-y", 1, release, release, digest, digest)
+	newBoot, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-y", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, digest, digest)
 	if err != nil || !newBoot.Accepted {
 		t.Fatalf("new boot epoch 1 must be accepted: err=%v accepted=%v", err, newBoot.Accepted)
 	}
@@ -182,14 +182,14 @@ func TestCatalogDigestAgreement(t *testing.T) {
 	var session [32]byte
 	digest := catalog.Digest()
 	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
-	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", release, release)
+	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-c", 1, release, release, digest, catalog.Digest()); err != nil || !decision.Accepted {
+	if decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-c", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, digest, catalog.Digest()); err != nil || !decision.Accepted {
 		t.Fatalf("lintel-embedded digest must be accepted: err=%v accepted=%v reason=%s", err, decision.Accepted, decision.Reason)
 	}
-	if decision, _ := service.Adjudicate(ctx, longTerm, "lintel", "boot-c2", 1, release, release, digest, digest+"00"); decision.Accepted {
+	if decision, _ := service.Adjudicate(ctx, longTerm, "lintel", "boot-c2", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, digest, digest+"00"); decision.Accepted {
 		t.Fatal("any other digest must be CATALOG_MISMATCH")
 	}
 }
@@ -199,12 +199,12 @@ func TestReplacementRetiresAndFences(t *testing.T) {
 	ctx := context.Background()
 	var session [32]byte
 	raw, generation := prepareAndReveal(t, service, "plinth", 1, session)
-	longTerm, _, err := service.Register(ctx, "plinth", raw, generation, "boot-1", release, release)
+	longTerm, _, err := service.Register(ctx, "plinth", raw, generation, "boot-1", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The accepted bearer authenticates before replacement.
-	if decision, err := service.Adjudicate(ctx, longTerm, "plinth", "boot-1", 1, release, release, "", ""); err != nil || !decision.Accepted {
+	if decision, err := service.Adjudicate(ctx, longTerm, "plinth", "boot-1", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, "", ""); err != nil || !decision.Accepted {
 		t.Fatalf("pre-replacement handshake must be accepted: err=%v accepted=%v reason=%s", err, decision.Accepted, decision.Reason)
 	}
 	view, err := service.View(ctx, "plinth")
@@ -222,11 +222,11 @@ func TestReplacementRetiresAndFences(t *testing.T) {
 	}
 	// The revoked slot rejects the old long-term bearer (SLOT_REVOKED), so
 	// the replaced runtime can never silently return.
-	if decision, _ := service.Adjudicate(ctx, longTerm, "plinth", "boot-1", 2, release, release, "", ""); decision.Accepted || decision.Reason != "SLOT_REVOKED" {
+	if decision, _ := service.Adjudicate(ctx, longTerm, "plinth", "boot-1", 2, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, "", ""); decision.Accepted || decision.Reason != "SLOT_REVOKED" {
 		t.Fatalf("replaced bearer must be rejected with SLOT_REVOKED, got accepted=%v reason=%s", decision.Accepted, decision.Reason)
 	}
 	// The consumed one-time token can never mint a second credential.
-	if _, _, err := service.Register(ctx, "plinth", raw, generation, "boot-1", release, release); err == nil {
+	if _, _, err := service.Register(ctx, "plinth", raw, generation, "boot-1", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint); err == nil {
 		t.Fatal("consumed token must not register twice")
 	}
 	// A fresh generation re-registers cleanly.
@@ -237,7 +237,7 @@ func TestReplacementRetiresAndFences(t *testing.T) {
 	if freshGeneration != 2 {
 		t.Fatalf("replacement generation must advance to 2, got %d", freshGeneration)
 	}
-	if _, _, err := service.Register(ctx, "plinth", fresh, freshGeneration, "boot-2", release, release); err != nil {
+	if _, _, err := service.Register(ctx, "plinth", fresh, freshGeneration, "boot-2", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint); err != nil {
 		t.Fatalf("re-register after replacement: %v", err)
 	}
 }
@@ -254,7 +254,7 @@ func TestConcurrentRegisterSingleWinner(t *testing.T) {
 	for i := 0; i < attempts; i++ {
 		go func() {
 			start.Wait()
-			_, _, err := service.Register(ctx, "plinth", raw, generation, "boot-race", release, release)
+			_, _, err := service.Register(ctx, "plinth", raw, generation, "boot-race", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 			results <- err
 		}()
 	}
@@ -267,6 +267,19 @@ func TestConcurrentRegisterSingleWinner(t *testing.T) {
 	}
 	if winners != 1 {
 		t.Fatalf("exactly one concurrent register must win, got %d", winners)
+	}
+}
+
+func TestAcceptedPeerReleaseIsRetainedForDispatchProvenance(t *testing.T) {
+	service := newService(t)
+	const peerRelease = "plinth-v9.4.1"
+	service.AttachStreamWithSenderVersion("plinth", "boot-peer", 1, peerRelease, func(any) error { return nil })
+	view, err := service.View(context.Background(), "plinth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ReleaseVersion != peerRelease {
+		t.Fatalf("peer release provenance=%q, want %q", view.ReleaseVersion, peerRelease)
 	}
 }
 

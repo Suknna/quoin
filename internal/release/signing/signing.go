@@ -75,7 +75,7 @@ func ClosureNames(releaseVersion string) (map[string]string, error) {
 func closureSubjectNames() map[string]string {
 	bundles := subjects.NamesForBundles()
 	names := map[string]string{
-		"helm_oci":                      bundles.HelmOCI,
+		"kubernetes":                    bundles.Kubernetes,
 		"compose":                       bundles.Compose,
 		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
 		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
@@ -255,8 +255,8 @@ func (closure Closure) subjectDigestOf(asset string) (string, error) {
 			return "", fmt.Errorf("asset %s platform %s missing", asset, platform)
 		}
 		return digest, nil
-	case asset == "helm_oci":
-		return closure.Inventory.Chart.OCIDigest, nil
+	case asset == "kubernetes":
+		return "sha256:" + closure.Inventory.Kubernetes.SHA256, nil
 	case asset == "compose":
 		return "sha256:" + closure.Inventory.Compose.SHA256, nil
 	case strings.HasPrefix(asset, "deployment_helper/"):

@@ -52,7 +52,7 @@ func TestTicket36(t *testing.T) {
 
 	for _, backend := range []struct{ name, pkg, test string }{
 		{"compose", "./test/release/compose", "^TestUpgradeComposeTicket36$"},
-		{"helm", "./test/release/helm", "^TestUpgradeHelmTicket36$"},
+		{"kubernetes", "./test/release/kubernetes", "^TestTicket43$"},
 	} {
 		cmd := exec.Command("go", "test", "-timeout=60m", "-v", backend.pkg, "-run", backend.test, "-count=1")
 		cmd.Dir = repoRoot(t)
@@ -83,23 +83,23 @@ func TestTicket36(t *testing.T) {
 	writeJSON(t, filepath.Join(root, "runtime-evidence.json"), map[string]any{
 		"gitCommit": commit, "dirtyStateDigest": digestOf(status), "startedAt": startedAt.Format(time.RFC3339Nano), "finishedAt": time.Now().UTC().Format(time.RFC3339Nano), "status": "passed", "commands": commands, "artifacts": artifacts,
 		"assertions": map[string]string{
-			"activeTaskDrain":     "each backend drained a real queued connection probe attempt through the frozen upgrade-drain cancel after prepareUpgrade",
-			"upgradePrepared":     "quoin_upgrade_prepared flipped to 1 only after the checklist was fully Safe and the pre-upgrade backup verified",
-			"unsupportedVersion":  "the real migrate binary rejected a synthetic non-release schema with the stable unsupported_schema_version code (mechanism evidence only, no N-1 migration implied)",
+			"activeTaskDrain":        "each backend drained a real queued connection probe attempt through the frozen upgrade-drain cancel after prepareUpgrade",
+			"upgradePrepared":        "quoin_upgrade_prepared flipped to 1 only after the checklist was fully Safe and the pre-upgrade backup verified",
+			"unsupportedVersion":     "the real migrate binary rejected a synthetic non-release schema with the stable unsupported_schema_version code (mechanism evidence only, no N-1 migration implied)",
 			"noReadyDuringMigration": "the real serve binary fails the exclusive data lock before binding listeners while the migration window holds it, then reaches normal readiness after release",
-			"preWriteRollback":    "image-only rollback before the migration commit restarted the old Release without any restore (mechanism evidence only)",
-			"reprepare":           "a second prepareUpgrade after the abort froze a new revision and reached prepared again",
-			"helperUpgrade":       "quoin-deploy compose|helm upgrade observed the prepared gauge, stopped the stack, offline-verified, migrated and restarted in order",
+			"preWriteRollback":       "image-only rollback before the migration commit restarted the old Release without any restore (mechanism evidence only)",
+			"reprepare":              "a second prepareUpgrade after the abort froze a new revision and reached prepared again",
+			"helperUpgrade":          "quoin-deploy compose|kubernetes upgrade observed the prepared gauge, stopped the stack, offline-verified, migrated and restarted in order",
 		},
 		"proofPoints": map[string]string{
-			"gates":   "upgrade/gates.log records the real-binary schema-gate and lock-exclusion proofs",
-			"compose": "compose/runtime-evidence.json records the real Compose coordinated upgrade",
-			"helm":    "helm/runtime-evidence.json records the equivalent real Kubernetes path",
+			"gates":      "upgrade/gates.log records the real-binary schema-gate and lock-exclusion proofs",
+			"compose":    "compose/runtime-evidence.json records the real Compose coordinated upgrade",
+			"kubernetes": "kubernetes/runtime-evidence.json records the real native Kubernetes lifecycle path",
 		},
 	})
 	writeJSON(t, filepath.Join(root, "cleanup.json"), map[string]any{
-		"backendCleanup": []string{"compose/cleanup.json", "helm/cleanup.json"},
-		"ownedResources": []string{"Compose project/network/volumes/containers", "Helm release/namespace/PVCs/pods", "local registries", "release images and OCI chart", "temporary credentials", "gate fixtures under test temporary directories"},
+		"backendCleanup": []string{"compose/cleanup.json", "kubernetes/cleanup.json"},
+		"ownedResources": []string{"Compose project/network/volumes/containers", "Kubernetes namespace/PVCs/pods", "local registries", "release images and OCI chart", "temporary credentials", "gate fixtures under test temporary directories"},
 		"result":         "each backend test proves its owned resources were removed before this coordinator succeeds",
 	})
 }

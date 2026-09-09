@@ -115,7 +115,7 @@
 - **HTTP-BACKUP-001 —** `triggerBackup` **MUST** 在命令事务内创建唯一 `status=queued` 的 Backup Run 后返回 202 与固定形状 `BackupSummary`；相同 `clientCommandId` 重试返回同一 Run，已有另一 active Run 返回 409。202 **MUST NOT** 表示快照、Artifact 复制或 manifest 已完成。（来源：Issue #17 Q17.21、DATA-BACKUP-007、OPS-BACKUP-001）
 - **HTTP-BACKUP-002 —** `listBackups` 与 `getBackup` **MUST** 投影 `queued|running|succeeded|failed`、当前/失败阶段、触发类型/执行模式与 nullable 计划边界、rowVersion、四个生命周期时间、固定 nullable 结果字段及必有 `sizeBytes`；它是成功发布时持久的 archive-set 成员字节总和（manifest、数据库快照与 manifest 列出的 Artifact，排除 tar framing），未成功 Run 为 0；只允许 `succeeded` Run 下载，其他状态返回冲突或 not-found 语义而不得流出中间文件。（来源：Issue #17 Q17.21、DATA-BACKUP-007）
 - **HTTP-BACKUP-003 —** `getArtifactRetentionSettings`/`updateArtifactRetentionSettings` **MUST** 仅 Admin 可用；更新命令携带 `clientCommandId + expectedRowVersion + generatedRetentionDays`，只影响后续新建 generated Artifact 的 `expiresAt`，不得回写既有 Artifact。
-- **HTTP-BACKUP-004 —** `BackupSettings.backupTarget` **MUST** 是只读的 Quoin 进程可见独立备份挂载目标，供 Admin 确认实际写入位置；它 **MUST NOT** 公开 Compose/Helm 宿主路径，且不属于 `updateBackupSettings` 输入。（来源：Issue #17 Q17.1、DATA-BACKUP-009）
+- **HTTP-BACKUP-004 —** `BackupSettings.backupTarget` **MUST** 是只读的 Quoin 进程可见独立备份挂载目标，供 Admin 确认实际写入位置；它 **MUST NOT** 公开 Compose/Kubernetes 宿主路径，且不属于 `updateBackupSettings` 输入。（来源：Issue #17 Q17.1、DATA-BACKUP-009）
 
 ## 10. 告警接入问题、诊断反馈与知识
 

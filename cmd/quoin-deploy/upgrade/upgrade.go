@@ -1,5 +1,5 @@
 // Package upgrade owns the shared invocation surface and the credential-free
-// prepared-observation state machine of `quoin-deploy <compose|helm> upgrade`
+// prepared-observation state machine of `quoin-deploy compose upgrade`
 // (T36, OPS-UPGRADE-002): the helper never receives Web credentials or calls
 // a product HTTP write interface; it only polls the unauthenticated ops
 // metrics of the not-publicly-exposed listener.
@@ -61,20 +61,15 @@ func Parse(name string, arguments []string) Flags {
 	return Flags{}
 }
 
-func backendOf(name string) string {
-	if len(name) >= 4 && name[:4] == "helm" {
-		return "helm"
-	}
-	return "compose"
-}
+func backendOf(string) string { return "compose" }
 
 // PreparedObservation is the closed projection of the Quoin ops metrics the
 // upgrade decision needs.
 type PreparedObservation struct {
-	Accepting            bool
-	MaintenanceUpgrade   bool
-	Prepared             bool
-	ProcessStart         float64
+	Accepting          bool
+	MaintenanceUpgrade bool
+	Prepared           bool
+	ProcessStart       float64
 }
 
 // ParsePrepared parses the metrics exposition body.
@@ -121,11 +116,11 @@ func ParsePrepared(body string) (PreparedObservation, error) {
 // PreparedOptions provides the backend-specific transport only; every state
 // transition and failure ordering lives in ObservePrepared.
 type PreparedOptions struct {
-	Read    func(label string) (PreparedObservation, error)
-	Now     func() time.Time
-	Sleep   func(time.Duration)
-	OnEnter func()
-	WaitFor time.Duration
+	Read      func(label string) (PreparedObservation, error)
+	Now       func() time.Time
+	Sleep     func(time.Duration)
+	OnEnter   func()
+	WaitFor   time.Duration
 	PollEvery time.Duration
 }
 

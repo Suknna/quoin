@@ -2,10 +2,9 @@
 // (T39). From one source checkout and one release version it builds, per
 // native or explicitly-declared emulated platform:
 //
-//   - the four component images with BuildKit SPDX SBOM and SLSA provenance
+//   - five application images with BuildKit SPDX SBOM and SLSA provenance
 //     attestations, pushed per platform by tag and merged into one OCI index;
-//   - the Helm chart package and its OCI push;
-//   - the digest-pinned Compose bundle;
+//   - checksum-bound Kubernetes and Compose bundles;
 //   - the two static quoin-deploy helpers.
 //
 // It writes the measured subject inventory the final Release manifest will
@@ -41,20 +40,26 @@ func main() {
 }
 
 type options struct {
-	registry  string // e.g. 127.0.0.1:5099/t39 or ghcr.io/suknna
-	version   string
-	chartOCI  string
-	builder   string
-	work      string
-	out       string
-	platforms []platformMode
-	logs      string
-	stage     string // all | images | assemble
+	registry string // e.g. 127.0.0.1:5099/t39 or ghcr.io/suknna
+	version  string
+	builder  string
+	// componentVersions accepts component=v-prefixed-SemVer overrides. A
+	// release may publish independently versioned images while releaseVersion
+	// still identifies the signed release closure.
+	componentVersions map[string]string
+	work              string
+	out               string
+	platforms         []platformMode
+	logs              string
+	stage             string // all | images | assemble
 }
 
 func run(arguments []string) error {
 	if len(arguments) > 0 && arguments[0] == "verify" {
 		return verifyMode(arguments[1:])
+	}
+	if len(arguments) > 0 && arguments[0] == "select" {
+		return selectMode(arguments[1:])
 	}
 	options, err := parseArguments(arguments)
 	if err != nil {
@@ -107,7 +112,7 @@ func writeInventory(options *options, inventory *subjects.Inventory) error {
 }
 
 // assembleInventory merges the per-platform build fragments into the full
-// subject inventory and completes the chart, compose and helper subjects.
+// subject inventory and completes the Kubernetes, Compose and helper subjects.
 func assembleInventory(options *options, lock inputs.Lock) (*subjects.Inventory, error) {
 	inventory := &subjects.Inventory{
 		Schema:         subjects.Schema,
@@ -136,7 +141,7 @@ func assembleInventory(options *options, lock inputs.Lock) (*subjects.Inventory,
 	if err := mergeImageFragments(options, inventory); err != nil {
 		return nil, err
 	}
-	if err := buildChart(options, inventory); err != nil {
+	if err := buildKubernetesBundle(options, inventory); err != nil {
 		return nil, err
 	}
 	if err := buildComposeBundle(options, inventory); err != nil {
@@ -149,7 +154,7 @@ func assembleInventory(options *options, lock inputs.Lock) (*subjects.Inventory,
 }
 
 func parseArguments(arguments []string) (*options, error) {
-	options := &options{platforms: []platformMode{}}
+	options := &options{platforms: []platformMode{}, componentVersions: map[string]string{}}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		value := func() (string, error) {
@@ -172,12 +177,19 @@ func parseArguments(arguments []string) (*options, error) {
 				return nil, err
 			}
 			options.version = version
-		case "-chart-oci":
-			chartOCI, err := value()
+		case "-component-version":
+			specification, err := value()
 			if err != nil {
 				return nil, err
 			}
-			options.chartOCI = chartOCI
+			component, version, found := strings.Cut(specification, "=")
+			if !found || !contains(inputs.Components, component) || version == "" {
+				return nil, fmt.Errorf("component version %q must be <component>=v-prefixed-SemVer", specification)
+			}
+			if _, err := subjects.Names(version); err != nil {
+				return nil, fmt.Errorf("component %s version: %w", component, err)
+			}
+			options.componentVersions[component] = version
 		case "-builder":
 			builder, err := value()
 			if err != nil {
@@ -231,9 +243,6 @@ func parseArguments(arguments []string) (*options, error) {
 	if options.stage != "images" && options.out == "" {
 		return nil, fmt.Errorf("-out is required for stage %s", options.stage)
 	}
-	if options.stage != "assemble" && options.chartOCI == "" {
-		return nil, fmt.Errorf("-chart-oci is required for stage %s", options.stage)
-	}
 	if options.stage != "assemble" && len(options.platforms) == 0 {
 		return nil, fmt.Errorf("at least one -platform linux/<arch>=<native|emulated> is required")
 	}
@@ -244,6 +253,22 @@ func parseArguments(arguments []string) (*options, error) {
 		return nil, err
 	}
 	return options, nil
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func componentVersion(options *options, component string) string {
+	if version := options.componentVersions[component]; version != "" {
+		return version
+	}
+	return options.version
 }
 
 func parsePlatform(specification string) (platformMode, error) {
@@ -346,14 +371,27 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 		}
 		for _, component := range inputs.Components {
 			repository := options.registry + "/" + component
-			baseArgs, err := lock.BuildArgs(component)
-			if err != nil {
-				return err
+			baseArgs := []string{}
+			dockerfile := "deploy/images/" + component + "/Dockerfile"
+			target := ""
+			if component == "frontend" {
+				// The web image is a stock Caddy static runtime assembled by
+				// the frontend target; it has no backend base-image lock.
+				dockerfile, target = "build/package/Dockerfile", "web"
+			} else {
+				var err error
+				baseArgs, err = lock.BuildArgs(component)
+				if err != nil {
+					return err
+				}
 			}
 			arguments := []string{"docker", "buildx", "build", "--builder", options.builder,
 				"--platform", platform.Platform,
 				"--sbom=true", "--provenance=mode=min",
-				"-f", "deploy/images/" + component + "/Dockerfile",
+				"-f", dockerfile,
+			}
+			if target != "" {
+				arguments = append(arguments, "--target", target)
 			}
 			lockArgs := append([]string{}, baseArgs...)
 			if component == "lintel" {
@@ -364,6 +402,9 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 			}
 			for _, argument := range lockArgs {
 				arguments = append(arguments, "--build-arg", argument)
+			}
+			if component != "frontend" {
+				arguments = append(arguments, "--build-arg", "RELEASE_VERSION="+componentVersion(options, component))
 			}
 			arguments = append(arguments, "--build-arg", "GOPROXY="+goproxy, "-t", repository+":"+platform.Arch, "--push", ".")
 			if _, err := command(options, "build-"+component+"-"+platform.Arch, arguments...); err != nil {
@@ -415,6 +456,7 @@ func mergeImageFragments(options *options, inventory *subjects.Inventory) error 
 	for _, component := range inputs.Components {
 		repository := options.registry + "/" + component
 		subject := subjects.ImageSubject{
+			Version:        componentVersion(options, component),
 			Repository:     repository,
 			Platforms:      map[string]string{},
 			BuildExecution: map[string]string{},

@@ -142,7 +142,6 @@ jobs:
           go run ./internal/release/build \
             -registry 127.0.0.1:5000/rq \
             -version "$QUOIN_RELEASE_VERSION" \
-            -chart-oci 127.0.0.1:5000/rq/charts \
             -builder rq-builder \
             -work .work/subjects \
             -out .work/subjects/subjects-inventory.json \
@@ -154,22 +153,12 @@ jobs:
           go build -o bin/qualify ./internal/verification/suites/qualify
       - name: Prepare the deployment inputs
         run: |
-          # The chart is measured into the invocation-local registry so
-          # the Kubernetes install pulls the exact digest-pinned chart.
-          chart_root=.work/chart && mkdir -p "$chart_root"
-          chart_version=$(jq -r '.release_version | ltrimstr("v")' .work/subjects/subjects-inventory.json)
-          helm package deploy/helm/quoin --version "$chart_version" --destination "$chart_root"
-          chart_digest=$(helm push "$chart_root/quoin-$chart_version.tgz" \
-            "oci://127.0.0.1:5000/rq/charts" 2>&1 | awk '/Digest:/ {print $2}')
-          test -n "$chart_digest"
           bin/qualify prepare \
             --work .work/suite \
-            --backend kubernetes \
-            --config .work/suite/helm-install.yaml \
+            --backend compose \
+            --config .work/suite/install.yaml \
             --manifest .work/suite/release-manifest.json \
             --inventory .work/subjects/subjects-inventory.json \
-            --chart-repo "127.0.0.1:5000/rq/charts/quoin" \
-            --chart-digest "$chart_digest" \
             --quoin-port 20880 --stele-port 20881
       - name: Execute the catalog cells for linux/${{ matrix.arch }}
         env:
@@ -258,7 +247,6 @@ jobs:
           go run ./internal/release/build \
             -registry 127.0.0.1:5000/rq \
             -version "$QUOIN_RELEASE_VERSION" \
-            -chart-oci 127.0.0.1:5000/rq/charts \
             -builder rq-builder \
             -work .work/subjects \
             -out .work/subjects/subjects-inventory.json \
@@ -280,31 +268,22 @@ jobs:
           go build -o bin/qualify ./internal/verification/suites/qualify
       - name: Prepare the deployment inputs
         run: |
-          # The chart is measured into the invocation-local registry so
-          # the Kubernetes install pulls the exact digest-pinned chart.
-          chart_root=.work/chart && mkdir -p "$chart_root"
-          chart_version=$(jq -r '.release_version | ltrimstr("v")' .work/subjects/subjects-inventory.json)
-          helm package deploy/helm/quoin --version "$chart_version" --destination "$chart_root"
-          chart_digest=$(helm push "$chart_root/quoin-$chart_version.tgz" \
-            "oci://127.0.0.1:5000/rq/charts" 2>&1 | awk '/Digest:/ {print $2}')
-          test -n "$chart_digest"
+          # Kubernetes qualification applies the ordinary native manifest;
+          # image identity is patched from this invocation's subject inventory.
           bin/qualify prepare \
             --work .work/suite \
             --backend kubernetes \
-            --config .work/suite/helm-install.yaml \
+            --config .work/suite/kubernetes.yaml \
             --manifest .work/suite/release-manifest.json \
-            --inventory .work/subjects/subjects-inventory.json \
-            --chart-repo "127.0.0.1:5000/rq/charts/quoin" \
-            --chart-digest "$chart_digest"
+            --inventory .work/subjects/subjects-inventory.json
       - name: Execute every suite natively for kubernetes/${{ matrix.arch }}
         run: |
-          # The Kubernetes stack adapter (T43) drives the stack-backed
-          # suites through the real cluster: helm install of the
-          # digest-pinned chart, invocation-owned port-forwards, kubectl
-          # exec registration and the disposable second release.
+          # The Kubernetes stack adapter drives the stack-backed suites through
+          # the real cluster: ordinary YAML applied with kubectl, invocation-
+          # owned port-forwards, kubectl exec registration and a second namespace.
           bin/qualify run \
             --work .work/suite \
-            --config .work/suite/helm-install.yaml \
+            --config .work/suite/kubernetes.yaml \
             --manifest .work/suite/release-manifest.json \
             --backend kubernetes --arch linux/${{ matrix.arch }} \
             --suite release-qualification \

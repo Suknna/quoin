@@ -22,10 +22,9 @@ import (
 )
 
 const (
-	toxiImage      = faults.ToxiproxyImageTag
-	t40Registry    = "t40-registry"
-	t40Builder     = "t40-release-subjects"
-	chartVersion40 = "0.1.0-dev"
+	toxiImage   = faults.ToxiproxyImageTag
+	t40Registry = "t40-registry"
+	t40Builder  = "t40-release-subjects"
 )
 
 type subjectsBundle struct {
@@ -112,6 +111,7 @@ func buildReleaseSubjects(t *testing.T, recorder *ticketEvidence, workRoot, serv
 		dockerfile string
 		target     string
 	}{
+		{"frontend", "build/package/Dockerfile", "web"},
 		{"quoin", "deploy/images/quoin/Dockerfile", ""},
 		{"stele", "deploy/images/stele/Dockerfile", ""},
 		{"plinth", "deploy/images/plinth/Dockerfile", ""},
@@ -213,22 +213,23 @@ func writeReleaseManifestOf(recorder *ticketEvidence, workRoot string, bundle *s
 				"linux/amd64": map[string]any{"sha256": strings.Repeat("60", 32), "bytes": 1},
 				"linux/arm64": map[string]any{"sha256": strings.Repeat("61", 32), "bytes": 1},
 			}},
-		"helm":    map[string]any{"oci_repository": "t40/charts", "oci_digest": "sha256:" + strings.Repeat("10", 32), "tgz_asset_name": "quoin-" + chartVersion40 + "-t40.tgz", "tgz_sha256": strings.Repeat("10", 32)},
-		"compose": map[string]any{"asset_name": "quoin-compose-" + releaseVersion + "-t40.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
+		"kubernetes": map[string]any{"asset_name": "quoin-kubernetes-" + releaseVersion + ".tar.gz", "bundle_sha256": strings.Repeat("10", 32)},
+		"compose":    map[string]any{"asset_name": "quoin-compose-" + releaseVersion + ".tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{
 			"linux/amd64": map[string]any{"asset_name": "quoin-deploy-linux-amd64", "sha256": strings.Repeat("30", 32)},
 			"linux/arm64": map[string]any{"asset_name": "quoin-deploy-linux-arm64", "sha256": strings.Repeat("31", 32)},
 		}},
 		"offline": map[string]any{"asset_name": "quoin-offline-" + releaseVersion + "-t40.tar.zst"},
 		"sigstore_bundles": map[string]any{
-			"image_indexes": map[string]any{"quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json"},
+			"image_indexes": map[string]any{"frontend": "f.sigstore.json", "quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json"},
 			"image_manifests": map[string]any{
-				"quoin":  map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
-				"plinth": map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
-				"lintel": map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
-				"stele":  map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
+				"frontend": map[string]any{"linux/amd64": "fa.sigstore.json", "linux/arm64": "fb.sigstore.json"},
+				"quoin":    map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
+				"plinth":   map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
+				"lintel":   map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
+				"stele":    map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
 			},
-			"helm_oci": "h.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
+			"kubernetes": "k.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
 			"deployment_helper": map[string]any{"linux/amd64": "da.sigstore.json", "linux/arm64": "db.sigstore.json"},
 			"offline":           "o.sigstore.json",
 		},
@@ -254,7 +255,7 @@ func writeReleaseManifestOf(recorder *ticketEvidence, workRoot string, bundle *s
 			platforms["linux/amd64"] = image.Platforms["linux/arm64"]
 		}
 		images[component] = map[string]any{
-			"repository": image.Repository, "index_digest": image.Index, "platforms": platforms,
+			"version": releaseVersion, "repository": image.Repository, "index_digest": image.Index, "platforms": platforms,
 		}
 	}
 	manifest["images"] = images

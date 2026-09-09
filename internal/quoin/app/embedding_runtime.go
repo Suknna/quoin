@@ -30,7 +30,7 @@ func (service *RuntimeService) dispatchEmbeddingAttempt(ctx context.Context, att
 		return fmt.Errorf("plinth is not connected")
 	}
 	attempts := service.Knowledge.Attempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)

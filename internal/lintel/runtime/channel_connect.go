@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	sharedops "github.com/Suknna/quoin/internal/ops"
@@ -40,6 +41,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 		Slot:                    runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
 		BootId:                  channel.bootID,
 		ConnectionEpoch:         epoch,
+		ContractFingerprint:     contract.ProtoAuthorityFingerprint,
 		ReleaseVersion:          buildinfo.Release,
 		JourneyCatalogDigest:    catalog.Digest(),
 		JourneyCatalogVersion:   catalog.Version,

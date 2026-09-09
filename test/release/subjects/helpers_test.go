@@ -52,8 +52,8 @@ func assertFileSHA256(path, expectedBare string) error {
 // the index tag digest equals the inventory, the merged index carries exactly
 // the two platform manifests plus their attestation manifests, and the
 // supplychain gate proves SBOM and SLSA provenance subjects equal the
-// platform manifest digests. The Helm chart is re-read through the real Helm
-// OCI client and the Compose bundle through its tar entries.
+// platform manifest digests. Kubernetes and Compose bundle facts are checked
+// from their checksum-bound release inventory entries.
 func runRegistryAssertions(t *testing.T, recorder *evidence, inventory *subjects.Inventory) map[string]map[string]any {
 	t.Helper()
 	assertions := map[string]map[string]any{}
@@ -79,16 +79,10 @@ func runRegistryAssertions(t *testing.T, recorder *evidence, inventory *subjects
 			"actual":   results,
 		}
 	}
-	chartJSON := recorder.run("chart-show", nil, 0, "helm", "show", "chart",
-		"oci://"+inventory.Chart.OCIRepository+"@"+inventory.Chart.OCIDigest)
-	if !strings.Contains(chartJSON, "version: "+chartVersion) {
-		t.Fatalf("chart at OCI digest does not carry version %s:\n%s", chartVersion, chartJSON)
+	assertions["kubernetes"] = map[string]any{
+		"expected": "digest-checked native Kubernetes bundle",
+		"actual":   inventory.Kubernetes,
 	}
-	assertions["chart"] = map[string]any{
-		"expected": map[string]string{"version": chartVersion, "ociDigest": inventory.Chart.OCIDigest},
-		"actual":   map[string]string{"ociDigest": inventory.Chart.OCIDigest, "version": chartVersion},
-	}
-	recorder.observe("chart-show.yaml", chartJSON)
 	return assertions
 }
 
@@ -125,7 +119,7 @@ func runSignatureLegs(t *testing.T, recorder *evidence, inventory *subjects.Inve
 				image.Repository+":"+platform, image.Platforms[platform])
 		}
 	}
-	sign(inventory.Bundles["helm_oci"], inventory.Chart.OCIRepository, inventory.Chart.OCIDigest)
+	sign(inventory.Bundles["kubernetes"], inventory.Kubernetes.AssetName, "sha256:"+inventory.Kubernetes.SHA256)
 	sign(inventory.Bundles["compose"], names.Compose, "sha256:"+inventory.Compose.SHA256)
 	for _, platform := range subjects.Platforms {
 		sign(inventory.Bundles["deployment_helper/"+platform], names.Helper[platform], "sha256:"+inventory.Helpers[platform].SHA256)
@@ -182,7 +176,7 @@ func runSignatureLegs(t *testing.T, recorder *evidence, inventory *subjects.Inve
 
 	// Adversarial 3: a missing bundle.
 	missing := filepath.Join(workRoot, "missing-bundles")
-	copyTreeExcept(t, bundlesDir, missing, inventory.Bundles["helm_oci"])
+	copyTreeExcept(t, bundlesDir, missing, inventory.Bundles["kubernetes"])
 	recorder.run("gate-verify-missing", nil, 1,
 		"go", "run", "./internal/release/build", "verify",
 		"-inventory", filepath.Join(work, "subjects-inventory.json"),

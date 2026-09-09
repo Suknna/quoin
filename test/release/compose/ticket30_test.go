@@ -172,6 +172,7 @@ func buildAndPushReleaseImages(t *testing.T, recorder *evidence, workRoot string
 		{"stele", "deploy/images/stele/Dockerfile", "", true},
 		{"plinth", "deploy/images/plinth/Dockerfile", "", true},
 		{"lintel", "build/package/Dockerfile", "lintel", false},
+		{"frontend", "build/package/Dockerfile", "web", false},
 	}
 	for _, build := range builds {
 		entry := &releaseImages{Repository: registryHost + "/" + registryRepository + "/" + build.component}
@@ -296,9 +297,9 @@ func pushDualPlatformIndex(t *testing.T, entry *releaseImages) string {
 
 // writeReleaseManifest generates the acceptance release manifest from the
 // measured image digests and the frozen machine locks. The browser section
-// carries the locked upstream values; the helm/compose/helper/sigstore and
-// validation sections are structural local-test values owned by the stage-10
-// release pipeline and are disclosed as such in the runtime evidence.
+// carries the locked upstream values; the Kubernetes/compose/helper/sigstore
+// and validation sections are structural local-test values owned by the
+// stage-10 release pipeline and are disclosed as such in runtime evidence.
 func writeReleaseManifest(t *testing.T, recorder *evidence, workRoot string, images map[string]*releaseImages) string {
 	t.Helper()
 	var inputs struct {
@@ -328,7 +329,7 @@ func writeReleaseManifest(t *testing.T, recorder *evidence, workRoot string, ima
 		"source_commit":   recorder.gitCommit,
 		"generated_at":    time.Now().UTC().Format(time.RFC3339),
 		"browser":         browser,
-		"helm":            map[string]any{"oci_repository": "ghcr.io/suknna/quoin-chart", "oci_digest": "sha256:" + strings.Repeat("10", 32), "tgz_asset_name": "quoin-0.1.0-t30.tgz", "tgz_sha256": strings.Repeat("10", 32)},
+		"kubernetes":      map[string]any{"asset_name": "quoin-kubernetes-v0.1.0-t30.tar.gz", "bundle_sha256": strings.Repeat("10", 32)},
 		"compose":         map[string]any{"asset_name": "quoin-compose-v0.1.0-t30.tar.gz", "bundle_sha256": strings.Repeat("20", 32)},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{
 			"linux/amd64": map[string]any{"asset_name": "quoin-deploy-linux-amd64", "sha256": strings.Repeat("30", 32)},
@@ -336,14 +337,15 @@ func writeReleaseManifest(t *testing.T, recorder *evidence, workRoot string, ima
 		}},
 		"offline": map[string]any{"asset_name": "quoin-offline-v0.1.0-t30.tar.zst"},
 		"sigstore_bundles": map[string]any{
-			"image_indexes": map[string]any{"quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json"},
+			"image_indexes": map[string]any{"quoin": "q.sigstore.json", "plinth": "p.sigstore.json", "lintel": "l.sigstore.json", "stele": "s.sigstore.json", "frontend": "f.sigstore.json"},
 			"image_manifests": map[string]any{
-				"quoin":  map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
-				"plinth": map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
-				"lintel": map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
-				"stele":  map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
+				"quoin":    map[string]any{"linux/amd64": "qa.sigstore.json", "linux/arm64": "qb.sigstore.json"},
+				"plinth":   map[string]any{"linux/amd64": "pa.sigstore.json", "linux/arm64": "pb.sigstore.json"},
+				"lintel":   map[string]any{"linux/amd64": "la.sigstore.json", "linux/arm64": "lb.sigstore.json"},
+				"stele":    map[string]any{"linux/amd64": "sa.sigstore.json", "linux/arm64": "sb.sigstore.json"},
+				"frontend": map[string]any{"linux/amd64": "fa.sigstore.json", "linux/arm64": "fb.sigstore.json"},
 			},
-			"helm_oci": "h.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
+			"kubernetes": "k.sigstore.json", "release_manifest": "m.sigstore.json", "compose": "c.sigstore.json",
 			"deployment_helper": map[string]any{"linux/amd64": "da.sigstore.json", "linux/arm64": "db.sigstore.json"},
 			"offline":           "o.sigstore.json",
 		},
@@ -355,10 +357,10 @@ func writeReleaseManifest(t *testing.T, recorder *evidence, workRoot string, ima
 		"validation": map[string]any{},
 	}
 	manifestImages := map[string]any{}
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range []string{"quoin", "plinth", "lintel", "stele", "frontend"} {
 		entry := images[component]
 		manifestImages[component] = map[string]any{
-			"repository": entry.Repository, "index_digest": entry.Index,
+			"version": "v0.1.0-dev", "repository": entry.Repository, "index_digest": entry.Index,
 			"platforms": map[string]any{"linux/amd64": entry.AMD64, "linux/arm64": entry.ARM64},
 		}
 	}

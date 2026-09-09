@@ -21,7 +21,7 @@ import (
 type releaseLegs struct {
 	Cell string `json:"cell"`
 
-	FourImagesByIndexDigest                             bool   `json:"fourImagesByIndexDigest"`
+	FiveImagesByIndexDigest                             bool   `json:"fiveImagesByIndexDigest"`
 	LiveReadyMetricsScraped                             bool   `json:"liveReadyMetricsScraped"`
 	FreshSecretBootstrap                                bool   `json:"freshSecretBootstrap"`
 	ExistingDataMissingSecretFailClosed                 bool   `json:"existingDataMissingSecretFailClosed"`
@@ -70,7 +70,7 @@ func RunReleaseQualificationPhase(request DeploymentRequest, stack *Stack, admin
 			return fmt.Errorf("release observations missing: %w", err)
 		}
 		facts := map[string]any{
-			"four-images-by-index-digest":                                legs.FourImagesByIndexDigest,
+			"five-images-by-index-digest":                                legs.FiveImagesByIndexDigest,
 			"live-ready-metrics-scraped":                                 legs.LiveReadyMetricsScraped,
 			"fresh-secret-bootstrap":                                     boolWord(legs.FreshSecretBootstrap),
 			"existing-data-missing-secret-fail-closed":                   boolWord(legs.ExistingDataMissingSecretFailClosed),
@@ -159,7 +159,7 @@ func driveReleaseLegs(request DeploymentRequest, stack *Stack, adminPassword str
 			for _, check := range report.Checks {
 				passedIDs[check.ID] = check.Result == "passed"
 			}
-			legs.FourImagesByIndexDigest = passedIDs["image-digest-quoin"] && passedIDs["image-digest-plinth"] && passedIDs["image-digest-lintel"] && passedIDs["image-digest-stele"]
+			legs.FiveImagesByIndexDigest = passedIDs["image-digest-quoin"] && passedIDs["image-digest-plinth"] && passedIDs["image-digest-lintel"] && passedIDs["image-digest-stele"] && passedIDs["image-digest-frontend"]
 			legs.FreshSecretBootstrap = strings.Contains(string(body), "secret-bootstrap")
 			legs.Detail["install-report-checks"] = fmt.Sprint(len(report.Checks))
 		}

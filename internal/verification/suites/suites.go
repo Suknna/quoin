@@ -1,7 +1,7 @@
 // Package suites owns the Release Qualification suite vocabulary and the
 // per-cell phase coordinator (T40). The frozen verification catalog is
 // the single scenario authority: this package maps suite names to
-// scenario IDs, resolves the catalog's `<compose|helm>` phase templates
+// scenario IDs, resolves the catalog's `<compose|kubernetes>` phase templates
 // against the concrete deployment backend, and executes one cell's
 // setup/action/assert/teardown phases through real commands using the
 // same environment contract the contract-gate runner uses
@@ -24,6 +24,10 @@ const (
 	SuiteMonitoringStack      = "monitoring-stack"
 	SuiteStorageFaults        = "storage-faults"
 	SuiteNetworkFaults        = "network-faults"
+	// Dedicated acceptance suites are Kubernetes-native adapters for catalog
+	// scenarios whose established Compose commands predate the common verifier.
+	SuiteRestoreIsolation = "restore-isolation"
+	SuiteLintelRecovery   = "lintel-recovery"
 )
 
 // table maps each suite name to its owning catalog scenario. The
@@ -34,6 +38,8 @@ var table = map[string]string{
 	SuiteMonitoringStack:      "integration.monitoring-stack",
 	SuiteStorageFaults:        "fault.storage",
 	SuiteNetworkFaults:        "fault.network",
+	SuiteRestoreIsolation:     "deployment.restore-isolation",
+	SuiteLintelRecovery:       "browser.lintel-recovery",
 }
 
 // ScenarioID returns the catalog scenario one suite executes.
@@ -47,7 +53,7 @@ func ScenarioID(suite string) (string, error) {
 
 // SuiteNames lists the suite vocabulary in stable order.
 func SuiteNames() []string {
-	return []string{SuiteProductionTransport, SuiteReleaseQualification, SuiteMonitoringStack, SuiteStorageFaults, SuiteNetworkFaults}
+	return []string{SuiteProductionTransport, SuiteReleaseQualification, SuiteMonitoringStack, SuiteStorageFaults, SuiteNetworkFaults, SuiteRestoreIsolation, SuiteLintelRecovery}
 }
 
 // CIHarness names map the ci/verify-* entrypoints to harness tables.
@@ -57,20 +63,25 @@ var CIHarnessScenarios = map[string]string{
 	"migrations":             "deployment.migrations",
 }
 
-// ResolvePhase replaces the catalog's `<compose|helm>` placeholder with
-// the concrete backend of this target. Unresolved placeholders would
-// otherwise reach bash literally, so a template that still carries one
-// after resolution is an error, not a silent skip.
+// ResolvePhase replaces the catalog's `<compose|kubernetes>` placeholder with
+// the concrete backend of this target. Kubernetes phases invoke kubectl-native
+// verification rather than a deployment helper subcommand. Unresolved
+// placeholders would otherwise reach bash literally, so they are errors.
 func ResolvePhase(command, backend string) (string, error) {
-	// The catalog placeholder names the two helper backends; the
-	// kubernetes deployment helper verb is "helm".
-	verb := backend
-	if strings.EqualFold(backend, BackendKubernetes) {
-		verb = "helm"
-	}
-	resolved := strings.ReplaceAll(command, "<compose|helm>", verb)
+	resolved := strings.ReplaceAll(command, "<compose|kubernetes>", backend)
 	if strings.Contains(resolved, "<") && strings.Contains(resolved, ">") {
 		return "", fmt.Errorf("phase command %q still carries an unresolved placeholder", command)
+	}
+	// Compose owns its established operational commands. Kubernetes deliberately
+	// exposes lifecycle verification only through verify --suite, which enters
+	// the native Stack and cannot fall through to an unsupported dispatcher verb.
+	if backend == BackendKubernetes {
+		switch {
+		case strings.HasPrefix(resolved, "quoin-deploy kubernetes restore --verify-isolation"):
+			return strings.Replace(resolved, "quoin-deploy kubernetes restore --verify-isolation", "quoin-deploy kubernetes verify --suite restore-isolation", 1), nil
+		case strings.HasPrefix(resolved, "quoin-deploy kubernetes recover-lintel"):
+			return strings.Replace(resolved, "quoin-deploy kubernetes recover-lintel", "quoin-deploy kubernetes verify --suite lintel-recovery", 1), nil
+		}
 	}
 	return resolved, nil
 }

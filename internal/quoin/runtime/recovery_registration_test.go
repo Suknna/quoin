@@ -64,11 +64,11 @@ func recoveryService(t *testing.T) (*qruntime.Service, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-old", release, release)
+	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-old", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-old", 1, release, release, catalog.Digest(), catalog.Digest())
+	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-old", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest())
 	if err != nil || !decision.Accepted {
 		t.Fatalf("old credential hello: decision=%+v err=%v", decision, err)
 	}
@@ -122,7 +122,7 @@ func TestTicket35RecoveryRegistrationRotatesAndResumes(t *testing.T) {
 		t.Fatalf("re-fence error=%v, want frozen fence conflict", err)
 	}
 
-	longTerm, generation, err := service.Register(ctx, "lintel", resume.RegistrationToken, begin.ReplacementGeneration, "boot-new", release, release)
+	longTerm, generation, err := service.Register(ctx, "lintel", resume.RegistrationToken, begin.ReplacementGeneration, "boot-new", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,11 +144,11 @@ func TestTicket35RecoveryRegistrationRotatesAndResumes(t *testing.T) {
 		t.Fatalf("after rotation state=%s current=%d retiring=%d oldRetired=%v", state, currentGen, retiringGen, oldRetired.Valid)
 	}
 	// The superseded one-time token from the first begin can never mint.
-	if _, _, err := service.Register(ctx, "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", release, release); err == nil {
+	if _, _, err := service.Register(ctx, "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint); err == nil {
 		t.Fatal("superseded recovery token unexpectedly registered")
 	}
 	// The consumed one-time token can never mint twice.
-	if _, _, err := service.Register(ctx, "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", release, release); err == nil {
+	if _, _, err := service.Register(ctx, "lintel", begin.RegistrationToken, begin.ReplacementGeneration, "boot-new", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint); err == nil {
 		t.Fatal("replayed recovery registration unexpectedly succeeded")
 	}
 	// Resume after registration: no second token, same replacement.
@@ -160,7 +160,7 @@ func TestTicket35RecoveryRegistrationRotatesAndResumes(t *testing.T) {
 		t.Fatalf("resume after register=%+v", afterRegister)
 	}
 	// The replacement's first Hello authenticates generation 2.
-	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-new", 1, release, release, catalog.Digest(), catalog.Digest())
+	decision, err := service.Adjudicate(ctx, longTerm, "lintel", "boot-new", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest())
 	if err != nil || !decision.Accepted || !decision.MarkedFirstAuthenticated {
 		t.Fatalf("replacement hello: decision=%+v err=%v", decision, err)
 	}
@@ -178,6 +178,7 @@ func TestTicket35RecoveryBeginRejectsInvalidInputsAndStates(t *testing.T) {
 	ctx := context.Background()
 	for _, fence := range []qruntime.LintelRecoveryFence{
 		{Backend: "nomad", Disposition: "retired", DispositionDigest: digestOf("d"), FenceReportDigest: digestOf("f")},
+		{Backend: "helm", Disposition: "retired", DispositionDigest: digestOf("d"), FenceReportDigest: digestOf("f")},
 		{Backend: "compose", Disposition: "wiped", DispositionDigest: digestOf("d"), FenceReportDigest: digestOf("f")},
 		{Backend: "compose", Disposition: "retired", DispositionDigest: "not-a-digest", FenceReportDigest: digestOf("f")},
 	} {
@@ -189,7 +190,7 @@ func TestTicket35RecoveryBeginRejectsInvalidInputsAndStates(t *testing.T) {
 	if _, err := database.Exec(`UPDATE maintenance_state SET active=1,reason='RootKeyRebind',entered_at='2026-01-01T00:00:00Z',entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1 AND active=0`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.BeginLintelRecoveryRegistration(ctx, qruntime.LintelRecoveryFence{Backend: "helm", Disposition: "retired", DispositionDigest: digestOf("d"), FenceReportDigest: digestOf("f")}); !errors.Is(err, qruntime.ErrLintelRecoveryState) {
+	if _, err := service.BeginLintelRecoveryRegistration(ctx, qruntime.LintelRecoveryFence{Backend: "kubernetes", Disposition: "retired", DispositionDigest: digestOf("d"), FenceReportDigest: digestOf("f")}); !errors.Is(err, qruntime.ErrLintelRecoveryState) {
 		t.Fatalf("error=%v, want state rejection", err)
 	}
 }

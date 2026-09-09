@@ -46,7 +46,7 @@ func verifyOperationalSurface(req Request, loaded *loadedRequest, helper *runner
 		return helper.run(stage, name, dockerize(arguments)...)
 	}
 
-	for _, component := range deployconfig.Components {
+	for _, component := range deployconfig.ImageComponents {
 		if loaded.manifest == nil {
 			break
 		}
@@ -100,7 +100,8 @@ func verifyOperationalSurface(req Request, loaded *loadedRequest, helper *runner
 		if logsErr != nil {
 			return &PlatformError{Code: "logs_unreadable", Message: fmt.Sprintf("%s: %v", component, logsErr), NextAction: "inspect Docker state, then rerun verify"}
 		}
-		if failure := judgeLogs(component, logs, loaded.release()); failure != nil {
+		if failure := judgeLogs(component, logs, loaded.componentVersion(component)); failure != nil {
+
 			helper.report.RecordCheck(report.Check{ID: "logs-" + component, Result: "failed", Expected: "JSON Lines with frozen fields", Actual: failure.Message, Code: failure.Code, Recovery: failure.NextAction})
 			return failure
 		}
@@ -144,8 +145,8 @@ func judgeReadiness(component string, loaded *loadedRequest, readiness sharedops
 	if readiness.Component != component {
 		return &PlatformError{Code: "readiness_identity_mismatch", Message: fmt.Sprintf("%s reported component %q", component, readiness.Component), NextAction: "redeploy the component from the release manifest"}
 	}
-	if readiness.Release != loaded.release() {
-		return &PlatformError{Code: "release_mismatch", Message: fmt.Sprintf("%s reports release %q but the deployment is %q", component, readiness.Release, loaded.release()), NextAction: "redeploy the stack from one release"}
+	if expected := loaded.componentVersion(component); readiness.Release != expected {
+		return &PlatformError{Code: "release_mismatch", Message: fmt.Sprintf("%s reports version %q but the manifest pins %q", component, readiness.Release, expected), NextAction: "redeploy the component from its manifest-pinned image"}
 	}
 	if readiness.Reason == sharedops.Ready {
 		if !readiness.AcceptingWork || readiness.Mode != "normal" {
@@ -445,35 +446,32 @@ func judgeTopology(loaded *loadedRequest, helper *runner, stage int) error {
 		}
 	}
 	prefix := loaded.project + "-"
-	for _, component := range deployconfig.Components {
+	for _, component := range append([]string{"gateway", "frontend"}, deployconfig.Components...) {
 		if !running[prefix+component+"-1"] {
 			return &PlatformError{Code: "topology_service_not_running", Message: fmt.Sprintf("%s is not running (state view:\n%s)", component, output), NextAction: "rerun the install command to resume"}
 		}
 	}
-	for _, component := range []string{"plinth", "lintel"} {
+	for _, component := range []string{"frontend", "quoin", "plinth", "lintel", "stele"} {
 		if len(published[prefix+component+"-1"]) != 0 {
-			return &PlatformError{Code: "topology_port_leak", Message: fmt.Sprintf("%s published %v to the host", component, published[prefix+component+"-1"]), NextAction: "Runtime and ops listeners must stay on the internal network"}
+			return &PlatformError{Code: "topology_port_leak", Message: fmt.Sprintf("%s published %v to the host", component, published[prefix+component+"-1"]), NextAction: "only the TLS gateway may publish a host port"}
 		}
 	}
-	helper.report.RecordCheck(report.Check{ID: "topology", Result: "passed", Expected: "four services running; only Quoin public and Stele webhook published", Actual: fmt.Sprintf("published=%v", published), Code: "topology_fixed"})
+	helper.report.RecordCheck(report.Check{ID: "topology", Result: "passed", Expected: "six services running; only the Caddy TLS gateway published", Actual: fmt.Sprintf("published=%v", published), Code: "topology_fixed"})
 	if loaded.input.PublishMode == "loopback" {
-		for _, component := range []string{"quoin", "stele"} {
-			expectedPort := loaded.input.QuoinPublicHostPort
-			if component == "stele" {
-				expectedPort = loaded.input.SteleWebhookHostPort
+		gateway := "gateway"
+		expectedPort := loaded.input.QuoinPublicHostPort
+		found := false
+		for _, binding := range published[prefix+gateway+"-1"] {
+			if binding != fmt.Sprintf("127.0.0.1:%d", expectedPort) {
+				return &PlatformError{Code: "topology_binding_violation", Message: fmt.Sprintf("%s is published on %s, want 127.0.0.1:%d only", gateway, binding, expectedPort), NextAction: "loopback mode must bind the deployment input port on 127.0.0.1 only"}
 			}
-			found := false
-			for _, binding := range published[prefix+component+"-1"] {
-				if binding != fmt.Sprintf("127.0.0.1:%d", expectedPort) {
-					return &PlatformError{Code: "topology_binding_violation", Message: fmt.Sprintf("%s is published on %s, want 127.0.0.1:%d only", component, binding, expectedPort), NextAction: "loopback mode must bind the deployment input ports on 127.0.0.1 only"}
-				}
-				found = true
-			}
-			if !found {
-				return &PlatformError{Code: "topology_port_mismatch", Message: fmt.Sprintf("%s published %v, want 127.0.0.1:%d", component, published[prefix+component+"-1"], expectedPort), NextAction: "the projected host ports must equal the deployment input"}
-			}
+			found = true
+		}
+		if !found {
+			return &PlatformError{Code: "topology_port_mismatch", Message: fmt.Sprintf("%s published %v, want 127.0.0.1:%d", gateway, published[prefix+gateway+"-1"], expectedPort), NextAction: "the projected host port must equal the deployment input"}
 		}
 	}
+
 	return nil
 }
 

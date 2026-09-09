@@ -205,7 +205,7 @@ func signSubjectBundles(t *testing.T, signer *closureSigner, bundlesDir string, 
 			subject("image_manifests/"+component+"/"+platform, image.Platforms[platform])
 		}
 	}
-	subject("helm_oci", inventory.Chart.OCIDigest)
+		subject("kubernetes", "sha256:"+inventory.Kubernetes.SHA256)
 	subject("compose", "sha256:"+inventory.Compose.SHA256)
 	for _, platform := range subjects.Platforms {
 		subject("deployment_helper/"+platform, "sha256:"+inventory.Helpers[platform].SHA256)

@@ -24,10 +24,12 @@ RUN go mod download
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Release identity is independently versioned build provenance.
+ARG RELEASE_VERSION=v0.1.0-dev
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/lintel ./cmd/lintel && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/quoin-healthcheck ./cmd/quoin-healthcheck
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/lintel ./cmd/lintel && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin-healthcheck ./cmd/quoin-healthcheck
 
 # The locked Chromium artifact for the target architecture is fetched and
 # hash-verified on the build platform; it is only ever extracted, never

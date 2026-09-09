@@ -38,10 +38,10 @@ func TestTicket33(t *testing.T) {
 	}()
 	for _, target := range []struct{ name, pkg, test string }{
 		{"compose", "./test/release/compose", "TestRestoreComposeTicket33"},
-		{"helm", "./test/release/helm", "TestRestoreHelmTicket33"},
+		{"kubernetes", "./test/release/kubernetes", "TestTicket43"},
 	} {
 		// -v is required: Go otherwise suppresses a skipped child test and would
-		// turn an unavailable Compose/Helm environment into a false acceptance.
+		// turn an unavailable Compose/Kubernetes environment into a false acceptance.
 		log, code := run(t, evidence, target.name, "go", "test", "-timeout=30m", "-v", target.pkg, "-run", "^"+target.test+"$", "-count=1")
 		logPath := filepath.Join(evidence, target.name+".log")
 		commands = append(commands, map[string]any{"name": target.name, "args": append([]string(nil), append([]string{"go", "test", "-timeout=30m", "-v", target.pkg, "-run", "^" + target.test + "$", "-count=1"}, []string{}...)...), "exitCode": code, "log": logPath})
@@ -72,13 +72,13 @@ func TestTicket33(t *testing.T) {
 		},
 		"proofPoints": map[string]string{
 			"compose":       "compose/runtime-evidence.json and compose/restore-observation.json record a real helper install, offline backup, PTY restore, maintenance HTTP repair, normal verification and cleanup",
-			"helm":          "helm/runtime-evidence.json and helm/restore-observation.json record the equivalent real Kubernetes/Helm path",
+			"kubernetes":    "kubernetes/runtime-evidence.json records the real native Kubernetes lifecycle path, including restore",
 			"missingBackup": "each backend executes an attached-TTY restore for a nonexistent backup before the valid snapshot path",
 		},
 	})
 	writeJSON(t, filepath.Join(evidence, "cleanup.json"), map[string]any{
-		"backendCleanup": []string{"compose/cleanup.json", "helm/cleanup.json"},
-		"ownedResources": []string{"Compose project/network/volumes/containers", "Helm release/namespace/PVCs/pods", "provider fixture", "temporary credentials"},
+		"backendCleanup": []string{"compose/cleanup.json", "kubernetes/cleanup.json"},
+		"ownedResources": []string{"Compose project/network/volumes/containers", "Kubernetes namespace/PVCs/pods", "provider fixture", "temporary credentials"},
 		"result":         "each backend test proves its own owned resources were removed before this coordinator succeeds",
 	})
 }
@@ -141,7 +141,6 @@ func toolInfo(t *testing.T) map[string]string {
 		"go":      {"go", "version"},
 		"docker":  {"docker", "version", "--format", "{{.Server.Version}}"},
 		"compose": {"docker", "compose", "version"},
-		"helm":    {"helm", "version", "--short"},
 		"kubectl": {"kubectl", "version", "--client"},
 	} {
 		if output, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err == nil {

@@ -75,21 +75,23 @@ func TestReleaseManifestValidation(t *testing.T) {
 		"images": map[string]any{
 			"quoin": image("127.0.0.1:5000/quoin"), "plinth": image("127.0.0.1:5000/plinth"),
 			"lintel": image("127.0.0.1:5000/lintel"), "stele": image("127.0.0.1:5000/stele"),
+			"frontend": image("127.0.0.1:5000/frontend"),
 		},
 		"browser":           map[string]any{"playwright_version": "1.62.1", "chromium_revision": "1234", "artifacts": map[string]any{"linux/amd64": artifact(), "linux/arm64": artifact()}},
-		"helm":              map[string]any{"oci_repository": "ghcr.io/suknna/quoin-chart", "oci_digest": digest("a"), "tgz_asset_name": "quoin-1.2.3.tgz", "tgz_sha256": bare()},
+		"kubernetes":        map[string]any{"asset_name": "quoin-kubernetes-v1.2.3.tar.gz", "bundle_sha256": bare()},
 		"compose":           map[string]any{"asset_name": "quoin-compose-v1.2.3.tar.gz", "bundle_sha256": bare()},
 		"deployment_helper": map[string]any{"artifacts": map[string]any{"linux/amd64": blob("quoin-deploy-linux-amd64"), "linux/arm64": blob("quoin-deploy-linux-arm64")}},
 		"offline":           map[string]any{"asset_name": "quoin-offline-v1.2.3.tar.zst"},
 		"sigstore_bundles": map[string]any{
-			"image_indexes": map[string]any{"quoin": bundle(), "plinth": bundle(), "lintel": bundle(), "stele": bundle()},
+			"image_indexes": map[string]any{"quoin": bundle(), "plinth": bundle(), "lintel": bundle(), "stele": bundle(), "frontend": bundle()},
 			"image_manifests": map[string]any{
-				"quoin":  map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
-				"plinth": map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
-				"lintel": map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
-				"stele":  map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
+				"quoin":    map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
+				"plinth":   map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
+				"lintel":   map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
+				"stele":    map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
+				"frontend": map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
 			},
-			"helm_oci": bundle(), "release_manifest": bundle(), "compose": bundle(),
+			"kubernetes": bundle(), "release_manifest": bundle(), "compose": bundle(),
 			"deployment_helper": map[string]any{"linux/amd64": bundle(), "linux/arm64": bundle()},
 			"offline":           bundle(),
 		},
@@ -158,7 +160,7 @@ func TestInstallStateRoundtripAndAtomicWrite(t *testing.T) {
 }
 
 func image(repository string) map[string]any {
-	return map[string]any{"repository": repository, "index_digest": digest("q"), "platforms": map[string]any{"linux/amd64": digest("q"), "linux/arm64": digest("q")}}
+	return map[string]any{"version": "v1.2.3", "repository": repository, "index_digest": digest("q"), "platforms": map[string]any{"linux/amd64": digest("q"), "linux/arm64": digest("q")}}
 }
 
 func digest(seed string) string {

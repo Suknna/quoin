@@ -15,7 +15,7 @@ func TestLoadDecodesFrozenLock(t *testing.T) {
 	if lock.ContractVersion != 1 {
 		t.Fatalf("contract version %d", lock.ContractVersion)
 	}
-	for _, component := range Components {
+	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
 		base, err := lock.Base(component)
 		if err != nil {
 			t.Fatalf("%s: %v", component, err)

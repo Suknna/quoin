@@ -2,8 +2,8 @@ package kubernetes
 
 // The T43 acceptance's shared fixtures: the evidence recorder (the
 // T39/T40/T42 contract), the invocation-local registry, the formal
-// subject build, the measured chart, the qualification inventory and
-// the owned-resource cleanup.
+// subject build, the native qualification inventory and the
+// owned-resource cleanup.
 
 import (
 	"bytes"
@@ -167,39 +167,29 @@ func buildSubjects(t *testing.T, recorder *ticketEvidence) {
 	}
 	goproxy := strings.TrimSpace(runOutput(t, "go", "env", "GOPROXY"))
 	arch := hostArch()
-	for _, component := range []string{"quoin", "stele", "plinth", "lintel"} {
+	for _, component := range []string{"quoin", "stele", "plinth", "lintel", "frontend"} {
 		repository := registryHostPort + "/t43/" + component
-		recorder.run(t, "build-"+component, nil, 0, "docker", "buildx", "build",
-			"--builder", builder, "--platform", "linux/"+arch,
-			"--sbom=true", "--provenance=mode=min",
-			"-f", "deploy/images/"+component+"/Dockerfile",
-			"--build-arg", "GOPROXY="+goproxy,
-			"-t", repository+":"+arch, "--push", ".")
+		dockerfile, target := "deploy/images/"+component+"/Dockerfile", ""
+		if component == "frontend" {
+			dockerfile, target = "build/package/Dockerfile", "web"
+		}
+		arguments := []string{"buildx", "build", "--builder", builder, "--platform", "linux/" + arch,
+			"--sbom=true", "--provenance=mode=min", "-f", dockerfile, "--build-arg", "GOPROXY=" + goproxy}
+		if target != "" {
+			arguments = append(arguments, "--target", target)
+		}
+		arguments = append(arguments, "-t", repository+":"+arch, "--push", ".")
+		recorder.run(t, "build-"+component, nil, 0, append([]string{"docker"}, arguments...)...)
 	}
 }
 
-// chartAndInventory packages and pushes the chart, measures its OCI
-// digest, and freezes the qualification inventory of the four images.
-func chartAndInventory(t *testing.T, recorder *ticketEvidence, workRoot string) (string, string, map[string]suites.SubjectImage) {
+// nativeInventory measures the ordinary manifest's four application images.
+// The stock frontend and Caddy images are not built by this legacy acceptance
+// helper; qualification's full subject builder covers all five artifacts.
+func nativeInventory(t *testing.T, recorder *ticketEvidence, _ string) map[string]suites.SubjectImage {
 	t.Helper()
-	chartRoot := filepath.Join(workRoot, "chart")
-	_ = os.MkdirAll(chartRoot, 0o755)
-	recorder.run(t, "chart-package", nil, 0, "helm", "package", "deploy/helm/quoin",
-		"--version", strings.TrimPrefix(releaseVersion, "v"), "--destination", chartRoot)
-	pushOutput := recorder.run(t, "chart-push", nil, 0, "helm", "push",
-		filepath.Join(chartRoot, "quoin-"+strings.TrimPrefix(releaseVersion, "v")+".tgz"),
-		"oci://"+registryHostPort+"/t43/charts")
-	chartDigest := ""
-	for _, line := range strings.Split(pushOutput, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "Digest: ") {
-			chartDigest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Digest: "))
-		}
-	}
-	if chartDigest == "" {
-		t.Fatal("chart push reported no digest")
-	}
 	inventory := map[string]suites.SubjectImage{}
-	for _, component := range []string{"quoin", "stele", "plinth", "lintel"} {
+	for _, component := range []string{"quoin", "stele", "plinth", "lintel", "frontend"} {
 		repository := registryHostPort + "/t43/" + component
 		summary := recorder.run(t, "digest-"+component, nil, -1, "docker", "buildx", "imagetools", "inspect", repository+":"+hostArch())
 		indexDigest := ""
@@ -212,12 +202,12 @@ func chartAndInventory(t *testing.T, recorder *ticketEvidence, workRoot string) 
 			t.Fatalf("%s index digest unresolved", component)
 		}
 		inventory[component] = suites.SubjectImage{
-			Repository: repository, Index: indexDigest,
+			Version: releaseVersion, Repository: repository, Index: indexDigest,
 			Platforms: map[string]string{"linux/" + hostArch(): indexDigest},
 		}
 	}
-	recorder.observe("subjects.json", map[string]any{"chart": chartDigest, "images": inventory})
-	return registryHostPort + "/t43/charts/quoin", chartDigest, inventory
+	recorder.observe("subjects.json", map[string]any{"images": inventory})
+	return inventory
 }
 
 // cleanup removes the owned namespace and registry; the release and
@@ -231,7 +221,7 @@ func cleanup(t *testing.T, recorder *ticketEvidence) {
 func cleanupRecord() map[string]any {
 	return map[string]any{
 		"ownedResources": map[string]string{
-			"helm-release":     "uninstalled and proven gone (teardown-zero.json)",
+			"native-manifest":  "deleted and proven gone (teardown-zero.json)",
 			"namespace":        "kubectl delete namespace executed",
 			"port-forwards":    "killed with the stack; zero proven by pgrep",
 			"registry":         "docker rm -f t43-registry",

@@ -19,8 +19,9 @@ import (
 // Architectures is the closed platform set of every release.
 var Architectures = []string{"linux/amd64", "linux/arm64"}
 
-// Components is the closed component set of every release.
-var Components = []string{"lintel", "plinth", "quoin", "stele"}
+// Components is the closed independently-buildable application image set.
+// Caddy remains a fixed third-party deployment dependency, not a subject.
+var Components = []string{"frontend", "lintel", "plinth", "quoin", "stele"}
 
 // BaseImage is one digest-locked multi-platform base.
 type BaseImage struct {
@@ -129,6 +130,11 @@ func Load() (Lock, error) {
 		return Lock{}, fmt.Errorf("plinth worker tools catalog has no packages")
 	}
 	for _, component := range Components {
+		// Frontend is built by its own Caddy-based Docker target and does not
+		// consume a Go component base-image lock.
+		if component == "frontend" {
+			continue
+		}
 		if document.ComponentBases[component] == "" {
 			return Lock{}, fmt.Errorf("component %s has no locked base image", component)
 		}

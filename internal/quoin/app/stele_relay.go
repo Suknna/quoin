@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"google.golang.org/grpc"
@@ -17,8 +17,8 @@ import (
 )
 
 // steleRelayServer implements the frozen SteleRelay unary service
-// (RUNTIME-STELE-001..006): service-token metadata auth, strict release
-// equality, credential digest snapshot, and idempotent Delivery relay.
+// (RUNTIME-STELE-001..006): service-token metadata auth, complete Proto
+// authority fingerprint admission, credential digest snapshot, and idempotent Delivery relay.
 type steleRelayServer struct {
 	runtimev1.UnimplementedSteleRelayServer
 	alerts    *alerts.Service
@@ -59,11 +59,9 @@ func hashOf(value []byte) []byte {
 	return sum[:]
 }
 
-func (server *steleRelayServer) checkRelease(ctx context.Context) error {
-	md, _ := metadata.FromIncomingContext(ctx)
-	values := md.Get("x-quoin-release")
-	if len(values) != 1 || values[0] != buildinfo.Release {
-		return status.Error(codes.FailedPrecondition, "release version mismatch")
+func (server *steleRelayServer) checkContractFingerprint(value string) error {
+	if !contract.ValidProtoAuthorityFingerprint(value) || value != contract.ProtoAuthorityFingerprint {
+		return status.Error(codes.FailedPrecondition, "Proto contract fingerprint mismatch")
 	}
 	return nil
 }
@@ -72,8 +70,8 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 	if err := server.authorize(ctx); err != nil {
 		return nil, err
 	}
-	if request.GetReleaseVersion() != buildinfo.Release {
-		return nil, status.Error(codes.FailedPrecondition, "release version mismatch")
+	if err := server.checkContractFingerprint(request.GetContractFingerprint()); err != nil {
+		return nil, err
 	}
 	version, sources, err := server.alerts.CredentialSnapshot(ctx)
 	if err != nil {
@@ -81,7 +79,7 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 	}
 	response := &runtimev1.GetCredentialSnapshotResponse{
 		SnapshotVersion:     version,
-		QuoinReleaseVersion: buildinfo.Release,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	}
 	for _, source := range sources {
 		snapshot := &runtimev1.AlertSourceSnapshot{
@@ -102,11 +100,8 @@ func (server *steleRelayServer) Deliver(ctx context.Context, request *runtimev1.
 	if err := server.authorize(ctx); err != nil {
 		return nil, err
 	}
-	if err := server.checkRelease(ctx); err != nil {
+	if err := server.checkContractFingerprint(request.GetContractFingerprint()); err != nil {
 		return nil, err
-	}
-	if request.GetReleaseVersion() != buildinfo.Release {
-		return nil, status.Error(codes.FailedPrecondition, "release version mismatch")
 	}
 	if request.GetRelayId() == "" || request.GetSourceId() <= 0 || request.GetCredentialId() <= 0 || request.GetCredentialSnapshotVersion() < 1 {
 		return nil, status.Error(codes.InvalidArgument, "relay_id, source_id, credential_id and snapshot_version are required")

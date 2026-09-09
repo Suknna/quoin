@@ -23,7 +23,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -72,13 +72,13 @@ func main() {
 	// RUNTIME-AUTH-006: the wire text is base64url; the token file holds the
 	// raw 32 bytes.
 	tokenText := base64.RawURLEncoding.EncodeToString(token)
-	md := metadata.Pairs("authorization", "Bearer "+tokenText, "x-quoin-release", buildinfo.Release)
+	md := metadata.Pairs("authorization", "Bearer "+tokenText)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	response, err := client.Deliver(metadata.NewOutgoingContext(ctx, md), &runtimev1.DeliveryRelayRequest{
 		RelayId: *relayID, SourceId: *sourceID, CredentialId: *credentialID,
 		CredentialSnapshotVersion: *snapshot, Protocol: "alertmanager",
-		Body: body, ReceivedAt: timestamppb.New(time.Now().UTC()), ReleaseVersion: buildinfo.Release,
+		Body: body, ReceivedAt: timestamppb.New(time.Now().UTC()), ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	})
 	if err != nil {
 		fatal(err)

@@ -135,7 +135,7 @@ func finalizeMode(arguments []string) error {
 		}
 	}
 
-	// Pull the four component layouts and pack the offline archive.
+	// Pull the independently published application layouts and pack the offline archive.
 	runner := offline.ExecRunner{}
 	work := flags["-work"]
 	if work == "" {
@@ -161,7 +161,7 @@ func finalizeMode(arguments []string) error {
 		}
 		helpers[inventory.Helpers[platform].AssetName] = body
 	}
-	chartBody, err := os.ReadFile(filepath.Join(releaseDir, "assets", names.ChartTgz))
+	kubernetesBody, err := os.ReadFile(filepath.Join(releaseDir, "assets", names.Kubernetes))
 	if err != nil {
 		return err
 	}
@@ -170,14 +170,14 @@ func finalizeMode(arguments []string) error {
 		return err
 	}
 	archive, err := offline.Build(filepath.Join(releaseDir, "offline-archive"), offline.Contents{
-		Manifest:     manifestBytes,
-		ChartName:    names.ChartTgz,
-		Chart:        chartBody,
-		ComposeName:  names.Compose,
-		Compose:      composeBody,
-		Helpers:      helpers,
-		Verification: appendVerificationMaterials(inventoryBytes, evidence),
-		ImageLayouts: layouts,
+		Manifest:       manifestBytes,
+		KubernetesName: names.Kubernetes,
+		Kubernetes:     kubernetesBody,
+		ComposeName:    names.Compose,
+		Compose:        composeBody,
+		Helpers:        helpers,
+		Verification:   appendVerificationMaterials(inventoryBytes, evidence),
+		ImageLayouts:   layouts,
 	}, runner)
 	if err != nil {
 		return fmt.Errorf("build offline archive: %w", err)
@@ -218,7 +218,7 @@ func readEvidenceDir(dir string) (map[string]manifest.EvidenceInput, error) {
 	return evidence, nil
 }
 
-// stageAssets copies the chart tgz, the compose bundle and both helpers
+// stageAssets copies the Kubernetes and Compose bundles plus both helpers
 // into the release directory layout, asserting each recorded SHA-256
 // against the copied bytes.
 func stageAssets(assetsDir, releaseDir string, inventory *subjects.Inventory, names subjects.AssetNames) (map[string]string, error) {
@@ -241,7 +241,7 @@ func stageAssets(assetsDir, releaseDir string, inventory *subjects.Inventory, na
 		staged[filepath.Base(source)] = wantSHA
 		return nil
 	}
-	if err := copyChecked(filepath.Join(assetsDir, "chart", names.ChartTgz), filepath.Join(releaseDir, "assets", names.ChartTgz), inventory.Chart.TgzSHA256); err != nil {
+	if err := copyChecked(filepath.Join(assetsDir, names.Kubernetes), filepath.Join(releaseDir, "assets", names.Kubernetes), inventory.Kubernetes.SHA256); err != nil {
 		return nil, err
 	}
 	if err := copyChecked(filepath.Join(assetsDir, names.Compose), filepath.Join(releaseDir, "assets", names.Compose), inventory.Compose.SHA256); err != nil {

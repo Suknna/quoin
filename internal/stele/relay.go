@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
@@ -77,7 +77,7 @@ func (relay *Relay) Close() error {
 
 func (relay *Relay) context() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken, "x-quoin-release", buildinfo.Release)
+	md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken)
 	return metadata.NewOutgoingContext(ctx, md), cancel
 }
 
@@ -95,7 +95,7 @@ func (relay *Relay) refreshLoop() {
 func (relay *Relay) refresh() {
 	ctx, cancel := relay.context()
 	defer cancel()
-	response, err := relay.client.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ReleaseVersion: buildinfo.Release})
+	response, err := relay.client.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
 	if err != nil {
 		relay.mu.Lock()
 		relay.lastError = err
@@ -104,9 +104,9 @@ func (relay *Relay) refresh() {
 		sharedops.LogEvent("stele", "error", "relay.snapshot_failed", err.Error())
 		return
 	}
-	if response.GetQuoinReleaseVersion() != buildinfo.Release {
+	if response.GetContractFingerprint() != contract.ProtoAuthorityFingerprint {
 		relay.mu.Lock()
-		relay.lastError = fmt.Errorf("release mismatch: quoin=%s stele=%s", response.GetQuoinReleaseVersion(), buildinfo.Release)
+		relay.lastError = fmt.Errorf("Proto contract fingerprint mismatch")
 		relay.ready = false
 		relay.mu.Unlock()
 		return
@@ -171,11 +171,11 @@ func (relay *Relay) Deliver(ctx context.Context, relayID string, sourceID, crede
 	request := &runtimev1.DeliveryRelayRequest{
 		RelayId: relayID, SourceId: sourceID, CredentialId: credentialID,
 		CredentialSnapshotVersion: uint64(snapshotVersion), Protocol: "alertmanager",
-		Body: body, ReceivedAt: timestampProto(receivedAt), ReleaseVersion: buildinfo.Release,
+		Body: body, ReceivedAt: timestampProto(receivedAt), ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken, "x-quoin-release", buildinfo.Release)
+		md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken)
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		response, err := relay.client.Deliver(metadata.NewOutgoingContext(callCtx, md), request)
 		cancel()

@@ -66,8 +66,8 @@ service ArtifactService {
 }
 
 // Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
-// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带 release_version，
-// 与 Quoin 严格相等（RUNTIME-STELE-006、RUNTIME-VERSION-001）。
+// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带完整 Proto 权威契约的
+// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
 service SteleRelay {
   // 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
   // （RUNTIME-STELE-002）。
@@ -150,7 +150,7 @@ enum HelloRejectReason {
   HELLO_REJECT_REASON_UNSPECIFIED = 0;
   HELLO_REJECT_REASON_TOKEN_INVALID = 1;
   HELLO_REJECT_REASON_SLOT_REVOKED = 2;
-  HELLO_REJECT_REASON_VERSION_MISMATCH = 3;
+  HELLO_REJECT_REASON_CONTRACT_MISMATCH = 3;
   HELLO_REJECT_REASON_EPOCH_STALE = 4;
   HELLO_REJECT_REASON_CATALOG_MISMATCH = 5; // Lintel journey_catalog_digest 与 Quoin 嵌入 Catalog 不一致（RUNTIME-CTRL-010）
 }
@@ -197,7 +197,7 @@ enum UploadRejectReason {
 enum GoAwayReason {
   GO_AWAY_REASON_UNSPECIFIED = 0;
   GO_AWAY_REASON_SHUTTING_DOWN = 1;    // Quoin 有序停机（服务端不可用，可重试）
-  GO_AWAY_REASON_VERSION_MISMATCH = 2; // 版本不匹配（不应发生：握手已拒绝）
+  GO_AWAY_REASON_CONTRACT_MISMATCH = 2; // 契约不匹配（不应发生：握手已拒绝）
   GO_AWAY_REASON_REVOKED = 3;          // 凭据吊销（拒绝重连）
   GO_AWAY_REASON_ROTATED = 4;          // 长期 token 已轮换（以新 token 重连）
   GO_AWAY_REASON_REPLACED = 5;         // slot 被替换（以新注册令牌重新注册）
@@ -240,13 +240,14 @@ enum DeliveryStatus {
 // ============================================================================
 
 // Register 请求：一次性注册令牌（HTTP-COMMAND-012 的 reveal 产物，绑定 slot + generation）
-// 单次消费；不携带长期 Bearer（尚未拥有）。release_version 必须与 Quoin 严格相等。
+// 单次消费；不携带长期 Bearer（尚未拥有）。contract_fingerprint 必须是完整 Proto
+// 权威集合的 canonical SHA-256（64 位小写 hex），缺失、无效或不一致均拒绝。
 message RegisterRuntimeRequest {
   RuntimeSlot slot = 1;
   string one_time_token = 2;   // 一次性注册令牌：32 随机字节的 base64url 无填充文本（RUNTIME-AUTH-006）
   uint64 generation = 3;       // 令牌绑定的 credential generation（>= 1）；必须与 Quoin 内存令牌记录一致
   string boot_id = 4;          // 每次进程启动重新生成（RUNTIME-CTRL-004）
-  string release_version = 5;  // 与 Quoin 严格相等，不做协商（RUNTIME-VERSION-001）
+  string contract_fingerprint = 5;
 }
 
 // Register 响应：长期服务 token 仅此一次返回；supervisor 必须原子持久化到权限 0600
@@ -338,13 +339,16 @@ message ControlEnvelope {
   }
 }
 
-// 握手首帧：Bearer 已由 metadata 认证；本帧声明 slot/连接身份、版本与 Journey Catalog digest。
+// 握手首帧：Bearer 已由 metadata 认证；本帧声明 slot/连接身份、完整 Proto
+// 权威契约指纹与 Journey Catalog digest。
 message Hello {
   RuntimeSlot slot = 1;
   string boot_id = 2;              // 每次进程启动重新生成
   uint64 connection_epoch = 3;     // 每次连接递增，>= 1（RUNTIME-CTRL-004）
-  string release_version = 4;      // 与 Quoin 严格相等
-  repeated int64 active_attempts = 5; // 上次连接仍在执行的 attempt（调和输入，可空）
+  string contract_fingerprint = 4; // 完整权威集合 SHA-256，小写 hex
+  repeated int64 active_attempts = 5;
+  // Informational build provenance only. It does not participate in admission.
+  string release_version = 11; // 上次连接仍在执行的 attempt（调和输入，可空）
   string journey_catalog_digest = 6; // 仅 Lintel：嵌入 Journey Catalog 原始 JCS 字节 SHA-256（hex，64 字符）
   uint32 browser_capacity_slots = 7; // 仅 Lintel：该 boot 固定浏览器 slot 总数，必须 >=1；Quoin 是唯一 FIFO 队列
   string chromium_revision = 8;      // 仅 Lintel：精确 Chromium revision；profile 只允许 revision 完全相等
@@ -1356,17 +1360,17 @@ message ArtifactGrepTextResponse {
 // Stele 告警接入（SteleRelay）
 // ============================================================================
 
-// 快照请求：release_version 必填且与 Quoin 严格相等（RUNTIME-STELE-006）。
+// 快照请求：contract_fingerprint 必须与 Quoin 的完整 Proto 权威契约相同。
 message GetCredentialSnapshotRequest {
-  string release_version = 1;
+  string contract_fingerprint = 1;
 }
 
 // 版本化只读快照：Stele 仅内存缓存；Deliver 必须回传 snapshot_version
-// （DATA-ALERT-008）。quoin_release_version 供 Stele 快速核对（RUNTIME-STELE-006）。
+// （DATA-ALERT-008）。contract_fingerprint 供 Stele 复核通信准入。
 message GetCredentialSnapshotResponse {
   uint64 snapshot_version = 1;     // 单调递增；Deliver 回传
   repeated AlertSourceSnapshot sources = 2;
-  string quoin_release_version = 3; // Quoin 当前 release_version（严格相等核对）
+  string contract_fingerprint = 3; // Quoin 当前完整 Proto 权威契约 SHA-256
 }
 
 // 单个逻辑告警源的非秘密投影（对应 alert_sources 的 enabled 与 active 凭据 digest）。
@@ -1384,8 +1388,8 @@ message CredentialDigestEntry {
   bytes digest = 2;                // 32-byte Bearer digest
 }
 
-// Delivery 转交：精确原始 body；relay_id 幂等；release_version 必填且严格相等
-// （CONTEXT「Stele」、RUNTIME-STELE-003/005）。
+// Delivery 转交：精确原始 body；relay_id 幂等；contract_fingerprint 必填且必须与
+// Quoin 的完整 Proto 权威契约相同（CONTEXT「Stele」、RUNTIME-STELE-003/005）。
 message DeliveryRelayRequest {
   string relay_id = 1;             // Stele 每次外部请求生成；内部重试复用
   int64 source_id = 2;
@@ -1394,7 +1398,7 @@ message DeliveryRelayRequest {
   string protocol = 5;             // v1: alertmanager
   bytes body = 6;                  // 精确原始请求体（可能非 UTF-8）
   google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
-  string release_version = 8;      // 与 Quoin 严格相等（RUNTIME-STELE-006）
+  string contract_fingerprint = 8; // 完整权威集合 SHA-256，小写 hex
 }
 
 // Delivery 结果：ACCEPTED=204；REJECTED=4xx 不重试；UNAVAILABLE=5xx 重试

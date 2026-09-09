@@ -20,6 +20,13 @@ type StreamSender func(envelope any) error
 // AttachStreamWithSender records the accepted stream together with its
 // outbound sender; dispatchers may then use SendTo until the stream ends.
 func (service *Service) AttachStreamWithSender(slotName, bootID string, epoch uint64, sender StreamSender) <-chan struct{} {
+	return service.AttachStreamWithSenderVersion(slotName, bootID, epoch, "", sender)
+}
+
+// AttachStreamWithSenderVersion records the peer's informational build version
+// with the transient stream owner. Admission was already decided by the Proto
+// authority fingerprint before this point.
+func (service *Service) AttachStreamWithSenderVersion(slotName, bootID string, epoch uint64, releaseVersion string, sender StreamSender) <-chan struct{} {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	key := slotName + "\x00" + bootID
@@ -29,7 +36,7 @@ func (service *Service) AttachStreamWithSender(slotName, bootID string, epoch ui
 	if old, live := service.conns[slotName]; live {
 		old.close()
 	}
-	fresh := &connection{bootID: bootID, epoch: epoch, updated: service.now(), closing: make(chan struct{}), sender: sender}
+	fresh := &connection{bootID: bootID, epoch: epoch, releaseVersion: releaseVersion, updated: service.now(), closing: make(chan struct{}), sender: sender}
 	service.conns[slotName] = fresh
 	return fresh.closing
 }
@@ -85,8 +92,9 @@ func (service *Service) SendToFenced(slotName, bootID string, epoch uint64, send
 
 // StreamView describes the live binding a dispatcher must fence on.
 type StreamView struct {
-	BootID string
-	Epoch  uint64
+	BootID         string
+	Epoch          uint64
+	ReleaseVersion string
 }
 
 // SetBrowserCapacity binds the Lintel Hello capacity to the exact live stream.

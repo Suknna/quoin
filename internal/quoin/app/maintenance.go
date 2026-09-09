@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
@@ -53,7 +52,6 @@ func NewMaintenanceHandler(service *auth.Service, database *sql.DB, publicOrigin
 func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReason string) (http.Handler, error) {
 	configureHumaErrorModel()
 	apiMux := http.NewServeMux()
-	staticMux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Quoin maintenance API", "1.0.0-draft")
 	apiConfig.OpenAPIPath, apiConfig.DocsPath, apiConfig.SchemasPath = "", "", ""
 	apiConfig.Transformers, apiConfig.CreateHooks = []huma.Transformer{}, nil
@@ -94,19 +92,13 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 		huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 		application.registerUpgradeDrainRoutes(api)
 	}
-	application.registerStatic(staticMux)
-	root := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if strings.HasPrefix(request.URL.Path, "/api/") {
-			apiMux.ServeHTTP(writer, request)
-			return
-		}
-		staticMux.ServeHTTP(writer, request)
-	})
+	// The frontend service owns every non-API path, including its maintenance
+	// page. Quoin deliberately keeps the maintenance allowlist API-only.
 	csrf := http.NewCrossOriginProtection()
 	if err := csrf.AddTrustedOrigin(publicOrigin); err != nil {
 		return nil, err
 	}
-	return securityHeaders(requireBrowserOrigin(csrf.Handler(root))), nil
+	return securityHeaders(requireBrowserOrigin(csrf.Handler(apiMux))), nil
 }
 
 // registerMaintenanceTrustRebuildRoutes is intentionally an explicit projection

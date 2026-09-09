@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestRenderProducesFourLongLivedServicesBehindBootstrapGate(t *testing.T) {
+func TestRenderProducesAuthoritativeSixServiceTopologyBehindBootstrapGate(t *testing.T) {
 	root := t.TempDir()
 	input := contract.ComposeInstall{Document: "compose-install", PublicOrigin: "https://quoin.test", PublishMode: "loopback", QuoinPublicHostPort: 18080, SteleWebhookHostPort: 18081, SecretDirectory: filepath.Join(root, "secrets"), LintelBrowserSlots: 1, LintelShmSizeBytes: 1 << 30}
 	projection, err := compose.Render(input, filepath.Join(root, "state"))
@@ -33,6 +33,9 @@ func TestRenderProducesFourLongLivedServicesBehindBootstrapGate(t *testing.T) {
 	if err := yaml.Unmarshal(data, &document); err != nil {
 		t.Fatal(err)
 	}
+	if len(document.Services) != 8 {
+		t.Fatalf("generated projection must retain the authoritative six long-lived services plus two bootstrap jobs, got %d: %+v", len(document.Services), document.Services)
+	}
 	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
 		service, exists := document.Services[component]
 		if !exists {
@@ -42,8 +45,18 @@ func TestRenderProducesFourLongLivedServicesBehindBootstrapGate(t *testing.T) {
 			t.Fatalf("%s bypasses Admin bootstrap: %+v", component, service.DependsOn)
 		}
 	}
-	if len(document.Services["quoin"].Ports) != 1 || len(document.Services["stele"].Ports) != 1 {
-		t.Fatal("loopback projection must publish only Quoin and Stele")
+	gateway, exists := document.Services["gateway"]
+	if !exists {
+		t.Fatal("missing Caddy gateway service")
+	}
+	if gateway.DependsOn["frontend"].Condition != "service_started" || gateway.DependsOn["quoin"].Condition != "service_healthy" || gateway.DependsOn["stele"].Condition != "service_healthy" {
+		t.Fatalf("gateway must wait for frontend and API backends: %+v", gateway.DependsOn)
+	}
+	if _, exists := document.Services["frontend"]; !exists {
+		t.Fatal("missing independently deployed frontend service")
+	}
+	if len(gateway.Ports) != 1 || len(document.Services["quoin"].Ports) != 0 || len(document.Services["stele"].Ports) != 0 {
+		t.Fatal("loopback projection must publish only the TLS gateway")
 	}
 	if len(document.Services["plinth"].Ports) != 0 || len(document.Services["lintel"].Ports) != 0 {
 		t.Fatal("Runtime or ops ports leaked to the host")
@@ -54,10 +67,11 @@ func TestRenderWithPinnedImagesAndVerifyOverlay(t *testing.T) {
 	root := t.TempDir()
 	input := contract.ComposeInstall{Document: "compose-install", PublicOrigin: "https://quoin.test", PublishMode: "loopback", QuoinPublicHostPort: 18080, SteleWebhookHostPort: 18081, SecretDirectory: filepath.Join(root, "secrets"), LintelBrowserSlots: 1, LintelShmSizeBytes: 1 << 30}
 	projection, err := compose.RenderWithOptions(input, filepath.Join(root, "state"), compose.Options{Images: map[string]string{
-		"quoin":  "127.0.0.1:5000/quoin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"plinth": "127.0.0.1:5000/plinth@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"lintel": "127.0.0.1:5000/lintel@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-		"stele":  "127.0.0.1:5000/stele@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"quoin":    "127.0.0.1:5000/quoin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"plinth":   "127.0.0.1:5000/plinth@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"lintel":   "127.0.0.1:5000/lintel@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"stele":    "127.0.0.1:5000/stele@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"frontend": "127.0.0.1:5000/frontend@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +89,7 @@ func TestRenderWithPinnedImagesAndVerifyOverlay(t *testing.T) {
 		"127.0.0.1:5000/plinth@sha256:bbbb",
 		"127.0.0.1:5000/lintel@sha256:cccc",
 		"127.0.0.1:5000/stele@sha256:dddd",
+		"127.0.0.1:5000/frontend@sha256:eeee",
 	} {
 		if !strings.Contains(text, pinned) {
 			t.Fatalf("projection missing pinned reference %s", pinned)
@@ -107,8 +122,8 @@ func TestRenderWithPinnedImagesAndVerifyOverlay(t *testing.T) {
 	if len(verifier.Volumes) != 0 || len(verifier.Ports) != 0 {
 		t.Fatal("verifier must not mount state or publish ports")
 	}
-	if len(verifier.Networks) != 1 || verifier.Networks[0] != "internal" {
-		t.Fatalf("verifier must join only the internal network: %v", verifier.Networks)
+	if len(verifier.Networks) != 0 {
+		t.Fatalf("verifier must inherit the projection's default network: %v", verifier.Networks)
 	}
 	if len(verifier.Entrypoint) != 1 || verifier.Entrypoint[0] != "/quoin-healthcheck" {
 		t.Fatalf("verifier entrypoint must be the healthcheck binary: %v", verifier.Entrypoint)

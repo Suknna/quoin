@@ -66,12 +66,9 @@ func prepareCommand(arguments []string) {
 	release := flags.String("release", "v0.1.0-dev", "release version of the built subjects")
 	quoinPort := flags.Int("quoin-port", 20880, "published Quoin loopback port")
 	stelePort := flags.Int("stele-port", 20881, "published Stele loopback port")
-	chartRepo := flags.String("chart-repo", "", "measured chart OCI repository (Kubernetes installs need it)")
-	chartDigest := flags.String("chart-digest", "", "measured chart OCI digest (sha256:...)")
 	if err := flags.Parse(arguments); err != nil || *work == "" || *inventoryPath == "" {
 		usage()
 	}
-	chart := suites.ChartSubject{OCIRepository: *chartRepo, OCIDigest: *chartDigest}
 	body, err := os.ReadFile(*inventoryPath)
 	if err != nil {
 		fatal(err)
@@ -79,6 +76,7 @@ func prepareCommand(arguments []string) {
 	var inventory struct {
 		Release string `json:"release"`
 		Images  map[string]struct {
+			Version     string            `json:"version"`
 			Repository  string            `json:"repository"`
 			IndexDigest string            `json:"index_digest"`
 			Platforms   map[string]string `json:"platforms"`
@@ -90,7 +88,7 @@ func prepareCommand(arguments []string) {
 	images := map[string]suites.SubjectImage{}
 	for component, image := range inventory.Images {
 		images[component] = suites.SubjectImage{
-			Repository: image.Repository, Index: image.IndexDigest, Platforms: image.Platforms,
+			Version: image.Version, Repository: image.Repository, Index: image.IndexDigest, Platforms: image.Platforms,
 		}
 	}
 	if len(images) == 0 {
@@ -106,7 +104,10 @@ func prepareCommand(arguments []string) {
 	var configPath string
 	var configErr error
 	if strings.EqualFold(*backend, "kubernetes") {
-		configPath, configErr = suites.WriteHelmInstallConfig(*work)
+		// Kubernetes applies the ordinary repository manifest directly; no
+		// separate installer input or deployment DSL is needed.
+		configPath = filepath.Join(*work, "kubernetes.yaml")
+		configErr = os.WriteFile(configPath, nil, 0o600)
 	} else {
 		configPath, configErr = suites.WriteInstallConfig(*work, suites.InstallPorts{Quoin: *quoinPort, Stele: *stelePort})
 	}
@@ -114,7 +115,7 @@ func prepareCommand(arguments []string) {
 		fatal(configErr)
 	}
 	commit, _ := execOutput("git", "rev-parse", "HEAD")
-	manifestPath, err := suites.WriteReleaseManifest(*work, version, strings.TrimSpace(commit), images, chart)
+	manifestPath, err := suites.WriteReleaseManifest(*work, version, strings.TrimSpace(commit), images)
 	if err != nil {
 		fatal(err)
 	}

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
@@ -81,9 +80,9 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 	// (RUNTIME-AUTH-006). The server hashes the received text; hash the same
 	// text here.
 	tokenText := base64.RawURLEncoding.EncodeToString(serviceToken)
-	authCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText, "x-quoin-release", buildinfo.Release))
+	authCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText))
 
-	snapshot, err := client.GetCredentialSnapshot(authCtx, &runtimev1.GetCredentialSnapshotRequest{ReleaseVersion: buildinfo.Release})
+	snapshot, err := client.GetCredentialSnapshot(authCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +104,7 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		response, err := client.Deliver(authCtx, &runtimev1.DeliveryRelayRequest{
 			RelayId: relayID, SourceId: result.SourceID, CredentialId: result.CredentialID,
 			CredentialSnapshotVersion: snapshot.GetSnapshotVersion(), Protocol: "alertmanager",
-			Body: body, ReleaseVersion: buildinfo.Release,
+			Body: body, ContractFingerprint: contract.ProtoAuthorityFingerprint,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -129,14 +128,18 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		t.Fatalf("delivery count=%d err=%v", deliveryCount, err)
 	}
 
-	// Wrong release must be rejected.
-	badCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText, "x-quoin-release", "v9.9.9"))
-	if _, err := client.GetCredentialSnapshot(badCtx, &runtimev1.GetCredentialSnapshotRequest{ReleaseVersion: "v9.9.9"}); err == nil {
-		t.Fatal("release mismatch must fail")
+	// A missing or malformed contract fingerprint must never provide a legacy
+	// release-version admission path.
+	badCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText))
+	if _, err := client.GetCredentialSnapshot(badCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: "not-a-valid-fingerprint"}); err == nil {
+		t.Fatal("invalid contract fingerprint must fail")
+	}
+	if _, err := client.Deliver(badCtx, &runtimev1.DeliveryRelayRequest{RelayId: "relay-bad-contract", SourceId: result.SourceID, CredentialId: result.CredentialID, CredentialSnapshotVersion: snapshot.GetSnapshotVersion(), Protocol: "alertmanager", Body: body}); err == nil {
+		t.Fatal("missing contract fingerprint must fail")
 	}
 	// Wrong token must be rejected.
-	badAuth := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer wrong-token", "x-quoin-release", buildinfo.Release))
-	if _, err := client.GetCredentialSnapshot(badAuth, &runtimev1.GetCredentialSnapshotRequest{ReleaseVersion: buildinfo.Release}); err == nil {
+	badAuth := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer wrong-token"))
+	if _, err := client.GetCredentialSnapshot(badAuth, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); err == nil {
 		t.Fatal("bad token must fail")
 	}
 }

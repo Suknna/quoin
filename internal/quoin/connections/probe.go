@@ -161,7 +161,7 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 		return attemptID, nil
 	}
 	lease := service.now().UTC().Add(5 * time.Minute).Format(time.RFC3339Nano)
-	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, binding.BootID, *binding.ConnectionEpoch, lease, releaseVersion, attemptID); err != nil {
+	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, binding.BootID, *binding.ConnectionEpoch, lease, binding.ReleaseVersion, attemptID); err != nil {
 		return 0, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

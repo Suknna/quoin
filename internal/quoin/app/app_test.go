@@ -18,8 +18,53 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
-// TestAuthEndpointsOverRealServer drives the real Huma surface end to end,
-// including the PUT password path, over an in-process server with real SQLite.
+// TestPublicHandlerOnlyServesBackendRoutes guards the split deployment boundary:
+// the frontend service owns pages and SPA fallback, while Quoin only serves its
+// API, streaming, and WebSocket routes. This ensures an absent frontend image
+// can never turn an unknown backend endpoint into an apparently successful page.
+func TestPublicHandlerOnlyServesBackendRoutes(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	secrets := filepath.Join(root, "secrets")
+	config := contract.QuoinConfig{
+		Component: "quoin", PublicOrigin: "https://quoin.example.com",
+		DataDirectory:             filepath.Join(root, "data"),
+		BackupDirectory:           filepath.Join(root, "backup"),
+		RootKeyFile:               filepath.Join(secrets, "root-key"),
+		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
+		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
+		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
+	}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service, err := auth.NewService(database.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
+	defer server.Close()
+	for _, endpoint := range []string{"/", "/investigations/example", "/api/v1/not-a-route"} {
+		response, err := server.Client().Get(server.URL + endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s: status=%d, want %d", endpoint, response.StatusCode, http.StatusNotFound)
+		}
+		if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("GET %s: backend security headers missing: %v", endpoint, response.Header)
+		}
+	}
+}
+
 func TestAuthEndpointsOverRealServer(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

@@ -18,6 +18,40 @@ import (
 // and upgrade-refusal legs on a disposable clone of the deployment so
 // the live matrix stack keeps serving the dependent suites. Every leg
 // drives the real deployment helper as a subprocess.
+func boolExit(ok bool) int {
+	if ok {
+		return 0
+	}
+	return 1
+}
+
+// runNativeObservedBackup triggers the online product path and waits until the
+// product publishes a completed backup. It never stops Quoin or uses the
+// offline Pod runner, preserving the online-vs-offline qualification boundary.
+func runNativeObservedBackup(stack *Stack, detail map[string]string) int {
+	session, err := stack.Login("admin", stack.AdminPassword)
+	if err != nil {
+		detail["backup-login"] = err.Error()
+		return 1
+	}
+	_, status, err := session.Post("/api/v1/backups", fmt.Sprintf(`{"clientCommandId":"native-backup-%d"}`, time.Now().UnixNano()))
+	if err != nil || (status != http.StatusAccepted && status != http.StatusOK && status != http.StatusConflict) {
+		detail["backup-trigger"] = fmt.Sprintf("status=%d err=%v", status, err)
+		return 1
+	}
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		body, listStatus, _ := session.Get("/api/v1/backups?limit=5")
+		if listStatus == http.StatusOK && (strings.Contains(body, `"state":"succeeded"`) || strings.Contains(body, `"state":"Succeeded"`)) {
+			detail["backup-online"] = "published-succeeded"
+			return 0
+		}
+		time.Sleep(3 * time.Second)
+	}
+	detail["backup-online"] = "timed-out"
+	return 1
+}
+
 func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPassword string, detail map[string]string) (backup, offlineBackup, restoreIsolation, restoredIdentities, missingSecretFailClosed, bootstrapGates, bootstrapRetry, prewriteRollback bool) {
 	helper, _ := os.Executable()
 	// The disposable clone is a second, fully-isolated deployment of the
@@ -40,29 +74,50 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 			tamperedBody = strings.Replace(string(body), `"version"`, `"version-tampered"`, 1)
 		}
 		_ = os.WriteFile(tampered, []byte(tamperedBody), 0o600)
-		code := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "upgrade",
-			"--config", disposable.ConfigPath, "--release-manifest", tampered,
-			"--report", filepath.Join(disposable.DeploymentRoot(), "tampered-report.json"))
-		prewriteRollback = code == 2
-		detail["upgrade-refusal-exit"] = fmt.Sprint(code)
+		if disposable.Backend == BackendKubernetes {
+			prewriteRollback = disposable.NativeUpgradeRefusal(tampered) != nil
+			detail["upgrade-refusal-exit"] = fmt.Sprint(boolExit(prewriteRollback))
+		} else {
+			code := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "upgrade",
+				"--config", disposable.ConfigPath, "--release-manifest", tampered,
+				"--report", filepath.Join(disposable.DeploymentRoot(), "tampered-report.json"))
+			prewriteRollback = code == 2
+			detail["upgrade-refusal-exit"] = fmt.Sprint(code)
+		}
+
 	}
 
 	// Admin bootstrap failure then retry: a wrong password confirmation
 	// must fail the bootstrap without ever starting workloads, and the
 	// retry must then complete the install.
-	failedReport := filepath.Join(disposable.DeploymentRoot(), "failed-report.json")
-	install := exec.Command(helper, disposable.HelperVerb(), "install", "--config", disposable.ConfigPath,
-		"--release-manifest", disposable.ManifestPath, "--report", failedReport)
-	install.Env = disposable.ComposeEnv()
-	install.Dir = envWorkdir(disposable.ComposeEnv())
-	install.Stdin = strings.NewReader(strings.Join([]string{"admin", "T40 Disposable", disposable.AdminPassword, "wrong-confirmation"}, "\n") + "\n")
-	_ = install.Run()
-	failedCode := 0
-	if install.ProcessState != nil {
-		failedCode = install.ProcessState.ExitCode()
+	if disposable.Backend == BackendKubernetes {
+		// Prepare the real fixed-name manifest/PVC resources but keep Quoin
+		// stopped. A wrong PTY confirmation then proves no serving workload is
+		// admitted before the successful retry creates the first administrator.
+		if err := disposable.NativePrepareBootstrap(); err == nil {
+			bootstrapRetry, err = disposable.NativeBootstrapFailureRetry()
+			if err != nil {
+				detail["bootstrap-failure"] = err.Error()
+			}
+		} else {
+			detail["bootstrap-prepare"] = err.Error()
+		}
+		detail["bootstrap-failure-exit"] = fmt.Sprint(boolExit(bootstrapRetry))
+	} else {
+		failedReport := filepath.Join(disposable.DeploymentRoot(), "failed-report.json")
+		install := exec.Command(helper, disposable.HelperVerb(), "install", "--config", disposable.ConfigPath,
+			"--release-manifest", disposable.ManifestPath, "--report", failedReport)
+		install.Env = disposable.ComposeEnv()
+		install.Dir = envWorkdir(disposable.ComposeEnv())
+		install.Stdin = strings.NewReader(strings.Join([]string{"admin", "T40 Disposable", disposable.AdminPassword, "wrong-confirmation"}, "\n") + "\n")
+		_ = install.Run()
+		failedCode := 0
+		if install.ProcessState != nil {
+			failedCode = install.ProcessState.ExitCode()
+		}
+		bootstrapRetry = failedCode != 0 && disposable.RunningWorkloadCount() == 0
+		detail["bootstrap-failure-exit"] = fmt.Sprint(failedCode)
 	}
-	bootstrapRetry = failedCode != 0 && disposable.RunningWorkloadCount() == 0
-	detail["bootstrap-failure-exit"] = fmt.Sprint(failedCode)
 
 	if report, err := disposable.EnsureInstalled(); err != nil {
 		detail["disposable-install"] = err.Error()
@@ -82,7 +137,15 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// (POST /api/v1/backups); the driver plays that Admin
 	// concurrently with the helper.
 	backupReport := filepath.Join(disposable.DeploymentRoot(), "backup-report.json")
-	backupExit := runObservedBackup(helper, disposable, backupReport, detail)
+	backupExit := 1
+	if disposable.Backend == BackendKubernetes {
+		// Online proof remains online: trigger through the authenticated public
+		// API and observe the published backup listing. OfflinePod is reserved
+		// exclusively for the following stopped-workload fallback leg.
+		backupExit = runNativeObservedBackup(disposable, detail)
+	} else {
+		backupExit = runObservedBackup(helper, disposable, backupReport, detail)
+	}
 	backup = backupExit == 0
 	detail["backup-exit"] = fmt.Sprint(backupExit)
 
@@ -90,9 +153,16 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// unreachable Quoin, so stop the workload first, take the offline
 	// backup, and bring the deployment back for the restore leg.
 	if stopErr := disposable.StopQuoin(); stopErr == nil {
-		offlineReport := filepath.Join(disposable.DeploymentRoot(), "offline-report.json")
-		offlineExit := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "backup", "--offline",
-			"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath, "--report", offlineReport)
+		offlineExit := 1
+		if disposable.Backend == BackendKubernetes {
+			output, err := disposable.NativeBackup()
+			offlineExit = boolExit(err == nil)
+			detail["offline-backup-output"] = lastLines(output, 6)
+		} else {
+			offlineReport := filepath.Join(disposable.DeploymentRoot(), "offline-report.json")
+			offlineExit = runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "backup", "--offline",
+				"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath, "--report", offlineReport)
+		}
 		offlineBackup = offlineExit == 0
 		detail["offline-backup-exit"] = fmt.Sprint(offlineExit)
 		if _, reinstallErr := disposable.EnsureInstalled(); reinstallErr != nil {
@@ -146,11 +216,21 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	}
 	detail["backup-id"] = backupID
 	if backupID != "" && cookieToInvalidate != nil {
-		_, _ = disposable.Down(true)
+		_, _ = disposable.Down(disposable.Backend != BackendKubernetes)
 		if _, err := disposable.EnsureInstalled(); err == nil {
 			restoreReport := filepath.Join(disposable.DeploymentRoot(), "restore-report.json")
-			code := runRestoreInteractively(helper, disposable, backupID, restoreReport, detail)
+			code := 1
+			if disposable.Backend == BackendKubernetes {
+				if err := disposable.StopQuoin(); err == nil {
+					output, restoreErr := disposable.NativeRestore(backupID, "recovery-admin", disposable.AdminPassword+"-recovery")
+					code = boolExit(restoreErr == nil)
+					detail["restore-output"] = lastLines(output, 6)
+				}
+			} else {
+				code = runRestoreInteractively(helper, disposable, backupID, restoreReport, detail)
+			}
 			detail["restore-exit"] = fmt.Sprint(code)
+
 			if code == 0 {
 				restoreIsolation = true
 				if refreshErr := disposable.RefreshTransports(); refreshErr != nil {
@@ -160,13 +240,13 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 				// prove the pre-restore cookie no longer authorizes.
 				deadline := time.Now().Add(180 * time.Second)
 				for time.Now().Before(deadline) {
-					request, err := http.NewRequest(http.MethodGet, disposable.BaseURL()+"/api/v1/auth/session", nil)
+					request, err := http.NewRequest(http.MethodGet, disposable.BaseURL()+"/api/v1/auth/me", nil)
 					if err != nil {
 						break
 					}
 					request.AddCookie(cookieToInvalidate)
 					request.Header.Set("Origin", publicOrigin)
-					response, err := (&http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+					response, err := (&http.Client{Timeout: 5 * time.Second, Transport: insecureTLSTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
 					if err == nil {
 						response.Body.Close()
 						// The pre-restore session must never authorize on the
@@ -202,15 +282,24 @@ func driveDisposableLifecycle(request DeploymentRequest, stack *Stack, adminPass
 	// (directory on compose, release-scoped Secret on kubernetes —
 	// never the live matrix stack's) and the reinstall runs over the
 	// retained data.
-	_, _ = disposable.Down(true)
+	// Keep the native PVC while removing only its authority; deleting the
+	// disposable namespace would erase the data and make this a false proof.
+	_, _ = disposable.Down(disposable.Backend != BackendKubernetes)
 	if err := disposable.RemoveSecretAuthority(); err != nil {
 		detail["missing-secret-removal"] = err.Error()
 		return
 	}
-	code := runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "install",
-		"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath,
-		"--report", filepath.Join(disposable.DeploymentRoot(), "nosecret-report.json"))
-	missingSecretFailClosed = code == 2
+	code := 1
+	if disposable.Backend == BackendKubernetes {
+		_, err := disposable.EnsureInstalled()
+		code = boolExit(err == nil)
+		missingSecretFailClosed = err != nil
+	} else {
+		code = runHelper(helper, disposable.HelperEnv(), disposable.HelperVerb(), "install",
+			"--config", disposable.ConfigPath, "--release-manifest", disposable.ManifestPath,
+			"--report", filepath.Join(disposable.DeploymentRoot(), "nosecret-report.json"))
+		missingSecretFailClosed = code == 2
+	}
 	detail["missing-secret-exit"] = fmt.Sprint(code)
 	return
 }
@@ -397,7 +486,7 @@ func runRestoreInteractively(helper string, disposable *Stack, backupID, report 
 	// The Kubernetes attach relay does not replay output that predates
 	// the attach: the pod's username prompt prints before kubectl attach
 	// joins, so it never appears in the transcript. A username is not
-	// secret — the helm admin bootstrap answers it blind for the same
+	// secret — the prior deployment helper bootstrap answered it blind for the same
 	// reason — while the password prompts print after the attach and are
 	// answered strictly after their markers (same as compose).
 	ok := step("Type RESTORE", "RESTORE\n", 60*time.Second)

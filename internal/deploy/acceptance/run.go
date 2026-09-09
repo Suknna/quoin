@@ -21,7 +21,7 @@ const (
 )
 
 // RunRequest supplies the backend-owned verifier as a narrow closure. Keeping
-// the verifier behind this seam avoids a second Compose/Helm implementation:
+// the verifier behind this seam avoids a second Compose implementation:
 // helper mode calls the ordinary read-only verifier exactly once.
 type RunRequest struct {
 	Backend             string

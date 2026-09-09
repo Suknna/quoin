@@ -31,7 +31,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       registry: ${{ steps.paths.outputs.registry }}
-      chart-oci: ${{ steps.paths.outputs.chart-oci }}
       identity: ${{ steps.paths.outputs.identity }}
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +39,6 @@ jobs:
         run: |
           repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "registry=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
-          echo "chart-oci=ghcr.io/${repo}/charts" >> "$GITHUB_OUTPUT"
           echo "identity=^https://github\.com/${repo}/" >> "$GITHUB_OUTPUT"
 
   collect:
@@ -141,7 +139,7 @@ jobs:
           # The release images already live in ghcr; copy them digest-pinned
           # into the loopback registry the deployment consumes (digests are
           # preserved; the repository location is transport only).
-          for component in quoin plinth lintel stele; do
+          for component in quoin plinth lintel stele frontend; do
             index=$(jq -r --arg c "$component" \
               '.images[$c].index_digest' .release/assets/subjects-inventory.json)
             repository=$(jq -r --arg c "$component" \

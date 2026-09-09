@@ -1,0 +1,9 @@
+# Set publicOrigin to the exact externally visible HTTPS origin before first start.
+component: quoin
+publicOrigin: https://quoin.example.com
+dataDirectory: /var/lib/quoin/data
+backupDirectory: /var/lib/quoin/backups
+rootKeyFile: /run/quoin-secrets/root-key
+runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
+runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
+steleServiceTokenFile: /run/quoin-secrets/stele-service-token

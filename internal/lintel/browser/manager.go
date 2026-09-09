@@ -103,7 +103,7 @@ func NewManager(config Config) (*Manager, error) {
 		// perl wrapper: the wrapper resolves getpwuid for the runtime uid
 		// and aborts with "I do not know who you are" when the uid has
 		// no passwd entry — Compose runs Lintel as the installing user's
-		// dynamic uid and Helm as 65532, neither of which the image
+		// dynamic uid and Kubernetes as 65532, neither of which the image
 		// carries. The real binary needs no passwd entry and is the
 		// foreground process this manager assumes.
 		config.X0VNCBinary = "X0tigervnc"

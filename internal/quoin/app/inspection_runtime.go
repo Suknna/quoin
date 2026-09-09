@@ -35,7 +35,7 @@ func (service *RuntimeService) dispatchInspectionAttempt(ctx context.Context, at
 		return fmt.Errorf("plinth is not connected")
 	}
 	attempts := service.Inspections.Attempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)
@@ -89,7 +89,7 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 		return fmt.Errorf("plinth is not connected")
 	}
 	attempts := service.Inspections.Attempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)

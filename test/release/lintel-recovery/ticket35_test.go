@@ -33,7 +33,7 @@ func TestTicket35(t *testing.T) {
 	artifacts := []map[string]any{}
 	for _, backend := range []struct{ name, pkg string }{
 		{"compose", "./test/release/compose"},
-		{"helm", "./test/release/helm"},
+		{"kubernetes", "./test/release/kubernetes"},
 	} {
 		cmd := exec.Command("go", "test", "-timeout=60m", "-v", backend.pkg, "-run", "^TestTicket35", "-count=1")
 		cmd.Dir = filepath.Join("..", "..", "..")
@@ -74,13 +74,13 @@ func TestTicket35(t *testing.T) {
 			"helperOnlyFinalize":  "maintenance exited only through the deployment_helper-owned finalizer transaction",
 		},
 		"proofPoints": map[string]string{
-			"compose": "compose/runtime-evidence.json records the real install, registration and both recovery dispositions",
-			"helm":    "helm/runtime-evidence.json records the equivalent real Kubernetes path",
+			"compose":    "compose/runtime-evidence.json records the real install, registration and both recovery dispositions",
+			"kubernetes": "kubernetes/runtime-evidence.json records the real native Kubernetes lifecycle path",
 		},
 	})
 	writeJSON(t, filepath.Join(root, "cleanup.json"), map[string]any{
-		"backendCleanup": []string{"compose/cleanup.json", "helm/cleanup.json"},
-		"ownedResources": []string{"Compose project/network/volumes/containers", "Helm release/namespace/PVCs/pods", "local registries", "release images and OCI chart", "temporary credentials"},
+		"backendCleanup": []string{"compose/cleanup.json", "kubernetes/cleanup.json"},
+		"ownedResources": []string{"Compose project/network/volumes/containers", "Kubernetes namespace/PVCs/pods", "local registries", "release images and OCI chart", "temporary credentials"},
 		"result":         "each backend test proves its owned resources were removed before this coordinator succeeds",
 	})
 }

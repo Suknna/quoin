@@ -1,0 +1,36 @@
+# Internal-only operational listeners for in-cluster verification and monitoring.
+# They are never routed by gateway and deliberately have no public exposure.
+---
+apiVersion: v1
+kind: Service
+metadata: {name: quoin-ops}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: quoin}
+  ports: [{name: ops, port: 9090, targetPort: ops}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: plinth-ops}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: plinth}
+  ports: [{name: ops, port: 9090, targetPort: ops}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lintel-ops}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: lintel}
+  ports: [{name: ops, port: 9090, targetPort: ops}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: stele-ops}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: stele}
+  ports: [{name: ops, port: 9090, targetPort: ops}]

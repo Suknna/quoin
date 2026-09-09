@@ -48,6 +48,7 @@ type SlotView struct {
 	BootID               string    `json:"bootId,omitempty"`
 	ConnectionEpoch      *uint64   `json:"connectionEpoch,omitempty"`
 	LastSeenAt           *string   `json:"lastSeenAt,omitempty"`
+	ReleaseVersion       string    `json:"releaseVersion,omitempty"`
 	FirstAuthenticatedAt *string   `json:"currentFirstAuthenticatedAt,omitempty"`
 }
 
@@ -88,6 +89,7 @@ type registrationToken struct {
 type connection struct {
 	bootID               string
 	epoch                uint64
+	releaseVersion       string // Informational peer build provenance, never admission.
 	updated              time.Time
 	closing              chan struct{}
 	once                 sync.Once
@@ -169,6 +171,7 @@ func (service *Service) View(ctx context.Context, slot string) (SlotView, error)
 	if live {
 		view.Connected = true
 		view.BootID = conn.bootID
+		view.ReleaseVersion = conn.releaseVersion
 		epoch := conn.epoch
 		view.ConnectionEpoch = &epoch
 		seen := conn.updated.UTC().Format(time.RFC3339Nano)

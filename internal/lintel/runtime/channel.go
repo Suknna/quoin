@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/browser"
 	"github.com/Suknna/quoin/internal/lintel/browser/exploration"
@@ -190,11 +190,11 @@ func (channel *Channel) RunRegister(ctx context.Context) error {
 	defer connection.Close()
 	client := runtimev1.NewRuntimeControlClient(connection)
 	response, err := client.Register(metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+parsed.Token)), &runtimev1.RegisterRuntimeRequest{
-		Slot:           runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
-		OneTimeToken:   parsed.Token,
-		Generation:     uint64(parsed.Generation),
-		BootId:         channel.bootID,
-		ReleaseVersion: buildinfo.Release,
+		Slot:                runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
+		OneTimeToken:        parsed.Token,
+		Generation:          uint64(parsed.Generation),
+		BootId:              channel.bootID,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	})
 	if err != nil {
 		return fmt.Errorf("注册失败: %w", err)

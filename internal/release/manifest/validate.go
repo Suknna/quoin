@@ -63,6 +63,9 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 			return fmt.Errorf("manifest image %s missing", component)
 		}
 		subject := inventory.Images[component]
+		if image.Version != subject.Version {
+			return fmt.Errorf("%s version %q != inventory %q", component, image.Version, subject.Version)
+		}
 		if image.Repository != subject.Repository {
 			return fmt.Errorf("%s repository %q != inventory %q", component, image.Repository, subject.Repository)
 		}
@@ -75,11 +78,9 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 			}
 		}
 	}
-	if document.Helm.OCIRepository != inventory.Chart.OCIRepository ||
-		document.Helm.OCIDigest != inventory.Chart.OCIDigest ||
-		document.Helm.TgzAssetName != inventory.Chart.TgzAssetName ||
-		document.Helm.TgzSHA256 != inventory.Chart.TgzSHA256 {
-		return fmt.Errorf("helm subject %+v != inventory %+v", document.Helm, inventory.Chart)
+	if document.Kubernetes.AssetName != inventory.Kubernetes.AssetName ||
+		document.Kubernetes.BundleSHA256 != inventory.Kubernetes.SHA256 {
+		return fmt.Errorf("kubernetes subject %+v != inventory %+v", document.Kubernetes, inventory.Kubernetes)
 	}
 	if document.Compose.AssetName != inventory.Compose.AssetName ||
 		document.Compose.BundleSHA256 != inventory.Compose.SHA256 {
@@ -106,7 +107,7 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 			}
 		}
 	}
-	if document.SigstoreBundles.HelmOCI != names.HelmOCI ||
+	if document.SigstoreBundles.Kubernetes != names.Kubernetes ||
 		document.SigstoreBundles.Compose != names.Compose ||
 		document.SigstoreBundles.DeploymentHelper["linux/amd64"] != names.DeploymentHelper["linux/amd64"] ||
 		document.SigstoreBundles.DeploymentHelper["linux/arm64"] != names.DeploymentHelper["linux/arm64"] {

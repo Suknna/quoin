@@ -407,9 +407,9 @@ func cleanupTicketResources(t *testing.T, recorder *evidence, workRoot, registry
 			"metrics-contract":         "install and verify judge the live /metrics output for exact family and closed-label equality with the frozen catalog (verify-report.json)",
 			"install-retry-state":      "weak-password failure records completed stages; same-identity retry resumes without re-running them; changed digest against pending state refused (install-retry-state.json)",
 			"cleanup-retained-volumes": "down retains state directories and secrets while removing containers/networks; reinstall confirms the original administrator; final cleanup removes exactly the ticket-owned resources (retained-state.json, cleanup.json)",
-			"digest-pinned-artifacts":  "four components installed from repository@index digests measured from real dual-platform pushes (release-images.json, container-image-references.json)",
+			"digest-pinned-artifacts":  "five components installed from repository@index digests measured from real dual-platform pushes (release-images.json, container-image-references.json)",
 		},
-		"disclosures": "the release manifest's non-image sections (helm, compose bundle, helper assets, sigstore names, validation summary) are structural local-test values; the release pipeline owning them is Stage 10 (OPS-RELEASE-001). The lintel image uses the qualified canonical development recipe because the formal locked lintel package set has drifted from Debian 13 (see the ticket findings).",
+		"disclosures": "the release manifest's non-image sections (Kubernetes and Compose bundles, helper assets, sigstore names, validation summary) are structural local-test values; the release pipeline owning them is Stage 10 (OPS-RELEASE-001). The lintel image uses the qualified canonical development recipe because the formal locked lintel package set has drifted from Debian 13 (see the ticket findings).",
 		"redactions":  "administrator passwords never appear in evidence; host paths under the Go temp root are recorded as-is because the root is removed at teardown",
 	})
 }

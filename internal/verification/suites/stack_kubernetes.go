@@ -1,17 +1,15 @@
 package suites
 
-// The Kubernetes implementation of the suite deployment backend: the
-// staged install runs through the helper's helm path, the cluster is
-// reached exclusively through invocation-owned kubectl port-forwards
-// (the compose loopback-parity rule: nothing is published persistently
-// to the cluster), one-shot registration execs inside the running
-// workload pod so it carries exactly the workload's image, environment
-// and mounts, and the disposable clone is a second helm release of the
-// same subject in the same namespace with its own release-scoped
-// resources and data.
+// The Kubernetes implementation of the suite deployment backend applies the
+// ordinary deployment manifest with kubectl. The cluster is reached exclusively
+// through invocation-owned port-forwards (the compose loopback-parity rule:
+// nothing is published persistently to the cluster), and one-shot registration
+// execs run inside the workload pod so they carry the workload's exact image,
+// environment and mounts. A disposable clone uses a separate namespace.
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,29 +19,30 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Suknna/quoin/internal/contract"
+	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/creack/pty"
 )
 
-// kubernetesBackend drives one helm release per Stack.
+// kubernetesBackend drives one plain-manifest deployment per Stack.
 type kubernetesBackend struct{}
 
-func (*kubernetesBackend) helperVerb() string { return "helm" }
+// helperVerb identifies the native dispatcher. Only catalog-driven verify
+// phases are supported; lifecycle work is executed directly by this backend.
+func (*kubernetesBackend) helperVerb() string { return "kubernetes" }
 
-func (*kubernetesBackend) opsBase(stack *Stack) string {
-	return "http://" + stack.releaseName() + "-quoin-ops:9090"
-}
+func (*kubernetesBackend) opsBase(*Stack) string { return "http://quoin-ops:9090" }
 
 func (*kubernetesBackend) helperEnv(stack *Stack) []string {
 	return append(os.Environ(),
 		"XDG_STATE_HOME="+filepath.Join(stack.WorkRoot, stack.releaseSlug(), "state"),
-		"QUOIN_HELM_NAMESPACE="+stack.namespace(),
-		"QUOIN_HELM_RELEASE="+stack.releaseName(),
 		"QUOIN_DEPLOY_SCRIPTED=1",
 	)
 }
 
-// namespace and releaseName mirror the helm helper's own override
-// surface with the same defaults, so the adapter and every helper
-// subprocess agree on one deployment identity.
+// namespace isolates a Kubernetes deployment. Fixed manifest resource names
+// remain collision-free because a disposable clone receives its own namespace.
 func (stack *Stack) namespace() string {
 	if stack.Namespace != "" {
 		return stack.Namespace
@@ -58,63 +57,472 @@ func (stack *Stack) releaseName() string {
 	return "quoin"
 }
 
+func (stack *Stack) kubernetesManifest() string {
+	// Qualification config is an invocation-local marker, while the ordinary
+	// manifest remains repository-owned. Resolve it from the suite's repo root
+	// rather than assuming the work directory mirrors repository layout.
+	return filepath.Join(repoRootOf(stack.ConfigPath), "deploy", "kubernetes", "quoin.yaml")
+}
+
+func (stack *Stack) kubernetesManifests() []string {
+	root := filepath.Join(repoRootOf(stack.ConfigPath), "deploy", "kubernetes")
+	return []string{filepath.Join(root, "quoin.yaml"), filepath.Join(root, "ops-services.yaml")}
+}
+
+func repoRootOf(configPath string) string {
+	if root := os.Getenv("QUOIN_REPO_ROOT"); root != "" {
+		return root
+	}
+	return workDirOf(configPath)
+}
+
 // releaseSlug is the release's on-disk identity (the compose project's
 // counterpart): per-release state, reports and credentials key on it.
 func (stack *Stack) releaseSlug() string {
 	return stack.namespace() + "-" + stack.releaseName()
 }
 
-func (*kubernetesBackend) ensureInstalled(stack *Stack) (string, error) {
-	helper, err := os.Executable()
-	if err != nil {
-		return "", err
+// prepareBootstrap creates and pins the native workload resources, but leaves
+// Quoin stopped so the one-off first-administrator Pod owns the database lock.
+func (backend *kubernetesBackend) prepareBootstrap(stack *Stack) error {
+	if err := stack.ensureNamespace(); err != nil {
+		return err
 	}
+	if err := stack.bootstrapNativeSecrets(); err != nil {
+		return err
+	}
+	for _, manifest := range stack.kubernetesManifests() {
+		if _, _, err := stack.kubectl("--namespace", stack.namespace(), "apply", "--filename", manifest); err != nil {
+			return fmt.Errorf("apply Kubernetes manifest %s: %w", filepath.Base(manifest), err)
+		}
+	}
+	if err := stack.pinManifestImages(); err != nil {
+		return err
+	}
+	_, _, err := stack.kubectl("--namespace", stack.namespace(), "scale", "deployment/quoin", "--replicas=0")
+	return err
+}
+
+func (*kubernetesBackend) ensureInstalled(stack *Stack) (string, error) {
 	if err := stack.ensureNamespace(); err != nil {
 		return "", err
 	}
 	// A reinstall right after Down races the previous pods' asynchronous
-	// teardown (volume detach holds Terminating pods past the uninstall
-	// wait); a bounded quiet-window prevents the new pods from scheduling
-	// onto half-torn volumes.
+	// teardown. Wait for the old namespace objects to settle before apply.
 	if err := stack.awaitTerminationSettled(90 * time.Second); err != nil {
 		return "", err
 	}
-	report := filepath.Join(stack.WorkRoot, stack.releaseSlug(), "install-report.json")
-	install := exec.Command(helper, "helm", "install", "--config", stack.ConfigPath,
-		"--release-manifest", stack.ManifestPath, "--report", report)
-	install.Env = stack.HelperEnv()
-	install.Dir = workDirOf(helper)
-	install.Stdout, install.Stderr = stack.Stdout, stack.Stderr
-	if stack.AdminPassword != "" {
-		install.Stdin = strings.NewReader(strings.Join([]string{"admin", "Ticket 43 Admin", stack.AdminPassword, stack.AdminPassword}, "\n") + "\n")
+	if err := stack.bootstrapNativeSecrets(); err != nil {
+		return "", err
 	}
-	// One idempotent resume when the workloads merely outran the
-	// install-ready wait (large image extraction under load): the
-	// helper's own contract says "rerun the same command to resume"
-	// (OPS-HELPER-002). A second failure is a real failure.
-	if err := install.Run(); err != nil {
-		retry := exec.Command(helper, "helm", "install", "--config", stack.ConfigPath,
-			"--release-manifest", stack.ManifestPath, "--report", report)
-		retry.Env = install.Env
-		retry.Dir = install.Dir
-		retry.Stdout, retry.Stderr = stack.Stdout, stack.Stderr
-		if stack.AdminPassword != "" {
-			retry.Stdin = strings.NewReader(strings.Join([]string{"admin", "Ticket 43 Admin", stack.AdminPassword, stack.AdminPassword}, "\n") + "\n")
-		}
-		if retryErr := retry.Run(); retryErr != nil {
-			return report, fmt.Errorf("helm install: %w (resume attempt: %v)", err, retryErr)
+	for _, manifest := range stack.kubernetesManifests() {
+		if _, _, err := stack.kubectl("--namespace", stack.namespace(), "apply", "--filename", manifest); err != nil {
+			return "", fmt.Errorf("apply Kubernetes manifest %s: %w", filepath.Base(manifest), err)
 		}
 	}
-	// The cluster exposes nothing persistently (compose loopback
-	// parity): bring the public and webhook services to this process's
-	// loopback through invocation-owned port-forwards.
+	if err := stack.pinManifestImages(); err != nil {
+		return "", err
+	}
+	// The first administrator must be created while no Quoin server owns the
+	// database lock. A one-off Pod mounts the real PVCs and config before the
+	// long-running deployment is allowed to roll out.
+	if _, _, err := stack.kubectl("--namespace", stack.namespace(), "scale", "deployment/quoin", "--replicas=0"); err != nil {
+		return "", fmt.Errorf("stop Quoin for administrator bootstrap: %w", err)
+	}
+	if _, _, err := stack.kubectl("--namespace", stack.namespace(), "wait", "--for=delete", "pod", "-l", "app.kubernetes.io/component=quoin", "--timeout=120s"); err != nil {
+		return "", fmt.Errorf("wait for Quoin bootstrap lock release: %w", err)
+	}
+	if err := stack.bootstrapNativeAdministrator(); err != nil {
+		return "", err
+	}
+	if _, _, err := stack.kubectl("--namespace", stack.namespace(), "scale", "deployment/quoin", "--replicas=1"); err != nil {
+		return "", fmt.Errorf("start Quoin after administrator bootstrap: %w", err)
+	}
+	// Plinth and Lintel are deliberately runtime-unregistered until suite
+	// registration. Waiting for their readiness here would deadlock bootstrap.
+	for _, deployment := range []string{"gateway", "frontend", "stele"} {
+		if _, _, err := stack.kubectl("--namespace", stack.namespace(), "rollout", "status", "deployment/"+deployment, "--timeout=300s"); err != nil {
+			return "", fmt.Errorf("wait for deployment %s: %w", deployment, err)
+		}
+	}
+	// The cluster exposes nothing persistently: bring public and webhook
+	// services to this process through invocation-owned port-forwards.
 	if err := stack.startForwards(); err != nil {
-		return report, err
+		return "", err
 	}
 	if err := stack.awaitPublic(300 * time.Second); err != nil {
-		return report, err
+		return "", err
 	}
-	return report, nil
+	return "", nil
+}
+
+// bootstrapNativeSecrets uses the core bootstrap implementation to generate
+// the real secret set locally, then sends it directly to the isolated cluster
+// namespace. Secret bytes never enter reports or command-line arguments.
+func (stack *Stack) bootstrapNativeSecrets() error {
+	// A retained PVC without its matching authority is a fail-closed state.
+	// Never mint fresh keys into an existing namespace: that would make stored
+	// data unrecoverable and could silently rotate a live Runtime identity.
+	secret, _, secretErr := stack.kubectl("--namespace", stack.namespace(), "get", "secret/quoin-secrets", "--output=json")
+	if secretErr == nil {
+		var current struct {
+			Data map[string]string `json:"data"`
+		}
+		if json.Unmarshal([]byte(secret), &current) != nil {
+			return fmt.Errorf("read existing Kubernetes secret: invalid JSON")
+		}
+		for _, key := range []string{"root-key", "runtime-ca.pem", "runtime-tls.crt", "runtime-tls.key", "stele-service-token"} {
+			if current.Data[key] == "" {
+				return fmt.Errorf("existing quoin-secrets is incomplete (missing %s); restore the original complete secret set", key)
+			}
+		}
+		return nil
+	}
+	if _, _, pvcErr := stack.kubectl("--namespace", stack.namespace(), "get", "pvc/quoin-data"); pvcErr == nil {
+		return fmt.Errorf("quoin data PVC exists without quoin-secrets; restore the original complete secret set")
+	}
+	root := filepath.Join(stack.DeploymentRoot(), "bootstrap")
+	secrets := filepath.Join(root, "secrets")
+	if err := os.MkdirAll(secrets, 0o700); err != nil {
+		return fmt.Errorf("create native bootstrap directory: %w", err)
+	}
+	config := contract.QuoinConfig{
+		Component: "quoin", PublicOrigin: publicOrigin,
+		DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"),
+		RootKeyFile:               filepath.Join(secrets, "root-key"),
+		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
+		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
+		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
+	}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		return fmt.Errorf("generate Kubernetes bootstrap secrets: %w", err)
+	}
+	// Create-or-replace avoids retaining an incomplete secret after a failed
+	// first attempt while preserving the exact core-generated bytes.
+	arguments := []string{"--namespace", stack.namespace(), "create", "secret", "generic", "quoin-secrets",
+		"--from-file=root-key=" + config.RootKeyFile,
+		"--from-file=runtime-ca.pem=" + filepath.Join(secrets, "runtime-ca.pem"),
+		"--from-file=runtime-tls.crt=" + config.RuntimeTLSCertificateFile,
+		"--from-file=runtime-tls.key=" + config.RuntimeTLSPrivateKeyFile,
+		"--from-file=stele-service-token=" + config.SteleServiceTokenFile,
+		"--dry-run=client", "--output=yaml"}
+	command := exec.Command("kubectl", arguments...)
+	command.Env = stack.HelperEnv()
+	body, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("render native secret: %w", err)
+	}
+	if _, _, err := stack.kubectlInput(string(body), "apply", "--filename", "-"); err != nil {
+		return fmt.Errorf("apply native secret: %w", err)
+	}
+	gateway := exec.Command("kubectl", "--namespace", stack.namespace(), "create", "secret", "tls", "gateway-tls",
+		"--cert="+config.RuntimeTLSCertificateFile, "--key="+config.RuntimeTLSPrivateKeyFile, "--dry-run=client", "--output=yaml")
+	gateway.Env = stack.HelperEnv()
+	body, err = gateway.Output()
+	if err != nil {
+		return fmt.Errorf("render gateway TLS secret: %w", err)
+	}
+	if _, _, err := stack.kubectlInput(string(body), "apply", "--filename", "-"); err != nil {
+		return fmt.Errorf("apply gateway TLS secret: %w", err)
+	}
+	return nil
+}
+
+// bootstrapNativeAdministrator starts a one-off Pod over the retained Quoin
+// PVCs and attaches a pseudo-terminal only after the command prompts. It runs
+// while the deployment is scaled down, so it exclusively owns the database
+// lock rather than racing a serving Quoin process.
+func (stack *Stack) bootstrapNativeAdministrator() error {
+	return stack.bootstrapNativeAdministratorWithConfirmation(stack.AdminPassword)
+}
+
+// bootstrapNativeAdministratorWithConfirmation exists to prove the bootstrap
+// gate with a real failed confirmation before a successful retry. The supplied
+// confirmation is never persisted or emitted in diagnostics.
+func (stack *Stack) bootstrapNativeAdministratorWithConfirmation(confirmation string) error {
+	if stack.AdminPassword == "" {
+		return nil
+	}
+	image, err := stack.nativeImage("quoin")
+	if err != nil {
+		return err
+	}
+	pod := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: quoin-admin-bootstrap
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: admin
+      image: %s
+      stdin: true
+      tty: true
+      command: ["/quoin", "admin", "create", "--config", "/etc/quoin/component.yaml"]
+      securityContext:
+        allowPrivilegeEscalation: false
+      volumeMounts:
+        - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+        - {name: data, mountPath: /var/lib/quoin/data}
+        - {name: backups, mountPath: /var/lib/quoin/backups}
+        - {name: secrets, mountPath: /run/quoin-secrets, readOnly: true}
+  volumes:
+    - {name: config, configMap: {name: quoin-config}}
+    - {name: data, persistentVolumeClaim: {claimName: quoin-data}}
+    - {name: backups, persistentVolumeClaim: {claimName: quoin-backups}}
+    - {name: secrets, secret: {secretName: quoin-secrets}}
+`, image)
+	if _, _, err := stack.kubectlInput(pod, "--namespace", stack.namespace(), "apply", "--filename", "-"); err != nil {
+		return fmt.Errorf("create administrator bootstrap pod: %w", err)
+	}
+	defer func() {
+		_, _, _ = stack.kubectl("--namespace", stack.namespace(), "delete", "pod/quoin-admin-bootstrap", "--ignore-not-found=true", "--wait=true")
+	}()
+	command := exec.Command("kubectl", "--namespace", stack.namespace(), "attach", "--stdin", "--tty", "pod/quoin-admin-bootstrap", "--container", "admin")
+	command.Env = stack.HelperEnv()
+	terminal, err := pty.Start(command)
+	if err != nil {
+		return fmt.Errorf("attach administrator bootstrap terminal: %w", err)
+	}
+	defer terminal.Close()
+	output := make(chan string, 16)
+	go func() {
+		buffer := make([]byte, 4096)
+		for {
+			count, readErr := terminal.Read(buffer)
+			if count > 0 {
+				output <- string(buffer[:count])
+			}
+			if readErr != nil {
+				close(output)
+				return
+			}
+		}
+	}()
+	transcript := ""
+	answerPrompt := func(prompt, answer string) error {
+		deadline := time.NewTimer(90 * time.Second)
+		defer deadline.Stop()
+		for !strings.Contains(transcript, prompt) {
+			select {
+			case chunk, open := <-output:
+				if !open {
+					return fmt.Errorf("administrator bootstrap ended before %q", prompt)
+				}
+				transcript += chunk
+			case <-deadline.C:
+				return fmt.Errorf("administrator bootstrap prompt %q timed out", prompt)
+			}
+		}
+		// term.ReadPassword disables echo before the password prompt is emitted.
+		// Prompt synchronization keeps secret input out of captured terminal text.
+		if _, err := terminal.Write([]byte(answer + "\n")); err != nil {
+			return fmt.Errorf("answer administrator bootstrap prompt: %w", err)
+		}
+		return nil
+	}
+	for _, item := range []struct{ prompt, answer string }{
+		{"Username:", "admin"},
+		{"Display name:", "Qualification Administrator"},
+		{"Temporary password:", stack.AdminPassword},
+		{"Confirm temporary password:", confirmation},
+	} {
+		if err := answerPrompt(item.prompt, item.answer); err != nil {
+			return err
+		}
+	}
+	if err := command.Wait(); err != nil {
+		return fmt.Errorf("create first administrator: %w", err)
+	}
+	return nil
+}
+
+// offlinePod runs a core Quoin command in a short-lived Pod with the actual
+// retained PVCs and secret authority. It replaces the retired Helm helper's
+// offline lifecycle transport without introducing another deployment DSL.
+func (backend *kubernetesBackend) offlinePod(stack *Stack, operation string, arguments ...string) (string, error) {
+	image, err := stack.nativeImage("quoin")
+	if err != nil {
+		return "", err
+	}
+	name := "quoin-native-" + operation
+	commandJSON, _ := json.Marshal(append([]string{"/quoin"}, arguments...))
+	pod := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata: {name: %s}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: operation
+      image: %s
+      command: %s
+      securityContext: {allowPrivilegeEscalation: false}
+      volumeMounts:
+        - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+        - {name: data, mountPath: /var/lib/quoin/data}
+        - {name: backups, mountPath: /var/lib/quoin/backups}
+        - {name: secrets, mountPath: /run/quoin-secrets, readOnly: true}
+  volumes:
+    - {name: config, configMap: {name: quoin-config}}
+    - {name: data, persistentVolumeClaim: {claimName: quoin-data}}
+    - {name: backups, persistentVolumeClaim: {claimName: quoin-backups}}
+    - {name: secrets, secret: {secretName: quoin-secrets}}
+`, name, image, commandJSON)
+	if _, _, err := stack.kubectlInput(pod, "--namespace", stack.namespace(), "apply", "--filename", "-"); err != nil {
+		return "", err
+	}
+	defer func() {
+		_, _, _ = stack.kubectl("--namespace", stack.namespace(), "delete", "pod/"+name, "--ignore-not-found=true", "--wait=true")
+	}()
+	if output, _, err := stack.kubectl("--namespace", stack.namespace(), "wait", "--for=condition=Ready=false", "pod/"+name, "--timeout=10s"); err != nil && output != "" {
+		// A fast-completing offline Pod need not become Ready.
+	}
+	_, _, _ = stack.kubectl("--namespace", stack.namespace(), "wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/"+name, "--timeout=300s")
+	logs, _, logErr := stack.kubectl("--namespace", stack.namespace(), "logs", "pod/"+name)
+	phase, _, phaseErr := stack.kubectl("--namespace", stack.namespace(), "get", "pod/"+name, "-o", "jsonpath={.status.phase}")
+	if logErr != nil {
+		return logs, logErr
+	}
+	if phaseErr != nil || strings.TrimSpace(phase) != "Succeeded" {
+		return logs, fmt.Errorf("native %s Pod phase=%s", operation, strings.TrimSpace(phase))
+	}
+	return logs, nil
+}
+
+func (backend *kubernetesBackend) restorePod(stack *Stack, backupID, username, password string) (string, error) {
+	image, err := stack.nativeImage("quoin")
+	if err != nil {
+		return "", err
+	}
+	const name = "quoin-native-restore"
+	pod := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata: {name: %s}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: operation
+      image: %s
+      stdin: true
+      tty: true
+      command: ["/quoin", "restore", "--backup", %q, "--config", "/etc/quoin/component.yaml"]
+      securityContext: {allowPrivilegeEscalation: false}
+      volumeMounts:
+        - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+        - {name: data, mountPath: /var/lib/quoin/data}
+        - {name: backups, mountPath: /var/lib/quoin/backups}
+        - {name: secrets, mountPath: /run/quoin-secrets, readOnly: true}
+  volumes:
+    - {name: config, configMap: {name: quoin-config}}
+    - {name: data, persistentVolumeClaim: {claimName: quoin-data}}
+    - {name: backups, persistentVolumeClaim: {claimName: quoin-backups}}
+    - {name: secrets, secret: {secretName: quoin-secrets}}
+`, name, image, backupID)
+	if _, _, err := stack.kubectlInput(pod, "--namespace", stack.namespace(), "apply", "--filename", "-"); err != nil {
+		return "", err
+	}
+	defer func() {
+		_, _, _ = stack.kubectl("--namespace", stack.namespace(), "delete", "pod/"+name, "--ignore-not-found=true", "--wait=true")
+	}()
+	command := exec.Command("kubectl", "--namespace", stack.namespace(), "attach", "--stdin", "--tty", "pod/"+name, "--container", "operation")
+	command.Env = stack.HelperEnv()
+	terminal, err := pty.Start(command)
+	if err != nil {
+		return "", err
+	}
+	defer terminal.Close()
+	chunks := make(chan string, 16)
+	go func() {
+		buffer := make([]byte, 4096)
+		for {
+			n, e := terminal.Read(buffer)
+			if n > 0 {
+				chunks <- string(buffer[:n])
+			}
+			if e != nil {
+				close(chunks)
+				return
+			}
+		}
+	}()
+	transcript := ""
+	for _, item := range []struct{ prompt, answer string }{{"Recovery administrator username:", username}, {"Temporary password:", password}, {"Confirm temporary password:", password}} {
+		deadline := time.NewTimer(90 * time.Second)
+		for !strings.Contains(transcript, item.prompt) {
+			select {
+			case chunk, ok := <-chunks:
+				if !ok {
+					deadline.Stop()
+					return transcript, fmt.Errorf("restore ended before %q", item.prompt)
+				}
+				transcript += chunk
+			case <-deadline.C:
+				return transcript, fmt.Errorf("restore prompt %q timed out", item.prompt)
+			}
+		}
+		deadline.Stop()
+		if _, err := terminal.Write([]byte(item.answer + "\n")); err != nil {
+			return transcript, err
+		}
+	}
+	if err := command.Wait(); err != nil {
+		return transcript, err
+	}
+	return transcript, nil
+}
+
+func (stack *Stack) nativeImage(component string) (string, error) {
+	body, err := os.ReadFile(stack.ManifestPath)
+	if err != nil {
+		return "", fmt.Errorf("read release manifest: %w", err)
+	}
+	var manifest struct {
+		Images map[string]struct {
+			Repository string `json:"repository"`
+			Index      string `json:"index_digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return "", fmt.Errorf("parse release manifest: %w", err)
+	}
+	image, ok := manifest.Images[component]
+	if !ok || image.Repository == "" || image.Index == "" {
+		return "", fmt.Errorf("release manifest has no digest-pinned %s image", component)
+	}
+	return image.Repository + "@" + image.Index, nil
+}
+
+// pinManifestImages applies the qualification subject's immutable image
+// references after the stock manifest is applied. This is test harness glue,
+// not a user-facing deployment language.
+func (stack *Stack) pinManifestImages() error {
+	body, err := os.ReadFile(stack.ManifestPath)
+	if err != nil {
+		return fmt.Errorf("read release manifest: %w", err)
+	}
+	var manifest struct {
+		Images map[string]struct {
+			Repository string `json:"repository"`
+			Index      string `json:"index_digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return fmt.Errorf("parse release manifest: %w", err)
+	}
+	for _, component := range []string{"quoin", "plinth", "lintel", "stele", "frontend"} {
+		image, ok := manifest.Images[component]
+		if !ok || image.Repository == "" || image.Index == "" {
+			return fmt.Errorf("release manifest has no digest-pinned %s image", component)
+		}
+		if _, _, err := stack.kubectl("--namespace", stack.namespace(), "set", "image", "deployment/"+component,
+			component+"="+image.Repository+"@"+image.Index); err != nil {
+			return fmt.Errorf("pin %s image: %w", component, err)
+		}
+	}
+	return nil
 }
 
 // ensureNamespace creates the deployment namespace when absent.
@@ -213,11 +621,11 @@ func (stack *Stack) startForwards() error {
 		}
 		return fmt.Errorf("port-forward %s never accepted connections", service)
 	}
-	if err := forward("service/"+stack.releaseName()+"-quoin-public", stack.QuoinPort); err != nil {
+	if err := forward("service/gateway", stack.QuoinPort); err != nil {
 		rollback()
 		return err
 	}
-	if err := forward("service/"+stack.releaseName()+"-stele-webhook", stack.StelePort); err != nil {
+	if err := forward("service/stele", stack.StelePort); err != nil {
 		rollback()
 		return err
 	}
@@ -428,7 +836,7 @@ func namespaceForwardPIDs(stack *Stack) []int {
 func (*kubernetesBackend) execCommand(stack *Stack, component string, arguments []string) (string, int, error) {
 	full := append([]string{
 		"--namespace", stack.namespace(), "exec",
-		"deployment/" + stack.releaseName() + "-" + component, "--",
+		"deployment/" + component, "--",
 	}, arguments...)
 	return stack.kubectl(full...)
 }
@@ -442,7 +850,7 @@ func (*kubernetesBackend) runService(stack *Stack, component string, arguments [
 	// /quoin, /plinth, /lintel, /stele).
 	full := append([]string{
 		"--namespace", stack.namespace(), "exec", "-i",
-		"deployment/" + stack.releaseName() + "-" + component, "--", "/" + component,
+		"deployment/" + component, "--", "/" + component,
 	}, arguments...)
 	command := exec.Command("kubectl", full...)
 	command.Dir = workDirOf(stack.ConfigPath)
@@ -460,7 +868,7 @@ func (*kubernetesBackend) runService(stack *Stack, component string, arguments [
 
 func (*kubernetesBackend) logs(stack *Stack, component string) (string, error) {
 	output, _, err := stack.kubectl("--namespace", stack.namespace(), "logs",
-		"deployment/"+stack.releaseName()+"-"+component, "--tail=300")
+		"deployment/"+component, "--tail=300")
 	return output, err
 }
 
@@ -474,26 +882,29 @@ func (*kubernetesBackend) refreshTransports(stack *Stack) error {
 	// (the next EnsureInstalled cycle) and pidfile records keep the
 	// best-effort forward cleanup-safe.
 	stack.CloseTransports()
-	if err := stack.startForwardsRequired(stack.releaseName() + "-quoin-public"); err != nil {
+	if err := stack.startForwardsRequired("gateway"); err != nil {
 		return err
 	}
-	stack.startForwardsBestEffort(stack.releaseName() + "-stele-webhook")
+	stack.startForwardsBestEffort("stele")
 	return nil
 }
 
-func (*kubernetesBackend) down(stack *Stack, _ bool) (string, error) {
-	var combined bytes.Buffer
-	uninstall := exec.Command("helm", "uninstall", stack.releaseName(), "--namespace", stack.namespace(), "--wait", "--timeout", "120s")
-	uninstall.Stdout, uninstall.Stderr = &combined, &combined
-	uninstallErr := uninstall.Run()
-	if uninstallErr != nil && strings.Contains(uninstallErr.Error(), "release: not found") {
-		return combined.String(), nil
+func (*kubernetesBackend) down(stack *Stack, dataRemoval bool) (string, error) {
+	// Delete ordinary workload objects by manifest. Persistent data survives a
+	// normal down exactly like Compose bind-mounted data; the disposable
+	// namespace is deleted only when its caller requests data removal.
+	var output string
+	var err error
+	for _, manifest := range stack.kubernetesManifests() {
+		output, _, err = stack.kubectl("--namespace", stack.namespace(), "delete", "--ignore-not-found=true", "--wait=true", "--filename", manifest)
+		if err != nil {
+			return output, err
+		}
 	}
-	// PVCs are NEVER deleted here: the compose counterpart's data lives
-	// on host bind mounts that down -v cannot touch either — the
-	// disposable legs depend on data surviving Down, and data destruction
-	// belongs to the namespace teardown (the invocation's cleanup).
-	return combined.String(), uninstallErr
+	if dataRemoval && strings.HasSuffix(stack.namespace(), "-disp") {
+		output, _, err = stack.kubectl("delete", "namespace", stack.namespace(), "--ignore-not-found=true", "--wait=true")
+	}
+	return output, err
 }
 
 func (*kubernetesBackend) stopComponent(stack *Stack, component string, timeout time.Duration) (string, time.Duration, error) {
@@ -504,7 +915,7 @@ func (*kubernetesBackend) stopComponent(stack *Stack, component string, timeout 
 	// component is genuinely stopped (no replacement pod) until
 	// startComponent returns it to service.
 	started := time.Now()
-	selector := "app.kubernetes.io/instance=" + stack.releaseName() + ",app.kubernetes.io/component=" + component
+	selector := "app.kubernetes.io/component=" + component
 	podList, _, _ := stack.kubectl("--namespace", stack.namespace(), "get", "pods", "-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
 	pod := strings.TrimSpace(podList)
 	if pod == "" {
@@ -516,7 +927,7 @@ func (*kubernetesBackend) stopComponent(stack *Stack, component string, timeout 
 	}
 	exitCode, drainErr := waitForPodExitCode(stack, pod, timeout)
 	_, _, _ = stack.kubectl("--namespace", stack.namespace(), "scale",
-		"deployment/"+stack.releaseName()+"-"+component, "--replicas=0")
+		"deployment/"+component, "--replicas=0")
 	if drainErr != nil {
 		return exitCode, time.Since(started), drainErr
 	}
@@ -540,7 +951,7 @@ func waitForPodExitCode(stack *Stack, pod string, timeout time.Duration) (string
 
 func (*kubernetesBackend) startComponent(stack *Stack, component string) error {
 	// stopComponent scaled the deployment to zero; return it to service.
-	deployment := "deployment/" + stack.releaseName() + "-" + component
+	deployment := "deployment/" + component
 	if _, _, err := stack.kubectl("--namespace", stack.namespace(), "scale",
 		deployment, "--replicas=1"); err != nil {
 		return err
@@ -563,11 +974,11 @@ func (*kubernetesBackend) stopQuoin(stack *Stack) error {
 	// pod would answer with a live body instead of proving the network
 	// path dead.
 	if _, _, err := stack.kubectl("--namespace", stack.namespace(), "scale",
-		"deployment/"+stack.releaseName()+"-quoin", "--replicas=0"); err != nil {
+		"deployment/quoin", "--replicas=0"); err != nil {
 		return err
 	}
 	_, _, err := stack.kubectl("--namespace", stack.namespace(), "wait",
-		"--for=delete", "pod", "-l", "app.kubernetes.io/instance="+stack.releaseName()+",app.kubernetes.io/component=quoin",
+		"--for=delete", "pod", "-l", "app.kubernetes.io/component=quoin",
 		"--timeout=90s")
 	return err
 }
@@ -578,7 +989,7 @@ func (*kubernetesBackend) cloneRoot(stack *Stack) string {
 
 func (*kubernetesBackend) runningWorkloadCount(stack *Stack) int {
 	output, _, _ := stack.kubectl("--namespace", stack.namespace(), "get", "pods",
-		"-l", "app.kubernetes.io/instance="+stack.releaseName(),
+		"-l", "app.kubernetes.io/part-of=quoin",
 		"-o", "jsonpath={.items[*].metadata.name}")
 	count := 0
 	for _, name := range strings.Fields(output) {
@@ -599,18 +1010,15 @@ func (*kubernetesBackend) reportsDir(stack *Stack) string {
 }
 
 func (*kubernetesBackend) clone(stack *Stack) *Stack {
-	// The disposable lifecycle deployment is a second helm release of
-	// the same subject in its own namespace: release-scoped resources,
-	// PVCs, secrets and state, with its loopback forwards offset like
-	// the compose clone. The separate namespace is required — the chart
-	// owns a fixed-name "quoin" Service (the runtime TLS SAN alias) that
-	// a same-namespace second release cannot adopt.
+	// The disposable lifecycle deployment applies the same plain manifest in
+	// its own namespace. Fixed resource names are thus fully isolated while
+	// its loopback forwards retain the compose clone's offset ports.
 	disposableRoot := filepath.Join(stack.WorkRoot, stack.releaseSlug()+"-disp-root")
 	_ = os.MkdirAll(disposableRoot, 0o700)
 	return &Stack{
 		Backend:     stack.Backend,
 		Namespace:   stack.namespace() + "-disp",
-		ReleaseName: stack.releaseName() + "-disp",
+		ReleaseName: "quoin",
 		WorkRoot:    stack.WorkRoot,
 		ConfigPath:  stack.ConfigPath, ManifestPath: stack.ManifestPath,
 		AdminPassword: RandomPassword(), QuoinPort: stack.QuoinPort + 20, StelePort: stack.StelePort + 20,
@@ -660,7 +1068,8 @@ func (stack *Stack) awaitTerminationSettled(timeout time.Duration) error {
 	var stuck string
 	for time.Now().Before(deadline) {
 		output, _, err := stack.kubectl("--namespace", stack.namespace(), "get", "pods",
-			"-l", "app.kubernetes.io/instance="+stack.releaseName(),
+			"-l", "app.kubernetes.io/part-of=quoin",
+
 			"-o", "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.metadata.deletionTimestamp}{\";\"}{end}")
 		if err == nil {
 			stuck = ""

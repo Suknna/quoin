@@ -26,6 +26,7 @@ type PlinthView struct {
 	Connected       bool
 	BootID          string
 	ConnectionEpoch uint64
+	ReleaseVersion  string
 }
 
 // RuntimeSlice adapts the investigation aggregate to the control stream.
@@ -58,7 +59,7 @@ func (slice *RuntimeSlice) Dispatch(ctx context.Context, attemptID int64) error 
 		sharedops.LogEvent("quoin", "error", "investigation.dispatch_slot", "attempt="+int64String(attemptID)+" connected="+boolString(view.Connected)+" epoch="+int64String(int64(view.ConnectionEpoch)))
 		return errors.New("plinth is not connected")
 	}
-	if err := slice.Service.Attempts().BindToStream(ctx, attemptID, view.BootID, view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := slice.Service.Attempts().BindToStream(ctx, attemptID, view.BootID, view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		sharedops.LogEvent("quoin", "error", "investigation.dispatch_bind", "attempt="+int64String(attemptID)+" "+err.Error())
 		return err
 	}

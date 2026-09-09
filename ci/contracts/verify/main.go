@@ -78,7 +78,6 @@ func verifySchemas(root string) error {
 		{"contracts/verification-catalog.yaml", "verification-catalog.schema.json"},
 		{"contracts/verification-result-profile.yaml", "verification-result-profile.schema.json"},
 		{"contracts/examples/compose-install.yaml", "deployment-config.schema.json"},
-		{"contracts/examples/helm-install.yaml", "deployment-config.schema.json"},
 		{"contracts/examples/deployment-verification-request.json", "deployment-verification.schema.json"},
 		{"contracts/examples/deployment-verification-report.json", "deployment-verification.schema.json"},
 	}

@@ -1,5 +1,5 @@
 // Package backup owns the shared read-only ops-metrics observation contract for
-// deployment backup helpers. Compose and Helm differ only in transport.
+// deployment backup helpers. deployment backends differ only in transport.
 package backup
 
 import (

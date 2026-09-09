@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,16 +16,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Suknna/quoin/deploy/compose"
-	"github.com/Suknna/quoin/internal/contract"
-	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/release/subjects"
+	"gopkg.in/yaml.v3"
 )
 
 func bundleNameMap() map[string]string {
 	bundles := subjects.NamesForBundles()
 	mapping := map[string]string{
-		"helm_oci":                      bundles.HelmOCI,
+		"kubernetes":                    bundles.Kubernetes,
 		"compose":                       bundles.Compose,
 		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
 		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
@@ -38,51 +37,168 @@ func bundleNameMap() map[string]string {
 	return mapping
 }
 
-// buildChart packages the frozen Chart with the release SemVer and pushes it
-// to the configured OCI registry.
-func buildChart(options *options, inventory *subjects.Inventory) error {
-	chartVersion, err := subjects.ChartVersion(options.version)
-	if err != nil {
-		return err
-	}
-	packageDirectory := filepath.Join(options.work, "chart")
-	if err := os.MkdirAll(packageDirectory, 0o755); err != nil {
-		return err
-	}
-	if _, err := command(options, "chart-package", "helm", "package", "deploy/helm/quoin",
-		"--version", chartVersion, "--destination", packageDirectory); err != nil {
-		return err
-	}
+// buildKubernetesBundle packages the directly applicable native manifests.
+// The archive is checksum-bound like Compose and is expanded by the release
+// consumer before kubectl apply.
+func buildKubernetesBundle(options *options, inventory *subjects.Inventory) error {
 	names, err := subjects.Names(options.version)
 	if err != nil {
 		return err
 	}
-	tgzPath := filepath.Join(packageDirectory, names.ChartTgz)
-	data, err := os.ReadFile(tgzPath)
+	manifestDirectory := filepath.Join(repoRoot(), "deploy", "kubernetes")
+	manifests := map[string][]byte{}
+	err = filepath.WalkDir(manifestDirectory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			return nil
+		}
+		manifest, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		pinnedManifest, err := pinKubernetesImages(manifest, inventory.Images)
+		if err != nil {
+			return fmt.Errorf("pin Kubernetes manifest %s: %w", path, err)
+		}
+		relative, err := filepath.Rel(manifestDirectory, path)
+		if err != nil {
+			return err
+		}
+		manifests[filepath.ToSlash(relative)] = pinnedManifest
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(manifests) == 0 {
+		return fmt.Errorf("no Kubernetes YAML manifests in %s", manifestDirectory)
+	}
+	bundle := filepath.Join(options.work, names.Kubernetes)
+	if err := writeComposeBundle(bundle, manifests); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(bundle)
 	if err != nil {
 		return err
 	}
 	sum := sha256.Sum256(data)
-	pushOutput, err := command(options, "chart-push", "helm", "push", tgzPath, "oci://"+options.chartOCI)
-	if err != nil {
-		return err
-	}
-	digest := ""
-	for _, line := range strings.Split(pushOutput, "\n") {
-		if strings.HasPrefix(line, "Digest: ") {
-			digest = strings.TrimSpace(strings.TrimPrefix(line, "Digest: "))
+	inventory.Kubernetes = subjects.BlobSubject{AssetName: names.Kubernetes, SHA256: hex.EncodeToString(sum[:])}
+	return nil
+}
+
+// pinKubernetesImages patches only workload container image scalar values in
+// the copied authoritative YAML. It does not invent deployment configuration:
+// every application image must correspond to a measured inventory index, while
+// the fixed third-party Caddy image remains untouched.
+func pinKubernetesImages(source []byte, images map[string]subjects.ImageSubject) ([]byte, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(source))
+	var rendered bytes.Buffer
+	encoder := yaml.NewEncoder(&rendered)
+	encoder.SetIndent(2)
+	for {
+		var document yaml.Node
+		err := decoder.Decode(&document)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode Kubernetes manifest: %w", err)
+		}
+		if len(document.Content) == 0 {
+			continue
+		}
+		if err := patchWorkloadImages(&document, images); err != nil {
+			return nil, err
+		}
+		if err := encoder.Encode(&document); err != nil {
+			return nil, fmt.Errorf("encode Kubernetes manifest: %w", err)
 		}
 	}
-	if digest == "" {
-		return fmt.Errorf("chart push reported no digest")
+	if err := encoder.Close(); err != nil {
+		return nil, err
 	}
-	inventory.Chart = subjects.ChartSubject{
-		OCIRepository: options.chartOCI + "/quoin",
-		OCIDigest:     digest,
-		TgzAssetName:  names.ChartTgz,
-		TgzSHA256:     hex.EncodeToString(sum[:]),
+	return rendered.Bytes(), nil
+}
+
+// patchWorkloadImages supports the standard PodSpec carriers shipped by the
+// native deployment: Deployment, Job and Pod. Application containers are
+// identified by their canonical quoin/<component> image prefix or by their
+// container name; stock third-party images such as Caddy and busybox remain
+// unchanged. This keeps bootstrap jobs tied to the same measured Quoin image.
+func patchWorkloadImages(document *yaml.Node, images map[string]subjects.ImageSubject) error {
+	root := document.Content[0]
+	if len(document.Content) == 0 || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	var podSpec *yaml.Node
+	switch yamlMapValue(root, "kind") {
+	case "Deployment", "StatefulSet", "DaemonSet", "Job":
+		podSpec = yamlMapNode(yamlMapNode(yamlMapNode(root, "spec"), "template"), "spec")
+	case "Pod":
+		podSpec = yamlMapNode(root, "spec")
+	default:
+		return nil
+	}
+	if podSpec == nil {
+		return fmt.Errorf("Kubernetes %s has no pod spec", yamlMapValue(root, "kind"))
+	}
+	return patchContainerList(yamlMapNode(podSpec, "containers"), images)
+}
+
+func patchContainerList(containers *yaml.Node, images map[string]subjects.ImageSubject) error {
+	if containers == nil || containers.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for _, container := range containers.Content {
+		imageNode := yamlMapNode(container, "image")
+		if imageNode == nil || imageNode.Kind != yaml.ScalarNode {
+			return fmt.Errorf("container %q has no scalar image", yamlMapValue(container, "name"))
+		}
+		component := applicationImageComponent(yamlMapValue(container, "name"), imageNode.Value, images)
+		if component == "" {
+			continue
+		}
+		image := images[component]
+		if image.Repository == "" || image.IndexDigest == "" {
+			return fmt.Errorf("application container %q has no measured image subject", component)
+		}
+		imageNode.Value = image.Repository + "@" + image.IndexDigest
 	}
 	return nil
+}
+
+func applicationImageComponent(name, reference string, images map[string]subjects.ImageSubject) string {
+	if _, ok := images[name]; ok {
+		return name
+	}
+	for component := range images {
+		if strings.HasPrefix(reference, "quoin/"+component+":") || strings.HasPrefix(reference, "quoin/"+component+"@") {
+			return component
+		}
+	}
+	return ""
+}
+
+func yamlMapNode(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			return node.Content[index+1]
+		}
+	}
+	return nil
+}
+
+func yamlMapValue(node *yaml.Node, key string) string {
+	value := yamlMapNode(node, key)
+	if value == nil {
+		return ""
+	}
+	return value.Value
 }
 
 // buildComposeBundle assembles the digest-pinned Compose bundle: the
@@ -94,62 +210,35 @@ func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 	if err != nil {
 		return err
 	}
-	renderRoot := filepath.Join(options.work, "compose-render")
-	if err := os.MkdirAll(renderRoot, 0o755); err != nil {
+	composeYAML, err := os.ReadFile(filepath.Join(repoRoot(), "deploy", "compose.yaml"))
+	if err != nil {
 		return err
 	}
-	images := map[string]string{}
-	for _, component := range subjects.Components {
-		image := inventory.Images[component]
-		images[component] = image.Repository + "@" + image.IndexDigest
-	}
-	input := contract.ComposeInstall{
-		Document:             "compose-install",
-		PublicOrigin:         "https://quoin.example.com",
-		PublishMode:          "loopback",
-		QuoinPublicHostPort:  8080,
-		SteleWebhookHostPort: 8081,
-		SecretDirectory:      "/var/lib/quoin/secrets",
-		LintelBrowserSlots:   1,
-		LintelShmSizeBytes:   1 << 30,
-	}
-	projection, err := compose.RenderWithOptions(input, filepath.Join(renderRoot, "state"), compose.Options{Images: images})
-	if err != nil {
-		return fmt.Errorf("render digest-pinned compose projection: %w", err)
-	}
-	composeYAML, err := os.ReadFile(projection.ComposeFile)
+	composeYAML, err = pinComposeImages(composeYAML, inventory.Images)
 	if err != nil {
 		return err
 	}
 	if err := assertNoLatest(string(composeYAML)); err != nil {
 		return fmt.Errorf("rendered compose.yaml: %w", err)
 	}
-	example, err := os.ReadFile(filepath.Join(repoRoot(), "deploy", "examples", "compose-install.yaml"))
+	entries := map[string][]byte{"compose.yaml": composeYAML}
+	configDirectory := filepath.Join(repoRoot(), "deploy", "config")
+	configs, err := os.ReadDir(configDirectory)
 	if err != nil {
 		return err
 	}
-	entry := []byte(`#!/bin/sh
-# quoin-deploy wizard entry (OPS-RELEASE-003/OPS-HELPER-001): the operator
-# downloads the platform helper asset (quoin-deploy-linux-amd64 or
-# quoin-deploy-linux-arm64) published with this release, names it
-# quoin-deploy beside this bundle and invokes:
-#   ./quoin-deploy compose install --config install-minimal.yaml
-set -eu
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ ! -x "$here/quoin-deploy" ]; then
-	echo "quoin-deploy helper not found next to this bundle." >&2
-	echo "Download the platform asset published with this release and place it as $here/quoin-deploy." >&2
-	exit 2
-fi
-exec "$here/quoin-deploy" "$@"
-`)
+	for _, config := range configs {
+		if config.IsDir() || !strings.HasSuffix(config.Name(), ".yaml") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(configDirectory, config.Name()))
+		if err != nil {
+			return err
+		}
+		entries["config/"+config.Name()] = body
+	}
 	bundlePath := filepath.Join(options.work, names.Compose)
-	if err := writeComposeBundle(bundlePath, map[string][]byte{
-		"compose.yaml":                         composeYAML,
-		"install-minimal.yaml":                 example,
-		"schema/deployment-config.schema.json": gen.DeploymentConfigSchema,
-		"quoin-deploy":                         entry,
-	}); err != nil {
+	if err := writeComposeBundle(bundlePath, entries); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(bundlePath)
@@ -159,6 +248,40 @@ exec "$here/quoin-deploy" "$@"
 	sum := sha256.Sum256(data)
 	inventory.Compose = subjects.BlobSubject{AssetName: names.Compose, SHA256: hex.EncodeToString(sum[:])}
 	return nil
+}
+
+// pinComposeImages projects the canonical direct Compose file into a release
+// artifact by replacing only the five application service image scalars with
+// immutable measured indexes. Relative config and secrets paths are preserved.
+func pinComposeImages(source []byte, images map[string]subjects.ImageSubject) ([]byte, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		return nil, fmt.Errorf("decode compose.yaml: %w", err)
+	}
+	root := document.Content[0]
+	services := yamlMapNode(root, "services")
+	if services == nil || services.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("compose.yaml has no services mapping")
+	}
+	for _, component := range subjects.Components {
+		service := yamlMapNode(services, component)
+		imageNode := yamlMapNode(service, "image")
+		image, ok := images[component]
+		if service == nil || imageNode == nil || imageNode.Kind != yaml.ScalarNode || !ok || image.Repository == "" || image.IndexDigest == "" {
+			return nil, fmt.Errorf("compose service %q has no measured image subject", component)
+		}
+		imageNode.Value = image.Repository + "@" + image.IndexDigest
+	}
+	var rendered bytes.Buffer
+	encoder := yaml.NewEncoder(&rendered)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&document); err != nil {
+		return nil, err
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, err
+	}
+	return rendered.Bytes(), nil
 }
 
 // writeComposeBundle assembles the deterministic tar.gz (sorted entries,

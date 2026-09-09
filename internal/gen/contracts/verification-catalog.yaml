@@ -616,13 +616,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite production-transport
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite production-transport
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite production-transport --phase setup
-      action: quoin-deploy <compose|helm> verify --suite production-transport --phase action
-      assert: quoin-deploy <compose|helm> verify --suite production-transport --phase assert
+      setup: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase assert
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -743,7 +743,7 @@ scenarios:
           docker_version: release-pinned
           compose_version: release-pinned
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -830,7 +830,7 @@ scenarios:
           docker_version: release-pinned
           compose_version: release-pinned
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -915,7 +915,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_0.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1000,7 +1000,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_0.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1085,7 +1085,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_1.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1170,7 +1170,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_1.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1255,7 +1255,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_2.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1340,7 +1340,7 @@ scenarios:
           backend: kubernetes
           kubernetes_version_selector: maintained_minor_2.latest_patch
         assertions:
-          - id: four-images-by-index-digest
+          - id: five-images-by-index-digest
             kind: state
             expected: true
           - id: live-ready-metrics-scraped
@@ -1417,14 +1417,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite release-qualification
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite release-qualification
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite release-qualification --phase setup
-      action: quoin-deploy <compose|helm> verify --suite release-qualification --phase action
-      assert: quoin-deploy <compose|helm> verify --suite release-qualification --phase assert
-      teardown: quoin-deploy <compose|helm> verify --suite release-qualification --phase teardown
+      setup: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase assert
+      teardown: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase teardown
     depends_on: []
     proof_refs:
       - contracts.machine
@@ -1451,7 +1451,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|helm> verify --suite release-qualification
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite release-qualification
       success_assertions:
         - temporary-environment-removed
     timeout_seconds: 28800
@@ -1743,14 +1743,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite monitoring-stack
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase setup
-      action: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase action
-      assert: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase assert
-      teardown: quoin-deploy <compose|helm> verify --suite monitoring-stack --phase teardown
+      setup: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase assert
+      teardown: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase teardown
     depends_on:
       - release.native-matrix
       - fault.network
@@ -1776,7 +1776,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|helm> verify --suite monitoring-stack
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack
       success_assertions:
         - monitoring-stack-removed
         - temporary-data-removed
@@ -3876,14 +3876,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite storage-faults
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite storage-faults
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite storage-faults --phase setup
-      action: quoin-deploy <compose|helm> verify --suite storage-faults --phase action
-      assert: quoin-deploy <compose|helm> verify --suite storage-faults --phase assert
-      teardown: quoin-deploy <compose|helm> verify --suite storage-faults --phase teardown
+      setup: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase assert
+      teardown: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase teardown
     depends_on:
       - release.native-matrix
     proof_refs: []
@@ -3919,7 +3919,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|helm> verify --suite storage-faults
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite storage-faults
       success_assertions:
         - fuse-unmounted
         - temporary-data-removed
@@ -4450,14 +4450,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite network-faults
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite network-faults --phase setup
-      action: quoin-deploy <compose|helm> verify --suite network-faults --phase action
-      assert: quoin-deploy <compose|helm> verify --suite network-faults --phase assert
-      teardown: quoin-deploy <compose|helm> verify --suite network-faults --phase teardown
+      setup: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase assert
+      teardown: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase teardown
     depends_on:
       - release.native-matrix
     proof_refs:
@@ -4492,7 +4492,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|helm> verify --suite network-faults --phase teardown
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase teardown
       success_assertions:
         - toxiproxy-removed
         - proxy-routes-restored
@@ -4862,13 +4862,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> verify --suite deployment-acceptance
+      entrypoint: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase setup
-      action: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase action
-      assert: quoin-deploy <compose|helm> verify --suite deployment-acceptance --phase assert
+      setup: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase setup
+      action: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase action
+      assert: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase assert
       teardown: no-op
     depends_on: []
     proof_refs:
@@ -5643,13 +5643,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> restore --verify-isolation
+      entrypoint: quoin-deploy <compose|kubernetes> restore --verify-isolation
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> restore --verify-isolation --phase setup
-      action: quoin-deploy <compose|helm> restore --verify-isolation --phase action
-      assert: quoin-deploy <compose|helm> restore --verify-isolation --phase assert
+      setup: quoin-deploy <compose|kubernetes> restore --verify-isolation --phase setup
+      action: quoin-deploy <compose|kubernetes> restore --verify-isolation --phase action
+      assert: quoin-deploy <compose|kubernetes> restore --verify-isolation --phase assert
       teardown: no-op
     depends_on: []
     proof_refs:
@@ -6206,13 +6206,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|helm> recover-lintel
+      entrypoint: quoin-deploy <compose|kubernetes> recover-lintel
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|helm> recover-lintel --phase setup
-      action: quoin-deploy <compose|helm> recover-lintel --phase action
-      assert: quoin-deploy <compose|helm> recover-lintel --phase assert
+      setup: quoin-deploy <compose|kubernetes> recover-lintel --phase setup
+      action: quoin-deploy <compose|kubernetes> recover-lintel --phase action
+      assert: quoin-deploy <compose|kubernetes> recover-lintel --phase assert
       teardown: no-op
     depends_on: []
     proof_refs:

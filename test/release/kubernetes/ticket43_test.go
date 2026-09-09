@@ -1,14 +1,12 @@
 package kubernetes
 
 // TestTicket43 is the T43 acceptance coordinator: it proves the
-// Kubernetes stack adapter through its real path — release subjects
-// built and charted into an invocation-local registry, a real helm
-// install of the digest-pinned chart through the deployment helper,
-// invocation-owned port-forwards carrying the public and webhook
-// surfaces, the three stack-backed suites' locally-applicable
-// kubernetes cells through the real coordinator (including the
-// disposable second-release lifecycle and stdin runtime registration),
-// and teardown that leaves zero releases, namespaces and port-forwards.
+// Kubernetes stack adapter through its real path — release subjects built
+// into an invocation-local registry, ordinary digest-pinned YAML applied with
+// kubectl, invocation-owned port-forwards carrying the public and webhook
+// surfaces, the stack-backed suites' locally-applicable Kubernetes cells
+// through the real coordinator (including the disposable namespace lifecycle
+// and stdin runtime registration), and teardown of temporary resources.
 // A reachable cluster is required; unavailable means the run does not
 // pass.
 
@@ -55,29 +53,27 @@ func TestTicket43(t *testing.T) {
 	assertions := map[string]map[string]any{}
 
 	// ------------------------------------------------------------
-	// Leg 1 — the release subjects: the four formal images plus the
-	// digest-measured chart in the invocation-local registry, and the
-	// qualification deployment inputs (helm install config +
-	// helper-shaped manifest carrying the REAL chart digest).
+	// Leg 1 — the release subjects and the helper-shaped manifest carrying
+	// the image identities the native manifest applies in this namespace.
 	// ------------------------------------------------------------
 	ensureRegistry(t, recorder)
 	buildSubjects(t, recorder)
-	chartRepo, chartDigest, inventory := chartAndInventory(t, recorder, workRoot)
-	helmConfig, err := suites.WriteHelmInstallConfig(workRoot)
+	inventory := nativeInventory(t, recorder, workRoot)
+	kubernetesConfig := filepath.Join(workRoot, "kubernetes.yaml")
+	if err := os.WriteFile(kubernetesConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath, err := suites.WriteReleaseManifest(workRoot, releaseVersion, gitCommit(), inventory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestPath, err := suites.WriteReleaseManifest(workRoot, releaseVersion, gitCommit(), inventory, suites.ChartSubject{OCIRepository: chartRepo, OCIDigest: chartDigest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	recorder.note("helm-install.yaml", mustRead(t, helmConfig))
+	recorder.note("kubernetes.yaml", mustRead(t, filepath.Join(repoRoot(), "deploy", "kubernetes", "quoin.yaml")))
 	recorder.note("release-manifest.json", mustRead(t, manifestPath))
 
 	// ------------------------------------------------------------
 	// Leg 2 — the three stack-backed suites through the real
 	// coordinator on this cluster's locally-applicable cells. The
-	// kubernetes Stack owns the helm install, port-forwards, exec/logs,
+	// Kubernetes Stack owns native manifest apply, port-forwards, exec/logs,
 	// stdin registration and the disposable second release.
 	// ------------------------------------------------------------
 	loaded, err := catalog.LoadAndValidate(filepath.Join(repoRoot(), "docs/specs/quoin-v1/contracts/verification-catalog.yaml"))
@@ -115,7 +111,7 @@ func TestTicket43(t *testing.T) {
 		"QUOIN_SUITE_QUOIN_PORT="+strconv.Itoa(quoinPort),
 		"QUOIN_SUITE_STELE_PORT="+strconv.Itoa(stelePort),
 		"QUOIN_SUITE_ADMIN_PASSWORD="+adminPassword,
-		"QUOIN_SUITE_CONFIG="+helmConfig,
+		"QUOIN_SUITE_CONFIG="+kubernetesConfig,
 		"QUOIN_SUITE_RELEASE_MANIFEST="+manifestPath,
 	)
 	executed := map[string]string{}
@@ -186,9 +182,9 @@ func TestTicket43(t *testing.T) {
 	// Leg 3 — teardown-zero: the coordinator's environment down leaves
 	// no release, no namespace resources and no port-forward.
 	// ------------------------------------------------------------
-	// The Stack's own Down: helm uninstall AND the recorded transports
+	// The Stack's own Down deletes the native manifest and recorded transports
 	// (pidfile-owned port-forwards) die with the deployment.
-	teardownStack := &suites.Stack{Backend: "kubernetes", Namespace: namespace, ReleaseName: releaseName, WorkRoot: workRoot, ConfigPath: helmConfig, ManifestPath: manifestPath}
+	teardownStack := &suites.Stack{Backend: "kubernetes", Namespace: namespace, ReleaseName: releaseName, WorkRoot: workRoot, ConfigPath: kubernetesConfig, ManifestPath: manifestPath}
 	if _, err := teardownStack.Down(false); err != nil {
 		t.Fatalf("teardown down: %v", err)
 	}
@@ -201,7 +197,7 @@ func TestTicket43(t *testing.T) {
 		t.Logf("teardown pod delete-wait: %v: %s", err, strings.TrimSpace(output))
 	}
 	assertions["teardown-zero"] = map[string]any{
-		"expected": "no helm release, no release-scoped resources, zero kubectl port-forward processes",
+		"expected": "no native manifest resources, zero kubectl port-forward processes",
 		"actual":   proveTeardownZero(t, recorder, namespace, releaseName),
 	}
 
@@ -233,10 +229,9 @@ func TestTicket43(t *testing.T) {
 			"serverVersion": clusterVersion(t),
 			"minor":         serverMinor,
 			"kubectl":       runOutput(t, "kubectl", "version", "--client", "--short"),
-			"helm":          runOutput(t, "helm", "version", "--short"),
 		},
 		"observedTransitions": map[string]any{
-			"install":  "helm install through the helper with the digest-verified local chart",
+			"install":  "kubectl apply of the ordinary native manifest with digest-pinned subject images",
 			"suites":   executed,
 			"teardown": assertions["teardown-zero"]["actual"],
 		},
@@ -248,14 +243,14 @@ func TestTicket43(t *testing.T) {
 }
 
 // requireKubernetesCell proves the executing environment can run the
-// kubernetes cells: a reachable cluster, kubectl, helm, docker for the
+// Kubernetes cells require a reachable cluster, kubectl, docker for the
 // subject build, and socat for kubectl port-forward.
 func requireKubernetesCell(t *testing.T) {
 	t.Helper()
 	// The acceptance contract is explicit: an unavailable cluster means
 	// the run does not pass. With QUOIN_EVIDENCE_DIR set this fails
 	// (never skips); without it the cheap default `go test ./...` skips.
-	for _, tool := range []string{"kubectl", "helm", "docker", "go", "git", "socat"} {
+	for _, tool := range []string{"kubectl", "docker", "go", "git", "socat"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("%s unavailable in the kubernetes cell: %v", tool, err)
 		}
@@ -330,16 +325,15 @@ func clusterVersion(t *testing.T) string {
 	return document.ServerVersion.GitVersion
 }
 
-// proveTeardownZero asserts the release, its release-scoped resources
-// and the namespace's workloads are gone after the suites' teardown.
+// proveTeardownZero asserts native manifest resources and the namespace's
+// workloads are gone after the suites' teardown.
 func proveTeardownZero(t *testing.T, recorder *ticketEvidence, namespace, release string) map[string]any {
 	t.Helper()
-	releaseGone := true
-	if output, err := exec.Command("helm", "status", release, "--namespace", namespace).CombinedOutput(); err == nil || !strings.Contains(string(output), "not found") {
-		releaseGone = strings.Contains(string(output), "not found")
-	}
+	_ = release // Resource names are fixed; namespace is the deployment identity.
+	deploymentOutput, err := exec.Command("kubectl", "--namespace", namespace, "get", "deployment/quoin").CombinedOutput()
+	resourcesGone := err != nil && strings.Contains(string(deploymentOutput), "NotFound")
 	podsOutput, _ := exec.Command("kubectl", "--namespace", namespace, "get", "pods",
-		"-l", "app.kubernetes.io/instance="+release, "--no-headers").CombinedOutput()
+		"-l", "app.kubernetes.io/part-of=quoin", "--no-headers").CombinedOutput()
 	// kubectl prints "No resources found ..." when the selector matches
 	// nothing — that IS the empty proof, not residue.
 	if strings.Contains(string(podsOutput), "No resources found") {
@@ -347,12 +341,12 @@ func proveTeardownZero(t *testing.T, recorder *ticketEvidence, namespace, releas
 	}
 	forwards, _ := exec.Command("sh", "-c", "pgrep -af 'kubectl.*port-forward' | grep -v grep || true").CombinedOutput()
 	proof := map[string]any{
-		"releaseGone":  releaseGone,
-		"releasePods":  strings.TrimSpace(string(podsOutput)),
-		"portForwards": strings.TrimSpace(string(forwards)),
+		"resourcesGone": resourcesGone,
+		"releasePods":   strings.TrimSpace(string(podsOutput)),
+		"portForwards":  strings.TrimSpace(string(forwards)),
 	}
 	recorder.observe("teardown-zero.json", proof)
-	if !releaseGone || proof["releasePods"].(string) != "" || proof["portForwards"].(string) != "" {
+	if !resourcesGone || proof["releasePods"].(string) != "" || proof["portForwards"].(string) != "" {
 		t.Fatalf("teardown residue: %+v", proof)
 	}
 	return proof

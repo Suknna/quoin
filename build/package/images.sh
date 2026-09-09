@@ -1,26 +1,40 @@
 #!/usr/bin/env bash
-# Builds the four component images from the single canonical Dockerfile.
-# Images are local dev projections (v0.1.0-dev); release qualification owns
-# the digest-pinned publishing path and is out of scope for this ticket.
+# Builds selected independently publishable application images. The frontend
+# target compiles its own assets inside Docker, so backend image builds never
+# need host Node tooling or an existing frontend dist directory.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-if [ "${QUOIN_FORCE_IMAGE_BUILD:-0}" = "1" ] || [ ! -f internal/gen/web/dist/index.html ] || [ -z "$(ls -A internal/gen/web/dist/assets 2>/dev/null)" ]; then
-  echo "building frontend projection" >&2
-  pnpm --dir web install --frozen-lockfile
-  pnpm --dir web build
-fi
-
 image_namespace="${QUOIN_IMAGE_NAMESPACE:-quoin}"
-image_tag="${QUOIN_IMAGE_TAG:-v0.1.0-dev}"
-for target in quoin plinth lintel stele; do
-  image="$image_namespace/$target:$image_tag"
-  if docker image inspect "$image" >/dev/null 2>&1 && [ "${QUOIN_FORCE_IMAGE_BUILD:-0}" != "1" ]; then
-    echo "image $image already present"
-    continue
+default_tag="${QUOIN_IMAGE_TAG:-v0.1.0-dev}"
+components="${QUOIN_IMAGE_COMPONENTS:-frontend,quoin,plinth,lintel,stele}"
+versions="${QUOIN_IMAGE_VERSIONS:-}"
+
+component_tag() {
+  local component=$1 entry
+  IFS=',' read -ra entries <<< "$versions"
+  for entry in "${entries[@]}"; do
+    if [[ "$entry" == "$component="* ]]; then
+      printf '%s\n' "${entry#*=}"
+      return
+    fi
+  done
+  printf '%s\n' "$default_tag"
+}
+
+IFS=',' read -ra selected <<< "$components"
+for target in "${selected[@]}"; do
+  case "$target" in frontend|quoin|plinth|lintel|stele) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
+  image="$image_namespace/$target:$(component_tag "$target")"
+  if [ "$target" = frontend ]; then
+    docker build -f build/package/Dockerfile --target web \
+      ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
+      -t "$image" .
+  else
+    docker build -f build/package/Dockerfile --target "$target" \
+      --build-arg "RELEASE_VERSION=$(component_tag "$target")" \
+      ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
+      -t "$image" .
   fi
-  docker build -f build/package/Dockerfile --target "$target" \
-    ${QUOIN_IMAGE_GOPROXY:+--build-arg "GOPROXY=$QUOIN_IMAGE_GOPROXY"} \
-    -t "$image" .
 done

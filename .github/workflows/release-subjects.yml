@@ -1,6 +1,6 @@
 # Release-subject pipeline (T39, OPS-SUPPLY-001/002). One annotated SemVer
-# tag builds the four component images on native runners (linux/amd64 and
-# linux/arm64 — no QEMU), assembles the merged OCI indexes, Chart, Compose
+# tag builds the five application images on native runners (linux/amd64 and
+# linux/arm64 — no QEMU), assembles the merged OCI indexes, Kubernetes YAML, Compose
 # bundle and static helpers, signs every subject with cosign keyless OIDC and
 # runs the offline pre-qualification gate. The final evidence-referencing
 # Release manifest and offline archive belong to the release-closure ticket.
@@ -25,18 +25,24 @@ jobs:
   context:
     name: Resolve lowercase registry paths
     runs-on: ubuntu-24.04
+    outputs:
+      registry: ${{ steps.paths.outputs.registry }}
+      version: ${{ steps.paths.outputs.version }}
     steps:
       - name: Export registry environment
+        id: paths
         env:
           RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          # Docker references must be lowercase; the GitHub owner may not be.
-          echo "QUOIN_REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-          echo "QUOIN_CHART_OCI=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts" >> "$GITHUB_ENV"
-          echo "QUOIN_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
 
   build-native:
     name: Build ${{ matrix.platform }} on a native runner
+    needs: context
+    env:
+      QUOIN_REGISTRY: ${{ needs.context.outputs.registry }}
+      QUOIN_RELEASE_VERSION: ${{ needs.context.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -73,9 +79,12 @@ jobs:
           retention-days: 14
 
   assemble:
-    name: Assemble indexes, chart, compose bundle and helpers
+    name: Assemble indexes, Kubernetes YAML, compose bundle and helpers
     needs: [context, build-native]
     runs-on: ubuntu-24.04
+    env:
+      QUOIN_REGISTRY: ${{ needs.context.outputs.registry }}
+      QUOIN_RELEASE_VERSION: ${{ needs.context.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -101,7 +110,7 @@ jobs:
           name: subject-assets
           path: |
             .work/subjects-inventory.json
-            .work/quoin-*.tgz
+            .work/quoin-kubernetes-*.tar.gz
             .work/quoin-compose-*.tar.gz
             .work/quoin-deploy-linux-*
             .work/logs/
@@ -111,6 +120,8 @@ jobs:
     name: Sign every subject with cosign keyless
     needs: [context, assemble]
     runs-on: ubuntu-24.04
+    env:
+      QUOIN_REGISTRY: ${{ needs.context.outputs.registry }}
     permissions:
       id-token: write
       contents: read
@@ -131,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .work/bundles .work/payloads
-          for component in quoin plinth lintel stele; do
+          for component in quoin plinth lintel stele frontend; do
             index=$(jq -r --arg c "$component" '.images[$c].index_digest' .work/subjects-inventory.json)
             docker buildx imagetools inspect --raw "${QUOIN_REGISTRY}/$component@$index" \
               > ".work/payloads/$component-index"
@@ -157,20 +168,17 @@ jobs:
               cp ".work/payloads/$component-manifest-$arch" ".work/bundles/$component-manifest-$arch.sigstore.json.payload"
             done
           done
-      - name: Sign chart, compose bundle and helpers
+      - name: Sign Kubernetes YAML, compose bundle and helpers
         run: |
           set -euo pipefail
-          chart_digest=$(jq -r '.chart.oci_digest' .work/subjects-inventory.json)
-          docker buildx imagetools inspect --raw "${QUOIN_CHART_OCI}/quoin@$chart_digest" \
-            > .work/payloads/quoin-chart-oci
-          cosign sign-blob --yes --output-certificate .work/payloads/quoin-chart-oci.crt \
-            --output-signature .work/payloads/quoin-chart-oci.sig \
-            .work/payloads/quoin-chart-oci
-          cosign bundle create --artifact .work/payloads/quoin-chart-oci \
-            --signature .work/payloads/quoin-chart-oci.sig \
-            --certificate .work/payloads/quoin-chart-oci.crt \
-            > .work/bundles/quoin-chart-oci.sigstore.json
-          cp .work/payloads/quoin-chart-oci .work/bundles/quoin-chart-oci.sigstore.json.payload
+          kubernetes=$(jq -r '.kubernetes.asset_name' .work/subjects-inventory.json)
+          cosign sign-blob --yes --output-certificate .work/payloads/kubernetes.crt \
+            --output-signature .work/payloads/kubernetes.sig ".work/$kubernetes"
+          cosign bundle create --artifact ".work/$kubernetes" \
+            --signature .work/payloads/kubernetes.sig \
+            --certificate .work/payloads/kubernetes.crt \
+            > .work/bundles/quoin-kubernetes-bundle.sigstore.json
+          cp ".work/$kubernetes" .work/bundles/quoin-kubernetes-bundle.sigstore.json.payload
           compose=$(jq -r '.compose.asset_name' .work/subjects-inventory.json)
           cosign sign-blob --yes --output-certificate .work/payloads/compose.crt \
             --output-signature .work/payloads/compose.sig ".work/$compose"

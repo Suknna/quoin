@@ -1,5 +1,6 @@
 node_modules/
 web/node_modules/
+web/dist/
 web/playwright-report/
 web/test-results/
 .artifacts/

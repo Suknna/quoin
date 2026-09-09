@@ -6,7 +6,6 @@
 # Required environment:
 #   QUOIN_RELEASE_VERSION  v-prefixed SemVer of the tag being built
 #   QUOIN_REGISTRY         image registry namespace (e.g. ghcr.io/suknna)
-#   QUOIN_CHART_OCI        chart OCI namespace (e.g. ghcr.io/suknna/charts)
 # Optional environment:
 #   QUOIN_STAGE           all | images | assemble (default: all)
 #   QUOIN_BUILDER          buildx builder name (default: release-subjects)
@@ -22,7 +21,6 @@ cd "$repo_root"
 
 version=${QUOIN_RELEASE_VERSION:?QUOIN_RELEASE_VERSION is required}
 registry=${QUOIN_REGISTRY:?QUOIN_REGISTRY is required}
-chart_oci=${QUOIN_CHART_OCI:?QUOIN_CHART_OCI is required}
 builder=${QUOIN_BUILDER:-release-subjects}
 work=${QUOIN_WORK:-"$repo_root/.artifacts/release-subjects"}
 out=${QUOIN_OUT:-"$work/subjects-inventory.json"}
@@ -59,7 +57,6 @@ stage=${QUOIN_STAGE:-all}
 exec go run ./internal/release/build \
   -registry "$registry" \
   -version "$version" \
-  -chart-oci "$chart_oci" \
   -builder "$builder" \
   -work "$work" \
   -out "$out" \

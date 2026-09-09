@@ -18,6 +18,7 @@
 - **UI-BOUNDARY-003 —** v1 使用简体中文单语言，不建立 i18n 框架。代码、labels、annotations、协议状态、日志与上游错误保留原文，并在其周围提供中文解释。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-BOUNDARY-004 —** 颜色自动跟随 `prefers-color-scheme`，不提供应用内主题或密度设置。布局只把 shadcn Sidebar/Resizable 已有的折叠、隐藏、拖动、键盘调整与基于 `autoSaveId` 的浏览器本地 layout restore 打开，不建设第二套布局系统或服务端个人偏好。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-BOUNDARY-005 —** 不建设 Dashboard、通知中心、铃铛收件箱、已读状态、浏览器通知权限流程、配置卡片墙、通用 JSON 表单或第二套 YAML 编辑器。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-BOUNDARY-006 —** 前端 MUST 独立生产构建并作为静态 HTTP 服务发布；生产容器不得运行开发服务器，也不得将资源复制到共享卷交由入口托管。开发服务器 MAY 仅在开发环境代理同源后端请求。前端深层路由刷新必须由前端静态服务处理，但 SPA fallback MUST NOT 吞掉 `/api/`、认证、SSE、noVNC WebSocket 或告警入口请求。（来源：[Issue #93](https://github.com/Suknna/quoin/issues/93)、ADR-0001）
 
 ## 2. 信息架构与路由
 

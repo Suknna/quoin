@@ -110,7 +110,7 @@ func load(req Request) (*loadedRequest, error) {
 			return nil, &InputError{err.Error()}
 		}
 		loaded.binding = binding
-		for _, component := range deployconfig.Components {
+		for _, component := range deployconfig.ImageComponents {
 			reference, err := manifest.ImageReference(component)
 			if err != nil {
 				return nil, &InputError{err.Error()}
@@ -136,6 +136,18 @@ func (loaded *loadedRequest) release() string {
 		return loaded.manifest.ReleaseVersion
 	}
 	return buildinfo.Release
+}
+
+// componentVersion is the runtime identity expected from a component image.
+// Component releases are independently versioned; only legacy local installs
+// without a manifest fall back to the helper build version.
+func (loaded *loadedRequest) componentVersion(component string) string {
+	if loaded.manifest != nil {
+		if image, ok := loaded.manifest.Images[component]; ok && image.Version != "" {
+			return image.Version
+		}
+	}
+	return loaded.release()
 }
 
 func isTerminal(stdin io.Reader) bool {

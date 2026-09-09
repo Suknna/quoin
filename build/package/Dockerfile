@@ -12,13 +12,15 @@ RUN go mod download
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Release identity is build provenance, not a runtime compatibility check.
+ARG RELEASE_VERSION=v0.1.0-dev
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/quoin ./cmd/quoin && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/plinth ./cmd/plinth && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/lintel ./cmd/lintel && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/stele ./cmd/stele && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags='-s -w -buildid=' -o /out/quoin-healthcheck ./cmd/quoin-healthcheck
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin ./cmd/quoin && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/plinth ./cmd/plinth && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/lintel ./cmd/lintel && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/stele ./cmd/stele && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin-healthcheck ./cmd/quoin-healthcheck
 
 FROM scratch AS quoin
 USER 65532:65532
@@ -73,3 +75,51 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /out/stele /stele
 COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/stele"]
+
+FROM node:24-bookworm-slim AS web-build
+WORKDIR /src
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY web/package.json web/package.json
+RUN corepack enable && pnpm install --filter @quoin/web --frozen-lockfile
+COPY web web
+RUN pnpm --dir web build
+
+FROM caddy:2.10.2-alpine AS web-config
+# Caddy's official image accepts JSON at runtime. Keep YAML as the only checked-
+# in source, then convert the embedded Caddyfile at build time with PyYAML rather
+# than introducing a bespoke static-server framework.
+COPY build/package/web-caddy.yaml /tmp/web-caddy.yaml
+RUN apk add --no-cache py3-yaml && \
+    python3 - <<'PY'
+import pathlib
+import subprocess
+import yaml
+
+source = yaml.safe_load(pathlib.Path('/tmp/web-caddy.yaml').read_text())
+caddyfile = source.get('caddyfile')
+if not isinstance(caddyfile, str) or not caddyfile.strip():
+    raise SystemExit('web-caddy.yaml must contain a non-empty caddyfile string')
+pathlib.Path('/tmp/Caddyfile').write_text(caddyfile)
+with pathlib.Path('/out-caddy.json').open('w') as output:
+    subprocess.run(['caddy', 'adapt', '--config', '/tmp/Caddyfile', '--adapter', 'caddyfile', '--pretty'], check=True, stdout=output)
+PY
+
+FROM caddy:2.10.2-alpine AS web-capless
+# Caddy's stock binary carries cap_net_bind_service for :80/:443. This frontend
+# only listens on 8080; retaining the file capability makes exec fail when the
+# Pod drops all bounding capabilities and forbids privilege escalation.
+RUN setcap -r /usr/bin/caddy
+
+FROM caddy:2.10.2-alpine AS web
+# Copying the stripped executable into the fresh runtime image leaves the
+# libcap tooling behind and avoids carrying an executable file capability.
+COPY --from=web-capless /usr/bin/caddy /usr/bin/caddy
+COPY --from=web-config /out-caddy.json /etc/caddy/caddy.json
+COPY --from=web-build --chown=65532:65532 /src/web/dist /srv
+# The official Alpine Caddy image deliberately has no named unprivileged user.
+# Use the same fixed non-root UID as the other product images and grant it only
+# Caddy's runtime state directories plus the immutable static document root.
+RUN chown -R 65532:65532 /data /config
+EXPOSE 8080
+USER 65532:65532
+CMD ["caddy", "run", "--config", "/etc/caddy/caddy.json"]

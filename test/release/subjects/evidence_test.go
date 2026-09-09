@@ -1,6 +1,6 @@
 // Package subjects hosts the T39 acceptance: the release-subject builder and
 // offline pre-qualification gate exercised through real buildx builders, a
-// real local registry, real Helm OCI pushes and real X.509/DSSE signatures,
+// real local registry, checksum-bound Kubernetes bundles and real X.509/DSSE signatures,
 // with structured runtime and cleanup evidence under QUOIN_EVIDENCE_DIR.
 // Tests skip unless QUOIN_EVIDENCE_DIR is set so `go test ./...` stays cheap
 // in ordinary development.

@@ -229,9 +229,11 @@ func Install(req Request) (exitCode int) {
 
 	// Stage: long-lived workloads. No `--wait`: Compose re-creates exited
 	// one-shot dependencies while waiting, which races the running Quoin for
-	// the data-directory flock.
+	// the data-directory flock. Gateway selects the authoritative public TLS
+	// entrypoint and starts its frontend dependency; Plinth and Lintel have no
+	// gateway edge, so name them explicitly to retain the full service graph.
 	stage = helper.report.BeginStage(stageWorkloads)
-	if output, runErr := helper.run(stage, "compose-up", dockerize(append(append([]string{}, loaded.composeArguments...), "up", "--detach", "--remove-orphans", "quoin", "plinth", "lintel", "stele"))...); runErr != nil {
+	if output, runErr := helper.run(stage, "compose-up", dockerize(append(append([]string{}, loaded.composeArguments...), "up", "--detach", "--remove-orphans", "gateway", "plinth", "lintel"))...); runErr != nil {
 		return helper.failStage(req, stage, &PlatformError{Code: "workloads_not_started", Message: strings.TrimSpace(output), NextAction: "inspect the reported service failure; rerun the same command to resume"})
 	}
 	if waitErr := helper.awaitHealthy(loaded, 300*time.Second, stage); waitErr != nil {

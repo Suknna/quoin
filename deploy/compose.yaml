@@ -1,0 +1,289 @@
+# Six-service local topology. Copy the component YAML and supplied secret files as
+# described in docs/deployment.md; Compose never generates or stores credentials.
+name: quoin
+services:
+  gateway:
+    image: caddy:2.10.2-alpine
+    user: "1000:1000"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - 'printf "%s" "$$CADDY_JSON" > /tmp/caddy.json; exec caddy run --config /tmp/caddy.json'
+    environment:
+      CADDY_JSON: |
+        {
+          "apps": {
+            "http": {
+              "servers": {
+                "https": {
+                  "listen": [
+                    ":8443"
+                  ],
+                  "automatic_https": {
+                    "disable": true,
+                    "disable_redirects": true
+                  },
+                  "routes": [
+                    {
+                      "match": [
+                        {
+                          "path": [
+                            "/api"
+                          ]
+                        }
+                      ],
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "set": {
+                              "Strict-Transport-Security": [
+                                "max-age=31536000; includeSubDomains"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "static_response",
+                          "status_code": 404
+                        }
+                      ],
+                      "terminal": true
+                    },
+                    {
+                      "match": [
+                        {
+                          "path": [
+                            "/api/*"
+                          ]
+                        }
+                      ],
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "set": {
+                              "Strict-Transport-Security": [
+                                "max-age=31536000; includeSubDomains"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "quoin:8080"
+                            }
+                          ],
+                          "stream_timeout": "0s"
+                        }
+                      ],
+                      "terminal": true
+                    },
+                    {
+                      "match": [
+                        {
+                          "path": [
+                            "/stele",
+                            "/stele/*"
+                          ]
+                        }
+                      ],
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "set": {
+                              "Strict-Transport-Security": [
+                                "max-age=31536000; includeSubDomains"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "rewrite",
+                          "strip_path_prefix": "/stele"
+                        },
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "stele:8080"
+                            }
+                          ]
+                        }
+                      ],
+                      "terminal": true
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "set": {
+                              "Strict-Transport-Security": [
+                                "max-age=31536000; includeSubDomains"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "reverse_proxy",
+                          "upstreams": [
+                            {
+                              "dial": "frontend:8080"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "tls_connection_policies": [
+                    {}
+                  ]
+                }
+              }
+            },
+            "tls": {
+              "certificates": {
+                "load_files": [
+                  {
+                    "certificate": "/etc/caddy/tls/tls.crt",
+                    "key": "/etc/caddy/tls/tls.key"
+                  }
+                ]
+              }
+            }
+          }
+        }
+    ports: ["443:8443"]
+    volumes:
+      - ./secrets/gateway:/etc/caddy/tls:ro
+      - gateway-data:/data
+      - gateway-config:/config
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      frontend: {condition: service_started}
+      quoin: {condition: service_healthy}
+      stele: {condition: service_healthy}
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  frontend:
+    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0-dev}
+    expose: ["8080"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  quoin:
+    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0-dev}
+    command: ["serve", "--config", "/etc/quoin/component.yaml"]
+    user: "65532:65532"
+    expose: ["8080", "8443", "9090"]
+    volumes:
+      - ./config/quoin.yaml:/etc/quoin/component.yaml:ro
+      - quoin-data:/var/lib/quoin/data
+      - quoin-backups:/var/lib/quoin/backups
+      - ./secrets/quoin:/run/quoin-secrets:ro
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  plinth:
+    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0-dev}
+    command: ["--config", "/etc/quoin/component.yaml"]
+    user: "65532:65532"
+    expose: ["9090"]
+    volumes:
+      - ./config/plinth.yaml:/etc/quoin/component.yaml:ro
+      - plinth-state:/var/lib/plinth
+      - plinth-workspaces:/var/lib/plinth/workspaces
+      - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      quoin: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  lintel:
+    image: ${QUOIN_LINTEL_IMAGE:-quoin/lintel:v0.1.0-dev}
+    command: ["--config", "/etc/quoin/component.yaml"]
+    user: "65532:65532"
+    expose: ["9090"]
+    volumes:
+      - ./config/lintel.yaml:/etc/quoin/component.yaml:ro
+      - lintel-state:/var/lib/lintel
+      - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+    tmpfs: [/tmp]
+    shm_size: 1gb
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      quoin: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  stele:
+    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0-dev}
+    command: ["--config", "/etc/quoin/component.yaml"]
+    user: "65532:65532"
+    expose: ["8080", "9090"]
+    volumes:
+      - ./config/stele.yaml:/etc/quoin/component.yaml:ro
+      - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+      - ./secrets/quoin/stele-service-token:/run/quoin-secrets/stele-service-token:ro
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      quoin: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+volumes:
+  gateway-data: {}
+  gateway-config: {}
+  quoin-data: {}
+  quoin-backups: {}
+  plinth-state: {}
+  plinth-workspaces: {}
+  lintel-state: {}

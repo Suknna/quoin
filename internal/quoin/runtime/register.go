@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/Suknna/quoin/internal/contract"
 )
 
 // RegisterError distinguishes the canonical gRPC statuses (RUNTIME-REG-003).
@@ -33,8 +35,8 @@ var (
 // (RUNTIME-REG-002): within one IMMEDIATE transaction it creates the
 // confirmed credential (generation bound to the token), sets current and
 // moves the slot to registered, returning the fresh long-term token.
-// releaseVersion must equal this Quoin exactly.
-func (service *Service) Register(ctx context.Context, slotName, oneTimeToken string, generation int64, bootID, releaseVersion, currentRelease string) (longTermToken string, generationOut int64, err error) {
+// contractFingerprint must be the canonical complete Proto authority digest.
+func (service *Service) Register(ctx context.Context, slotName, oneTimeToken string, generation int64, bootID, contractFingerprint, currentFingerprint string) (longTermToken string, generationOut int64, err error) {
 	if !ValidSlot(slotName) || generation == 0 || bootID == "" {
 		return "", 0, &RegisterError{Status: "INVALID_ARGUMENT", Detail: "slot, generation and boot id are required"}
 	}
@@ -42,8 +44,8 @@ func (service *Service) Register(ctx context.Context, slotName, oneTimeToken str
 	if err != nil || len(raw) != 32 {
 		return "", 0, &RegisterError{Status: "INVALID_ARGUMENT", Detail: "token must be 32 bytes base64url"}
 	}
-	if releaseVersion != currentRelease {
-		return "", 0, &RegisterError{Status: "FAILED_PRECONDITION", Detail: "release version mismatch"}
+	if !validContractFingerprint(contractFingerprint) || contractFingerprint != currentFingerprint {
+		return "", 0, &RegisterError{Status: "FAILED_PRECONDITION", Detail: "Proto contract fingerprint mismatch"}
 	}
 	// Single-consume under the service lock: the winner consumes the token
 	// atomically; every other racer sees UNAUTHENTICATED (already consumed).
@@ -223,10 +225,16 @@ func (service *Service) consumeToken(digest [32]byte, slotName string, generatio
 	return token, true
 }
 
+// validContractFingerprint accepts only the canonical, complete Proto
+// authority fingerprint. Empty and malformed peer values are rejected.
+func validContractFingerprint(value string) bool {
+	return contract.ValidProtoAuthorityFingerprint(value)
+}
+
 // HelloDecision is the adjudication result of a Connect handshake.
 type HelloDecision struct {
 	Accepted                 bool
-	Reason                   string // empty when accepted; else TOKEN_INVALID | SLOT_REVOKED | VERSION_MISMATCH | EPOCH_STALE | CATALOG_MISMATCH
+	Reason                   string // empty when accepted; else TOKEN_INVALID | SLOT_REVOKED | CONTRACT_MISMATCH | EPOCH_STALE | CATALOG_MISMATCH
 	LastConnectionEpoch      uint64
 	ProfileReconcileRequired bool
 	// generation advanced to first_authenticated_at by this handshake.
@@ -253,7 +261,7 @@ func (service *Service) ValidateBearer(ctx context.Context, bearer string, slotN
 	return true
 }
 
-func (service *Service) Adjudicate(ctx context.Context, bearer string, slotName, bootID string, epoch uint64, releaseVersion, currentRelease, expectedCatalogDigest, journeyCatalogDigest string) (HelloDecision, error) {
+func (service *Service) Adjudicate(ctx context.Context, bearer string, slotName, bootID string, epoch uint64, contractFingerprint, currentFingerprint, expectedCatalogDigest, journeyCatalogDigest string) (HelloDecision, error) {
 	decision := HelloDecision{}
 	raw, err := base64.RawURLEncoding.DecodeString(bearer)
 	if err != nil || len(raw) != 32 {
@@ -296,8 +304,8 @@ func (service *Service) Adjudicate(ctx context.Context, bearer string, slotName,
 		decision.Reason = "TOKEN_INVALID"
 		return decision, nil
 	}
-	if releaseVersion != currentRelease {
-		decision.Reason = "VERSION_MISMATCH"
+	if !validContractFingerprint(contractFingerprint) || contractFingerprint != currentFingerprint {
+		decision.Reason = "CONTRACT_MISMATCH"
 		return decision, nil
 	}
 	// Epoch monotonicity inside (slot, boot): new boots may restart at 1.

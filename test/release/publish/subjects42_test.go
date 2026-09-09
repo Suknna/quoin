@@ -2,7 +2,7 @@ package publish
 
 // The T42 release subjects: the real T39 release builder produces the
 // four dual-platform images (native amd64, emulated arm64 build evidence
-// only — VERIFY-EXTERNAL-004), the merged OCI indexes, the Helm chart,
+// only — VERIFY-EXTERNAL-004), the merged OCI indexes, the Kubernetes bundle,
 // the digest-pinned Compose bundle and both static helpers, ending with
 // the validated subject inventory the final Release manifest references.
 
@@ -126,7 +126,6 @@ func buildSubjects42(t *testing.T, recorder *ticketEvidence, workRoot string) *s
 		"go", "run", "./internal/release/build",
 		"-registry", t42RegistryHost+"/"+t42Namespace,
 		"-version", releaseVersion42,
-		"-chart-oci", t42RegistryHost+"/"+t42Namespace+"/charts",
 		"-builder", t42Builder,
 		"-work", work,
 		"-stage", "images",
@@ -146,7 +145,6 @@ func buildSubjects42(t *testing.T, recorder *ticketEvidence, workRoot string) *s
 		"go", "run", "./internal/release/build",
 		"-registry", t42RegistryHost+"/"+t42Namespace,
 		"-version", releaseVersion42,
-		"-chart-oci", t42RegistryHost+"/"+t42Namespace+"/charts",
 		"-builder", t42Builder,
 		"-work", work,
 		"-out", result.inventoryPath,

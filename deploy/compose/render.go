@@ -2,21 +2,18 @@
 package compose
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"text/template"
+	"strings"
 
+	deploy "github.com/Suknna/quoin/deploy"
 	"github.com/Suknna/quoin/internal/contract"
 	"gopkg.in/yaml.v3"
 )
 
 const minimumShmBytes = 1 << 30
-
-//go:embed compose.yaml.tmpl
-var composeTemplate string
 
 type Projection struct {
 	Directory   string
@@ -33,33 +30,6 @@ type Options struct {
 	// generated Quoin component configuration. nil keeps the local development
 	// projection unchanged (no Deployment Acceptance subject).
 	DeploymentBinding *contract.DeploymentBinding
-}
-
-type renderData struct {
-	UID, GID            int
-	QuoinImage          string
-	PlinthImage         string
-	LintelImage         string
-	SteleImage          string
-	QuoinConfigBind     string
-	PlinthConfigBind    string
-	LintelConfigBind    string
-	SteleConfigBind     string
-	DataBind            string
-	BackupBind          string
-	SecretsRWBind       string
-	SecretsROBind       string
-	RuntimeCABind       string
-	SteleTokenBind      string
-	PlinthStateBind     string
-	PlinthWorkBind      string
-	LintelStateBind     string
-	LintelShmSize       int64
-	Loopback            bool
-	QuoinPort           int
-	StelePort           int
-	ExternalNetwork     bool
-	ExternalNetworkName string
 }
 
 func Render(input contract.ComposeInstall, stateDirectory string) (Projection, error) {
@@ -122,54 +92,16 @@ func RenderWithOptions(input contract.ComposeInstall, stateDirectory string, opt
 	if err := writeAtomic(filepath.Join(configDirectory, "install-input.yaml"), inputData, 0o600); err != nil {
 		return Projection{}, err
 	}
-	values := renderData{
-		UID: os.Getuid(), GID: os.Getgid(),
-		QuoinImage:          imageReference(options, "quoin"),
-		PlinthImage:         imageReference(options, "plinth"),
-		LintelImage:         imageReference(options, "lintel"),
-		SteleImage:          imageReference(options, "stele"),
-		QuoinConfigBind:     bind(quoinPath, "/etc/quoin/component.yaml", "ro"),
-		PlinthConfigBind:    bind(plinthPath, "/etc/quoin/component.yaml", "ro"),
-		LintelConfigBind:    bind(lintelPath, "/etc/quoin/component.yaml", "ro"),
-		SteleConfigBind:     bind(stelePath, "/etc/quoin/component.yaml", "ro"),
-		DataBind:            bind(directories["data"], "/var/lib/quoin/data", ""),
-		BackupBind:          bind(directories["backups"], "/var/lib/quoin/backups", ""),
-		SecretsRWBind:       bind(input.SecretDirectory, containerSecrets, ""),
-		SecretsROBind:       bind(input.SecretDirectory, containerSecrets, "ro"),
-		RuntimeCABind:       bind(filepath.Join(input.SecretDirectory, "runtime-ca.pem"), containerSecrets+"/runtime-ca.pem", "ro"),
-		SteleTokenBind:      bind(filepath.Join(input.SecretDirectory, "stele-service-token"), containerSecrets+"/stele-service-token", "ro"),
-		PlinthStateBind:     bind(directories["plinth"], "/var/lib/plinth", ""),
-		PlinthWorkBind:      bind(directories["workspaces"], "/var/lib/plinth/workspaces", ""),
-		LintelStateBind:     bind(directories["lintel"], "/var/lib/lintel", ""),
-		LintelShmSize:       input.LintelShmSizeBytes,
-		Loopback:            input.PublishMode == "loopback",
-		QuoinPort:           input.QuoinPublicHostPort,
-		StelePort:           input.SteleWebhookHostPort,
-		ExternalNetwork:     input.PublishMode == "internal-network-only",
-		ExternalNetworkName: quote(input.ExternalProxyNetwork),
-	}
-	parsed, err := template.New("compose").Parse(composeTemplate)
+	// Start from the direct deployment document so generated installs and the
+	// user-operated Compose path cannot drift into separate topologies.
+	composeData, err := renderAuthoritativeCompose(input, options, map[string]string{
+		"quoin": quoinPath, "plinth": plinthPath, "lintel": lintelPath, "stele": stelePath,
+	}, directories)
 	if err != nil {
 		return Projection{}, err
 	}
 	composePath := filepath.Join(configDirectory, "compose.yaml")
-	file, err := os.OpenFile(composePath+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return Projection{}, err
-	}
-	if err := parsed.Execute(file, values); err != nil {
-		file.Close()
-		os.Remove(file.Name())
-		return Projection{}, err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return Projection{}, err
-	}
-	if err := file.Close(); err != nil {
-		return Projection{}, err
-	}
-	if err := os.Rename(composePath+".tmp", composePath); err != nil {
+	if err := writeAtomic(composePath, composeData, 0o600); err != nil {
 		return Projection{}, err
 	}
 	return Projection{Directory: configDirectory, ComposeFile: composePath}, nil
@@ -211,7 +143,161 @@ func bind(hostPath, containerPath, mode string) string {
 	if mode != "" {
 		value += ":" + mode
 	}
-	return quote(value)
+	return value
+}
+
+// renderAuthoritativeCompose patches only deploy-specific details into the
+// source-controlled six-service Compose document. The document itself remains
+// the authority for Caddy routes, TLS behaviour, and service relationships.
+func renderAuthoritativeCompose(input contract.ComposeInstall, options Options, configs, directories map[string]string) ([]byte, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(deploy.ComposeTemplate, &document); err != nil {
+		return nil, fmt.Errorf("parse authoritative Compose document: %w", err)
+	}
+	root := document.Content[0]
+	services := mappingValue(root, "services")
+	if services == nil {
+		return nil, fmt.Errorf("authoritative Compose document has no services")
+	}
+	for _, component := range []string{"gateway", "frontend", "quoin", "plinth", "lintel", "stele"} {
+		if mappingValue(services, component) == nil {
+			return nil, fmt.Errorf("authoritative Compose document lacks %s service", component)
+		}
+	}
+	for component := range configs {
+		setScalar(mappingValue(services, component), "image", imageReference(options, component))
+	}
+	setScalar(mappingValue(services, "frontend"), "image", imageReference(options, "frontend"))
+	// Secret bootstrap produces the Runtime TLS pair. It is also the local
+	// gateway's self-signed certificate, avoiding a second credential source.
+	gateway := mappingValue(services, "gateway")
+	for _, key := range []string{"environment", "command"} {
+		if value := mappingValue(gateway, key); value != nil {
+			replaceScalar(value, "/etc/caddy/tls/tls.crt", "/etc/caddy/tls/runtime-tls.crt")
+			replaceScalar(value, "/etc/caddy/tls/tls.key", "/etc/caddy/tls/runtime-tls.key")
+		}
+	}
+	setScalar(gateway, "user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	setScalar(mappingValue(services, "quoin"), "user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	for _, component := range []string{"plinth", "lintel", "stele"} {
+		setScalar(mappingValue(services, component), "user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	}
+
+	secretDirectory := input.SecretDirectory
+	setSequence(mappingValue(services, "quoin"), "volumes", []string{
+		bind(configs["quoin"], "/etc/quoin/component.yaml", "ro"), bind(directories["data"], "/var/lib/quoin/data", ""), bind(directories["backups"], "/var/lib/quoin/backups", ""), bind(secretDirectory, "/run/quoin-secrets", ""),
+	})
+	setSequence(mappingValue(services, "plinth"), "volumes", []string{
+		bind(configs["plinth"], "/etc/quoin/component.yaml", "ro"), bind(directories["plinth"], "/var/lib/plinth", ""), bind(directories["workspaces"], "/var/lib/plinth/workspaces", ""), bind(filepath.Join(secretDirectory, "runtime-ca.pem"), "/run/quoin-secrets/runtime-ca.pem", "ro"),
+	})
+	setSequence(mappingValue(services, "lintel"), "volumes", []string{
+		bind(configs["lintel"], "/etc/quoin/component.yaml", "ro"), bind(directories["lintel"], "/var/lib/lintel", ""), bind(filepath.Join(secretDirectory, "runtime-ca.pem"), "/run/quoin-secrets/runtime-ca.pem", "ro"),
+	})
+	setSequence(mappingValue(services, "stele"), "volumes", []string{
+		bind(configs["stele"], "/etc/quoin/component.yaml", "ro"), bind(filepath.Join(secretDirectory, "runtime-ca.pem"), "/run/quoin-secrets/runtime-ca.pem", "ro"), bind(filepath.Join(secretDirectory, "stele-service-token"), "/run/quoin-secrets/stele-service-token", "ro"),
+	})
+	setSequence(mappingValue(services, "gateway"), "volumes", []string{
+		bind(secretDirectory, "/etc/caddy/tls", "ro"),
+	})
+	setScalar(mappingValue(services, "lintel"), "shm_size", strconv.FormatInt(input.LintelShmSizeBytes, 10))
+	setSequence(mappingValue(services, "gateway"), "ports", []string{fmt.Sprintf("127.0.0.1:%d:8443", input.QuoinPublicHostPort)})
+
+	addBootstrapServices(services, configs["quoin"], directories, secretDirectory, options)
+	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+		service := mappingValue(services, component)
+		dependsOn := mappingValue(service, "depends_on")
+		if dependsOn == nil {
+			dependsOn = newMapping()
+			setNode(service, "depends_on", dependsOn)
+		}
+		setNode(dependsOn, "admin-bootstrap", dependency("service_completed_successfully"))
+	}
+	encoded, err := yaml.Marshal(&document)
+	if err != nil {
+		return nil, fmt.Errorf("encode generated Compose document: %w", err)
+	}
+	return encoded, nil
+}
+
+func addBootstrapServices(services *yaml.Node, quoinConfig string, directories map[string]string, secretDirectory string, options Options) {
+	secretBootstrap := newMapping()
+	setScalar(secretBootstrap, "image", imageReference(options, "quoin"))
+	setSequence(secretBootstrap, "command", []string{"secrets", "bootstrap", "--config", "/etc/quoin/component.yaml"})
+	setScalar(secretBootstrap, "user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	setScalar(secretBootstrap, "read_only", "true")
+	setSequence(secretBootstrap, "cap_drop", []string{"ALL"})
+	setSequence(secretBootstrap, "security_opt", []string{"no-new-privileges:true"})
+	setSequence(secretBootstrap, "volumes", []string{bind(quoinConfig, "/etc/quoin/component.yaml", "ro"), bind(directories["data"], "/var/lib/quoin/data", ""), bind(secretDirectory, "/run/quoin-secrets", "")})
+	setSequence(secretBootstrap, "tmpfs", []string{"/tmp"})
+	setScalar(secretBootstrap, "restart", "no")
+	setNode(services, "secret-bootstrap", secretBootstrap)
+
+	adminBootstrap := newMapping()
+	setScalar(adminBootstrap, "image", imageReference(options, "quoin"))
+	setSequence(adminBootstrap, "command", []string{"admin", "create", "--config", "/etc/quoin/component.yaml"})
+	setScalar(adminBootstrap, "user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
+	setScalar(adminBootstrap, "read_only", "true")
+	setScalar(adminBootstrap, "stdin_open", "true")
+	setScalar(adminBootstrap, "tty", "true")
+	setSequence(adminBootstrap, "cap_drop", []string{"ALL"})
+	setSequence(adminBootstrap, "security_opt", []string{"no-new-privileges:true"})
+	setNode(adminBootstrap, "depends_on", newMappingWith("secret-bootstrap", dependency("service_completed_successfully")))
+	setSequence(adminBootstrap, "volumes", []string{bind(quoinConfig, "/etc/quoin/component.yaml", "ro"), bind(directories["data"], "/var/lib/quoin/data", ""), bind(directories["backups"], "/var/lib/quoin/backups", ""), bind(secretDirectory, "/run/quoin-secrets", "ro")})
+	setSequence(adminBootstrap, "tmpfs", []string{"/tmp"})
+	setScalar(adminBootstrap, "restart", "no")
+	setNode(services, "admin-bootstrap", adminBootstrap)
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
+func setScalar(mapping *yaml.Node, key, value string) {
+	setNode(mapping, key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+}
+
+// replaceScalar walks a YAML value because Caddy JSON is nested inside the
+// gateway environment mapping rather than stored directly as that key's value.
+func replaceScalar(node *yaml.Node, old, replacement string) {
+	if node.Kind == yaml.ScalarNode {
+		node.Value = strings.ReplaceAll(node.Value, old, replacement)
+	}
+	for _, child := range node.Content {
+		replaceScalar(child, old, replacement)
+	}
+}
+func setSequence(mapping *yaml.Node, key string, values []string) {
+	sequence := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, value := range values {
+		sequence.Content = append(sequence.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+	}
+	setNode(mapping, key, sequence)
+}
+func setNode(mapping *yaml.Node, key string, value *yaml.Node) {
+	for index := 0; index < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			mapping.Content[index+1] = value
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, value)
+}
+func newMapping() *yaml.Node { return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"} }
+func newMappingWith(key string, value *yaml.Node) *yaml.Node {
+	mapping := newMapping()
+	setNode(mapping, key, value)
+	return mapping
+}
+func dependency(condition string) *yaml.Node {
+	return newMappingWith("condition", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: condition})
 }
 
 // imageReference projects a component image line: a digest-pinned reference
@@ -220,6 +306,9 @@ func bind(hostPath, containerPath, mode string) string {
 func imageReference(options Options, component string) string {
 	if reference, ok := options.Images[component]; ok && reference != "" {
 		return reference
+	}
+	if component == "frontend" {
+		return "${QUOIN_IMAGE_NAMESPACE:-quoin}/web:v0.1.0-dev"
 	}
 	return "${QUOIN_IMAGE_NAMESPACE:-quoin}/" + component + ":v0.1.0-dev"
 }
@@ -236,7 +325,6 @@ func RenderVerifyOverlay(projection Projection, options Options) (string, error)
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    networks: [internal]
     restart: "no"
 `
 	path := filepath.Join(projection.Directory, "verify.yaml")

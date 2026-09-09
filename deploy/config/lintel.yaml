@@ -1,0 +1,6 @@
+component: lintel
+stateDirectory: /var/lib/lintel
+quoinRuntimeEndpoint: https://quoin:8443
+quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+browserSlots: 1
+minimumShmBytes: 1073741824

@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
@@ -64,11 +63,11 @@ func TestTicket35RecoveryIssuerServesRegisterAndFirstHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldLong, _, err := slots.Register(ctx, "lintel", raw, generation, "boot-old", buildinfo.Release, buildinfo.Release)
+	oldLong, _, err := slots.Register(ctx, "lintel", raw, generation, "boot-old", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision, err := slots.Adjudicate(ctx, oldLong, "lintel", "boot-old", 1, buildinfo.Release, buildinfo.Release, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
+	if decision, err := slots.Adjudicate(ctx, oldLong, "lintel", "boot-old", 1, contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint, catalog.Digest(), catalog.Digest()); err != nil || !decision.Accepted {
 		t.Fatalf("old hello: %+v %v", decision, err)
 	}
 	// The issuer takes the exclusive data-directory lock; the fixture's
@@ -120,7 +119,7 @@ func TestTicket35RecoveryIssuerServesRegisterAndFirstHello(t *testing.T) {
 	defer registerCancel()
 	registered, err := client.Register(metadata.NewOutgoingContext(registerCtx, metadata.Pairs("authorization", "Bearer "+envelope.Token)), &runtimev1.RegisterRuntimeRequest{
 		Slot: runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL, OneTimeToken: envelope.Token,
-		Generation: uint64(envelope.Generation), BootId: "boot-new", ReleaseVersion: buildinfo.Release,
+		Generation: uint64(envelope.Generation), BootId: "boot-new", ContractFingerprint: contract.ProtoAuthorityFingerprint,
 	})
 	if err != nil {
 		t.Fatalf("recovery register: %v", err)
@@ -133,7 +132,7 @@ func TestTicket35RecoveryIssuerServesRegisterAndFirstHello(t *testing.T) {
 	}
 	hello := &runtimev1.Hello{
 		Slot: runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL, BootId: "boot-new", ConnectionEpoch: 1,
-		ReleaseVersion: buildinfo.Release, JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint, JourneyCatalogDigest: catalog.Digest(), JourneyCatalogVersion: catalog.Version,
 		BrowserCapacitySlots: 1,
 	}
 	if err := stream.Send(&runtimev1.ControlEnvelope{MessageId: 1, ConnectionEpoch: 1, BootId: "boot-new", Msg: &runtimev1.ControlEnvelope_Hello{Hello: hello}}); err != nil {

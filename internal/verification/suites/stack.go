@@ -2,6 +2,7 @@ package suites
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -37,7 +38,7 @@ type Stack struct {
 	Backend string
 	// Namespace and ReleaseName carry the Kubernetes deployment
 	// identity (the compose project's counterparts); both default to
-	// "quoin" exactly like the helm helper's own override surface.
+	// "quoin" with fixed resource names inside an isolated namespace.
 	Namespace   string
 	ReleaseName string
 
@@ -60,15 +61,16 @@ func (stack *Stack) ComposeEnv() []string {
 	return stack.HelperEnv()
 }
 
-// BaseURL is the public Quoin origin base. A qualification cell
-// running containerized reaches the host-published loopback through
-// QUOIN_LOOPBACK_HOST.
+// BaseURL is the public Quoin origin base. A qualification cell running
+// containerized reaches the host-published loopback through QUOIN_LOOPBACK_HOST.
+// Compose now exposes the Caddy TLS gateway rather than Quoin's internal HTTP
+// listener; tests deliberately trust the deployment's self-signed certificate.
 func (stack *Stack) BaseURL() string {
 	host := "127.0.0.1"
 	if fromEnv := os.Getenv("QUOIN_LOOPBACK_HOST"); fromEnv != "" {
 		host = fromEnv
 	}
-	return "http://" + host + ":" + strconv.Itoa(stack.QuoinPort)
+	return "https://" + host + ":" + strconv.Itoa(stack.QuoinPort)
 }
 
 // EnsureInstalled runs the helper's staged install (idempotent resume)
@@ -81,7 +83,7 @@ func (stack *Stack) EnsureInstalled() (string, error) {
 // awaitPublic polls the public listener until the product answers.
 func (stack *Stack) awaitPublic(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: insecureTLSTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for time.Now().Before(deadline) {
 		request, err := http.NewRequest(http.MethodGet, stack.BaseURL()+"/api/v1/auth/session", nil)
 		if err == nil {
@@ -120,6 +122,80 @@ func (stack *Stack) Down(dataRemoval bool) (string, error) {
 	return stack.backend().down(stack, dataRemoval)
 }
 
+// NativeBackup executes Quoin's core offline backup command against retained
+// Kubernetes PVCs. Compose retains its existing helper implementation.
+func (stack *Stack) NativeBackup() (string, error) {
+	backend, ok := stack.backend().(*kubernetesBackend)
+	if !ok {
+		return "", fmt.Errorf("native backup is only available for Kubernetes")
+	}
+	return backend.offlinePod(stack, "backup", "--offline", "--config", "/etc/quoin/component.yaml")
+}
+
+// NativeRestore executes Quoin's core restore transaction against retained
+// Kubernetes PVCs. The caller must first stop the Quoin deployment.
+func (stack *Stack) NativeRestore(backupID, username, password string) (string, error) {
+	backend, ok := stack.backend().(*kubernetesBackend)
+	if !ok {
+		return "", fmt.Errorf("native restore is only available for Kubernetes")
+	}
+	return backend.restorePod(stack, backupID, username, password)
+}
+
+// NativeUpgradeRefusal validates that a malformed subject cannot be resolved
+// into a native deployment image, before any Kubernetes object is mutated.
+// NativePrepareBootstrap creates the ordinary manifest resources and secret
+// authority while keeping Quoin stopped for an administrator bootstrap probe.
+func (stack *Stack) NativePrepareBootstrap() error {
+	backend, ok := stack.backend().(*kubernetesBackend)
+	if !ok {
+		return fmt.Errorf("native bootstrap preparation is only available for Kubernetes")
+	}
+	return backend.prepareBootstrap(stack)
+}
+
+// NativeBootstrapFailureRetry proves the first administrator flow rejects a
+// mismatched confirmation while Quoin remains stopped, then retries with the
+// correct confirmation and leaves the deployment eligible to start.
+func (stack *Stack) NativeBootstrapFailureRetry() (bool, error) {
+	if _, ok := stack.backend().(*kubernetesBackend); !ok {
+		return false, fmt.Errorf("native bootstrap retry is only available for Kubernetes")
+	}
+	wrong := stack.AdminPassword + "-mismatch"
+	if err := stack.bootstrapNativeAdministratorWithConfirmation(wrong); err == nil {
+		return false, fmt.Errorf("administrator bootstrap accepted mismatched password confirmation")
+	}
+	pods, _, _ := stack.kubectl("--namespace", stack.namespace(), "get", "pods", "-l", "app.kubernetes.io/component=quoin", "-o", "jsonpath={.items[*].metadata.name}")
+	if strings.TrimSpace(pods) != "" {
+		return false, fmt.Errorf("Quoin started after rejected administrator bootstrap")
+	}
+	if err := stack.bootstrapNativeAdministrator(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (stack *Stack) NativeUpgradeRefusal(manifestPath string) error {
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	var subject struct {
+		Images map[string]struct {
+			Repository string `json:"repository"`
+			Index      string `json:"index_digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(body, &subject); err != nil {
+		return err
+	}
+	image, ok := subject.Images["quoin"]
+	if !ok || image.Repository == "" || !strings.HasPrefix(image.Index, "sha256:") || len(image.Index) != len("sha256:")+64 {
+		return fmt.Errorf("invalid immutable Quoin image subject")
+	}
+	return nil
+}
+
 // Session is one authenticated admin HTTP session against the public
 // origin (the same-origin login round trip). The __Host- session
 // cookie is Secure, so it is pinned here and attached per request
@@ -132,6 +208,13 @@ type Session struct {
 }
 
 const publicOrigin = "https://quoin.example.com"
+
+// insecureTLSTransport is limited to qualification's loopback probe of the
+// deployment-generated self-signed gateway certificate. Product clients retain
+// ordinary certificate verification; suite traffic has no production trust root.
+func insecureTLSTransport() *http.Transport {
+	return &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 -- isolated test gateway
+}
 
 // Login performs the real admin login over the public port. The first
 // login of a fresh deployment answers passwordChangeRequired; the
@@ -194,7 +277,7 @@ func (stack *Stack) loginOnce(username, password string) (*Session, string, erro
 	if shared, ok := stack.sharedAdminPassword(); ok {
 		password = shared
 	}
-	session := &Session{Client: &http.Client{Timeout: 30 * time.Second,
+	session := &Session{Client: &http.Client{Timeout: 30 * time.Second, Transport: insecureTLSTransport(),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		Base: stack.BaseURL(), Origin: publicOrigin}
 	request, err := http.NewRequest(http.MethodPost, session.Base+"/api/v1/auth/login",

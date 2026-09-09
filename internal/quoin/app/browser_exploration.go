@@ -1614,7 +1614,7 @@ func (service *RuntimeService) dispatchBrowserExplorationAction(ctx context.Cont
 	// action is still not sent until its audit row has committed.
 	result, err := conn.ExecContext(ctx, `UPDATE execution_attempts
 		SET state='Assigned',runtime_slot='lintel',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1
-		WHERE id=? AND state='Queued'`, view.BootID, *view.ConnectionEpoch, lease, service.ReleaseVersion, childID)
+		WHERE id=? AND state='Queued'`, view.BootID, *view.ConnectionEpoch, lease, view.ReleaseVersion, childID)
 	if err != nil {
 		return err
 	}

@@ -7,22 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"mime"
 	"net"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	generatedweb "github.com/Suknna/quoin/internal/gen/web"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
@@ -420,7 +415,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 			if err != nil {
 				return appinvestigation.PlinthView{}, err
 			}
-			slice := appinvestigation.PlinthView{Connected: view.Connected, BootID: view.BootID}
+			slice := appinvestigation.PlinthView{Connected: view.Connected, BootID: view.BootID, ReleaseVersion: view.ReleaseVersion}
 			if view.ConnectionEpoch != nil {
 				slice.ConnectionEpoch = *view.ConnectionEpoch
 			}
@@ -495,8 +490,9 @@ func (application *apiServer) newServers(config contract.QuoinConfig) (*servers,
 	return &servers{public: &http.Server{Addr: ":8080", Handler: gate, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer, upgradeGate: gate}, nil
 }
 
-// NewHandler builds the same-origin public surface: the real Huma API plus the
-// embedded web shell, behind the frozen CSRF and security-header gates.
+// NewHandler builds Quoin's backend-only public surface. The independent
+// frontend service owns pages and SPA fallback; the shared entry proxy keeps
+// browser traffic same-origin before dispatching it here.
 func NewHandler(application *apiServer, publicOrigin string) (http.Handler, error) {
 	configureHumaErrorModel()
 	mux := http.NewServeMux()
@@ -527,7 +523,6 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
 	// The helper request is a deterministic YAML download and owns its head.
 	mux.HandleFunc("GET /api/v1/deployment-verifications/{invocationId}/helper-request", application.serveDeploymentVerificationHelperRequest)
-	application.registerStatic(mux)
 
 	csrf := http.NewCrossOriginProtection()
 	if err := csrf.AddTrustedOrigin(publicOrigin); err != nil {
@@ -787,40 +782,6 @@ func authFailure(err error, action string) error {
 	}
 	sharedops.LogEvent("quoin", "error", "auth.session_read_failed", err.Error())
 	return huma.Error500InternalServerError("暂时无法"+action+"，请重试。", err)
-}
-
-func (application *apiServer) registerStatic(mux *http.ServeMux) {
-	root, err := fs.Sub(generatedweb.Files, "dist")
-	if err != nil {
-		panic(err)
-	}
-	mux.HandleFunc("GET /", func(writer http.ResponseWriter, request *http.Request) {
-		name := strings.TrimPrefix(path.Clean(request.URL.Path), "/")
-		if name == "." || name == "" {
-			name = "index.html"
-		}
-		data, readErr := fs.ReadFile(root, name)
-		if readErr != nil {
-			if strings.HasPrefix(request.URL.Path, "/api/") || strings.Contains(path.Base(name), ".") {
-				http.NotFound(writer, request)
-				return
-			}
-			name = "index.html"
-			data, readErr = fs.ReadFile(root, name)
-		}
-		if readErr != nil {
-			http.Error(writer, "frontend unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if name == "index.html" {
-			writer.Header().Set("Cache-Control", "no-cache")
-		} else if strings.HasPrefix(name, "assets/") {
-			writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		}
-		writer.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(name)))
-		writer.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		_, _ = writer.Write(data)
-	})
 }
 
 // runMaintenance starts only the HTTP maintenance allowlist and ops readiness

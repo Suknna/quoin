@@ -55,8 +55,8 @@ func TestTicket42(t *testing.T) {
 	pathEnv := bin + ":" + os.Getenv("PATH")
 
 	// ------------------------------------------------------------
-	// Leg 1 — the release subjects: dual-platform images, chart,
-	// compose bundle, helpers and the validated inventory.
+	// Leg 1 — the release subjects: dual-platform application images,
+	// Kubernetes and Compose bundles, helpers and the validated inventory.
 	// ------------------------------------------------------------
 	ensureRegistry(t, recorder)
 	builderOwned := ensureBuilder(t, recorder, workRoot)
@@ -308,7 +308,7 @@ func TestTicket42(t *testing.T) {
 			"subject":      subjectDigest,
 			"archive":      "quoin-offline-" + releaseVersion42 + ".tar.zst",
 			"bundles":      "16 subject + release_manifest + offline (signing closure)",
-			"toolchain":    map[string]string{"skopeo": skopeoVersion(), "zstd": "zstd CLI", "helm": helmVersion()},
+			"toolchain":    map[string]string{"skopeo": skopeoVersion(), "zstd": "zstd CLI"},
 		},
 		"components": map[string]any{
 			"quoinDeploy": pathAndDigest(filepath.Join(bin, "quoin-deploy")),
@@ -317,7 +317,7 @@ func TestTicket42(t *testing.T) {
 			"signingRoot": "ephemeral Fulcio-shaped CA (no key outlives the test)",
 		},
 		"observedTransitions": map[string]any{
-			"subjects": "dual-platform images + merged indexes + chart + compose + helpers (validated inventory)",
+			"subjects": "dual-platform application images + merged indexes + Kubernetes and Compose bundles + helpers (validated inventory)",
 			"finalize": "manifest derived; archive packed; gate passed with offline import",
 			"acceptance": map[string]any{
 				"invocation": site.InvocationID, "outcome": site.OverallOutcome,
@@ -397,7 +397,7 @@ func runReleaseSuiteCell(t *testing.T, recorder *ticketEvidence, evidenceRoot, w
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestPath, err := suites.WriteReleaseManifest(suiteRoot, releaseVersion42, gitCommit(), images, suites.ChartSubject{})
+	manifestPath, err := suites.WriteReleaseManifest(suiteRoot, releaseVersion42, gitCommit(), images)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,14 +468,6 @@ func pathAndDigest(path string) map[string]any {
 
 func skopeoVersion() string {
 	output, err := exec.Command("skopeo", "--version").Output()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(string(output))
-}
-
-func helmVersion() string {
-	output, err := exec.Command("helm", "version", "--short").Output()
 	if err != nil {
 		return "unknown"
 	}

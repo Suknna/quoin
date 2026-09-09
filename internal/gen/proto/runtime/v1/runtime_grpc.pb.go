@@ -528,8 +528,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
-// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带 release_version，
-// 与 Quoin 严格相等（RUNTIME-STELE-006、RUNTIME-VERSION-001）。
+// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带完整 Proto 权威契约的
+// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
 type SteleRelayClient interface {
 	// 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
 	// （RUNTIME-STELE-002）。
@@ -572,8 +572,8 @@ func (c *steleRelayClient) Deliver(ctx context.Context, in *DeliveryRelayRequest
 // for forward compatibility.
 //
 // Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 不注册 Runtime，service token
-// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带 release_version，
-// 与 Quoin 严格相等（RUNTIME-STELE-006、RUNTIME-VERSION-001）。
+// 由部署 Secret 文件提供（RUNTIME-STELE-001）。每个请求必须携带完整 Proto 权威契约的
+// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
 type SteleRelayServer interface {
 	// 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
 	// （RUNTIME-STELE-002）。

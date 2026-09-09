@@ -37,7 +37,7 @@ func (service *RuntimeService) dispatchAnalysisAttempt(ctx context.Context, atte
 	if !view.Connected || view.ConnectionEpoch == nil {
 		return fmt.Errorf("plinth is not connected")
 	}
-	if err := service.Analyses.Attempts().BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, analysisLeaseWindow()); err != nil {
+	if err := service.Analyses.Attempts().BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, analysisLeaseWindow(), view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := service.Analyses.Attempts().DispatchInputFor(ctx, attemptID)

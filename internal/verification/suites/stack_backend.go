@@ -33,7 +33,8 @@ const (
 
 // stackBackend is the set of backend-owned behaviors behind Stack.
 type stackBackend interface {
-	// helperVerb is the deployment helper subcommand ("compose"|"helm").
+	// helperVerb is the deployment helper subcommand. Kubernetes deployments
+	// use plain manifests through kubectl and therefore return no helper verb.
 	helperVerb() string
 	// opsBase is the in-deployment base URL of the Quoin ops listener
 	// (the browser identities' start URL and authenticated prefix point

@@ -1,5 +1,5 @@
 // Package recover_lintel owns the shared, catalog-bound invocation surface
-// of `quoin-deploy <compose|helm> recover-lintel` (T35): the frozen
+// of `quoin-deploy compose recover-lintel` (T35): the frozen
 // verification-catalog entrypoint binds the internal orchestration flags
 // (OPS-HELPER-001), so both backends parse one flag set instead of keeping
 // parallel lists.
@@ -89,9 +89,4 @@ func Parse(name string, arguments []string) Flags {
 	return Flags{}
 }
 
-func backendOf(name string) string {
-	if len(name) >= 4 && name[:4] == "helm" {
-		return "helm"
-	}
-	return "compose"
-}
+func backendOf(string) string { return "compose" }

@@ -1,0 +1,58 @@
+name: component-builds
+
+on:
+  pull_request:
+  push:
+    branches: ['main', 'feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      components: ${{ steps.select.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Select applications from changed build inputs
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git ls-files > /tmp/changed-files
+          else
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files
+          fi
+          result=$(go run ./internal/release/build select -changed-file /tmp/changed-files)
+          printf 'components=%s\n' "$(jq -c '.components' <<< "$result")" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: select
+    if: needs.select.outputs.components != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.select.outputs.components) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify generated contracts
+        run: go run ./ci/contracts/generate --check
+      - name: Build the selected application without publishing
+        env:
+          QUOIN_IMAGE_COMPONENTS: ${{ matrix.component }}
+          QUOIN_IMAGE_TAG: ci-${{ github.sha }}
+        run: bash build/package/images.sh

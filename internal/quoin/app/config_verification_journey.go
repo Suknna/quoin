@@ -52,7 +52,7 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 		return err
 	}
 	if attemptView.State == "Queued" {
-		if err := attempts.BindToSlot(ctx, attemptID, "lintel", view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+		if err := attempts.BindToSlot(ctx, attemptID, "lintel", view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 			return err
 		}
 	} else if attemptView.State != "Assigned" || attemptView.BootID == nil || *attemptView.BootID != view.BootID {

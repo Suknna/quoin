@@ -27,7 +27,7 @@ func (service *RuntimeService) dispatchVerificationAttempt(ctx context.Context, 
 		return fmt.Errorf("plinth is not connected")
 	}
 	attempts := service.BusinessSystems.VerificationAttempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)
@@ -97,7 +97,7 @@ func (service *RuntimeService) dispatchResourceRefreshAttempt(ctx context.Contex
 		return fmt.Errorf("plinth is not connected")
 	}
 	attempts := service.BusinessSystems.ResourceRefreshAttempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease); err != nil {
+	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
 	input, err := attempts.DispatchInputFor(ctx, attemptID)

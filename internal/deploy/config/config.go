@@ -19,8 +19,14 @@ import (
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// Components is the closed four-component set of a Quoin release.
+// Components is the closed set of application processes exposing the frozen
+// operational surface.
 var Components = []string{"quoin", "plinth", "lintel", "stele"}
+
+// ImageComponents additionally includes the independently versioned frontend
+// artifact. It has no ops listener, so it is intentionally excluded from
+// Components and its readiness/metrics verification.
+var ImageComponents = []string{"quoin", "plinth", "lintel", "stele", "frontend"}
 
 type ReleaseManifest struct {
 	ManifestVersion int                     `json:"manifest_version"`
@@ -29,7 +35,7 @@ type ReleaseManifest struct {
 	GeneratedAt     string                  `json:"generated_at"`
 	Images          map[string]ReleaseImage `json:"images"`
 	Browser         json.RawMessage         `json:"browser"`
-	Helm            json.RawMessage         `json:"helm"`
+	Kubernetes      json.RawMessage         `json:"kubernetes"`
 	Compose         json.RawMessage         `json:"compose"`
 	Helper          json.RawMessage         `json:"deployment_helper"`
 	Offline         json.RawMessage         `json:"offline"`
@@ -39,6 +45,7 @@ type ReleaseManifest struct {
 }
 
 type ReleaseImage struct {
+	Version     string            `json:"version"`
 	Repository  string            `json:"repository"`
 	IndexDigest string            `json:"index_digest"`
 	Platforms   map[string]string `json:"platforms"`
@@ -156,11 +163,11 @@ func StateDirectory() (string, error) {
 	return StateDirectoryFor("compose")
 }
 
-// StateDirectoryFor returns a backend-private state root. Install retry state
-// carries a backend identity, so sharing its file across backends would make a
-// completed Compose stage appear reusable by Helm (or vice versa).
+// StateDirectoryFor returns the Compose helper state root. Kubernetes uses
+// ordinary manifests directly through kubectl and deliberately has no helper
+// retry state or second deployment DSL.
 func StateDirectoryFor(backend string) (string, error) {
-	if backend != "compose" && backend != "helm" {
+	if backend != "compose" {
 		return "", fmt.Errorf("unsupported deployment backend %q", backend)
 	}
 	base := os.Getenv("XDG_STATE_HOME")
@@ -181,9 +188,9 @@ type InstallStateKey struct {
 	Backend        string `json:"backend"`
 	ConfigDigest   string `json:"config_digest"`
 	Command        string `json:"command"`
-	// TargetIdentity fences retry state to one concrete deployment target.
-	// Backends that do not need an external target leave it empty; Helm records
-	// the current API server, cluster UID, namespace and release.
+	// TargetIdentity is reserved for a concrete deployment target. Compose
+	// leaves it empty because its project identity is part of its config.
+
 	TargetIdentity string `json:"target_identity,omitempty"`
 }
 

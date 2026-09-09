@@ -23,6 +23,10 @@ func RunDeploymentSuite(request DeploymentRequest) int {
 
 func runDeploymentSuite(request DeploymentRequest) error {
 	switch request.Suite {
+	case SuiteRestoreIsolation:
+		return RunRestoreIsolationPhase(request)
+	case SuiteLintelRecovery:
+		return RunLintelRecoveryPhase(request)
 	case SuiteStorageFaults:
 		return RunStorageFaultPhase(request)
 	case SuiteNetworkFaults:

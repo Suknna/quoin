@@ -59,6 +59,7 @@ func fixtureInventory(t *testing.T) (*subjects.Inventory, []byte) {
 	}
 	for _, component := range subjects.Components {
 		inventory.Images[component] = subjects.ImageSubject{
+			Version:     "v0.1.0-dev",
 			Repository:  "127.0.0.1:5142/t42/" + component,
 			IndexDigest: "sha256:" + digest("index-"+component),
 			Platforms: map[string]string{
@@ -69,12 +70,7 @@ func fixtureInventory(t *testing.T) (*subjects.Inventory, []byte) {
 			Attestations:   map[string][]string{},
 		}
 	}
-	inventory.Chart = subjects.ChartSubject{
-		OCIRepository: "127.0.0.1:5142/t42/charts",
-		OCIDigest:     "sha256:" + digest("chart-oci"),
-		TgzAssetName:  names.ChartTgz,
-		TgzSHA256:     digest("chart-tgz"),
-	}
+	inventory.Kubernetes = subjects.BlobSubject{AssetName: names.Kubernetes, SHA256: digest("kubernetes-bundle")}
 	inventory.Compose = subjects.BlobSubject{AssetName: names.Compose, SHA256: digest("compose")}
 	for _, platform := range subjects.Platforms {
 		inventory.Helpers[platform] = subjects.BlobSubject{AssetName: names.Helper[platform], SHA256: digest("helper-" + platform)}
@@ -86,7 +82,7 @@ func fixtureInventory(t *testing.T) (*subjects.Inventory, []byte) {
 		}
 	}
 	for key, value := range map[string]string{
-		"helm_oci": bundles.HelmOCI, "compose": bundles.Compose,
+		"kubernetes": bundles.Kubernetes, "compose": bundles.Compose,
 		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
 		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
 	} {

@@ -10,7 +10,7 @@ func testInventory() *Inventory {
 	names, _ := Names("v0.1.0-dev")
 	bundles := NamesForBundles()
 	bundleMap := map[string]string{
-		"helm_oci":                      bundles.HelmOCI,
+		"kubernetes":                    bundles.Kubernetes,
 		"compose":                       bundles.Compose,
 		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
 		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
@@ -32,6 +32,7 @@ func testInventory() *Inventory {
 			attestations[platform] = []string{digestAt(100 + i*3 + j)}
 		}
 		images[component] = ImageSubject{
+			Version:        "v0.1.0-dev",
 			Repository:     "registry.local/quoin/" + component,
 			IndexDigest:    digestAt(i*3 + 3),
 			Platforms:      platforms,
@@ -45,13 +46,8 @@ func testInventory() *Inventory {
 		SourceCommit:   strings.Repeat("ab", 20),
 		GeneratedAt:    "2026-09-03T00:00:00Z",
 		Images:         images,
-		Chart: ChartSubject{
-			OCIRepository: "registry.local/quoin/charts/quoin",
-			OCIDigest:     digestAt(50),
-			TgzAssetName:  names.ChartTgz,
-			TgzSHA256:     strings.TrimPrefix(digestAt(51), "sha256:"),
-		},
-		Compose: BlobSubject{AssetName: names.Compose, SHA256: strings.TrimPrefix(digestAt(52), "sha256:")},
+		Kubernetes:     BlobSubject{AssetName: names.Kubernetes, SHA256: strings.TrimPrefix(digestAt(51), "sha256:")},
+		Compose:        BlobSubject{AssetName: names.Compose, SHA256: strings.TrimPrefix(digestAt(52), "sha256:")},
 		Helpers: map[string]BlobSubject{
 			"linux/amd64": {AssetName: names.Helper["linux/amd64"], SHA256: strings.TrimPrefix(digestAt(53), "sha256:")},
 			"linux/arm64": {AssetName: names.Helper["linux/arm64"], SHA256: strings.TrimPrefix(digestAt(54), "sha256:")},
@@ -101,8 +97,8 @@ func TestNamesFollowReleaseContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names.ChartTgz != "quoin-1.2.3-rc.1.tgz" {
-		t.Fatalf("chart tgz %q", names.ChartTgz)
+	if names.Kubernetes != "quoin-kubernetes-v1.2.3-rc.1.tar.gz" {
+		t.Fatalf("kubernetes bundle %q", names.Kubernetes)
 	}
 	if names.Compose != "quoin-compose-v1.2.3-rc.1.tar.gz" {
 		t.Fatalf("compose %q", names.Compose)
@@ -132,7 +128,7 @@ func TestValidateRejectsLatestAndDrift(t *testing.T) {
 	platforms := map[string]string(image.Platforms)
 	platforms["linux/arm64"] = platforms["linux/amd64"]
 	inventory.Images["stele"] = ImageSubject{
-		Repository: image.Repository, IndexDigest: image.IndexDigest,
+		Version: image.Version, Repository: image.Repository, IndexDigest: image.IndexDigest,
 		Platforms: platforms, BuildExecution: image.BuildExecution, Attestations: image.Attestations,
 	}
 	if err := inventory.Validate(); err == nil {
@@ -148,15 +144,15 @@ func TestValidateRejectsLatestAndDrift(t *testing.T) {
 	}
 
 	inventory = testInventory()
-	delete(inventory.Bundles, "helm_oci")
+	delete(inventory.Bundles, "kubernetes")
 	if err := inventory.Validate(); err == nil {
 		t.Fatal("missing bundle entry must fail")
 	}
 
 	inventory = testInventory()
-	inventory.Chart.TgzAssetName = "quoin-9.9.9.tgz"
+	inventory.Kubernetes.AssetName = "quoin-kubernetes-v9.9.9.tar.gz"
 	if err := inventory.Validate(); err == nil {
-		t.Fatal("chart asset name drift must fail")
+		t.Fatal("kubernetes asset name drift must fail")
 	}
 }
 

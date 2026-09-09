@@ -1,6 +1,6 @@
 // Package offline owns the release offline archive (OPS-OFFLINE-001/002):
-// one deterministic .tar.zst per release carrying the four component OCI
-// image layouts, the Chart, the Compose bundle, the final Release manifest
+// one deterministic .tar.zst per release carrying the five application OCI
+// image layouts, the Kubernetes and Compose bundles, the final Release manifest
 // and the internal verification materials. The archive's own signature and
 // Sigstore bundle are external sidecars and never enter the archive, so
 // the archive never contains the signature of itself.
@@ -40,14 +40,14 @@ func (ExecRunner) Run(name string, argv ...string) (string, error) {
 // multi-platform index; Verification maps file names to the signed
 // evidence materials (subject inventory and categorized bundles).
 type Contents struct {
-	Manifest     []byte
-	ChartName    string
-	Chart        []byte
-	ComposeName  string
-	Compose      []byte
-	Helpers      map[string][]byte // asset name -> bytes (both architectures)
-	Verification map[string][]byte
-	ImageLayouts map[string]string // component -> OCI layout directory
+	Manifest       []byte
+	KubernetesName string
+	Kubernetes     []byte
+	ComposeName    string
+	Compose        []byte
+	Helpers        map[string][]byte // asset name -> bytes (both architectures)
+	Verification   map[string][]byte
+	ImageLayouts   map[string]string // component -> OCI layout directory
 }
 
 // Archive is the built offline archive and its measured digest.
@@ -101,7 +101,7 @@ func writeTar(path string, contents Contents) error {
 	}
 	entries := []entry{
 		{name: "release-manifest.json", mode: 0o644, body: contents.Manifest},
-		{name: "assets/chart/" + contents.ChartName, mode: 0o644, body: contents.Chart},
+		{name: "assets/kubernetes/" + contents.KubernetesName, mode: 0o644, body: contents.Kubernetes},
 		{name: "assets/compose/" + contents.ComposeName, mode: 0o644, body: contents.Compose},
 	}
 	helperNames := make([]string, 0, len(contents.Helpers))
@@ -179,14 +179,14 @@ func writeTar(path string, contents Contents) error {
 // the manifest pins, the verification materials and the component index
 // digests.
 type Expected struct {
-	Manifest      []byte
-	ChartName     string
-	ChartSHA256   string
-	ComposeName   string
-	ComposeSHA256 string
-	HelperNames   map[string]string // asset name -> sha256
-	Verification  map[string][]byte // name -> exact bytes
-	IndexDigests  map[string]string // component -> expected OCI index digest
+	Manifest         []byte
+	KubernetesName   string
+	KubernetesSHA256 string
+	ComposeName      string
+	ComposeSHA256    string
+	HelperNames      map[string]string // asset name -> sha256
+	Verification     map[string][]byte // name -> exact bytes
+	IndexDigests     map[string]string // component -> expected OCI index digest
 }
 
 // Check is one archive verification result with a stable code.
@@ -262,8 +262,8 @@ func Verify(archivePath string, expected Expected, runner Runner) (*Report, erro
 	pass("archive.manifest-bytes", "release-manifest.json")
 
 	for asset, digest := range map[string]string{
-		"assets/chart/" + expected.ChartName:     expected.ChartSHA256,
-		"assets/compose/" + expected.ComposeName: expected.ComposeSHA256,
+		"assets/kubernetes/" + expected.KubernetesName: expected.KubernetesSHA256,
+		"assets/compose/" + expected.ComposeName:       expected.ComposeSHA256,
 	} {
 		body, err := os.ReadFile(filepath.Join(report.Extracted, filepath.FromSlash(asset)))
 		if err != nil {
