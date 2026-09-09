@@ -22,15 +22,17 @@ function NotFoundRoute({ props, onLogout }: RouteHostProps) {
 
 /** Selects an independently lazy-loaded host without statically importing any feature module. */
 export function RouteHosts({ components, props, onLogout }: { components: RouteHostComponents; props: WorkspaceModuleProps; onLogout: () => Promise<void> }) {
-	const routeIsConnections = props.route === "/admin/connections" || props.route.startsWith("/admin/connections/");
+	// Module selection is pathname-only; the query belongs to the selected module's view state.
+	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
+	const routeIsConnections = pathname === "/admin/connections" || pathname.startsWith("/admin/connections/");
 	const Host = routeIsConnections ? components.connections
-		: props.route === "/alerts" || props.route.startsWith("/alerts/") ? components.alerts
-		: props.route.startsWith("/investigations") ? components.investigations
-		: props.route.startsWith("/inspections") ? components.inspections
-		: props.route.startsWith("/business-systems") ? components.systems
-		: props.route.startsWith("/knowledge") ? components.knowledge
-		: props.route.startsWith("/account") ? components.account
-		: props.route === "/admin" || props.route.startsWith("/admin/") ? components.administration
+		: pathname === "/alerts" || pathname.startsWith("/alerts/") ? components.alerts
+		: pathname.startsWith("/investigations") ? components.investigations
+		: pathname.startsWith("/inspections") ? components.inspections
+		: pathname.startsWith("/business-systems") ? components.systems
+		: pathname.startsWith("/knowledge") ? components.knowledge
+		: pathname.startsWith("/account") ? components.account
+		: pathname === "/admin" || pathname.startsWith("/admin/") ? components.administration
 		: undefined;
 	return Host ? <Host props={props} onLogout={onLogout} /> : <NotFoundRoute props={props} onLogout={onLogout} />;
 }

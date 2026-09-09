@@ -29,7 +29,7 @@ export function useAdministrationModule(props: WorkspaceModuleProps): WorkspaceM
  // Routes are absolute (`/administration/users`); module selection starts after its prefix.
  const routeParts = props.route.split("/").filter(Boolean);
  const path = routeParts[0] === "administration" || routeParts[0] === "admin" ? routeParts[1] ?? "users" : routeParts[0] ?? "users";
- const labels: Record<string, string> = { users: "用户", "alerts": "告警源", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", verification: "部署验证", labels: "标签契约", journeys: "Journey" };
+ const labels: Record<string, string> = { users: "用户", connections: "连接", alerts: "告警源", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", verification: "部署验证", labels: "标签契约", journeys: "Journey" };
  const list = <div className="space-y-1 p-3">{Object.entries(labels).map(([key, label]) => <Button key={key} variant={path === key ? "secondary" : "ghost"} className="w-full justify-start" onClick={() => props.navigate(`/admin/${key}`)}>{label}</Button>)}</div>;
  if (props.user.role !== "admin") return { title: "管理", list, content: <Alert variant="destructive"><AlertDescription>管理功能仅向管理员开放。</AlertDescription></Alert> };
  const content = path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "runtimes" ? <Runtimes suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "maintenance" ? <Maintenance authenticationSuspended={props.authenticationSuspended} /> : path === "audit" ? <AuditLog /> : path === "verification" ? <Verification suspended={props.suspended} /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : <Journeys />;

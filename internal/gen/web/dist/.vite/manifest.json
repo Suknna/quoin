@@ -132,7 +132,7 @@
     ]
   },
   "index.html": {
-    "file": "assets/index-lbCruE2c.js",
+    "file": "assets/index-CX1PPbqT.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -177,7 +177,7 @@
     ]
   },
   "route-hosts/AdministrationRoute.tsx": {
-    "file": "assets/AdministrationRoute-D74Tj6H7.js",
+    "file": "assets/AdministrationRoute-B4nNhmlX.js",
     "name": "AdministrationRoute",
     "src": "route-hosts/AdministrationRoute.tsx",
     "isDynamicEntry": true,

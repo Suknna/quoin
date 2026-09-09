@@ -8,6 +8,13 @@ import type {
 } from '../../../api/generated/types'
 
 export interface DeploymentVerificationDetail extends DeploymentVerificationSummary {
+  items: VerificationInvocationItem[] | null
+  results: VerificationItemResult[] | null
+  conflicts: VerificationResultConflict[] | null
+  subjectDrifts: VerificationSubjectDrift[] | null
+}
+
+export type NormalizedDeploymentVerificationDetail = Omit<DeploymentVerificationDetail, 'items' | 'results' | 'conflicts' | 'subjectDrifts'> & {
   items: VerificationInvocationItem[]
   results: VerificationItemResult[]
   conflicts: VerificationResultConflict[]
@@ -15,8 +22,24 @@ export interface DeploymentVerificationDetail extends DeploymentVerificationSumm
 }
 
 export interface DeploymentVerificationPage {
-  items: DeploymentVerificationSummary[]
+  items: DeploymentVerificationDetail[]
   nextCursor?: string
+}
+
+/**
+ * Go serializes an uninitialized slice as JSON null, while the verification
+ * OpenAPI contract declares these collections as arrays. Normalize that
+ * transport mismatch at the API boundary so an accepted invocation with no
+ * results yet remains a renderable authoritative projection.
+ */
+function normalizeDeploymentVerification(detail: DeploymentVerificationDetail): NormalizedDeploymentVerificationDetail {
+  return {
+    ...detail,
+    items: detail.items ?? [],
+    results: detail.results ?? [],
+    conflicts: detail.conflicts ?? [],
+    subjectDrifts: detail.subjectDrifts ?? [],
+  }
 }
 
 export interface DeploymentVerificationApiError extends Error {
@@ -54,26 +77,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export function fetchDeploymentVerifications(cursor?: string): Promise<DeploymentVerificationPage> {
+export async function fetchDeploymentVerifications(cursor?: string): Promise<DeploymentVerificationPage & { items: NormalizedDeploymentVerificationDetail[] }> {
   const query = new URLSearchParams({ limit: '30' })
   if (cursor) query.set('cursor', cursor)
-  return request<DeploymentVerificationPage>(`/api/v1/deployment-verifications?${query}`)
+  const page = await request<DeploymentVerificationPage>(`/api/v1/deployment-verifications?${query}`)
+  return { ...page, items: page.items.map(normalizeDeploymentVerification) }
 }
 
-export function fetchDeploymentVerification(invocationId: string): Promise<DeploymentVerificationDetail> {
-  return request<DeploymentVerificationDetail>(`/api/v1/deployment-verifications/${encodeURIComponent(invocationId)}`)
+export async function fetchDeploymentVerification(invocationId: string): Promise<NormalizedDeploymentVerificationDetail> {
+  return normalizeDeploymentVerification(await request<DeploymentVerificationDetail>(`/api/v1/deployment-verifications/${encodeURIComponent(invocationId)}`))
 }
 
-export function startDeploymentVerification(clientCommandId = newClientCommandId()): Promise<DeploymentVerificationDetail> {
-  return request<DeploymentVerificationDetail>('/api/v1/deployment-verifications', {
+export async function startDeploymentVerification(clientCommandId = newClientCommandId()): Promise<NormalizedDeploymentVerificationDetail> {
+  return normalizeDeploymentVerification(await request<DeploymentVerificationDetail>('/api/v1/deployment-verifications', {
     method: 'POST', body: JSON.stringify({ clientCommandId }),
-  })
+  }))
 }
 
-export function cancelDeploymentVerification(invocationId: string, clientCommandId = newClientCommandId()): Promise<DeploymentVerificationDetail> {
-  return request<DeploymentVerificationDetail>(`/api/v1/deployment-verifications/${encodeURIComponent(invocationId)}/cancel`, {
+export async function cancelDeploymentVerification(invocationId: string, clientCommandId = newClientCommandId()): Promise<NormalizedDeploymentVerificationDetail> {
+  return normalizeDeploymentVerification(await request<DeploymentVerificationDetail>(`/api/v1/deployment-verifications/${encodeURIComponent(invocationId)}/cancel`, {
     method: 'POST', body: JSON.stringify({ clientCommandId }),
-  })
+  }))
 }
 
 export async function downloadHelperRequest(invocationId: string): Promise<{ body: Blob; filename: string; requestDigest?: string }> {
@@ -88,13 +112,13 @@ export async function downloadHelperRequest(invocationId: string): Promise<{ bod
   }
 }
 
-export async function importHelperReport(invocationId: string, body: Blob): Promise<{ detail: DeploymentVerificationDetail; created: boolean }> {
+export async function importHelperReport(invocationId: string, body: Blob): Promise<{ detail: NormalizedDeploymentVerificationDetail; created: boolean }> {
   const response = await fetch(`/api/v1/deployment-verifications/${encodeURIComponent(invocationId)}/helper-reports`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/yaml' }, body,
   })
   if (!response.ok) throw await failure(response, '无法导入 helper report。')
-  return { detail: await response.json() as DeploymentVerificationDetail, created: response.status === 201 }
+  return { detail: normalizeDeploymentVerification(await response.json() as DeploymentVerificationDetail), created: response.status === 201 }
 }
 
 export interface ObservationRequest {
