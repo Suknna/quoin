@@ -1,22 +1,28 @@
 # 部署
 
-Issue #93 的交付是六个独立服务：入口 `gateway`（stock Caddy）、`frontend`、`quoin`、`plinth`、`lintel` 和 `stele`。浏览器、API、SSE 与 noVNC WebSocket 共用一个 HTTPS Origin；告警发送方使用同一 Origin 的 `/stele/` 路径。Caddy 优先转发 `/api/*` 到 Quoin、`/stele/*` 到 Stele，其余请求到前端，因此 SPA fallback 不会吞掉 API、SSE 或 WebSocket 请求。
+Quoin 交付六个独立服务：入口 `gateway`（stock Caddy）、`frontend`、`quoin`、`plinth`、`lintel` 与 `stele`。浏览器、API、SSE 与 noVNC WebSocket 共用一个 HTTPS Origin；告警发送方使用同一 Origin 的 `/stele/` 路径。Caddy 优先转发 `/api/*` 到 Quoin、`/stele/*` 到 Stele，其他请求到前端，因此 SPA fallback 不会吞掉 API、SSE 或 WebSocket。
 
-不需要 Helm、Ingress Controller、cert-manager 或 ACME。Caddy 使用固定的 `caddy:2.10.2-alpine` 镜像；它不是本项目构建产物。前端使用独立的 `quoin/frontend:v0.1.0-dev` 镜像，容器内静态 HTTP 监听 `8080`。
+Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Quoin 不包含 `quoin-deploy`，不会创建、更新或删除 Kubernetes 工作负载、PVC、Secret、实例，也不会编排 Compose 安装、升级、备份或恢复。运维人员负责清单应用、镜像替换、扩缩容、数据卷和 Secret 生命周期。
+
+不需要 Helm、Ingress Controller、cert-manager 或 ACME。Caddy 使用固定的 `caddy:2.10.2-alpine` 镜像；它不是本项目构建产物。
+
+## 文件和权限
+
+- [`deploy/kubernetes/quoin.yaml`](../deploy/kubernetes/quoin.yaml)：可直接 `kubectl apply` 的普通多文档 YAML，定义六服务、内部 Service、ConfigMap、PVC 和 Secret 挂载。
+- [`deploy/kubernetes/ops-services.yaml`](../deploy/kubernetes/ops-services.yaml)：内部运维端口 Service；不得公开暴露。
+- [`deploy/compose.yaml`](../deploy/compose.yaml) 与 [`deploy/config`](../deploy/config)：本地/辅助环境的同一六服务示例。
+- `deploy/secrets/`：仅供 Compose 示例的部署者私有目录，必须为 `0700`；不提交。Gateway TLS 文件应仅可被 Caddy UID 读取；Quoin 根密钥、Runtime TLS 身份和 Stele token 仅可被 Quoin UID 读取。
+
+`quoin-data` 保存 SQLite 与 Artifact，`quoin-backups` 保存核心一致性备份，`plinth-state` 与 `lintel-state` 保存各 Runtime 的长期状态。不要删除或替换这些卷而不执行已批准的恢复流程。丢失 `quoin-data` 意味着权威业务数据丢失；丢失根密钥时，必须停机、独占数据库并执行 `quoin maintenance rebind-root-key`，随后重新录入受影响连接。丢失 Runtime 状态卷时，由 Admin 为原 Runtime slot 准备替换注册；不得创建额外 slot。普通 SQLite 备份不包含部署外部的 Stele service token、TLS 私钥或根密钥，Secret 必须由运维独立备份并与数据匹配保管。
 
 ## Kubernetes
 
-[`deploy/kubernetes/quoin.yaml`](../deploy/kubernetes/quoin.yaml) 是普通多文档 YAML，没有固定 `metadata.namespace`。先选择 namespace 并准备入口证书：
+选择 namespace，创建部署者持有的 TLS 和应用 Secret，然后应用普通清单：
 
 ```bash
 kubectl create namespace quoin
 kubectl -n quoin create secret tls gateway-tls \
   --cert=/secure/path/tls.crt --key=/secure/path/tls.key
-```
-
-全新安装请直接继续下方“First Kubernetes installation”，不要重复创建运行时 Secret。只有接入**已有完整运行时秘密与已初始化数据卷**时，才使用下面的导入路径；禁止对已有数据重新生成根密钥：
-
-```bash
 kubectl -n quoin create secret generic quoin-secrets \
   --from-file=root-key=/secure/path/root-key \
   --from-file=runtime-ca.pem=/secure/path/runtime-ca.pem \
@@ -24,79 +30,33 @@ kubectl -n quoin create secret generic quoin-secrets \
   --from-file=runtime-tls.key=/secure/path/runtime-tls.key \
   --from-file=stele-service-token=/secure/path/stele-service-token
 kubectl -n quoin apply -f deploy/kubernetes/quoin.yaml
-```
-
-`quoin-secrets` contains existing runtime identity material, not public certificates. It is generated/rotated through the existing Quoin bootstrap and credential procedures; never commit these files. `gateway-tls` must contain the public certificate as `tls.crt` and private key as `tls.key`; certificate issuance and replacement remain the deployer's responsibility.
-
-Before applying, update `quoin-config`'s `publicOrigin` from `https://quoin.example.com` to the exact public HTTPS Origin. Replace the four application and one frontend image references with release digest references before production use. The Caddy image stays at the fixed stock tag. The manifest keeps the default gateway Service as `ClusterIP`; patch it to `LoadBalancer` or `NodePort` only if the target cluster requires that exposure mode:
-
-```bash
-kubectl -n quoin patch service gateway -p '{"spec":{"type":"LoadBalancer"}}'
-```
-
-The manifest uses fixed names within its namespace: deployments `gateway`, `frontend`, `quoin`, `plinth`, `lintel`, `stele`; services `gateway`, `frontend`, `quoin`, `stele`; ConfigMaps `gateway-config`, `quoin-config`, `plinth-config`, `lintel-config`, `stele-config`; PVCs `quoin-data`, `quoin-backups`, `plinth-state`, `lintel-state`. `quoin:8443` is intentionally retained as the internal Runtime TLS identity alias. Operational `9090` listeners are available only through the internal ClusterIP Services in [`deploy/kubernetes/ops-services.yaml`](../deploy/kubernetes/ops-services.yaml); they are not publicly exposed or routed by Caddy.
-
-### First Kubernetes installation
-
-Quoin must generate the runtime secret set and create the first administrator before the long-running Deployment is useful. Apply the ordinary first-install files in this order. Holding Quoin at zero avoids a database lock while the one-off Job and administrator Pod use the retained PVCs:
-
-```bash
-kubectl -n quoin apply -f deploy/kubernetes/quoin.yaml
 kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
-kubectl -n quoin scale deployment/quoin --replicas=0
-kubectl -n quoin create secret generic quoin-secrets
-kubectl -n quoin apply -f deploy/kubernetes/bootstrap.yaml
-kubectl -n quoin wait --for=condition=complete job/quoin-bootstrap --timeout=5m
-kubectl -n quoin apply -f deploy/kubernetes/admin.yaml
-kubectl -n quoin attach -it quoin-admin
-kubectl -n quoin wait --for=jsonpath='{.status.phase}'=Succeeded pod/quoin-admin --timeout=5m
-kubectl -n quoin delete pod/quoin-admin job/quoin-bootstrap \
-  serviceaccount/quoin-bootstrap role/quoin-bootstrap rolebinding/quoin-bootstrap
-kubectl -n quoin scale deployment/quoin --replicas=1
 ```
 
-`bootstrap.yaml` runs the existing `quoin secrets bootstrap --config /etc/quoin/component.yaml --kubernetes-secret quoin-secrets` command. It mounts the **same** `quoin-data` and `quoin-backups` PVCs and an `emptyDir` at `/run/quoin-secrets`; its root init container performs `chown 65532:65532 /run/quoin-secrets && chmod 0700 /run/quoin-secrets`, then the Quoin container runs as UID 65532 with every capability dropped. Its ServiceAccount can only `get` and `update` the fixed `quoin-secrets` Secret. `admin.yaml` starts `quoin admin create` directly and requires the attached terminal prompts. Do not put credentials on a command line, redirect the TTY, or collect its output in logs.
+先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 digest 替换五个应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
 
-The bootstrap and administrator Pods are intentionally ordinary operational manifests rather than another generated deployment format. They must mount the retained Quoin PVCs: creating an administrator on a disposable filesystem and then starting against a fresh PVC loses the administrator. Back up the generated `quoin-secrets` using the approved secret backup process; it contains the root key and Runtime identity material.
+首次 Admin 初始化是核心应用的离线命令，而不是部署编排：停止长期 Quoin workload，使用与**同一**数据卷和 Secret 挂载的受控一次性容器/Pod，通过 attached TTY 执行 `quoin admin create --config /etc/quoin/component.yaml`，成功后再启动服务。临时密码不得进入命令行、环境变量或日志。`quoin admin reset-password`、`quoin backup --offline`、`quoin restore`、`quoin migrate` 和 `quoin maintenance recover-lintel` 同样要求长期 Quoin 已停止且调用者独占 SQLite；运维负责提供正确的 PVC/目录和只读 Secret 挂载。
 
 ## Compose
 
-[`deploy/compose.yaml`](../deploy/compose.yaml) provides the same six roles for a local or auxiliary environment. It deliberately uses direct files and named volumes, not the retired deployment renderer. It reads paths relative to the Compose file, so run it from the repository root with `docker compose -f deploy/compose.yaml …` or copy the file with its sibling [`deploy/config`](../deploy/config) directory. Set `deploy/config/quoin.yaml`'s `publicOrigin` to the public `https://` address; the runtime endpoint in Plinth, Lintel and Stele remains `https://quoin:8443`.
-
-Create the private input directories and public TLS files before the first start:
+从仓库根目录运行：
 
 ```bash
 mkdir -p deploy/secrets/gateway deploy/secrets/quoin
 chmod 700 deploy/secrets deploy/secrets/gateway deploy/secrets/quoin
-# Quoin's non-root UID must own the mutable bootstrap directory.
-sudo chown 65532:65532 deploy/secrets/quoin
-# Copy the deployer-issued public certificate and private key without changing names.
-install -m 640 /secure/path/tls.crt deploy/secrets/gateway/tls.crt
-install -m 640 /secure/path/tls.key deploy/secrets/gateway/tls.key
-# The stock gateway runs as UID 1000; grant it read access without widening to world.
-sudo chown -R 1000:1000 deploy/secrets/gateway
-```
-
-Bootstrap secrets against the persistent Compose volumes, then interactively create the first administrator. Only the one-off bootstrap command overrides the secret mount as writable; normal services keep it read-only. Run these commands from the repository root (or adjust the absolute bootstrap mount to your copied directory). They do not print secret contents, and `admin create` requires an attached TTY:
-
-```bash
-docker compose -f deploy/compose.yaml run --rm --no-deps \
-  -v "$PWD/deploy/secrets/quoin:/run/quoin-secrets:rw" quoin \
-  secrets bootstrap --config /etc/quoin/component.yaml
-docker compose -f deploy/compose.yaml run --rm --no-deps quoin \
-  admin create --config /etc/quoin/component.yaml
+# 复制部署者保管的 TLS、根密钥、Runtime 身份和 Stele token。
 docker compose -f deploy/compose.yaml up -d
 ```
 
-The only host-published port is gateway `443`; application, runtime, webhook, and operational ports remain internal. Send Alertmanager-compatible requests to `https://<origin>/stele/` with the configured bearer. Persistent named volumes preserve Quoin data/backups and Plinth/Lintel state across container replacement. Caddy state volumes contain only gateway runtime state and do not contain frontend assets or application credentials.
+`deploy/config/quoin.yaml` 的 `publicOrigin` 必须是公开 `https://` 地址；Plinth、Lintel 和 Stele 的 Runtime endpoint 保持 `https://quoin:8443`。仅 gateway 发布主机端口 `443`；应用、Runtime、webhook 和运维端口保持在 Compose 内部网络。命名卷保留 Quoin 数据/备份和 Plinth/Lintel 状态；`docker compose down -v` 会删除它们，除非运维已按恢复策略导出并验证数据和匹配 Secret。
 
-## Validation
+## 核心备份、离线恢复和校验
 
-Validate syntax without changing a cluster:
+已登录 Admin 可继续使用 Web 备份管理与定时策略创建核心一致性备份。在线管理不是在线覆盖恢复：恢复前必须停机并独占 SQLite。运维执行 `quoin backup --offline`、`quoin restore` 或 `quoin migrate` 前，应确认：目标数据目录/PVC、备份文件及其 checksum、版本兼容性、根密钥/Secret 匹配，以及没有其他 Quoin 进程持有数据库锁。恢复后先执行应用提供的校验，再启动长期服务并检查 Runtime 注册与健康状态。
+
+## 静态检查
 
 ```bash
 docker compose -f deploy/compose.yaml config >/dev/null
 kubectl apply --dry-run=client -f deploy/kubernetes/quoin.yaml
 ```
-
-For a live qualification, always create a disposable namespace and explicitly inspect the current Kubernetes context first. Do not apply this manifest to an existing workload namespace as a validation shortcut.

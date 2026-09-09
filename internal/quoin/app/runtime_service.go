@@ -25,7 +25,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
-	"github.com/Suknna/quoin/internal/quoin/verification/deployment"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -61,9 +60,6 @@ type RuntimeService struct {
 	Artifacts *artifact.Store
 	// Browsers owns durable Browser Identity/Operation authority (T20).
 	Browsers *browser.Service
-	// Verifications owns Deployment Acceptance browser results (T38); nil in
-	// the maintenance control service keeps handshake-only behaviour.
-	Verifications *deployment.Service
 	// MaintenanceBlocking gates scheduling admission while any maintenance
 	// revision is active: due boundaries then record their durable
 	// runtime_unavailable outcome instead of creating dispatchable work

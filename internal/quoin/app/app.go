@@ -43,7 +43,6 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
-	"github.com/Suknna/quoin/internal/quoin/verification/deployment"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"google.golang.org/grpc"
@@ -73,8 +72,6 @@ type apiServer struct {
 	feedbackService               *feedback.Service
 	knowledgeService              *knowledge.Service
 	browsers                      *browser.Service
-	verifications                 *deployment.Service
-	verificationAdapter           verificationArtifacts
 	investigationUpload           *appinvestigation.Handler
 	configHandler                 *appconfig.Handler
 	artifacts                     *artifact.Store
@@ -89,7 +86,6 @@ type apiServer struct {
 	knowledgeDispatchFunc         func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
 	resourceRefreshDispatchFunc   func(ctx context.Context)
-	verificationDispatchFunc      func(ctx context.Context)
 	inspectionDispatchFunc        func(ctx context.Context)
 	browserOperationsDispatchFunc func(ctx context.Context)
 	inspectionCancelDispatchFunc  func(ctx context.Context, attemptID int64) error
@@ -157,7 +153,6 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
-		verifications:    deployment.NewService(db, time.Now, nil, ""),
 		maintenance:      maintenance.NewService(db),
 		upgradeService:   upgrade.NewService(db),
 		browserTunnels:   newBrowserTunnelHub(),
@@ -285,7 +280,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
-	application.verifications = deployment.NewService(database.SQL, time.Now, config.DeploymentBinding, config.PublicOrigin)
 	serverSet, err := application.newServers(config)
 	if err != nil {
 		return err
@@ -302,20 +296,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 	application.artifacts = artifactStore
-	application.WireVerificationArtifacts(artifactStore)
-	application.verifications.SetExecutionHooks(deployment.ExecutionHooks{
-		StartConnectionProbe: func(ctx context.Context, connectionName string) error {
-			if _, err := application.connections.StartProbe(ctx, connectionName, application.runtime, application.dispatchProbe); err != nil {
-				return err
-			}
-			return nil
-		},
-		RunConfigVerification: func(ctx context.Context, principalID, systemID, versionID, contractVersionID, manifestItemID int64) error {
-			_, err := application.systems.RunDeploymentAcceptanceVerification(ctx, principalID, systemID, versionID, contractVersionID, manifestItemID)
-			return err
-		},
-	})
-	go application.runDeploymentDeadlineSweeper(ctx)
 	gcProjector, err := serverSet.ops.ArtifactGCSuccessProjector()
 	if err != nil {
 		return err
@@ -384,7 +364,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
-	controlService.Verifications = application.verifications
 	// Scheduling admission stops inside any maintenance revision: missed
 	// boundaries record their durable runtime_unavailable tombstone instead
 	// of creating dispatchable work (OPS-UPGRADE-003).
@@ -430,13 +409,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
 	application.resourceRefreshDispatchFunc = controlService.dispatchQueuedResourceRefreshAttempts
-	application.verificationDispatchFunc = func(ctx context.Context) {
-		controlService.dispatchQueuedVerificationAttempts(ctx)
-		// Browser-check children flow through their journey Browser Operation's
-		// global FIFO, not the supervisor queue (CFG-VERIFYRUN-002).
-		controlService.dispatchQueuedBrowserOperations(ctx)
-		controlService.dispatchReadyJourneyAttempts(ctx)
-	}
 	application.browserOperationsDispatchFunc = controlService.dispatchQueuedBrowserOperations
 	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
@@ -521,8 +493,6 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	mux.HandleFunc("POST /api/v1/business-systems", configHandler.ServeBusinessSystemUpload)
 	mux.HandleFunc("POST /api/v1/label-contracts", configHandler.ServeLabelContractUpload)
 	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
-	// The helper request is a deterministic YAML download and owns its head.
-	mux.HandleFunc("GET /api/v1/deployment-verifications/{invocationId}/helper-request", application.serveDeploymentVerificationHelperRequest)
 
 	csrf := http.NewCrossOriginProtection()
 	if err := csrf.AddTrustedOrigin(publicOrigin); err != nil {
@@ -582,7 +552,6 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			return application.cancelDispatchFunc(ctx, attemptID)
 		},
 	}
-	application.registerVerificationRoutes(api)
 	investigationHandler.Register(api)
 	configHandler := &appconfig.Handler{
 		Systems:   application.systems,
@@ -613,9 +582,6 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			}
 		},
 		DispatchConfigVerification: func(ctx context.Context) {
-			if application.verificationDispatchFunc != nil {
-				application.verificationDispatchFunc(ctx)
-			}
 			if application.inspectionDispatchFunc != nil {
 				application.inspectionDispatchFunc(ctx)
 			}

@@ -32,9 +32,9 @@ Proto 权威契约是以下权威 protobuf 文件的集合，用户此前称为 
 
 浏览器仍访问单一公共 Origin；入口分流页面请求与后端 API、SSE、WebSocket 请求，开发环境由前端开发服务器代理后端请求。独立发布不意味着启用带凭据的跨域 CORS，现有会话认证与来源校验边界保留。
 
-部署以 Kubernetes 为主，直接提供简单 YAML 清单，移除 Helm，不再把 Chart 作为交付或发布要求。默认由 Kubernetes TLS Secret 提供证书，入口 Caddy 加载证书并终止 TLS，通过标准 Service 对外暴露；不强制依赖 Ingress Controller、cert-manager 或公网 ACME。Service 的具体暴露类型由目标集群网络条件决定，不假定所有集群都有 LoadBalancer 实现。默认方案不承担自动申请证书，证书提供与更新由部署者负责。
+部署以 Kubernetes 为主，直接提供简单 YAML 清单，移除 Helm，不再把 Chart 作为交付或发布要求。部署者负责 `kubectl apply`、升级、缩放、PVC 和 Secret 生命周期；应用只消费被挂载的配置、存储和凭据，不调用 Kubernetes 或 Compose 编排自己的安装、升级、备份恢复或实例操作。默认由 Kubernetes TLS Secret 提供证书，入口 Caddy 加载证书并终止 TLS，通过标准 Service 对外暴露；不强制依赖 Ingress Controller、cert-manager 或公网 ACME。Service 的具体暴露类型由目标集群网络条件决定，不假定所有集群都有 LoadBalancer 实现。默认方案不承担自动申请证书，证书提供与更新由部署者负责。
 
-Compose 作为辅助部署方式保留，直接提供简单 Compose 配置文件，不要求用户经过复杂部署配置生成流程。六服务指服务角色划分，不要求在 Kubernetes 中放入同一个 Pod。
+Compose 作为辅助部署方式保留，直接提供简单 Compose 配置文件，不要求用户经过复杂部署配置生成流程。部署者通过标准 `docker compose` 命令管理容器生命周期。六服务指服务角色划分，不要求在 Kubernetes 中放入同一个 Pod。
 
 ## 被替换的旧约束
 

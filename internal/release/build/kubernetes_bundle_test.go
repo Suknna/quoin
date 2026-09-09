@@ -25,14 +25,12 @@ func TestBuildKubernetesBundlePinsEveryApplicationImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundlePath := filepath.Join(options.work, inventory.Kubernetes.AssetName)
-	for _, required := range []string{"bootstrap.yaml", "ops-services.yaml", "quoin.yaml"} {
+	for _, required := range []string{"ops-services.yaml", "quoin.yaml"} {
 		if readBundleEntry(t, bundlePath, required) == nil {
 			t.Fatalf("bundle misses required manifest %s", required)
 		}
 	}
 	body := readBundleEntry(t, bundlePath, "quoin.yaml")
-	bootstrap := readBundleEntry(t, bundlePath, "bootstrap.yaml")
-	body = append(body, bootstrap...)
 	for _, component := range subjects.Components {
 		image := inventory.Images[component]
 		want := image.Repository + "@" + image.IndexDigest
