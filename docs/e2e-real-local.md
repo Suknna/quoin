@@ -70,9 +70,35 @@ make e2e-real QUOIN_E2E_RUNTIME="$PWD/.artifacts/my-e2e" QUOIN_E2E_PORT=9444 QUO
 
 ## #96 intake path
 
-1. Open **接入管理** → **Alertmanager**, create a unique source key, and copy the receiver URL and Bearer credential before dismissing the one-time dialog.
-2. Deliver Alertmanager-compatible JSON to the shown public `https://localhost:8444/stele/alerts` URL. A successful `204` means gateway → Stele → Quoin committed the event.
-3. The alert list should show the persisted external alert. A source awaiting its first valid event is not a platform fault.
+1. Sign in with the generated Admin identity and complete the forced password change. When using the automated acceptance command afterwards, use the generated `admin.password` as the final password; the runner reads that value from the private credential file.
+2. Open **运维中心** → **接入管理** (`/integrations`) → **Alertmanager**. Create a unique source key, and copy the receiver YAML and Bearer credential before dismissing the one-time dialog. The public receiver URL must match this deployment (by default `https://localhost:8444/stele/alerts`), not a container address. Other catalog platforms are unavailable in this slice; model providers remain in administrator settings.
+3. Send the following controlled fixture through the public receiver. Run it from the repository root in Bash; the hidden prompt keeps the source credential out of command history and process arguments. For a custom runtime, change `runtime` and `receiver` to match the chosen deployment. Do not use the Admin password as the Bearer credential.
+
+   ```bash
+   runtime="$PWD/.artifacts/e2e-102"
+   receiver='https://localhost:8444/stele/alerts'
+   read -rsp 'One-time source Bearer credential: ' source_token; printf '\n'
+   printf 'header = "Authorization: Bearer %s"\n' "$source_token" |
+     curl --config - --cacert "$runtime/gateway/tls/tls.crt" \
+       --silent --show-error --output /dev/null --write-out 'HTTP %{http_code}\n' \
+       --header 'Content-Type: application/json' \
+       --data-binary '{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"ManualAlertmanagerIntake","service":"checkout","severity":"critical"},"annotations":{"summary":"Manual public Stele acceptance"},"startsAt":"2026-09-10T00:00:00Z"}]}' \
+       "$receiver"
+   unset source_token
+   ```
+
+4. Expect `204` only after gateway → Stele → Quoin commits the Delivery. Open the current alert list and find `ManualAlertmanagerIntake`; the source detail should show its latest valid event. With no matching Label Contract, retain the existing unassigned/intake result rather than inventing business ownership. Before the first valid event, the source is waiting, not faulty.
+5. Repeat the same event with the same labels and `startsAt`. This is another upstream delivery, not another active Occurrence. Send a resolved event with the same labels and `startsAt`, `status: "resolved"` at both levels, and an `endsAt` after `startsAt` to end that lifecycle.
+6. Create an **Operator** through the Admin users page (not SQL), then sign in in a separate browser profile and finish its forced password change. Confirm the alert remains readable, management navigation is absent, and direct `/integrations`, business-management, inspection-management, and administrator URLs show access denied. In that authenticated session, `/api/v1/alert-sources`, `/api/v1/business-systems`, `/api/v1/label-contracts`, and `/api/v1/runtime` must return `403`; `/api/v1/business-context` remains readable without management secrets.
+
+### Receiver setup and failure recovery
+
+- For an actual Alertmanager, merge the copied receiver into its existing `receivers` and reference its name from the desired `route`. The fixture above tests the production ingress without requiring Alertmanager itself. To use this local self-signed gateway, mount `gateway/tls/tls.crt` into Alertmanager and configure `http_config.tls_config.ca_file`; keep TLS verification enabled. `localhost` must resolve to the gateway from the Alertmanager process, so a separately containerized Alertmanager needs an intentionally reachable deployment URL and matching certificate. See the [official Alertmanager configuration reference](https://prometheus.io/docs/alerting/latest/configuration/).
+- Newly created or rotated credentials can briefly return `401` while Stele refreshes its credential snapshot. Wait up to 15 seconds and retry. A deliberately invalid credential must continue to return `401`; verify the receiver URL and exact Bearer value rather than recreating the source repeatedly.
+- `503` means the relay did not confirm a committed result. Restore Quoin/relay availability and retry the same payload. Do not treat a timeout as proof that nothing committed; existing Delivery/Occurrence semantics handle relay retries and repeated upstream notifications.
+- A `204` acknowledges durable processing, not that every item was valid. Malformed or rejected input may be recorded as an intake issue without advancing the latest-valid-event timestamp. Check the alert/intake outcome, not just the HTTP status.
+- If the one-time reveal was dismissed or lost, it cannot be read again. Rotate through the source detail and save the new credential securely. After the new credential has received a valid event, retire the old generation through the existing lifecycle. Disable only a disposable test source when checking revocation; subsequent deliveries must fail and historical alerts remain historical facts.
+- The source credential and copied YAML are secrets. Do not put them in tickets, screenshots, browser persistent storage, or committed configuration. The harness's Admin credentials and the source Bearer are separate credentials.
 
 For the 0/1/50/long-source-key visual boundary data, after completing Admin password change:
 
