@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- Alert views colocate their route lifecycle. */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "cn";
-import { Activity, AlertTriangle, Bell, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Clock3, FileText, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Clock3, FileText, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { FeatureUnderConstruction } from "@/components/FeatureUnderConstruction";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EntityList, type EntityListItem } from "@/components/EntityList";
@@ -36,9 +35,8 @@ export function useAlertsModule(props: WorkspaceModuleProps): WorkspaceModuleVie
   const system = query.get("system") ?? "";
   const selectedId = query.get("id");
   useEffect(() => { if (path === "/alerts") props.navigate(listRoute(view, system, selectedId ?? undefined)); }, [path, props, selectedId, system, view]);
-  const navigation = <nav className="space-y-1 p-3" aria-label="告警中心模块"><Button className="w-full justify-start" aria-current={!postmortems ? "page" : undefined} variant={!postmortems ? "secondary" : "ghost"} onClick={() => props.navigate(listRoute(view, system, selectedId ?? undefined))}><Bell />告警列表</Button><Button className="w-full justify-start" aria-current={postmortems ? "page" : undefined} variant={postmortems ? "secondary" : "ghost"} onClick={() => props.navigate("/postmortems")}> <FileText />故障复盘</Button></nav>;
-  if (postmortems) return { title: "告警中心", list: navigation, content: <section className="p-6"><FeatureUnderConstruction description="故障复盘能力尚未开放。" /></section> };
-  return { title: "告警中心", list: navigation, content: <AlertList {...props} view={view} system={system} selectedId={selectedId} /> };
+  if (postmortems) return { title: "运维中心", list: null, content: <section className="p-6"><FeatureUnderConstruction description="故障复盘能力尚未开放。" /></section> };
+  return { title: "运维中心", list: null, content: <AlertList {...props} view={view} system={system} selectedId={selectedId} /> };
 }
 
 function severityTone(value?: string) {
@@ -61,10 +59,10 @@ function relativeTime(value: string) {
 function AlertList({ view, system, selectedId, navigate, suspended, openEvidence }: WorkspaceModuleProps & { view: "current" | "history"; system: string; selectedId: string | null }) {
   const [systems, setSystems] = useState<BusinessSystemOption[]>([]);
   const [query, setQuery] = useState("");
-  const [liveEnabled, setLiveEnabled] = useState(true);
   // Counts are independently snapshotted so neither tab presents a misleading zero before load.
   const [counts, setCounts] = useState<{ key: string; firing?: number; resolved?: number }>({ key: "" });
-  const live = useLiveAlerts(view === "history" ? "Resolved" : "Firing", system, !suspended && liveEnabled);
+  // The list is live by default; workbench suspension is the only local pause boundary.
+  const live = useLiveAlerts(view === "history" ? "Resolved" : "Firing", system, !suspended);
   const { setAtTop } = live;
   useEffect(() => { if (!suspended) fetchBusinessSystems().then(setSystems).catch(() => undefined); }, [suspended]);
   useEffect(() => {
@@ -93,7 +91,7 @@ function AlertList({ view, system, selectedId, navigate, suspended, openEvidence
   const emptyDescription = query ? "已加载的告警中没有匹配此搜索条件的记录。" : view === "current" ? "当前没有正在触发的告警。" : "尚未加载到已恢复的告警记录。";
   const listItems: EntityListItem[] = filteredItems.map((item) => ({ id: item.id, title: item.labels.alertname ?? item.id, subtitle: item.annotations?.summary ?? item.annotations?.description ?? item.businessSystemKey ?? "未提供摘要", badge: { text: item.state, variant: item.state === "Firing" ? "destructive" : "secondary" }, media: <span className={`size-2 rounded-full ${severityTone(item.labels.severity)}`} title={item.labels.severity ? `严重性：${item.labels.severity}` : "严重性：未知"} />, time: <time dateTime={item.lastStateChangeAt} title={time(item.lastStateChangeAt)}>{relativeTime(item.lastStateChangeAt)}</time> }));
   const controls = <div className="flex flex-wrap items-center justify-between gap-3"><Tabs value={view} onValueChange={(next) => navigate(listRoute(next as "current" | "history", system, selectedId ?? undefined))}><TabsList><TabsTrigger value="current">当前告警{counts.key === countKey && counts.firing !== undefined && <Badge variant="secondary" className="ml-1 tabular-nums">{counts.firing}</Badge>}</TabsTrigger><TabsTrigger value="history">历史告警{counts.key === countKey && counts.resolved !== undefined && <Badge variant="secondary" className="ml-1 tabular-nums">{counts.resolved}</Badge>}</TabsTrigger></TabsList></Tabs><div className="flex flex-1 flex-wrap justify-end gap-3"><Select value={system || "__all__"} onValueChange={(next) => navigate(listRoute(view, next === "__all__" ? "" : next, selectedId ?? undefined))}><SelectTrigger className="w-full sm:w-52"><SelectValue placeholder="全部业务系统" /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="__all__">全部业务系统</SelectItem>{systems.map((item) => <SelectItem key={item.key} value={item.key}>{item.displayName}</SelectItem>)}</SelectGroup></SelectContent></Select><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索已加载告警" className="w-full sm:max-w-xs" aria-label="搜索已加载告警" /></div></div>;
-  return <section className="flex flex-col gap-6"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start"><div><h1 className="text-2xl font-semibold tracking-tight">{view === "current" ? "当前告警" : "告警历史"}</h1><p className="mt-1 text-sm text-muted-foreground">查看来自上游 Alertmanager 的真实告警记录。</p></div><div className="flex items-center gap-3"><Button variant="outline" onClick={live.refresh} disabled={suspended || live.loading}><RefreshCw data-icon="inline-start" />刷新</Button><label className="flex items-center gap-2 text-sm text-muted-foreground"><Switch checked={liveEnabled} onCheckedChange={setLiveEnabled} disabled={suspended} aria-label="自动刷新" />自动刷新</label></div></div>{live.pendingNew > 0 && <Button variant="secondary" size="sm" onClick={live.mergePending}>显示 {live.pendingNew} 条新告警</Button>}<EntityList items={listItems} columns={["media", "title", "subtitle", "status", "time"]} selectedId={selectedId} onSelect={(item) => navigate(listRoute(view, system, item.id))} loading={live.loading} error={live.error} onRetry={live.refresh} controls={controls} emptyTitle={emptyTitle} emptyDescription={emptyDescription} /><AlertDetailSheet id={selectedId} onClose={() => navigate(listRoute(view, system))} suspended={suspended} openEvidence={openEvidence} /></section>;
+  return <section className="flex flex-col gap-6"><div><h1 className="text-2xl font-semibold tracking-tight">{view === "current" ? "当前告警" : "告警历史"}</h1><p className="mt-1 text-sm text-muted-foreground">查看来自上游 Alertmanager 的真实告警记录。</p></div>{live.pendingNew > 0 && <Button variant="secondary" size="sm" onClick={live.mergePending}>显示 {live.pendingNew} 条新告警</Button>}<EntityList items={listItems} columns={["media", "title", "subtitle", "status", "time"]} selectedId={selectedId} onSelect={(item) => navigate(listRoute(view, system, item.id))} loading={live.loading} error={live.error} onRetry={live.refresh} controls={controls} emptyTitle={emptyTitle} emptyDescription={emptyDescription} /><AlertDetailSheet id={selectedId} onClose={() => navigate(listRoute(view, system))} suspended={suspended} openEvidence={openEvidence} /></section>;
 }
 
 function DetailEmpty({ icon: Icon, title, description }: { icon: typeof FileText; title: string; description: string }) {

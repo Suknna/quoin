@@ -23,6 +23,43 @@ describe("alerts module", () => {
     expect(await screen.findByRole("heading", { name: "告警历史" })).toBeInTheDocument();
   });
 
+  it("keeps live updates on by default without normal refresh controls", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ snapshotSeq: 1, items: [] }) }));
+    render(<View route="/alerts/list" />);
+
+    await screen.findByRole("heading", { name: "当前告警" });
+    expect(screen.queryByRole("button", { name: "刷新" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "自动刷新" })).not.toBeInTheDocument();
+  });
+
+  it("retries a failed initial list fetch through EntityList while keeping SSE enabled", async () => {
+    const eventSources: unknown[] = [];
+    vi.stubGlobal("EventSource", class {
+      static readonly CONNECTING = 0;
+      static readonly CLOSED = 2;
+      readyState = 0;
+      onerror: ((event: Event) => void) | null = null;
+      constructor(url: string) { void url; eventSources.push(this); }
+      addEventListener(type: string, listener: (event: Event) => void) { void type; void listener; /* Test double only needs a live source boundary. */ }
+      close() { this.readyState = 2; }
+    });
+    let firingListReads = 0;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: string) => {
+      if (input.includes("/api/v1/alerts?state=Firing")) {
+        firingListReads += 1;
+        return Promise.resolve({ ok: firingListReads > 1, json: async () => ({ snapshotSeq: 2, items: [] }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ snapshotSeq: 2, items: [] }) });
+    }));
+    render(<View route="/alerts/list" />);
+
+    const readsBeforeRetry = firingListReads;
+    fireEvent.click(await screen.findByRole("button", { name: "重试" }));
+    await waitFor(() => expect(firingListReads).toBeGreaterThan(readsBeforeRetry));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByText("当前没有告警")).toBeInTheDocument();
+    expect(eventSources).toHaveLength(1);
+  });
 
 	it("starts analysis only after its tab opens and does not create when reading fails", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => {
