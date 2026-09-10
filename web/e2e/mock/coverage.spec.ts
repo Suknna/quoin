@@ -41,7 +41,7 @@ test("route matrix renders actual data without unhandled APIs or external transp
 		["/inspections", "巡检", "选择已发布系统的历史 Run"],
 		["/business-systems", "结算系统", "结算健康检查"],
 		["/knowledge", "知识库", "结算延迟排查"],
-		["/admin", "管理", "运行时"],
+		["/admin", "管理", "关于"],
 	] as const;
 	for (const [route, , data] of routes) {
 		await page.goto(route);

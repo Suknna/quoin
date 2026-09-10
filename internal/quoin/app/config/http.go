@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
@@ -156,6 +157,24 @@ func (handler *Handler) reader(ctx context.Context, cookie string) (int64, error
 		return 0, errors.New("config handler not wired")
 	}
 	return handler.Authenticate(ctx, cookie)
+}
+
+// managementReader keeps the public HTTP distinction between an expired
+// session (401) and an authenticated Operator denied a management API (403).
+// The raw multipart routes cannot rely on Huma to preserve this mapping.
+func (handler *Handler) managementReader(ctx context.Context, cookie string) (int64, int) {
+	principalID, err := handler.admin(ctx, cookie)
+	if err == nil {
+		return principalID, 0
+	}
+	var authorization interface{ GetStatus() int }
+	if errors.As(err, &authorization) && authorization.GetStatus() == http.StatusForbidden {
+		return 0, http.StatusForbidden
+	}
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return 0, http.StatusUnauthorized
+	}
+	return 0, http.StatusInternalServerError
 }
 
 func (handler *Handler) admin(ctx context.Context, cookie string) (int64, error) {

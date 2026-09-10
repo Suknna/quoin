@@ -15,6 +15,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
@@ -35,6 +36,13 @@ import (
 type RuntimeService struct {
 	runtimev1.UnimplementedRuntimeControlServer
 	Slots *qruntime.Service
+	// PlatformFaults projects runtime connection transitions into the independent
+	// unified-alert source; it never creates upstream Delivery or Occurrence data.
+	PlatformFaults *alerts.PlatformFaultReporter
+	// platformFaultProjectionMu serializes connection-view reads with durable
+	// fault projection. Each caller still reads SlotService's fenced authority,
+	// but serialization guarantees projectors commit in that observation order.
+	platformFaultProjectionMu sync.Mutex
 	// ReleaseVersion records Quoin's own build provenance when it creates
 	// browser-exploration attempts; peer releases come from the live Hello.
 	// It never participates in RPC admission.
@@ -204,6 +212,26 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		return stream.Send(proto)
 	}
 	closing := service.Slots.AttachStreamWithSenderVersion(slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion(), sender)
+	// Every return after attachment must release the stream's transient slot
+	// ownership. In particular, a projection/capacity/ack setup failure must
+	// not strand a phantom connected Runtime.
+	defer func() {
+		service.Slots.DetachStream(slot, hello.GetBootId(), hello.GetConnectionEpoch())
+		if faultErr := service.projectRuntimeConnection(context.Background(), slot); faultErr != nil {
+			sharedops.LogEvent("quoin", "error", "platform_fault.project_disconnect_failed", faultErr.Error())
+		}
+		if slot == qruntime.SlotPlinth {
+			// The stream ended: Cancelling attempts of this binding converge
+			// (RUNTIME-CANCEL-003); Running attempts keep their lease window
+			// for a same-boot reconnect (RUNTIME-TASK-005).
+			service.onPlinthStreamEnded(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
+		}
+	}()
+	// A successful Hello is the existing authoritative connection fact. The
+	// independent projector resolves only its matching platform lifecycle.
+	if faultErr := service.projectRuntimeConnection(ctx, slot); faultErr != nil {
+		return status.Error(codes.Internal, "project runtime connection")
+	}
 	if slot == qruntime.SlotLintel {
 		if err := service.Slots.SetBrowserCapacity(slot, hello.GetBootId(), hello.GetConnectionEpoch(), uint64(hello.GetBrowserCapacitySlots())); err != nil {
 			return status.Error(codes.Internal, "bind lintel browser capacity")
@@ -214,15 +242,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if err != nil {
 		return status.Error(codes.Internal, "allocate hello acknowledgement id")
 	}
-	defer func() {
-		service.Slots.DetachStream(slot, hello.GetBootId(), hello.GetConnectionEpoch())
-		if slot == qruntime.SlotPlinth {
-			// The stream ended: Cancelling attempts of this binding converge
-			// (RUNTIME-CANCEL-003); Running attempts keep their lease window
-			// for a same-boot reconnect (RUNTIME-TASK-005).
-			service.onPlinthStreamEnded(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
-		}
-	}()
 	ack := &runtimev1.ControlEnvelope{
 		MessageId:       helloAckID,
 		ConnectionEpoch: hello.GetConnectionEpoch(),
@@ -515,6 +534,22 @@ func mapRejectReason(reason string) string {
 	default:
 		return "HELLO_REJECT_REASON_UNSPECIFIED"
 	}
+}
+
+// projectRuntimeConnection makes the slot service's fenced connection view the
+// only lifecycle input. Keeping this lookup beside the gRPC boundary prevents
+// handler-local connect/disconnect events from racing a successor stream.
+func (service *RuntimeService) projectRuntimeConnection(ctx context.Context, slot string) error {
+	if service.PlatformFaults == nil {
+		return nil
+	}
+	service.platformFaultProjectionMu.Lock()
+	defer service.platformFaultProjectionMu.Unlock()
+	view, err := service.Slots.View(ctx, slot)
+	if err != nil {
+		return err
+	}
+	return service.PlatformFaults.ObserveRuntimeConnection(ctx, slot, view.Connected)
 }
 
 // NewRuntimeControl builds the control-stream service; keep the value so

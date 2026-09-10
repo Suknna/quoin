@@ -325,6 +325,9 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 	if err := recordAudit(ctx, conn, "system", 0, "initial_analysis.succeeded", "success", "initial_analysis", scopeID, now); err != nil {
 		return err
 	}
+	if err := service.projectTerminalCommit(ctx, conn, result.AttemptID, true, ""); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err
 	}
@@ -334,6 +337,23 @@ func (service *Service) CommitResult(ctx context.Context, result Result) error {
 
 // commitFailure records a failed attempt and fails the analysis when it
 // still owns the active attempt (DATA-ATTEMPT-005).
+// projectTerminalCommit obtains SQLite's monotonically assigned transaction
+// sequence inside the same commit as the attempt transition. That order—not
+// attempt creation order—defines which concurrent outcome may update the
+// execution-fault lifecycle.
+func (service *Service) projectTerminalCommit(ctx context.Context, conn *sql.Conn, attemptID int64, succeeded bool, termination string) error {
+	if service.ProjectTerminalOutcome == nil {
+		return nil
+	}
+	var sequence int64
+	// recordAudit above appended this terminal transition's audit row inside our
+	// BEGIN IMMEDIATE transaction, so its ID is the terminal commit sequence.
+	if err := conn.QueryRowContext(ctx, `SELECT MAX(id) FROM audit_events`).Scan(&sequence); err != nil {
+		return err
+	}
+	return service.ProjectTerminalOutcome(ctx, conn, sequence, succeeded, termination)
+}
+
 func (service *Service) commitFailure(ctx context.Context, result Result) error {
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -398,6 +418,9 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 		return err
 	}
 	if err := recordAudit(ctx, conn, "system", 0, "initial_analysis.failed", "success", "initial_analysis", scopeID, now); err != nil {
+		return err
+	}
+	if err := service.projectTerminalCommit(ctx, conn, result.AttemptID, false, reason); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

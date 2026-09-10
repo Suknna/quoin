@@ -168,7 +168,7 @@ func (application *apiServer) listConnections(ctx context.Context, input *struct
 		NextCursor string                  `json:"nextCursor,omitempty"`
 	}
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取连接列表"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接列表"); err != nil {
 		return nil, err
 	}
 	after := decodeCursor(input.Cursor)
@@ -231,7 +231,7 @@ func (application *apiServer) getConnection(ctx context.Context, input *struct {
 	CacheControl string               `header:"Cache-Control"`
 	Body         connectionDetailJSON `json:"body"`
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取连接详情"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接详情"); err != nil {
 		return nil, err
 	}
 	summary, err := application.connections.Get(ctx, input.ConnectionName)
@@ -529,7 +529,7 @@ func (application *apiServer) listConnectionProbeResults(ctx context.Context, in
 		NextCursor string               `json:"nextCursor,omitempty"`
 	}
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取探测结果"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取探测结果"); err != nil {
 		return nil, err
 	}
 	summary, err := application.connectionByName(ctx, input.ConnectionName)
@@ -588,7 +588,7 @@ func (application *apiServer) listConnectionRevisions(ctx context.Context, input
 		NextCursor string            `json:"nextCursor,omitempty"`
 	}
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取连接 revision 历史"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接 revision 历史"); err != nil {
 		return nil, err
 	}
 	summary, err := application.connectionByName(ctx, input.ConnectionName)
@@ -637,7 +637,7 @@ func (application *apiServer) listCredentialGenerations(ctx context.Context, inp
 		NextCursor string              `json:"nextCursor,omitempty"`
 	}
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取凭据 generation 历史"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取凭据 generation 历史"); err != nil {
 		return nil, err
 	}
 	summary, err := application.connectionByName(ctx, input.ConnectionName)

@@ -36,8 +36,8 @@ function required() {
 	return gate();
 }
 /** Configuration, credentials, and administration mutations require an administrator. */
-function adminRequired() {
-	const denied = gate();
+function adminRequired({ allowMaintenance = false }: { allowMaintenance?: boolean } = {}) {
+	const denied = getMockScenario() === "maintenance" && allowMaintenance ? null : gate();
 	if (denied) return denied;
 	return getMockState().currentUser?.role === "admin"
 		? null
@@ -178,10 +178,14 @@ export const domainHandlers = [
 			return new HttpResponse(null, { status: 204 });
 		},
 	),
-	http.get("*/api/v1/alert-sources", () => {
-		const denied = adminRequired();
-		return denied ?? page(getMockState().alertSources);
-	}),
+		http.get("*/api/v1/alert-sources", () => {
+			const denied = adminRequired();
+			return denied ?? page(getMockState().alertSources);
+		}),
+		http.get("*/api/v1/alert-sources/receiver-config", () => {
+			const denied = adminRequired();
+			return denied ?? json({ publicReceiverUrl: "https://quoin.example.test/api/v1/alert-receiver" });
+		}),
 	http.post("*/api/v1/alert-sources", async ({ request }) => {
 		const denied = adminRequired();
 		if (denied) return denied;
@@ -612,10 +616,14 @@ export const domainHandlers = [
 		return item ? json(item) : problem(404, "未找到连接。");
 	}),
 
-	http.get("*/api/v1/business-systems", () => {
-		const denied = required();
-		return denied ?? page(getMockState().systems);
-	}),
+		http.get("*/api/v1/business-context", () => {
+			const denied = required();
+			return denied ?? page(getMockState().systems.map(({ key, displayName }) => ({ key, displayName })));
+		}),
+		http.get("*/api/v1/business-systems", () => {
+			const denied = required();
+			return denied ?? page(getMockState().systems);
+		}),
 	http.get("*/api/v1/business-systems/:key/resources", ({ params }) => {
 		const denied = required();
 		return (
@@ -1144,6 +1152,19 @@ export const domainHandlers = [
 		const denied = required();
 		return denied ?? page(getMockState().auditEvents);
 	}),
+	http.get("*/api/v1/admin/about", () => {
+		const scenario = getMockScenario();
+		const denied = adminRequired({ allowMaintenance: true });
+		const long = scenario === "platform-boundary" ? "platform-preview-release-with-an-intentionally-long-non-secret-version-string-for-layout-boundary-verification-2026-09-09" : undefined;
+		return denied ?? json({
+			releaseVersion: long ?? "mock-preview",
+			maintenance: { active: scenario === "maintenance", reason: scenario === "maintenance" ? "Upgrade" : undefined, rowVersion: 1 },
+			components: [
+				{ slot: "plinth", state: "registered", currentGeneration: 1, rowVersion: 1, connected: true, lastSeenAt: "2026-09-09T09:30:00.000Z", releaseVersion: long ?? "mock-plinth" },
+				{ slot: "lintel", state: "registered", currentGeneration: 1, rowVersion: 1, connected: true, lastSeenAt: "2026-09-09T09:30:00.000Z", releaseVersion: long ?? "mock-lintel" },
+			],
+		});
+	}),
 	http.get("*/api/v1/runtime", () => {
 		const denied = required();
 		return (
@@ -1173,13 +1194,20 @@ export const domainHandlers = [
 		);
 	}),
 	http.get("*/api/v1/maintenance", () => {
-		const denied = getMockScenario() === "maintenance" ? null : required();
+		const scenario = getMockScenario();
+		const denied = scenario === "maintenance" ? null : required();
 		if (denied) return denied;
+		const count = scenario === "platform-boundary" ? 50 : scenario === "platform-one" ? 1 : 0;
+		const items = Array.from({ length: count }, (_, index) => {
+			const ordinal = index + 1;
+			const boundary = ordinal === 50;
+			return { kind: "preview_check", objectKey: boundary ? "platform-preview-object-key-with-an-intentionally-long-non-secret-identifier-for-50th-row-layout-verification" : `platform-preview-${ordinal}`, safeState: "Safe" as const, detailCode: boundary ? "preview-detail-with-an-intentionally-long-non-secret-maintenance-description-for-wrapping-and-horizontal-width-verification" : "preview_safe" };
+		});
 		return json({
-			active: getMockScenario() === "maintenance",
-			reason: getMockScenario() === "maintenance" ? "Upgrade" : undefined,
+			active: scenario === "maintenance",
+			reason: scenario === "maintenance" ? "Upgrade" : undefined,
 			rowVersion: 1,
-			items: [],
+			items,
 		});
 	}),
 	http.post("*/api/v1/maintenance/upgrade/prepare", () => {

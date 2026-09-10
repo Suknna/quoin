@@ -247,6 +247,9 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 		reject(err.Error())
 		return
 	}
+	// Analyses.CommitResult projected its platform state in the same SQLite
+	// transaction as the accepted terminal transition. Rejected late replays
+	// cannot revive a fault, and no post-commit crash window remains.
 	ack.GetResultAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
 	sharedops.LogEvent("quoin", "info", "analysis.result_committed", fmt.Sprintf("attempt=%d succeeded=%v", proposal.GetAttemptId(), succeeded))

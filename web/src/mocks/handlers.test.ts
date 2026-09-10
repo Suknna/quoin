@@ -55,10 +55,13 @@ describe('offline domain mock handlers', () => {
     expect((await response('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'changed-demo-password' }) })).status).toBe(200)
   })
 
-  test('gates administration writes and persists alert source credentials and mappings', async () => {
+  test('gates administration writes and platform facts while preserving mock-only runtime data', async () => {
     setMockScenario('operator')
     expect((await response('/api/v1/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'blocked', displayName: 'Blocked', role: 'operator' }) })).status).toBe(403)
+    expect((await response('/api/v1/admin/about')).status).toBe(403)
     setMockScenario('administrator')
+    const about = await (await response('/api/v1/admin/about')).json() as { releaseVersion: string; components: Array<{ slot: string; releaseVersion: string }> }
+    expect(about).toEqual(expect.objectContaining({ releaseVersion: 'mock-preview', components: [expect.objectContaining({ slot: 'plinth', releaseVersion: 'mock-plinth' }), expect.objectContaining({ slot: 'lintel', releaseVersion: 'mock-lintel' })] }))
     const source = await response('/api/v1/alert-sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'stateful-source', protocol: 'alertmanager' }) })
     expect(source.status).toBe(201)
     const createdSource = await source.json() as { credentialId: string }
@@ -68,6 +71,19 @@ describe('offline domain mock handlers', () => {
     const mapping = await response('/api/v1/business-systems/checkout/kubernetes-connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: 'connection-kubernetes-prod' }) })
     expect(mapping.status).toBe(201)
     expect((await (await response('/api/v1/business-systems/checkout/kubernetes-connections')).json() as Array<{ connectionId: string }>).some(item => item.connectionId === 'connection-kubernetes-prod')).toBe(true)
+  })
+
+  test('supplies admin-only platform boundary fixtures without changing production API behavior', async () => {
+    setMockScenario('maintenance')
+    expect((await response('/api/v1/admin/about')).status).toBe(200)
+    setMockScenario('platform-one')
+    expect((await (await response('/api/v1/maintenance')).json() as { items: unknown[] }).items).toHaveLength(1)
+    setMockScenario('platform-boundary')
+    const about = await (await response('/api/v1/admin/about')).json() as { releaseVersion: string }
+    const maintenance = await (await response('/api/v1/maintenance')).json() as { items: Array<{ objectKey: string; detailCode: string }> }
+    expect(about.releaseVersion).toContain('intentionally-long')
+    expect(maintenance.items).toHaveLength(50)
+    expect(maintenance.items[49]).toEqual(expect.objectContaining({ objectKey: expect.stringContaining('intentionally-long'), detailCode: expect.stringContaining('intentionally-long') }))
   })
 
   test('persists feedback, inspection analysis, settings, and empty-domain reads', async () => {

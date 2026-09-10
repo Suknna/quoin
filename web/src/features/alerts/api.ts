@@ -1,8 +1,11 @@
 export interface AlertOccurrenceSummary {
   id: string
+  source: 'alertmanager' | 'platform'
   state: 'Firing' | 'Resolved'
   rowVersion: number
   businessSystemKey?: string
+  component?: 'plinth' | 'lintel'
+  reason?: string
   firstSeenAt: string
   lastStateChangeAt: string
   resolvedAt?: string
@@ -72,22 +75,12 @@ export interface BusinessSystemOption {
   displayName: string
 }
 
+/** A restricted projection keeps alert and AI SRE consumers independent of management reads. */
 export async function fetchBusinessSystems(): Promise<BusinessSystemOption[]> {
-  const systems: BusinessSystemOption[] = []
-  let cursor = ''
-  do {
-    const params = new URLSearchParams({ limit: '200' })
-    if (cursor) params.set('cursor', cursor)
-    const response = await fetch(`/api/v1/business-systems?${params.toString()}`, { credentials: 'include' })
-    if (!response.ok) throw new Error('业务系统列表加载失败')
-    const page = (await response.json()) as {
-      items?: BusinessSystemOption[]
-      nextCursor?: string
-    }
-    systems.push(...(page.items ?? []))
-    cursor = page.nextCursor ?? ''
-  } while (cursor)
-  return systems
+  const response = await fetch('/api/v1/business-context', { credentials: 'include' })
+  if (!response.ok) throw new Error('业务上下文列表加载失败')
+  const page = (await response.json()) as { items?: BusinessSystemOption[] }
+  return page.items ?? []
 }
 
 export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', businessSystemKey = ''): Promise<AlertSnapshot> {

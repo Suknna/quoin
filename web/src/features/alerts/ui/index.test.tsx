@@ -17,6 +17,19 @@ function View({ route, navigate = vi.fn(), openEvidence = vi.fn() }: { route: st
 }
 
 describe("alerts module", () => {
+  it("shows platform lifecycle facts without upstream observations or business analysis", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => input === "/api/v1/alerts/platform:1" ? { id: "platform:1", source: "platform", component: "plinth", reason: "runtime_control_stream_disconnected", state: "Resolved", rowVersion: 2, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:02:00Z", resolvedAt: "2026-01-01T00:02:00Z", labels: { alertname: "Plinth disconnected" }, annotations: { summary: "运行通道断开" } } : { snapshotSeq: 2, items: [] } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=platform:1" />);
+    await screen.findByRole("heading", { name: "Plinth disconnected" });
+    expect(screen.getByText("发生时间")).toBeInTheDocument();
+    expect(screen.getByText("恢复时间")).toBeInTheDocument();
+    expect(screen.getByText("此平台故障没有业务采集声明，不支持初步分析。不会启动业务采集。")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "AI 分析" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "时间线" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => /observations|analyses/.test(String(url)))).toBe(false);
+  });
+
   it("renders the history view when the route includes its query string", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) }));
     render(<View route="/alerts/list?view=history" />);
@@ -30,6 +43,73 @@ describe("alerts module", () => {
     await screen.findByRole("heading", { name: "当前告警" });
     expect(screen.queryByRole("button", { name: "刷新" })).not.toBeInTheDocument();
     expect(screen.queryByRole("switch", { name: "自动刷新" })).not.toBeInTheDocument();
+  });
+
+  it("re-reads an open detail when the shared SSE boundary reports a newer version", async () => {
+    const sources: { listeners: Map<string, ((event: Event) => void)[]>; emit: (type: string, data: string) => void }[] = [];
+    vi.stubGlobal("EventSource", class {
+      static readonly CONNECTING = 0;
+      static readonly CLOSED = 2;
+      readyState = 0;
+      onerror: ((event: Event) => void) | null = null;
+      listeners = new Map<string, ((event: Event) => void)[]>();
+      constructor(url: string) { void url; sources.push(this); }
+      addEventListener(type: string, listener: (event: Event) => void) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
+      close() { this.readyState = 2; }
+      emit(type: string, data: string) { for (const listener of this.listeners.get(type) ?? []) listener(new MessageEvent(type, { data })); }
+    });
+    let detailVersion = 1;
+    const fetchMock = vi.fn().mockImplementation((input: string) => {
+      if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ snapshotSeq: 5, items: [] }) });
+      if (input === "/api/v1/alerts/platform:1") return Promise.resolve({ ok: true, json: async () => ({ id: "platform:1", source: "platform", component: "plinth", state: detailVersion === 1 ? "Firing" : "Resolved", rowVersion: detailVersion, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:02:00Z", resolvedAt: detailVersion === 1 ? undefined : "2026-01-01T00:02:00Z", labels: { alertname: "Plinth disconnected" } }) });
+      return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=platform:1" />);
+
+    await screen.findByRole("heading", { name: "Plinth disconnected" });
+    await waitFor(() => expect(sources).toHaveLength(1));
+    detailVersion = 2;
+    sources[0].emit("change", JSON.stringify({ seq: "6", type: "state_changed", occurrenceId: "platform:1", rowVersion: 2 }));
+
+    await screen.findByText("Resolved");
+    // Both list and open-detail projections reconcile through the same stream;
+    // the detail must therefore issue its own authoritative re-read as well.
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/alerts/platform:1").length).toBeGreaterThan(1));
+    expect(sources).toHaveLength(1);
+  });
+
+  it("re-snapshots both tab counts after a live occurrence enters then leaves the current list", async () => {
+    const sources: { listeners: Map<string, ((event: Event) => void)[]>; emit: (type: string, data: string) => void }[] = [];
+    vi.stubGlobal("EventSource", class {
+      static readonly CONNECTING = 0;
+      static readonly CLOSED = 2;
+      readyState = 0;
+      onerror: ((event: Event) => void) | null = null;
+      listeners = new Map<string, ((event: Event) => void)[]>();
+      constructor(url: string) { void url; sources.push(this); }
+      addEventListener(type: string, listener: (event: Event) => void) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
+      close() { this.readyState = 2; }
+      emit(type: string, data: string) { for (const listener of this.listeners.get(type) ?? []) listener(new MessageEvent(type, { data })); }
+    });
+    let state: "Firing" | "Resolved" = "Firing";
+    const occurrence = () => ({ id: "platform:1", source: "platform", component: "plinth", state, rowVersion: state === "Firing" ? 1 : 2, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:02:00Z", resolvedAt: state === "Resolved" ? "2026-01-01T00:02:00Z" : undefined, labels: { alertname: "Plinth disconnected" } });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: string) => {
+      if (input.includes("state=Firing")) return Promise.resolve({ ok: true, json: async () => ({ snapshotSeq: 5, items: state === "Firing" ? [occurrence()] : [] }) });
+      if (input.includes("state=Resolved")) return Promise.resolve({ ok: true, json: async () => ({ snapshotSeq: 5, items: state === "Resolved" ? [occurrence()] : [] }) });
+      if (input === "/api/v1/alerts/platform:1") return Promise.resolve({ ok: true, json: async () => occurrence() });
+      return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+    }));
+    render(<View route="/alerts/list" />);
+
+    await screen.findByText("Plinth disconnected");
+    expect(screen.getByRole("tab", { name: "当前告警1" })).toBeInTheDocument();
+    state = "Resolved";
+    sources[0].emit("change", JSON.stringify({ seq: "6", type: "state_changed", occurrenceId: "platform:1", rowVersion: 2 }));
+
+    await waitFor(() => expect(screen.queryByText("Plinth disconnected")).not.toBeInTheDocument());
+    await screen.findByRole("tab", { name: "当前告警0" });
+    expect(screen.getByRole("tab", { name: "历史告警1" })).toBeInTheDocument();
   });
 
   it("retries a failed initial list fetch through EntityList while keeping SSE enabled", async () => {

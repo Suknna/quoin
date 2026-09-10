@@ -60,6 +60,10 @@ type Service struct {
 	attempts *attempt.Service
 	evidence *evidence.Service
 	now      func() time.Time
+	// ProjectTerminalOutcome receives the terminal execution sequence while its
+	// SQLite transaction is still open. It projects independent platform facts
+	// atomically with the authoritative attempt transition.
+	ProjectTerminalOutcome func(ctx context.Context, conn *sql.Conn, commitSequence int64, succeeded bool, termination string) error
 	// commandReplay is the bounded in-process idempotency ledger
 	// (principal, client_command_id) -> analysis result, mirroring the
 	// alert-source precedent; the frozen client_commands table is

@@ -51,8 +51,9 @@ const routeHostComponents = {
 	inspections: lazy(() => import("./routes/InspectionsRoute")),
 	systems: lazy(() => import("./routes/SystemsRoute")),
 	knowledge: lazy(() => import("./routes/KnowledgeRoute")),
-	administration: lazy(() => import("./routes/AdministrationRoute")),
-	account: lazy(() => import("./routes/AccountRoute")),
+		administration: lazy(() => import("./routes/AdministrationRoute")),
+		integrations: lazy(() => import("./routes/IntegrationsRoute")),
+		account: lazy(() => import("./routes/AccountRoute")),
 } satisfies RouteHostComponents;
 
 type AuthScreen = "loading" | "login" | "password-change" | "workbench";

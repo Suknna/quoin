@@ -258,6 +258,49 @@ func sealAgentCall(t *testing.T, db *sql.DB, attemptID int64, modelID string) in
 	return callID
 }
 
+func TestTerminalFaultProjectionSharesAttemptCommitTransaction(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	occurrenceID := seedOccurrence(t, db)
+	seedProviderChain(t, db)
+	created, err := service.Create(ctx, occurrenceID, 1, "cmd-platform-fault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Attempts().BindToStream(ctx, created.AttemptID, "boot-1", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptAttempt(ctx, created.AttemptID, "boot-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	projected := false
+	service.ProjectTerminalOutcome = func(ctx context.Context, conn *sql.Conn, sequence int64, succeeded bool, termination string) error {
+		projected = true
+		if sequence <= 0 || succeeded || termination != "worker_protocol_error" {
+			t.Fatalf("terminal projection=%d/%v/%q", sequence, succeeded, termination)
+		}
+		_, err := conn.ExecContext(ctx, `INSERT INTO platform_faults(component,reason,state,first_seen_at,last_seen_at,last_execution_commit_sequence) VALUES('plinth','worker_protocol_error','Firing','2026-09-10T00:00:00Z','2026-09-10T00:00:00Z',?)`, sequence)
+		return err
+	}
+	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: false, Termination: "worker_protocol_error"}); err != nil {
+		t.Fatal(err)
+	}
+	if !projected {
+		t.Fatal("terminal transaction did not project worker failure")
+	}
+	var attemptState, faultState string
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, created.AttemptID).Scan(&attemptState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT state FROM platform_faults WHERE reason='worker_protocol_error'`).Scan(&faultState); err != nil {
+		t.Fatal(err)
+	}
+	if attemptState != "Failed" || faultState != "Firing" {
+		t.Fatalf("attempt=%q fault=%q", attemptState, faultState)
+	}
+}
+
 func TestCreateDispatchAcceptSeal(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)

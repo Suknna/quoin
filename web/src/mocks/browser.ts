@@ -78,7 +78,7 @@ export async function unregisterMockWorker(): Promise<void> {
 
 function readScenario(): PreviewScenario {
 	const scenario = localStorage.getItem(scenarioStorageKey);
-	return scenario === "operator" || scenario === "login" || scenario === "first-password" || scenario === "expired" || scenario === "unavailable" || scenario === "maintenance" || scenario === "empty" || scenario === "slow" || scenario === "conflict" ? scenario : "admin";
+	return scenario === "operator" || scenario === "login" || scenario === "first-password" || scenario === "expired" || scenario === "unavailable" || scenario === "maintenance" || scenario === "platform-one" || scenario === "platform-boundary" || scenario === "empty" || scenario === "slow" || scenario === "conflict" ? scenario : "admin";
 }
 
 function writeScenario(scenario: PreviewScenario): void {
@@ -87,11 +87,12 @@ function writeScenario(scenario: PreviewScenario): void {
 
 const handlerScenarioByPreview: Record<PreviewScenario, import("./handlers").MockScenario> = {
 	admin: "administrator", operator: "operator", login: "unauthenticated", "first-password": "password-change",
-	expired: "session-expired", unavailable: "unavailable", maintenance: "maintenance", empty: "empty", slow: "slow", conflict: "conflict",
+	expired: "session-expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", empty: "empty", slow: "slow", conflict: "conflict",
 };
 const previewScenarioByHandler: Record<import("./handlers").MockScenario, PreviewScenario> = {
 	administrator: "admin", operator: "operator", unauthenticated: "login", "password-change": "first-password",
-	"session-expired": "expired", unavailable: "unavailable", maintenance: "maintenance", empty: "empty", slow: "slow", conflict: "conflict",
+		"session-expired": "expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", empty: "empty", slow: "slow", conflict: "conflict",
+
 };
 
 function toHandlerScenario(scenario: PreviewScenario): import("./handlers").MockScenario {

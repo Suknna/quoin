@@ -60,6 +60,8 @@ type apiServer struct {
 	auth                          *auth.Service
 	db                            *sql.DB
 	alerts                        *alerts.Service
+	platformFaults                *alerts.PlatformFaultReporter
+	stelePublicURL                string
 	reveals                       *secrets.Store
 	commands                      *commandReplay
 	runtime                       *qruntime.Service
@@ -137,11 +139,20 @@ func NewMaintenanceAPIServer(service *auth.Service, db *sql.DB, rootKeyFile stri
 	return newAPIServer(service, db, rootKeyFile)
 }
 
+// SetStelePublicURL projects the deployment-owned external receiver endpoint.
+// It must be configured at process construction, never inferred from an HTTP
+// Host or forwarding header controlled by an untrusted upstream.
+func (application *apiServer) SetStelePublicURL(publicURL string) {
+	application.stelePublicURL = publicURL
+}
+
 func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiServer {
+	alertService := alerts.NewService(db)
 	application := &apiServer{
 		auth:             service,
 		db:               db,
-		alerts:           alerts.NewService(db),
+		alerts:           alertService,
+		platformFaults:   alerts.NewPlatformFaultReporter(alertService),
 		reveals:          secrets.NewStore(),
 		commands:         newCommandReplay(),
 		runtime:          qruntime.NewService(db),
@@ -220,11 +231,28 @@ type runtimeSlot struct {
 	Connected         bool    `json:"connected"`
 	BootID            string  `json:"bootId,omitempty"`
 	ConnectionEpoch   *uint64 `json:"connectionEpoch,omitempty"`
+	LastSeenAt        string  `json:"lastSeenAt,omitempty"`
+	ReleaseVersion    string  `json:"releaseVersion,omitempty"`
 }
 
 type runtimeStatus struct {
 	Plinth runtimeSlot `json:"plinth"`
 	Lintel runtimeSlot `json:"lintel"`
+}
+
+// aboutStatus is the admin-only product projection of real runtime and
+// maintenance facts. Unknown values stay empty at the transport boundary and
+// are rendered explicitly as Unknown by the UI rather than guessed healthy.
+type aboutMaintenance struct {
+	Active     bool   `json:"active"`
+	Reason     string `json:"reason,omitempty"`
+	RowVersion int64  `json:"rowVersion"`
+}
+
+type aboutStatus struct {
+	ReleaseVersion string           `json:"releaseVersion"`
+	Maintenance    aboutMaintenance `json:"maintenance"`
+	Components     []runtimeSlot    `json:"components"`
 }
 
 type runtimeOutput struct {
@@ -280,7 +308,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
+	application.SetStelePublicURL(config.StelePublicURL)
 	serverSet, err := application.newServers(config)
+
 	if err != nil {
 		return err
 	}
@@ -364,6 +394,13 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
+	controlService.PlatformFaults = application.platformFaults
+	// The initial-analysis terminal transaction is the only current reachable
+	// worker-launch failure authority. Project its fault before COMMIT so a
+	// successful ResultAck never outlives a missing platform-fault mutation.
+	application.analyses.ProjectTerminalOutcome = func(ctx context.Context, conn *sql.Conn, sequence int64, succeeded bool, termination string) error {
+		return application.platformFaults.ObserveExecutionOutcomeOn(ctx, conn, sequence, succeeded, termination)
+	}
 	// Scheduling admission stops inside any maintenance revision: missed
 	// boundaries record their durable runtime_unavailable tombstone instead
 	// of creating dispatchable work (OPS-UPGRADE-003).
@@ -510,6 +547,8 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/maintenance", OperationID: "getMaintenanceState"}, application.getMaintenanceState)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/admin/about", OperationID: "getAdminAbout"}, application.aboutPlatform)
+	application.registerBusinessContextRoute(api)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
 	application.registerRuntimeRoutes(api)
@@ -557,7 +596,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 		Systems:   application.systems,
 		Contracts: application.contracts,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateFull(ctx, cookie, "读取配置")
+			session, err := application.authenticateAdmin(ctx, cookie, "读取配置")
 			if err != nil {
 				return 0, err
 			}
@@ -591,7 +630,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	inspectionHandler := &appinspection.Handler{
 		Inspections: application.inspections,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateFull(ctx, cookie, "使用巡检")
+			session, err := application.authenticateAdmin(ctx, cookie, "使用巡检")
 			if err != nil {
 				return 0, err
 			}
@@ -708,35 +747,71 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 	return &noContentOutput{SetCookie: sessionCookie("", -time.Hour), ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
+func dereferenceString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// runtimeSlotProjection translates the shared Runtime authority without
+// guessing connection-only facts for an offline component. Both status views
+// must use this single projection to keep their privacy and unknown semantics
+// identical.
+func runtimeSlotProjection(view qruntime.SlotView) runtimeSlot {
+	rendered := runtimeSlot{Slot: view.Slot, State: string(view.State), CurrentGeneration: view.CurrentGeneration, RowVersion: view.RowVersion, Connected: view.Connected}
+	if view.Connected {
+		rendered.BootID = view.BootID
+		rendered.ConnectionEpoch = view.ConnectionEpoch
+		rendered.LastSeenAt = dereferenceString(view.LastSeenAt)
+		rendered.ReleaseVersion = view.ReleaseVersion
+	}
+	return rendered
+}
+
 func (application *apiServer) runtimeStatus(ctx context.Context, input *authInput) (*runtimeOutput, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取 Runtime 状态"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Runtime 状态"); err != nil {
 		return nil, err
 	}
 	output := &runtimeOutput{}
-	for _, slot := range []string{"plinth", "lintel"} {
+	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
 		view, err := application.runtime.View(ctx, slot)
 		if err != nil {
 			return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
 		}
-		rendered := runtimeSlot{
-			Slot: view.Slot, State: string(view.State),
-			CurrentGeneration: view.CurrentGeneration, RowVersion: view.RowVersion,
-			Connected: view.Connected,
-		}
-		// Transient projection fields exist only while connected
-		// (RuntimeSlot contract: connected=false carries no boot/epoch).
-		if view.Connected {
-			rendered.BootID = view.BootID
-			epoch := view.ConnectionEpoch
-			rendered.ConnectionEpoch = epoch
-		}
-		if slot == "plinth" {
-			output.Body.Plinth = rendered
+		if slot == qruntime.SlotPlinth {
+			output.Body.Plinth = runtimeSlotProjection(view)
 		} else {
-			output.Body.Lintel = rendered
+			output.Body.Lintel = runtimeSlotProjection(view)
 		}
 	}
 	return output, nil
+}
+
+// aboutPlatform exposes only real, non-secret platform facts and existing
+// maintenance state to Admins. Runtime slot maintenance actions stay on their
+// established protected commands; Operators cannot call this endpoint.
+func (application *apiServer) aboutPlatform(ctx context.Context, input *authInput) (*struct {
+	Body aboutStatus `json:"body"`
+}, error) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "查看平台关于信息"); err != nil {
+		return nil, err
+	}
+	maintenanceState, err := application.maintenance.State(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("无法读取维护状态", err)
+	}
+	output := aboutStatus{ReleaseVersion: buildinfo.Release, Maintenance: aboutMaintenance{Active: maintenanceState.Active, Reason: maintenanceState.Reason, RowVersion: maintenanceState.RowVersion}, Components: []runtimeSlot{}}
+	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
+		view, err := application.runtime.View(ctx, slot)
+		if err != nil {
+			return nil, huma.Error500InternalServerError("无法读取组件状态", err)
+		}
+		output.Components = append(output.Components, runtimeSlotProjection(view))
+	}
+	return &struct {
+		Body aboutStatus `json:"body"`
+	}{Body: output}, nil
 }
 
 // authFailure maps authentication outcomes once for every session-carrying

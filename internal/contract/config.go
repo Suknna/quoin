@@ -35,6 +35,9 @@ type QuoinConfig struct {
 	RuntimeTLSCertificateFile string `json:"runtimeTlsCertificateFile" yaml:"runtimeTlsCertificateFile"`
 	RuntimeTLSPrivateKeyFile  string `json:"runtimeTlsPrivateKeyFile" yaml:"runtimeTlsPrivateKeyFile"`
 	SteleServiceTokenFile     string `json:"steleServiceTokenFile" yaml:"steleServiceTokenFile"`
+	// StelePublicURL is the externally reachable Alertmanager receiver endpoint.
+	// It is deployment authority, never inferred from an HTTP request host.
+	StelePublicURL string `json:"stelePublicURL" yaml:"stelePublicURL"`
 	// DeploymentBinding is frozen by install/upgrade from the release
 	// manifest and deployment input bytes. It is absent for local development
 	// projections; Deployment Acceptance is then simply unavailable.

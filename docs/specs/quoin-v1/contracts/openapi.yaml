@@ -578,6 +578,23 @@ paths:
                 $ref: '#/components/schemas/RuntimeStatus'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/admin/about:
+    get:
+      tags: [adminops]
+      operationId: getAdminAbout
+      summary: 管理员读取平台组件事实与维护状态
+      description: 仅返回真实可得的版本、连接与维护事实；未知信息不得推断为健康，且不得包含凭据或修复管理链接。
+      responses:
+        '200':
+          description: 非秘密的平台关于投影。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAbout'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/v1/runtime-slots/{slot}/registration/prepare:
     post:
       tags: [adminops]
@@ -4021,6 +4038,25 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
+  /api/v1/alert-sources/receiver-config:
+    get:
+      tags: [adminops]
+      operationId: getAlertmanagerReceiverConfig
+      summary: Alertmanager 部署公开 receiver 地址
+      description: 仅返回部署配置的公开 Stele endpoint；不得从请求 Host 或转发头推导。未配置公开地址时返回 503。
+      responses:
+        '200':
+          description: 可复制到 Alertmanager webhook_configs.url 的 HTTPS 地址。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertmanagerReceiverConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
   /api/v1/alert-sources/{sourceKey}:
     get:
       tags: [adminops]
@@ -5900,6 +5936,9 @@ components:
         lastSeenAt:
           $ref: '#/components/schemas/Timestamp'
           description: 瞬时连接投影：最近心跳时间（内存，非持久权威；仅 connected=true 时存在）。
+        releaseVersion:
+          type: string
+          description: 当前连接 Runtime Hello 声明的非准入构建版本；未连接或未声明时省略，不得推测。
       allOf:
         - if:
             properties:
@@ -6052,12 +6091,38 @@ components:
         nextCursor:
           $ref: '#/components/schemas/Cursor'
           description: 绑定首页 snapshotSeq 的短有效期快照游标（HTTP-PAGE-006）；过期返回 410。
+    AdminAbout:
+      type: object
+      required: [releaseVersion, maintenance, components]
+      properties:
+        releaseVersion:
+          type: string
+        maintenance:
+          type: object
+          required: [active, rowVersion]
+          properties:
+            active: {type: boolean}
+            reason: {type: string}
+            rowVersion: {type: integer, minimum: 1}
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuntimeSlot'
     AlertOccurrenceSummary:
       type: object
-      required: [id, state, rowVersion, firstSeenAt, lastStateChangeAt, labels]
+      required: [id, source, state, rowVersion, firstSeenAt, lastStateChangeAt, labels]
       properties:
         id:
-          $ref: '#/components/schemas/LocatorId'
+          type: string
+          description: Alertmanager occurrence locator or platform:<fault-id> identity.
+        source:
+          type: string
+          enum: [alertmanager, platform]
+        component:
+          type: string
+          enum: [plinth, lintel]
+        reason:
+          type: string
         state:
           type: string
           enum: [Firing, Resolved]
@@ -8679,6 +8744,19 @@ components:
           $ref: '#/components/schemas/Timestamp'
         disabledAt:
           $ref: '#/components/schemas/Timestamp'
+        latestValidEventAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: 最近一次正常 Alert Observation 的 Quoin 提交时间。缺失表示等待首条有效事件；静默不表示故障。
+    AlertmanagerReceiverConfig:
+      type: object
+      required: [publicReceiverUrl]
+      additionalProperties: false
+      properties:
+        publicReceiverUrl:
+          type: string
+          format: uri
+          pattern: '^https://.*/stele/alerts$'
+          description: 由部署配置冻结的 Stele 公共 URL，不接受请求 Host 推导。
     AlertSourceDetail:
       allOf:
         - $ref: '#/components/schemas/AlertSourceSummary'

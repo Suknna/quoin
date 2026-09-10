@@ -120,9 +120,13 @@ func (stream *alertEventStream) serve(writer http.ResponseWriter, request *http.
 			return
 		}
 		for _, event := range events {
+			alertID := strconv.FormatInt(event.OccurrenceID, 10)
+			if event.PlatformFaultID > 0 {
+				alertID = "platform:" + strconv.FormatInt(event.PlatformFaultID, 10)
+			}
 			payload, marshalErr := json.Marshal(alertChangeEventJSON{
 				Seq: strconv.FormatInt(event.Seq, 10), Type: event.ChangeType,
-				OccurrenceID: strconv.FormatInt(event.OccurrenceID, 10), RowVersion: event.RowVersion,
+				OccurrenceID: alertID, RowVersion: event.RowVersion,
 			})
 			if marshalErr != nil {
 				return

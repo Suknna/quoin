@@ -8,11 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { newClientCommandId } from "@/api/workbench";
 import { acknowledgeIntakeIssue, createAlertSource, fetchIntakeIssues, revealCredential, type AlertSourceCredentialMetadata, type IntakeIssue } from "@/features/alerts/api";
+import { About } from "./About";
 import { Backups } from "./Backups";
 import { Journeys } from "./Journeys";
 import { LabelContracts } from "./LabelContracts";
-import { Maintenance } from "./Maintenance";
-import { Runtimes } from "./Runtimes";
 import { Users } from "./Users";
 import { ConfirmAction } from "./controls";
 
@@ -29,10 +28,10 @@ export function useAdministrationModule(props: WorkspaceModuleProps): WorkspaceM
  // Routes are absolute (`/administration/users`); module selection starts after its prefix.
  const routeParts = props.route.split("/").filter(Boolean);
  const path = routeParts[0] === "administration" || routeParts[0] === "admin" ? routeParts[1] ?? "users" : routeParts[0] ?? "users";
- const labels: Record<string, string> = { users: "用户", connections: "连接", alerts: "告警源", "alert-intake-issues": "告警接入问题", runtimes: "运行时", backups: "备份与保留", maintenance: "维护", audit: "审计", labels: "标签契约", journeys: "Journey" };
+ const labels: Record<string, string> = { about: "关于", users: "用户", connections: "连接", alerts: "告警源", "alert-intake-issues": "告警接入问题", backups: "备份与保留", audit: "审计", labels: "标签契约", journeys: "Journey" };
  const list = <div className="space-y-1 p-3">{Object.entries(labels).map(([key, label]) => <Button key={key} variant={path === key ? "secondary" : "ghost"} className="w-full justify-start" onClick={() => props.navigate(`/admin/${key}`)}>{label}</Button>)}</div>;
- if (props.user.role !== "admin") return { title: "管理", list, content: <Alert variant="destructive"><AlertDescription>管理功能仅向管理员开放。</AlertDescription></Alert> };
- const content = path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "alert-intake-issues" ? <AlertIntakeIssues suspended={props.suspended} /> : path === "runtimes" ? <Runtimes suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "maintenance" ? <Maintenance authenticationSuspended={props.authenticationSuspended} /> : path === "audit" ? <AuditLog /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : <Journeys />;
+ if (props.user.role !== "admin") return { title: "管理", list: null, content: <Alert variant="destructive"><AlertDescription>管理功能仅向管理员开放。</AlertDescription></Alert> };
+ const content = path === "about" ? <About suspended={props.suspended} authenticationSuspended={props.authenticationSuspended} /> : path === "users" ? <Users suspended={props.suspended} /> : path === "alerts" ? <AlertSources suspended={props.suspended} /> : path === "alert-intake-issues" ? <AlertIntakeIssues suspended={props.suspended} /> : path === "backups" ? <Backups suspended={props.suspended} /> : path === "audit" ? <AuditLog /> : path === "labels" ? <LabelContracts suspended={props.suspended} /> : path === "journeys" ? <Journeys /> : <Alert variant="destructive"><AlertDescription>未找到此管理页面。</AlertDescription></Alert>;
  return { title: labels[path] ?? "管理", list, content };
 }
 

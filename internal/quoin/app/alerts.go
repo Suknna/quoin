@@ -54,6 +54,11 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 	if key == "" {
 		return nil, huma.Error400BadRequest("告警源 key 不能为空", nil)
 	}
+	// This literal child route is reserved by the public API and must not be
+	// claimed by a logical source key.
+	if key == "receiver-config" {
+		return nil, huma.Error400BadRequest("告警源 key 为保留名称", nil)
+	}
 	// Command replay: same clientCommandId + same digest returns the original
 	// result; a different digest conflicts (HTTP-COMMAND-003). We keep a
 	// small in-process map keyed by (session, command) because the frozen
@@ -195,11 +200,7 @@ func (application *apiServer) getAlertOccurrence(ctx context.Context, input *str
 	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
 	}
-	id, err := strconv.ParseInt(input.OccurrenceID, 10, 64)
-	if err != nil || id <= 0 {
-		return nil, huma.Error404NotFound("告警不存在", nil)
-	}
-	occurrence, err := application.alerts.GetOccurrence(ctx, id)
+	occurrence, err := application.alerts.GetAlert(ctx, input.OccurrenceID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, huma.Error404NotFound("告警不存在", nil)
@@ -222,11 +223,7 @@ func (application *apiServer) listAlertObservations(ctx context.Context, input *
 	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
 	}
-	id, err := strconv.ParseInt(input.OccurrenceID, 10, 64)
-	if err != nil || id <= 0 {
-		return nil, huma.Error404NotFound("告警不存在", nil)
-	}
-	observations, err := application.alerts.ListObservations(ctx, id)
+	observations, err := application.alerts.ListObservations(ctx, input.OccurrenceID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("无法读取观测", err)
 	}
@@ -248,8 +245,8 @@ func (application *apiServer) listIntakeIssues(ctx context.Context, input *struc
 		NextCursor string               `json:"nextCursor,omitempty"`
 	} `json:"body"`
 }, error) {
-	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
-		return nil, huma.Error401Unauthorized("请重新登录")
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警接入问题"); err != nil {
+		return nil, err
 	}
 	issues, err := application.alerts.ListIntakeIssues(ctx, input.Acknowledged)
 	if err != nil {
@@ -266,14 +263,36 @@ func (application *apiServer) listIntakeIssues(ctx context.Context, input *struc
 	}{Items: asItems(issues)}}, nil
 }
 
+// receiverConfig returns the deployment-owned Stele endpoint used in an
+// Alertmanager receiver. It is never derived from an untrusted HTTP Host header.
+func (application *apiServer) receiverConfig(ctx context.Context, input *authInput) (*struct {
+	Body struct {
+		PublicReceiverURL string `json:"publicReceiverUrl"`
+	} `json:"body"`
+}, error) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Alertmanager 接收地址"); err != nil {
+		return nil, err
+	}
+	if application.stelePublicURL == "" {
+		return nil, huma.Error503ServiceUnavailable("告警接收地址尚未配置", nil)
+	}
+	out := &struct {
+		Body struct {
+			PublicReceiverURL string `json:"publicReceiverUrl"`
+		} `json:"body"`
+	}{}
+	out.Body.PublicReceiverURL = application.stelePublicURL
+	return out, nil
+}
+
 func (application *apiServer) listAlertSources(ctx context.Context, input *authInput) (*struct {
 	Body struct {
 		Items      []alerts.SourceSummary `json:"items"`
 		NextCursor string                 `json:"nextCursor,omitempty"`
 	} `json:"body"`
 }, error) {
-	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
-		return nil, huma.Error401Unauthorized("请重新登录")
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源"); err != nil {
+		return nil, err
 	}
 	sources, err := application.alerts.ListSources(ctx)
 	if err != nil {
@@ -296,8 +315,8 @@ func (application *apiServer) getAlertSource(ctx context.Context, input *struct 
 }) (*struct {
 	Body alerts.SourceDetail `json:"body"`
 }, error) {
-	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
-		return nil, huma.Error401Unauthorized("请重新登录")
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源"); err != nil {
+		return nil, err
 	}
 	detail, err := application.alerts.GetSource(ctx, input.SourceKey)
 	if err != nil {
@@ -321,6 +340,9 @@ func (application *apiServer) registerAlertRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-intake-issues", OperationID: "listAlertIntakeIssues"}, application.listIntakeIssues)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-intake-issues/{issueId}/acknowledge", OperationID: "acknowledgeIntakeIssue", Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusTooManyRequests}}, application.acknowledgeIntakeIssue)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-sources", OperationID: "listAlertSources"}, application.listAlertSources)
+	// The literal route is registered before {sourceKey} so receiver-config is
+	// never interpreted as a user-controlled source locator.
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-sources/receiver-config", OperationID: "getAlertmanagerReceiverConfig", Errors: []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable}}, application.receiverConfig)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/alert-sources/{sourceKey}", OperationID: "getAlertSource"}, application.getAlertSource)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources", OperationID: "createAlertSource", DefaultStatus: http.StatusCreated}, application.createAlertSource)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/credentials/reveal", OperationID: "revealAlertSourceCredential"}, application.revealAlertSourceCredential)
@@ -424,7 +446,7 @@ func (application *apiServer) listAlertSourceCredentials(ctx context.Context, in
 		NextCursor string                     `json:"nextCursor,omitempty"`
 	} `json:"body"`
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取告警源凭据"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源凭据"); err != nil {
 		return nil, err
 	}
 	if _, err := application.alerts.GetSource(ctx, input.SourceKey); err != nil {

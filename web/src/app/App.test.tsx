@@ -106,12 +106,10 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		const create = vi.spyOn(workbenchApi, "createConnection");
 		render(<App />);
-		await waitFor(() =>
-			expect(screen.getByRole("button", { name: "新建" })).toBeDisabled(),
-		);
-		expect(
-			await screen.findByRole("button", { name: "创建连接" }),
-		).toBeDisabled();
+		// Operators have no administration action surface, even when entering an admin URL directly.
+		expect(await screen.findByRole("alert")).toHaveTextContent("仅向管理员开放");
+		expect(screen.queryByRole("button", { name: "新建" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "创建连接" })).not.toBeInTheDocument();
 		expect(create).not.toHaveBeenCalled();
 	});
 
@@ -122,7 +120,7 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		await screen.findByRole("button", { name: "新建" });
+		await screen.findAllByRole("button", { name: "新建" });
 
 		act(() => appApiState.unauthorized?.());
 
@@ -219,7 +217,7 @@ describe("authentication workflow", () => {
 			);
 		render(<App />);
 		fireEvent.click(
-			await screen.findByRole("button", { name: "新建模型提供方" }),
+			(await screen.findAllByRole("button", { name: "新建模型提供方" }))[0],
 		);
 		fireEvent.change(screen.getByLabelText("Base URL"), {
 			target: { value: "https://provider.invalid" },
@@ -251,7 +249,7 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
 		fireEvent.click(
-			await screen.findByRole("button", { name: "新建模型提供方" }),
+			(await screen.findAllByRole("button", { name: "新建模型提供方" }))[0],
 		);
 		const apiKey = screen.getByLabelText("API Key");
 		fireEvent.change(apiKey, { target: { value: "provider-secret" } });
@@ -266,7 +264,7 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
 		await screen.findByLabelText("名称");
-		fireEvent.click(screen.getByRole("button", { name: "新建模型提供方" }));
+		fireEvent.click((await screen.findAllByRole("button", { name: "新建模型提供方" }))[0]);
 		const name = await screen.findByLabelText("名称");
 		fireEvent.change(name, { target: { value: "preserved-draft" } });
 		await screen.findByLabelText("API Key");

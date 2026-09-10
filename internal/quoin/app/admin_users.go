@@ -403,7 +403,7 @@ func (application *apiServer) listAuditEvents(ctx context.Context, input *struct
 		NextCursor string                `json:"nextCursor,omitempty"`
 	}
 }, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取审计事件"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取审计事件"); err != nil {
 		return nil, err
 	}
 	cursor := auth.AuditCursor{}

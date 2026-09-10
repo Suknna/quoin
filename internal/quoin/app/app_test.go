@@ -179,7 +179,11 @@ func splitCookie(setCookie string) string {
 
 func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, origin string, rootKeyFile string) http.Handler {
 	t.Helper()
-	handler, err := app.NewHandler(app.NewAPIServer(service, db, rootKeyFile), origin)
+	application := app.NewAPIServer(service, db, rootKeyFile)
+	// Tests use a fixed deployment value rather than httptest's Host so receiver
+	// configuration cannot accidentally begin trusting request-controlled hosts.
+	application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
+	handler, err := app.NewHandler(application, origin)
 	if err != nil {
 		t.Fatal(err)
 	}

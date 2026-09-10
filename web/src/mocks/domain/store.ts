@@ -10,7 +10,7 @@ import type { CandidateDetail, ImportBatchDetail, KnowledgeDetail, KnowledgeVers
 import type { InvestigationAttempt, InvestigationDetail, InvestigationMessage } from '../../features/investigation/api'
 
 /** Public scenario vocabulary consumed by the future mock bootstrap and scenario panel. */
-export type MockScenario = 'administrator' | 'operator' | 'unauthenticated' | 'password-change' | 'session-expired' | 'unavailable' | 'maintenance' | 'empty' | 'slow' | 'conflict'
+export type MockScenario = 'administrator' | 'operator' | 'unauthenticated' | 'password-change' | 'session-expired' | 'unavailable' | 'maintenance' | 'platform-one' | 'platform-boundary' | 'empty' | 'slow' | 'conflict'
 
 export const DEMO_CREDENTIALS = {
   admin: { username: 'admin', password: 'demo-admin-password' },
@@ -64,8 +64,9 @@ export interface MockState {
 }
 
 function baseState(scenario: MockScenario): MockState {
-  const webAlert: AlertOccurrenceSummary = { id: 'alert-checkout-latency', state: 'Firing', rowVersion: 3, businessSystemKey: 'checkout', firstSeenAt: '2026-09-09T08:10:00Z', lastStateChangeAt: '2026-09-09T09:20:00Z', labels: { alertname: 'CheckoutLatencyHigh', service: 'checkout', severity: 'critical' }, annotations: { summary: '结算接口 P95 延迟超过阈值' } }
-  const resolvedAlert: AlertOccurrenceSummary = { id: 'alert-catalog-errors', state: 'Resolved', rowVersion: 2, businessSystemKey: 'catalog', firstSeenAt: '2026-09-08T07:00:00Z', lastStateChangeAt: '2026-09-08T08:20:00Z', resolvedAt: '2026-09-08T08:20:00Z', labels: { alertname: 'CatalogErrors', service: 'catalog', severity: 'warning' }, annotations: { summary: '目录错误率已恢复' } }
+  // Platform-fault frontend currently requires explicit source metadata on every unified alert fixture.
+  const webAlert: AlertOccurrenceSummary = { id: 'alert-checkout-latency', state: 'Firing', rowVersion: 3, businessSystemKey: 'checkout', firstSeenAt: '2026-09-09T08:10:00Z', lastStateChangeAt: '2026-09-09T09:20:00Z', source: 'alertmanager', labels: { alertname: 'CheckoutLatencyHigh', service: 'checkout', severity: 'critical' }, annotations: { summary: '结算接口 P95 延迟超过阈值' } }
+  const resolvedAlert: AlertOccurrenceSummary = { id: 'alert-catalog-errors', state: 'Resolved', rowVersion: 2, businessSystemKey: 'catalog', firstSeenAt: '2026-09-08T07:00:00Z', lastStateChangeAt: '2026-09-08T08:20:00Z', resolvedAt: '2026-09-08T08:20:00Z', source: 'alertmanager', labels: { alertname: 'CatalogErrors', service: 'catalog', severity: 'warning' }, annotations: { summary: '目录错误率已恢复' } }
   const analysis: InitialAnalysisDetail = { id: 'analysis-1', state: 'Succeeded', rowVersion: 2, createdAt: now, attemptCount: 1, output: { id: 'analysis-output-1', modelId: 'gpt-demo', content: '延迟主要来自 payment 依赖的上游等待。建议检查 payment 服务和连接池。', evidenceIds: ['evidence-latency'], createdAt: now } }
   const firstMessage: InvestigationMessage = { id: 'message-1', seq: 1, role: 'user', status: 'active', content: '请分析结算服务延迟告警。', attachments: [], evidenceIds: null, createdAt: now }
   const assistantMessage: InvestigationMessage = { id: 'message-2', seq: 2, role: 'assistant', status: 'active', content: '已关联告警和指标证据。payment 上游等待是最可能的原因。', parentMessageId: 'message-1', attachments: [], attemptId: 'attempt-1', evidenceIds: ['evidence-latency'], createdAt: now }

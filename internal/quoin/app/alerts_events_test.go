@@ -67,6 +67,7 @@ func newSSEStack(t *testing.T) *sseStack {
 		t.Fatal(err)
 	}
 	application := app.NewAPIServer(authService, database.SQL, config.RootKeyFile)
+	application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
 	handler, err := app.NewHandler(application, config.PublicOrigin)
 	if err != nil {
 		t.Fatal(err)

@@ -15,6 +15,8 @@ export const previewScenarios = [
 	{ id: "expired", label: "会话过期", description: "已登录后会话失效" },
 	{ id: "unavailable", label: "服务不可用", description: "认证服务不可用" },
 	{ id: "maintenance", label: "维护中", description: "维护窗口中的工作台" },
+	{ id: "platform-one", label: "平台单项", description: "关于页单项维护清单预览" },
+	{ id: "platform-boundary", label: "平台边界", description: "关于页 50 项与超长事实预览" },
 	{ id: "empty", label: "空数据", description: "无业务记录的工作台" },
 	{ id: "slow", label: "慢响应", description: "延迟返回的模拟接口" },
 	{ id: "conflict", label: "并发冲突", description: "写入返回冲突" },

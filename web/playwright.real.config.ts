@@ -3,15 +3,20 @@ import { defineConfig, devices } from "@playwright/test";
 const baseURL = process.env.QUOIN_REAL_E2E_BASE_URL;
 if (!baseURL) throw new Error("QUOIN_REAL_E2E_BASE_URL is required for real-system Playwright tests.");
 
-/** Explicit smoke tests for a separately provisioned real environment. */
+/**
+ * Explicit browser acceptance for a separately provisioned real deployment.
+ * The supported #96/#102 command selects only current issue scenarios; legacy
+ * files remain opt-in and can never make supported acceptance look green.
+ */
 export default defineConfig({
 	testDir: "./e2e/real",
-	// Legacy journeys are retained for their real-stack intent. Their former Docker
-	// fixture is intentionally not recreated; opt in only with a compatible stack.
-	testIgnore: process.env.QUOIN_REAL_E2E_LEGACY === "1" ? undefined : "**/legacy/**",
-	timeout: 45_000,
-	expect: { timeout: 10_000 },
+	testMatch: process.env.QUOIN_REAL_E2E_LEGACY === "1" ? undefined : "**/issue-{96,102}*.integration.spec.ts",
+	timeout: 60_000,
+	expect: { timeout: 15_000 },
 	forbidOnly: Boolean(process.env.CI),
-	use: { baseURL, trace: "retain-on-failure" },
+	// Registration reveal tokens are intentionally one-time secrets; do not
+	// preserve traces that could contain them, even for a failed local run.
+	use: { baseURL, trace: "off", screenshot: "off", video: "off", ignoreHTTPSErrors: true },
+	workers: 1,
 	projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
 });

@@ -2,6 +2,10 @@
 
 **状态：Draft**
 
+> **现状与迁移：** 本文件中的路由、业务系统 YAML-only 编辑、独立刷新、业务内浏览器身份和仅 Alertmanager Occurrence 告警视图仍反映未修改的 v1 机器契约，不声称已实现 [#95](https://github.com/Suknna/quoin/issues/95) 的目标。该目标及 ADR-0002 优先：运维中心应提供接入管理和业务纳管子页，表单与 YAML 编辑同一声明，内部组件只在管理员“关于”中管理，平台故障通过独立来源映射进入统一告警读模型。落地时必须同步更新 OpenAPI/Schema 与本文件，不得用前端模拟替代后端能力。
+
+> **UI 验收：** 所有前端调整必须遵守并记录 [`docs/frontend/ui-acceptance.md`](../../frontend/ui-acceptance.md) 的组件约束和真实浏览器自查；本文档-only 变更无需执行页面检查。
+
 **CATEGORY 前缀：`UI`**（SPEC-TRACE-002）
 
 本文件定义 Quoin Web UI 的人类交互契约。HTTP 请求、响应字段与错误码的唯一机器权威是 [`contracts/openapi.yaml`](./contracts/openapi.yaml)；持久化状态机与不可变历史由 [`persistence.md`](./persistence.md) 和 [`contracts/sql/schema.sql`](./contracts/sql/schema.sql) 定义。本文件只规定这些领域事实如何组织、展示和操作，不建立第二份领域状态。
@@ -25,7 +29,7 @@
 ### 2.1 三栏工作台
 
 - **UI-SHELL-001 —** 宽屏只有三层：第一栏全局图标导航；第二栏当前模块对象列表、筛选与主要创建操作；第三栏对象详情或工作区。第三栏占剩余空间；第一栏可折叠为 icon rail/offcanvas；第二栏可折叠、隐藏和调整宽度。可观察布局状态只保存第一、二栏百分比，第三栏始终由剩余空间派生，禁止另存会与总和漂移的第三值。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SHELL-002 —** 全局模块固定为：告警 `/alerts`、调查 `/investigations`、巡检 `/inspections`、业务系统 `/business-systems`、知识 `/knowledge`、管理 `/admin`。Admin 显示六项；Operator 不显示管理。登录成功默认进入 `/alerts`，不增加首页。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-SHELL-002 —** 全局导航固定为：运维中心、AI SRE、管理员设置。运维中心包含告警、故障复盘、巡检、业务纳管和接入管理子页；AI SRE 包含对话和知识子页；管理员设置只对 Admin 显示。Operator 只显示和使用告警与 AI SRE，不显示巡检、业务纳管、接入管理、浏览器登录或管理员设置；Admin 可使用全部业务功能。导航可见性不放宽服务端权限：服务端必须在每次受限请求上拒绝 Operator。登录成功默认进入运维中心的告警页，不增加首页；具体路径待 #95 实施时与机器契约同步确定。（来源：[CONTEXT.md](../../../CONTEXT.md)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-SHELL-003 —** 导航图标必须在 hover 与 focus 时显示中文名称。徽标只投影可操作权威状态，例如 active/failed Attempt、巡检 gap、待确认知识、未确认接入问题、Runtime/备份故障；不得保存独立通知事实。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SHELL-004 —** URL 未选对象时不得自动选择列表第一项。第三栏使用 shadcn `Empty`：一个语义图标、短标题、自然语言描述与至多一个主操作；不得纯空白或伪装成 Dashboard。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SHELL-005 —** 第二栏普通对象列表使用语义化链接/按钮，不把页面实现为 `application`、`grid` 或自定义 roving-focus 应用。列表采用紧凑两行项目而非横向大表格或大卡片。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
@@ -79,16 +83,16 @@
 - **UI-AUTH-002 —** Session 失效时用不可绕过的重新登录层遮蔽受保护内容。仅在当前页面内存保留非秘密正文、附件引用和表单输入；同一 principal 重新登录后恢复原 URL 与输入，principal 改变或页面刷新则丢弃；一次性秘密永不恢复。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-AUTH-003 —** 临时密码验证后仍停留在登录页并进入“设置新密码”阶段；成功建立正常 Session 后才加载工作台。页面展示实际 15–128 Unicode 规则，允许粘贴、自动填充和密码管理器。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-AUTH-004 —** 全局导航底部头像菜单只含当前身份/角色、修改密码、我的 Session、审计记录和退出。“我的 Session”以全工作台层列出设备/浏览器、创建、最后活动与当前项，可逐个撤销其他 Session并说明 SSE/WebSocket 会立即断开。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-AUTH-005 —** `/audit` 是头像菜单打开的全工作台列表，不是第七个模块。Operator/Admin 都可按操作者类型、动作和时间筛选并查看结构化详情。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-AUTH-005 —** `/audit` 是仅 Admin 可从头像菜单打开的全工作台列表，不是第七个模块；服务端必须拒绝 Operator 直接访问。Admin 可按操作者类型、动作和时间筛选并查看结构化详情。（来源：[CONTEXT「账号、Session 与审计投影」](../../../CONTEXT.md#账号session-与审计投影)）
 
 ## 5. 告警工作台
 
-- **UI-ALERT-001 —** `/alerts` 第二栏顶部使用“当前 / 历史 / 接入问题”三段；前两段只投影 Firing/Resolved Occurrence，接入问题是独立查询，不得伪装为第三种生命周期状态。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-ALERT-001 —** 统一告警页按来源投影上游 Alertmanager Occurrence 与平台故障；两者均保留真实来源和自身生命周期，平台故障不得伪造 Delivery、Occurrence 或业务归属。既有上游告警列表、详情和初步分析交互保持；接入问题继续是独立查询，不得伪装为生命周期状态。具体路由、筛选和读模型字段待 #95 实施时与机器契约同步确定。（来源：[CONTEXT「平台故障」](../../../CONTEXT.md#平台故障)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-ALERT-002 —** 普通告警项主行显示状态图标+文字、`alertname` 与关键时间；次行显示业务系统、可用的 severity 原值与必要徽标。选中、hover、focus 和未读变化不得只靠颜色。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ALERT-003 —** 普通告警筛选只提供“当前/历史”、可搜索业务系统 combobox 与清除入口；不得展示 OpenAPI 不支持的全文、severity 排序或任意 label query。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ALERT-004 —** 告警详情标题区提供一个“初步分析”主操作。运行后原位显示真实阶段与取消；正文优先显示最新成功输出，旧版本按时间列出并可展开，失败/取消记录不得消失。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ALERT-005 —** 从告警或其 Initial Analysis 创建调查进入 `/investigations/new`，输入框上方显示不可变来源项并直接聚焦；首条消息被接受前不得创建空 Investigation。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-ALERT-006 —** 接入问题未确认项在前，列表显示 kind、逻辑来源、首次/最近发生时间和重复次数；详情先用普通语言解释影响，再展示 Delivery、item index、labels/fingerprint、截断数量与不可变事件历史。Operator 只读；Admin 原位“标记已处理”，完成后仍可用已处理筛选查看。同 signature 再发生时出现新的待处理对象。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-ALERT-006 —** 接入问题管理仅 Admin 可进入：未确认项在前，列表显示 kind、逻辑来源、首次/最近发生时间和重复次数；详情先用普通语言解释影响，再展示 Delivery、item index、labels/fingerprint、截断数量与不可变事件历史。Admin 可原位“标记已处理”，完成后仍可用已处理筛选查看。同 signature 再发生时出现新的待处理对象。Operator 不得进入管理页面或直接读取其 API，只能在告警页看到授权的非秘密影响提示；服务端必须强制拒绝直接访问。（来源：[CONTEXT「告警接入问题」](../../../CONTEXT.md#告警接入问题)）
 
 ## 6. 调查对话
 
@@ -129,30 +133,30 @@
 
 ## 10. 业务系统与浏览器登录
 
-- **UI-SYSTEM-001 —** 业务系统自己的配置版本、计划、Observed Resource 和 Browser Identity 只在 `/business-systems`；管理模块只保留部署级 Label Contract/Journey Catalog，不提供第二写入口。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-SYSTEM-001 —** 运维中心提供业务纳管与接入管理两个子页。业务纳管显示业务声明、资源、巡检、访问配置和版本；接入管理展示支持的平台目录与已接入实例，并进入平台专属表单和说明。表单与 YAML 是同一业务声明的编辑视图，不产生第二权威或秘密副本；具体路由和 API 映射待 #95 实施时与机器契约同步确定。（来源：[CONTEXT「业务系统」](../../../CONTEXT.md#业务系统)、[CONTEXT「接入」](../../../CONTEXT.md#接入)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-SYSTEM-002 —** 列表主行显示显示名、Enabled/Disabled；次行显示 current config version、资源新鲜度、Browser Identity 状态及待处理徽标。顶部只提供状态筛选与名称搜索。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-003 —** 系统详情是连续页：当前状态、配置版本、巡检计划、Observed Resources、Browser Identity，并提供简短 section navigation；不拆为五个 tabs。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-004 —** Admin“上传配置”打开全工作台层，可下载模板、拖放/选择单份 YAML，并展示目标 Label Contract 与 Journey Catalog provenance。失败按 YAML path 给原因和修复方式并保留文件；不得提供竞争性表单或自由编辑器。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-SYSTEM-004 —** 业务纳管必须提供表单和 YAML 两种编辑视图，二者生成、校验和发布同一版本化业务声明。失败保留非秘密输入并给出字段或 YAML path 的修复说明；未知或不支持的内容不得在表单往返中静默丢失。不得建立竞争性元数据保存路径、第二声明或自由 JSON 配置面。（来源：[CONTEXT「业务系统」](../../../CONTEXT.md#业务系统)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-SYSTEM-005 —** 配置历史列出全部不可变版本。版本详情展示相对 current published version 的机械 YAML diff、静态校验、Config Verification Run 与兼容性。“运行测试”直接创建；“发布”确认后原子切换。冲突重新读取 current pointer，不覆盖其他版本。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-006 —** Label Contract 激活使用全工作台 readiness：列出目标契约、每个 enabled 系统全部合法“配置版本 + Passed Config Verification Run”候选及阻塞原因；多候选由 Admin 选择，不以 latest 代替。全部选择后一次确认并原子激活。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-007 —** Observed Resource 列表明确“当前观测到 / 当前未观测到 / 数据陈旧”，显示 discovery rule、identity labels、最后成功刷新和最后见到；不得把未观测到写成已删除。详情铺满工作台显示完整 labels、discovery rule、观测时间与当前/陈旧状态。v1 没有资源历史引用数据模型，界面不得制造该列表。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-008 —** Browser Identity section 显示状态、revision、profile generation、最近 probe 和占用。Admin“配置身份”只填写显示名、起始 URL、认证 probe 与类型化参数并创建新 revision；Operator 只见“重新登录”。不得编辑 Cookie/profile 文件。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-009 —** `/business-systems/:systemKey/browser-login` 的 noVNC 铺满工作台；顶部窄工具条显示系统、真实 operation 状态、连接恢复提示、发布登录状态和取消。发布成功自动关闭远程桌面并返回来源详情；关闭浏览器页面不等于取消。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-SYSTEM-008 —** 浏览器身份在接入管理中独立创建或选择，并由业务声明以显式授权引用；默认不得跨业务复用。页面仅展示非秘密状态、revision、profile generation、最近验证和占用；不得编辑或回显 Cookie/profile 文件。只有 Admin 可管理浏览器身份、发起或发布人工登录；Operator 不显示也不得直接访问这些能力，服务端必须强制拒绝。（来源：[CONTEXT「浏览器身份」](../../../CONTEXT.md#浏览器身份)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
+- **UI-SYSTEM-009 —** `/business-systems/:systemKey/browser-login` 的 noVNC 仅 Admin 可打开并铺满工作台；顶部窄工具条显示系统、真实 operation 状态、连接恢复提示、发布登录状态和取消。发布成功自动关闭远程桌面并返回来源详情；关闭浏览器页面不等于取消。服务端必须拒绝 Operator 直接访问。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-010 —** 不提供独立 enable/disable 开关。Admin 通过 YAML 根 `enabled` 的新不可变版本发布；确认说明对定时巡检、资源刷新和告警展示的影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-011 —** 系统详情必须提供“立即刷新”（Admin only）入口：提交后立即显示已受理状态（202 的 Run 投影）并以轮询展示进行中/完成结果，等待期间允许离开与返回；刷新结果直接投影为 Observed Resource 当前/陈旧列表（UI-SYSTEM-007），不提供与 `resource_refresh_runs` 竞争的本地状态或伪造进度百分比。Operator 只读可见列表与陈旧标记，不显示刷新入口。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、Issue #41）
+- **UI-SYSTEM-011 —** 不提供独立资源刷新入口或无业务任务归属的扫描。资源观测只能由已声明的定时巡检、告警分析、对话工具调用，或明确标识且与正式资源投影隔离的验证/试运行触发；接入、保存、发布和页面访问不得启动采集。页面显示观测时间、来源任务和配置版本，并将失败或局部观测与完整范围内未再观测区分。（来源：[CONTEXT「观测资源」](../../../CONTEXT.md#观测资源)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 
 ## 11. Admin 管理工作区
 
-- **UI-ADMIN-001 —** 第二栏按设置清单、用户、Label Contract/Journey Catalog、连接、模型供应商、告警源、Runtime、备份与 Artifact 保留、安全、审计分组，第三栏显示内容；不增加第四栏或卡片墙首页。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-ADMIN-001 —** 第二栏按设置清单、用户、Label Contract/Journey Catalog、模型供应商、备份与 Artifact 保留、安全、审计和“关于”分组，第三栏显示内容；不增加第四栏或卡片墙首页。接入管理和业务纳管属于运维中心，而不是新增全局接入中心；内部组件不面向普通用户管理，“关于”只向管理员展示实际可得的版本、连接状态和受保护维护入口。（来源：[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-ADMIN-002 —** 设置清单由权威状态派生，分别展示模型供应商、Thanos/Kubernetes、Plinth/Lintel、Label Contract、Business System、Browser Identity、Stele 告警源和备份目标的就绪、依赖及修复入口；不保存人工完成 checkbox，也不阻塞无关能力。全部就绪折叠为“核心能力已就绪”，故障/缺失时自动展开相关项。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ADMIN-003 —** 用户列表显示用户名、显示名、角色、启用状态和最后登录；详情编辑显示名/角色/状态，并提供重置密码、撤销全部 Session。禁用、降级、重置和撤销说明现有登录会立即失效；最后一个有效 Admin 冲突显示服务端真实原因。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-ADMIN-004 —** 连接按 Thanos、Kubernetes、Model Provider 类型分组并使用类型化表单。详情分别显示 current revision、credential generation、enabled/unverified、最近真实测试与不可变历史；不得提供任意 URL + JSON 表单。连接表单每次首次提交生成用户不可见的 `client_command_id`；仅原请求网络重试复用，提交后用户修改 `password`/`kubeconfig`/`apiKey` 再提交时必须生成新 ID，避免持久化任何秘密比较 oracle（HTTP-COMMAND-002/003）。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-ADMIN-004 —** Alertmanager、Prometheus、Thanos、Kubernetes 与浏览器的平台配置表单位于运维中心的接入管理子页，管理员设置不得建立第二写入口。管理员设置只管理模型供应商及其安全/运维规则；模型供应商表单使用类型化字段，不得提供任意 URL + JSON 表单。任何携带秘密的表单首次提交生成用户不可见的 `client_command_id`；仅原请求网络重试复用，用户修改秘密后再提交必须生成新 ID，避免持久化秘密比较 oracle。具体字段和 API 待 #95 实施时与机器契约同步确定。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入)、[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **UI-ADMIN-005 —** Model Provider 表单先经 `discoverProviderModels` 探测上游 `/v1/models`。多个 model ID 由 Admin 选择；零项、失败或 metadata 缺失时保留手工输入，不直接禁止保存。保存后状态为“尚未验证”；真实 probe 成功并显示实测 streaming/tool/embedding 能力后才可 enable。失败保留配置及结构化非秘密错误码/允许字段供重试修正，禁止展示供应商原始响应、header 或 request body，不自动删除或宣称能力。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ADMIN-006 —** 一次性 Alert Source Bearer/Runtime token 在创建或轮换响应含 reveal handle 时立即打开全工作台层并消费；原文默认可见，提供复制和“关闭后无法再次查看”。前端不得自行缩短服务端固定 60 秒期限；同 Session 命令重放若仍返回原 handle 应继续同一流程，410 时只说明已过期/消费且必须轮换。秘密只存在当前页面内存，不进路由、toast、日志、下载或浏览器持久化。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-007 —** Alert Source 详情显示全部 credential 的非秘密 ID、Active/Pending Retirement/Retired、创建、首次使用与退休时间。新 generation 首个成功 Delivery 后旧 generation 进入 Pending Retirement；界面持续提示 Admin 更新完成后显式退休，不按时间或一次成功自动消失，退休前说明立即影响。（来源：[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-008 —** Runtime 只显示 Plinth/Lintel 两个固定 slot；每项分别显示已注册、当前在线、current/pending/retiring generation、最后见到与 active 工作阻塞。新 current 首次认证前显示“等待新 token 首次使用”，成功后旧 generation 持续显示 Pending Retirement 并提供 Admin 显式退休；系统不得按时间或一次成功自动退休。替换流程仍说明吊销/中断影响和等待新 Runtime 注册/连接。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-009 —** 备份连续页顶部从 `contracts/openapi.yaml#BackupSettings.backupTarget` 显示 Quoin 进程可见的目标挂载、计划时间/IANA 时区/保留份数与最近成功，显式保存。下方显示 Backup Run 的 `queued|running|succeeded|failed`、真实阶段/错误、由 `BackupSummary.sizeBytes` 投影的 archive-set 大小、checksum 和下载；active 记录原位调和，terminal 后不可变；立即备份受理后可离开等待，已有 active Run 时解释冲突而不重复创建。不得提供在线恢复按钮，只展示停机恢复说明与 manifest。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)、Issue #17 Q17.21）
-- **UI-ADMIN-010 —** `contracts/openapi.yaml` 的 `MaintenanceState` 为恢复、升级和 root-key rebind 后唯一维护投影。登录后 active=true 时应用以全工作台维护页遮蔽普通业务入口，只展示 reason、逐项 Safe/Blocking、原因、直接修复入口与“退出维护”；Operator 不得绕过，Admin 点击退出后服务端重验全部条件，冲突刷新当前清单，不提供 force/skip。非维护时不得显示这套内部清单。（来源：[CONTEXT「存储、保留与部署」](../../../CONTEXT.md#存储保留与部署)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
+- **UI-ADMIN-010 —** `contracts/openapi.yaml` 的 `MaintenanceState` 为恢复、升级和 root-key rebind 后唯一维护投影。登录后 active=true 时应用以全工作台维护页遮蔽普通业务入口：Admin 可看到 reason、逐项 Safe/Blocking、原因、直接修复入口与“退出维护”，点击退出后服务端重验全部条件，冲突刷新当前清单，不提供 force/skip；Operator 不得绕过，但只显示维护不可用说明，不得看到内部清单、原因或修复链接。非维护时不得显示这套内部清单。（来源：[CONTEXT「存储、保留与部署」](../../../CONTEXT.md#存储保留与部署)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-011 —** Artifact 保留设置只显示一个“生成型 Artifact 在线保留天数”字段（默认 90）及后果说明；保存携带 expected row version，只影响以后创建的 generated Artifact，必须明确告知既有到期时间不会回写。GC 周期、物理路径和部署卷不得暴露为产品设置。（来源：Issue #17 Q17.1、DATA-BACKUP-009）
 
 ## 12. 动效、键盘与可访问性
@@ -167,7 +171,7 @@
 
 实现阶段必须用真实浏览器完成以下证据，单纯构建成功不等于通过：
 
-1. **UI-TEST-001 路由恢复**：六模块、筛选、选中对象及每种持久化全工作台层刷新/深链恢复；后退恢复来源滚动与焦点；秘密/草稿不出现在 URL。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+1. **UI-TEST-001 路由恢复**：运维中心、AI SRE、管理员设置及其子页的筛选、选中对象和每种持久化全工作台层刷新/深链恢复；后退恢复来源滚动与焦点；秘密/草稿不出现在 URL。（来源：[CONTEXT.md](../../../CONTEXT.md)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 2. **UI-TEST-002 响应式**：至少 320、768、1024、1440 CSS px 覆盖三栏、逐层全屏、noVNC、长 Markdown、代码块与文件列表；无非预期页面级横向滚动。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 3. **UI-TEST-003 键盘/焦点**：只用键盘完成登录、导航、筛选、发送/停止/重试/Undo、打开关闭工作台层、表单错误恢复与高影响确认；自动检查焦点可见/不被遮挡及 24×24 target。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 4. **UI-TEST-004 动效**：普通与 reduced-motion 分别观察进入、退出、列表变化、pending、成功、失败、取消；reduced-motion 必须保持等价静态反馈。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）

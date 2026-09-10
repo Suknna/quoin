@@ -300,6 +300,30 @@ CREATE TABLE alert_occurrences (
 CREATE INDEX idx_alert_occurrences_firing ON alert_occurrences (state, last_state_change_at DESC);
 CREATE INDEX idx_alert_occurrences_business ON alert_occurrences (business_system_id);
 
+-- Platform faults are independent of Alertmanager Delivery and Occurrence.
+-- A single open row is the lifecycle authority for one component/reason pair;
+-- repeat observations only advance last_seen_at and never create alert noise.
+CREATE TABLE platform_faults (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  component            TEXT NOT NULL CHECK (component IN ('plinth','lintel')),
+  -- Closed platform-owned failure vocabulary. Business/model/input errors stay
+  -- on their own attempt and must never be promoted into this source.
+  reason               TEXT NOT NULL CHECK (reason IN ('runtime_control_stream_disconnected','worker_protocol_error')),
+  state                TEXT NOT NULL CHECK (state IN ('Firing','Resolved')),
+  row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  first_seen_at        TEXT NOT NULL,
+  last_seen_at         TEXT NOT NULL,
+  resolved_at          TEXT,
+  -- Execution faults record the newest terminal commit sequence. This durable
+  -- order rejects late at-least-once result replays without confusing attempt
+  -- creation order with the authoritative terminal commit order.
+  last_execution_commit_sequence INTEGER,
+  CHECK ((state = 'Firing' AND resolved_at IS NULL) OR (state = 'Resolved' AND resolved_at IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX ux_platform_faults_open_identity
+  ON platform_faults(component, reason) WHERE state = 'Firing';
+CREATE INDEX idx_platform_faults_state ON platform_faults(state, last_seen_at DESC);
+
 CREATE TABLE alert_occurrence_labels (
   id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   occurrence_id INTEGER NOT NULL REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -423,11 +447,13 @@ BEGIN SELECT RAISE(ABORT, 'alert intake issue must be created as one unacknowled
 -- 可清理（保留窗口由部署配置），不是告警历史权威源。最新行（MAX(id)）是回放 high-water，
 -- 由触发器强制保留、永不删除（trg_alert_change_log_no_delete_latest，DATA-SSE-009）。
 CREATE TABLE alert_change_log (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  occurrence_id INTEGER NOT NULL REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  change_type   TEXT NOT NULL CHECK (change_type IN ('created','state_changed')),
-  row_version   INTEGER NOT NULL CHECK (row_version >= 1),
-  committed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  occurrence_id     INTEGER REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  platform_fault_id INTEGER REFERENCES platform_faults(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  change_type       TEXT NOT NULL CHECK (change_type IN ('created','state_changed')),
+  row_version       INTEGER NOT NULL CHECK (row_version >= 1),
+  committed_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK ((occurrence_id IS NOT NULL AND platform_fault_id IS NULL) OR (occurrence_id IS NULL AND platform_fault_id IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_alert_change_log_occurrence ON alert_change_log (occurrence_id);
 
@@ -3151,6 +3177,20 @@ CREATE TRIGGER trg_alert_change_log_state AFTER UPDATE OF state ON alert_occurre
 WHEN NEW.state <> OLD.state
 BEGIN
   INSERT INTO alert_change_log (occurrence_id, change_type, row_version)
+  VALUES (NEW.id, 'state_changed', NEW.row_version);
+END;
+
+-- Platform faults use the same bounded alert change transport without claiming
+-- an upstream occurrence; platform_fault_id preserves the independent identity.
+CREATE TRIGGER trg_platform_fault_change_insert AFTER INSERT ON platform_faults
+BEGIN
+  INSERT INTO alert_change_log (platform_fault_id, change_type, row_version)
+  VALUES (NEW.id, 'created', NEW.row_version);
+END;
+CREATE TRIGGER trg_platform_fault_change_state AFTER UPDATE OF state ON platform_faults
+WHEN NEW.state <> OLD.state
+BEGIN
+  INSERT INTO alert_change_log (platform_fault_id, change_type, row_version)
   VALUES (NEW.id, 'state_changed', NEW.row_version);
 END;
 

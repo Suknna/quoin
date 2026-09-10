@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { WorkspaceModuleProps, WorkspaceModuleView } from "@/app/module-contract";
 import { fetchAlerts, fetchBusinessSystems, fetchObservations, fetchOccurrence, type AlertOccurrenceSummary, type BusinessSystemOption, type ObservationSummary } from "@/features/alerts/api";
 import { useLiveAlerts } from "@/features/alerts/useLiveAlerts";
+import { useAlertEventStream } from "@/app/realtime/hooks";
 import { analysisCommandId, createAnalysis, fetchAnalyses, fetchAnalysis, fetchAttempts, isActive, reasonLabel, retryAnalysis, stateLabel, type AttemptSummary, type InitialAnalysisDetail } from "@/features/analysis/api";
 
 const problem = (reason: unknown, fallback: string) => reason instanceof Error ? reason.message : fallback;
@@ -61,6 +62,12 @@ function AlertList({ view, system, selectedId, navigate, suspended, openEvidence
   const [query, setQuery] = useState("");
   // Counts are independently snapshotted so neither tab presents a misleading zero before load.
   const [counts, setCounts] = useState<{ key: string; firing?: number; resolved?: number }>({ key: "" });
+  const stream = useAlertEventStream();
+  const countScopeRef = useRef(""); const countGenerationRef = useRef(0);
+  const countScope = `${system}\u0000${suspended}`;
+  // Invalidate count reads while rendering the new route scope so a delayed
+  // old filter response cannot replace the badges before effect cleanup.
+  if (countScopeRef.current !== countScope) { countScopeRef.current = countScope; countGenerationRef.current += 1; }
   // The list is live by default; workbench suspension is the only local pause boundary.
   const live = useLiveAlerts(view === "history" ? "Resolved" : "Firing", system, !suspended);
   const { setAtTop } = live;
@@ -74,14 +81,23 @@ function AlertList({ view, system, selectedId, navigate, suspended, openEvidence
     return () => window.removeEventListener("scroll", updateAtTop);
   }, [setAtTop]);
   const countKey = system;
+  const refreshCounts = useCallback(async (requestGeneration = countGenerationRef.current) => {
+    if (suspended || requestGeneration !== countGenerationRef.current) return;
+    try {
+      // Counts always come from the two server projections; never derive them
+      // from the visible list because it may intentionally buffer new rows.
+      const [firing, resolved] = await Promise.all([fetchAlerts("Firing", system), fetchAlerts("Resolved", system)]);
+      if (requestGeneration === countGenerationRef.current && !suspended) setCounts({ key: system, firing: firing.items.length, resolved: resolved.items.length });
+    } catch { /* Keep the most recent verified counts until the next snapshot. */ }
+  }, [suspended, system]);
+  useEffect(() => { if (!suspended) void refreshCounts(); }, [refreshCounts, suspended]);
   useEffect(() => {
-    if (suspended) return;
-    let active = true;
-    void Promise.all([fetchAlerts("Firing", system), fetchAlerts("Resolved", system)]).then(([firing, resolved]) => {
-      if (active) setCounts({ key: countKey, firing: firing.items.length, resolved: resolved.items.length });
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, [countKey, suspended, system]);
+    let cancelled = false;
+    const refresh = () => { const generation = countGenerationRef.current; if (!cancelled && !suspended) void refreshCounts(generation); };
+    const unsubscribeChange = stream.onChange(refresh);
+    const unsubscribeResync = stream.onResync(refresh);
+    return () => { cancelled = true; unsubscribeChange(); unsubscribeResync(); };
+  }, [refreshCounts, stream, suspended]);
   const filteredItems = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return live.items;
@@ -89,9 +105,9 @@ function AlertList({ view, system, selectedId, navigate, suspended, openEvidence
   }, [live.items, query]);
   const emptyTitle = query ? "没有匹配的告警" : view === "current" ? "当前没有告警" : "没有历史告警";
   const emptyDescription = query ? "已加载的告警中没有匹配此搜索条件的记录。" : view === "current" ? "当前没有正在触发的告警。" : "尚未加载到已恢复的告警记录。";
-  const listItems: EntityListItem[] = filteredItems.map((item) => ({ id: item.id, title: item.labels.alertname ?? item.id, subtitle: item.annotations?.summary ?? item.annotations?.description ?? item.businessSystemKey ?? "未提供摘要", badge: { text: item.state, variant: item.state === "Firing" ? "destructive" : "secondary" }, media: <span className={`size-2 rounded-full ${severityTone(item.labels.severity)}`} title={item.labels.severity ? `严重性：${item.labels.severity}` : "严重性：未知"} />, time: <time dateTime={item.lastStateChangeAt} title={time(item.lastStateChangeAt)}>{relativeTime(item.lastStateChangeAt)}</time> }));
+  const listItems: EntityListItem[] = filteredItems.map((item) => ({ id: item.id, title: item.labels.alertname ?? item.id, subtitle: item.annotations?.summary ?? item.annotations?.description ?? item.businessSystemKey ?? "未提供摘要", badge: { text: item.source === "platform" ? `平台内部 · ${item.state}` : item.state, variant: item.state === "Firing" ? "destructive" : "secondary" }, media: <span className={`size-2 rounded-full ${severityTone(item.labels.severity)}`} title={item.labels.severity ? `严重性：${item.labels.severity}` : "严重性：未知"} />, time: <time dateTime={item.lastStateChangeAt} title={time(item.lastStateChangeAt)}>{relativeTime(item.lastStateChangeAt)}</time> }));
   const controls = <div className="flex flex-wrap items-center justify-between gap-3"><Tabs value={view} onValueChange={(next) => navigate(listRoute(next as "current" | "history", system, selectedId ?? undefined))}><TabsList><TabsTrigger value="current">当前告警{counts.key === countKey && counts.firing !== undefined && <Badge variant="secondary" className="ml-1 tabular-nums">{counts.firing}</Badge>}</TabsTrigger><TabsTrigger value="history">历史告警{counts.key === countKey && counts.resolved !== undefined && <Badge variant="secondary" className="ml-1 tabular-nums">{counts.resolved}</Badge>}</TabsTrigger></TabsList></Tabs><div className="flex flex-1 flex-wrap justify-end gap-3"><Select value={system || "__all__"} onValueChange={(next) => navigate(listRoute(view, next === "__all__" ? "" : next, selectedId ?? undefined))}><SelectTrigger className="w-full sm:w-52"><SelectValue placeholder="全部业务系统" /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="__all__">全部业务系统</SelectItem>{systems.map((item) => <SelectItem key={item.key} value={item.key}>{item.displayName}</SelectItem>)}</SelectGroup></SelectContent></Select><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索已加载告警" className="w-full sm:max-w-xs" aria-label="搜索已加载告警" /></div></div>;
-  return <section className="flex flex-col gap-6"><div><h1 className="text-2xl font-semibold tracking-tight">{view === "current" ? "当前告警" : "告警历史"}</h1><p className="mt-1 text-sm text-muted-foreground">查看来自上游 Alertmanager 的真实告警记录。</p></div>{live.pendingNew > 0 && <Button variant="secondary" size="sm" onClick={live.mergePending}>显示 {live.pendingNew} 条新告警</Button>}<EntityList items={listItems} columns={["media", "title", "subtitle", "status", "time"]} selectedId={selectedId} onSelect={(item) => navigate(listRoute(view, system, item.id))} loading={live.loading} error={live.error} onRetry={live.refresh} controls={controls} emptyTitle={emptyTitle} emptyDescription={emptyDescription} /><AlertDetailSheet id={selectedId} onClose={() => navigate(listRoute(view, system))} suspended={suspended} openEvidence={openEvidence} /></section>;
+  return <section className="mx-auto flex w-full max-w-6xl flex-col gap-6"><div><h1 className="text-2xl font-semibold tracking-tight">{view === "current" ? "当前告警" : "告警历史"}</h1><p className="mt-1 text-sm text-muted-foreground">查看上游告警与平台内部组件故障的真实记录。</p></div>{live.pendingNew > 0 && <Button variant="secondary" size="sm" onClick={live.mergePending}>显示 {live.pendingNew} 条新告警</Button>}<EntityList items={listItems} columns={["media", "title", "subtitle", "status", "time"]} selectedId={selectedId} onSelect={(item) => navigate(listRoute(view, system, item.id))} loading={live.loading} error={live.error} onRetry={live.refresh} controls={controls} emptyTitle={emptyTitle} emptyDescription={emptyDescription} /><AlertDetailSheet id={selectedId} onClose={() => navigate(listRoute(view, system))} suspended={suspended} openEvidence={openEvidence} /></section>;
 }
 
 function DetailEmpty({ icon: Icon, title, description }: { icon: typeof FileText; title: string; description: string }) {
@@ -124,14 +140,52 @@ function AttemptStateIcon({ state }: { state: AttemptSummary["state"] }) {
 }
 
 function AlertDetailSheet({ id, onClose, suspended, openEvidence }: { id: string | null; onClose: () => void; suspended: boolean; openEvidence: (id: string) => void }) {
+  const stream = useAlertEventStream();
   const [occurrence, setOccurrence] = useState<AlertOccurrenceSummary | null>(null); const [observations, setObservations] = useState<ObservationSummary[]>([]); const [error, setError] = useState(""); const [analysisOpen, setAnalysisOpen] = useState(false);
-  const load = useCallback(async () => { if (!id || suspended) return; setError(""); try { const [detail, timeline] = await Promise.all([fetchOccurrence(id), fetchObservations(id)]); setOccurrence(detail); setObservations(timeline.items); } catch (reason) { setOccurrence(null); setError(problem(reason, "无法加载告警详情。")); } }, [id, suspended]);
+  // The route and suspension state form a read scope. Advance it during render
+  // so an old HTTP/SSE task cannot commit in the gap before effect cleanup.
+  const scopeRef = useRef(""); const generationRef = useRef(0); const versionRef = useRef(0); const eventQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const scope = `${id ?? ""}\u0000${suspended}`;
+  if (scopeRef.current !== scope) { scopeRef.current = scope; generationRef.current += 1; versionRef.current = 0; }
+  const load = useCallback(async (minimumVersion = 0, requestGeneration = generationRef.current) => {
+    const occurrenceId = id;
+    if (!occurrenceId || suspended || requestGeneration !== generationRef.current) return;
+    setError("");
+    try {
+      const detail = await fetchOccurrence(occurrenceId);
+      if (suspended || requestGeneration !== generationRef.current) return;
+      // A response below the event's row version is not a usable projection.
+      // Ask the shared stream's snapshot owner to rebuild rather than display
+      // a stale occurrence or advance an unverified event.
+      if (detail.rowVersion < minimumVersion) { stream.resync(); return; }
+      if (detail.rowVersion < versionRef.current) return;
+      const timeline = detail.source === "platform" ? { items: [] } : await fetchObservations(occurrenceId);
+      if (suspended || requestGeneration !== generationRef.current || detail.rowVersion < versionRef.current) return;
+      versionRef.current = detail.rowVersion;
+      setOccurrence(detail); setObservations(timeline.items);
+    } catch (reason) {
+      if (requestGeneration !== generationRef.current) return;
+      setOccurrence(null); setError(problem(reason, "无法加载告警详情。"));
+    }
+  }, [id, stream, suspended]);
   // State reset and fetch intentionally follow the URL-selected occurrence.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { setOccurrence(null); if (id) void load(); }, [id, load]);
+  useEffect(() => { setOccurrence(null); setObservations([]); if (id && !suspended) void load(); }, [id, load, suspended]);
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribe = stream.onChange((event, sourceGeneration) => {
+      if (event.occurrenceId !== id || suspended) return;
+      const eventGeneration = generationRef.current;
+      eventQueueRef.current = eventQueueRef.current.then(async () => {
+        if (cancelled || eventGeneration !== generationRef.current || sourceGeneration !== stream.generation || event.rowVersion <= versionRef.current) return;
+        await load(event.rowVersion, eventGeneration);
+      }).catch(() => { if (!cancelled && eventGeneration === generationRef.current) stream.resync(); });
+    });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [id, load, stream, suspended]);
+  useEffect(() => stream.onResync(() => { if (id && !suspended) void load(0, generationRef.current); }), [id, load, stream, suspended]);
   const annotationEntries = occurrence ? Object.entries(occurrence.annotations ?? {}).filter(([key]) => key !== "description" && key !== "summary") : [];
   const description = occurrence?.annotations?.description ?? occurrence?.annotations?.summary;
-  return <Sheet open={Boolean(id)} onOpenChange={(open) => { if (!open) onClose(); }}><SheetContent side="right" className="flex h-dvh w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl"><SheetHeader className="shrink-0 border-b px-6 py-5 pr-12"><SheetTitle className="text-lg">{occurrence?.labels.alertname ?? "告警详情"}</SheetTitle><SheetDescription>查看告警的真实属性、观察记录和初步分析。</SheetDescription>{occurrence && <div className="flex flex-wrap items-center gap-2 pt-2"><Badge variant={occurrence.state === "Firing" ? "destructive" : "secondary"}>{occurrence.state}</Badge><Separator orientation="vertical" className="hidden h-4 self-center sm:block" /><Badge variant="outline">{occurrence.businessSystemKey ?? "未归属业务系统"}</Badge><Separator orientation="vertical" className="hidden h-4 self-center sm:block" /><span className="flex w-full items-center gap-1 text-xs text-muted-foreground sm:w-auto"><Clock3 className="size-3.5" aria-hidden="true" />最近变更 {time(occurrence.lastStateChangeAt)}</span></div>}</SheetHeader><div className="min-h-0 flex-1 overflow-hidden">{error ? <div className="p-6"><Alert variant="destructive"><AlertTriangle /><AlertTitle>无法加载告警详情</AlertTitle><AlertDescription>{error}</AlertDescription><Button className="mt-2" size="sm" variant="outline" onClick={() => void load()}><RefreshCw data-icon="inline-start" />重试</Button></Alert></div> : !occurrence ? <div className="flex flex-col gap-4 p-6" role="status" aria-label="正在加载告警详情"><Skeleton className="h-7 w-1/3" /><Skeleton className="h-24 w-full" /><Skeleton className="h-24 w-full" /></div> : <Tabs defaultValue="overview" onValueChange={(value) => setAnalysisOpen(value === "analysis")} className="h-full min-h-0 gap-0"><div className="shrink-0 border-b px-6"><TabsList variant="line" className="h-11"><TabsTrigger value="overview">概览</TabsTrigger><TabsTrigger value="timeline">时间线</TabsTrigger><TabsTrigger value="analysis">AI 分析</TabsTrigger></TabsList></div><TabsContent value="overview" className="min-h-0 overflow-y-auto p-4 sm:p-6"><div className="flex flex-col gap-6"><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">告警说明</h2>{description ? <p className="whitespace-pre-wrap text-sm leading-6">{description}</p> : <DetailEmpty icon={FileText} title="没有提供描述" description="上游告警未附带描述或摘要。" />}</section>{annotationEntries.length > 0 && <><Separator /><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">注释</h2><PropertyList entries={annotationEntries} /></section></>}<Separator /><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">属性</h2><PropertyList entries={Object.entries(occurrence.labels)} /></section></div></TabsContent><TabsContent value="timeline" className="min-h-0 overflow-y-auto p-4 sm:p-6"><section aria-labelledby="observation-title"><h2 id="observation-title" className="mb-4 text-sm font-medium">观察记录</h2>{observations.length === 0 ? <DetailEmpty icon={Activity} title="没有观察记录" description="此告警尚未记录状态观察。" /> : <ul className="ml-2 border-l border-border" aria-label="观察记录时间线">{observations.map((item) => <li key={item.id} className="relative pl-5"><ObservationDot effect={item.effect} /><Item className="rounded-none border-0 px-0 py-4" size="sm"><ItemMedia variant="icon"><ObservationIcon effect={item.effect} /></ItemMedia><ItemContent><ItemTitle>{item.observedState}</ItemTitle><ItemDescription>效果：{item.effect} · 提交于 {time(item.committedAt)}</ItemDescription></ItemContent></Item></li>)}</ul>}</section></TabsContent><TabsContent value="analysis" className="min-h-0 overflow-y-auto p-4 sm:p-6">{analysisOpen && <InitialAnalysis key={occurrence.id} occurrenceId={occurrence.id} suspended={suspended} openEvidence={openEvidence} />}</TabsContent></Tabs>}</div></SheetContent></Sheet>;
+  return <Sheet open={Boolean(id)} onOpenChange={(open) => { if (!open) onClose(); }}><SheetContent side="right" className="flex h-dvh w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl"><SheetHeader className="shrink-0 border-b px-6 py-5 pr-12"><SheetTitle className="text-lg">{occurrence?.labels.alertname ?? "告警详情"}</SheetTitle><SheetDescription>{occurrence?.source === "platform" ? "查看平台组件故障的原因和发生、恢复时间。" : "查看告警的真实属性、观察记录和初步分析。"}</SheetDescription>{occurrence && <div className="flex flex-wrap items-center gap-2 pt-2"><Badge variant={occurrence.state === "Firing" ? "destructive" : "secondary"}>{occurrence.state}</Badge><Separator orientation="vertical" className="hidden h-4 self-center sm:block" /><Badge variant="outline">{occurrence.source === "platform" ? `平台内部 · ${occurrence.component ?? "未知组件"}` : occurrence.businessSystemKey ?? "未归属业务系统"}</Badge><Separator orientation="vertical" className="hidden h-4 self-center sm:block" /><span className="flex w-full items-center gap-1 text-xs text-muted-foreground sm:w-auto"><Clock3 className="size-3.5" aria-hidden="true" />最近变更 {time(occurrence.lastStateChangeAt)}</span></div>}</SheetHeader><div className="min-h-0 flex-1 overflow-hidden">{error ? <div className="p-6"><Alert variant="destructive"><AlertTriangle /><AlertTitle>无法加载告警详情</AlertTitle><AlertDescription>{error}</AlertDescription><Button className="mt-2" size="sm" variant="outline" onClick={() => void load()}><RefreshCw data-icon="inline-start" />重试</Button></Alert></div> : !occurrence ? <div className="flex flex-col gap-4 p-6" role="status" aria-label="正在加载告警详情"><Skeleton className="h-7 w-1/3" /><Skeleton className="h-24 w-full" /><Skeleton className="h-24 w-full" /></div> : <Tabs defaultValue="overview" onValueChange={(value) => setAnalysisOpen(value === "analysis")} className="h-full min-h-0 gap-0"><div className="shrink-0 border-b px-6"><TabsList variant="line" className="h-11"><TabsTrigger value="overview">概览</TabsTrigger>{occurrence.source !== "platform" && <TabsTrigger value="timeline">时间线</TabsTrigger>}{occurrence.source !== "platform" && <TabsTrigger value="analysis">AI 分析</TabsTrigger>}</TabsList></div><TabsContent value="overview" className="min-h-0 overflow-y-auto p-4 sm:p-6"><div className="flex flex-col gap-6"><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">告警说明</h2>{description ? <p className="whitespace-pre-wrap text-sm leading-6">{description}</p> : <DetailEmpty icon={FileText} title="没有提供描述" description="上游告警未附带描述或摘要。" />}</section>{occurrence.source === "platform" && <><Separator /><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">故障生命周期</h2><PropertyList entries={[["发生时间", time(occurrence.firstSeenAt)], ["恢复时间", occurrence.resolvedAt ? time(occurrence.resolvedAt) : "尚未恢复"], ["原因", occurrence.reason ?? "未知"]]} /><p className="text-sm text-muted-foreground">此平台故障没有业务采集声明，不支持初步分析。不会启动业务采集。</p></section></>}{annotationEntries.length > 0 && <><Separator /><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">注释</h2><PropertyList entries={annotationEntries} /></section></>}<Separator /><section className="flex flex-col gap-3"><h2 className="text-sm font-medium">属性</h2><PropertyList entries={Object.entries(occurrence.labels)} /></section></div></TabsContent><TabsContent value="timeline" className="min-h-0 overflow-y-auto p-4 sm:p-6"><section aria-labelledby="observation-title"><h2 id="observation-title" className="mb-4 text-sm font-medium">观察记录</h2>{observations.length === 0 ? <DetailEmpty icon={Activity} title="没有观察记录" description="此告警尚未记录状态观察。" /> : <ul className="ml-2 border-l border-border" aria-label="观察记录时间线">{observations.map((item) => <li key={item.id} className="relative pl-5"><ObservationDot effect={item.effect} /><Item className="rounded-none border-0 px-0 py-4" size="sm"><ItemMedia variant="icon"><ObservationIcon effect={item.effect} /></ItemMedia><ItemContent><ItemTitle>{item.observedState}</ItemTitle><ItemDescription>效果：{item.effect} · 提交于 {time(item.committedAt)}</ItemDescription></ItemContent></Item></li>)}</ul>}</section></TabsContent>{occurrence.source !== "platform" && <TabsContent value="analysis" className="min-h-0 overflow-y-auto p-4 sm:p-6">{analysisOpen && <InitialAnalysis key={occurrence.id} occurrenceId={occurrence.id} suspended={suspended} openEvidence={openEvidence} />}</TabsContent>}</Tabs>}</div></SheetContent></Sheet>;
 }
 
 function InitialAnalysis({ occurrenceId, suspended, openEvidence }: { occurrenceId: string; suspended: boolean; openEvidence: (id: string) => void }) {

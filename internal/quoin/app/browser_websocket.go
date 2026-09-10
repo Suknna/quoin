@@ -46,7 +46,7 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			_ = conn.Close()
 			return
 		}
-		session, err := application.authenticateFull(request.Context(), cookie, "附着人工浏览器登录")
+		session, err := application.authenticateAdmin(request.Context(), cookie, "附着人工浏览器登录")
 		if err != nil {
 			_ = conn.Close()
 			return
@@ -105,7 +105,7 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			http.Error(writer, "browser login requires an authenticated Session", http.StatusUnauthorized)
 			return
 		}
-		session, err := application.authenticateFull(request.Context(), cookie, "附着人工浏览器登录")
+		session, err := application.authenticateAdmin(request.Context(), cookie, "附着人工浏览器登录")
 		if err != nil {
 			http.Error(writer, "browser login Session is not authorized", http.StatusUnauthorized)
 			return

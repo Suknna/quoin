@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { type CSSProperties, type ReactNode, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,15 +41,30 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { WorkspaceModuleView } from "./module-contract";
 
-const operationItems = [
-	{ title: "告警列表", route: "/alerts/list", matches: (route: string) => route.startsWith("/alerts"), icon: Bell },
-	{ title: "故障复盘", route: "/postmortems", matches: (route: string) => route.startsWith("/postmortems"), icon: FileText },
-	{ title: "巡检", route: "/inspections", matches: (route: string) => route.startsWith("/inspections"), icon: ClipboardCheck },
-	{ title: "业务系统", route: "/business-systems", matches: (route: string) => route.startsWith("/business-systems"), icon: LayoutDashboard },
-] as const;
+type OperationItem = {
+	title: string;
+	route: string;
+	matches: (route: string) => boolean;
+	icon: typeof Bell;
+	adminOnly?: boolean;
+};
+
+const operationItems: readonly OperationItem[] = [
+	{ title: "告警列表", route: "/alerts/list", matches: (route) => route.startsWith("/alerts"), icon: Bell },
+	{ title: "故障复盘", route: "/postmortems", matches: (route) => route.startsWith("/postmortems"), icon: FileText },
+	{ title: "巡检", route: "/inspections", matches: (route) => route.startsWith("/inspections"), icon: ClipboardCheck, adminOnly: true },
+	{ title: "业务纳管", route: "/business-systems", matches: (route) => route.startsWith("/business-systems"), icon: LayoutDashboard, adminOnly: true },
+	{ title: "接入管理", route: "/integrations", matches: (route) => route.startsWith("/integrations"), icon: Settings, adminOnly: true },
+];
 
 function isOperationsRoute(route: string) {
 	return operationItems.some((item) => item.matches(route));
+}
+
+/** Operator work is intentionally limited to alerts and AI SRE, including direct route navigation. */
+function canAccessOperationsRoute(route: string, user: UserSummary) {
+	const item = operationItems.find((candidate) => candidate.matches(route));
+	return !item?.adminOnly || user.role === "admin";
 }
 
 function isAiSreRoute(route: string) {
@@ -65,10 +81,10 @@ function RailButton({ label, active, icon: Icon, onClick }: { label: string; act
 }
 
 /** Renders the route-owned module menu before any feature-specific object list. */
-function ModuleNavigation({ route, navigate }: { route: string; navigate: (route: string) => void }) {
-	if (isOperationsRoute(route)) {
+function ModuleNavigation({ route, user, navigate }: { route: string; user: UserSummary; navigate: (route: string) => void }) {
+	if (isOperationsRoute(route) && canAccessOperationsRoute(route, user)) {
 		return <nav className="flex flex-col gap-1 border-b p-3" aria-label="运维中心模块">
-			{operationItems.map((item) => <Button key={item.route} className="w-full justify-start" variant={item.matches(route) ? "secondary" : "ghost"} aria-current={item.matches(route) ? "page" : undefined} onClick={() => navigate(item.route)}><item.icon data-icon="inline-start" />{item.title}</Button>)}
+			{operationItems.filter((item) => !item.adminOnly || user.role === "admin").map((item) => <Button key={item.route} className="w-full justify-start" variant={item.matches(route) ? "secondary" : "ghost"} aria-current={item.matches(route) ? "page" : undefined} onClick={() => navigate(item.route)}><item.icon data-icon="inline-start" />{item.title}</Button>)}
 		</nav>;
 	}
 	if (isAiSreRoute(route)) {
@@ -102,7 +118,7 @@ export function WorkspaceShell({
 	const moduleHeader = operations ? "运维中心" : aiSre ? "AI SRE" : view.title;
 	// Alert and postmortem views have no page actions, so their desktop content begins directly below the module pane.
 	const hideDesktopHeader = !view.actions && (route.startsWith("/alerts") || route.startsWith("/postmortems"));
-	const moduleNavigation = <ModuleNavigation route={route} navigate={navigate} />;
+	const moduleNavigation = <ModuleNavigation route={route} user={user} navigate={navigate} />;
 	const moduleList = moduleNavigation || view.list ? <>{moduleNavigation}{view.list}</> : null;
 
 	async function logout() {
@@ -129,7 +145,7 @@ export function WorkspaceShell({
 			<div className="hidden h-full min-w-0 flex-1 flex-col bg-sidebar md:flex"><SidebarHeader className="border-b p-4"><div className="text-sm font-semibold">{moduleHeader}</div></SidebarHeader><SidebarContent>{moduleList}</SidebarContent></div>
 		</Sidebar>
 		{logoutError && <div className="fixed right-4 bottom-4 z-50"><p role="alert" className="rounded-md border border-destructive bg-background p-3 text-sm text-destructive">{logoutError}</p></div>}
-		<SidebarInset>{!hideDesktopHeader && <header className="sticky top-0 z-10 hidden shrink-0 items-center gap-2 border-b bg-background p-4 md:flex"><SidebarTrigger className="-ml-1" /><div className="text-sm font-medium">{moduleHeader}</div><div className="ml-auto flex gap-2">{view.actions}</div></header>}<header className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b bg-background p-4 md:hidden"><SidebarTrigger className="-ml-1" /><div className="text-sm font-medium">{moduleHeader}</div><Sheet><SheetTrigger asChild><Button variant="outline" size="sm" className="ml-2">菜单</Button></SheetTrigger><SheetContent side="left"><SheetHeader><SheetTitle>{moduleHeader}</SheetTitle></SheetHeader>{moduleList}</SheetContent></Sheet><div className="ml-auto flex gap-2">{view.actions}</div></header><main className={`mx-auto w-full p-6 ${operations ? "max-w-6xl" : "max-w-3xl"}`}>{view.content}</main></SidebarInset>
+			<SidebarInset>{!hideDesktopHeader && <header className="sticky top-0 z-10 hidden shrink-0 items-center gap-2 border-b bg-background p-4 md:flex"><SidebarTrigger className="-ml-1" /><div className="text-sm font-medium">{moduleHeader}</div><div className="ml-auto flex gap-2">{view.actions}</div></header>}<header className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b bg-background p-4 md:hidden"><SidebarTrigger className="-ml-1" /><div className="text-sm font-medium">{moduleHeader}</div><Sheet><SheetTrigger asChild><Button variant="outline" size="sm" className="ml-2">菜单</Button></SheetTrigger><SheetContent side="left"><SheetHeader><SheetTitle>{moduleHeader}</SheetTitle></SheetHeader>{moduleList}</SheetContent></Sheet><div className="ml-auto flex gap-2">{view.actions}</div></header><main className={`mx-auto w-full p-6 ${operations ? "max-w-6xl" : "max-w-3xl"}`}>{!canAccessOperationsRoute(route, user) ? <Alert variant="destructive"><AlertDescription>此页面仅向管理员开放。</AlertDescription></Alert> : view.content}</main></SidebarInset>
 	</SidebarProvider>;
 }
 

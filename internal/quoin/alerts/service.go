@@ -32,9 +32,11 @@ func (service *Service) recordAudit(ctx context.Context, conn *sql.Conn, actorTy
 	return err
 }
 
-// ListSources returns the admin-facing alert source list.
+// ListSources returns the admin-facing alert source list. latest_valid_event_at
+// records the most recent successfully committed Alertmanager delivery. An absent
+// value deliberately means the source is waiting for its first event, never faulty.
 func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error) {
-	rows, err := service.db.QueryContext(ctx, `SELECT id, source_key, protocol, enabled, row_version, created_at, disabled_at FROM alert_sources ORDER BY id`)
+	rows, err := service.db.QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s ORDER BY s.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -44,8 +46,8 @@ func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error
 		var summary SourceSummary
 		var id int64
 		var enabled int
-		var disabledAt sql.NullString
-		if err := rows.Scan(&id, &summary.Key, &summary.Protocol, &enabled, &summary.RowVersion, &summary.CreatedAt, &disabledAt); err != nil {
+		var disabledAt, latestValidEventAt sql.NullString
+		if err := rows.Scan(&id, &summary.Key, &summary.Protocol, &enabled, &summary.RowVersion, &summary.CreatedAt, &disabledAt, &latestValidEventAt); err != nil {
 			return nil, err
 		}
 		summary.ID = strconv.FormatInt(id, 10)
@@ -53,19 +55,23 @@ func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error
 		if disabledAt.Valid {
 			summary.DisabledAt = &disabledAt.String
 		}
+		if latestValidEventAt.Valid {
+			summary.LatestValidEventAt = &latestValidEventAt.String
+		}
 		sources = append(sources, summary)
 	}
 	return sources, rows.Err()
 }
 
 type SourceSummary struct {
-	ID         string  `json:"id"`
-	Key        string  `json:"key"`
-	Protocol   string  `json:"protocol"`
-	Enabled    bool    `json:"enabled"`
-	RowVersion int64   `json:"rowVersion"`
-	CreatedAt  string  `json:"createdAt"`
-	DisabledAt *string `json:"disabledAt"`
+	ID                 string  `json:"id"`
+	Key                string  `json:"key"`
+	Protocol           string  `json:"protocol"`
+	Enabled            bool    `json:"enabled"`
+	RowVersion         int64   `json:"rowVersion"`
+	CreatedAt          string  `json:"createdAt"`
+	DisabledAt         *string `json:"disabledAt"`
+	LatestValidEventAt *string `json:"latestValidEventAt,omitempty"`
 }
 
 // GetSource returns one alert source with its credential count.
@@ -73,9 +79,9 @@ func (service *Service) GetSource(ctx context.Context, sourceKey string) (Source
 	var detail SourceDetail
 	var id int64
 	var enabled int
-	var disabledAt sql.NullString
-	err := service.db.QueryRowContext(ctx, `SELECT id, source_key, protocol, enabled, row_version, created_at, disabled_at, (SELECT COUNT(*) FROM alert_source_credentials c WHERE c.source_id = alert_sources.id) FROM alert_sources WHERE source_key=?`, sourceKey).
-		Scan(&id, &detail.Key, &detail.Protocol, &enabled, &detail.RowVersion, &detail.CreatedAt, &disabledAt, &detail.CredentialCount)
+	var disabledAt, latestValidEventAt sql.NullString
+	err := service.db.QueryRowContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, (SELECT COUNT(*) FROM alert_source_credentials c WHERE c.source_id=s.id), (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s WHERE s.source_key=?`, sourceKey).
+		Scan(&id, &detail.Key, &detail.Protocol, &enabled, &detail.RowVersion, &detail.CreatedAt, &disabledAt, &detail.CredentialCount, &latestValidEventAt)
 	if err != nil {
 		return SourceDetail{}, err
 	}
@@ -83,6 +89,9 @@ func (service *Service) GetSource(ctx context.Context, sourceKey string) (Source
 	detail.Enabled = enabled == 1
 	if disabledAt.Valid {
 		detail.DisabledAt = &disabledAt.String
+	}
+	if latestValidEventAt.Valid {
+		detail.LatestValidEventAt = &latestValidEventAt.String
 	}
 	return detail, nil
 }

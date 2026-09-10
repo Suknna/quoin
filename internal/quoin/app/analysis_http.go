@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
@@ -57,6 +58,12 @@ func (application *apiServer) createInitialAnalysis(ctx context.Context, input *
 	session, err := application.authenticateFull(ctx, input.Session, "发起初步分析")
 	if err != nil {
 		return nil, err
+	}
+	// Platform faults deliberately have no business declaration or analysis
+	// capability. Reject before parsing an upstream occurrence locator so opening
+	// their detail can never trigger a business collection attempt.
+	if strings.HasPrefix(input.OccurrenceID, "platform:") {
+		return nil, huma.Error422UnprocessableEntity("平台内部故障没有可用的业务分析上下文", nil)
 	}
 	occurrenceID, err := strconv.ParseInt(input.OccurrenceID, 10, 64)
 	if err != nil || occurrenceID <= 0 {

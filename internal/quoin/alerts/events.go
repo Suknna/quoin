@@ -8,10 +8,11 @@ import (
 // (DATA-SSE-001/003): Occurrence ID, change type and row version only —
 // never object bodies.
 type ChangeEvent struct {
-	Seq          int64
-	OccurrenceID int64
-	ChangeType   string
-	RowVersion   int64
+	Seq             int64
+	OccurrenceID    int64
+	PlatformFaultID int64
+	ChangeType      string
+	RowVersion      int64
 }
 
 // Watermarks derives the replay watermarks directly from the change log
@@ -25,7 +26,7 @@ func (service *Service) Watermarks(ctx context.Context) (highWater int64, oldest
 // ChangesAfter returns up to limit change events with id greater than after,
 // in ascending id order (bounded replay window).
 func (service *Service) ChangesAfter(ctx context.Context, after int64, limit int) ([]ChangeEvent, error) {
-	rows, err := service.db.QueryContext(ctx, `SELECT id, occurrence_id, change_type, row_version FROM alert_change_log WHERE id > ? ORDER BY id ASC LIMIT ?`, after, limit)
+	rows, err := service.db.QueryContext(ctx, `SELECT id, COALESCE(occurrence_id,0), COALESCE(platform_fault_id,0), change_type, row_version FROM alert_change_log WHERE id > ? ORDER BY id ASC LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +34,7 @@ func (service *Service) ChangesAfter(ctx context.Context, after int64, limit int
 	events := []ChangeEvent{}
 	for rows.Next() {
 		var event ChangeEvent
-		if err := rows.Scan(&event.Seq, &event.OccurrenceID, &event.ChangeType, &event.RowVersion); err != nil {
+		if err := rows.Scan(&event.Seq, &event.OccurrenceID, &event.PlatformFaultID, &event.ChangeType, &event.RowVersion); err != nil {
 			return nil, err
 		}
 		events = append(events, event)

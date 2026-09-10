@@ -63,7 +63,7 @@ func newAdminSurface(t *testing.T) (*httptest.Server, map[string]string) {
 func TestAdminUserAuthorizationMatrix(t *testing.T) {
 	server, admin := newAdminSurface(t)
 
-	// Operator: can read audit, cannot touch user management.
+	// Operator: cannot access audit or user-management APIs.
 	mustPost(t, server, admin, `/api/v1/admin/users`, `{"clientCommandId":"authz-create-01","username":"op1","displayName":"Operator One","role":"operator","password":"Operator one passphrase 2026!"}`, http.StatusCreated)
 	login := mustPost(t, server, map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json"}, `/api/v1/auth/login`, `{"username":"op1","password":"Operator one passphrase 2026!"}`, http.StatusOK)
 	operator := map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json", "Cookie": splitCookie(login.headers.Get("Set-Cookie"))}
@@ -76,10 +76,10 @@ func TestAdminUserAuthorizationMatrix(t *testing.T) {
 	if !strings.Contains(denied.body, "需要管理员权限") {
 		t.Fatalf("operator write must be forbidden with a human message, got %s", denied)
 	}
-	// Every logged-in user reads audit events (HTTP-PERM-001).
-	audit := mustRequest(t, server, operator, `/api/v1/audit-events?action=user.create`, http.StatusOK)
-	if !strings.Contains(audit, `"user.create"`) {
-		t.Fatalf("operator must read audit events, got %s", audit)
+	// Audit records are platform management data, not ordinary business context.
+	audit := mustRequest(t, server, operator, `/api/v1/audit-events?action=user.create`, http.StatusForbidden)
+	if !strings.Contains(audit, `"forbidden"`) {
+		t.Fatalf("operator audit access must be forbidden, got %s", audit)
 	}
 	// Own sessions visible to the operator with the current marker.
 	sessions := mustRequest(t, server, operator, `/api/v1/auth/sessions`, http.StatusOK)

@@ -33,7 +33,7 @@ type browserIdentityOutput struct {
 }
 
 func (application *apiServer) getBrowserIdentity(ctx context.Context, input *browserIdentityInput) (*browserIdentityOutput, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取浏览器身份"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取浏览器身份"); err != nil {
 		return nil, err
 	}
 	identity, err := application.browsers.GetIdentity(ctx, input.SystemKey)
@@ -102,7 +102,7 @@ type browserOperationOutput struct {
 }
 
 func (application *apiServer) startBrowserManualLogin(ctx context.Context, input *startBrowserLoginInput) (*browserOperationOutput, error) {
-	session, err := application.authenticateFull(ctx, input.Session, "启动人工浏览器登录")
+	session, err := application.authenticateAdmin(ctx, input.Session, "启动人工浏览器登录")
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ type browserOperationInput struct {
 }
 
 func (application *apiServer) getBrowserLoginOperation(ctx context.Context, input *browserOperationInput) (*browserOperationOutput, error) {
-	if _, err := application.authenticateFull(ctx, input.Session, "读取人工浏览器登录"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取人工浏览器登录"); err != nil {
 		return nil, err
 	}
 	id, err := strconv.ParseInt(input.OperationID, 10, 64)
@@ -145,7 +145,7 @@ type cancelBrowserOperationInput struct {
 }
 
 func (application *apiServer) cancelBrowserLoginOperation(ctx context.Context, input *cancelBrowserOperationInput) (*browserOperationOutput, error) {
-	session, err := application.authenticateFull(ctx, input.Session, "取消人工浏览器登录")
+	session, err := application.authenticateAdmin(ctx, input.Session, "取消人工浏览器登录")
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +182,7 @@ type publishBrowserProfileInput struct {
 // typed request to Lintel. The authoritative profile is returned by the
 // operation GET after the asynchronous Runtime result commits it.
 func (application *apiServer) publishBrowserProfile(ctx context.Context, input *publishBrowserProfileInput) (*browserOperationOutput, error) {
-	session, err := application.authenticateFull(ctx, input.Session, "发布浏览器登录身份")
+	session, err := application.authenticateAdmin(ctx, input.Session, "发布浏览器登录身份")
 	if err != nil {
 		return nil, err
 	}

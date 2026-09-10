@@ -1,0 +1,77 @@
+# Disposable #96/#102 acceptance topology. Runtime state and generated credentials live
+# beneath an ignored artifact tree; this file deliberately contains no secret values.
+# A distinct project name lets #102 run beside an already hand-debugged #96 topology.
+name: ${QUOIN_E2E_PROJECT:-quoin-e2e-real}
+services:
+  gateway:
+    image: caddy:2.10.2-alpine
+    ports:
+      - "${QUOIN_E2E_PORT:-8443}:8443"
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/gateway/tls:/etc/caddy/tls:ro
+    depends_on:
+      quoin:
+        condition: service_healthy
+      stele:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
+  frontend:
+    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0-dev}
+
+  quoin:
+    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0-dev}
+    command: ["serve", "--config", "/etc/quoin/component.yaml"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/quoin.yaml:/etc/quoin/component.yaml:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/data:/var/lib/quoin/data
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/backups:/var/lib/quoin/backups
+      # Long-lived Quoin only reads its deployment identity. The bootstrap
+      # one-shot explicitly overrides this mount while creating fresh secrets.
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets:/run/quoin-secrets:ro
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  # #102 uses the unmodified production Plinth adapter. It is deliberately
+  # not auto-registered: the browser test must prepare/reveal a token through
+  # the Admin About UI, then feed it only to this attached registration CLI.
+  plinth:
+    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0-dev}
+    command: ["--config", "/etc/quoin/component.yaml"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/plinth.yaml:/etc/quoin/component.yaml:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/plinth-state:/var/lib/plinth
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/plinth-workspaces:/var/lib/plinth/workspaces
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+    depends_on:
+      quoin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  stele:
+    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0-dev}
+    command: ["--config", "/etc/quoin/component.yaml"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/stele.yaml:/etc/quoin/component.yaml:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-service-token:/run/quoin-secrets/stele-service-token:ro
+    depends_on:
+      quoin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s

@@ -24,6 +24,12 @@
       "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+)(?::[0-9]{1,5})?$",
       "maxLength": 512
     },
+    "stelePublicURL": {
+      "type": "string",
+      "description": "Alertmanager 到 Stele 的部署公开 receiver URL；必须是 HTTPS 且固定为 /stele/alerts，不从请求 Host 推导。",
+      "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+)(?::[0-9]{1,5})?/stele/alerts$",
+      "maxLength": 512
+    },
     "quoinRuntimeEndpoint": {
       "type": "string",
       "description": "Runtime/Stele 拨号的 Quoin TLS gRPC endpoint；这是远端地址，不是本进程监听配置。",
@@ -88,6 +94,7 @@
         "runtimeTlsCertificateFile": { "$ref": "#/$defs/absolutePath" },
         "runtimeTlsPrivateKeyFile": { "$ref": "#/$defs/absolutePath" },
         "steleServiceTokenFile": { "$ref": "#/$defs/absolutePath" },
+        "stelePublicURL": { "$ref": "#/$defs/stelePublicURL" },
         "deploymentBinding": { "$ref": "#/$defs/deploymentBinding" }
       }
     },

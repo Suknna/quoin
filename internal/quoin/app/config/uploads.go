@@ -80,9 +80,13 @@ func (handler *Handler) ServeBusinessSystemUpload(writer http.ResponseWriter, re
 		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再上传配置。", nil)
 		return
 	}
-	principalID, err := handler.admin(request.Context(), cookie)
-	if err != nil {
-		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再上传配置。", nil)
+	principalID, status := handler.managementReader(request.Context(), cookie)
+	if status != 0 {
+		if status == http.StatusForbidden {
+			writeProblemJSON(writer, status, "forbidden", "该操作需要管理员权限。", nil)
+			return
+		}
+		writeProblemJSON(writer, status, "unauthenticated", "请重新登录后再上传配置。", nil)
 		return
 	}
 	mediaType, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -189,9 +193,13 @@ func (handler *Handler) ServeLabelContractUpload(writer http.ResponseWriter, req
 		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再上传契约。", nil)
 		return
 	}
-	principalID, err := handler.admin(request.Context(), cookie)
-	if err != nil {
-		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再上传契约。", nil)
+	principalID, status := handler.managementReader(request.Context(), cookie)
+	if status != 0 {
+		if status == http.StatusForbidden {
+			writeProblemJSON(writer, status, "forbidden", "该操作需要管理员权限。", nil)
+			return
+		}
+		writeProblemJSON(writer, status, "unauthenticated", "请重新登录后再上传契约。", nil)
 		return
 	}
 	mediaType, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
@@ -302,8 +310,12 @@ func (handler *Handler) ServeBusinessSystemTemplate(writer http.ResponseWriter, 
 		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再下载模板。", nil)
 		return
 	}
-	if _, err := handler.reader(request.Context(), cookie); err != nil {
-		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再下载模板。", nil)
+	if _, status := handler.managementReader(request.Context(), cookie); status != 0 {
+		if status == http.StatusForbidden {
+			writeProblemJSON(writer, status, "forbidden", "该操作需要管理员权限。", nil)
+			return
+		}
+		writeProblemJSON(writer, status, "unauthenticated", "请重新登录后再下载模板。", nil)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/yaml")

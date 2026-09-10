@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/quoin/auth"
+
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
@@ -121,7 +123,14 @@ func (handler *Handler) reader(ctx context.Context, cookie string) (int64, error
 	}
 	principalID, err := handler.Authenticate(ctx, cookie)
 	if err != nil {
-		return 0, problem(http.StatusUnauthorized, "unauthorized", "登录会话无效，请重新登录。")
+		var authorization interface{ GetStatus() int }
+		if errors.As(err, &authorization) && authorization.GetStatus() == http.StatusForbidden {
+			return 0, problem(http.StatusForbidden, "forbidden", "该操作需要管理员权限。")
+		}
+		if errors.Is(err, auth.ErrUnauthenticated) {
+			return 0, problem(http.StatusUnauthorized, "unauthorized", "登录会话无效，请重新登录。")
+		}
+		return 0, problem(http.StatusInternalServerError, "unavailable", "服务暂时不可用，请稍后重试。")
 	}
 	return principalID, nil
 }

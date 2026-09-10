@@ -15,6 +15,7 @@ rootKeyFile: /run/secrets/root-key
 runtimeTlsCertificateFile: /run/secrets/runtime-tls.crt
 runtimeTlsPrivateKeyFile: /run/secrets/runtime-tls.key
 steleServiceTokenFile: /run/secrets/stele-token
+stelePublicURL: https://quoin.example.com/stele/alerts
 `
 
 func TestDecodeAcceptsStrictGeneratedConfiguration(t *testing.T) {
@@ -22,7 +23,7 @@ func TestDecodeAcceptsStrictGeneratedConfiguration(t *testing.T) {
 	if err := contract.Decode([]byte(validQuoin), &config); err != nil {
 		t.Fatal(err)
 	}
-	if config.Component != "quoin" || config.PublicOrigin != "https://quoin.example.com" {
+	if config.Component != "quoin" || config.PublicOrigin != "https://quoin.example.com" || config.StelePublicURL != "https://quoin.example.com/stele/alerts" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
