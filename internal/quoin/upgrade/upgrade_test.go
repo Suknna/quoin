@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
 )
@@ -99,7 +99,8 @@ func seedInspectionRun(t *testing.T, db *sql.DB, adminID int64) int64 {
 		t.Fatal(err)
 	}
 	systemID, _ := system.LastInsertId()
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,enabled,timezone,resource_refresh_interval_seconds,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at) VALUES(?, 't36-system','T36 System',1,'UTC',3600,1,'draft','body','p','v1',?,?,'cat-v1',?,?)`, systemID, draft.Version, digest64, digest64, now)
+	metricsConnectionID := seedConnection(t, db, "t36-metrics")
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?,?,'cat-v1',?,?)`, systemID, metricsConnectionID, draft.Version, digest64, digest64, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func seedInspectionRun(t *testing.T, db *sql.DB, adminID int64) int64 {
 	// Moving the current pointer onto the same-system unpublished draft
 	// publishes it through the frozen owner trigger; the root projection
 	// columns must travel in the same UPDATE.
-	mustExec(t, db, `UPDATE business_systems SET enabled=1,current_config_version_id=?,display_name='T36 System',timezone='UTC',resource_refresh_interval_seconds=3600,row_version=row_version+1 WHERE id=?`, versionID, systemID)
+	mustExec(t, db, `UPDATE business_systems SET enabled=1,current_config_version_id=?,display_name='T36 System',timezone='UTC',row_version=row_version+1 WHERE id=?`, versionID, systemID)
 	run, err := db.Exec(`INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at) VALUES(?, 'nightly',?,?, 'manual','Queued',?)`, systemID, versionID, draft.Version, now)
 	if err != nil {
 		t.Fatal(err)

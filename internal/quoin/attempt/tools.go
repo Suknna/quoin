@@ -102,9 +102,10 @@ var InitialAnalysisTools = []ToolDef{
 	},
 	{
 		Name: "thanos_query", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "thanos_query_result_v1", ProducesEvidence: true,
-		Description: "对全局 Thanos 执行一次只读 PromQL 即时查询（instant query）；模型只提供 query 表达式，连接与凭据由 Quoin 确定性解析，结果作为不可变 Evidence 封存。",
-		Arguments:   map[string]ArgumentKind{"query": KindString},
-		Required:    []string{"query"},
+		Description: "对当前告警已归属业务的已发布指标接入执行一次只读 PromQL 即时查询；每个向量选择器必须精确匹配该业务 Label Contract。模型只提供 query，连接与凭据由 Quoin 从不可变分析上下文确定性解析，结果作为不可变 Evidence 封存。",
+
+		Arguments: map[string]ArgumentKind{"query": KindString},
+		Required:  []string{"query"},
 	},
 }
 

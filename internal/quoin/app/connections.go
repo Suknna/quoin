@@ -25,8 +25,10 @@ type connectionConfigInput struct {
 	TLSCaPem            string `json:"tlsCaPem,omitempty"`
 	TLSServerName       string `json:"tlsServerName,omitempty"`
 	TLSSkipVerify       bool   `json:"tlsSkipVerify,omitempty"`
+	AuthType            string `json:"authType,omitempty"`
 	Username            string `json:"username,omitempty"`
 	Password            string `json:"password,omitempty"`
+	BearerToken         string `json:"bearerToken,omitempty"`
 	ContextName         string `json:"contextName,omitempty"`
 	DefaultNamespace    string `json:"defaultNamespace,omitempty"`
 	Kubeconfig          string `json:"kubeconfig,omitempty"`
@@ -41,17 +43,38 @@ type connectionConfigInput struct {
 // per the frozen oneOf variants.
 func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret json.RawMessage, secretPresent bool, err error) {
 	switch input.Type {
-	case connections.TypeThanos:
-		projection, _ := json.Marshal(map[string]any{
-			"type": connections.TypeThanos, "baseUrl": input.BaseURL,
-			"tlsCaPem": input.TLSCaPem, "tlsServerName": input.TLSServerName,
-			"tlsSkipVerify": input.TLSSkipVerify, "username": input.Username,
-		})
-		if input.Password != "" {
-			secret, _ = json.Marshal(map[string]string{"type": connections.TypeThanos, "username": input.Username, "password": input.Password})
-			return projection, secret, true, nil
+	case connections.TypePrometheus, connections.TypeThanos:
+		authType := input.AuthType
+		if authType == "" {
+			authType = "none"
 		}
-		return projection, nil, false, nil
+		projection, _ := json.Marshal(map[string]any{
+			"type": input.Type, "baseUrl": input.BaseURL,
+			"tlsCaPem": input.TLSCaPem, "tlsServerName": input.TLSServerName,
+			"tlsSkipVerify": input.TLSSkipVerify, "authType": authType,
+			"username": input.Username,
+		})
+		switch authType {
+		case "none":
+			if input.Username != "" || input.Password != "" || input.BearerToken != "" {
+				return nil, nil, false, errors.New("none authentication cannot include credentials")
+			}
+			return projection, nil, false, nil
+		case "basic":
+			if input.Username == "" || input.Password == "" || input.BearerToken != "" {
+				return nil, nil, false, errors.New("basic authentication requires username and password only")
+			}
+			secret, _ = json.Marshal(map[string]string{"type": input.Type, "username": input.Username, "password": input.Password})
+			return projection, secret, true, nil
+		case "bearer":
+			if input.Username != "" || input.Password != "" || input.BearerToken == "" {
+				return nil, nil, false, errors.New("bearer authentication requires bearerToken only")
+			}
+			secret, _ = json.Marshal(map[string]string{"type": input.Type, "bearerToken": input.BearerToken})
+			return projection, secret, true, nil
+		default:
+			return nil, nil, false, errors.New("metrics authType must be none, basic or bearer")
+		}
 	case connections.TypeKubernetes:
 		if input.Kubeconfig == "" {
 			return nil, nil, false, errors.New("kubernetes requires a kubeconfig secret")
@@ -79,7 +102,7 @@ func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret
 		secret, _ := json.Marshal(map[string]string{"type": connections.TypeModelProvider, "apiKey": input.APIKey})
 		return nonSecret, secret, true, nil
 	default:
-		return nil, nil, false, errors.New("connection.type must be thanos, kubernetes or model_provider")
+		return nil, nil, false, errors.New("connection.type must be prometheus, thanos, kubernetes or model_provider")
 	}
 }
 

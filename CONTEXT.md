@@ -213,7 +213,7 @@ _Avoid_: 代码写死 label、每业务系统重复定义归属 label、CMDB Sch
 _Avoid_: YAML 与数据库双配置权威、接入即扫描、租户、Kubernetes 集群、自动推断服务、停用删除历史
 
 **观测资源（Observed Resource）**：
-由具有合法业务身份声明的任务产生、带业务、观测时间、来源任务和配置版本的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map`；显示名称、数组顺序和非身份 labels 不参与身份。已声明的定时巡检、告警分析、对话工具调用及显式验证/试运行可以按需采集；接入、发布、打开页面和独立周期刷新不采集。完整范围内的成功观测才能表达未再观测到；局部查询、失败或缺口不得清空其他资源或推断物理删除。
+由具有合法业务身份声明的已发布任务产生、带业务、观测时间、来源任务和配置版本的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map`；显示名称、数组顺序和非身份 labels 不参与身份。已声明的定时巡检、告警分析和对话工具调用可以按需采集并形成正式观测；显式验证/试运行只形成独立的 Run 证据，绝不写入 Observed Resource。接入、发布、打开页面和独立周期刷新不采集。完整范围内的成功观测才能表达未再观测到；局部查询、失败或缺口不得清空其他资源或推断物理删除。
 _Avoid_: 资产、CMDB 条目、Kubernetes 对象快照、独立周期资源刷新、用 `/series` 元数据证明当前资源状态、完整 labels fingerprint 身份
 
 **Kubernetes 运行时状态（Kubernetes Runtime State）**：
@@ -225,8 +225,8 @@ Quoin 访问一个外部运行系统时使用的稳定命名身份与访问边�
 _Avoid_: 无类型 URL+凭据、可覆盖配置、长期可下发旧秘密、用户凭据、巡检计划、Runtime 身份
 
 **指标接入（Metrics Integration）**：
-用户配置的 Prometheus 或 Thanos 查询能力，保存访问能力而不代表任何业务用途；同一平台可有多个接入。业务系统的已发布声明显式引用所需指标接入并分别限定查询用途和范围，执行必须解析为该引用，不能回退到全局或“第一个”接入；业务声明及其引用不内嵌接入凭据，凭据仍在接入边界管理。PromQL 校验仍使用 AST 而非正则，并按业务声明的 Label Contract 与范围强制约束；资源身份规则仍不得把历史或合成查询伪装为当前资源。
-_Avoid_: 全局唯一 Thanos、每业务系统私有凭据、Grafana 数据源、Thanos StoreAPI、字符串改写 PromQL
+用户配置的 Prometheus 或 Thanos 查询能力，保存访问能力而不代表任何业务用途；同一平台可有多个接入。每份需要指标能力的业务系统声明以一个明确的 `metrics_connection_id` 引用确定接入；执行必须解析为该引用，不能回退到全局或“第一个”接入。Prometheus 与 Thanos 是不同的平台类型；认证模式只限 `none`、HTTP Basic 和 Bearer，TLS 仍使用接入的既有类型化配置，不能以跳过证书校验替代 TLS 配置。业务声明及其引用不内嵌地址、凭据或 TLS 秘密，凭据仍在接入边界管理。PromQL 校验仍使用 AST 而非正则，并按业务声明的 Label Contract 与范围强制约束；资源身份规则仍不得把历史或合成查询伪装为当前资源。
+_Avoid_: 全局唯一 Thanos、缺失或歧义引用时回退、每业务系统私有凭据、Grafana 数据源、Thanos StoreAPI、字符串改写 PromQL
 
 **接入（Integration）**：
 用户从支持的平台目录配置并管理的访问能力，包括 Alertmanager、Prometheus、Thanos、Kubernetes 和浏览器。接入保存平台特有的访问配置、凭据边界和验证状态；业务系统声明接入的用途与范围，Run/Attempt 冻结实际使用的已授权接入修订。接入的保存、浏览和启用本身不采集业务资源。
@@ -241,8 +241,8 @@ _Avoid_: 巡检报告、调查、跨业务系统的自动推断模板、任意 A
 _Avoid_: 诊断、巡检报告、由程序猜测的检查、Kubernetes 定时检查、健康阈值规则引擎、动态 fan-out、通用模板或 DSL
 
 **业务系统配置版本（Business System Configuration Version）**：
-每个业务系统的一份完整、版本化权威声明原子包含稳定业务系统 key/name/enabled、接入引用、资源发现和全部巡检计划；每个系统只有一个当前已发布版本。等价表单和 YAML 视图编辑同一草稿，Config Verification Run 精确绑定该草稿；发布命令携带 version ID 与 expected current published version ID，事务中重验并切换，不匹配则冲突。Label Contract 联合激活仍原子切换契约和全部兼容版本。声明统一提供 IANA 时区，discovery、plan、check 使用稳定 key。YAML 导入/导出时只接受一个 UTF-8 文档，拒绝重复 key、anchor/alias、merge、自定义 tag、非字符串字段名、第二文档和尾随内容，并设输入/AST/深度上限；YAML 输入只解析一次，保存原文、parser/schema 版本、类型结构和 digest，运行只使用类型结构。表单与 YAML 共享同一 Schema 校验结果；未知字段、重复 key 或不兼容契约必须拒绝，不得在表单往返中静默丢失。具体字段和机器契约仍待 #95 实施时同步迁移。
-_Avoid_: 页面隐式归属、共享可覆盖草稿、资源与计划分别发布、运行时重新解析、自动热加载、表单与 YAML 双权威、要求用户先读内部 Schema
+每个业务系统的一份完整、版本化权威声明原子包含稳定业务系统 key/name/enabled、接入引用、资源身份规则和全部巡检计划；每个系统只有一个当前已发布版本。指标能力由顶层必填 `metrics_connection_id`（十进制 numeric-string）明确引用；可选 `alert_source_ids` 是同一表示法的数组，`alert_source_labels` 是精确字符串映射，且业务归属的权威仍是 Label Contract。等价表单和 YAML 视图编辑同一草稿，Config Verification Run 精确绑定该草稿；发布命令携带 version ID 与 expected current published version ID，事务中重验并切换，不匹配则冲突。Label Contract 联合激活仍原子切换契约和全部兼容版本。声明统一提供 IANA 时区，资源身份规则、plan、check 使用稳定 key。YAML 导入/导出时只接受一个 UTF-8 文档，拒绝重复 key、anchor/alias、merge、自定义 tag、非字符串字段名、第二文档和尾随内容，并设输入/AST/深度上限；YAML 输入只解析一次，保存原文、parser/schema 版本、类型结构和 digest，运行只使用类型结构。表单与 YAML 共享同一 Schema 校验结果；未知字段、重复 key 或不兼容契约必须拒绝，不得在表单往返中静默丢失。具体字段和机器契约随 #97 迁移并由其唯一机器权威定义。
+_Avoid_: 页面隐式归属、缺失指标引用、共享可覆盖草稿、资源与计划分别发布、运行时重新解析、自动热加载、表单与 YAML 双权威、要求用户先读内部 Schema
 
 **浏览器身份（Browser Identity）**：
 受控浏览器运行侧保存的持久登录身份，保存稳定身份和当前配置 revision/profile generation/状态指针；它作为浏览器接入独立配置，并由业务系统以显式授权引用，而非只能从业务内创建。身份复用默认不跨业务，只有明确授权的引用可复用。Revision 包含起始 URL、版本化 authentication probe 与类型化参数；每个 Browser Operation 冻结实际 revision。人工登录仅 Admin 可发起、操作及发布，绑定发起用户和 Web Session，单一身份互斥，其他用户不得旁观或接管；Operator 没有重新登录或其他浏览器身份管理例外，服务端必须拒绝其直接请求。关闭操作页不保存也不隐式取消，只有仍有效会话经 probe 成功后的显式保存才能发布新 Profile Generation，失败不覆盖旧有效版本。Cookie、storage state 与 profile 字节只保存在受控浏览器侧，不进入前端、数据库、模型、Artifact、日志或备份；Quoin 只保留引用、清单、状态、时间和运行引用。技术故障与明确未登录仍须区分，且不将前者伪造成凭据失效。

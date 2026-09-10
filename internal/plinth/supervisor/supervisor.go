@@ -51,7 +51,14 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION:
 		switch dispatch.GetScopeType() {
 		case runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN:
-			supervisor.runConfigVerification(parent, sink, client, dispatch, binding, stopTask)
+			var input struct {
+				SchemaKind string `json:"schemaKind"`
+			}
+			if dispatch.GetInput() != nil && json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &input) == nil && input.SchemaKind == "config_verification_discovery_execution_v1" {
+				supervisor.runVerificationDiscovery(parent, sink, client, dispatch, binding, stopTask)
+			} else {
+				supervisor.runConfigVerification(parent, sink, client, dispatch, binding, stopTask)
+			}
 		case runtimev1.ScopeType_SCOPE_TYPE_RESOURCE_REFRESH_RUN:
 			supervisor.runResourceRefresh(parent, sink, client, dispatch, binding, stopTask)
 		case runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK:
@@ -117,7 +124,7 @@ func (supervisor *Supervisor) runConfigVerification(parent context.Context, sink
 		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
 		return
 	}
-	result, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword()}, input.Query.Mode, input.Query.Expression, input.Query.RangeSeconds, input.Query.StepSeconds)
+	result, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword(), BearerToken: payload.GetThanos().GetBearerToken()}, input.Query.Mode, input.Query.Expression, input.Query.RangeSeconds, input.Query.StepSeconds)
 	if err != nil {
 		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, []string{err.Error()}, "query_failed")
 		return
@@ -310,7 +317,7 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 	// action fetches through the chat grant.
 	grant := grants[0]
 	for _, candidate := range grants {
-		if candidate.GetPurpose() == "model_probe_chat" || candidate.GetPurpose() == "thanos_probe" || candidate.GetPurpose() == "kubernetes_probe" {
+		if candidate.GetPurpose() == "model_probe_chat" || candidate.GetPurpose() == "prometheus_probe" || candidate.GetPurpose() == "thanos_probe" || candidate.GetPurpose() == "kubernetes_probe" {
 			grant = candidate
 			break
 		}
@@ -341,23 +348,29 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		schemaKind string
 	)
 	switch grantPayload.GetConnectionType() {
-	case "thanos":
-		var config plinthconnections.ThanosConfig
-		var secret plinthconnections.ThanosSecret
+	case "prometheus", "thanos":
+		var config plinthconnections.MetricsConfig
+		var secret plinthconnections.MetricsSecret
 		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
 		if grantPayload.GetThanos() != nil {
-			secret = plinthconnections.ThanosSecret{Username: grantPayload.GetThanos().GetUsername(), Password: grantPayload.GetThanos().GetPassword()}
+			secret = plinthconnections.MetricsSecret{Username: grantPayload.GetThanos().GetUsername(), Password: grantPayload.GetThanos().GetPassword(), BearerToken: grantPayload.GetThanos().GetBearerToken()}
 		}
-		schemaKind = "connection_probe_thanos_v1"
+		schemaKind = "connection_probe_" + grantPayload.GetConnectionType() + "_v1"
 		if configErr != nil {
-			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": "thanos", "query": "vector(1)", "error": "revision 配置无法解析: " + configErr.Error()})
+			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": grantPayload.GetConnectionType(), "query": "vector(1)", "error": "revision 配置无法解析: " + configErr.Error()})
 			break
 		}
-		detail, runErr := plinthconnections.RunThanosProbe(ctx, config, secret)
+		var detail plinthconnections.ThanosProbeDetail
+		var runErr error
+		if grantPayload.GetConnectionType() == "prometheus" {
+			detail, runErr = plinthconnections.RunPrometheusProbe(ctx, config, secret)
+		} else {
+			detail, runErr = plinthconnections.RunThanosProbe(ctx, config, secret)
+		}
 		outcome = "passed"
 		if runErr != nil {
 			outcome = "failed"
-			sharedops.LogEvent("plinth", "info", "probe.thanos_failed", runErr.Error())
+			sharedops.LogEvent("plinth", "info", "probe.metrics_failed", runErr.Error())
 			detailJSON = mustJSON(withError(mustJSON(detail), runErr))
 		} else {
 			detailJSON = mustJSON(detail)

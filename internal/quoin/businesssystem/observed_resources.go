@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 type ObservedResourceSummary struct {
@@ -23,15 +22,15 @@ type ObservedResourceDetail struct {
 	CreatedAt string            `json:"createdAt"`
 }
 
-// ListObservedResources derives freshness from the configured interval and the
-// immutable last-success fact; stale is never independently written as truth.
+// ListObservedResources preserves the last authoritative observation facts.
+// The retired independent refresh cadence cannot infer freshness; a missed
+// controlled task is a collection gap, not evidence that a resource is stale.
 func (service *Service) ListObservedResources(ctx context.Context, systemKey string, current *bool, after int64, limit int) ([]ObservedResourceSummary, int64, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	var systemID int64
-	var interval sql.NullInt64
-	if err := service.db.QueryRowContext(ctx, `SELECT id,resource_refresh_interval_seconds FROM business_systems WHERE key=?`, systemKey).Scan(&systemID, &interval); err != nil {
+	if err := service.db.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, 0, ErrNotFound
 		}
@@ -72,9 +71,6 @@ func (service *Service) ListObservedResources(ctx context.Context, systemKey str
 		item := ObservedResourceSummary{ID: fmt.Sprint(id), DiscoveryKey: discovery, IdentityLabels: identity, ObservedAt: observed, Current: currentInt == 1}
 		if last.Valid {
 			item.LastSuccessfulRefreshAt = &last.String
-			if interval.Valid {
-				item.Stale = resourceStale(last.String, interval.Int64, service.now())
-			}
 		}
 		items = append(items, item)
 	}
@@ -97,14 +93,9 @@ func (service *Service) observedResourceIdentity(ctx context.Context, id int64) 
 	}
 	return labels, rows.Err()
 }
-func resourceStale(last string, interval int64, now time.Time) bool {
-	observed, err := time.Parse(time.RFC3339Nano, last)
-	return err != nil || observed.Add(time.Duration(interval)*time.Second).Before(now)
-}
-
 func (service *Service) GetObservedResource(ctx context.Context, systemKey string, resourceID int64) (ObservedResourceDetail, error) {
-	var systemID, interval int64
-	if err := service.db.QueryRowContext(ctx, `SELECT id,resource_refresh_interval_seconds FROM business_systems WHERE key=?`, systemKey).Scan(&systemID, &interval); err != nil {
+	var systemID int64
+	if err := service.db.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if err == sql.ErrNoRows {
 			return ObservedResourceDetail{}, ErrNotFound
 		}
@@ -130,7 +121,6 @@ func (service *Service) GetObservedResource(ctx context.Context, systemKey strin
 	summary := ObservedResourceSummary{ID: fmt.Sprint(resourceID), DiscoveryKey: discovery, IdentityLabels: identity, ObservedAt: observed, Current: current == 1}
 	if last.Valid {
 		summary.LastSuccessfulRefreshAt = &last.String
-		summary.Stale = resourceStale(last.String, interval, service.now())
 	}
 	return ObservedResourceDetail{ObservedResourceSummary: summary, Labels: labels, CreatedAt: created}, nil
 }

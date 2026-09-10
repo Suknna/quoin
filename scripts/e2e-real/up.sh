@@ -4,9 +4,11 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-runtime_root=${QUOIN_E2E_RUNTIME:-"${repo_root}/.artifacts/e2e-102"}
-port=${QUOIN_E2E_PORT:-8443}
+runtime_root=${QUOIN_E2E_RUNTIME:-"${repo_root}/.artifacts/e2e-97"}
+port=${QUOIN_E2E_PORT:-8445}
 origin="https://localhost:${port}"
+# Keep #97 separate even when invoked directly rather than through Make.
+if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-97" ]]; then export QUOIN_E2E_PROJECT=${QUOIN_E2E_PROJECT:-quoin-e2e-97}; fi
 compose=(docker compose --project-directory "${repo_root}" --env-file /dev/null -f "${repo_root}/deploy/e2e-real.compose.yaml")
 
 require_command() {
@@ -21,6 +23,26 @@ require_command openssl
 
 if [[ -f "${runtime_root}/credentials.yaml" ]]; then
 	# A running environment is intentionally reused to make browser hand-debugging stable.
+	# Repair only the generated #97 fixture-secret boundary on retained runs;
+	# deployment identities remain owned by the container runtime and untouched.
+	for fixture_secret in metrics-basic-password metrics-bearer-token; do
+		if [[ -f "${runtime_root}/secrets/${fixture_secret}" ]]; then
+			install -d -m 700 "${runtime_root}/fixture/secrets"
+			sudo install -m 600 -o "$(id -u)" -g "$(id -g)" "${runtime_root}/secrets/${fixture_secret}" "${runtime_root}/fixture/secrets/${fixture_secret}"
+		fi
+	done
+	# This distinct self-signed endpoint is a test upstream, not the public
+	# gateway certificate. Its DNS SAN must match the Compose service name so both
+	# the production adapter and the counter reader verify TLS normally.
+	if [[ ! -s "${runtime_root}/fixture/prometheus-tls.crt" || ! -s "${runtime_root}/fixture/prometheus-tls.key" ]] || ! openssl x509 -in "${runtime_root}/fixture/prometheus-tls.crt" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:prometheus-tls-fixture'; then
+		openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+			-keyout "${runtime_root}/fixture/prometheus-tls.key" \
+			-out "${runtime_root}/fixture/prometheus-tls.crt" \
+			-subj /CN=prometheus-tls-fixture \
+			-addext 'subjectAltName=DNS:prometheus-tls-fixture' >/dev/null 2>&1
+		chmod 640 "${runtime_root}/fixture/prometheus-tls.key"
+		chmod 644 "${runtime_root}/fixture/prometheus-tls.crt"
+	fi
 	if "${compose[@]}" ps --status running --services 2>/dev/null | grep -qx gateway; then
 		printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\n' "$origin" "$runtime_root"
 		exit 0
@@ -33,10 +55,21 @@ if [[ -e "${runtime_root}" && ! -f "${runtime_root}/credentials.yaml" ]]; then
 fi
 
 umask 077
-mkdir -p "${runtime_root}"/{config,data,backups,secrets,gateway/tls,logs,plinth-state,plinth-workspaces}
+mkdir -p "${runtime_root}"/{config,data,backups,secrets,gateway/tls,logs,plinth-state,plinth-workspaces,fixture/secrets}
+# #97 fixture credentials do not belong in the deployment secret mount: Quoin
+# bootstrap changes that mount to the runtime UID. Keep this user-owned 0600
+# fixture-only directory readable by Playwright and mount it read-only only to
+# fixture containers. Quoin receives the values exclusively in public API calls.
+for fixture_secret in metrics-basic-password metrics-bearer-token; do
+	if [[ ! -s "${runtime_root}/fixture/secrets/${fixture_secret}" ]]; then
+		openssl rand -base64 36 | tr -d '\n' >"${runtime_root}/fixture/secrets/${fixture_secret}"
+	fi
+	chmod 600 "${runtime_root}/fixture/secrets/${fixture_secret}"
+done
 # Only deployment credentials are private. Containerized services must traverse
 # generated config/gateway paths; their contents deliberately contain no secrets.
-chmod 755 "${runtime_root}" "${runtime_root}/config" "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/gateway" "${runtime_root}/gateway/tls"
+chmod 755 "${runtime_root}" "${runtime_root}/config" "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/gateway" "${runtime_root}/gateway/tls" "${runtime_root}/fixture"
+install -m 755 "${repo_root}/scripts/e2e-real/metrics-fixture.py" "${runtime_root}/fixture/metrics-fixture.py"
 chmod 700 "${runtime_root}/plinth-state" "${runtime_root}/plinth-workspaces"
 chmod 700 "${runtime_root}/secrets"
 
@@ -85,15 +118,26 @@ if [[ ! -s "${runtime_root}/gateway/tls/tls.crt" ]]; then
 		-subj /CN=localhost \
 		-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1
 fi
-chmod 644 "${runtime_root}/config"/*.yaml "${runtime_root}/gateway/Caddyfile" "${runtime_root}/gateway/tls/tls.crt"
-chmod 640 "${runtime_root}/gateway/tls/tls.key"
+# The no-auth Prometheus fixture has a dedicated DNS-SAN certificate. Its CA
+# chain is passed through the normal connection tlsCaPem field; no skip-verify
+# exception is used in either the production adapter or counter-reader path.
+if [[ ! -s "${runtime_root}/fixture/prometheus-tls.crt" || ! -s "${runtime_root}/fixture/prometheus-tls.key" ]]; then
+	openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+		-keyout "${runtime_root}/fixture/prometheus-tls.key" \
+		-out "${runtime_root}/fixture/prometheus-tls.crt" \
+		-subj /CN=prometheus-tls-fixture \
+		-addext 'subjectAltName=DNS:prometheus-tls-fixture' >/dev/null 2>&1
+fi
+chmod 644 "${runtime_root}/config"/*.yaml "${runtime_root}/gateway/Caddyfile" "${runtime_root}/gateway/tls/tls.crt" "${runtime_root}/fixture/prometheus-tls.crt"
+chmod 640 "${runtime_root}/gateway/tls/tls.key" "${runtime_root}/fixture/prometheus-tls.key"
 
 # Build the real visible services and the unmodified production Plinth adapter.
 # Lintel stays out because #102 only proves the Plinth lifecycle.
 QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,stele bash "${repo_root}/deploy/images/build.sh"
 export QUOIN_E2E_RUNTIME="$runtime_root" QUOIN_E2E_PORT="$port"
-# Isolate #102 containers from an existing #96 hand-debug environment by default.
-if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-102" ]]; then export QUOIN_E2E_PROJECT=quoin-e2e-102; fi
+# #97 always uses its own Compose project, so it cannot reuse or disturb an
+# existing #96/#102/manual environment unless a caller explicitly overrides it.
+if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-97" ]]; then export QUOIN_E2E_PROJECT=quoin-e2e-97; fi
 
 # Bootstrap deployment secrets and the first administrator before the Quoin
 # server opens its exclusive data-directory lock. Both steps use the supported
@@ -156,4 +200,4 @@ admin:
 EOF
 chmod 600 "${runtime_root}/credentials.yaml"
 "${compose[@]}" up -d --wait --wait-timeout 90
-printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\n' "$origin" "$runtime_root" "${runtime_root}/credentials.yaml"
+printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\nQUOIN_E2E_METRICS_FIXTURE_PROMETHEUS=http://prometheus-fixture:8080\nQUOIN_E2E_METRICS_FIXTURE_THANOS=http://thanos-fixture:8080\n' "$origin" "$runtime_root" "${runtime_root}/credentials.yaml"

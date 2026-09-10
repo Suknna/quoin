@@ -23,7 +23,7 @@ const browserCheckSystemYAML = `system_key: payments
 display_name: 支付系统
 enabled: true
 timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
+metrics_connection_id: "1"
 resource_discoveries: []
 inspection_plans:
   - key: browser-plan

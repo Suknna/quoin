@@ -87,8 +87,8 @@ type apiServer struct {
 	analysisDispatchFunc          func(ctx context.Context, attemptID int64) error
 	knowledgeDispatchFunc         func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
-	resourceRefreshDispatchFunc   func(ctx context.Context)
 	inspectionDispatchFunc        func(ctx context.Context)
+	verificationDispatchFunc      func(ctx context.Context)
 	browserOperationsDispatchFunc func(ctx context.Context)
 	inspectionCancelDispatchFunc  func(ctx context.Context, attemptID int64) error
 	browserPublishDispatchFunc    func(ctx context.Context, request browser.PublishRequest) error
@@ -445,10 +445,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
-	application.resourceRefreshDispatchFunc = controlService.dispatchQueuedResourceRefreshAttempts
 	application.browserOperationsDispatchFunc = controlService.dispatchQueuedBrowserOperations
 	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
+	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
 	application.inspectionCancelDispatchFunc = controlService.dispatchInspectionCancellation
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
@@ -459,7 +459,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// T12: the periodic lease sweeper converges attempts whose runtime
 	// disappeared without reconnecting (RUNTIME-TASK-006).
 	go controlService.RunLeaseSweeper(ctx)
-	go controlService.RunResourceRefreshScheduler(ctx)
 	go controlService.RunInspectionScheduler(ctx)
 	application.upgradeGate = serverSet.upgradeGate
 	application.setReadiness = serverSet.ops.SetReadiness
@@ -615,14 +614,11 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			}
 			return application.cancelDispatchFunc(ctx, attemptID)
 		},
-		DispatchResourceRefresh: func(ctx context.Context) {
-			if application.resourceRefreshDispatchFunc != nil {
-				application.resourceRefreshDispatchFunc(ctx)
-			}
-		},
 		DispatchConfigVerification: func(ctx context.Context) {
-			if application.inspectionDispatchFunc != nil {
-				application.inspectionDispatchFunc(ctx)
+			// Verification attempts have their own snapshot schema and dispatcher;
+			// inspection scheduling cannot discover draft-owned verification work.
+			if application.verificationDispatchFunc != nil {
+				go application.verificationDispatchFunc(ctx)
 			}
 		},
 	}

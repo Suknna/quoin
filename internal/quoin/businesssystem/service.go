@@ -207,16 +207,19 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 		INSERT INTO business_system_config_versions(
 			business_system_id,version_seq,state,yaml_body,parser_version,schema_version,
 			label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,
-			created_by,created_at,system_key,display_name,enabled,timezone,resource_refresh_interval_seconds)
+			created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
 		VALUES(?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		systemID, versionSeq, string(input.YAMLBody), config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystemConfig),
 		contractID, catalogDigest, catalogVersion, digest, principalID, now,
-		document.SystemKey, document.DisplayName, boolToInt(document.Enabled), document.Timezone, document.ResourceRefreshIntervalSeconds)
+		document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
 	if err != nil {
 		return ConfigVersionDetail{}, err
 	}
 	versionID, err := versionInsert.LastInsertId()
 	if err != nil {
+		return ConfigVersionDetail{}, err
+	}
+	if err := service.validateDeclarationReferences(ctx, conn, document, false); err != nil {
 		return ConfigVersionDetail{}, err
 	}
 	if err := insertProjections(ctx, conn, versionID, document); err != nil {
@@ -241,7 +244,58 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 
 // insertProjections persists the typed discovery/plan/check columns
 // (DATA-CONFIG-003: runtime never re-parses the YAML).
+// validateDeclarationReferences verifies only non-secret authorities named by a
+// declaration. Upload permits a disabled metrics connection so an Admin can
+// complete a draft before validating it; publish and execution require the
+// selected connection to be currently enabled and qualified.
+func (service *Service) validateMetricsConnectionForPublish(ctx context.Context, conn *sql.Conn, connectionID int64) error {
+	var connectionType string
+	var enabled, revalidation int
+	err := conn.QueryRowContext(ctx, `SELECT type,enabled,revalidation_required FROM connections WHERE id=?`, connectionID).Scan(&connectionType, &enabled, &revalidation)
+	if errors.Is(err, sql.ErrNoRows) || (connectionType != "prometheus" && connectionType != "thanos") || enabled != 1 || revalidation != 0 {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "metrics_connection_id", Reason: "发布要求引用一个已启用且已验证的 Prometheus 或 Thanos 指标接入", Remediation: "启用并完成接入验证后重试"}}}
+	}
+	return err
+}
+
+func (service *Service) validateDeclarationReferences(ctx context.Context, conn *sql.Conn, document config.BusinessSystemDocument, requireEnabled bool) error {
+	var connectionType string
+	var enabled, revalidation int
+	err := conn.QueryRowContext(ctx, `SELECT type,enabled,revalidation_required FROM connections WHERE id=?`, document.MetricsConnectionID).Scan(&connectionType, &enabled, &revalidation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "metrics_connection_id", Reason: "引用的指标连接不存在", Remediation: "选择已创建的 Prometheus 或 Thanos 接入"}}}
+	}
+	if err != nil {
+		return err
+	}
+	if connectionType != "prometheus" && connectionType != "thanos" {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "metrics_connection_id", Reason: "引用的连接不是 Prometheus 或 Thanos 指标接入", Remediation: "选择指标类型的接入"}}}
+	}
+	if requireEnabled && (enabled != 1 || revalidation != 0) {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "metrics_connection_id", Reason: "引用的指标连接已停用或需要重新验证", Remediation: "启用并验证该接入，或选择另一个可用接入"}}}
+	}
+	for index, sourceID := range document.AlertSourceIDs {
+		var found int
+		if err := conn.QueryRowContext(ctx, `SELECT 1 FROM alert_sources WHERE id=?`, sourceID).Scan(&found); errors.Is(err, sql.ErrNoRows) {
+			return &config.ValidationError{Errors: []config.FieldError{{Path: fmt.Sprintf("alert_source_ids[%d]", index), Reason: "引用的告警来源不存在", Remediation: "选择已创建的 Alertmanager 来源"}}}
+		} else if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func insertProjections(ctx context.Context, conn *sql.Conn, versionID int64, document config.BusinessSystemDocument) error {
+	for _, sourceID := range document.AlertSourceIDs {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO config_alert_source_refs(config_version_id,alert_source_id) VALUES(?,?)`, versionID, sourceID); err != nil {
+			return err
+		}
+	}
+	for labelName, labelValue := range document.AlertSourceLabels {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO config_alert_label_conditions(config_version_id,label_name,label_value) VALUES(?,?,?)`, versionID, labelName, labelValue); err != nil {
+			return err
+		}
+	}
 	for _, discovery := range document.Discoveries {
 		labels, err := json.Marshal(discovery.IdentityLabels)
 		if err != nil {
@@ -348,17 +402,23 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 		DisplayName string
 		Enabled     int64
 		Timezone    string
-		Refresh     int64
 		PublishedAt sql.NullString
 	}
 	err = conn.QueryRowContext(ctx, `
-		SELECT display_name,enabled,timezone,resource_refresh_interval_seconds,published_at
+		SELECT display_name,enabled,timezone,published_at
 		FROM business_system_config_versions WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(
-		&projection.DisplayName, &projection.Enabled, &projection.Timezone, &projection.Refresh, &projection.PublishedAt)
+		&projection.DisplayName, &projection.Enabled, &projection.Timezone, &projection.PublishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BusinessSystemDetail{}, ErrNotFound
 	}
 	if err != nil {
+		return BusinessSystemDetail{}, err
+	}
+	var metricsConnectionID int64
+	if err := conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, versionID).Scan(&metricsConnectionID); err != nil {
+		return BusinessSystemDetail{}, err
+	}
+	if err := service.validateMetricsConnectionForPublish(ctx, conn, metricsConnectionID); err != nil {
 		return BusinessSystemDetail{}, err
 	}
 	if projection.PublishedAt.Valid {
@@ -372,10 +432,10 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 	update, err := conn.ExecContext(ctx, `
 		UPDATE business_systems SET
 			current_config_version_id=?,
-			display_name=?, enabled=?, timezone=?, resource_refresh_interval_seconds=?,
+			display_name=?, enabled=?, timezone=?,
 			row_version=row_version+1
-		WHERE id=? AND current_config_version_id IS ?`,
-		versionID, projection.DisplayName, projection.Enabled, projection.Timezone, projection.Refresh, systemID, expectedCurrent)
+			WHERE id=? AND current_config_version_id IS ?`,
+		versionID, projection.DisplayName, projection.Enabled, projection.Timezone, systemID, expectedCurrent)
 	if err != nil {
 		return BusinessSystemDetail{}, mapPublishAbort(err, systemKey, versionID)
 	}

@@ -38,12 +38,8 @@ func RunPromQL(ctx context.Context, config ThanosConfig, secret ThanosSecret, mo
 	if err != nil {
 		return nil, nil, err
 	}
-	if secret.Password != "" {
-		username := secret.Username
-		if username == "" {
-			username = config.Username
-		}
-		request.SetBasicAuth(username, secret.Password)
+	if err := ApplyMetricsAuth(request, config, secret); err != nil {
+		return nil, nil, err
 	}
 	response, err := client.Do(request)
 	if err != nil {

@@ -132,6 +132,13 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 	if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT attempt_type,scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType, &scopeType); err != nil {
 		return err
 	}
+	if attemptType == "inspection_collection" && scopeType == "resource_refresh_run" {
+		// Resource refresh is retired, but a legacy in-flight attempt still has
+		// the same Plinth process boundary. Keep this narrow cancellation route
+		// after its producer/scheduler are removed so migration fences reach the
+		// physical worker instead of becoming stranded database state.
+		scopeType = "legacy_resource_refresh_run"
+	}
 	if attemptType == "inspection_collection" && scopeType == "run_check" {
 		var journeyCount int
 		if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&journeyCount); err != nil {

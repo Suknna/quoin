@@ -12,9 +12,9 @@ import (
 
 const validSystemYAML = `system_key: payments
 display_name: 支付系统
+metrics_connection_id: "1"
 enabled: false
 timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
 resource_discoveries:
   - key: web-pods
     display_name: Web Pods
@@ -61,7 +61,7 @@ func parseValidSystem(t *testing.T, body string) BusinessSystemDocument {
 
 func TestSchemaAcceptsValidFixture(t *testing.T) {
 	document := parseValidSystem(t, validSystemYAML)
-	if document.SystemKey != "payments" || document.Enabled || document.Timezone != "Asia/Shanghai" {
+	if document.SystemKey != "payments" || document.MetricsConnectionID != 1 || document.Enabled || document.Timezone != "Asia/Shanghai" {
 		t.Fatalf("extraction wrong: %#v", document)
 	}
 	if len(document.Discoveries) != 1 || len(document.Plans) != 1 || len(document.Plans[0].Checks) != 2 {
@@ -85,7 +85,7 @@ func TestSchemaRejections(t *testing.T) {
 		{"range missing step", strings.Replace(validSystemYAML, "          range_seconds: 3600\n          step_seconds: 60", "          range_seconds: 3600", 1), "step_seconds"},
 		{"missing root field", strings.Replace(validSystemYAML, "enabled: false\n", "", 1), "missing"},
 		{"invalid label name", strings.Replace(validSystemYAML, "identity_labels: [job, instance]", "identity_labels: [\"1bad\", instance]", 1), "identity_labels"},
-		{"negative refresh interval", strings.Replace(validSystemYAML, "resource_refresh_interval_seconds: 300", "resource_refresh_interval_seconds: 0", 1), "resource_refresh_interval_seconds"},
+		{"metrics connection must be a numeric string", strings.Replace(validSystemYAML, "metrics_connection_id: \"1\"", "metrics_connection_id: 1", 1), "metrics_connection_id"},
 		// Deep-equal duplicate array entries (same identity label twice) are
 		// rejected by uniqueItems; same-key-but-different-entry is the
 		// semantic layer's job (CFG-YAML-003) and covered below.
@@ -310,7 +310,7 @@ func TestDocumentDigestCoversSemantics(t *testing.T) {
 	if base.Digest() != same.Digest() {
 		t.Fatal("formatting-only change must not alter the digest")
 	}
-	changed := parseValidSystem(t, strings.Replace(validSystemYAML, "resource_refresh_interval_seconds: 300", "resource_refresh_interval_seconds: 301", 1))
+	changed := parseValidSystem(t, strings.Replace(validSystemYAML, "metrics_connection_id: \"1\"", "metrics_connection_id: \"2\"", 1))
 	if base.Digest() == changed.Digest() {
 		t.Fatal("semantic change must alter the digest")
 	}

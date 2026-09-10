@@ -15,7 +15,8 @@ type envelopeWire = secrets.Envelope
 func sealEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionType string, bindingRevision int, typed *typedSecretJSON) (*envelopeWire, error) {
 	return secrets.Seal(rootKey, connectionID, generationSeq, connectionType, bindingRevision, &secrets.TypedSecret{
 		Type:          typed.Type,
-		Thanos:        thanosOf(typed.Thanos),
+		Prometheus:    metricsOf(typed.Prometheus),
+		Thanos:        metricsOf(typed.Thanos),
 		Kubernetes:    kubernetesOf(typed.Kubernetes),
 		ModelProvider: modelProviderOf(typed.ModelProvider),
 	})
@@ -28,24 +29,25 @@ func openEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionT
 	}
 	return &typedSecretJSON{
 		Type:          secret.Type,
-		Thanos:        thanosFrom(secret.Thanos),
+		Prometheus:    metricsFrom(secret.Prometheus),
+		Thanos:        metricsFrom(secret.Thanos),
 		Kubernetes:    kubernetesFrom(secret.Kubernetes),
 		ModelProvider: modelProviderFrom(secret.ModelProvider),
 	}, nil
 }
 
-func thanosOf(source *thanosSecretJSON) *secrets.ThanosSecret {
+func metricsOf(source *metricsSecretJSON) *secrets.MetricsSecret {
 	if source == nil {
 		return nil
 	}
-	return &secrets.ThanosSecret{Username: source.Username, Password: source.Password}
+	return &secrets.MetricsSecret{Username: source.Username, Password: source.Password, BearerToken: source.BearerToken}
 }
 
-func thanosFrom(source *secrets.ThanosSecret) *thanosSecretJSON {
+func metricsFrom(source *secrets.MetricsSecret) *metricsSecretJSON {
 	if source == nil {
 		return nil
 	}
-	return &thanosSecretJSON{Username: source.Username, Password: source.Password}
+	return &metricsSecretJSON{Username: source.Username, Password: source.Password, BearerToken: source.BearerToken}
 }
 
 func kubernetesOf(source *kubernetesSecretJSON) *secrets.KubernetesSecret {

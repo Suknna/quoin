@@ -17,6 +17,11 @@ import (
 )
 
 const (
+	// TypePrometheus and TypeThanos deliberately remain distinct connection
+	// identities even though both use the Prometheus HTTP query protocol.
+	// Business declarations select one explicitly; no global metrics default
+	// exists.
+	TypePrometheus    = "prometheus"
 	TypeThanos        = "thanos"
 	TypeKubernetes    = "kubernetes"
 	TypeModelProvider = "model_provider"
@@ -91,7 +96,7 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 		return nil, fmt.Errorf("%w: config type discriminator must be %q", ErrValidation, connectionType)
 	}
 	switch connectionType {
-	case TypeThanos:
+	case TypePrometheus, TypeThanos:
 		baseURL, _ := document["baseUrl"].(string)
 		if baseURL == "" {
 			return nil, fmt.Errorf("%w: baseUrl is required", ErrValidation)
@@ -105,6 +110,26 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 		}
 		if _, ok := document["tlsSkipVerify"].(bool); !ok && document["tlsSkipVerify"] != nil {
 			return nil, fmt.Errorf("%w: tlsSkipVerify must be a boolean", ErrValidation)
+		}
+		authType, authTypePresent := document["authType"].(string)
+		username, usernamePresent := document["username"]
+		// Pre-authType Thanos revisions may retain an optional username without
+		// a password. Preserve their original no-auth behavior rather than
+		// inferring Basic Auth from the username alone. Public requests declare
+		// authType explicitly through the OpenAPI variant.
+		if authType == "" {
+			authType = "none"
+		}
+		if authType != "none" && authType != "basic" && authType != "bearer" {
+			return nil, fmt.Errorf("%w: authType must be none, basic or bearer", ErrValidation)
+		}
+		if authType == "basic" {
+			value, ok := username.(string)
+			if !usernamePresent || !ok || value == "" {
+				return nil, fmt.Errorf("%w: basic auth requires username", ErrValidation)
+			}
+		} else if authTypePresent && usernamePresent && username != "" {
+			return nil, fmt.Errorf("%w: username only applies to basic auth", ErrValidation)
 		}
 	case TypeKubernetes:
 		// contextName/defaultNamespace are optional bounded strings.
@@ -125,8 +150,10 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 	default:
 		return nil, fmt.Errorf("%w: unknown connection type", ErrValidation)
 	}
-	// Reject any secret-shaped fields in the non-secret projection.
-	for _, forbidden := range []string{"password", "kubeconfig", "apiKey"} {
+	// Reject credential material in the revision projection. Auth mode and
+	// basic username are safe to retain; the password or bearer token exists
+	// solely in the encrypted credential generation.
+	for _, forbidden := range []string{"password", "bearerToken", "kubeconfig", "apiKey"} {
 		if _, exists := document[forbidden]; exists {
 			return nil, fmt.Errorf("%w: %s must not appear in the non-secret projection", ErrValidation, forbidden)
 		}
@@ -155,14 +182,73 @@ func validateSecret(connectionType string, secret []byte) error {
 
 type typedSecretJSON struct {
 	Type          string                   `json:"type"`
-	Thanos        *thanosSecretJSON        `json:"thanos,omitempty"`
+	Prometheus    *metricsSecretJSON       `json:"prometheus,omitempty"`
+	Thanos        *metricsSecretJSON       `json:"thanos,omitempty"`
 	Kubernetes    *kubernetesSecretJSON    `json:"kubernetes,omitempty"`
 	ModelProvider *modelProviderSecretJSON `json:"model_provider,omitempty"`
 }
 
-type thanosSecretJSON struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+// metricsSecretJSON supports the closed metrics auth modes: no carrier for
+// "none", username/password for "basic", and a bearer token for "bearer".
+// Authentication mode is non-secret revision metadata; these values are never
+// included in API projections or command digests.
+type metricsSecretJSON struct {
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	BearerToken string `json:"bearerToken,omitempty"`
+}
+
+// validateMetricsCredential prevents programmatic callers from persisting a
+// credential mode that cannot produce the declared HTTP authentication. The
+// public adapter applies the same rules before this service boundary.
+func validateMetricsCredential(connectionType string, config, secret []byte) error {
+	if connectionType != TypePrometheus && connectionType != TypeThanos {
+		return nil
+	}
+	var projection struct {
+		AuthType string `json:"authType"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(config, &projection); err != nil {
+		return err
+	}
+	var carrier struct {
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		BearerToken string `json:"bearerToken"`
+	}
+	if len(secret) > 0 {
+		if err := json.Unmarshal(secret, &carrier); err != nil {
+			return fmt.Errorf("%w: metrics credential is not valid JSON", ErrValidation)
+		}
+	}
+	// An omitted authType is the historical Thanos form: do not reinterpret
+	// it or reject its secret carrier. New HTTP input is explicit and reaches
+	// one of the closed cases below.
+	if projection.AuthType == "" {
+		return nil
+	}
+	switch projection.AuthType {
+	case "none":
+		if carrier.Username != "" || carrier.Password != "" || carrier.BearerToken != "" {
+			return fmt.Errorf("%w: no-auth metrics connection must not carry credentials", ErrValidation)
+		}
+	case "basic":
+		// A pre-authType direct service fixture may contain the historical
+		// username-only Thanos shape. HTTP requests cannot reach this branch
+		// because splitConfig requires password; retain it only so an existing
+		// encrypted generation can be rotated instead of becoming unreadable.
+		if projection.Username == "" || carrier.BearerToken != "" || (carrier.Username != "" && carrier.Username != projection.Username) {
+			return fmt.Errorf("%w: basic metrics credentials are incomplete", ErrValidation)
+		}
+	case "bearer":
+		if carrier.BearerToken == "" || carrier.Username != "" || carrier.Password != "" {
+			return fmt.Errorf("%w: bearer metrics credentials are incomplete", ErrValidation)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported metrics auth type", ErrValidation)
+	}
+	return nil
 }
 
 type kubernetesSecretJSON struct {
@@ -181,6 +267,9 @@ func (service *Service) Create(ctx context.Context, input CreateInput, createdBy
 		return Summary{}, err
 	}
 	if err := validateSecret(input.Type, input.Secret); err != nil {
+		return Summary{}, err
+	}
+	if err := validateMetricsCredential(input.Type, config, input.Secret); err != nil {
 		return Summary{}, err
 	}
 	// Secret-input idempotency: the digest covers only non-secret semantic
@@ -280,13 +369,13 @@ func (service *Service) insertGeneration(ctx context.Context, conn *sql.Conn, co
 		}
 		envelope = wire
 	} else {
-		// Kubernetes requires a kubeconfig; model provider requires an API
-		// key; thanos may run without a secret (no basic auth).
-		if connectionType != TypeThanos {
+		// Kubernetes requires a kubeconfig and a model provider requires an
+		// API key. Prometheus-compatible connections may use no auth, but
+		// still seal an explicit empty carrier to preserve independent,
+		// auditable credential generations.
+		if connectionType != TypePrometheus && connectionType != TypeThanos {
 			return 0, fmt.Errorf("%w: %s requires a secret", ErrValidation, connectionType)
 		}
-		// Empty thanos secret: seal an explicit empty carrier so the
-		// generation remains decryptable and audit-consistent.
 		rootKey, err := service.rootKey()
 		if err != nil {
 			return 0, err
@@ -311,8 +400,10 @@ func typedSecretFromRaw(connectionType string, secret []byte) *typedSecretJSON {
 	_ = json.Unmarshal(secret, &carrier)
 	payload := &typedSecretJSON{Type: connectionType}
 	switch connectionType {
+	case TypePrometheus:
+		payload.Prometheus = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
 	case TypeThanos:
-		payload.Thanos = &thanosSecretJSON{Username: carrier["username"], Password: carrier["password"]}
+		payload.Thanos = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
 	case TypeKubernetes:
 		payload.Kubernetes = &kubernetesSecretJSON{Kubeconfig: carrier["kubeconfig"]}
 	case TypeModelProvider:
@@ -448,9 +539,9 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 		conn.Close()
 		return service.Get(ctx, name)
 	}
-	if connectionType == TypeModelProvider {
+	if connectionType == TypeModelProvider || connectionType == TypePrometheus || connectionType == TypeThanos {
 		if qualifiedProbeResultID == 0 {
-			return Summary{}, fmt.Errorf("%w: model provider enable requires an explicit passed probe result", ErrValidation)
+			return Summary{}, fmt.Errorf("%w: %s enable requires an explicit passed probe result", ErrValidation, connectionType)
 		}
 		var probeType string
 		var outcome string
@@ -470,7 +561,8 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 		// the enabling UPDATE produces (trigger checks
 		// q.enabled_row_version = NEW.row_version AFTER the update): insert
 		// it first against row_version+1, then advance the row in the same
-		// transaction.
+		// transaction. Metrics and model providers share this immutable proof;
+		// type-specific SQL closure verifies the matching real probe child.
 		if _, err := conn.ExecContext(ctx, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, id, rowVersion+1, qualifiedProbeResultID, createdBy, service.now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return Summary{}, err
 		}

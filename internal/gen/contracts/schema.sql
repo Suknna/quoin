@@ -613,7 +613,6 @@ CREATE TABLE business_systems (
   row_version                        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 系统行并发前提（DATA-CONFIG-005）
   current_config_version_id          INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   timezone                           TEXT,  -- 已发布配置版本的根投影；发布/联合激活时由触发器同步（DATA-CONFIG-001），从未发布时为 NULL
-  resource_refresh_interval_seconds  INTEGER CHECK (resource_refresh_interval_seconds IS NULL OR resource_refresh_interval_seconds > 0),
   created_at                         TEXT NOT NULL
 ) STRICT;
 
@@ -635,10 +634,28 @@ CREATE TABLE business_system_config_versions (
   -- 解析一次的类型化根投影（DATA-CONFIG-003）：运行只使用类型结构，不重新解析 YAML
   system_key                        TEXT NOT NULL,  -- 必须等于 business_systems.key（trg_business_config_versions_system_key_match）
   display_name                      TEXT NOT NULL,
+  metrics_connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 版本化明确指标接入引用；尝试授权冻结其 revision/credential generation
   enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
   timezone                          TEXT NOT NULL,  -- IANA 时区（根节点统一提供，DATA-CONFIG-004）
-  resource_refresh_interval_seconds INTEGER NOT NULL CHECK (resource_refresh_interval_seconds > 0), -- 根节点统一刷新周期
   UNIQUE (business_system_id, version_seq)
+) STRICT;
+
+-- Optional alert attribution restrictions declared with a config version.
+-- Empty source refs/label conditions mean no extra restriction; the Label
+-- Contract business label remains the mandatory attribution authority.
+CREATE TABLE config_alert_source_refs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  alert_source_id   INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (config_version_id, alert_source_id)
+) STRICT;
+
+CREATE TABLE config_alert_label_conditions (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_name        TEXT NOT NULL,
+  label_value       TEXT NOT NULL,
+  UNIQUE (config_version_id, label_name)
 ) STRICT;
 
 CREATE TABLE config_discoveries (
@@ -736,7 +753,7 @@ CREATE UNIQUE INDEX ux_observed_refresh_log_attempt ON observed_refresh_log (att
 CREATE TABLE connections (
   id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   name                              TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
-  type                              TEXT NOT NULL CHECK (type IN ('thanos','kubernetes','model_provider')),
+  type                              TEXT NOT NULL CHECK (type IN ('prometheus','thanos','kubernetes','model_provider')),
   enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
   row_version                       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable/rotate 命令并发前提（DATA-CONN-005）
   revalidation_required             INTEGER NOT NULL DEFAULT 0 CHECK (revalidation_required IN (0,1)),
@@ -775,7 +792,7 @@ CREATE TABLE connection_probe_results (
   id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                    INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_id                 INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  connection_type               TEXT NOT NULL CHECK (connection_type IN ('model_provider','thanos','kubernetes')),
+  connection_type               TEXT NOT NULL CHECK (connection_type IN ('model_provider','prometheus','thanos','kubernetes')),
   connection_revision_id        INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id      INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   root_binding_revision         INTEGER NOT NULL CHECK (root_binding_revision >= 1),
@@ -864,11 +881,10 @@ CREATE UNIQUE INDEX ux_business_system_kubernetes_connection_active
 CREATE INDEX idx_business_system_kubernetes_connections_system
   ON business_system_kubernetes_connections (business_system_id, state, connection_id);
 
--- 一个部署只能有一个 active model provider 与一个全局 active Thanos；Kubernetes 连接允许多个。
+-- Only the model provider is process-wide singular. Metrics connections are
+-- independently selected by a business declaration and may all be enabled.
 CREATE UNIQUE INDEX ux_connections_one_enabled_model_provider ON connections ((1))
   WHERE type = 'model_provider' AND enabled = 1;
-CREATE UNIQUE INDEX ux_connections_one_enabled_thanos ON connections ((1))
-  WHERE type = 'thanos' AND enabled = 1;
 
 -- Browser Identity 配置是不可变 revision；stable identity 只持有当前指针（DATA-BROWSER-001/010）。
 CREATE TABLE browser_identity_revisions (
@@ -1332,6 +1348,22 @@ CREATE UNIQUE INDEX ux_resource_refresh_run_scheduled ON resource_refresh_runs (
   WHERE scheduled_for IS NOT NULL;
 CREATE INDEX idx_resource_refresh_runs_system ON resource_refresh_runs (business_system_id, created_at DESC);
 
+-- Controlled draft-only discovery evidence. Unlike observed_resources this is
+-- scoped to a Config Verification Run and is never a formal resource projection.
+CREATE TABLE config_verification_discovery_results (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  verification_run_id INTEGER NOT NULL REFERENCES config_verification_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  discovery_key       TEXT NOT NULL,
+  attempt_id          INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evidence_id         INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  status              TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
+  gap_reason          TEXT CHECK (gap_reason IS NULL OR gap_reason IN ('query_failed','partial_response','no_data','cancelled','interrupted')),
+  result_digest       BLOB CHECK (result_digest IS NULL OR length(result_digest)=32),
+  created_at          TEXT NOT NULL,
+  UNIQUE (verification_run_id, discovery_key),
+  CHECK ((status='ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL) OR (status IN ('error','gap') AND gap_reason IS NOT NULL))
+) STRICT;
+
 CREATE TABLE config_verification_run_check_results (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   verification_run_id INTEGER NOT NULL REFERENCES config_verification_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1584,7 +1616,7 @@ CREATE TABLE execution_attempts (
   CHECK (connection_epoch IS NULL OR connection_epoch >= 1),
   CHECK (requested_by_tool_call_id IS NULL OR attempt_type = 'browser_exploration'),
   CHECK (
-    (scope_type = 'config_verification_run' AND plan_key IS NOT NULL AND check_key IS NOT NULL AND discovery_key IS NULL)
+    (scope_type = 'config_verification_run' AND ((plan_key IS NOT NULL AND check_key IS NOT NULL AND discovery_key IS NULL) OR (plan_key IS NULL AND check_key IS NULL AND discovery_key IS NOT NULL)))
     OR (scope_type = 'run_check' AND plan_key IS NULL AND check_key IS NOT NULL AND discovery_key IS NULL)
     OR (scope_type = 'resource_refresh_run' AND plan_key IS NULL AND check_key IS NULL AND discovery_key IS NOT NULL)
     OR (scope_type NOT IN ('run_check','config_verification_run','resource_refresh_run') AND plan_key IS NULL AND check_key IS NULL AND discovery_key IS NULL)
@@ -1616,7 +1648,9 @@ CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (sco
 CREATE UNIQUE INDEX ux_execution_attempt_active_run_check ON execution_attempts (scope_type, scope_id, check_key)
   WHERE scope_type = 'run_check' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_active_config_verification_check ON execution_attempts (scope_type, scope_id, plan_key, check_key)
-  WHERE scope_type = 'config_verification_run' AND state IN ('Queued','Assigned','Running','Cancelling');
+  WHERE scope_type = 'config_verification_run' AND check_key IS NOT NULL AND state IN ('Queued','Assigned','Running','Cancelling');
+CREATE UNIQUE INDEX ux_execution_attempt_active_config_verification_discovery ON execution_attempts (scope_type, scope_id, discovery_key)
+  WHERE scope_type = 'config_verification_run' AND discovery_key IS NOT NULL AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_active_resource_refresh_discovery ON execution_attempts (scope_type, scope_id, discovery_key)
   WHERE scope_type = 'resource_refresh_run' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_browser_requestor ON execution_attempts (requested_by_tool_call_id)
@@ -1673,7 +1707,7 @@ CREATE TABLE attempt_input_items (
 CREATE TABLE attempt_connection_grants (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','kubernetes_read','model_probe_chat','model_probe_embedding','thanos_probe','kubernetes_probe')),
+  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','kubernetes_read','model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe','kubernetes_probe')),
   business_system_id        INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1682,15 +1716,19 @@ CREATE TABLE attempt_connection_grants (
   created_by_tool_call_id    INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
   CHECK ((purpose = 'kubernetes_read' AND business_system_id IS NOT NULL AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose = 'thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
+      -- Historic unscoped grants remain readable. New thanos_query inserts are
+      -- fenced by trg_attempt_connection_grants_thanos_query_scope below.
+      OR (purpose = 'thanos_query' AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
       OR (purpose = 'config_thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
       OR (purpose IN ('chat_model','embedding') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
-      OR (purpose IN ('model_probe_chat','model_probe_embedding','thanos_probe','kubernetes_probe') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
+      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe','kubernetes_probe') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
   (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id, COALESCE(business_system_id, 0));
--- PromQL collection has one deterministic global Thanos locator. A credential rotation must not
--- leave a Queued Attempt with competing historical grants; it must re-freeze a fresh Attempt.
+-- PromQL collection has one deterministic selected metrics locator. A credential
+-- rotation must not leave a Queued Attempt with competing historical grants; it
+-- must re-freeze a fresh Attempt. The legacy purpose name is wire-stable and
+-- covers both Prometheus and Thanos connections.
 CREATE UNIQUE INDEX ux_attempt_connection_grant_config_thanos_attempt ON attempt_connection_grants (attempt_id)
   WHERE purpose = 'config_thanos_query';
 
@@ -2393,6 +2431,28 @@ CREATE TRIGGER trg_alert_observations_no_update BEFORE UPDATE ON alert_observati
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
 CREATE TRIGGER trg_alert_observations_no_delete BEFORE DELETE ON alert_observations
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
+-- New model tool grants must bind the immutable Business System configuration
+-- item carried by this Attempt's input snapshot. A later publish cannot change
+-- that approved snapshot route. Existing nullable historic grants remain
+-- immutable/readable but cannot be newly inserted or executed.
+CREATE TRIGGER trg_attempt_connection_grants_thanos_query_scope BEFORE INSERT ON attempt_connection_grants
+WHEN NEW.purpose = 'thanos_query' AND NOT EXISTS (
+  SELECT 1 FROM attempt_input_snapshots snapshot
+  JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id
+  JOIN business_system_config_versions v ON v.id=config_item.business_system_config_version_id
+  JOIN attempt_input_items contract_item ON contract_item.snapshot_id=snapshot.id
+  JOIN attempt_input_items occurrence_item ON occurrence_item.snapshot_id=snapshot.id
+  JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
+  WHERE snapshot.attempt_id=NEW.attempt_id
+    AND config_item.item_role='business_config'
+    AND contract_item.item_role='label_contract'
+    AND occurrence_item.item_role='occurrence'
+    AND v.business_system_id=NEW.business_system_id
+    AND v.metrics_connection_id=NEW.connection_id
+    AND v.label_contract_version_id=contract_item.label_contract_version_id
+    AND occurrence.business_system_id=NEW.business_system_id
+)
+BEGIN SELECT RAISE(ABORT, 'metrics query grant requires its attempt snapshot business config and selected metrics connection'); END;
 CREATE TRIGGER trg_attempt_connection_grants_config_thanos_closure BEFORE INSERT ON attempt_connection_grants
 WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
   SELECT 1 FROM execution_attempts a
@@ -2409,7 +2469,7 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
       ))
     )
 )
-BEGIN SELECT RAISE(ABORT, 'config_thanos_query grant requires one Queued PromQL Config Verification, Resource Refresh, or Running Inspection Run collection Attempt'); END;
+BEGIN SELECT RAISE(ABORT, 'config metrics query grant requires one Queued PromQL Config Verification, Resource Refresh, or Running Inspection Run collection Attempt'); END;
 CREATE TRIGGER trg_evidence_no_update BEFORE UPDATE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
 CREATE TRIGGER trg_evidence_no_delete BEFORE DELETE ON evidence
@@ -2668,7 +2728,7 @@ BEGIN SELECT RAISE(ABORT, 'knowledge_import_batches history is not deletable'); 
 CREATE TRIGGER trg_business_config_versions_no_content_update BEFORE UPDATE OF
   business_system_id, version_seq, yaml_body, parser_version, schema_version,
   label_contract_version_id, journey_catalog_digest, journey_catalog_version,
-  system_key, display_name, enabled, timezone, resource_refresh_interval_seconds,
+  system_key, display_name, metrics_connection_id, enabled, timezone,
   digest, created_by, created_at ON business_system_config_versions
 BEGIN SELECT RAISE(ABORT, 'business_system_config_version content is immutable'); END;
 
@@ -3221,11 +3281,11 @@ CREATE TRIGGER trg_users_username_immutable BEFORE UPDATE OF username ON users
 BEGIN SELECT RAISE(ABORT, 'username is stable and cannot be rewritten'); END;
 CREATE TRIGGER trg_business_systems_identity_immutable BEFORE UPDATE OF key, created_at ON business_systems
 BEGIN SELECT RAISE(ABORT, 'business_system stable key is immutable'); END;
--- 首次 YAML 上传创建的聚合必须从 Disabled/未发布状态开始；YAML 的 enabled/timezone/interval
+-- 首次 YAML 上传创建的聚合必须从 Disabled/未发布状态开始；YAML 的 enabled/timezone
 -- 只存在于第一份不可变草稿，显式发布后才投影到 business_systems（DATA-CONFIG-001）。
 CREATE TRIGGER trg_business_systems_insert_unconfigured BEFORE INSERT ON business_systems
 WHEN NEW.enabled <> 0 OR NEW.current_config_version_id IS NOT NULL
-  OR NEW.timezone IS NOT NULL OR NEW.resource_refresh_interval_seconds IS NOT NULL
+  OR NEW.timezone IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'business_system must be created Disabled with no current config or published root projection'); END;
 CREATE TRIGGER trg_alert_sources_identity_immutable BEFORE UPDATE OF source_key, protocol, created_at ON alert_sources
 BEGIN SELECT RAISE(ABORT, 'alert_source stable key is immutable'); END;
@@ -3506,24 +3566,22 @@ BEGIN SELECT RAISE(ABORT, 'config targeting a non-current label contract can onl
 CREATE TRIGGER trg_business_systems_no_unset_config_pointer BEFORE UPDATE OF current_config_version_id ON business_systems
 WHEN OLD.current_config_version_id IS NOT NULL AND NEW.current_config_version_id IS NULL
 BEGIN SELECT RAISE(ABORT, 'business_systems current_config_version_id cannot be unset (no deactivation)'); END;
--- 根投影守卫：business_systems 的 display_name/enabled/timezone/resource_refresh_interval_seconds 必须
--- 等于 current 指针所指版本的类型化根投影（不允许绕过 YAML 发布直接改写，DATA-CONFIG-001）。
--- 指针变化与投影变化在同一 UPDATE 中强制一致（不允许只改指针不改投影或反之）。
-CREATE TRIGGER trg_business_systems_projection_matches_version BEFORE UPDATE OF display_name, enabled, timezone, resource_refresh_interval_seconds ON business_systems
+-- 根投影守卫：business_systems 的 display_name/enabled/timezone 必须等于 current
+-- 指针所指版本的类型化根投影（不允许绕过 YAML 发布直接改写，DATA-CONFIG-001）。
+CREATE TRIGGER trg_business_systems_projection_matches_version BEFORE UPDATE OF display_name, enabled, timezone ON business_systems
 WHEN NEW.current_config_version_id IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.current_config_version_id
     AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
-    AND v.timezone = NEW.timezone AND v.resource_refresh_interval_seconds = NEW.resource_refresh_interval_seconds
+    AND v.timezone = NEW.timezone
 )
 BEGIN SELECT RAISE(ABORT, 'business_system root projection must equal its current config version root projection'); END;
--- 指针本身变化时也强制投影一致（指针 UPDATE 必须同时携带目标版本投影）。
 CREATE TRIGGER trg_business_systems_pointer_projection_on_pointer_change BEFORE UPDATE OF current_config_version_id ON business_systems
 WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id) AND NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.current_config_version_id
     AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
-    AND v.timezone = NEW.timezone AND v.resource_refresh_interval_seconds = NEW.resource_refresh_interval_seconds
+    AND v.timezone = NEW.timezone
 )
 BEGIN SELECT RAISE(ABORT, 'current pointer change must carry the target version root projection in the same UPDATE'); END;
 -- 指针变更后继：把新 current 版本派生为 published（写入一次性 published_at 事实）、旧 current 派生为 superseded。
@@ -4494,9 +4552,12 @@ WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'config_ver
   SELECT 1 FROM config_verification_runs t
   JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
   JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE t.id = NEW.scope_id
-    AND ((c.kind = 'promql' AND NEW.runtime_slot = 'plinth')
-      OR (c.kind = 'browser' AND NEW.runtime_slot = 'lintel'))
+	  WHERE t.id = NEW.scope_id
+	    AND ((c.kind = 'promql' AND NEW.runtime_slot = 'plinth')
+	      OR (c.kind = 'browser' AND NEW.runtime_slot = 'lintel'))
+	  UNION ALL
+	  SELECT 1 FROM config_verification_runs t JOIN config_discoveries d ON d.config_version_id=t.config_version_id AND d.discovery_key=NEW.discovery_key
+	  WHERE t.id=NEW.scope_id AND NEW.discovery_key IS NOT NULL AND NEW.runtime_slot='plinth'
 )
 BEGIN SELECT RAISE(ABORT, 'config verification attempt slot must match its check kind'); END;
 CREATE TRIGGER trg_execution_attempts_run_check_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
@@ -4588,13 +4649,17 @@ BEGIN SELECT RAISE(ABORT, 'illegal config_verification_run state transition'); E
 CREATE TRIGGER trg_config_verification_runs_running_requires_evidence_at BEFORE UPDATE OF state ON config_verification_runs
 WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
 BEGIN SELECT RAISE(ABORT, 'config_verification_run evidence_at must be set when entering Running'); END;
--- Passed 证据：绑定配置版本的全部 check 都有 ok+Evidence 结果行（且无多余/非 ok 行）。
+-- Passed 证据：绑定配置版本的全部 check 与 resource discovery 都有 ok+Evidence
+-- 结果行。草稿验证结果绝不写 observed_resources。
 CREATE TRIGGER trg_config_verification_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_verification_runs
 WHEN NEW.state = 'Passed' AND OLD.state <> 'Passed' AND (
   EXISTS (SELECT 1 FROM config_checks c JOIN config_plans p ON p.id = c.plan_id
           WHERE p.config_version_id = OLD.config_version_id
             AND NOT EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND r.plan_key = p.plan_key AND r.check_key = c.check_key))
+  OR EXISTS (SELECT 1 FROM config_discoveries d WHERE d.config_version_id=OLD.config_version_id
+            AND NOT EXISTS (SELECT 1 FROM config_verification_discovery_results r WHERE r.verification_run_id=OLD.id AND r.discovery_key=d.discovery_key))
   OR EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
+  OR EXISTS (SELECT 1 FROM config_verification_discovery_results r WHERE r.verification_run_id=OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
 )
 BEGIN SELECT RAISE(ABORT, 'config_verification_run can only Pass when every check of the bound config version has an ok result with evidence'); END;
 -- 父 Config Verification Run 进入终态前必须在同一事务 fence 子 Attempt；Cancelled 允许已进入 Cancelling 的运行子 Attempt。
@@ -4831,8 +4896,7 @@ BEGIN
     row_version = row_version + 1,
     display_name = (SELECT display_name FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
     enabled = (SELECT enabled FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
-    timezone = (SELECT timezone FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
-    resource_refresh_interval_seconds = (SELECT resource_refresh_interval_seconds FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER))
+    timezone = (SELECT timezone FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER))
   FROM json_each(NEW.items_json) je
   WHERE business_systems.id = CAST(je.value ->> '$.business_system_id' AS INTEGER);
   -- 8) 更新 label_contract_state 指针对；匹配的未应用 activation_id 是唯一内部写入令牌。
@@ -4906,7 +4970,11 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         JOIN config_checks c ON c.plan_id = p.id
         WHERE t.id = NEW.scope_id AND t.state = 'Running'
           AND c.check_key = NEW.check_key AND c.kind IN ('promql','browser')
-          AND NEW.plan_key IS NOT NULL AND NEW.check_key IS NOT NULL))
+          AND NEW.plan_key IS NOT NULL AND NEW.check_key IS NOT NULL
+        UNION ALL
+        SELECT 1 FROM config_verification_runs t JOIN config_discoveries d ON d.config_version_id=t.config_version_id AND d.discovery_key=NEW.discovery_key
+        WHERE t.id=NEW.scope_id AND t.state='Running'
+          AND NEW.discovery_key IS NOT NULL AND NEW.plan_key IS NULL AND NEW.check_key IS NULL))
    OR (NEW.scope_type = 'resource_refresh_run' AND NOT EXISTS (
         SELECT 1 FROM resource_refresh_runs r JOIN config_discoveries d ON d.config_version_id=r.config_version_id AND d.discovery_key=NEW.discovery_key
         WHERE r.id=NEW.scope_id AND r.state IN ('Queued','Running') AND NEW.discovery_key IS NOT NULL))
@@ -4939,12 +5007,13 @@ WHEN NOT EXISTS (
       WHEN 'knowledge_extraction' THEN 'knowledge_extraction_v1'
       WHEN 'embedding' THEN 'embedding_v1'
       WHEN 'inspection_collection' THEN CASE a.scope_type
-        WHEN 'config_verification_run' THEN CASE WHEN EXISTS (
-          SELECT 1 FROM config_verification_runs t
-          JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = a.plan_key
-          JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
-          WHERE t.id = a.scope_id AND c.kind = 'browser')
-          THEN 'inspection_collection_v1'
+        WHEN 'config_verification_run' THEN CASE
+          WHEN a.discovery_key IS NOT NULL THEN 'config_verification_discovery_execution_v1'
+          WHEN EXISTS (
+            SELECT 1 FROM config_verification_runs t
+            JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = a.plan_key
+            JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
+            WHERE t.id = a.scope_id AND c.kind = 'browser') THEN 'inspection_collection_v1'
           ELSE 'config_verification_execution_v1' END
         WHEN 'resource_refresh_run' THEN 'resource_refresh_execution_v1'
         WHEN 'run_check' THEN CASE WHEN EXISTS (
@@ -4989,6 +5058,8 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
           (c.type = 'model_provider'
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'model_probe_chat')
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'model_probe_embedding'))
+          OR (c.type = 'prometheus'
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'prometheus_probe'))
           OR (c.type = 'thanos'
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'thanos_probe'))
           OR (c.type = 'kubernetes'
@@ -5012,7 +5083,7 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
           AND credential.connection_id = connection.id
         JOIN root_key_state root_key ON root_key.id = 1
         WHERE g.attempt_id = NEW.id AND g.purpose = 'config_thanos_query'
-          AND connection.type = 'thanos' AND connection.enabled = 1 AND connection.revalidation_required = 0
+          AND connection.type IN ('prometheus','thanos') AND connection.enabled = 1 AND connection.revalidation_required = 0
           AND connection.current_revision_id = revision.id
           AND connection.current_credential_generation_id = credential.id
           AND credential.key_binding_revision = root_key.binding_revision
@@ -5071,6 +5142,7 @@ WHEN NOT EXISTS (
         AND ag.qualified_probe_result_id IS NULL
         AND ag.purpose = CASE c.type
           WHEN 'model_provider' THEN 'model_probe_chat'
+          WHEN 'prometheus' THEN 'prometheus_probe'
           WHEN 'thanos' THEN 'thanos_probe'
           WHEN 'kubernetes' THEN 'kubernetes_probe'
         END)
@@ -5089,7 +5161,7 @@ WHEN OLD.attempt_type = 'connection_probe' AND NEW.state IN ('Succeeded','Failed
       END
       AND ((p.connection_type = 'model_provider' AND EXISTS (
               SELECT 1 FROM model_provider_connection_probe_results x WHERE x.probe_result_id = p.id))
-        OR (p.connection_type = 'thanos' AND EXISTS (
+        OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (
               SELECT 1 FROM thanos_connection_probe_results x WHERE x.probe_result_id = p.id))
         OR (p.connection_type = 'kubernetes' AND EXISTS (
               SELECT 1 FROM kubernetes_connection_probe_results x WHERE x.probe_result_id = p.id)))
@@ -5110,8 +5182,8 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'model-provider probe child must match its header, provider config and real calls'); END;
 CREATE TRIGGER trg_thanos_connection_probe_results_closure BEFORE INSERT ON thanos_connection_probe_results
-WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type = 'thanos')
-BEGIN SELECT RAISE(ABORT, 'Thanos probe child must match a Thanos probe header'); END;
+WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type IN ('prometheus','thanos'))
+BEGIN SELECT RAISE(ABORT, 'metrics probe child must match a Prometheus-compatible probe header'); END;
 CREATE TRIGGER trg_kubernetes_connection_probe_results_closure BEFORE INSERT ON kubernetes_connection_probe_results
 WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type = 'kubernetes')
 BEGIN SELECT RAISE(ABORT, 'Kubernetes probe child must match a Kubernetes probe header'); END;
@@ -5129,23 +5201,30 @@ CREATE TRIGGER trg_connection_enable_qualification_closure BEFORE INSERT ON conn
 WHEN NOT EXISTS (
   SELECT 1 FROM connections c
   JOIN connection_probe_results p ON p.id = NEW.probe_result_id AND p.connection_id = c.id
-  JOIN model_provider_connection_probe_results m ON m.probe_result_id = p.id
   JOIN credential_generations g ON g.id = p.credential_generation_id
   JOIN root_key_state k ON k.id = 1 AND k.binding_revision = g.key_binding_revision
-  WHERE c.id = NEW.connection_id AND c.type = 'model_provider' AND c.enabled = 0
+  WHERE c.id = NEW.connection_id AND c.type IN ('model_provider','prometheus','thanos') AND c.enabled = 0
     AND NEW.enabled_row_version = c.row_version + 1
     AND p.connection_revision_id = c.current_revision_id
     AND p.credential_generation_id = c.current_credential_generation_id
     AND p.root_binding_revision = k.binding_revision AND p.outcome = 'passed'
-    AND m.streaming_supported = 1 AND m.native_tool_calling_supported = 1
-    AND m.cancellation_observed = 1 AND m.usage_observed = 1 AND m.embedding_supported = 1)
+    AND (
+      (c.type = 'model_provider' AND EXISTS (
+        SELECT 1 FROM model_provider_connection_probe_results m
+        WHERE m.probe_result_id = p.id AND m.streaming_supported = 1
+          AND m.native_tool_calling_supported = 1 AND m.cancellation_observed = 1
+          AND m.usage_observed = 1 AND m.embedding_supported = 1))
+      OR (c.type IN ('prometheus','thanos') AND EXISTS (
+        SELECT 1 FROM thanos_connection_probe_results metrics
+        WHERE metrics.probe_result_id = p.id))
+    ))
 BEGIN SELECT RAISE(ABORT, 'enable qualification must select a passed probe for the exact current model-provider binding'); END;
 CREATE TRIGGER trg_connections_enable_requires_probe BEFORE UPDATE OF enabled, current_revision_id, current_credential_generation_id ON connections
-WHEN NEW.type = 'model_provider' AND NEW.enabled = 1 AND (
+WHEN NEW.type IN ('model_provider','prometheus','thanos') AND NEW.enabled = 1 AND (
   OLD.enabled <> 0 OR NEW.current_revision_id IS NULL OR NEW.current_credential_generation_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM connection_enable_qualifications q
     WHERE q.connection_id = NEW.id AND q.enabled_row_version = NEW.row_version))
-BEGIN SELECT RAISE(ABORT, 'model_provider enable must atomically append an explicit immutable qualification event'); END;
+BEGIN SELECT RAISE(ABORT, 'metrics and model-provider enable must atomically append an explicit immutable qualification event'); END;
 CREATE TRIGGER trg_business_system_kubernetes_connection_type BEFORE INSERT ON business_system_kubernetes_connections
 WHEN NOT EXISTS (SELECT 1 FROM connections c WHERE c.id = NEW.connection_id AND c.type = 'kubernetes')
 BEGIN SELECT RAISE(ABORT, 'business system binding requires a kubernetes connection'); END;
@@ -5163,6 +5242,7 @@ WHEN NOT EXISTS (
       (a.attempt_type = 'connection_probe' AND a.scope_type = 'connection' AND a.scope_id = c.id
         AND NEW.qualified_probe_result_id IS NULL
         AND ((c.type = 'model_provider' AND NEW.purpose IN ('model_probe_chat','model_probe_embedding'))
+          OR (c.type = 'prometheus' AND NEW.purpose = 'prometheus_probe')
           OR (c.type = 'thanos' AND NEW.purpose = 'thanos_probe')
           OR (c.type = 'kubernetes' AND NEW.purpose = 'kubernetes_probe')))
       OR (c.enabled = 1 AND c.revalidation_required = 0 AND (
@@ -5178,8 +5258,8 @@ WHEN NOT EXISTS (
               AND m.cancellation_observed = 1 AND m.usage_observed = 1
               AND (NEW.purpose <> 'embedding' OR m.embedding_supported = 1))
         )
-        OR (NEW.purpose = 'thanos_query' AND c.type = 'thanos' AND NEW.qualified_probe_result_id IS NULL)
-        OR (NEW.purpose = 'config_thanos_query' AND c.type = 'thanos' AND NEW.qualified_probe_result_id IS NULL
+        OR (NEW.purpose = 'thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL)
+        OR (NEW.purpose = 'config_thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL
             AND a.attempt_type = 'inspection_collection' AND (
               a.scope_type IN ('config_verification_run','resource_refresh_run')
               OR (a.scope_type = 'run_check' AND EXISTS (
@@ -5427,7 +5507,11 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     SELECT 1 FROM config_verification_run_check_results r
     WHERE NEW.scope_type = 'config_verification_run' AND r.verification_run_id = NEW.scope_id
       AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
-      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL))
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM config_verification_discovery_results r
+    WHERE NEW.scope_type='config_verification_run' AND r.verification_run_id=NEW.scope_id
+      AND r.discovery_key=NEW.discovery_key AND r.attempt_id=NEW.id AND r.result_digest IS NOT NULL))
   OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'resource_refresh_run' AND NOT EXISTS (
     SELECT 1 FROM observed_refresh_log l
     WHERE l.attempt_id = NEW.id AND l.result_digest IS NOT NULL))
@@ -5480,6 +5564,10 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
       AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
       AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
     UNION ALL
+    SELECT 1 FROM config_verification_discovery_results r
+    WHERE NEW.scope_type='config_verification_run' AND r.verification_run_id=NEW.scope_id
+      AND r.discovery_key=NEW.discovery_key AND r.attempt_id=NEW.id AND r.result_digest IS NOT NULL
+    UNION ALL
     SELECT 1 FROM observed_refresh_log l
     WHERE NEW.scope_type = 'resource_refresh_run' AND l.resource_refresh_run_id = NEW.scope_id
       AND l.attempt_id = NEW.id AND l.result_digest IS NOT NULL
@@ -5488,7 +5576,7 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     SELECT 1 FROM connection_probe_results p
       WHERE p.attempt_id = NEW.id AND p.connection_id = NEW.scope_id
         AND ((p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
-          OR (p.connection_type = 'thanos' AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id))
+          OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id))
           OR (p.connection_type = 'kubernetes' AND EXISTS (SELECT 1 FROM kubernetes_connection_probe_results k WHERE k.probe_result_id = p.id)))))
   OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction') AND (
       NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.id AND m.status = 'succeeded')

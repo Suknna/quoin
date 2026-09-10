@@ -75,3 +75,52 @@ services:
       timeout: 2s
       retries: 30
       start_period: 2s
+
+  # These deliberately small, independently authenticated upstreams prove #97
+  # through the production runtime adapter. They are not Quoin mocks and expose
+  # their query counters only to the private Compose network for no-scan checks.
+  prometheus-fixture:
+    image: python:3.13-alpine
+    command: ["python3", "/fixture/metrics-fixture.py", "--name", "prometheus-basic", "--auth", "basic", "--basic-username", "e2e-prometheus"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/metrics-fixture.py:/fixture/metrics-fixture.py:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/secrets/metrics-basic-password:/run/fixture/basic-password:ro
+    environment:
+      METRICS_FIXTURE_BASIC_PASSWORD_FILE: /run/fixture/basic-password
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/-/ready')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  prometheus-tls-fixture:
+    image: python:3.13-alpine
+    command: ["python3", "/fixture/metrics-fixture.py", "--name", "prometheus-noauth-tls", "--auth", "none", "--tls-cert", "/run/fixture/tls.crt", "--tls-key", "/run/fixture/tls.key"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/metrics-fixture.py:/fixture/metrics-fixture.py:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/prometheus-tls.crt:/run/fixture/tls.crt:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/prometheus-tls.key:/run/fixture/tls.key:ro
+    healthcheck:
+      # The fixture owns this certificate and validates it by its Compose DNS
+      # name; do not hide a broken TLS setup behind an unverified context.
+      test: ["CMD", "python3", "-c", "import ssl,urllib.request; c=ssl.create_default_context(cafile='/run/fixture/tls.crt'); urllib.request.urlopen('https://prometheus-tls-fixture:8080/-/ready', context=c)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  thanos-fixture:
+    image: python:3.13-alpine
+    command: ["python3", "/fixture/metrics-fixture.py", "--name", "thanos-bearer", "--auth", "bearer"]
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/metrics-fixture.py:/fixture/metrics-fixture.py:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/secrets/metrics-bearer-token:/run/fixture/bearer-token:ro
+    environment:
+      METRICS_FIXTURE_BEARER_TOKEN_FILE: /run/fixture/bearer-token
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/-/ready')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s

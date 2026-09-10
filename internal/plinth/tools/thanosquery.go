@@ -117,12 +117,8 @@ func ExecuteThanosQuery(ctx context.Context, params ThanosQueryParams) (payload 
 	if err != nil {
 		return fail("invalid_arguments", "查询 URL 构造失败: "+err.Error())
 	}
-	if params.Secret.Password != "" {
-		username := params.Secret.Username
-		if username == "" {
-			username = params.Config.Username
-		}
-		request.SetBasicAuth(username, params.Secret.Password)
+	if err := plinthconnections.ApplyMetricsAuth(request, params.Config, params.Secret); err != nil {
+		return fail("invalid_connection_config", "指标连接认证配置无效: "+err.Error())
 	}
 	response, err := client.Do(request)
 	if err != nil {

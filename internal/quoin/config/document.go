@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	_ "time/tzdata" // the runtime image is scratch-based; the binary embeds the IANA tz database (CFG-YAML-003)
@@ -24,13 +25,18 @@ import (
 // BusinessSystemDocument is the parse-once typed projection persisted as
 // immutable columns (DATA-CONFIG-003); runtime never re-parses the YAML.
 type BusinessSystemDocument struct {
-	SystemKey                      string
-	DisplayName                    string
-	Enabled                        bool
-	Timezone                       string
-	ResourceRefreshIntervalSeconds int64
-	Discoveries                    []DiscoveryProjection
-	Plans                          []PlanProjection
+	SystemKey   string
+	DisplayName string
+	// MetricsConnectionID is the required, versioned metrics route. It is a
+	// locator rather than a display name so a renamed connection cannot redirect
+	// an already reviewed declaration.
+	MetricsConnectionID int64
+	Enabled             bool
+	Timezone            string
+	AlertSourceIDs      []int64
+	AlertSourceLabels   map[string]string
+	Discoveries         []DiscoveryProjection
+	Plans               []PlanProjection
 }
 
 // DiscoveryProjection mirrors one resource_discoveries entry.
@@ -115,11 +121,20 @@ func (document BusinessSystemDocument) canonicalValue() map[string]any {
 		}
 		plans = append(plans, planValue)
 	}
+	alertSourceIDs := make([]any, 0, len(document.AlertSourceIDs))
+	for _, id := range document.AlertSourceIDs {
+		alertSourceIDs = append(alertSourceIDs, fmt.Sprint(id))
+	}
+	alertSourceLabels := make(map[string]any, len(document.AlertSourceLabels))
+	for name, value := range document.AlertSourceLabels {
+		alertSourceLabels[name] = value
+	}
 	return map[string]any{
 		"system_key": document.SystemKey, "display_name": document.DisplayName,
-		"enabled": document.Enabled, "timezone": document.Timezone,
-		"resource_refresh_interval_seconds": document.ResourceRefreshIntervalSeconds,
-		"resource_discoveries":              discoveries, "inspection_plans": plans,
+		"metrics_connection_id": fmt.Sprint(document.MetricsConnectionID),
+		"enabled":               document.Enabled, "timezone": document.Timezone,
+		"alert_source_ids": alertSourceIDs, "alert_source_labels": alertSourceLabels,
+		"resource_discoveries": discoveries, "inspection_plans": plans,
 	}
 }
 
@@ -174,11 +189,13 @@ func ExtractBusinessSystem(value any) (BusinessSystemDocument, error) {
 		return BusinessSystemDocument{}, fmt.Errorf("文档根必须是映射")
 	}
 	document := BusinessSystemDocument{
-		SystemKey:                      rootString(root, "system_key"),
-		DisplayName:                    rootString(root, "display_name"),
-		Enabled:                        rootBool(root, "enabled"),
-		Timezone:                       rootString(root, "timezone"),
-		ResourceRefreshIntervalSeconds: int64(rootInt(root, "resource_refresh_interval_seconds")),
+		SystemKey:           rootString(root, "system_key"),
+		DisplayName:         rootString(root, "display_name"),
+		MetricsConnectionID: rootLocator(root, "metrics_connection_id"),
+		Enabled:             rootBool(root, "enabled"),
+		Timezone:            rootString(root, "timezone"),
+		AlertSourceIDs:      locatorSlice(root["alert_source_ids"]),
+		AlertSourceLabels:   stringMap(root["alert_source_labels"]),
 	}
 	if rawDiscoveries, ok := root["resource_discoveries"].([]any); ok {
 		for _, item := range rawDiscoveries {
@@ -352,6 +369,35 @@ func rootString(root map[string]any, key string) string {
 func rootBool(root map[string]any, key string) bool {
 	value, _ := root[key].(bool)
 	return value
+}
+
+func rootLocator(root map[string]any, key string) int64 {
+	value, _ := strconv.ParseInt(rootString(root, key), 10, 64)
+	return value
+}
+
+func locatorSlice(value any) []int64 {
+	items, _ := value.([]any)
+	result := make([]int64, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			if id, err := strconv.ParseInt(text, 10, 64); err == nil && id > 0 {
+				result = append(result, id)
+			}
+		}
+	}
+	return result
+}
+
+func stringMap(value any) map[string]string {
+	items, _ := value.(map[string]any)
+	result := make(map[string]string, len(items))
+	for key, value := range items {
+		if text, ok := value.(string); ok {
+			result[key] = text
+		}
+	}
+	return result
 }
 
 func rootInt(root map[string]any, key string) int64 {

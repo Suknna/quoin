@@ -5,38 +5,10 @@ import (
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
-	"net/http"
 )
 
-func (handler *Handler) startResourceRefresh(ctx context.Context, input *struct {
-	Session   string `cookie:"__Host-quoin-session"`
-	SystemKey string `path:"systemKey"`
-	Body      struct {
-		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-	}
-}) (*struct {
-	Status       int                                     `header:"-"`
-	CacheControl string                                  `header:"Cache-Control"`
-	Body         businesssystem.ResourceRefreshRunDetail `json:"body"`
-}, error) {
-	principalID, err := handler.admin(ctx, input.Session)
-	if err != nil {
-		return nil, err
-	}
-	detail, err := handler.Systems.StartResourceRefresh(ctx, principalID, input.Body.ClientCommandID, input.SystemKey)
-	if err != nil {
-		return nil, mapDomainError(err)
-	}
-	if handler.DispatchResourceRefresh != nil {
-		go handler.DispatchResourceRefresh(context.Background())
-	}
-	return &struct {
-		Status       int                                     `header:"-"`
-		CacheControl string                                  `header:"Cache-Control"`
-		Body         businesssystem.ResourceRefreshRunDetail `json:"body"`
-	}{Status: http.StatusAccepted, CacheControl: noStore(), Body: detail}, nil
-}
-
+// getResourceRefreshRun keeps the historical read surface available after the
+// standalone manual and scheduled producers have been retired.
 func (handler *Handler) getResourceRefreshRun(ctx context.Context, input *struct {
 	Session              string `cookie:"__Host-quoin-session"`
 	SystemKey            string `path:"systemKey"`
@@ -48,9 +20,9 @@ func (handler *Handler) getResourceRefreshRun(ctx context.Context, input *struct
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
 	}
-	runID, problem := parseLocator(input.ResourceRefreshRunID)
-	if problem != nil {
-		return nil, problem
+	runID, invalid := parseLocator(input.ResourceRefreshRunID)
+	if invalid != nil {
+		return nil, invalid
 	}
 	detail, err := handler.Systems.GetResourceRefresh(ctx, input.SystemKey, runID)
 	if err != nil {

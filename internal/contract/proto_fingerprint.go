@@ -7,7 +7,7 @@ import "regexp"
 // ProtoAuthorityFingerprint is the SHA-256 fingerprint of the complete,
 // ordered Proto authority set. It is compiled into every component and is not
 // configurable at deployment time.
-const ProtoAuthorityFingerprint = "e157e5924e924e233093a25a4ec02b85ea8597e641592e675244c585c3e2bae8"
+const ProtoAuthorityFingerprint = "221599db296cef92b0a8d0e0ec0373da3f47a25f40652348921982a10450de0f"
 
 var protoAuthorityFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 

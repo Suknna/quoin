@@ -8,9 +8,9 @@
   "required": [
     "system_key",
     "display_name",
+    "metrics_connection_id",
     "enabled",
     "timezone",
-    "resource_refresh_interval_seconds",
     "resource_discoveries",
     "inspection_plans"
   ],
@@ -25,6 +25,11 @@
       "type": "string",
       "minLength": 1
     },
+    "metrics_connection_id": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$",
+      "description": "明确引用的 Prometheus 或 Thanos Connection locator；上传和发布均验证其类型和可用性，运行只使用随配置版本冻结的绑定。"
+    },
     "enabled": {
       "type": "boolean",
       "description": "发布时成为业务系统 enabled 投影（DATA-CONFIG-001）。"
@@ -34,10 +39,16 @@
       "minLength": 1,
       "description": "IANA 时区名（如 Asia/Shanghai）；上传时以系统时区数据库校验，非 IANA 名称拒绝（CFG-YAML-003）。"
     },
-    "resource_refresh_interval_seconds": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "统一资源刷新周期（根节点提供；discovery 不再各自携带，DATA-CONFIG-004）。"
+    "alert_source_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+      "description": "可选的 Alertmanager 来源 locator 白名单；它只限制候选来源，不能替代 Label Contract 的业务归属。"
+    },
+    "alert_source_labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "description": "可选的精确告警标签条件；与 Label Contract 的业务标签共同收窄来源，空对象表示没有额外条件。"
     },
     "resource_discoveries": {
       "type": "array",

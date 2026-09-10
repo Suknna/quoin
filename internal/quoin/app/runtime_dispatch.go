@@ -248,8 +248,11 @@ func (service *RuntimeService) FetchCredentialGrant(ctx context.Context, request
 		RevisionConfigJson:     payload.RevisionConfigJSON,
 	}
 	switch {
-	case payload.Thanos != nil:
-		response.Secret = &runtimev1.FetchCredentialGrantResponse_Thanos{Thanos: &runtimev1.ThanosCredentialSecret{Username: payload.Thanos.Username, Password: payload.Thanos.Password}}
+	case payload.Metrics != nil:
+		// The established wire slot is named `thanos`; it deliberately carries
+		// either Prometheus or Thanos credentials, while ConnectionType remains
+		// the authoritative discriminator.
+		response.Secret = &runtimev1.FetchCredentialGrantResponse_Thanos{Thanos: &runtimev1.ThanosCredentialSecret{Username: payload.Metrics.Username, Password: payload.Metrics.Password, BearerToken: payload.Metrics.BearerToken}}
 	case payload.Kubernetes != nil:
 		response.Secret = &runtimev1.FetchCredentialGrantResponse_Kubernetes{Kubernetes: &runtimev1.KubernetesCredentialSecret{Kubeconfig: payload.Kubernetes.Kubeconfig}}
 	case payload.ModelProvider != nil:
@@ -286,13 +289,17 @@ type kubernetesDetail struct {
 // frozen typed-child CHECK contract before the closure transaction runs.
 func parseTypedChild(schemaKind string, detail json.RawMessage) (*connections.TypedChild, error) {
 	switch schemaKind {
-	case "connection_probe_thanos_v1":
+	case "connection_probe_prometheus_v1", "connection_probe_thanos_v1":
 		var parsed thanosDetail
 		if err := json.Unmarshal(detail, &parsed); err != nil {
-			return nil, fmt.Errorf("thanos detail unparseable: %w", err)
+			return nil, fmt.Errorf("metrics detail unparseable: %w", err)
 		}
-		if parsed.Kind != "thanos" {
-			return nil, fmt.Errorf("thanos detail kind mismatch")
+		expectedKind := "thanos"
+		if schemaKind == "connection_probe_prometheus_v1" {
+			expectedKind = "prometheus"
+		}
+		if parsed.Kind != expectedKind {
+			return nil, fmt.Errorf("%s detail kind mismatch", expectedKind)
 		}
 		// The typed-child columns carry the frozen ACTION constants
 		// (query=vector(1), type=vector, count=1 — schema CHECK); the

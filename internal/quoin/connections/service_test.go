@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
@@ -125,7 +126,7 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 }
 
 func TestEnableFencesAndModelProviderQualification(t *testing.T) {
-	service, _, _ := newService(t)
+	service, database, _ := newService(t)
 	ctx := context.Background()
 	first, err := service.Create(ctx, thanosInput(""), 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
@@ -137,13 +138,19 @@ func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enabledFirst, err := service.Enable(ctx, first.Name, first.RowVersion, 0, 1)
-	if err != nil || !enabledFirst.Enabled {
-		t.Fatalf("enable first: %v %+v", err, enabledFirst)
+	if _, err := service.Enable(ctx, first.Name, first.RowVersion, 0, 1); !errors.Is(err, connections.ErrValidation) {
+		t.Fatalf("metrics enable without a passed probe must be rejected, got %v", err)
 	}
-	// Single-enabled partial index for thanos.
-	if _, err := service.Enable(ctx, second.Name, second.RowVersion, 0, 1); !errors.Is(err, connections.ErrSingleEnabled) {
-		t.Fatalf("second enabled thanos must conflict, got %v", err)
+	firstProbe := passedMetricsProbe(t, service, database, first, "boot-first", 1)
+	enabledFirst, err := service.Enable(ctx, first.Name, first.RowVersion, firstProbe, 1)
+	if err != nil || !enabledFirst.Enabled {
+		t.Fatalf("enable first after exact passed probe: %v %+v", err, enabledFirst)
+	}
+	// Metrics connections are independently selectable by business declaration,
+	// but each one must independently qualify its own frozen pair.
+	secondProbe := passedMetricsProbe(t, service, database, second, "boot-second", 2)
+	if secondEnabled, err := service.Enable(ctx, second.Name, second.RowVersion, secondProbe, 1); err != nil || !secondEnabled.Enabled {
+		t.Fatalf("second enabled thanos must independently qualify, got %v %+v", err, secondEnabled)
 	}
 	// Row-version fence.
 	if _, err := service.Enable(ctx, second.Name, second.RowVersion-1, 0, 1); !errors.Is(err, connections.ErrRowVersion) {
@@ -163,6 +170,50 @@ func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 	if _, err := service.Enable(ctx, provider.Name, provider.RowVersion, 99999, 1); !errors.Is(err, connections.ErrValidation) {
 		t.Fatalf("unknown probe result must be rejected, got %v", err)
 	}
+}
+
+// passedMetricsProbe follows the production probe state machine so an enable
+// qualification can only reference a real immutable result over this exact
+// connection revision and credential generation.
+func passedMetricsProbe(t *testing.T, service *connections.Service, database *sql.DB, summary connections.Summary, boot string, epoch uint64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	// The shared fixture registers Plinth once; repeated qualifying probes use
+	// the same slot and only advance their independent attempt bindings.
+	var registered int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_slots WHERE slot='plinth' AND state='registered'`).Scan(&registered); err != nil {
+		t.Fatal(err)
+	}
+	if registered == 0 {
+		if err := registerPlinthSlot(database); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, boot, epoch, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(ctx, attemptID, boot, epoch); err != nil {
+		t.Fatal(err)
+	}
+	result := connections.TypedProbeResult{
+		Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", attemptID),
+		StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z",
+	}
+	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{
+		Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`,
+	}}
+	if err := service.CommitProbeResult(ctx, attemptID, boot, epoch, result, child); err != nil {
+		t.Fatal(err)
+	}
+	var probeID int64
+	if err := database.QueryRowContext(ctx, `SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	return probeID
 }
 
 func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {

@@ -12,56 +12,89 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 )
 
-// seedThanosChain inserts one enabled thanos connection with a
-// root-binding-matching credential generation (no probe qualification is
-// required for thanos: the enable command only fences the partial index).
+// seedThanosChain follows the production metrics lifecycle: a current passed
+// probe is committed first, then Enable atomically records its qualification.
+// Tests must not bypass this server-side admission fence.
 func seedThanosChain(t *testing.T, db *sql.DB) (connectionID, revisionID, generationID int64) {
 	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, []byte(strings.Repeat("e", 12)), []byte(strings.Repeat("f", 16)), now); err != nil {
-		t.Fatal(err)
-	}
 	var existingConnectionID, existingRevisionID, existingGenerationID int64
-	err := db.QueryRow(`SELECT c.id, c.current_revision_id, c.current_credential_generation_id FROM connections c WHERE c.type='thanos' AND c.enabled=1`).Scan(&existingConnectionID, &existingRevisionID, &existingGenerationID)
+	err := db.QueryRow(`SELECT id,current_revision_id,current_credential_generation_id FROM connections WHERE type='thanos' AND enabled=1 AND revalidation_required=0`).Scan(&existingConnectionID, &existingRevisionID, &existingGenerationID)
 	if err == nil {
 		return existingConnectionID, existingRevisionID, existingGenerationID
 	}
 	if err != sql.ErrNoRows {
 		t.Fatalf("existing thanos lookup: %v", err)
 	}
-	connection, err := db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES(?,'thanos',0,?)`, fmt.Sprintf("thanos-%d", seedCounter), now)
+	summary := createQualifiedThanos(t, db, fmt.Sprintf("thanos-%d", seedCounter), uint64(seedCounter+1))
+	return summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID
+}
+
+func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) connections.Summary {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state == "unregistered" {
+		credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), now, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		credentialID, _ := credential.LastInsertId()
+		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credentialID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connections.ProbeContractSource = func() string { return "analysis-test-probe-contract-v1" }
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
+		t.Fatal(err)
+	}
+	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "analysis-metrics-create-"+name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connectionID, _ = connection.LastInsertId()
-	revision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,'{"baseUrl":"http://thanos.test"}',?)`, connectionID, now)
+	attemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisionID, _ = revision.LastInsertId()
-	nonce := make([]byte, 12)
-	for i := range nonce {
-		nonce[i] = byte(seedCounter*17 + i)
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "analysis-probe", epoch, time.Minute); err != nil || !ok {
+		t.Fatalf("bind metrics probe: ok=%v err=%v", ok, err)
 	}
-	generation, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`, connectionID, nonce, []byte(strings.Repeat("f", 32)), now)
+	if err := service.AcceptProbe(context.Background(), attemptID, "analysis-probe", epoch); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CommitProbeResult(context.Background(), attemptID, "analysis-probe", epoch, connections.TypedProbeResult{Outcome: "passed", ResultDigest: strings.Repeat("a", 64), StartedAt: now, FinishedAt: now}, &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`}}); err != nil {
+		t.Fatal(err)
+	}
+	var probeID int64
+	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	generationID, _ = generation.LastInsertId()
-	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?, current_credential_generation_id=?, row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE connections SET enabled=1, row_version=row_version+1 WHERE id=? AND enabled=0`, connectionID); err != nil {
-		t.Fatal(err)
-	}
-	return connectionID, revisionID, generationID
+	return enabled
 }
 
 // runThanosAttempt creates one analysis through the production path and
@@ -108,9 +141,38 @@ func runThanosAttempt(t *testing.T, db *sql.DB, service *Service, occurrenceID i
 
 // completeThanosProposal seals the model call carrying one proposed
 // thanos_query and returns the durable authorization.
+func completeThanosProposalWithQuery(t *testing.T, service *Service, attemptID, callID int64, query string) ([]attempt.ToolAuthorization, error) {
+	t.Helper()
+	arguments := []byte(`{"query":` + strconv.Quote(query) + `}`)
+	proposed := []attempt.ProposedTool{{
+		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
+		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
+	}}
+	_, responseDigest, err := attempt.CanonicalChatResponseJSON("", proposed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service.Attempts().CompleteModelCall(context.Background(), attempt.CompleteCall{
+		AttemptID: attemptID, CallID: callID,
+		Outcome: "succeeded", FinishReason: "tool_calls",
+		AssistantText: "", ProposedTools: proposed,
+		ResponseDigest: responseDigest, ResponseComplete: true,
+		InputTokens: 12, OutputTokens: 8, TotalTokens: 20,
+	})
+}
+
 func completeThanosProposal(t *testing.T, service *Service, attemptID, callID int64) attempt.ToolAuthorization {
 	t.Helper()
-	arguments := []byte(`{"query":"up"}`)
+	var systemKey string
+	if err := service.DB().QueryRow(`
+		SELECT config.system_key
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL
+		JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id
+		WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
+		t.Fatal(err)
+	}
+	arguments := []byte(`{"query":"up{business_system=\"` + systemKey + `\"}"}`)
 	proposed := []attempt.ProposedTool{{
 		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
 		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
@@ -152,6 +214,31 @@ func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants WHERE tool_call_id=? AND connection_grant_id=?`, authorization.ToolCallID, authorization.Grants[0].GrantID).Scan(&bindings); err != nil || bindings != 1 {
 		t.Fatalf("bindings=%d err=%v", bindings, err)
 	}
+	var grantedBusiness, expectedBusiness int64
+	if err := db.QueryRow(`SELECT business_system_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedBusiness); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT occurrence.business_system_id FROM alert_occurrences occurrence JOIN initial_analyses analysis ON analysis.occurrence_id=occurrence.id JOIN execution_attempts attempt ON attempt.scope_id=analysis.id WHERE attempt.id=?`, attemptID).Scan(&expectedBusiness); err != nil || grantedBusiness != expectedBusiness {
+		t.Fatalf("grant business=%d expected=%d err=%v", grantedBusiness, expectedBusiness, err)
+	}
+}
+
+// TestThanosToolRejectsUnsafeQueryWithoutGrant proves server-side Label
+// Contract enforcement runs before grant creation; prompt text cannot widen a
+// business query into an unscoped selector.
+func TestThanosToolRejectsUnsafeQueryWithoutGrant(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	seedProviderChain(t, db)
+	seedThanosChain(t, db)
+	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-unsafe")
+	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, "up"); err == nil {
+		t.Fatal("complete must reject an unscoped PromQL query")
+	}
+	var grants int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, attemptID).Scan(&grants); err != nil || grants != 0 {
+		t.Fatalf("grants=%d err=%v", grants, err)
+	}
 }
 
 // TestThanosToolRejectedWithoutAuthorizationTarget proves the
@@ -163,22 +250,14 @@ func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
 	service := NewService(db)
 	seedProviderChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-reject")
-	arguments := []byte(`{"query":"up"}`)
-	proposed := []attempt.ProposedTool{{
-		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
-		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
-	}}
-	_, responseDigest, err := attempt.CanonicalChatResponseJSON("", proposed)
-	if err != nil {
+	var systemKey string
+	if err := db.QueryRow(`SELECT config.system_key FROM attempt_input_snapshots snapshot JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Attempts().CompleteModelCall(context.Background(), attempt.CompleteCall{
-		AttemptID: attemptID, CallID: callID,
-		Outcome: "succeeded", FinishReason: "tool_calls",
-		AssistantText: "", ProposedTools: proposed,
-		ResponseDigest: responseDigest, ResponseComplete: true,
-		InputTokens: 12, OutputTokens: 8, TotalTokens: 20,
-	}); err == nil {
+	if _, err := db.Exec(`UPDATE connections SET enabled=0,row_version=row_version+1 WHERE id=(SELECT config.metrics_connection_id FROM attempt_input_snapshots snapshot JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id WHERE snapshot.attempt_id=?)`, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, `up{business_system="`+systemKey+`"}`); err == nil {
 		t.Fatal("complete must reject a thanos_query without an enabled connection")
 	}
 	var toolRows int
@@ -190,14 +269,73 @@ func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
 // TestThanosBeginToolCallExecutionFence proves the execution authorization
 // re-reads the connection state (DATA-CONN-002): a disable committed after
 // the grant refuses BeginToolCall and the tool call stays pending.
+// TestThanosQueryUsesAnalysisSnapshotAfterNewPublish proves a new business
+// publish cannot redirect an already-created analysis to its newer connection.
+func TestThanosQueryUsesAnalysisSnapshotAfterNewPublish(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	seedProviderChain(t, db)
+	originalConnection, _, _ := seedThanosChain(t, db)
+	occurrenceID := seedOccurrence(t, db)
+	attemptID, callID := runThanosAttempt(t, db, service, occurrenceID, "cmd-thanos-fixed-snapshot")
+
+	var businessID, oldVersionID, contractID int64
+	var systemKey, displayName string
+	if err := db.QueryRow(`
+		SELECT occurrence.business_system_id, config.id, config.label_contract_version_id, config.system_key, config.display_name
+		FROM alert_occurrences occurrence
+		JOIN business_systems business ON business.id=occurrence.business_system_id
+		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
+		WHERE occurrence.id=?`, occurrenceID).Scan(&businessID, &oldVersionID, &contractID, &systemKey, &displayName); err != nil {
+		t.Fatal(err)
+	}
+	newConnection := seedAdditionalThanosChain(t, db)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, strings.Repeat("c", 64), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newVersionID, _ := draft.LastInsertId()
+	if _, err := db.Exec(`UPDATE business_systems SET current_config_version_id=?,display_name=?,enabled=1,timezone='UTC',row_version=row_version+1 WHERE id=?`, newVersionID, displayName, businessID); err != nil {
+		t.Fatal(err)
+	}
+	authorization := completeThanosProposal(t, service, attemptID, callID)
+	var grantedConnection int64
+	if err := db.QueryRow(`SELECT connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedConnection); err != nil || grantedConnection != originalConnection {
+		t.Fatalf("grant connection=%d, want frozen original=%d (err=%v)", grantedConnection, originalConnection, err)
+	}
+	var snapshotVersion int64
+	if err := db.QueryRow(`SELECT business_system_config_version_id FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?) AND business_system_config_version_id IS NOT NULL`, attemptID).Scan(&snapshotVersion); err != nil || snapshotVersion != oldVersionID {
+		t.Fatalf("snapshot version=%d, want original=%d (err=%v)", snapshotVersion, oldVersionID, err)
+	}
+}
+
+func seedAdditionalThanosChain(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	return createQualifiedThanos(t, db, fmt.Sprintf("thanos-extra-%d", seedCounter), uint64(seedCounter+100)).ID
+}
+
+// TestThanosBeginToolCallExecutionFence proves the execution authorization
+// re-reads the connection state (DATA-CONN-002): a disable committed after
+// the grant refuses BeginToolCall and the tool call stays pending.
 func TestThanosBeginToolCallExecutionFence(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
 	seedProviderChain(t, db)
-	connectionID, _, _ := seedThanosChain(t, db)
+	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-fence")
 	authorization := completeThanosProposal(t, service, attemptID, callID)
-	if _, err := db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=?`, connectionID); err != nil {
+	var connectionID int64
+	if err := db.QueryRow(`SELECT connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&connectionID); err != nil {
+		t.Fatal(err)
+	}
+	var connectionName string
+	var connectionVersion int64
+	if err := db.QueryRow(`SELECT name,row_version FROM connections WHERE id=?`, connectionID).Scan(&connectionName, &connectionVersion); err != nil {
+		t.Fatal(err)
+	}
+	connectionService := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	if _, err := connectionService.Disable(context.Background(), connectionName, connectionVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Attempts().BeginToolCall(context.Background(), attemptID, authorization.ToolCallID); err == nil {
@@ -207,12 +345,9 @@ func TestThanosBeginToolCallExecutionFence(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM tool_calls WHERE id=?`, authorization.ToolCallID).Scan(&status); err != nil || status != "pending" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	if _, err := db.Exec(`UPDATE connections SET enabled=1, row_version=row_version+1 WHERE id=?`, connectionID); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Attempts().BeginToolCall(context.Background(), attemptID, authorization.ToolCallID); err != nil {
-		t.Fatalf("begin after re-enable: %v", err)
-	}
+	// Disabled is terminal for this credential route until a new successful
+	// qualification and Enable command. The pending call stays denied rather
+	// than re-enabling it with an unchecked SQL update.
 }
 
 // TestThanosEvidenceCommitsWithToolCallTerminalState proves the success

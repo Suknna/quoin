@@ -3628,7 +3628,7 @@ type ConnectionGrant struct {
 	GrantId                 int64                  `protobuf:"varint,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`                                                     // attempt_connection_grants.id（不可变、Attempt-scoped）
 	ConnectionRevisionId    int64                  `protobuf:"varint,2,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`            // connections.current_revision_id 绑定
 	CredentialGenerationId  int64                  `protobuf:"varint,3,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"`      // credential_generations.id 绑定
-	Purpose                 string                 `protobuf:"bytes,4,opt,name=purpose,proto3" json:"purpose,omitempty"`                                                                     // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|thanos_probe|kubernetes_probe
+	Purpose                 string                 `protobuf:"bytes,4,opt,name=purpose,proto3" json:"purpose,omitempty"`                                                                     // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|prometheus_probe|thanos_probe|kubernetes_probe
 	ConnectionProbeResultId int64                  `protobuf:"varint,5,opt,name=connection_probe_result_id,json=connectionProbeResultId,proto3" json:"connection_probe_result_id,omitempty"` // model_provider 必须绑定通过的不可变 qualification；其它类型为 0
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
@@ -7956,7 +7956,7 @@ type FetchCredentialGrantResponse struct {
 	AttemptId              int64                  `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
 	ConnectionRevisionId   int64                  `protobuf:"varint,3,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`       // connections.current_revision_id 绑定
 	CredentialGenerationId int64                  `protobuf:"varint,4,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"` // credential_generations.id 绑定
-	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "thanos" | "kubernetes" | "model_provider"（connections.type）
+	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "prometheus" | "thanos" | "kubernetes" | "model_provider"（connections.type）
 	RevisionConfigJson     []byte                 `protobuf:"bytes,6,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"`              // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
 	// Types that are valid to be assigned to Secret:
 	//
@@ -8096,12 +8096,15 @@ func (*FetchCredentialGrantResponse_Kubernetes) isFetchCredentialGrantResponse_S
 
 func (*FetchCredentialGrantResponse_ModelProvider) isFetchCredentialGrantResponse_Secret() {}
 
-// thanos 连接秘密（与 OpenAPI ThanosConnectionInput 秘密字段一致；仅 supervisor 内存）。
-// CONTEXT:147 只承诺 HTTP Basic Auth；不使用 Bearer。
+// Prometheus-compatible connection credentials (Prometheus or Thanos) are
+// carried in the established `thanos` oneof slot; connection_type is the
+// authoritative product-type discriminator. Values exist only in supervisor
+// memory for the attempt and are never returned through the public API.
 type ThanosCredentialSecret struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
 	Password      string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	BearerToken   string                 `protobuf:"bytes,3,opt,name=bearer_token,json=bearerToken,proto3" json:"bearer_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8146,6 +8149,13 @@ func (x *ThanosCredentialSecret) GetUsername() string {
 func (x *ThanosCredentialSecret) GetPassword() string {
 	if x != nil {
 		return x.Password
+	}
+	return ""
+}
+
+func (x *ThanosCredentialSecret) GetBearerToken() string {
+	if x != nil {
+		return x.BearerToken
 	}
 	return ""
 }
@@ -10488,10 +10498,11 @@ const file_runtime_proto_rawDesc = "" +
 	"kubernetes\x18\b \x01(\v2,.quoin.runtime.v1.KubernetesCredentialSecretH\x00R\n" +
 	"kubernetes\x12X\n" +
 	"\x0emodel_provider\x18\t \x01(\v2/.quoin.runtime.v1.ModelProviderCredentialSecretH\x00R\rmodelProviderB\b\n" +
-	"\x06secret\"V\n" +
+	"\x06secret\"s\n" +
 	"\x16ThanosCredentialSecret\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
-	"\bpassword\x18\x02 \x01(\tR\bpasswordJ\x04\b\x03\x10\x04\"<\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\x12!\n" +
+	"\fbearer_token\x18\x03 \x01(\tR\vbearerToken\"<\n" +
 	"\x1aKubernetesCredentialSecret\x12\x1e\n" +
 	"\n" +
 	"kubeconfig\x18\x01 \x01(\tR\n" +

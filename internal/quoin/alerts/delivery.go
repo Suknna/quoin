@@ -328,7 +328,7 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 		// Write-once attribution under the contract active at first
 		// observation (T17): missing/unknown label values stay 未归属
 		// (NULL business_system_id) and are never rewritten later.
-		businessSystemID, attrErr := attribution.attribute(ctx, conn, item.labels)
+		businessSystemID, attrErr := attribution.attribute(ctx, conn, sourceID, item.labels)
 		if attrErr != nil {
 			return nil, "", attrErr
 		}

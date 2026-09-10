@@ -10,7 +10,7 @@ if (!baseURL) throw new Error("QUOIN_REAL_E2E_BASE_URL is required for real-syst
  */
 export default defineConfig({
 	testDir: "./e2e/real",
-	testMatch: process.env.QUOIN_REAL_E2E_LEGACY === "1" ? undefined : "**/issue-{96,102}*.integration.spec.ts",
+	testMatch: process.env.QUOIN_REAL_E2E_LEGACY === "1" ? undefined : "**/issue-{96,97,102}*.integration.spec.ts",
 	timeout: 60_000,
 	expect: { timeout: 15_000 },
 	forbidOnly: Boolean(process.env.CI),

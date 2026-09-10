@@ -327,7 +327,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedVerificationAttempts(context.Background())
-		go service.dispatchQueuedResourceRefreshAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedEmbeddings(context.Background())

@@ -8,6 +8,7 @@ package businesssystem
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -20,7 +21,7 @@ const zeroCheckSystemYAML = `system_key: checks-free
 display_name: 无检查系统
 enabled: false
 timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
+metrics_connection_id: "1"
 resource_discoveries: []
 inspection_plans: []
 `
@@ -77,6 +78,30 @@ func TestRunVerificationZeroCheckDraftPassesInCommand(t *testing.T) {
 	}
 }
 
+func TestRunVerificationPromQLDraftCreatesSupervisorAttemptsForPrometheus(t *testing.T) {
+	h := newHarness(t)
+	// Add a fully qualified Prometheus connection and use its locator in the
+	// exact uploaded declaration; no global metrics default may be selected.
+	seedPrometheusExecutionPath(t, h.db, time.Now().UTC().Format(time.RFC3339Nano))
+	var metricsConnectionID int64
+	if err := h.db.QueryRow(`SELECT id FROM connections WHERE name='main-prometheus'`).Scan(&metricsConnectionID); err != nil {
+		t.Fatal(err)
+	}
+	yaml := strings.Replace(validSystemYAML, `metrics_connection_id: "1"`, `metrics_connection_id: "`+strconv.FormatInt(metricsConnectionID, 10)+`"`, 1)
+	draft := h.mustUpload(t, yaml, 1, "cmd-t17-prometheus-0001")
+	detail, err := h.systems.RunVerification(context.Background(), h.principal, "cmd-t17-prometheus-0002", "payments", versionID(t, draft))
+	if err != nil {
+		t.Fatalf("Prometheus verification grant creation: %v", err)
+	}
+	if detail.State != "Running" {
+		t.Fatalf("Prometheus verification state=%q", detail.State)
+	}
+	var grants int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants g JOIN connections c ON c.id=g.connection_id WHERE g.purpose='config_thanos_query' AND c.type='prometheus'`).Scan(&grants); err != nil || grants == 0 {
+		t.Fatalf("Prometheus must freeze config query grants: grants=%d err=%v", grants, err)
+	}
+}
+
 func TestRunVerificationPromQLDraftCreatesSupervisorAttempts(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-checks-0001")
@@ -94,8 +119,12 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttempts(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE purpose='config_thanos_query'`).Scan(&grants); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 2 || grants != 2 {
-		t.Fatalf("every PromQL check must freeze one supervisor attempt and grant: attempts=%d grants=%d", attempts, grants)
+	if attempts != 3 || grants != 3 {
+		t.Fatalf("every PromQL check and declared discovery must freeze one supervisor attempt and grant: attempts=%d grants=%d", attempts, grants)
+	}
+	var discoveries int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='config_verification_run' AND scope_id=? AND discovery_key='web-pods'`, verificationRunID(t, detail)).Scan(&discoveries); err != nil || discoveries != 1 {
+		t.Fatalf("declared discovery must have one standalone verification attempt: count=%d err=%v", discoveries, err)
 	}
 	// The active fence rejects a second run over the same draft.
 	_, err = h.systems.RunVerification(context.Background(), h.principal, "cmd-t17-run-0004", "payments", versionID(t, draft))
@@ -164,7 +193,7 @@ func TestCommitVerificationProposalWritesEvidenceAndClosesRun(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 2 {
+	if len(ids) != 3 {
 		t.Fatalf("attempts=%v", ids)
 	}
 	for _, id := range ids {
@@ -174,30 +203,40 @@ func TestCommitVerificationProposalWritesEvidenceAndClosesRun(t *testing.T) {
 		if _, err := h.db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at='2026-01-01T00:00:00Z',started_at='2026-01-01T00:00:00Z',row_version=row_version+1 WHERE id=?`, id); err != nil {
 			t.Fatal(err)
 		}
-		var planKey, checkKey string
-		if err := h.db.QueryRow(`SELECT plan_key,check_key FROM execution_attempts WHERE id=?`, id).Scan(&planKey, &checkKey); err != nil {
+		var planKey, checkKey, discoveryKey sql.NullString
+		if err := h.db.QueryRow(`SELECT plan_key,check_key,discovery_key FROM execution_attempts WHERE id=?`, id).Scan(&planKey, &checkKey, &discoveryKey); err != nil {
 			t.Fatal(err)
 		}
-		payload, err := json.Marshal(map[string]any{"schemaKind": "config_promql_result_v1", "attemptId": id, "verificationRunId": verificationRunID(t, run), "planKey": planKey, "checkKey": checkKey, "outcome": "success", "observedAt": "2026-01-01T00:00:01Z", "result": map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}}, "warnings": []string{}, "errors": []string{}, "gapReason": nil})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := h.systems.CommitVerificationProposal(context.Background(), id, "boot-1", 1, payload); err != nil {
-			t.Fatal(err)
+		if discoveryKey.Valid {
+			payload, err := json.Marshal(map[string]any{"schemaKind": "config_verification_discovery_result_v1", "attemptId": id, "verificationRunId": verificationRunID(t, run), "discoveryKey": discoveryKey.String, "outcome": "success", "observedAt": "2026-01-01T00:00:01Z", "series": []any{map[string]any{"labels": map[string]string{"business_system": "payments", "job": "web", "instance": "one"}, "timestamp": 1, "value": "1"}}, "warnings": []string{}, "errors": []string{}, "gapReason": nil})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.systems.CommitVerificationDiscoveryProposal(context.Background(), id, "boot-1", 1, payload); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			payload, err := json.Marshal(map[string]any{"schemaKind": "config_promql_result_v1", "attemptId": id, "verificationRunId": verificationRunID(t, run), "planKey": planKey.String, "checkKey": checkKey.String, "outcome": "success", "observedAt": "2026-01-01T00:00:01Z", "result": map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}}, "warnings": []string{}, "errors": []string{}, "gapReason": nil})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.systems.CommitVerificationProposal(context.Background(), id, "boot-1", 1, payload); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	final, err := h.systems.GetVerification(context.Background(), "payments", versionID(t, draft), verificationRunID(t, run))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.State != "Passed" || len(final.CheckResults) != 2 {
+	if final.State != "Passed" || len(final.CheckResults) != 2 || len(final.IdentitySamples) != 1 {
 		t.Fatalf("final=%#v", final)
 	}
 	var evidence int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM evidence WHERE target_type='config_verification_run'`).Scan(&evidence); err != nil {
 		t.Fatal(err)
 	}
-	if evidence != 2 {
+	if evidence != 3 {
 		t.Fatalf("evidence=%d", evidence)
 	}
 }

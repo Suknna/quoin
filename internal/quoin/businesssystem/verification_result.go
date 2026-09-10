@@ -150,8 +150,11 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 	if err := conn.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=r.config_version_id)
-		  - (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id),
+		  + (SELECT COUNT(*) FROM config_discoveries d WHERE d.config_version_id=r.config_version_id)
+		  - (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id)
+		  - (SELECT COUNT(*) FROM config_verification_discovery_results x WHERE x.verification_run_id=r.id),
 		  (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
+		  + (SELECT COUNT(*) FROM config_verification_discovery_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
 		FROM config_verification_runs r WHERE r.id=?`, runID).Scan(&pending, &failed); err != nil {
 		return err
 	}
@@ -179,8 +182,11 @@ func convergeVerificationRunOn(ctx context.Context, conn *sql.Conn, runID int64)
 	if err := conn.QueryRowContext(ctx, `
 		SELECT
 		  (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=r.config_version_id)
-		  - (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id),
+		  + (SELECT COUNT(*) FROM config_discoveries d WHERE d.config_version_id=r.config_version_id)
+		  - (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id)
+		  - (SELECT COUNT(*) FROM config_verification_discovery_results x WHERE x.verification_run_id=r.id),
 		  (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
+		  + (SELECT COUNT(*) FROM config_verification_discovery_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
 		FROM config_verification_runs r WHERE r.id=?`, runID).Scan(&pending, &failed); err != nil {
 		return err
 	}

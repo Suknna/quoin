@@ -8,7 +8,9 @@ package businesssystem
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/config"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	_ "modernc.org/sqlite"
 )
@@ -24,9 +27,9 @@ const activeContractYAML = "label_contract:\n  business_system_label: business_s
 
 const validSystemYAML = `system_key: payments
 display_name: 支付系统
+metrics_connection_id: "1"
 enabled: false
 timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
 resource_discoveries:
   - key: web-pods
     display_name: Web Pods
@@ -80,8 +83,8 @@ func newHarness(t *testing.T) *harness {
 	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
-	seedThanosExecutionPath(t, db, now)
 	seedPlinthRuntime(t, db, now)
+	seedThanosExecutionPath(t, db, now)
 	seedLintelRuntime(t, db, now)
 	contracts := labelcontract.NewService(db)
 	// Contract v1 active through the real zero-system activation command.
@@ -99,26 +102,47 @@ func newHarness(t *testing.T) *harness {
 // own encryption integration tests; this harness verifies that Quoin never
 // needs to decrypt those bytes to create an execution Attempt.
 func seedThanosExecutionPath(t *testing.T, db *sql.DB, now string) {
+	seedMetricsExecutionPath(t, db, now, connections.TypeThanos, "main-thanos")
+}
+
+// seedPrometheusExecutionPath exercises Config Verification’s production grant
+// creation against the distinct Prometheus discriminator rather than relying
+// on Thanos-compatible SQL shortcuts.
+func seedPrometheusExecutionPath(t *testing.T, db *sql.DB, now string) {
+	seedMetricsExecutionPath(t, db, now, connections.TypePrometheus, "main-prometheus")
+}
+
+func seedMetricsExecutionPath(t *testing.T, db *sql.DB, now, connectionType, name string) {
 	t.Helper()
-	if _, err := db.Exec(`INSERT INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
 		t.Fatal(err)
 	}
-	connection, err := db.Exec(`INSERT INTO connections(name,type,enabled,row_version,revalidation_required,created_at) VALUES('main-thanos','thanos',1,1,0,?)`, now)
+	rootKey := make([]byte, 32)
+	service := connections.NewService(db, func() ([]byte, error) { return rootKey, nil })
+	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
+	configJSON, _ := json.Marshal(map[string]any{"type": connectionType, "baseUrl": "https://metrics.test", "authType": "none"})
+	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connectionType, NonSecretJSON: configJSON}, 1, "seed-metrics-create-"+name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	connectionID, _ := connection.LastInsertId()
-	revision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,1,'{}',1,?)`, connectionID, now)
+	attemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisionID, _ := revision.LastInsertId()
-	generation, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_by,created_at) VALUES(?,1,1,1,?,?,1,?)`, connectionID, make([]byte, 12), make([]byte, 16), now)
-	if err != nil {
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "seed-boot", 1, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), attemptID, "seed-boot", 1); err != nil {
 		t.Fatal(err)
 	}
-	generationID, _ := generation.LastInsertId()
-	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=2 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
+	if err := service.CommitProbeResult(context.Background(), attemptID, "seed-boot", 1, connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", attemptID), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}, &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: fmt.Sprintf(`{"kind":%q}`, connectionType)}}); err != nil {
+		t.Fatal(err)
+	}
+	var probeID int64
+	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -173,7 +197,7 @@ func TestFirstUploadCreatesDisabledSystemWithDraft(t *testing.T) {
 	if detail.VersionSeq != 1 || detail.State != "draft" || detail.PublishedAt != nil {
 		t.Fatalf("first draft wrong: %#v", detail)
 	}
-	if detail.SystemKey != "payments" || detail.Timezone != "Asia/Shanghai" || detail.ResourceRefreshIntervalSeconds != 300 {
+	if detail.SystemKey != "payments" || detail.Timezone != "Asia/Shanghai" || detail.MetricsConnectionID != "1" {
 		t.Fatalf("root projection wrong: %#v", detail)
 	}
 	if len(detail.Discoveries) != 1 || len(detail.Plans) != 1 || len(detail.Plans[0].Checks) != 2 {
@@ -276,7 +300,7 @@ func TestPublishSwitchesPointerAndProjection(t *testing.T) {
 	if detail.CurrentConfigVersionID == nil || *detail.CurrentConfigVersionID != draft.ID {
 		t.Fatalf("current pointer wrong: %#v", detail)
 	}
-	if detail.RowVersion != 2 || detail.Enabled || detail.Timezone == nil || *detail.Timezone != "Asia/Shanghai" || detail.ResourceRefreshIntervalSeconds == nil || *detail.ResourceRefreshIntervalSeconds != 300 {
+	if detail.RowVersion != 2 || detail.Enabled || detail.Timezone == nil || *detail.Timezone != "Asia/Shanghai" {
 		t.Fatalf("root projection must sync from the published version: %#v", detail)
 	}
 	// The version derives published with a one-time published_at; the
@@ -316,7 +340,7 @@ func TestPublishEnablesSystemThroughProjection(t *testing.T) {
 func TestPublishConflictFences(t *testing.T) {
 	h := newHarness(t)
 	first := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0020")
-	second := h.mustUpload(t, strings.Replace(validSystemYAML, "resource_refresh_interval_seconds: 300", "resource_refresh_interval_seconds: 301", 1), 1, "cmd-upload-0021")
+	second := h.mustUpload(t, strings.Replace(validSystemYAML, "display_name: 支付系统", "display_name: 支付系统 v2", 1), 1, "cmd-upload-0021")
 	// Stale expected (null) after the first publish commits.
 	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0020", "payments", mustID(t, first.ID), nil); err != nil {
 		t.Fatalf("first publish: %v", err)
@@ -399,7 +423,7 @@ func TestUploadCommandReplay(t *testing.T) {
 	if versions != 1 {
 		t.Fatalf("replay must not append a version: %d", versions)
 	}
-	_, err = h.upload(t, strings.Replace(validSystemYAML, "300", "301", 1), 1, "cmd-upload-0040")
+	_, err = h.upload(t, strings.Replace(validSystemYAML, "display_name: 支付系统", "display_name: 重放冲突", 1), 1, "cmd-upload-0040")
 	if !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("same id with different content must conflict: %v", err)
 	}

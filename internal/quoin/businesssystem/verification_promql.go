@@ -52,6 +52,10 @@ type promQLVerificationCheck struct {
 // Run creation transaction. A missing usable Thanos connection aborts that
 // transaction: a run cannot claim execution when it has no authorized path.
 func createPromQLVerificationAttempts(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID int64, now string) (int, error) {
+	var metricsConnectionID int64
+	if err := conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
+		return 0, err
+	}
 	rows, err := conn.QueryContext(ctx, `
 		SELECT p.plan_key,c.check_key,c.query_mode,c.expression,c.range_seconds,c.step_seconds
 		FROM config_checks c
@@ -69,7 +73,7 @@ func createPromQLVerificationAttempts(ctx context.Context, conn *sql.Conn, runID
 		if err := rows.Scan(&check.PlanKey, &check.CheckKey, &check.Mode, &check.Expression, &check.RangeSeconds, &check.StepSeconds); err != nil {
 			return 0, err
 		}
-		if err := createPromQLVerificationAttempt(ctx, conn, runID, configVersionID, contractID, check, now); err != nil {
+		if err := createPromQLVerificationAttempt(ctx, conn, runID, configVersionID, contractID, metricsConnectionID, check, now); err != nil {
 			return 0, err
 		}
 		count++
@@ -77,7 +81,7 @@ func createPromQLVerificationAttempts(ctx context.Context, conn *sql.Conn, runID
 	return count, rows.Err()
 }
 
-func createPromQLVerificationAttempt(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID int64, check promQLVerificationCheck, now string) error {
+func createPromQLVerificationAttempt(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID, metricsConnectionID int64, check promQLVerificationCheck, now string) error {
 	var rangeSeconds, stepSeconds *int64
 	if check.RangeSeconds.Valid {
 		rangeSeconds = &check.RangeSeconds.Int64
@@ -96,7 +100,7 @@ func createPromQLVerificationAttempt(ctx context.Context, conn *sql.Conn, runID,
 	if err != nil {
 		return err
 	}
-	grant, err := thanos.ResolveConfigGrant(ctx, conn, attemptID)
+	grant, err := thanos.ResolveConfigGrantForConnection(ctx, conn, attemptID, metricsConnectionID)
 	if err != nil {
 		return err
 	}

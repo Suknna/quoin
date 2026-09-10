@@ -12,14 +12,14 @@
     "closed_action_sets": { "const": true },
     "connection_types": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
+      "minItems": 4,
+      "maxItems": 4,
       "items": {
         "type": "object",
         "required": ["type", "action_set_id", "action_set_version", "executor", "actions", "pass_expression"],
         "additionalProperties": false,
         "properties": {
-          "type": { "enum": ["model_provider", "thanos", "kubernetes"] },
+          "type": { "enum": ["model_provider", "prometheus", "thanos", "kubernetes"] },
           "action_set_id": { "type": "string", "pattern": "^[a-z][a-z0-9._-]+$" },
           "action_set_version": { "const": 1 },
           "executor": { "const": "plinth_supervisor" },

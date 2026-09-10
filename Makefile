@@ -25,13 +25,12 @@ web-build:
 images:
 	bash deploy/images/build.sh
 
-# #96/#102 real acceptance starts a disposable topology. Defaults deliberately
-# use a separate #102 directory and project, preserving a user's #96 hand-debug
-# deployment. Set QUOIN_E2E_RUNTIME (and a distinct port when concurrent) to
-# select an explicit disposable directory.
-QUOIN_E2E_RUNTIME ?= $(CURDIR)/.artifacts/e2e-102
-QUOIN_E2E_PORT ?= 8444
-QUOIN_E2E_PROJECT ?= quoin-e2e-102
+# #97 real acceptance starts a separate disposable topology. Defaults never
+# reuse the retained #96/#102/manual deployment; override all three selectors
+# together only when an explicitly different isolated harness is desired.
+QUOIN_E2E_RUNTIME ?= $(CURDIR)/.artifacts/e2e-97
+QUOIN_E2E_PORT ?= 8445
+QUOIN_E2E_PROJECT ?= quoin-e2e-97
 
 e2e-real-up:
 	QUOIN_E2E_RUNTIME="$(QUOIN_E2E_RUNTIME)" QUOIN_E2E_PORT="$(QUOIN_E2E_PORT)" QUOIN_E2E_PROJECT="$(QUOIN_E2E_PROJECT)" bash scripts/e2e-real/up.sh

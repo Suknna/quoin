@@ -30,15 +30,21 @@ type GrantPayload struct {
 	CredentialGeneration int64
 	ConnectionType       string
 	RevisionConfigJSON   json.RawMessage
-	Thanos               *ThanosCredentialSecret
-	Kubernetes           *KubernetesCredentialSecret
-	ModelProvider        *ModelProviderCredentialSecret
+	Metrics              *MetricsCredentialSecret
+	// Thanos remains a compatibility alias for existing internal callers. New
+	// code must use Metrics; both fields point at equivalent non-persisted data.
+	Thanos        *MetricsCredentialSecret
+	Kubernetes    *KubernetesCredentialSecret
+	ModelProvider *ModelProviderCredentialSecret
 }
 
-// ThanosCredentialSecret mirrors runtime.proto ThanosCredentialSecret.
-type ThanosCredentialSecret struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password"`
+// MetricsCredentialSecret mirrors runtime.proto ThanosCredentialSecret. The
+// established wire slot carries both Prometheus and Thanos credentials; the
+// connection_type discriminator preserves their distinct semantics.
+type MetricsCredentialSecret struct {
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	BearerToken string `json:"bearerToken,omitempty"`
 }
 
 // KubernetesCredentialSecret mirrors runtime.proto KubernetesCredentialSecret.
@@ -146,16 +152,20 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 		return GrantPayload{}, err
 	}
 	switch {
+	case secret.Prometheus != nil:
+		payload.Metrics = &MetricsCredentialSecret{Username: secret.Prometheus.Username, Password: secret.Prometheus.Password, BearerToken: secret.Prometheus.BearerToken}
 	case secret.Thanos != nil:
-		payload.Thanos = &ThanosCredentialSecret{Username: secret.Thanos.Username, Password: secret.Thanos.Password}
+		payload.Metrics = &MetricsCredentialSecret{Username: secret.Thanos.Username, Password: secret.Thanos.Password, BearerToken: secret.Thanos.BearerToken}
+		payload.Thanos = payload.Metrics
 	case secret.Kubernetes != nil:
 		payload.Kubernetes = &KubernetesCredentialSecret{Kubeconfig: secret.Kubernetes.Kubeconfig}
 	case secret.ModelProvider != nil:
 		payload.ModelProvider = &ModelProviderCredentialSecret{APIKey: secret.ModelProvider.APIKey}
-	case connectionType == TypeThanos:
-		// Thanos may run without basic auth: the empty carrier is the
-		// legitimate credential shape (DATA-CONN-005), not a denial.
-		payload.Thanos = &ThanosCredentialSecret{}
+	case connectionType == TypePrometheus || connectionType == TypeThanos:
+		// Metrics endpoints may run without auth. The explicit empty carrier
+		// is still a valid grant so every connection retains an independent
+		// credential generation and dispatch snapshot.
+		payload.Metrics = &MetricsCredentialSecret{}
 	default:
 		return GrantPayload{}, fmt.Errorf("sealed secret carries no typed variant for %q", connectionType)
 	}
@@ -248,6 +258,80 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 	return nil
 }
 
+// InterruptProbe closes a Running probe with its immutable interrupted typed
+// result before advancing the Attempt terminal state. Generic Attempt
+// interruption cannot be used here because the SQL terminal fence requires
+// the typed result to exist first; restart/reconciliation therefore uses this
+// dedicated closure path.
+func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, reason string) error {
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	var state string
+	var scopeID int64
+	if err := conn.QueryRowContext(ctx, `SELECT state,scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &scopeID); err != nil {
+		return err
+	}
+	if state == "Interrupted" || state == "Succeeded" || state == "Failed" || state == "Cancelled" {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
+	if state != "Running" {
+		return fmt.Errorf("connection probe %d is %s; interrupted closure requires Running", attemptID, state)
+	}
+	var connectionType string
+	var revisionID, generationID int64
+	if err := conn.QueryRowContext(ctx, `SELECT c.type,g.connection_revision_id,g.credential_generation_id FROM connections c JOIN attempt_connection_grants g ON g.connection_id=c.id WHERE g.attempt_id=? ORDER BY g.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
+		return err
+	}
+	var bindingRevision int
+	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+		return err
+	}
+	actionSetID, actionSetVersion, err := ActionSet(connectionType)
+	if err != nil {
+		return err
+	}
+	contractDigest, err := ProbeContractDigest()
+	if err != nil {
+		return err
+	}
+	now := service.now().UTC().Format(time.RFC3339Nano)
+	insert, err := conn.ExecContext(ctx, `INSERT INTO connection_probe_results(attempt_id,connection_id,connection_type,connection_revision_id,credential_generation_id,root_binding_revision,action_set_id,action_set_version,probe_contract_digest,outcome,result_digest,started_at,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, scopeID, connectionType, revisionID, generationID, bindingRevision, actionSetID, actionSetVersion, contractDigest, "interrupted", interruptionDigest(attemptID, reason), now, now, now)
+	if err != nil {
+		return err
+	}
+	headerID, err := insert.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if err := writeInterruptedChild(ctx, conn, headerID, connectionType, scopeID); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Running'`, now, reason, attemptID); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 // RecordCancelAck finalizes Cancelling -> Cancelled once the runtime
 // confirms the attempt stopped (RUNTIME-CANCEL-003); the cancelled result
 // already exists from the fence transaction.
@@ -269,14 +353,30 @@ func cancelDigest(attemptID int64) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func interruptionDigest(attemptID int64, reason string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("interrupted:%d:%s", attemptID, reason)))
+	return hex.EncodeToString(sum[:])
+}
+
 // writeCancelledChild persists the frozen action-set shaped child row for a
 // cancelled probe (values are the contract constants; outcome carries the
 // cancellation semantics).
+func writeInterruptedChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64) error {
+	return writeTerminalProbeChild(ctx, conn, headerID, connectionType, connectionID, "interrupted")
+}
+
 func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64) error {
+	return writeTerminalProbeChild(ctx, conn, headerID, connectionType, connectionID, "cancelled")
+}
+
+// writeTerminalProbeChild preserves a closed typed child for a terminal probe
+// that never produced an upstream observation. Its terminal outcome is
+// explicit in detail_json; no successful capability fact is manufactured.
+func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64, terminal string) error {
 	switch connectionType {
-	case TypeThanos:
+	case TypePrometheus, TypeThanos:
 		_, err := conn.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
-			headerID, "vector(1)", "vector", 1, "1", `{"kind":"thanos","cancelled":true}`)
+			headerID, "vector(1)", "vector", 1, "1", fmt.Sprintf(`{"kind":%q,%q:true}`, connectionType, terminal))
 		return err
 	case TypeKubernetes:
 		effective := "default"
@@ -290,7 +390,7 @@ func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, co
 			}
 		}
 		_, err := conn.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			headerID, effective, 0, 0, 0, 0, 0, 0, 0, `{"kind":"kubernetes","cancelled":true}`)
+			headerID, effective, 0, 0, 0, 0, 0, 0, 0, fmt.Sprintf(`{"kind":"kubernetes",%q:true}`, terminal))
 		return err
 	case TypeModelProvider:
 		var configJSON string
@@ -303,7 +403,7 @@ func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, co
 		}
 		_ = json.Unmarshal([]byte(configJSON), &config)
 		_, err := conn.ExecContext(ctx, `INSERT INTO model_provider_connection_probe_results(probe_result_id,chat_model_id,embedding_model_id,context_budget_tokens,max_output_tokens,streaming_supported,native_tool_calling_supported,multi_tool_call_supported,cancellation_observed,usage_observed,request_id_observed,embedding_supported,embedding_vector_dim,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			headerID, config.ChatModelID, nil, config.ContextBudgetTokens, config.MaxOutputTokens, 0, 0, 0, 0, 0, 0, 0, nil, `{"kind":"model_provider","cancelled":true}`)
+			headerID, config.ChatModelID, nil, config.ContextBudgetTokens, config.MaxOutputTokens, 0, 0, 0, 0, 0, 0, 0, nil, fmt.Sprintf(`{"kind":"model_provider",%q:true}`, terminal))
 		return err
 	default:
 		return fmt.Errorf("connection type %q has no supervisor probe child", connectionType)

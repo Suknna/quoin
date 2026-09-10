@@ -56,7 +56,7 @@ func (supervisor *Supervisor) runResourceRefresh(parent context.Context, sink *r
 		supervisor.proposeResourceRefresh(sink, attemptID, binding, input, "error", nil, []string{"invalid Thanos connection config"}, "query_failed")
 		return
 	}
-	raw, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword()}, "instant", input.Selector, nil, nil)
+	raw, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword(), BearerToken: payload.GetThanos().GetBearerToken()}, "instant", input.Selector, nil, nil)
 	if err != nil {
 		supervisor.proposeResourceRefresh(sink, attemptID, binding, input, "error", nil, []string{err.Error()}, "query_failed")
 		return

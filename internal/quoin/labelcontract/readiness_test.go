@@ -32,16 +32,33 @@ func seedReadinessSystem(t *testing.T, db *sql.DB, key string, enabled bool) int
 	return id
 }
 
+// seedReadinessMetricsConnection supplies the required versioned metrics
+// reference. Readiness does not exercise connection dispatch, so this fixture
+// creates only the stable Connection aggregate required by the FK.
+func seedReadinessMetricsConnection(t *testing.T, db *sql.DB, systemID int64) int64 {
+	t.Helper()
+	name := fmt.Sprintf("readiness-metrics-%d", systemID)
+	if _, err := db.Exec(`INSERT OR IGNORE INTO connections(name,type,enabled,created_at) VALUES(?,'thanos',0,?)`, name, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM connections WHERE name=?`, name).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 // seedDraft inserts one unpublished config version targeting the contract;
 // system_key must equal the owning system's stable key (frozen trigger).
 func seedDraft(t *testing.T, db *sql.DB, systemID, contractID int64, seq int64, systemKey string) int64 {
 	t.Helper()
+	metricsConnectionID := seedReadinessMetricsConnection(t, db, systemID)
 	result, err := db.Exec(`INSERT INTO business_system_config_versions(
 		business_system_id,version_seq,state,yaml_body,parser_version,schema_version,
 		label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,
-		created_by,created_at,system_key,display_name,enabled,timezone,resource_refresh_interval_seconds)
-		VALUES(?,?,'draft','fixture','v1','v1',?,'0000000000000000000000000000000000000000000000000000000000000000','v1',?,NULL,?,?,?,0,'Asia/Shanghai',300)`,
-		systemID, seq, contractID, testDigest(int(seq)), time.Now().UTC().Format(time.RFC3339Nano), systemKey, systemKey)
+		created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
+		VALUES(?,?,'draft','fixture','v1','v1',?,'0000000000000000000000000000000000000000000000000000000000000000','v1',?,NULL,?,?,?,?,0,'Asia/Shanghai')`,
+		systemID, seq, contractID, testDigest(int(seq)), time.Now().UTC().Format(time.RFC3339Nano), systemKey, systemKey, metricsConnectionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,13 +151,13 @@ func TestReadinessBlockersAndCandidates(t *testing.T) {
 	service := NewService(db)
 	mustCreateDraft(t, service, validContractYAML, "cmd-ready-0002") // contract 1 (target)
 
-	ready := seedReadinessSystem(t, db, "alpha", true)       // draft + Passed run
-	missing := seedReadinessSystem(t, db, "bravo", true)     // draft, no run at all
-	failed := seedReadinessSystem(t, db, "charlie", true)    // draft + Failed run only
-	queued := seedReadinessSystem(t, db, "delta", true)      // draft + Queued run only
-	mixed := seedReadinessSystem(t, db, "echo", true)        // draft + Failed + Cancelled runs
-	seedReadinessSystem(t, db, "golf", true)                 // no draft at all
-	seedReadinessSystem(t, db, "disabled-sys", false)        // never in readiness
+	ready := seedReadinessSystem(t, db, "alpha", true)    // draft + Passed run
+	missing := seedReadinessSystem(t, db, "bravo", true)  // draft, no run at all
+	failed := seedReadinessSystem(t, db, "charlie", true) // draft + Failed run only
+	queued := seedReadinessSystem(t, db, "delta", true)   // draft + Queued run only
+	mixed := seedReadinessSystem(t, db, "echo", true)     // draft + Failed + Cancelled runs
+	seedReadinessSystem(t, db, "golf", true)              // no draft at all
+	seedReadinessSystem(t, db, "disabled-sys", false)     // never in readiness
 
 	readyDraft := seedDraft(t, db, ready, 1, 1, "alpha")
 	seedRun(t, db, ready, readyDraft, 1, "Passed")

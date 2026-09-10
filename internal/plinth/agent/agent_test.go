@@ -14,6 +14,34 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestParseInputRequiresBusinessContext(t *testing.T) {
+	_, err := ParseInput([]byte(`{
+		"occurrence":{"id":"1","labels":{}},
+		"modelContract":{"modelId":"fixture"}
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "business context") {
+		t.Fatalf("ParseInput error = %v, want missing business context", err)
+	}
+}
+
+func TestBuildInitialMessagesIncludesFrozenBusinessContext(t *testing.T) {
+	input, err := ParseInput([]byte(`{
+		"occurrence":{"id":"1","labels":{"business_system":"payments"}},
+		"businessContext":{"systemKey":"payments","configVersionId":"8","labelContractVersionId":"3","businessSystemLabel":"business_system"},
+		"modelContract":{"modelId":"fixture"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInitialMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || !strings.Contains(messages[1].Content, "业务配置上下文") || !strings.Contains(messages[1].Content, "payments") {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
 func TestParseInvestigationInputAttachments(t *testing.T) {
 	canonical := []byte(`{
 	  "messages": [

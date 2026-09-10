@@ -25,21 +25,34 @@ import (
 // probeTimeout bounds each individual probe action.
 const probeTimeout = 15 * time.Second
 
-// ThanosConfig is the non-secret thanos revision projection.
-type ThanosConfig struct {
+// MetricsConfig is the shared Prometheus-compatible non-secret projection.
+// Type remains a required discriminator so a Thanos selection can never be
+// silently treated as a Prometheus one (or vice versa).
+type MetricsConfig struct {
 	Type          string `json:"type"`
 	BaseURL       string `json:"baseUrl"`
 	TLSCaPem      string `json:"tlsCaPem,omitempty"`
 	TLSServerName string `json:"tlsServerName,omitempty"`
 	TLSSkipVerify bool   `json:"tlsSkipVerify,omitempty"`
+	AuthType      string `json:"authType,omitempty"`
 	Username      string `json:"username,omitempty"`
 }
 
-// ThanosSecret is the decrypted thanos credential.
-type ThanosSecret struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password"`
+// MetricsSecret only exists in supervisor memory after an attempt-scoped
+// credential grant. Exactly one of Password/BearerToken is used according to
+// MetricsConfig.AuthType.
+type MetricsSecret struct {
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	BearerToken string `json:"bearerToken,omitempty"`
 }
+
+// The concrete aliases preserve existing Thanos tool call sites while exposing
+// a distinct Prometheus adapter surface to new business-scoped callers.
+type ThanosConfig = MetricsConfig
+type ThanosSecret = MetricsSecret
+type PrometheusConfig = MetricsConfig
+type PrometheusSecret = MetricsSecret
 
 // KubernetesConfig is the non-secret kubernetes revision projection.
 type KubernetesConfig struct {
@@ -76,6 +89,14 @@ type KubernetesProbeDetail struct {
 }
 
 // RunThanosProbe executes the frozen thanos-query-v1 action set.
+// RunPrometheusProbe executes the same Prometheus HTTP API contract while
+// retaining the configured Prometheus identity in its evidence detail.
+func RunPrometheusProbe(ctx context.Context, config PrometheusConfig, secret PrometheusSecret) (ThanosProbeDetail, error) {
+	detail, err := RunThanosProbe(ctx, config, secret)
+	detail.Kind = "prometheus"
+	return detail, err
+}
+
 func RunThanosProbe(ctx context.Context, config ThanosConfig, secret ThanosSecret) (ThanosProbeDetail, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -88,12 +109,8 @@ func RunThanosProbe(ctx context.Context, config ThanosConfig, secret ThanosSecre
 	if err != nil {
 		return ThanosProbeDetail{Kind: "thanos", Query: "vector(1)"}, err
 	}
-	if secret.Password != "" {
-		username := secret.Username
-		if username == "" {
-			username = config.Username
-		}
-		request.SetBasicAuth(username, secret.Password)
+	if err := ApplyMetricsAuth(request, config, secret); err != nil {
+		return ThanosProbeDetail{Kind: config.Type, Query: "vector(1)"}, err
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -138,6 +155,45 @@ func RunThanosProbe(ctx context.Context, config ThanosConfig, secret ThanosSecre
 		return detail, fmt.Errorf("样本值是 %s，期望 1", detail.SampleValue)
 	}
 	return detail, nil
+}
+
+// applyMetricsAuth materializes the closed persisted auth choice. It rejects
+// inconsistent snapshots rather than guessing from a leftover secret.
+func ApplyMetricsAuth(request *http.Request, config MetricsConfig, secret MetricsSecret) error {
+	authType := config.AuthType
+	if authType == "" {
+		// Revisions created before authType existed used an optional Basic
+		// password carrier. Preserve that behavior during the transition: an
+		// absent mode with password means Basic, otherwise no authentication.
+		// New public inputs must always declare one of the closed modes.
+		authType = "none"
+		if secret.Password != "" {
+			authType = "basic"
+		}
+	}
+	switch authType {
+	case "none":
+		if secret.Username != "" || secret.Password != "" || secret.BearerToken != "" {
+			return errors.New("no-auth metrics connection carries credentials")
+		}
+	case "basic":
+		username := secret.Username
+		if username == "" {
+			username = config.Username
+		}
+		if username == "" || secret.Password == "" || secret.BearerToken != "" {
+			return errors.New("basic metrics credentials are incomplete")
+		}
+		request.SetBasicAuth(username, secret.Password)
+	case "bearer":
+		if secret.BearerToken == "" || secret.Username != "" || secret.Password != "" {
+			return errors.New("bearer metrics credentials are incomplete")
+		}
+		request.Header.Set("Authorization", "Bearer "+secret.BearerToken)
+	default:
+		return fmt.Errorf("unsupported metrics auth type %q", authType)
+	}
+	return nil
 }
 
 func thanosHTTPClient(config ThanosConfig) (*http.Client, error) {

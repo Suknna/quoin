@@ -142,6 +142,15 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		service.reconcileTerminalParentExplorations(ctx)
 		return
 	}
+	// A connection_probe has its own immutable typed result closure. During a
+	// restart it must append the interrupted child before the terminal Attempt
+	// update; generic interruption would violate that database fence.
+	if view.AttemptType == "connection_probe" && service.Connections != nil {
+		if err := service.Connections.InterruptProbe(ctx, view.ID, reason); err != nil {
+			sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+		}
+		return
+	}
 	attempts := service.attemptsService()
 	if attempts == nil {
 		return
@@ -558,7 +567,10 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 			if view.AttemptType == "inspection_collection" && view.ScopeType == "config_verification_run" {
 				err = service.dispatchVerificationAttempt(ctx, view.ID)
 			} else if view.AttemptType == "inspection_collection" && view.ScopeType == "resource_refresh_run" {
-				err = service.dispatchResourceRefreshAttempt(ctx, view.ID)
+				// Resource refresh has no replacement producer. An historical
+				// Assigned child that the runtime did not report cannot resume;
+				// close its parent through the retained loss convergence instead.
+				service.finalizeLoss(ctx, view, "lease_expired")
 			} else {
 				err = service.reDispatchAgentAttempt(ctx, view)
 			}

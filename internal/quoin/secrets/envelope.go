@@ -24,16 +24,21 @@ type Envelope struct {
 
 // TypedSecret is the decrypted connection secret in supervisor memory only.
 type TypedSecret struct {
-	Type string `json:"type"` // thanos | kubernetes | model_provider
+	Type string `json:"type"` // prometheus | thanos | kubernetes | model_provider
 	// Exactly one carrier is set per type; raw values never persist.
-	Thanos        *ThanosSecret        `json:"thanos,omitempty"`
+	Prometheus    *MetricsSecret       `json:"prometheus,omitempty"`
+	Thanos        *MetricsSecret       `json:"thanos,omitempty"`
 	Kubernetes    *KubernetesSecret    `json:"kubernetes,omitempty"`
 	ModelProvider *ModelProviderSecret `json:"model_provider,omitempty"`
 }
 
-type ThanosSecret struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+// MetricsSecret is shared only as an encrypted carrier. The connection type
+// retains the Prometheus/Thanos distinction; the auth scheme is derived from
+// the non-secret revision and selects exactly one secret representation.
+type MetricsSecret struct {
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	BearerToken string `json:"bearerToken,omitempty"`
 }
 
 type KubernetesSecret struct {

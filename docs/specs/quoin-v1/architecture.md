@@ -13,7 +13,7 @@ Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](c
 
 ## 1. 权威边界
 
-> **现状与迁移：** #102 已实现管理员关于页和独立平台故障来源，统一告警不再仅限于 Alertmanager Occurrence；平台故障不获得业务归属或业务分析能力。当前指标执行仍使用既有 Thanos 路由，Browser Identity 仍受既有业务绑定约束。下文执行策略表及 ARCH-CHAT-004/005 中的显式接入引用是 [#95](https://github.com/Suknna/quoin/issues/95)/ADR-0002 的待实施目标，不代表已经完成运行时迁移；后续切片必须同步 API、Schema、执行适配与测试，保留权限、审计、配置版本和上游告警生命周期边界。
+> **现状与迁移：** #102 已实现管理员关于页和独立平台故障来源，统一告警不再仅限于 Alertmanager Occurrence；平台故障不获得业务归属或业务分析能力。#97 已把指标执行迁移为由版本化业务声明的显式 Prometheus/Thanos 接入引用确定性路由，并以 Config Verification Run 承载受控查询和 discovery；独立资源刷新已退役且历史保留。Browser Identity 的独立接入与其余 #95 目标仍由后续切片交付，且必须同步 API、Schema、执行适配与测试，保留权限、审计、配置版本和上游告警生命周期边界。
 
 - **ARCH-AUTH-001 —** Quoin **MUST** 是用户、配置、连接、凭据、任务、消息、Evidence、Artifact、Knowledge 与全部执行状态的唯一持久权威。Plinth、Lintel、Stele 与前端都只能持有可丢弃投影，**MUST NOT** 建立可独立续跑或反向覆盖 Quoin 的第二历史。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-AUTH-002 —** Quoin **MUST** 创建并裁决每个 Execution Attempt；Runtime 只执行由 Quoin 当前 `attempt_id + runtime_slot + boot_id + connection_epoch` 租约授权的工作。所有重放、恢复、取消和迟到结果均以 Quoin 的 SQLite 提交顺序为准。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）

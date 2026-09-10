@@ -19,8 +19,10 @@ import (
 	"fmt"
 )
 
-// attributionIndex is the per-delivery snapshot of the active contract's
-// business_system_label; zero allocations when no contract is active.
+// attributionIndex is the per-delivery snapshot of the active Label Contract.
+// The contract remains the sole owner of the mandatory business key label;
+// source references and label conditions on a published business declaration
+// can only narrow that already-selected candidate.
 type attributionIndex struct {
 	label string
 }
@@ -55,10 +57,12 @@ func loadAttribution(ctx context.Context, conn *sql.Conn) (attributionIndex, err
 }
 
 // attribute resolves the business-system row id for one label set under the
-// active contract; (nil, nil) means 未归属 — the label is absent, the
-// contract defines no label, no contract is active, or the value matches no
-// business system key.
-func (index attributionIndex) attribute(ctx context.Context, conn *sql.Conn, labels map[string]string) (*int64, error) {
+// active contract. The contract label remains mandatory: a source reference
+// alone never selects a business. The selected system must have a currently
+// published declaration whose optional source and exact-label projections both
+// permit the incoming alert. (nil, nil) means 未归属, including a missing or
+// unknown contract label and any declaration restriction mismatch.
+func (index attributionIndex) attribute(ctx context.Context, conn *sql.Conn, sourceID int64, labels map[string]string) (*int64, error) {
 	if index.label == "" {
 		return nil, nil
 	}
@@ -66,8 +70,45 @@ func (index attributionIndex) attribute(ctx context.Context, conn *sql.Conn, lab
 	if !ok || value == "" {
 		return nil, nil
 	}
+
+	canonical, err := CanonicalLabels(labels)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize labels for attribution: %w", err)
+	}
+	// The current configuration pointer is the publication boundary. Draft and
+	// superseded versions must never change new alert attribution, and historical
+	// occurrence attribution remains write-once after this lookup succeeds.
 	var id int64
-	err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, value).Scan(&id)
+	err = conn.QueryRowContext(ctx, `
+		SELECT systems.id
+		FROM business_systems systems
+		JOIN business_system_config_versions versions
+		  ON versions.id = systems.current_config_version_id
+		WHERE systems.key = ?
+		  AND (
+			NOT EXISTS (
+				SELECT 1
+				FROM config_alert_source_refs refs
+				WHERE refs.config_version_id = versions.id
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM config_alert_source_refs refs
+				WHERE refs.config_version_id = versions.id
+				  AND refs.alert_source_id = ?
+			)
+		  )
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM config_alert_label_conditions conditions
+			WHERE conditions.config_version_id = versions.id
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM json_each(?) incoming
+				WHERE incoming.key = conditions.label_name
+				  AND incoming.value = conditions.label_value
+			  )
+		  )`, value, sourceID, canonical).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

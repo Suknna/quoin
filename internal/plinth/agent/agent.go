@@ -44,6 +44,12 @@ type Input struct {
 		Labels          map[string]string `json:"labels"`
 		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"occurrence"`
+	BusinessContext struct {
+		SystemKey              string `json:"systemKey"`
+		ConfigVersionID        string `json:"configVersionId"`
+		LabelContractVersionID string `json:"labelContractVersionId"`
+		BusinessSystemLabel    string `json:"businessSystemLabel"`
+	} `json:"businessContext"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
@@ -60,6 +66,10 @@ func ParseInput(canonical []byte) (Input, error) {
 	if input.Occurrence.ID == "" || input.Occurrence.Labels == nil {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing occurrence context")
 	}
+	if input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" ||
+		input.BusinessContext.LabelContractVersionID == "" || input.BusinessContext.BusinessSystemLabel == "" {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input missing immutable business context")
+	}
 	if input.ModelContract.ModelID == "" {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing model contract")
 	}
@@ -70,7 +80,8 @@ func ParseInput(canonical []byte) (Input, error) {
 // contract plus the rendered occurrence context (ARCH-CONTEXT-002).
 func BuildInitialMessages(input Input) ([]*schema.Message, error) {
 	contextBody, err := json.MarshalIndent(map[string]any{
-		"告警": input.Occurrence,
+		"告警":      input.Occurrence,
+		"业务配置上下文": input.BusinessContext,
 	}, "", "  ")
 	if err != nil {
 		return nil, err

@@ -44,6 +44,18 @@ connection_types:
         side_effect: provider_ephemeral_request
         assertions: [vector_non_empty, dimension_matches_configured]
     pass_expression: chat-stream && native-tool-call && parallel-tool-calls && cancellation && usage-and-request-id && embedding
+  - type: prometheus
+    action_set_id: prometheus-query-v1
+    action_set_version: 1
+    executor: plinth_supervisor
+    actions:
+      - id: vector-one
+        operation_kind: prometheus_query
+        operation: Execute query=vector(1) against the configured Prometheus HTTP query endpoint.
+        request: { method: GET, path: /api/v1/query, query: vector(1) }
+        side_effect: none
+        assertions: [http_success, response_type_vector, sample_count_one, sample_value_one]
+    pass_expression: vector-one
   - type: thanos
     action_set_id: thanos-query-v1
     action_set_version: 1

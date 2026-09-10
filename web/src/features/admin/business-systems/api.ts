@@ -182,7 +182,13 @@ export interface ConfigVersionSummary {
 export interface ConfigVersionDetail extends ConfigVersionSummary {
   yamlBody: string
   timezone: string
-  resourceRefreshIntervalSeconds: number
+  /** Historical v1 input retained only when reading old version records. New declarations omit it. */
+  resourceRefreshIntervalSeconds?: number
+  /** The selected metrics connection is an explicit non-secret declaration reference. */
+  metricsConnectionId?: string
+  /** Label ownership rules are preserved in the same versioned declaration as YAML. */
+  alertSourceIds?: string[]
+  alertSourceLabels?: Record<string, string>
   discoveries: DiscoveryView[]
   plans: PlanView[]
 }
@@ -307,6 +313,12 @@ export interface VerificationRunSummary {
 }
 
 export interface VerificationRunDetail extends VerificationRunSummary {
+  /** The connection snapshot selected by this run, never an implicit/global default. */
+  metricsConnectionId?: string
+  /** Trial-only identities; these must never overwrite the formal observed-resource projection. */
+  identitySamples?: Array<{ discoveryKey: string; labels: Record<string, string> }>
+  /** Trial-only query summary retained with the Run-owned result evidence. */
+  queryResults?: Array<{ planKey: string; checkKey: string; resultType: string; sampleCount: number }>
   checkResults: VerificationCheckResultView[]
   resultDetail?: string
 }

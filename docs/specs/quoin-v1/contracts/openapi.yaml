@@ -2994,47 +2994,12 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-  /api/v1/business-systems/{systemKey}/resources:refresh:
-    post:
-      tags: [config]
-      operationId: startResourceRefresh
-      x-external-dependency: true
-      summary: 立即按当前已发布配置刷新 Observed Resources
-      description: 创建唯一的 manual Resource Refresh Run；配置、Label Contract、discovery 与 Thanos grant 均在受理事务冻结（DATA-OBSERVED-004）。
-      parameters:
-        - $ref: '#/components/parameters/SystemKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ResourceRefreshRunRequest'
-      responses:
-        '202':
-          description: Resource Refresh Run 已受理。
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ResourceRefreshRunDetail'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}:
     get:
       tags: [config]
       operationId: getResourceRefreshRun
-      summary: Resource Refresh Run 权威详情
+      summary: 历史 Resource Refresh Run 权威详情（只读）
+      description: 仅保留历史审计读取；独立资源刷新创建和调度已退役。
       parameters:
         - $ref: '#/components/parameters/SystemKey'
         - name: resourceRefreshRunId
@@ -8270,10 +8235,33 @@ components:
           description: 嵌入的生成产物 catalog 文档；形状由 contracts/schemas/journey-catalog.schema.json 唯一拥有（DATA-CONFIG-008）。
     ConnectionSummary:
       oneOf:
+        - $ref: '#/components/schemas/PrometheusConnectionSummary'
         - $ref: '#/components/schemas/ThanosConnectionSummary'
         - $ref: '#/components/schemas/KubernetesConnectionSummary'
         - $ref: '#/components/schemas/ModelProviderConnectionSummary'
       description: 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。
+    PrometheusConnectionSummary:
+      type: object
+      required: [name, type, enabled, rowVersion, config]
+      properties:
+        name:
+          $ref: '#/components/schemas/StableKey'
+        type:
+          type: string
+          const: prometheus
+        enabled:
+          type: boolean
+        rowVersion:
+          type: integer
+          minimum: 1
+        revalidationRequired:
+          type: boolean
+        currentRevisionId:
+          $ref: '#/components/schemas/LocatorId'
+        currentCredentialGenerationId:
+          $ref: '#/components/schemas/LocatorId'
+        config:
+          $ref: '#/components/schemas/PrometheusConnectionNonSecret'
     ThanosConnectionSummary:
       type: object
       required: [name, type, enabled, rowVersion, config]
@@ -8358,7 +8346,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         connectionType:
           type: string
-          enum: [model_provider, thanos, kubernetes]
+          enum: [model_provider, prometheus, thanos, kubernetes]
         connectionRevisionId:
           $ref: '#/components/schemas/LocatorId'
         credentialGenerationId:
@@ -8387,9 +8375,29 @@ components:
         details:
           oneOf:
             - $ref: '#/components/schemas/ModelProviderConnectionProbeDetails'
+            - $ref: '#/components/schemas/PrometheusConnectionProbeDetails'
             - $ref: '#/components/schemas/ThanosConnectionProbeDetails'
             - $ref: '#/components/schemas/KubernetesConnectionProbeDetails'
       description: connectionType 与 details 变体必须一致；该闭合由服务端 typed child 表与 JSON Schema fixtures 共同校验。
+    PrometheusConnectionProbeDetails:
+      type: object
+      required: [kind, query, responseType, sampleCount, sampleValue]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          const: prometheus
+        query:
+          type: string
+          const: vector(1)
+        responseType:
+          type: string
+          const: vector
+        sampleCount:
+          type: integer
+          const: 1
+        sampleValue:
+          type: string
     ThanosConnectionProbeDetails:
       type: object
       required: [kind, query, responseType, sampleCount, sampleValue]
@@ -8512,6 +8520,7 @@ components:
           minimum: 1
         config:
           oneOf:
+            - $ref: '#/components/schemas/PrometheusConnectionNonSecret'
             - $ref: '#/components/schemas/ThanosConnectionNonSecret'
             - $ref: '#/components/schemas/KubernetesConnectionNonSecret'
             - $ref: '#/components/schemas/ModelProviderConnectionNonSecret'
@@ -8534,9 +8543,36 @@ components:
           $ref: '#/components/schemas/LocatorId'
           description: 创建者用户 locator（可选，非秘密）。
       description: 凭据 generation 的非秘密标识投影；密文与内部元数据永不下发、永不返回（DATA-CONN-001/004）。
+    PrometheusConnectionNonSecret:
+      type: object
+      required: [type, baseUrl, authType]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: prometheus
+        baseUrl:
+          type: string
+          format: uri
+          description: Prometheus HTTP API base URL.
+        tlsCaPem:
+          type: string
+          description: Custom CA PEM (non-secret).
+        tlsServerName:
+          type: string
+          description: TLS ServerName override (non-secret).
+        tlsSkipVerify:
+          type: boolean
+          description: Explicit TLS verification override (non-secret).
+        authType:
+          type: string
+          enum: [none, basic, bearer]
+        username:
+          type: string
+          description: HTTP Basic username (non-secret; present only for basic auth).
     ThanosConnectionNonSecret:
       type: object
-      required: [type, baseUrl]
+      required: [type, baseUrl, authType]
       additionalProperties: false
       properties:
         type:
@@ -8555,6 +8591,9 @@ components:
         tlsSkipVerify:
           type: boolean
           description: 跳过 TLS 校验（仅 Admin 明确接受风险时设置；非秘密）。
+        authType:
+          type: string
+          enum: [none, basic, bearer]
         username:
           type: string
           description: HTTP Basic Auth 用户名（非秘密）。
@@ -8600,9 +8639,37 @@ components:
           type: integer
           minimum: 1
           description: 优先由 provider metadata 自动发现；metadata 不足时由 Admin 补充。
+    PrometheusConnectionInput:
+      type: object
+      required: [type, baseUrl, authType]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: prometheus
+        baseUrl:
+          type: string
+          format: uri
+        tlsCaPem:
+          type: string
+        tlsServerName:
+          type: string
+        tlsSkipVerify:
+          type: boolean
+        authType:
+          type: string
+          enum: [none, basic, bearer]
+        username:
+          type: string
+        password:
+          type: string
+          description: HTTP Basic password (secret; request-only).
+        bearerToken:
+          type: string
+          description: HTTP Bearer token (secret; request-only).
     ThanosConnectionInput:
       type: object
-      required: [type, baseUrl]
+      required: [type, baseUrl, authType]
       additionalProperties: false
       properties:
         type:
@@ -8617,11 +8684,17 @@ components:
           type: string
         tlsSkipVerify:
           type: boolean
+        authType:
+          type: string
+          enum: [none, basic, bearer]
         username:
           type: string
         password:
           type: string
-          description: HTTP Basic Auth 密码（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃，DATA-CONN-004）。
+          description: HTTP Basic Auth password (secret; request-only).
+        bearerToken:
+          type: string
+          description: HTTP Bearer token (secret; request-only).
     KubernetesConnectionInput:
       type: object
       required: [type, kubeconfig]
@@ -8701,6 +8774,7 @@ components:
           description: available=false 时供 Admin 理解发现失败；不得包含秘密或原始响应正文。
     ConnectionInput:
       oneOf:
+        - $ref: '#/components/schemas/PrometheusConnectionInput'
         - $ref: '#/components/schemas/ThanosConnectionInput'
         - $ref: '#/components/schemas/KubernetesConnectionInput'
         - $ref: '#/components/schemas/ModelProviderConnectionInput'

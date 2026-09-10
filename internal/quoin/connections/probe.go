@@ -37,6 +37,8 @@ func ProbeContractDigest() (string, error) {
 // ActionSet identifies the frozen action set for a connection type.
 func ActionSet(connectionType string) (string, int, error) {
 	switch connectionType {
+	case TypePrometheus:
+		return "prometheus-query-v1", 1, nil
 	case TypeThanos:
 		return "thanos-query-v1", 1, nil
 	case TypeKubernetes:
@@ -324,9 +326,9 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 		return fmt.Errorf("typed child missing for connection type %s", connectionType)
 	}
 	switch connectionType {
-	case TypeThanos:
+	case TypePrometheus, TypeThanos:
 		if child.Thanos == nil {
-			return fmt.Errorf("thanos probe result requires the thanos typed child")
+			return fmt.Errorf("metrics probe result requires the Prometheus-compatible typed child")
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
 			headerID, child.Thanos.Query, child.Thanos.ResponseType, child.Thanos.SampleCount, child.Thanos.SampleValue, child.Thanos.DetailJSON); err != nil {

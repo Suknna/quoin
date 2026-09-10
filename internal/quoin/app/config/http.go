@@ -33,8 +33,6 @@ type Handler struct {
 	// CancelDispatch sends a committed, bound cancellation fence to Plinth.
 	// The domain service commits the fence before this best-effort delivery.
 	CancelDispatch func(ctx context.Context, attemptID int64) error
-	// DispatchResourceRefresh scans and dispatches committed queued resource attempts.
-	DispatchResourceRefresh func(ctx context.Context)
 	// DispatchConfigVerification scans and dispatches committed queued
 	// PromQL verification attempts (created while Plinth is already connected).
 	DispatchConfigVerification func(ctx context.Context)
@@ -62,10 +60,11 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "runConfigVerificationRun"}, handler.runConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", OperationID: "getConfigVerificationRun"}, handler.getConfigVerificationRun)
 	handler.RegisterUpgradeDrain(api)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/resources:refresh", OperationID: "startResourceRefresh"}, handler.startResourceRefresh)
+	// Historical refresh runs remain auditable, but their former POST producer is
+	// deliberately absent: only retained facts can be read from this route.
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts", OperationID: "listLabelContracts"}, handler.listLabelContracts)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}", OperationID: "getLabelContract"}, handler.getLabelContract)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/label-contracts/{contractVersion}/activate", OperationID: "activateLabelContract"}, handler.activateLabelContract)

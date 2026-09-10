@@ -22,6 +22,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	_ "modernc.org/sqlite"
@@ -29,9 +30,9 @@ import (
 
 const mixedSystemYAML = `system_key: payments
 display_name: 支付系统
+metrics_connection_id: "1"
 enabled: true
 timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
 resource_discoveries: []
 inspection_plans:
   - key: mixed-plan
@@ -80,6 +81,10 @@ func newTestHarness(t *testing.T) *testHarness {
 	if _, err := db.Exec(schemaSeed()); err != nil {
 		t.Fatal(err)
 	}
+	previousProbeContractSource := connections.ProbeContractSource
+	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
+	t.Cleanup(func() { connections.ProbeContractSource = previousProbeContractSource })
+	seedMetricsConnection(t, db)
 	contracts := labelcontract.NewService(db)
 	if _, err := contracts.CreateDraft(context.Background(), 1, "seed-contract-0001", []byte("label_contract:\n  business_system_label: business_system\n"), quoinconfig.Limits{}); err != nil {
 		t.Fatal(err)
@@ -171,6 +176,77 @@ func (h *testHarness) seedBrowserIdentity(t *testing.T, withProfile bool) {
 	}
 }
 
+// seedMetricsConnection creates the explicitly declared metrics authority
+// through the public connection service before config upload freezes its ID.
+func seedMetricsConnection(t *testing.T, db *sql.DB) {
+	t.Helper()
+	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	created, err := service.Create(context.Background(), connections.CreateInput{
+		Name:          "fixture-metrics",
+		Type:          connections.TypeThanos,
+		NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"https://metrics.fixture","authType":"none"}`),
+	}, 1, "seed-metrics-connection")
+	if err != nil {
+		t.Fatalf("create metrics connection: %v", err)
+	}
+	if created.ID != 1 {
+		t.Fatalf("metrics connection ID = %d, want 1", created.ID)
+	}
+	enableQualifiedMetricsConnection(t, db, service, created, "fixture-metrics-probe")
+}
+
+// seedAlternateMetricsConnection preserves an available metrics connection while
+// tests prove that execution honors the unavailable connection explicitly named
+// by the uploaded configuration instead of falling back to a global singleton.
+func seedAlternateMetricsConnection(t *testing.T, db *sql.DB) {
+	t.Helper()
+	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	created, err := service.Create(context.Background(), connections.CreateInput{
+		Name:          "alternate-metrics",
+		Type:          connections.TypePrometheus,
+		NonSecretJSON: []byte(`{"type":"prometheus","baseUrl":"https://alternate-metrics.fixture","authType":"none"}`),
+	}, 1, "seed-alternate-metrics-connection")
+	if err != nil {
+		t.Fatalf("create alternate metrics connection: %v", err)
+	}
+	enableQualifiedMetricsConnection(t, db, service, created, "alternate-metrics-probe")
+}
+
+// enableQualifiedMetricsConnection exercises the public probe lifecycle so the
+// enable qualification references a passed result on the connection's current
+// revision and credential generation.
+func enableQualifiedMetricsConnection(t *testing.T, db *sql.DB, service *connections.Service, summary connections.Summary, bootID string) {
+	t.Helper()
+	ctx := context.Background()
+	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	if err != nil {
+		t.Fatalf("start metrics probe: %v", err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, bootID, 1, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(ctx, attemptID, bootID, 1); err != nil {
+		t.Fatalf("accept metrics probe: %v", err)
+	}
+	result := connections.TypedProbeResult{
+		Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", attemptID),
+		StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z",
+	}
+	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{
+		Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"metrics"}`,
+	}}
+	if err := service.CommitProbeResult(ctx, attemptID, bootID, 1, result, child); err != nil {
+		t.Fatalf("commit metrics probe: %v", err)
+	}
+	var probeID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enable(ctx, summary.Name, summary.RowVersion, probeID, 1); err != nil {
+		t.Fatalf("enable qualified metrics connection: %v", err)
+	}
+}
+
 func schemaSeed() string {
 	now := "2026-08-28T00:00:00Z"
 	return strings.Join([]string{
@@ -178,10 +254,6 @@ func schemaSeed() string {
 		`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at)
 		 VALUES (1,'admin','Admin','admin',1,'$argon2id$fixture',1,'` + now + `','` + now + `')`,
 		`INSERT INTO root_key_state(id, binding_revision, verifier_nonce, verifier_ciphertext, bound_at) VALUES (1, 1, zeroblob(12), zeroblob(16), '` + now + `')`,
-		`INSERT INTO connections(id, name, type, enabled, row_version, revalidation_required, created_at) VALUES (1, 'thanos', 'thanos', 1, 1, 0, '` + now + `')`,
-		`INSERT INTO connection_revisions(id, connection_id, revision_seq, config_json, created_at) VALUES (1, 1, 1, '{}', '` + now + `')`,
-		`INSERT INTO credential_generations(id, connection_id, generation_seq, envelope_version, key_binding_revision, nonce, ciphertext, created_at) VALUES (1, 1, 1, 1, 1, zeroblob(12), zeroblob(16), '` + now + `')`,
-		`UPDATE connections SET current_revision_id=1, current_credential_generation_id=1, row_version=2 WHERE id=1`,
 		`INSERT INTO runtime_slots(slot, state, row_version, created_at) VALUES ('plinth','unregistered',1,'` + now + `'),('lintel','unregistered',1,'` + now + `')`,
 		`INSERT INTO runtime_credentials(slot, generation, token_digest, created_at, confirmed_at, first_authenticated_at, row_version) VALUES ('plinth', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1),('lintel', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1)`,
 		`UPDATE runtime_slots SET state='registered', current_credential_id=(SELECT id FROM runtime_credentials WHERE slot='plinth'), row_version=2 WHERE slot='plinth'`,
@@ -442,10 +514,13 @@ func TestBrowserChildFreezesRealCatalogBinding(t *testing.T) {
 
 func TestCreateRunThanosUnavailableTyped(t *testing.T) {
 	h := newTestHarness(t)
+	seedAlternateMetricsConnection(t, h.db)
+	h.publishMixedPlan(t)
+	// Publish validates the declared connection; disable it afterward so run
+	// creation proves it does not fall back to the alternate metrics connection.
 	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	h.publishMixedPlan(t)
 	h.seedBrowserIdentity(t, false)
 	_, err := h.service.CreateInspectionRun(context.Background(), h.principal, "cmd-1", "payments", "mixed-plan")
 	if !errors.Is(err, thanos.ErrThanosUnavailable) {
@@ -466,10 +541,13 @@ func TestCreateRunThanosUnavailableTyped(t *testing.T) {
 
 func TestCreateScheduledInspectionRunDoesNotMislabelThanosFailure(t *testing.T) {
 	h := newTestHarness(t)
+	seedAlternateMetricsConnection(t, h.db)
+	versionID := h.publishMixedPlan(t)
+	// The frozen config selected ID 1; its later disable must fail scheduling
+	// even though the alternate metrics connection remains enabled.
 	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	versionID := h.publishMixedPlan(t)
 	plans, err := h.service.ScheduledPlans(context.Background())
 	if err != nil || len(plans) != 1 {
 		t.Fatalf("scheduled plans = %#v, %v", plans, err)

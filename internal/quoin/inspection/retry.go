@@ -180,6 +180,10 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
 			&RejectionError{Code: "empty_plan", Detail: "源巡检 Run 的计划没有检查项", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
 	}
+	var metricsConnectionID int64
+	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
+		return RunDetail{}, err
+	}
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,rerun_of_id,created_at)
@@ -199,7 +203,7 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 	}
 	for _, check := range checks {
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, configVersionID, contractID, check, now)
+			err = s.promqlChild(ctx, conn, runID, configVersionID, contractID, metricsConnectionID, check, now)
 		} else {
 			err = s.browserChild(ctx, conn, runID, configVersionID, contractID, planKey, systemID, check, now)
 		}

@@ -33,18 +33,18 @@ export const integrationCatalog: readonly IntegrationCatalogItem[] = [
 		description: "接收上游告警，并保留可轮换的来源凭据。",
 		availability: "available",
 	},
-	{
-		platform: "prometheus",
-		displayName: "Prometheus",
-		description: "指标查询接入将在后续切片提供。",
-		availability: "unavailable",
-	},
-	{
-		platform: "thanos",
-		displayName: "Thanos",
-		description: "全局指标查询接入将在后续切片提供。",
-		availability: "unavailable",
-	},
+		{
+			platform: "prometheus",
+			displayName: "Prometheus",
+			description: "配置面向业务声明的 PromQL 指标查询接入。",
+			availability: "available",
+		},
+		{
+			platform: "thanos",
+			displayName: "Thanos",
+			description: "配置面向业务声明的全局 PromQL 查询接入。",
+			availability: "available",
+		},
 	{
 		platform: "kubernetes",
 		displayName: "Kubernetes",

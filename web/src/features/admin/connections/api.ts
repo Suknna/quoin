@@ -3,7 +3,7 @@
 
 export interface ConnectionSummaryView {
   name: string
-  type: 'thanos' | 'kubernetes' | 'model_provider'
+  type: 'prometheus' | 'thanos' | 'kubernetes' | 'model_provider'
   enabled: boolean
   revalidationRequired: boolean
   currentRevisionId?: string

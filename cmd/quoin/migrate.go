@@ -29,12 +29,17 @@ func runMigrate(arguments []string) {
 	}
 	config := parseConfig(arguments, "migrate")
 	ctx := context.Background()
-	if version, digest, ok := bootstrap.PeekSchemaState(config.DataDirectory); ok {
-		if reason, mismatch := schemaMismatchReason(version, digest); mismatch {
-			failStable(errors.New(reason), reason)
+	if preflight {
+		if version, digest, ok := bootstrap.PeekSchemaState(config.DataDirectory); ok {
+			if reason, mismatch := schemaMismatchReason(version, digest); mismatch {
+				failStable(errors.New(reason), reason)
+			}
 		}
 	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+	// The migration command alone may open a root-key-authenticated legacy
+	// database. Normal bootstrap deliberately rejects it until this exclusive
+	// upgrade completes, so an old schema never serves application traffic.
+	database, err := bootstrap.OpenMigrationDatabase(ctx, config.DataDirectory, config.RootKeyFile)
 	if err != nil {
 		failStable(err, "schema_open_failed")
 	}
@@ -73,6 +78,10 @@ func stableCode(err error) string {
 		return "schema_digest_mismatch"
 	case errors.Is(err, upgrade.ErrSchemaHistoryPresent):
 		return "schema_history_present"
+	case errors.Is(err, upgrade.ErrLegacyMigrationBlocked):
+		return "legacy_migration_blocked"
+	case errors.Is(err, upgrade.ErrLegacyMigrationRequired):
+		return "legacy_migration_required"
 	case errors.Is(err, upgrade.ErrNotUpgradeMaintenance):
 		return "upgrade_maintenance_not_active"
 	case errors.Is(err, upgrade.ErrChecklistBlocking):

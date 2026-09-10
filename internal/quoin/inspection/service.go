@@ -180,9 +180,13 @@ func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, cl
 	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running', evidence_at=?, row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
 		return RunDetail{}, err
 	}
+	var metricsConnectionID int64
+	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, versionID).Scan(&metricsConnectionID); err != nil {
+		return RunDetail{}, err
+	}
 	for _, check := range checks {
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, contractID, check, now)
+			err = s.promqlChild(ctx, conn, runID, versionID, contractID, metricsConnectionID, check, now)
 		} else {
 			err = s.browserChild(ctx, conn, runID, versionID, contractID, planKey, systemID, check, now)
 		}
@@ -238,7 +242,7 @@ func loadChecks(ctx context.Context, conn *sql.Conn, planID int64) ([]planCheck,
 
 // promqlChild freezes one run_check PromQL attempt: the deployment Thanos
 // grant and the typed input carrying the run's evidence_at.
-func (s *Service) promqlChild(ctx context.Context, conn *sql.Conn, runID, versionID, contractID int64, check planCheck, now string) error {
+func (s *Service) promqlChild(ctx context.Context, conn *sql.Conn, runID, versionID, contractID, metricsConnectionID int64, check planCheck, now string) error {
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,created_at)
 		VALUES('inspection_collection','run_check',?,?,'Queued',?,?)`, runID, check.key, attempt.ReleaseVersion(), now)
@@ -249,7 +253,7 @@ func (s *Service) promqlChild(ctx context.Context, conn *sql.Conn, runID, versio
 	if err != nil {
 		return err
 	}
-	grant, err := thanos.ResolveConfigGrant(ctx, conn, attemptID)
+	grant, err := thanos.ResolveConfigGrantForConnection(ctx, conn, attemptID, metricsConnectionID)
 	if err != nil {
 		return err
 	}
@@ -650,6 +654,10 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 	if len(checks) == 0 {
 		return RunDetail{}, fmt.Errorf("scheduled plan %s/%s has no checks", plan.SystemKey, plan.PlanKey)
 	}
+	var metricsConnectionID int64
+	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, versionID).Scan(&metricsConnectionID); err != nil {
+		return RunDetail{}, err
+	}
 
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
@@ -703,7 +711,7 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 			continue
 		}
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, contractID, check, now)
+			err = s.promqlChild(ctx, conn, runID, versionID, contractID, metricsConnectionID, check, now)
 		} else {
 			err = s.browserChild(ctx, conn, runID, versionID, contractID, plan.PlanKey, systemID, check, now)
 		}

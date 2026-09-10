@@ -11,6 +11,7 @@ package businesssystem
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -47,11 +48,29 @@ type VerificationCheckResult struct {
 
 // VerificationRunDetail is the ConfigVerificationRunDetail projection; the
 // terminal states carry resultDetail (schema CHECK).
+type VerificationQueryResult struct {
+	PlanKey     string `json:"planKey"`
+	CheckKey    string `json:"checkKey"`
+	ResultType  string `json:"resultType"`
+	SampleCount int    `json:"sampleCount"`
+	// Samples is a bounded, non-secret preview of the returned vector/matrix
+	// payload. The full result stays in Evidence and is not a formal resource.
+	Samples json.RawMessage `json:"samples"`
+}
+
+type VerificationIdentitySample struct {
+	DiscoveryKey string            `json:"discoveryKey"`
+	Labels       map[string]string `json:"labels"`
+}
+
 type VerificationRunDetail struct {
 	VerificationRunSummary
-	CheckResults         []VerificationCheckResult `json:"checkResults"`
-	ResultDetail         *string                   `json:"resultDetail,omitempty"`
-	CancellingAttemptIDs []int64                   `json:"-"`
+	MetricsConnectionID  string                       `json:"metricsConnectionId"`
+	CheckResults         []VerificationCheckResult    `json:"checkResults"`
+	QueryResults         []VerificationQueryResult    `json:"queryResults"`
+	IdentitySamples      []VerificationIdentitySample `json:"identitySamples"`
+	ResultDetail         *string                      `json:"resultDetail,omitempty"`
+	CancellingAttemptIDs []int64                      `json:"-"`
 }
 
 // RunVerification creates the prepublish run for one unpublished draft and
@@ -143,13 +162,16 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=?`, versionID).Scan(&checkCount); err != nil {
 		return VerificationRunDetail{}, err
 	}
-	var promQLCount int
+	var promQLCount, discoveryCount int
 	if err := conn.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
 		WHERE p.config_version_id=? AND c.kind='promql'`, versionID).Scan(&promQLCount); err != nil {
 		return VerificationRunDetail{}, err
 	}
-	if promQLCount > 0 || browserCount > 0 {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM config_discoveries WHERE config_version_id=?`, versionID).Scan(&discoveryCount); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	if promQLCount > 0 || browserCount > 0 || discoveryCount > 0 {
 		// The scope trigger only permits child work beneath an active Run.
 		// This parent transition and every child/grant insert still share the
 		// creation transaction, so an unavailable connection rolls all of it back.
@@ -160,6 +182,9 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 			if _, err := createPromQLVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
 				return VerificationRunDetail{}, err
 			}
+		}
+		if err := createDiscoveryVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
+			return VerificationRunDetail{}, err
 		}
 		if browserCount > 0 {
 			if _, err := createBrowserVerificationAttempts(ctx, conn, runID, versionID, contractID, systemID, now); err != nil {
@@ -611,9 +636,10 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 		resultDetail sql.NullString
 	)
 	err := conn.QueryRowContext(ctx, `
-		SELECT id,purpose,config_version_id,label_contract_version_id,state,row_version,evidence_at,created_at,result_detail
-		FROM config_verification_runs WHERE id=? AND business_system_id=? AND config_version_id=?`,
-		runID, systemID, versionID).Scan(&id, &detail.Purpose, &versionID, &contractID, &detail.State, &detail.RowVersion, &evidenceAt, &detail.CreatedAt, &resultDetail)
+		SELECT r.id,r.purpose,r.config_version_id,r.label_contract_version_id,r.state,r.row_version,r.evidence_at,r.created_at,r.result_detail,v.metrics_connection_id
+		FROM config_verification_runs r JOIN business_system_config_versions v ON v.id=r.config_version_id
+		WHERE r.id=? AND r.business_system_id=? AND r.config_version_id=?`,
+		runID, systemID, versionID).Scan(&id, &detail.Purpose, &versionID, &contractID, &detail.State, &detail.RowVersion, &evidenceAt, &detail.CreatedAt, &resultDetail, &detail.MetricsConnectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return VerificationRunDetail{}, ErrNotFound
 	}
@@ -662,7 +688,100 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 		}
 		detail.CheckResults = append(detail.CheckResults, result)
 	}
-	return detail, rows.Err()
+	if err := rows.Err(); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	queryRows, err := conn.QueryContext(ctx, `
+			SELECT r.plan_key,r.check_key,e.result_json
+			FROM config_verification_run_check_results r
+			JOIN evidence e ON e.id=r.evidence_id
+			WHERE r.verification_run_id=? ORDER BY r.plan_key,r.check_key`, runID)
+	if err != nil {
+		return VerificationRunDetail{}, err
+	}
+	defer queryRows.Close()
+	for queryRows.Next() {
+		var result VerificationQueryResult
+		var raw string
+		if err := queryRows.Scan(&result.PlanKey, &result.CheckKey, &raw); err != nil {
+			return VerificationRunDetail{}, err
+		}
+		result.ResultType, result.SampleCount, result.Samples = verificationResultPreview([]byte(raw))
+		detail.QueryResults = append(detail.QueryResults, result)
+	}
+	if err := queryRows.Err(); err != nil {
+		return VerificationRunDetail{}, err
+	}
+	// Identity samples are derived only from real returned PromQL samples
+	// captured as verification Evidence. They never create or update formal
+	// observed resources; a declaration that produced no matching sample yields
+	// no identity sample rather than a fabricated empty label map.
+	identitySamples, err := verificationDiscoverySamples(ctx, conn, runID)
+	if err != nil {
+		return VerificationRunDetail{}, err
+	}
+	detail.IdentitySamples = identitySamples
+	return detail, nil
+}
+
+func verificationDiscoverySamples(ctx context.Context, conn *sql.Conn, runID int64) ([]VerificationIdentitySample, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT r.discovery_key,e.result_json
+		FROM config_verification_discovery_results r JOIN evidence e ON e.id=r.evidence_id
+		WHERE r.verification_run_id=? AND r.status='ok' ORDER BY r.discovery_key`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var samples []VerificationIdentitySample
+	for rows.Next() {
+		var key, raw string
+		if err := rows.Scan(&key, &raw); err != nil {
+			return nil, err
+		}
+		var result struct {
+			Series []struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"series"`
+		}
+		if json.Unmarshal([]byte(raw), &result) != nil {
+			continue
+		}
+		for _, series := range result.Series {
+			samples = append(samples, VerificationIdentitySample{DiscoveryKey: key, Labels: series.Labels})
+			if len(samples) == 20 {
+				return samples, nil
+			}
+		}
+	}
+	return samples, rows.Err()
+}
+
+func verificationResultPreview(raw []byte) (string, int, json.RawMessage) {
+	var envelope struct {
+		Data struct {
+			ResultType string            `json:"resultType"`
+			Result     []json.RawMessage `json:"result"`
+		} `json:"data"`
+		ResultType string            `json:"resultType"`
+		Result     []json.RawMessage `json:"result"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return "unknown", 0, json.RawMessage("[]")
+	}
+	kind, values := envelope.Data.ResultType, envelope.Data.Result
+	if kind == "" {
+		kind, values = envelope.ResultType, envelope.Result
+	}
+	count := len(values)
+	if count > 20 {
+		values = values[:20]
+	}
+	preview, err := json.Marshal(values)
+	if err != nil {
+		preview = []byte("[]")
+	}
+	return kind, count, preview
 }
 
 // mapVerificationAbort converts the frozen verification triggers' RAISE

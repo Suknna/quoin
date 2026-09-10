@@ -37,24 +37,63 @@ func newTestDB(t *testing.T) *sql.DB {
 
 var seedCounter int
 
-// seedOccurrence inserts one firing alert occurrence.
+// seedOccurrence inserts one firing alert occurrence with a published business
+// declaration. Analysis creation must not infer a global metrics connection.
 func seedOccurrence(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
 	seedCounter++
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	metricsConnectionID, _, _ := seedThanosChain(t, db)
+	contractID := seedActiveAnalysisContract(t, db, now)
+	key := fmt.Sprintf("business-%d", seedCounter)
+	business, err := db.Exec(`INSERT INTO business_systems(key,display_name,enabled,created_at) VALUES(?,?,0,?)`, key, key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	businessID, _ := business.LastInsertId()
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, strings.Repeat("c", 64), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionID, _ := version.LastInsertId()
+	if _, err := db.Exec(`UPDATE business_systems SET current_config_version_id=?,display_name=?,enabled=1,timezone='UTC',row_version=row_version+1 WHERE id=?`, versionID, key, businessID); err != nil {
+		t.Fatal(err)
+	}
 	source, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES(?,'alertmanager',1,?)`, fmt.Sprintf("source-%d", seedCounter), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sourceID, _ := source.LastInsertId()
-	labels := `{"alertname":"HighErrorRate","severity":"critical"}`
-	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,?)`,
-		sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 1}, now, labels, sha256Hex(labels), now, now)
+	labels := `{"alertname":"HighErrorRate","severity":"critical","business_system":"` + key + `"}`
+	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,business_system_id,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,?,?)`, sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 1}, now, labels, sha256Hex(labels), businessID, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := occurrence.LastInsertId()
 	return id
+}
+
+// seedActiveAnalysisContract establishes the Label Contract required by the
+// analysis snapshot. It is intentionally independent of the current business
+// pointer so later publications cannot alter a previously created snapshot.
+func seedActiveAnalysisContract(t *testing.T, db *sql.DB, now string) int64 {
+	t.Helper()
+	var existing int64
+	if err := db.QueryRow(`SELECT id FROM label_contracts WHERE state='active' LIMIT 1`).Scan(&existing); err == nil {
+		return existing
+	}
+	if _, err := db.Exec(`INSERT INTO label_contract_state(id,row_version,updated_at) SELECT 1,1,? WHERE NOT EXISTS (SELECT 1 FROM label_contract_state WHERE id=1)`, now); err != nil {
+		t.Fatal(err)
+	}
+	contract, err := db.Exec(`INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,row_version,created_at) VALUES(1,'fixture','{"label_contract":{"business_system_label":"business_system"}}',?,'fixture','v1','draft',1,?)`, strings.Repeat("a", 64), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractID, _ := contract.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO label_contract_activations(contract_id,expected_target_row_version,expected_state_row_version,items_json,created_at) VALUES(?,1,1,'[]',?)`, contractID, now); err != nil {
+		t.Fatal(err)
+	}
+	return contractID
 }
 
 // seedProviderChain inserts one enabled qualified model provider.

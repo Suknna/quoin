@@ -14,6 +14,9 @@ var (
 	//go:embed business-system-config.schema.json
 	BusinessSystemConfigSchema []byte
 
+	//go:embed config-verification-discovery-execution.schema.json
+	ConfigVerificationDiscoveryExecutionSchema []byte
+
 	//go:embed label-contract.schema.json
 	LabelContractSchema []byte
 

@@ -73,7 +73,7 @@ func (supervisor *Supervisor) runInspectionPromQL(parent context.Context, sink *
 		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
 		return
 	}
-	result, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword()}, input.Query.Mode, input.Query.Expression, input.Query.RangeSeconds, input.Query.StepSeconds)
+	result, warnings, err := plinthconnections.RunPromQL(ctx, config, plinthconnections.ThanosSecret{Username: payload.GetThanos().GetUsername(), Password: payload.GetThanos().GetPassword(), BearerToken: payload.GetThanos().GetBearerToken()}, input.Query.Mode, input.Query.Expression, input.Query.RangeSeconds, input.Query.StepSeconds)
 	if err != nil {
 		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, []string{err.Error()}, "query_failed")
 		return

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 )
 
@@ -42,42 +43,73 @@ var ErrThanosUnavailable = errors.New("no enabled thanos connection")
 // execution authorization re-check failed).
 var ErrGrantNotCurrent = errors.New("thanos grant is no longer current")
 
-// ResolveQueryGrant resolves the single enabled deployment Thanos
-// connection and freezes the attempt_connection_grants +
-// tool_call_connection_grants binding inside the caller's Tool Call
-// persistence transaction (ARCH-INPUT-003: the binding is appended only
-// after the model proposed the concrete tool call). The returned grant
-// travels in the CompleteModelCallAck authorization so the supervisor can
-// fetch the credential (ARCH-WORKER-002: never through the worker).
+// ResolveQueryGrant derives authority exclusively from the analysis snapshot:
+// the occurrence must have an immutable attributed business and that business's
+// exact published configuration/versioned Label Contract must be pinned in the
+// attempt input. It rejects a missing, stale, unpublished, disabled, or unsafe
+// context before a grant row exists; the model never chooses a connection or
+// relaxes the Label Contract selector scope.
 func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolGrant, error) {
 	var (
-		connectionID, revisionID, generationID int64
-		bindingRevision, rootBinding           int64
+		businessSystemID, configVersionID, connectionID        int64
+		systemKey, businessLabel, query                        string
+		revisionID, generationID, bindingRevision, rootBinding int64
 	)
-	err := conn.QueryRowContext(ctx, `
+	if err := conn.QueryRowContext(ctx, `
+		SELECT occurrence.business_system_id, config_item.business_system_config_version_id,
+		       config.system_key,
+		       json_extract(contract.contract_json, '$.label_contract.business_system_label'),
+		       json_extract(tool.arguments_json, '$.query')
+		FROM tool_calls tool
+		JOIN execution_attempts attempt ON attempt.id=tool.attempt_id
+		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=attempt.id
+		JOIN attempt_input_items occurrence_item ON occurrence_item.snapshot_id=snapshot.id AND occurrence_item.occurrence_id IS NOT NULL
+		JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
+		JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id AND config_item.business_system_config_version_id IS NOT NULL
+		JOIN business_system_config_versions config ON config.id=config_item.business_system_config_version_id
+		JOIN attempt_input_items contract_item ON contract_item.snapshot_id=snapshot.id AND contract_item.label_contract_version_id IS NOT NULL
+		JOIN label_contracts contract ON contract.id=contract_item.label_contract_version_id
+		WHERE tool.id=? AND tool.attempt_id=?
+		  AND occurrence.business_system_id=config.business_system_id
+		  AND config.label_contract_version_id=contract.id
+		  -- Publication is immutable; a later publish may supersede this frozen
+		  -- version without changing authority already bound to this attempt.
+		  AND config.published_at IS NOT NULL`,
+		toolCallID, attemptID,
+	).Scan(&businessSystemID, &configVersionID, &systemKey, &businessLabel, &query); err != nil {
+
+		if errors.Is(err, sql.ErrNoRows) {
+			return attempt.ToolGrant{}, fmt.Errorf("%w: analysis has no eligible published business configuration context", ErrThanosUnavailable)
+		}
+		return attempt.ToolGrant{}, err
+	}
+	if fields := config.ValidateCheckExpression(query, businessLabel, systemKey, "query"); len(fields) != 0 {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: query violates business Label Contract scope: %s", ErrThanosUnavailable, fields[0].Reason)
+	}
+	if err := conn.QueryRowContext(ctx, `
 		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
 		       g.key_binding_revision, s.binding_revision
-		FROM connections c
-		JOIN credential_generations g ON g.id = c.current_credential_generation_id
+		FROM business_system_config_versions config
+		JOIN connections c ON c.id=config.metrics_connection_id
+		JOIN credential_generations g ON g.id=c.current_credential_generation_id
 		CROSS JOIN root_key_state s
-		WHERE c.type = 'thanos' AND c.enabled = 1 AND c.revalidation_required = 0
-		LIMIT 1`,
-	).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding)
-	if errors.Is(err, sql.ErrNoRows) {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: create or enable a thanos connection first", ErrThanosUnavailable)
-	}
-	if err != nil {
+		WHERE config.id=? AND config.business_system_id=?
+		  AND c.type IN ('thanos','prometheus') AND c.enabled=1 AND c.revalidation_required=0`,
+		configVersionID, businessSystemID,
+	).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return attempt.ToolGrant{}, fmt.Errorf("%w: configured metrics connection is unavailable", ErrThanosUnavailable)
+		}
 		return attempt.ToolGrant{}, err
 	}
 	if bindingRevision != rootBinding {
 		return attempt.ToolGrant{}, fmt.Errorf("%w: credential root binding %d does not match %d", ErrGrantNotCurrent, bindingRevision, rootBinding)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,
+		INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,
 			credential_generation_id,created_by_tool_call_id,created_at)
-		VALUES(?,?,?,?,?,?,?)`,
-		attemptID, "thanos_query", connectionID, revisionID, generationID, toolCallID, now)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		attemptID, "thanos_query", businessSystemID, connectionID, revisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return attempt.ToolGrant{}, err
 	}
@@ -85,22 +117,17 @@ func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallI
 	if err != nil {
 		return attempt.ToolGrant{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO tool_call_connection_grants(tool_call_id,connection_grant_id,ordinal)
-		VALUES(?,?,0)`, toolCallID, grantID); err != nil {
+	if _, err := conn.ExecContext(ctx, `INSERT INTO tool_call_connection_grants(tool_call_id,connection_grant_id,ordinal) VALUES(?,?,0)`, toolCallID, grantID); err != nil {
 		return attempt.ToolGrant{}, err
 	}
-	return attempt.ToolGrant{
-		GrantID: grantID, ConnectionRevisionID: revisionID,
-		CredentialGenerationID: generationID, Purpose: "thanos_query",
-	}, nil
+	return attempt.ToolGrant{GrantID: grantID, ConnectionRevisionID: revisionID, CredentialGenerationID: generationID, Purpose: "thanos_query"}, nil
 }
 
-// ResolveConfigGrant freezes the one enabled deployment Thanos connection
-// for a deterministic Config Verification or Resource Refresh attempt. Unlike
-// tool grants, this grant has no model Tool Call owner; its `config_thanos_query`
-// purpose makes that distinction structurally visible in the schema.
-func ResolveConfigGrant(ctx context.Context, conn *sql.Conn, attemptID int64) (attempt.ToolGrant, error) {
+// ResolveConfigGrantForConnection freezes one exact Prometheus-compatible
+// connection for a deterministic Config Verification or Inspection attempt.
+// The declaration locator is mandatory: historical attempts retain their
+// already-created immutable grants rather than re-resolving a global default.
+func ResolveConfigGrantForConnection(ctx context.Context, conn *sql.Conn, attemptID, requiredConnectionID int64) (attempt.ToolGrant, error) {
 	var connectionID, revisionID, generationID, bindingRevision, rootBinding int64
 	if err := conn.QueryRowContext(ctx, `
 		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
@@ -108,8 +135,9 @@ func ResolveConfigGrant(ctx context.Context, conn *sql.Conn, attemptID int64) (a
 		FROM connections c
 		JOIN credential_generations g ON g.id = c.current_credential_generation_id
 		CROSS JOIN root_key_state s
-		WHERE c.type = 'thanos' AND c.enabled = 1 AND c.revalidation_required = 0
-		LIMIT 1`).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
+		WHERE c.type IN ('thanos','prometheus') AND c.enabled = 1 AND c.revalidation_required = 0
+		  AND c.id = ?
+		LIMIT 1`, requiredConnectionID).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return attempt.ToolGrant{}, fmt.Errorf("%w: create or enable a thanos connection first", ErrThanosUnavailable)
 		}

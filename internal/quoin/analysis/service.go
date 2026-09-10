@@ -37,12 +37,13 @@ const RendererVersion = "initial-analysis-renderer-v1"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
-	ErrNotFound             = errors.New("initial analysis not found")
-	ErrModelProviderMissing = errors.New("no enabled qualified model provider")
-	ErrActiveConflict       = errors.New("initial analysis is not retryable or the fence lost the race")
-	ErrNoOutput             = errors.New("initial analysis has no sealed output")
-	ErrLateResult           = errors.New("result proposal lost the commit-order race")
-	ErrOutputSealed         = errors.New("initial analysis already sealed an output")
+	ErrNotFound               = errors.New("initial analysis not found")
+	ErrModelProviderMissing   = errors.New("no enabled qualified model provider")
+	ErrBusinessContextMissing = errors.New("alert occurrence has no eligible published business configuration")
+	ErrActiveConflict         = errors.New("initial analysis is not retryable or the fence lost the race")
+	ErrNoOutput               = errors.New("initial analysis has no sealed output")
+	ErrLateResult             = errors.New("result proposal lost the commit-order race")
+	ErrOutputSealed           = errors.New("initial analysis already sealed an output")
 )
 
 // RowVersionError reports a stale expected_row_version fence miss.
@@ -150,10 +151,23 @@ func (service *Service) replayRemember(principalID int64, commandID string, entr
 	service.replay[key] = entry
 }
 
-// Input is the rendered, immutable input of one analysis.
+// Input is the rendered, immutable input of one analysis. BusinessContext is
+// the published declaration and Label Contract pair that scopes every metrics
+// observation proposed by this attempt.
 type Input struct {
-	Occurrence    OccurrenceContext `json:"occurrence"`
-	ModelContract ModelContract     `json:"modelContract"`
+	Occurrence      OccurrenceContext `json:"occurrence"`
+	BusinessContext BusinessContext   `json:"businessContext"`
+	ModelContract   ModelContract     `json:"modelContract"`
+}
+
+// BusinessContext names immutable configuration facts, never a secret or a
+// mutable connection locator. The resolver later reads its frozen input-item
+// references and snapshots the referenced connection revision/generation.
+type BusinessContext struct {
+	SystemKey              string `json:"systemKey"`
+	ConfigVersionID        string `json:"configVersionId"`
+	LabelContractVersionID string `json:"labelContractVersionId"`
+	BusinessSystemLabel    string `json:"businessSystemLabel"`
 }
 
 // OccurrenceContext is the frozen alert context the model receives.
@@ -335,6 +349,9 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	if err := json.Unmarshal([]byte(labelsJSON), &input.Occurrence.Labels); err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
+	if err := resolveBusinessContext(ctx, conn, occurrenceID, &input.BusinessContext); err != nil {
+		return Input{}, ModelContract{}, provider{}, err
+	}
 	selected, err := selectModelProvider(ctx, conn)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
@@ -346,6 +363,35 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	}
 	input.ModelContract = contract
 	return input, contract, selected, nil
+}
+
+// resolveBusinessContext admits analysis only when the immutable occurrence
+// attribution closes onto the business's current published declaration and its
+// active Label Contract. A later draft cannot affect this input because the
+// exact version references are frozen as attempt input items.
+func resolveBusinessContext(ctx context.Context, conn *sql.Conn, occurrenceID int64, context *BusinessContext) error {
+	var configVersionID, contractVersionID int64
+	err := conn.QueryRowContext(ctx, `
+		SELECT config.id, contract.id, config.system_key,
+		       json_extract(contract.contract_json, '$.label_contract.business_system_label')
+		FROM alert_occurrences occurrence
+		JOIN business_systems business ON business.id=occurrence.business_system_id
+		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
+		JOIN label_contracts contract ON contract.id=config.label_contract_version_id
+		WHERE occurrence.id=? AND business.enabled=1 AND config.state='published' AND contract.state='active'`, occurrenceID).
+		Scan(&configVersionID, &contractVersionID, &context.SystemKey, &context.BusinessSystemLabel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrBusinessContextMissing
+	}
+	if err != nil {
+		return err
+	}
+	if context.SystemKey == "" || context.BusinessSystemLabel == "" {
+		return ErrBusinessContextMissing
+	}
+	context.ConfigVersionID = strconv.FormatInt(configVersionID, 10)
+	context.LabelContractVersionID = strconv.FormatInt(contractVersionID, 10)
+	return nil
 }
 
 // selectModelProvider resolves the single enabled model provider and its
@@ -419,7 +465,27 @@ func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digest
 	occurrenceDigest := sha256.Sum256([]byte("occurrence:" + input.Occurrence.ID))
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,occurrence_id)
-		VALUES(?,1,'user',?,?)`, snapshotID, hex.EncodeToString(occurrenceDigest[:]), occurrenceID); err != nil {
+		VALUES(?,1,'occurrence',?,?)`, snapshotID, hex.EncodeToString(occurrenceDigest[:]), occurrenceID); err != nil {
+		return 0, err
+	}
+	configVersionID, err := strconv.ParseInt(input.BusinessContext.ConfigVersionID, 10, 64)
+	if err != nil || configVersionID <= 0 {
+		return 0, fmt.Errorf("analysis business configuration context is missing")
+	}
+	configDigest := sha256.Sum256([]byte("business-system-config-version:" + input.BusinessContext.ConfigVersionID))
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
+		VALUES(?,2,'business_config',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
+		return 0, err
+	}
+	contractVersionID, err := strconv.ParseInt(input.BusinessContext.LabelContractVersionID, 10, 64)
+	if err != nil || contractVersionID <= 0 {
+		return 0, fmt.Errorf("analysis Label Contract context is missing")
+	}
+	contractDigest := sha256.Sum256([]byte("label-contract-version:" + input.BusinessContext.LabelContractVersionID))
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
+		VALUES(?,3,'label_contract',?,?)`, snapshotID, hex.EncodeToString(contractDigest[:]), contractVersionID); err != nil {
 		return 0, err
 	}
 	if _, err := conn.ExecContext(ctx, `

@@ -510,16 +510,17 @@ export const domainHandlers = [
 		}>(request);
 		if (detailFor(input.name))
 			return problem(409, "连接名称已存在。", "already_exists");
-		if (
-			input.connection.type !== "thanos" &&
-			input.connection.type !== "kubernetes" &&
-			input.connection.type !== "model_provider"
-		)
+			if (
+				input.connection.type !== "prometheus" &&
+				input.connection.type !== "thanos" &&
+				input.connection.type !== "kubernetes" &&
+				input.connection.type !== "model_provider"
+			)
 			return problem(422, "连接类型无效。", "validation_error");
 		const connection = {
 			id: nextId("connection"),
 			name: input.name,
-			type: input.connection.type as "thanos" | "kubernetes" | "model_provider",
+				type: input.connection.type as "prometheus" | "thanos" | "kubernetes" | "model_provider",
 			enabled: false,
 			revalidationRequired: false,
 			rowVersion: 1,

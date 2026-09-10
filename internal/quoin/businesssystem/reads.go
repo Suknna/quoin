@@ -45,40 +45,39 @@ type PlanView struct {
 // BusinessSystemDetail is BusinessSystemDetail (browser identity arrives with the
 // Lintel stage and projects the frozen `none` state until then).
 type BusinessSystemDetail struct {
-	Key                            string          `json:"key"`
-	DisplayName                    string          `json:"displayName"`
-	Enabled                        bool            `json:"enabled"`
-	RowVersion                     int64           `json:"rowVersion"`
-	CurrentConfigVersionID         *string         `json:"currentConfigVersionId"`
-	Timezone                       *string         `json:"timezone"`
-	ResourceRefreshIntervalSeconds *int64          `json:"resourceRefreshIntervalSeconds"`
-	BrowserIdentityState           string          `json:"browserIdentityState"`
-	ConfigVersionCount             int64           `json:"configVersionCount"`
-	Discoveries                    []DiscoveryView `json:"discoveries"`
-	Plans                          []PlanView      `json:"plans"`
+	Key                    string          `json:"key"`
+	DisplayName            string          `json:"displayName"`
+	Enabled                bool            `json:"enabled"`
+	RowVersion             int64           `json:"rowVersion"`
+	CurrentConfigVersionID *string         `json:"currentConfigVersionId"`
+	Timezone               *string         `json:"timezone"`
+	BrowserIdentityState   string          `json:"browserIdentityState"`
+	ConfigVersionCount     int64           `json:"configVersionCount"`
+	Discoveries            []DiscoveryView `json:"discoveries"`
+	Plans                  []PlanView      `json:"plans"`
 }
 
 // ConfigVersionDetail is ConfigVersionSummary + ConfigVersionDetail.
 type ConfigVersionDetail struct {
-	ID                             string          `json:"id"`
-	VersionSeq                     int64           `json:"versionSeq"`
-	State                          string          `json:"state"`
-	CreatedAt                      string          `json:"createdAt"`
-	PublishedAt                    *string         `json:"publishedAt,omitempty"`
-	Digest                         string          `json:"digest"`
-	ParserVersion                  string          `json:"parserVersion"`
-	SchemaVersion                  string          `json:"schemaVersion"`
-	SystemKey                      string          `json:"systemKey"`
-	DisplayName                    string          `json:"displayName"`
-	Enabled                        bool            `json:"enabled"`
-	LabelContractVersionID         string          `json:"labelContractVersionId"`
-	JourneyCatalogDigest           string          `json:"journeyCatalogDigest"`
-	JourneyCatalogVersion          string          `json:"journeyCatalogVersion"`
-	YAMLBody                       string          `json:"yamlBody"`
-	Timezone                       string          `json:"timezone"`
-	ResourceRefreshIntervalSeconds int64           `json:"resourceRefreshIntervalSeconds"`
-	Discoveries                    []DiscoveryView `json:"discoveries"`
-	Plans                          []PlanView      `json:"plans"`
+	ID                     string          `json:"id"`
+	VersionSeq             int64           `json:"versionSeq"`
+	State                  string          `json:"state"`
+	CreatedAt              string          `json:"createdAt"`
+	PublishedAt            *string         `json:"publishedAt,omitempty"`
+	Digest                 string          `json:"digest"`
+	ParserVersion          string          `json:"parserVersion"`
+	SchemaVersion          string          `json:"schemaVersion"`
+	SystemKey              string          `json:"systemKey"`
+	DisplayName            string          `json:"displayName"`
+	Enabled                bool            `json:"enabled"`
+	LabelContractVersionID string          `json:"labelContractVersionId"`
+	JourneyCatalogDigest   string          `json:"journeyCatalogDigest"`
+	JourneyCatalogVersion  string          `json:"journeyCatalogVersion"`
+	YAMLBody               string          `json:"yamlBody"`
+	Timezone               string          `json:"timezone"`
+	MetricsConnectionID    string          `json:"metricsConnectionId"`
+	Discoveries            []DiscoveryView `json:"discoveries"`
+	Plans                  []PlanView      `json:"plans"`
 }
 
 // ConfigVersionSummary is ConfigVersionSummary for the history list.
@@ -136,7 +135,7 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 		}
 	}
 	rows, err := service.db.QueryContext(ctx, `
-		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,systems.resource_refresh_interval_seconds,
+		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
 		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
 		FROM business_systems AS systems WHERE `+joinAnd(conditions)+` ORDER BY systems.id DESC LIMIT ?`,
 		append(args, limit+1)...)
@@ -151,12 +150,11 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 			id           int64
 			current      sql.NullInt64
 			timezone     sql.NullString
-			refresh      sql.NullInt64
 			browserState string
 			detail       BusinessSystemDetail
 			enabledFlag  int64
 		)
-		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState); err != nil {
+		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState); err != nil {
 			return nil, "", err
 		}
 		detail.Enabled = enabledFlag == 1
@@ -168,10 +166,6 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 		if timezone.Valid {
 			value := timezone.String
 			detail.Timezone = &value
-		}
-		if refresh.Valid {
-			value := refresh.Int64
-			detail.ResourceRefreshIntervalSeconds = &value
 		}
 		ids = append(ids, id)
 		systems = append(systems, detail)
@@ -275,23 +269,22 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 
 func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (BusinessSystemDetail, error) {
 	query := `
-		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,systems.resource_refresh_interval_seconds,
+		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
 		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
 		FROM business_systems AS systems WHERE systems.id=?`
 	var (
 		id           int64
 		current      sql.NullInt64
 		timezone     sql.NullString
-		refresh      sql.NullInt64
 		browserState string
 		enabledFlag  int64
 		detail       BusinessSystemDetail
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState)
+		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &refresh, &browserState)
+		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState)
 	}
 	if err != nil {
 		return BusinessSystemDetail{}, err
@@ -305,10 +298,6 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 	if timezone.Valid {
 		value := timezone.String
 		detail.Timezone = &value
-	}
-	if refresh.Valid {
-		value := refresh.Int64
-		detail.ResourceRefreshIntervalSeconds = &value
 	}
 	var count int64
 	if conn != nil {
@@ -337,7 +326,7 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	query := `
 		SELECT id,version_seq,state,created_at,published_at,digest,parser_version,schema_version,
 			system_key,display_name,enabled,label_contract_version_id,journey_catalog_digest,journey_catalog_version,
-			yaml_body,timezone,resource_refresh_interval_seconds
+			yaml_body,timezone,metrics_connection_id
 		FROM business_system_config_versions WHERE id=? AND business_system_id=?`
 	var (
 		detail      ConfigVersionDetail
@@ -348,9 +337,9 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.ResourceRefreshIntervalSeconds)
+		err = conn.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.ResourceRefreshIntervalSeconds)
+		err = service.db.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
 	}
 	if err != nil {
 		return ConfigVersionDetail{}, err

@@ -17,7 +17,11 @@ for (const key of ["url", "username", "temporaryPassword", "password"]) {
 const repoRoot = new URL("../../", import.meta.url).pathname;
 const helper = `${repoRoot}scripts/e2e-real/register-plinth.sh`;
 
-const result = spawnSync("pnpm", ["--dir", "web", "test:e2e:real"], {
+const playwrightArgs = ["--dir", "web", "test:e2e:real"];
+// A focused issue suite is still run through the same private credential loader
+// and real stack; this prevents #97 from relying on #102's ordering side effect.
+if (process.env.QUOIN_E2E_PLAYWRIGHT_FILE) playwrightArgs.push(process.env.QUOIN_E2E_PLAYWRIGHT_FILE);
+const result = spawnSync("pnpm", playwrightArgs, {
 	cwd: repoRoot,
 	stdio: "inherit",
 	env: {
@@ -27,6 +31,9 @@ const result = spawnSync("pnpm", ["--dir", "web", "test:e2e:real"], {
 		QUOIN_E2E_ADMIN_PASSWORD: values.temporaryPassword,
 		QUOIN_E2E_ADMIN_FINAL_PASSWORD: values.password,
 		QUOIN_E2E_REGISTER_PLINTH_HELPER: helper,
+		QUOIN_E2E_RUNTIME: process.env.QUOIN_E2E_RUNTIME,
+		QUOIN_E2E_PORT: process.env.QUOIN_E2E_PORT,
+		QUOIN_E2E_PROJECT: process.env.QUOIN_E2E_PROJECT,
 	},
 });
 process.exit(result.status ?? 1);

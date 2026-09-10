@@ -429,7 +429,7 @@ message ConnectionGrant {
   int64 grant_id = 1;              // attempt_connection_grants.id（不可变、Attempt-scoped）
   int64 connection_revision_id = 2; // connections.current_revision_id 绑定
   int64 credential_generation_id = 3; // credential_generations.id 绑定
-  string purpose = 4;              // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|thanos_probe|kubernetes_probe
+  string purpose = 4;              // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|prometheus_probe|thanos_probe|kubernetes_probe
   int64 connection_probe_result_id = 5; // model_provider 必须绑定通过的不可变 qualification；其它类型为 0
 }
 
@@ -1172,7 +1172,7 @@ message FetchCredentialGrantResponse {
   int64 attempt_id = 2;
   int64 connection_revision_id = 3;     // connections.current_revision_id 绑定
   int64 credential_generation_id = 4;   // credential_generations.id 绑定
-  string connection_type = 5;           // "thanos" | "kubernetes" | "model_provider"（connections.type）
+  string connection_type = 5;           // "prometheus" | "thanos" | "kubernetes" | "model_provider"（connections.type）
   bytes revision_config_json = 6;       // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
   oneof secret {
     ThanosCredentialSecret thanos = 7;
@@ -1181,12 +1181,14 @@ message FetchCredentialGrantResponse {
   }
 }
 
-// thanos 连接秘密（与 OpenAPI ThanosConnectionInput 秘密字段一致；仅 supervisor 内存）。
-// CONTEXT:147 只承诺 HTTP Basic Auth；不使用 Bearer。
+// Prometheus-compatible connection credentials (Prometheus or Thanos) are
+// carried in the established `thanos` oneof slot; connection_type is the
+// authoritative product-type discriminator. Values exist only in supervisor
+// memory for the attempt and are never returned through the public API.
 message ThanosCredentialSecret {
   string username = 1;
   string password = 2;
-  reserved 3; // bearer_token removed: CONTEXT only commits Basic Auth
+  string bearer_token = 3;
 }
 
 // kubernetes 连接秘密：kubeconfig 正文（仅 supervisor 内存）。

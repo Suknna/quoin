@@ -97,6 +97,60 @@ func OpenDatabase(ctx context.Context, dataDirectory, rootKeyFile string) (*Data
 	return &Database{SQL: db, lock: lock}, nil
 }
 
+// OpenMigrationDatabase takes the same exclusive data-directory lock and root
+// key check as OpenDatabase, but intentionally leaves schema compatibility to
+// the migration authority. It is only for `quoin migrate`: normal bootstrap
+// must not start an old database before its all-or-nothing upgrade succeeds.
+func OpenMigrationDatabase(ctx context.Context, dataDirectory, rootKeyFile string) (*Database, error) {
+	lock, err := sharedops.AcquireDirectory(dataDirectory)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*Database, error) {
+		_ = lock.Close()
+		return nil, err
+	}
+	rootKey, err := os.ReadFile(rootKeyFile)
+	if err != nil {
+		return fail(fmt.Errorf("read root key: %w", err))
+	}
+	if len(rootKey) != 32 {
+		return fail(fmt.Errorf("root key must contain exactly 32 bytes"))
+	}
+	databasePath := filepath.Join(dataDirectory, "quoin.db")
+	if _, err := os.Stat(databasePath); err != nil {
+		return fail(fmt.Errorf("inspect database: %w", err))
+	}
+	dsn := (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)&_pragma=synchronous(FULL)"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fail(err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return fail(err)
+	}
+	if err := verifyPragmas(ctx, db); err != nil {
+		_ = db.Close()
+		return fail(err)
+	}
+	// Both old and new schema layouts retain this root binding. Authenticating it
+	// before migration prevents an unauthenticated local DB from being rewritten.
+	var revision int
+	var nonce, ciphertext []byte
+	if err := db.QueryRowContext(ctx, `SELECT binding_revision,verifier_nonce,verifier_ciphertext FROM root_key_state WHERE id=1`).Scan(&revision, &nonce, &ciphertext); err != nil {
+		_ = db.Close()
+		return fail(fmt.Errorf("read root key binding: %w", err))
+	}
+	if err := VerifyRootKeyVerifier(rootKey, revision, nonce, ciphertext); err != nil {
+		_ = db.Close()
+		return fail(fmt.Errorf("root key does not authenticate the database binding"))
+	}
+	return &Database{SQL: db, lock: lock}, nil
+}
+
 // PeekHasUsers answers whether an administrator already exists using a
 // read-only connection that never takes the data-directory write lock, so a
 // rerunning admin-bootstrap cannot race a running Quoin for the lock. It is
