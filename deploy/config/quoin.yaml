@@ -1,6 +1,8 @@
 # Set publicOrigin to the exact externally visible HTTPS origin before first start.
 component: quoin
 publicOrigin: https://quoin.example.com
+# Exact public Alertmanager receiver; never an internal container endpoint.
+stelePublicURL: https://quoin.example.com/stele/alerts
 dataDirectory: /var/lib/quoin/data
 backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/quoin-secrets/root-key

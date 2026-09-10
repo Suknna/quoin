@@ -13,6 +13,8 @@ Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](c
 
 ## 1. 权威边界
 
+> **现状与迁移：** #102 已实现管理员关于页和独立平台故障来源，统一告警不再仅限于 Alertmanager Occurrence；平台故障不获得业务归属或业务分析能力。当前指标执行仍使用既有 Thanos 路由，Browser Identity 仍受既有业务绑定约束。下文执行策略表及 ARCH-CHAT-004/005 中的显式接入引用是 [#95](https://github.com/Suknna/quoin/issues/95)/ADR-0002 的待实施目标，不代表已经完成运行时迁移；后续切片必须同步 API、Schema、执行适配与测试，保留权限、审计、配置版本和上游告警生命周期边界。
+
 - **ARCH-AUTH-001 —** Quoin **MUST** 是用户、配置、连接、凭据、任务、消息、Evidence、Artifact、Knowledge 与全部执行状态的唯一持久权威。Plinth、Lintel、Stele 与前端都只能持有可丢弃投影，**MUST NOT** 建立可独立续跑或反向覆盖 Quoin 的第二历史。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-AUTH-002 —** Quoin **MUST** 创建并裁决每个 Execution Attempt；Runtime 只执行由 Quoin 当前 `attempt_id + runtime_slot + boot_id + connection_epoch` 租约授权的工作。所有重放、恢复、取消和迟到结果均以 Quoin 的 SQLite 提交顺序为准。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-AUTH-003 —** 用户可见最终正文只由 `investigation_messages`、Initial Analysis 输出、Inspection Report、Knowledge Candidate 与 Evidence 等领域记录拥有。Model/Tool Call 保存版本、输入引用、连接绑定、usage、时间、结构化终止、规范可见响应与输出引用，**MUST NOT** 保存或展示隐藏思维链。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
@@ -57,8 +59,8 @@ Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](c
 
 | mode | worker | 模型循环 | 实时外部工具 | 输入与输出 |
 | --- | --- | --- | --- | --- |
-| Initial Analysis | 是 | 最小顺序 loop | Knowledge、全局 Thanos；**无 Kubernetes/Browser** | 冻结 Occurrence、当前业务系统/Label Contract、已有 Evidence；输出 Initial Analysis |
-| Investigation | 是 | 最小顺序 loop | Knowledge、全局 Thanos、业务系统绑定的 Kubernetes、Browser；工作区工具 | 当前有效消息分支、来源引用、Artifact；输出 assistant Message |
+| Initial Analysis | 是 | 最小顺序 loop | Knowledge、业务声明授权的指标接入；**无 Kubernetes/Browser** | 冻结 Occurrence、当前业务系统/Label Contract、已有 Evidence；输出 Initial Analysis |
+| Investigation | 是 | 最小顺序 loop | Knowledge、业务声明授权的指标接入、Kubernetes 和 Browser 接入；工作区工具 | 当前有效消息分支、来源引用、Artifact；输出 assistant Message |
 | Inspection Analysis | 是 | 固定分析调用，可使用工作区工具 | Knowledge；**不重新查询 Thanos/Kubernetes/Browser** | 本 Run 冻结 Evidence；输出不可变 Report |
 | Knowledge Extraction | 是 | 固定提取调用，可使用工作区工具 | **无实时运维工具** | 冻结来源材料；输出 Candidate proposals |
 | Embedding | 否 | 无 Agent/Tool loop | supervisor 直接调用 active provider 的 Embedding API | 冻结 KnowledgeVersion 正文；输出向量与模型身份 |
@@ -85,8 +87,8 @@ Journey Catalog 机器契约：[contracts/schemas/journey-catalog.schema.json](c
 - **ARCH-CHAT-001 —** Investigation 页面 **MUST** 是主流 Chat 页面。直接新建后用户立即用自然语言输入，不得在进入对话前增加 Business System、连接、告警、Evidence、模型或工具选择向导。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-CHAT-002 —** 现有告警、Initial Analysis、Evidence 与 Inspection 入口保持；从这些对象进入 Chat 时，Quoin 自动写入不可变 Investigation source refs。直接新建可以没有结构化来源；v1 不提供进入 Chat 后追加来源的独立配置流程。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-CHAT-003 —** 模型可以从用户自然语言和 Quoin 提供的业务系统 catalog 识别人类领域目标，只能在 Tool 参数中提交 Business System key/名称或其他人类对象 locator；模型 **MUST NOT** 查看或选择 Connection、ConnectionRevision、CredentialGeneration、grant 或凭据。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
-- **ARCH-CHAT-004 —** Quoin 是路由权威：一个部署有一个全局 Thanos；每个 Business System 可由 Admin 绑定零到多个 Kubernetes Connection。Quoin 在 Tool Call 持久化事务中把领域目标确定性解析为当时 current revision/generation 并冻结为 Attempt connection grants。名称不存在或存在真实歧义时返回结构化 `target_not_found/target_ambiguous` 结果，由模型在 Chat 中自然追问，**MUST NOT** 猜连接。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
-- **ARCH-CHAT-005 —** Thanos Tool 必须携带 Business System 目标；Quoin/supervisor 根据该系统当时 published Label Contract 注入或校验强制 matcher。模型不得提供绕过 matcher 的 raw endpoint、认证头或连接 ID。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、[CONTEXT.md](../../../CONTEXT.md)）
+- **ARCH-CHAT-004 —** Quoin 是路由权威：业务系统声明显式引用所需的指标、Kubernetes 和浏览器接入，并在 Tool Call 持久化事务中把领域目标解析为当时被授权的接入修订/凭据 generation 并冻结为 Attempt grant。引用缺失、不可用或有真实歧义时返回结构化预检结果，由模型在 Chat 中自然追问，**MUST NOT** 猜测、回退到全局或选择第一个连接。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入)、[CONTEXT「指标接入」](../../../CONTEXT.md#指标接入)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
+- **ARCH-CHAT-005 —** 指标查询 Tool 必须携带 Business System 目标；Quoin/supervisor 依据该系统已发布声明中的显式指标接入引用、Label Contract 和范围注入或校验强制 matcher。模型不得提供 raw endpoint、认证头或接入/连接 ID 来绕过业务边界。（来源：[CONTEXT「指标接入」](../../../CONTEXT.md#指标接入)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 - **ARCH-CHAT-006 —** 固定 `kubernetes_read` Tool 只在 Investigation mode 可用，接收 Business System 与 Kubernetes 资源领域参数；Quoin 以 key 或 display name 解析目标，未知、歧义或零 active mapping 作为不取凭据、不发网络请求的 `target_not_found`、`target_ambiguous`、`no_mapping` 预检 Tool Result 返回模型追问。唯一目标时 supervisor 对该系统全部绑定连接使用只读凭据按稳定顺序执行。v1 只提供发现、get/list、events 与 logs 等只读操作，不提供 exec、port-forward、apply、delete、patch 或通用 kubeconfig/shell。（来源：[Issue #42](https://github.com/Suknna/quoin/issues/42)、[CONTEXT.md](../../../CONTEXT.md)）
 - **ARCH-CHAT-006a —** `tool_calls.preflight_error_code/detail` 是 accepted Tool Call 的不可变路由事实：两者必须同时为空或同时为受限非空值；仅可在 pending 期间从空成对写入一次，任何 terminal closure 或 replay 都不得改写、清空或重新推导。（来源：[Issue #42](https://github.com/Suknna/quoin/issues/42)）
 - **ARCH-CHAT-007 —** Chat 页的持久工具时间线 **MUST** 从权威 `model_calls`/`tool_calls` 重建，不依赖瞬态 token delta、worker 内存或 `task_change_log`；HTTP 以 Investigation Attempt 下的独立游标分页 Tool Call 子资源返回工具名、参数、状态、模型可见有界结果/Artifact 引用与时间，避免详情响应嵌入无界历史。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、`http-api.md` HTTP-PAGE-005）

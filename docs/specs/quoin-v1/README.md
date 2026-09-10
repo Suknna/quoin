@@ -4,6 +4,8 @@
 
 **Non-normative：** 本目录承载 Quoin v1 的规范性技术契约。目标是把 [`CONTEXT.md`](../../../CONTEXT.md) 中已经冻结的领域语言与业务边界，落实为可供后续实施规划和验证直接使用的数据、API、组件协议、配置、前端、安全、运维与验收规格；本目录不包含生产实现或实施任务拆分。
 
+> **状态提示（2026-09-10）：** [GitHub #95](https://github.com/Suknna/quoin/issues/95) 与 ADR-0002 按切片实施。`6b62904` 已交付管理员关于页、平台故障独立来源、权限边界，以及复用既有 Alertmanager 服务的接入入口和真实 E2E 基础；相关 OpenAPI、SQL 与部署配置契约已同步。业务声明的等价表单/YAML、完整显式接入引用、独立浏览器接入及任务触发采集等其余目标尚未因此完成。本目录中涉及这些目标的条款是待实施设计，不能视为当前运行能力。平台故障仍沿用首版 fresh-v1/zero-history Schema 门，不支持旧库原地迁移。实现范围与验证证据见 [#102 验收记录](../../frontend/issue-102-acceptance.md)，手调见 [真实本地环境说明](../../e2e-real-local.md)。
+
 全部 Wayfinder 决策、依据与研究索引见 [Quoin v1 技术规格地图](https://github.com/Suknna/quoin/issues/1)。本文件的规范条款使用 `SPEC` 类别，来源均为已关闭的 [确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)。
 
 ## 阅读顺序
