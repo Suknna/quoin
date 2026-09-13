@@ -78,6 +78,12 @@ func (s *Service) catchUp(ctx context.Context) (Summary, bool, error) {
 	if err != nil {
 		return Summary{}, false, err
 	}
+	// queueScheduledAdmitted holds the sole production SQLite connection until
+	// it returns. Project only after that boundary so the metrics query cannot
+	// wait on its own pool lease.
+	if admitted {
+		s.refreshMetrics(ctx)
+	}
 	return value, admitted, nil
 }
 
@@ -130,7 +136,6 @@ func (s *Service) queueScheduledAdmitted(ctx context.Context, due time.Time, exp
 		return Summary{}, false, err
 	}
 	committed = true
-	s.refreshMetrics(ctx)
 	return queued, true, nil
 }
 

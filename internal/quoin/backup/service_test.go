@@ -163,6 +163,48 @@ func TestScheduleCatchupQueuesOnlyLatestBoundary(t *testing.T) {
 	}
 }
 
+// TestScheduleCatchUpWithMetricsDoesNotHoldTheOnlyConnection proves that the
+// scheduler's final metrics projection happens only after its admission
+// connection is returned to the production-sized SQLite pool.
+func TestScheduleCatchUpWithMetricsDoesNotHoldTheOnlyConnection(t *testing.T) {
+	service, db := newServiceForTest(t)
+	defer db.Close()
+	base := time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
+	service.now = func() time.Time { return base }
+	if _, err := db.Exec(`DROP TRIGGER trg_backup_settings_schedule_enabled_at_transition`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE backup_settings SET schedule_cron='*/5 * * * *',timezone='UTC',schedule_enabled_at=?,updated_at=?,row_version=row_version+1`, "2026-01-02T09:50:00Z", "2026-01-02T09:50:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	server, err := sharedops.New("quoin", ":0", sharedops.Ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := server.BackupMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetMetrics(metrics)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := service.CatchUp(ctx); err != nil {
+		t.Fatalf("catch up with one SQLite connection: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("catch up waited %s for its own SQLite connection", elapsed)
+	}
+	rows, err := service.List(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TriggerKind != "scheduled" || rows[0].ScheduledFor == nil || *rows[0].ScheduledFor != "2026-01-02T10:05:00Z" {
+		t.Fatalf("catch-up rows=%+v", rows)
+	}
+}
+
 func TestScheduleEnabledAtIgnoresUnrelatedSettingsEdits(t *testing.T) {
 	service, db := newServiceForTest(t)
 	defer db.Close()
