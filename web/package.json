@@ -18,6 +18,7 @@
     "@assistant-ui/react": "0.15.14",
     "@assistant-ui/react-data-stream": "0.12.26",
     "@novnc/novnc": "1.7.0",
+    "@shadcn/react": "^0.3.1",
     "@vitejs/plugin-react": "6.0.5",
     "assistant-stream": "0.3.37",
     "class-variance-authority": "0.7.1",
@@ -29,6 +30,8 @@
     "radix-ui": "1.6.7",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
     "vite": "8.2.1",
     "yaml": "^2.9.0"
   },

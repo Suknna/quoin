@@ -3,6 +3,7 @@ import type { InvestigationMessage } from './api'
 import {
   canOfferRetry,
   canOfferUndo,
+  effectiveAttemptForMessage,
   latestActiveUserMessage,
   mergeAttachmentIds,
   withdrawnRevision,
@@ -68,6 +69,28 @@ describe('canOfferRetry', () => {
     expect(canOfferRetry(states, doneTurn)).toBe(false)
     expect(canOfferRetry(states, failedTurn, 'attempt-live')).toBe(false)
     expect(canOfferRetry(states, userMessage('3', 5))).toBe(false)
+  })
+})
+
+describe('effectiveAttemptForMessage', () => {
+  it('uses a successful retry for its original user turn', () => {
+    const user = userMessage('m1', 1, { attemptId: 'a1' })
+    const retryReply = assistantMessage('m2', 2, { parentMessageId: 'm1', attemptId: 'a2' })
+    const attempts = [
+      { id: 'a1', type: 'chat', state: 'Failed' as const, rowVersion: 1, createdAt: '2026-01-01T00:00:00Z' },
+      { id: 'a2', type: 'chat', state: 'Succeeded' as const, rowVersion: 2, createdAt: '2026-01-01T00:01:00Z' },
+    ]
+    expect(effectiveAttemptForMessage(user, [user, retryReply], attempts)).toMatchObject({ id: 'a2', state: 'Succeeded' })
+  })
+
+  it('does not attribute a later unrelated attempt to an earlier turn', () => {
+    const original = userMessage('m1', 1, { attemptId: 'a1' })
+    const later = userMessage('m2', 2, { attemptId: 'a2' })
+    const attempts = [
+      { id: 'a1', type: 'chat', state: 'Failed' as const, rowVersion: 1, createdAt: '2026-01-01T00:00:00Z' },
+      { id: 'a2', type: 'chat', state: 'Succeeded' as const, rowVersion: 2, createdAt: '2026-01-01T00:01:00Z' },
+    ]
+    expect(effectiveAttemptForMessage(original, [original, later], attempts)).toMatchObject({ id: 'a1', state: 'Failed' })
   })
 })
 

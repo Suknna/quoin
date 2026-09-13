@@ -68,6 +68,8 @@ export interface InspectionReportSummary {
 }
 
 export interface InspectionReportDetail {
+  /** Immutable report locator required by the diagnosis-feedback target contract. */
+  id: string
   runId: string
   version: number
   evidenceDigest: string

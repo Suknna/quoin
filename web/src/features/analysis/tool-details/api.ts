@@ -31,6 +31,7 @@ export interface EvidenceDetail {
   producer:
     | { kind: 'quoin_local' }
     | { kind: 'plinth_tool'; attemptId: string; toolCallId: string; toolName: string; toolVersion: string }
+    | { kind: 'plinth_promql'; attemptId: string }
     | { kind: 'lintel_browser'; attemptId: string }
   connections: EvidenceConnection[]
   body:

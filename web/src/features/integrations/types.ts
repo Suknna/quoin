@@ -20,7 +20,9 @@ export interface IntegrationInstance {
 	id: string;
 	platform: IntegrationPlatform;
 	displayName: string;
-	status: "active" | "disabled" | "unavailable";
+	// Metrics rotations surface an explicit recovery state until a fresh
+	// current-pair probe requalifies the connection.
+	status: "active" | "revalidation_required" | "disabled" | "unavailable";
 	createdAt?: string;
 	latestValidEventAt?: string | null;
 	rowVersion?: number;

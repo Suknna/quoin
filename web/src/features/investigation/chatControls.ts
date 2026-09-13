@@ -7,9 +7,33 @@ import type { InvestigationMessage, MessageAttachmentSummary, Page, Investigatio
 // stay free of React so the rules are unit-testable.
 
 export interface AttemptFacts {
-  state: InvestigationAttempt['state']
-  rowVersion: number
+	state: InvestigationAttempt['state']
+	rowVersion: number
 }
+
+/**
+ * Resolves the meaningful attempt for a user turn. Retries deliberately reuse
+ * the original user-message row, so the newest attempt is the current result;
+ * the original failed attempt remains history rather than an active failure.
+ */
+export function effectiveAttemptForMessage(
+	message: InvestigationMessage,
+	messages: InvestigationMessage[],
+	attempts: InvestigationAttempt[],
+): InvestigationAttempt | undefined {
+	if (message.role !== 'user' || !message.attemptId) return undefined
+	const original = attempts.find((attempt) => attempt.id === message.attemptId)
+	// A completed retry is bound to its assistant response, whose parent is the
+	// retried user turn. This makes the successful retry authoritative while a
+	// later, unrelated user turn remains separate history.
+	const completedRetry = messages
+		.filter((candidate) => candidate.role === 'assistant' && candidate.parentMessageId === message.id && candidate.attemptId)
+		.map((candidate) => attempts.find((attempt) => attempt.id === candidate.attemptId))
+		.filter((attempt): attempt is InvestigationAttempt => Boolean(attempt))
+		.at(-1)
+	return completedRetry ?? original
+}
+
 
 /** Latest active user message of the branch (the only Undo candidate). */
 export function latestActiveUserMessage(messages: InvestigationMessage[]): InvestigationMessage | null {

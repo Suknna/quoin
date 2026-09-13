@@ -34,8 +34,9 @@ import { Input } from "@/components/ui/input";
 import { EvidenceReader } from "@/features/evidence/ui";
 import type { WorkspaceModuleProps } from "./module-contract";
 import {
-	migrateLegacyHash,
-	navigateWorkspace,
+		consolidatedRouteTarget,
+		migrateLegacyHash,
+		navigateWorkspace,
 	readWorkspaceRoute,
 } from "./router";
 import { type RouteHostComponents, RouteHosts } from "./routes/RouteHosts";
@@ -46,14 +47,14 @@ import "@/styles/index.css";
 /** Each host is a separate dynamic import so a feature module is fetched only for its route. */
 const routeHostComponents = {
 	alerts: lazy(() => import("./routes/AlertsRoute")),
-	connections: lazy(() => import("./routes/ConnectionsRoute")),
 	investigations: lazy(() => import("./routes/InvestigationsRoute")),
 	inspections: lazy(() => import("./routes/InspectionsRoute")),
 	systems: lazy(() => import("./routes/SystemsRoute")),
 	knowledge: lazy(() => import("./routes/KnowledgeRoute")),
-		administration: lazy(() => import("./routes/AdministrationRoute")),
-		integrations: lazy(() => import("./routes/IntegrationsRoute")),
-		account: lazy(() => import("./routes/AccountRoute")),
+	administration: lazy(() => import("./routes/AdministrationRoute")),
+	modelProvider: lazy(() => import("./routes/ModelProviderRoute")),
+	integrations: lazy(() => import("./routes/IntegrationsRoute")),
+	account: lazy(() => import("./routes/AccountRoute")),
 } satisfies RouteHostComponents;
 
 type AuthScreen = "loading" | "login" | "password-change" | "workbench";
@@ -323,9 +324,14 @@ function Workspace({
 		window.addEventListener("popstate", listen);
 		return () => window.removeEventListener("popstate", listen);
 	}, []);
-	const navigate = (to: string) => {
-		navigateWorkspace(to);
-	};
+		const navigate = (to: string) => {
+			navigateWorkspace(to);
+		};
+		useEffect(() => {
+			const destination = consolidatedRouteTarget(route.pathname);
+			if (destination) navigateWorkspace(destination, true);
+		}, [route.pathname]);
+
 	const evidenceId = route.pathname.match(/^\/evidence\/([^/]+)$/)?.[1];
 	const requestedSource = new URLSearchParams(route.search).get("from");
 	const sourceRoute = evidenceSource ?? requestedSource ?? "/investigations";

@@ -1,9 +1,23 @@
+export type AttributionStatus = 'attributed' | 'unattributed' | 'conflict'
+
+/**
+ * Immutable delivery-time evidence emitted by the alert API. The JSON fields
+ * intentionally remain strings until the server contract publishes typed arrays.
+ */
+export interface AttributionDiagnostic {
+  status: AttributionStatus
+  candidateSystemIdsJson: string
+  candidateConfigVersionIdsJson: string
+  reasonJson: string
+}
+
 export interface AlertOccurrenceSummary {
   id: string
   source: 'alertmanager' | 'platform'
   state: 'Firing' | 'Resolved'
   rowVersion: number
   businessSystemKey?: string
+  attribution?: AttributionDiagnostic
   component?: 'plinth' | 'lintel'
   reason?: string
   firstSeenAt: string

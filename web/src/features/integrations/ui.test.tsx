@@ -59,6 +59,14 @@ describe("integration workbench", () => {
 		expect(yaml).toContain("credentials: \"secret-token\"");
 	});
 
+	it("shows alert intake issues in the Alertmanager operations route", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ items: [{ id: "issue-1", kind: "identity_conflict", issueKey: "receiver", occurrenceCount: 2, rowVersion: 1 }] }));
+		render(<IntegrationView route="/integrations/alertmanager/issues" />);
+		expect(await screen.findByRole("heading", { name: "告警接入问题" })).toBeInTheDocument();
+		expect(screen.getByText("identity_conflict")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "确认" })).toBeEnabled();
+	});
+
 	it("submits the selected Prometheus authentication fields and clears its secret inputs", async () => {
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 			const url = String(input);
@@ -111,6 +119,26 @@ describe("integration workbench", () => {
 		fireEvent.click(screen.getByRole("button", { name: "重新验证并启用" }));
 		await waitFor(() => expect(props.navigate).toHaveBeenCalledWith("/integrations/prometheus/prom-main"));
 		expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/v1/connections"))).toHaveLength(1);
+	});
+
+	it("shows rotated metrics as requiring revalidation and offers recovery", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/api/v1/connections/prom-main")) return Response.json({ id: "42", name: "prom-main", type: "prometheus", enabled: false, revalidationRequired: true, rowVersion: 4, config: { type: "prometheus", baseUrl: "https://metrics.example", authType: "none" } });
+			if (url.endsWith("/probe")) return Response.json({ id: "probe-fresh" }, { status: 202 });
+			if (url.includes("probe-attempts/probe-fresh")) return Response.json({ state: "Succeeded" });
+			if (url.includes("/probe-results")) return Response.json({ items: [{ id: "result-fresh", attemptId: "probe-fresh", outcome: "passed" }] });
+			if (url.endsWith("/enable")) return Response.json({ id: "42", name: "prom-main", type: "prometheus", enabled: true, revalidationRequired: false, rowVersion: 5, config: { type: "prometheus", baseUrl: "https://metrics.example", authType: "none" } });
+			return Response.json({ message: "unexpected request" }, { status: 500 });
+		});
+		render(<IntegrationView route="/integrations/prometheus/prom-main" />);
+		await waitFor(() => expect(screen.getAllByText("需要重新验证").length).toBeGreaterThan(0));
+		const recovery = screen.getByRole("button", { name: "重新验证并启用" });
+		expect(recovery).toBeEnabled();
+		fireEvent.click(recovery);
+		await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/enable"))).toBe(true));
+		const enablePayload = JSON.parse(String(fetchMock.mock.calls.find(([url]) => String(url).endsWith("/enable"))?.[1]?.body));
+		expect(enablePayload).toMatchObject({ qualifiedProbeResultId: "result-fresh" });
 	});
 
 	it("rotates bearer credentials with the exact backend payload and clears the secret", async () => {

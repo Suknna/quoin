@@ -193,6 +193,7 @@ export interface ConfigVersionDetail extends ConfigVersionSummary {
   plans: PlanView[]
 }
 
+/** Historical provenance retained for mock records and versioned read projections. */
 export interface LabelContractSummary {
   id: string
   version: number
@@ -256,14 +257,10 @@ export async function getConfigVersion(key: string, versionId: string): Promise<
 
 export async function uploadBusinessSystemConfig(input: {
   file: File
-  targetLabelContractVersion: number
-  journeyCatalogDigest?: string
 }): Promise<ConfigVersionDetail> {
   const form = new FormData()
   form.append('file', input.file, input.file.name)
   form.append('clientCommandId', newClientCommandId())
-  form.append('targetLabelContractVersion', String(input.targetLabelContractVersion))
-  if (input.journeyCatalogDigest) form.append('journeyCatalogDigest', input.journeyCatalogDigest)
   const response = await fetch('/api/v1/business-systems', { method: 'POST', credentials: 'include', body: form })
   if (!response.ok) throw await problem(response)
   return (await response.json()) as ConfigVersionDetail
@@ -282,13 +279,6 @@ export async function publishBusinessSystemConfig(
   })
   if (!response.ok) throw await problem(response)
   return (await response.json()) as BusinessSystemDetail
-}
-
-export async function listLabelContracts(): Promise<LabelContractSummary[]> {
-  const response = await fetch('/api/v1/label-contracts?limit=100', { credentials: 'include' })
-  if (!response.ok) throw await problem(response)
-  const page = (await response.json()) as { items?: LabelContractSummary[] }
-  return page.items ?? []
 }
 
 export interface VerificationCheckResultView {
@@ -323,44 +313,6 @@ export interface VerificationRunDetail extends VerificationRunSummary {
   resultDetail?: string
 }
 
-export interface ReadinessCandidate {
-  configVersionId: string
-  passedVerificationRunId: string
-}
-
-export type ReadinessBlocker =
-  | 'no_compatible_version'
-  | 'verification_run_missing'
-  | 'verification_run_pending'
-  | 'verification_run_failed'
-  | 'verification_run_cancelled'
-  | 'verification_run_interrupted'
-
-export interface ReadinessSystem {
-  businessSystemKey: string
-  currentConfigVersionId?: string | null
-  businessSystemRowVersion: number
-  activationCandidates: ReadinessCandidate[]
-  blockers: ReadinessBlocker[]
-}
-
-export interface LabelContractReadiness {
-  targetContractVersion: number
-  stateRowVersion: number
-  targetRowVersion: number
-  currentContractVersionId?: string | null
-  systems: ReadinessSystem[]
-}
-
-export const readinessBlockerText: Record<ReadinessBlocker, string> = {
-  no_compatible_version: '没有面向该契约的未发布草稿版本',
-  verification_run_missing: '草稿还没有运行过 Config Verification Run',
-  verification_run_pending: '验证 Run 还在进行中',
-  verification_run_failed: '最新的验证 Run 失败了',
-  verification_run_cancelled: '最新的验证 Run 被取消了',
-  verification_run_interrupted: '最新的验证 Run 被中断了',
-}
-
 export const verificationStateText: Record<VerificationRunState, string> = {
   Queued: '已排队',
   Running: '正在验证',
@@ -368,12 +320,6 @@ export const verificationStateText: Record<VerificationRunState, string> = {
   Failed: '失败',
   Cancelled: '已取消',
   Interrupted: '已中断',
-}
-
-export async function fetchLabelContractReadiness(version: number, signal?: AbortSignal): Promise<LabelContractReadiness> {
-  const response = await fetch(`/api/v1/label-contracts/${version}/readiness`, { credentials: 'include', signal })
-  if (!response.ok) throw await problem(response)
-  return (await response.json()) as LabelContractReadiness
 }
 
 export async function listVerificationRuns(key: string, versionId: string): Promise<VerificationRunSummary[]> {
@@ -434,33 +380,6 @@ export async function cancelVerification(
   )
   if (!response.ok) throw await problem(response)
   return (await response.json()) as VerificationRunDetail
-}
-
-export interface ActivationItemInput {
-  businessSystemKey: string
-  configVersionId: string
-  verificationRunId: string
-  expectedCurrentConfigVersionId: string | null
-  expectedBusinessSystemRowVersion: number
-}
-
-export async function activateLabelContract(
-  version: number,
-  input: {
-    expectedStateRowVersion: number
-    expectedCurrentContractVersionId: string | null
-    expectedTargetRowVersion: number
-    compatibleVersions: ActivationItemInput[]
-  },
-): Promise<LabelContractSummary & { yamlBody?: string }> {
-  const response = await fetch(`/api/v1/label-contracts/${version}/activate`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientCommandId: newClientCommandId(), ...input }),
-  })
-  if (!response.ok) throw await problem(response)
-  return (await response.json()) as LabelContractSummary & { yamlBody?: string }
 }
 
 export async function getJourneyCatalog(): Promise<JourneyCatalogView> {

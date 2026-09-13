@@ -169,8 +169,8 @@ export function ModelProviderEditor({
 				type: "model_provider",
 				baseUrl,
 				chatModelId,
-				embeddingModelId,
-				contextBudgetTokens: contextBudget,
+					...(embeddingModelId ? { embeddingModelId } : {}),
+					contextBudgetTokens: contextBudget,
 				maxOutputTokens: maxOutput,
 				apiKey,
 			}));
@@ -196,7 +196,7 @@ export function ModelProviderEditor({
 			<div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" onClick={() => void discover()} disabled={disabled || discovering || !baseUrl}>{discovering ? "正在发现…" : "发现模型"}</Button><span className="text-sm text-muted-foreground">发现仅辅助填写，不构成验证。</span></div>
 			{discoveryNote && <p role="status" className="text-sm text-muted-foreground">{discoveryNote}</p>}
 			<ModelPicker id="chat-model-id" label="对话模型 ID" value={chatModelId} onChange={setChatModelId} models={models} disabled={disabled} required />
-			<ModelPicker id="embedding-model-id" label="Embedding 模型 ID" value={embeddingModelId} onChange={setEmbeddingModelId} models={models} disabled={disabled} required />
+				<ModelPicker id="embedding-model-id" label="Embedding 模型 ID（可选，知识库使用）" value={embeddingModelId} onChange={setEmbeddingModelId} models={models} disabled={disabled} />
 			<Field><FieldLabel htmlFor="context-budget-tokens">Context 预算 tokens</FieldLabel><Input id="context-budget-tokens" type="number" min="1" step="1" inputMode="numeric" value={contextBudgetTokens} onChange={(event) => setContextBudgetTokens(event.target.value)} disabled={disabled} required /></Field>
 			<Field><FieldLabel htmlFor="max-output-tokens">最大输出 tokens</FieldLabel><Input id="max-output-tokens" type="number" min="1" step="1" inputMode="numeric" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} disabled={disabled} required /></Field>
 			<Button type="submit" disabled={disabled}>{saving ? "正在创建…" : "创建模型提供方"}</Button>

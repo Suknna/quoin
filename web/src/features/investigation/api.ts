@@ -20,6 +20,13 @@ export interface InvestigationDetail extends InvestigationSummary {
   messageCount: number
   attemptCount: number
   sources: InvestigationSourceSummary[]
+  businessSystemKey?: string
+  businessSystemName?: string
+}
+
+export interface BusinessSystemOption {
+  key: string
+  displayName: string
 }
 
 export interface MessageAttachmentSummary {
@@ -127,8 +134,9 @@ export const api = {
   get: (investigationId: string) => read<InvestigationDetail>(`/api/v1/investigations/${investigationId}`),
   listMessages: (investigationId: string, cursor?: string) =>
     read<Page<InvestigationMessage>>(`/api/v1/investigations/${investigationId}/messages${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
-  create: (content: string, sources: Array<{ type: string; sourceId: string }>, attachmentIds: string[]) =>
-    send<InvestigationDetail>('/api/v1/investigations', { clientCommandId: commandId(), content, sources, attachmentIds }),
+  businessSystems: async () => (await read<{ items?: BusinessSystemOption[] }>('/api/v1/business-context')).items ?? [],
+  create: (content: string, sources: Array<{ type: string; sourceId: string }>, attachmentIds: string[], businessSystemKey = '') =>
+    send<InvestigationDetail>('/api/v1/investigations', { clientCommandId: commandId(), content, sources, attachmentIds, ...(businessSystemKey && { businessSystemKey }) }),
   sendMessage: (investigationId: string, content: string, expectedHeadMessageId: string | null, attachmentIds: string[]) =>
 		send<InvestigationMessage>(`/api/v1/investigations/${investigationId}/messages`, {
 			clientCommandId: commandId(), content, expectedHeadMessageId, attachmentIds,

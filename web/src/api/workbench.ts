@@ -292,7 +292,8 @@ export interface ModelProviderConnectionInput {
 	type: "model_provider";
 	baseUrl: string;
 	chatModelId: string;
-	embeddingModelId: string;
+	/** Optional while the knowledge workbench remains unavailable. */
+	embeddingModelId?: string;
 	contextBudgetTokens: number;
 	maxOutputTokens: number;
 	apiKey: string;

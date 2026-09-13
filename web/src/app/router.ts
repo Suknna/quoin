@@ -5,7 +5,22 @@ export interface WorkspaceRoute {
 	route: string;
 }
 
-const connectionPrefix = "/admin/connections";
+const legacyConnectionPrefix = "/admin/connections";
+
+/**
+ * Consolidation keeps saved links useful without leaving a second management
+ * surface alive. Settings owns only model providers; operational integrations
+ * own metrics and Alertmanager lifecycle.
+ */
+export function consolidatedRouteTarget(pathname: string): string | undefined {
+	if (pathname === legacyConnectionPrefix || pathname.startsWith(`${legacyConnectionPrefix}/`))
+		return "/integrations/instances";
+	if (pathname === "/admin/alerts") return "/integrations/alertmanager";
+	if (pathname === "/admin/alert-intake-issues")
+		return "/integrations/alertmanager/issues";
+	if (pathname === "/admin/labels") return "/admin";
+	return undefined;
+}
 
 /**
  * The workbench uses the browser history API so a reload retains the selected
@@ -14,10 +29,8 @@ const connectionPrefix = "/admin/connections";
  */
 export function legacyHashTarget(hash: string): string | undefined {
 	const value = hash.replace(/^#/, "");
-	if (value === "new") return `${connectionPrefix}/new`;
-	if (value.startsWith("connection/")) {
-		return `${connectionPrefix}/${value.slice("connection/".length)}`;
-	}
+	if (value === "new" || value.startsWith("connection/"))
+		return "/integrations/instances";
 	return undefined;
 }
 
@@ -34,7 +47,8 @@ export function readWorkspaceRoute(location: Pick<Location, "pathname" | "search
 export function navigateWorkspace(to: string, replace = false): WorkspaceRoute {
 	const target = new URL(to, window.location.origin);
 	const pathname = normalizeWorkspacePath(target.pathname);
-	window.history[replace ? "replaceState" : "pushState"](null, "", `${pathname}${target.search}`);
+	const destination = consolidatedRouteTarget(pathname) ?? pathname;
+	window.history[replace ? "replaceState" : "pushState"](null, "", `${destination}${target.search}`);
 	window.dispatchEvent(new PopStateEvent("popstate"));
 	return readWorkspaceRoute();
 }
@@ -47,5 +61,5 @@ export function migrateLegacyHash(): boolean {
 }
 
 export function isConnectionRoute(pathname: string): boolean {
-	return pathname === connectionPrefix || pathname.startsWith(`${connectionPrefix}/`);
+	return pathname === legacyConnectionPrefix || pathname.startsWith(`${legacyConnectionPrefix}/`);
 }

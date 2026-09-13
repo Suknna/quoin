@@ -36,14 +36,13 @@ function ForbiddenRoute({ props, onLogout }: RouteHostProps) {
 export function RouteHosts({ components, props, onLogout }: { components: RouteHostComponents; props: WorkspaceModuleProps; onLogout: () => Promise<void> }) {
 	// Module selection is pathname-only; the query belongs to the selected module's view state.
 	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
-	const routeIsConnections = pathname === "/admin/connections" || pathname.startsWith("/admin/connections/");
 	const operatorManagementRoute = pathname.startsWith("/integrations") || pathname.startsWith("/business-systems") || pathname.startsWith("/inspections") || pathname.startsWith("/admin") || pathname.startsWith("/audit") || pathname.startsWith("/browser-login");
 	if (props.user.role === "operator" && operatorManagementRoute) return <ForbiddenRoute props={props} onLogout={onLogout} />;
-	const Host = routeIsConnections ? components.connections
-		: pathname === "/alerts" || pathname.startsWith("/alerts/") || pathname === "/postmortems" ? components.alerts
+	const Host = pathname === "/alerts" || pathname.startsWith("/alerts/") || pathname === "/postmortems" ? components.alerts
 		: pathname.startsWith("/investigations") ? components.investigations
 		: pathname.startsWith("/inspections") ? components.inspections
 		: pathname === "/integrations" || pathname.startsWith("/integrations/") ? components.integrations
+		: pathname === "/admin/model_provider" || pathname.startsWith("/admin/model_provider/") ? components.modelProvider
 		: pathname.startsWith("/business-systems") ? components.systems
 		: pathname.startsWith("/knowledge") ? components.knowledge
 		: pathname.startsWith("/account") ? components.account

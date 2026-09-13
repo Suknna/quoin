@@ -49,7 +49,7 @@ beforeEach(() => {
 		}),
 	);
 	vi.stubGlobal("scrollTo", vi.fn());
-	window.history.replaceState(null, "", "/admin/connections/new");
+	window.history.replaceState(null, "", "/admin/model_provider/new");
 	window.location.hash = "";
 });
 afterEach(() => {
@@ -120,7 +120,7 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		await screen.findAllByRole("button", { name: "新建" });
+		await screen.findByRole("button", { name: "创建模型提供方" });
 
 		act(() => appApiState.unauthorized?.());
 
@@ -136,17 +136,17 @@ describe("authentication workflow", () => {
 		render(<App />);
 		const name = await screen.findByLabelText("名称");
 		const baseUrl = screen.getByLabelText("Base URL");
-		const password = screen.getByLabelText("密码（可选）");
+		const apiKey = screen.getByLabelText("API Key");
 		fireEvent.change(name, { target: { value: "main" } });
-		fireEvent.change(baseUrl, { target: { value: "https://thanos.example" } });
-		fireEvent.change(password, { target: { value: "top secret" } });
+		fireEvent.change(baseUrl, { target: { value: "https://provider.example" } });
+		fireEvent.change(apiKey, { target: { value: "top secret" } });
 
 		act(() => appApiState.unauthorized?.());
 
 		await screen.findByRole("dialog");
 		expect(name).toHaveValue("main");
-		expect(baseUrl).toHaveValue("https://thanos.example");
-		expect(password).toHaveValue("");
+		expect(baseUrl).toHaveValue("https://provider.example");
+		expect(apiKey).toHaveValue("");
 	});
 
 	it("preserves a suspended draft when the same user signs in again", async () => {
@@ -216,9 +216,7 @@ describe("authentication workflow", () => {
 					),
 			);
 		render(<App />);
-		fireEvent.click(
-			(await screen.findAllByRole("button", { name: "新建模型提供方" }))[0],
-		);
+		await screen.findByLabelText("Base URL");
 		fireEvent.change(screen.getByLabelText("Base URL"), {
 			target: { value: "https://provider.invalid" },
 		});
@@ -248,10 +246,7 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		fireEvent.click(
-			(await screen.findAllByRole("button", { name: "新建模型提供方" }))[0],
-		);
-		const apiKey = screen.getByLabelText("API Key");
+		const apiKey = await screen.findByLabelText("API Key");
 		fireEvent.change(apiKey, { target: { value: "provider-secret" } });
 		act(() => appApiState.unauthorized?.());
 		await screen.findByRole("dialog");
@@ -263,15 +258,13 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		await screen.findByLabelText("名称");
-		fireEvent.click((await screen.findAllByRole("button", { name: "新建模型提供方" }))[0]);
 		const name = await screen.findByLabelText("名称");
 		fireEvent.change(name, { target: { value: "preserved-draft" } });
 		await screen.findByLabelText("API Key");
 		window.history.pushState(
 			null,
 			"",
-			"/evidence/e-1?from=%2Fadmin%2Fconnections%2Fnew%3Ftype%3Dmodel_provider",
+			"/evidence/e-1?from=%2Fadmin%2Fmodel_provider%2Fnew",
 		);
 		window.dispatchEvent(new PopStateEvent("popstate"));
 		const dialog = await screen.findByRole("dialog", { name: "证据阅读" });
@@ -359,8 +352,8 @@ describe("authentication workflow", () => {
 		const enable = vi
 			.spyOn(workbenchApi, "enableConnection")
 			.mockResolvedValue({ ...modelProviderDetail, enabled: true });
-		window.location.hash = "connection/models%2Fmain";
-		render(<App />);
+			window.history.replaceState(null, "", "/admin/model_provider/models%2Fmain");
+			render(<App />);
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "启用连接" })).toBeEnabled(),
 		);
@@ -371,7 +364,7 @@ describe("authentication workflow", () => {
 		);
 	});
 
-	it("returns to login after logout receives an already-expired 401", async () => {
+		it("returns to login after logout receives an already-expired 401", async () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);

@@ -30,6 +30,41 @@ describe("alerts module", () => {
     expect(fetchMock.mock.calls.some(([url]) => /observations|analyses/.test(String(url)))).toBe(false);
   });
 
+  it("shows frozen unmatched attribution evidence without interpreting current declarations", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
+      if (input === "/api/v1/alerts/alert-unmatched") return { id: "alert-unmatched", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Unmatched alert" }, attribution: { status: "unattributed", candidateSystemIdsJson: "[]", candidateConfigVersionIdsJson: "[]", reasonJson: '{"code":"label_mismatch"}' } };
+      return { snapshotSeq: 1, items: [] };
+    } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=alert-unmatched" />);
+
+    await screen.findByRole("heading", { name: "Unmatched alert" });
+    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("告警标签不匹配任何业务声明");
+    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("候选业务系统 ID无");
+    expect(screen.getByText("以上为告警首次接收时冻结的归属证据，不会按当前业务声明重新解释。")).toBeInTheDocument();
+  });
+
+  it("shows conflict candidates and handles old occurrences without diagnostics", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
+      if (input === "/api/v1/alerts/alert-conflict") return { id: "alert-conflict", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Conflicting alert" }, attribution: { status: "conflict", candidateSystemIdsJson: "[12,34]", candidateConfigVersionIdsJson: "[101,202]", reasonJson: '{"code":"multiple_matching_declarations"}' } };
+      if (input === "/api/v1/alerts/alert-legacy") return { id: "alert-legacy", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Legacy alert" } };
+      return { snapshotSeq: 1, items: [] };
+    } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<View route="/alerts/list?id=alert-conflict" />);
+
+    await screen.findByRole("heading", { name: "Conflicting alert" });
+    const diagnostic = screen.getByRole("alert", { name: "归属冲突诊断" });
+    expect(diagnostic).toHaveTextContent("多个业务声明同时匹配");
+    expect(diagnostic).toHaveTextContent("候选业务系统 ID12, 34");
+    expect(diagnostic).toHaveTextContent("候选配置版本 ID101, 202");
+
+    view.rerender(<View route="/alerts/list?id=alert-legacy" />);
+    await screen.findByRole("heading", { name: "Legacy alert" });
+    expect(screen.queryByRole("alert", { name: /归属.*诊断/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "归属诊断" })).not.toBeInTheDocument();
+  });
+
   it("renders the history view when the route includes its query string", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) }));
     render(<View route="/alerts/list?view=history" />);
@@ -45,7 +80,26 @@ describe("alerts module", () => {
     expect(screen.queryByRole("switch", { name: "自动刷新" })).not.toBeInTheDocument();
   });
 
-  it("re-reads an open detail when the shared SSE boundary reports a newer version", async () => {
+	it("renders supplied annotations in overview and Markdown analysis safely", async () => {
+		const fetchMock = vi.fn().mockImplementation((input: string) => {
+			if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ snapshotSeq: 1, items: [] }) });
+			if (input.includes("/observations") || input.includes("/attempts")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+			if (input.endsWith("/analyses")) return Promise.resolve({ ok: true, json: async () => ({ items: [{ id: "analysis-1", state: "Succeeded", rowVersion: 1, createdAt: "2026-01-01T00:00:00Z" }] }) });
+			if (input.includes("/analyses/")) return Promise.resolve({ ok: true, json: async () => ({ id: "analysis-1", state: "Succeeded", rowVersion: 1, createdAt: "2026-01-01T00:00:00Z", attemptCount: 1, output: { id: "output", modelId: "demo", content: "## 已知事实\n\n- 未提供真实故障证据\n\n<script>alert('unsafe')</script>", evidenceIds: [], createdAt: "2026-01-01T00:00:00Z" } }) });
+			return Promise.resolve({ ok: true, json: async () => ({ id: "alert-1", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "MallGUIAcceptanceProbe" }, annotations: { summary: "controlled GUI acceptance probe", description: "No true fault; this is a controlled test annotation." } }) });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		render(<View route="/alerts/list?id=alert-1" />);
+		await screen.findByRole("heading", { name: "MallGUIAcceptanceProbe" });
+		expect(screen.getByText("No true fault; this is a controlled test annotation.")).toBeInTheDocument();
+		fireEvent.mouseDown(screen.getByRole("tab", { name: "AI 分析" }));
+		fireEvent.click(screen.getByRole("tab", { name: "AI 分析" }));
+		expect(await screen.findByRole("heading", { name: "已知事实" })).toBeInTheDocument();
+		expect(screen.getByText("未提供真实故障证据")).toBeInTheDocument();
+		expect(document.querySelector("script")).toBeNull();
+	});
+
+	it("re-reads an open detail when the shared SSE boundary reports a newer version", async () => {
     const sources: { listeners: Map<string, ((event: Event) => void)[]>; emit: (type: string, data: string) => void }[] = [];
     vi.stubGlobal("EventSource", class {
       static readonly CONNECTING = 0;
@@ -200,7 +254,7 @@ describe("alerts module", () => {
     expect(await screen.findByText("finished")).toBeInTheDocument();
   });
 
-  it("selects the newest failed analysis and retries that analysis", async () => {
+  it("selects the newest failed analysis and starts its recovery", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
       if (input.includes("/observations") || input.includes("/attempts")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
@@ -213,8 +267,8 @@ describe("alerts module", () => {
     render(<View route="/alerts/list?id=alert-1" />);
     await screen.findByRole("heading", { name: "Example" });
     fireEvent.mouseDown(screen.getByRole("tab", { name: "AI 分析" })); fireEvent.click(screen.getByRole("tab", { name: "AI 分析" }));
-    await screen.findByRole("button", { name: "重试分析" });
-    fireEvent.click(screen.getByRole("button", { name: "重试分析" }));
+    await screen.findByRole("button", { name: "重新发起分析" });
+    fireEvent.click(screen.getByRole("button", { name: "重新发起分析" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes("new-failure/retry") && (init as RequestInit).method === "POST")).toBe(true));
   });
 

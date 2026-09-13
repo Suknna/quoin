@@ -10,7 +10,8 @@ export type MetricsAuthMode = "none" | "basic" | "bearer";
 export interface MetricsInstance extends IntegrationInstance {
 	id: string;
 	platform: MetricsPlatform;
-	status: "active" | "disabled";
+	status: "active" | "revalidation_required" | "disabled";
+	revalidationRequired: boolean;
 	rowVersion: number;
 	endpoint?: string;
 	authType: MetricsAuthMode;
@@ -42,7 +43,10 @@ function metricsInstance(value: object): MetricsInstance {
 		id: String(projection.id ?? projection.name),
 		platform,
 		displayName: String(projection.name ?? projection.id),
-		status: projection.enabled === true ? "active" : "disabled",
+		// A rotated metrics connection can remain enabled while intentionally
+		// withheld from dispatch until a fresh exact-pair probe requalifies it.
+		status: projection.revalidationRequired === true ? "revalidation_required" : projection.enabled === true ? "active" : "disabled",
+		revalidationRequired: projection.revalidationRequired === true,
 		rowVersion: Number(projection.rowVersion ?? 0),
 		endpoint: typeof config?.baseUrl === "string" ? config.baseUrl : undefined,
 		authType: config?.authType === "basic" ? "basic" : config?.authType === "bearer" ? "bearer" : "none",

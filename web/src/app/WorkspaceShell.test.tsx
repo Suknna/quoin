@@ -45,10 +45,11 @@ describe("WorkspaceShell navigation", () => {
 		expect(document.querySelectorAll("header.md\\:flex")).toHaveLength(1);
 	});
 
-	it("shows the administrator operations menus with only the route-matching item active", () => {
+	it("shows each administrator operations entry once with only the route-matching item active", () => {
 		renderShell("/inspections/run-1");
 		expect(screen.getAllByText("运维中心")).toHaveLength(4);
 		for (const name of ["告警列表", "故障复盘", "巡检", "业务纳管", "接入管理"]) expect(screen.getByRole("button", { name })).toBeInTheDocument();
+		expect(screen.getAllByRole("button", { name: "接入管理" })).toHaveLength(1);
 		expect(screen.getByRole("button", { name: "巡检" })).toHaveAttribute("aria-current", "page");
 		expect(screen.getByRole("button", { name: "告警列表" })).not.toHaveAttribute("aria-current");
 		expect(screen.getByText("功能对象列表")).toBeInTheDocument();
@@ -67,7 +68,7 @@ describe("WorkspaceShell navigation", () => {
 	it("keeps AI SRE knowledge navigation and active semantics", () => {
 		renderShell("/knowledge/items/k-1");
 		expect(screen.getAllByText("AI SRE")).toHaveLength(4);
-		expect(screen.getByRole("button", { name: "知识" })).toHaveAttribute("aria-current", "page");
+		expect(screen.getByRole("button", { name: "知识（开发中）" })).toHaveAttribute("aria-current", "page");
 		expect(screen.getByRole("button", { name: "对话" })).not.toHaveAttribute("aria-current");
 		expect(screen.getByRole("button", { name: "AI SRE" })).toHaveAttribute("data-active", "true");
 	});
