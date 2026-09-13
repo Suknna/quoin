@@ -37,7 +37,7 @@ _Avoid_: Quoin、告警存储、Agent Runtime、消息队列、先返回 2xx 再
 _Avoid_: 只读观察者、系统管理员、按业务系统隔离的角色、人工登录例外
 
 **Admin**：
-管理员负责全部接入、凭据、浏览器登录、业务定义、配置发布、巡检配置、平台维护及用户/角色/Session、标签契约、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。系统始终必须保留至少一个有效 Admin。
+管理员负责全部接入、凭据、浏览器登录、业务定义、配置发布、巡检配置、平台维护及用户/角色/Session、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。目标态中，业务范围与标签由业务声明自身拥有，不再管理活动的全局标签契约。系统始终必须保留至少一个有效 Admin。
 _Avoid_: 超级租户、外部身份提供方、日常任务专属角色
 
 ## 认证与服务身份
@@ -70,7 +70,7 @@ Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵
 v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处理 Attempt 输入前必须 fail-closed 建立 `no_new_privs`、Landlock ABI >= 6 与进程内 seccomp，只能访问既定只读运行时路径、当前一次性工作区和 framed stdio，不能读取 supervisor 的敏感 `/proc` 文件、发域外信号、建立外部网络连接、写工作区外路径或继承非 stdio FD。Plinth readiness 与每个 worker Ack 前都实际执行这些对抗检查，任一失败即 `sandbox_unavailable`，不得静默降级。v1 接受同 PID namespace 下世界可读的非秘密进程元数据可见，不引入 user namespace、bubblewrap、额外 worker daemon 或第二套本地协议。
 
 **领域写命令契约**：
-所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定当时生效的业务系统配置和 Label Contract。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
+所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。目标态调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定当时生效的 BusinessSystem 声明；历史执行继续保留其旧绑定。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
 _Avoid_: 每个 handler 自定义重试语义、最后写入者静默覆盖、把内部 Runtime 围栏混为客户端命令键
 
 **审计与执行溯源**：
@@ -204,12 +204,12 @@ _Avoid_: 个人设置全局模块、通用连接 JSON、秘密持久化、自动
 
 ## 资源与巡检
 
-**标签契约（Label Contract）**：
-部署级、版本化的 Prometheus label 语义契约。第一版只统一配置业务系统归属 label 名；告警归属、资源发现、巡检 PromQL 校验、资源关联和页面筛选共同引用同一个契约版本。资源身份 labels 仍由每个资源发现声明显式配置。管理页展示当前/草稿版本并提供验证和激活入口；零启用业务系统时首个契约通过静态校验即可直接激活。有启用系统时，页面逐系统展示兼容状态、目标配置版本、Config Verification Run 结果和阻塞原因，只有全部系统都准备并验证兼容版本后，才与这些版本在一个事务中原子激活；任一失败则全部继续使用旧版本并显示原因。已开始的 Run 继续绑定旧版本，契约变更不重写历史 label 快照或归属。
-_Avoid_: 代码写死 label、每业务系统重复定义归属 label、CMDB Schema、多个当前契约、部分切换、空部署循环依赖
+**历史标签契约（Historical Label Contract）**：
+曾作为部署级、版本化 Prometheus 业务归属 label 语义的配置模型。它及其版本、激活、关联 Run 和 E2E 记录只为解读和保留既有历史而存在，不能充当目标态的活动全局标签权威，也不能覆盖新业务声明的范围。目标态以每份 BusinessSystem 声明自身的指标与告警 labels 定义语义；实施迁移前不宣称历史记录已经转换。
+_Avoid_: 把历史契约当当前权威、从旧记录推断新声明、多个当前契约、部分切换
 
 **业务系统（Business System）**：
-由一份版本化权威声明界定的稳定运维范围，生命周期只有 `Enabled | Disabled`。表单和 YAML 是编辑同一声明的两种视图，不形成第二份权威或秘密副本；草稿不改变正式范围，只有显式发布才切换当前声明及 enabled 状态。声明引用接入并定义用途、范围、告警归属、资源身份规则和巡检计划；停用后不启动新的定时巡检或普通人工 Inspection Run，已接受只读 Run 可完成并允许取消，告警和历史保留。
+由一份版本化 `quoin/v1` `BusinessSystem` 声明界定的稳定运维范围，生命周期只有 `Enabled | Disabled`。该声明是目标态唯一业务配置权威；未来的表单和 YAML 只是编辑同一声明的两种视图，不形成第二份权威或秘密副本。声明自身引用指标接入、定义指标范围和资源 labels、资源身份规则、告警来源及告警自身 labels、以及巡检计划；它不依赖活动全局 Label Contract。草稿不改变正式范围，只有显式发布才切换当前声明及 enabled 状态。停用后不启动新的定时巡检或普通人工 Inspection Run，已接受只读 Run 可完成并允许取消，告警和历史保留。该目标仍待迁移实施和接受。
 _Avoid_: YAML 与数据库双配置权威、接入即扫描、租户、Kubernetes 集群、自动推断服务、停用删除历史
 
 **观测资源（Observed Resource）**：
@@ -225,7 +225,7 @@ Quoin 访问一个外部运行系统时使用的稳定命名身份与访问边�
 _Avoid_: 无类型 URL+凭据、可覆盖配置、长期可下发旧秘密、用户凭据、巡检计划、Runtime 身份
 
 **指标接入（Metrics Integration）**：
-用户配置的 Prometheus 或 Thanos 查询能力，保存访问能力而不代表任何业务用途；同一平台可有多个接入。每份需要指标能力的业务系统声明以一个明确的 `metrics_connection_id` 引用确定接入；执行必须解析为该引用，不能回退到全局或“第一个”接入。Prometheus 与 Thanos 是不同的平台类型；认证模式只限 `none`、HTTP Basic 和 Bearer，TLS 仍使用接入的既有类型化配置，不能以跳过证书校验替代 TLS 配置。业务声明及其引用不内嵌地址、凭据或 TLS 秘密，凭据仍在接入边界管理。PromQL 校验仍使用 AST 而非正则，并按业务声明的 Label Contract 与范围强制约束；资源身份规则仍不得把历史或合成查询伪装为当前资源。
+用户配置的 Prometheus 或 Thanos 查询能力，保存访问能力而不代表任何业务用途；同一平台可有多个接入。每份目标态业务系统声明以一个明确的 `metrics.connectionRef` 引用确定接入；执行必须解析为该引用，不能回退到全局或“第一个”接入。Prometheus 与 Thanos 是不同的平台类型；认证模式只限 `none`、HTTP Basic 和 Bearer，TLS 仍使用接入的既有类型化配置，不能以跳过证书校验替代 TLS 配置。业务声明及其引用不内嵌地址、凭据或 TLS 秘密，凭据仍在接入边界管理。PromQL 校验使用 AST 而非正则，并按声明的资源范围和 allowed metrics 强制约束，不依赖活动全局 Label Contract。
 _Avoid_: 全局唯一 Thanos、缺失或歧义引用时回退、每业务系统私有凭据、Grafana 数据源、Thanos StoreAPI、字符串改写 PromQL
 
 **接入（Integration）**：
@@ -241,7 +241,7 @@ _Avoid_: 巡检报告、调查、跨业务系统的自动推断模板、任意 A
 _Avoid_: 诊断、巡检报告、由程序猜测的检查、Kubernetes 定时检查、健康阈值规则引擎、动态 fan-out、通用模板或 DSL
 
 **业务系统配置版本（Business System Configuration Version）**：
-每个业务系统的一份完整、版本化权威声明原子包含稳定业务系统 key/name/enabled、接入引用、资源身份规则和全部巡检计划；每个系统只有一个当前已发布版本。指标能力由顶层必填 `metrics_connection_id`（十进制 numeric-string）明确引用；可选 `alert_source_ids` 是同一表示法的数组，`alert_source_labels` 是精确字符串映射，且业务归属的权威仍是 Label Contract。等价表单和 YAML 视图编辑同一草稿，Config Verification Run 精确绑定该草稿；发布命令携带 version ID 与 expected current published version ID，事务中重验并切换，不匹配则冲突。Label Contract 联合激活仍原子切换契约和全部兼容版本。声明统一提供 IANA 时区，资源身份规则、plan、check 使用稳定 key。YAML 导入/导出时只接受一个 UTF-8 文档，拒绝重复 key、anchor/alias、merge、自定义 tag、非字符串字段名、第二文档和尾随内容，并设输入/AST/深度上限；YAML 输入只解析一次，保存原文、parser/schema 版本、类型结构和 digest，运行只使用类型结构。表单与 YAML 共享同一 Schema 校验结果；未知字段、重复 key 或不兼容契约必须拒绝，不得在表单往返中静默丢失。具体字段和机器契约随 #97 迁移并由其唯一机器权威定义。
+每个业务系统的一份完整、版本化权威声明原子包含稳定业务系统 name/enabled、接入引用、指标与资源范围、资源身份规则、告警来源和告警 labels、以及全部巡检计划；每个系统只有一个当前已发布版本。目标态机器形状由 `business-system.schema.json` 唯一拥有：根为 `apiVersion: quoin/v1`、`kind: BusinessSystem`，指标能力由 `metrics.connectionRef` 明确引用，告警来源由 `alerts.sourceRefs` 引用，检查以 `resourceRef` 指向声明的资源。该模型没有活动全局 Label Contract 或联合激活。等价表单和 YAML 视图编辑同一草稿，Config Verification Run 精确绑定该草稿；发布命令携带 version ID 与 expected current published version ID，事务中重验并切换，不匹配则冲突。声明中的巡检使用 IANA 时区，资源、plan、check 使用稳定 name。YAML 导入/导出时只接受一个 UTF-8 文档，拒绝重复 key、anchor/alias、merge、自定义 tag、非字符串字段名、第二文档和尾随内容，并设输入/AST/深度上限；YAML 输入只解析一次，保存原文、parser/schema 版本、类型结构和 digest，运行只使用类型结构。表单与 YAML 共享同一 Schema 校验结果；未知字段或重复 key 必须拒绝，不得在表单往返中静默丢失。该目标态仍待同步迁移并接受，历史声明及其执行记录不因此改写。
 _Avoid_: 页面隐式归属、缺失指标引用、共享可覆盖草稿、资源与计划分别发布、运行时重新解析、自动热加载、表单与 YAML 双权威、要求用户先读内部 Schema
 
 **浏览器身份（Browser Identity）**：

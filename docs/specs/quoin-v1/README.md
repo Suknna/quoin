@@ -72,7 +72,8 @@ contracts/
 | `contracts/schemas/verification-evidence.schema.json` | Scenario/cell 结果、断言、附件、cleanup 与 typed observation 的结构化证据索引 |
 | `contracts/schemas/deployment-verification.schema.json` | Deployment Acceptance helper request/report 与服务端生成 typed locator 的唯一交换格式；OpenAPI 直接引用其中 `helperRequest` / `helperReport` 定义 |
 | `contracts/schemas/connection-probes.schema.json` | Connection Probe action catalog 的严格文档形状 |
-| `contracts/schemas/*.schema.json` | 业务系统 YAML、Label Contract、Journey Catalog、Browser Tool、Browser Execution 与 Frontend State 等独立 JSON 文档格式 |
+| `contracts/schemas/business-system.schema.json` | 目标态 `quoin/v1` `BusinessSystem` 声明的唯一机器格式；其部署与验收仍待未来迁移切片完成 |
+| `contracts/schemas/*.schema.json` | 其他独立 JSON 文档格式；历史 `business-system-config.schema.json` 与 `label-contract.schema.json` 仅保留以解读既有记录，不是目标态配置权威 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
 - **SPEC-STRUCTURE-003 —** 九份主题 Markdown **MUST** 保持在 `docs/specs/quoin-v1/` 根目录；机器契约 **MUST** 使用上表所列的 `contracts/` 路径，并按 `SPEC-STRUCTURE-001` 延迟创建。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）
