@@ -20,11 +20,11 @@ import (
 // the worker binary and the dispatch row carry it (DATA-ATTEMPT-001).
 const AgentVersion = "initial-analysis-v1"
 
-// ToolSchemaVersion names the fixed tool-schema generation. T11 added
-// thanos_query (typed read-only Thanos evidence), which changes the
-// canonical schema bytes: the generation advances so both sides and the
-// persisted model_calls.tool_schema_version stay consistent.
-const ToolSchemaVersion = "initial-analysis-tools-v3"
+// ToolSchemaVersion names the fixed callable tool-schema generation. Kubernetes
+// observation is intentionally excluded while that capability remains in development.
+// v5 makes resourceRef mandatory for every metrics observation. Quoin resolves
+// that name only against the attempt's frozen compiled declaration.
+const ToolSchemaVersion = "initial-analysis-tools-v5"
 
 // ToolDef is one fixed tool in the catalog.
 type ToolDef struct {
@@ -101,26 +101,14 @@ var InitialAnalysisTools = []ToolDef{
 		Required:    []string{"artifactId", "pattern"},
 	},
 	{
-		Name: "thanos_query", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "thanos_query_result_v1", ProducesEvidence: true,
-		Description: "对当前告警已归属业务的已发布指标接入执行一次只读 PromQL 即时查询；每个向量选择器必须精确匹配该业务 Label Contract。模型只提供 query，连接与凭据由 Quoin 从不可变分析上下文确定性解析，结果作为不可变 Evidence 封存。",
+		Name: "thanos_query", Version: "2", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "thanos_query_result_v1", ProducesEvidence: true,
+		Description: "在当前尝试冻结的业务配置资源范围内执行只读 PromQL 即时查询。必须提供 resourceRef 和 query；Quoin 从不可变配置版本解析连接、允许指标和必需 labels，结果作为不可变 Evidence 封存。",
 
-		Arguments: map[string]ArgumentKind{"query": KindString},
-		Required:  []string{"query"},
+		Arguments: map[string]ArgumentKind{"resourceRef": KindString, "query": KindString},
+		Required:  []string{"resourceRef", "query"},
 	},
 }
 
-// KubernetesReadTool is exposed only to the investigation agent. Its domain
-// target is deterministically resolved by Quoin; it never accepts a connection
-// identifier or credential locator from the model.
-var KubernetesReadTool = ToolDef{
-	Name: "kubernetes_read", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "kubernetes_read_result_v1", ProducesEvidence: true,
-	Description: "对指定业务系统已绑定的 Kubernetes 连接执行固定只读操作。businessSystem 只接受业务系统 key 或名称；operation 只能为 discovery、pod_get、pod_list、events_list、pod_logs，绝不接受连接或凭据。",
-	Arguments:   map[string]ArgumentKind{"businessSystem": KindString, "operation": KindString, "namespace": KindString, "name": KindString, "container": KindString},
-	Required:    []string{"businessSystem", "operation"},
-}
-
-// InvestigationTools is intentionally a distinct catalog: ARCH-CHAT-006
-// permits Kubernetes observation only during an Investigation.
 // BrowserTool is available only to investigations. It is executed by Quoin,
 // never by the Plinth supervisor: requests are frozen and forwarded to a
 // Lintel-owned, closed browser-action executor.
@@ -130,7 +118,9 @@ var BrowserTool = ToolDef{
 	Parameters:  browserToolParameters(), ValidateArguments: validateBrowserToolArguments,
 }
 
-var InvestigationTools = append(append(append([]ToolDef{}, InitialAnalysisTools...), KubernetesReadTool), BrowserTool)
+// InvestigationTools retains chat-specific browser exploration while excluding
+// Kubernetes from every model-callable schema during the development gate.
+var InvestigationTools = append(append([]ToolDef{}, InitialAnalysisTools...), BrowserTool)
 
 // ToolsForAgentVersion returns the only catalog valid for an agent generation.
 func ToolsForAgentVersion(agentVersion string) []ToolDef {
@@ -193,58 +183,6 @@ func ValidateToolArguments(tool ToolDef, argumentsJSON []byte) error {
 	for key := range arguments {
 		if _, known := tool.Arguments[key]; !known {
 			return fmt.Errorf("tool %s argument %q is not part of the fixed schema", tool.Name, key)
-		}
-	}
-	if tool.Name == "kubernetes_read" {
-		operation, _ := arguments["operation"].(string)
-		require := func(key string) error {
-			if value, _ := arguments[key].(string); value == "" {
-				return fmt.Errorf("tool kubernetes_read operation %s requires %s", operation, key)
-			}
-			return nil
-		}
-		forbid := func(keys ...string) error {
-			for _, key := range keys {
-				if _, present := arguments[key]; present {
-					return fmt.Errorf("tool kubernetes_read argument %q is not allowed for operation %s", key, operation)
-				}
-			}
-			return nil
-		}
-		switch operation {
-		case "discovery":
-			if err := forbid("namespace", "name", "container"); err != nil {
-				return err
-			}
-		case "pod_list", "events_list":
-			if err := require("namespace"); err != nil {
-				return err
-			}
-			if err := forbid("name", "container"); err != nil {
-				return err
-			}
-		case "pod_get":
-			if err := require("namespace"); err != nil {
-				return err
-			}
-			if err := require("name"); err != nil {
-				return err
-			}
-			if err := forbid("container"); err != nil {
-				return err
-			}
-		case "pod_logs":
-			if err := require("namespace"); err != nil {
-				return err
-			}
-			if err := require("name"); err != nil {
-				return err
-			}
-			if err := require("container"); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("tool kubernetes_read operation %q is not allowed", operation)
 		}
 	}
 	return nil
@@ -312,118 +250,5 @@ func ValidateToolResultPayload(schemaKind string, canonical []byte) error {
 	if schemaKind == "browser_tool_result_v1" {
 		return validateBrowserToolResult(canonical)
 	}
-	if schemaKind != "kubernetes_read_result_v1" {
-		return nil
-	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(canonical, &body); err != nil {
-		return fmt.Errorf("kubernetes result must be JSON: %w", err)
-	}
-	allowed := map[string]bool{"success": true, "operation": true, "observedAt": true, "results": true, "resultsTruncated": true, "errorCode": true, "errorDetail": true, "artifact": true, "totalBytes": true, "totalLines": true, "sha256": true}
-	for key := range body {
-		if !allowed[key] {
-			return fmt.Errorf("kubernetes result field %q is not allowed", key)
-		}
-	}
-	var success bool
-	if raw, ok := body["success"]; !ok || json.Unmarshal(raw, &success) != nil {
-		return fmt.Errorf("kubernetes result requires boolean success")
-	}
-	// Routing preflight failures have no operation or result list and must
-	// be failures; otherwise a succeeded ledger row could carry an error.
-	if _, hasOperation := body["operation"]; !hasOperation {
-		if success {
-			return fmt.Errorf("kubernetes preflight failure must have success=false")
-		}
-		if _, hasResults := body["results"]; hasResults {
-			return fmt.Errorf("kubernetes preflight failure cannot carry results")
-		}
-		if _, hasArtifact := body["artifact"]; hasArtifact {
-			return fmt.Errorf("kubernetes preflight failure cannot carry artifact")
-		}
-		return validateKubernetesFailure(body)
-	}
-	var operation string
-	if err := json.Unmarshal(body["operation"], &operation); err != nil || operation == "" {
-		return fmt.Errorf("kubernetes result requires operation")
-	}
-	if operation != "discovery" && operation != "pod_get" && operation != "pod_list" && operation != "events_list" && operation != "pod_logs" {
-		return fmt.Errorf("kubernetes result has unknown operation %q", operation)
-	}
-	var observedAt string
-	if raw, ok := body["observedAt"]; !ok || json.Unmarshal(raw, &observedAt) != nil || observedAt == "" {
-		return fmt.Errorf("kubernetes result requires observedAt")
-	}
-	var totalBytes, totalLines int
-	var payloadHash string
-	if json.Unmarshal(body["totalBytes"], &totalBytes) != nil || totalBytes < 0 || json.Unmarshal(body["totalLines"], &totalLines) != nil || totalLines < 1 || json.Unmarshal(body["sha256"], &payloadHash) != nil || len(payloadHash) != 64 {
-		return fmt.Errorf("kubernetes result requires aggregate size, line count and sha256")
-	}
-	var results []json.RawMessage
-	if raw, ok := body["results"]; !ok || json.Unmarshal(raw, &results) != nil || len(results) == 0 {
-		return fmt.Errorf("kubernetes result requires non-empty results")
-	}
-	for _, raw := range results {
-		if err := validateKubernetesMappingResult(raw); err != nil {
-			return err
-		}
-	}
-	if success {
-		if _, exists := body["errorCode"]; exists {
-			return fmt.Errorf("successful kubernetes result cannot carry errorCode")
-		}
-	} else if err := validateKubernetesFailure(body); err != nil {
-		return err
-	}
-	if raw, exists := body["resultsTruncated"]; exists {
-		var truncated bool
-		if json.Unmarshal(raw, &truncated) != nil || !truncated {
-			return fmt.Errorf("kubernetes resultsTruncated must be true when present")
-		}
-	}
-	if raw, exists := body["artifact"]; exists {
-		var artifact map[string]json.RawMessage
-		if json.Unmarshal(raw, &artifact) != nil || len(artifact) != 2 || artifact["id"] == nil || artifact["mediaType"] == nil {
-			return fmt.Errorf("kubernetes result artifact must contain only id and mediaType")
-		}
-		var id, mediaType string
-		if json.Unmarshal(artifact["id"], &id) != nil || id == "" || json.Unmarshal(artifact["mediaType"], &mediaType) != nil || mediaType == "" {
-			return fmt.Errorf("kubernetes result artifact fields must be non-empty strings")
-		}
-	}
 	return nil
-}
-
-func validateKubernetesFailure(body map[string]json.RawMessage) error {
-	var code, detail string
-	if json.Unmarshal(body["errorCode"], &code) != nil || code == "" || json.Unmarshal(body["errorDetail"], &detail) != nil || detail == "" {
-		return fmt.Errorf("failed kubernetes result requires errorCode and errorDetail")
-	}
-	return nil
-}
-
-func validateKubernetesMappingResult(raw json.RawMessage) error {
-	var result map[string]json.RawMessage
-	if json.Unmarshal(raw, &result) != nil {
-		return fmt.Errorf("kubernetes result item must be an object")
-	}
-	allowed := map[string]bool{"success": true, "output": true, "truncated": true, "errorCode": true, "errorDetail": true}
-	for key := range result {
-		if !allowed[key] {
-			return fmt.Errorf("kubernetes result item field %q is not allowed", key)
-		}
-	}
-	var success bool
-	if rawSuccess, ok := result["success"]; !ok || json.Unmarshal(rawSuccess, &success) != nil {
-		return fmt.Errorf("kubernetes result item requires boolean success")
-	}
-	if success {
-		var output string
-		var truncated bool
-		if json.Unmarshal(result["output"], &output) != nil || json.Unmarshal(result["truncated"], &truncated) != nil {
-			return fmt.Errorf("successful kubernetes result item requires output and truncated")
-		}
-		return nil
-	}
-	return validateKubernetesFailure(result)
 }

@@ -152,6 +152,121 @@ func TestCreateSourceValidation(t *testing.T) {
 	}
 }
 
+func TestCreateWithBusinessSystemFreezesDirectChatMetricsContext(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
+	context := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
+
+	created, err := service.CreateWithBusinessSystem(ctx, principalID, "cmd-direct-context", "检查商城延迟", nil, nil, context.key)
+	if err != nil {
+		t.Fatalf("create direct chat: %v", err)
+	}
+	var configID int64
+	var contractItems int
+	if err := db.QueryRow(`
+		SELECT config.business_system_config_version_id,
+		       (SELECT COUNT(*) FROM attempt_input_items legacy WHERE legacy.snapshot_id=snapshot.id AND legacy.label_contract_version_id IS NOT NULL)
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items config ON config.snapshot_id=snapshot.id AND config.business_system_config_version_id IS NOT NULL
+		WHERE snapshot.attempt_id=?`, created.AttemptID).Scan(&configID, &contractItems); err != nil {
+		t.Fatal(err)
+	}
+	if configID != context.configID || contractItems != 0 {
+		t.Fatalf("frozen config/legacy items=%d/%d want %d/0", configID, contractItems, context.configID)
+	}
+	canonical, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(canonical), `"businessContext":{"systemKey":"mall-live-prometheus"`) {
+		t.Fatalf("input lacks direct business context: %s", canonical)
+	}
+	// Rebuilding resolves the frozen input items rather than any mutable
+	// business-system pointer, preserving this declared authority at dispatch.
+	if _, err := service.RebuildInput(ctx, created.AttemptID); err != nil {
+		t.Fatalf("rebuild frozen context: %v", err)
+	}
+}
+
+// TestDirectBusinessContextAuthorizesMetricsGrant proves the source-free path
+// uses only the direct Investigation's frozen authoritative config and Label
+// Contract; no occurrence is fabricated to obtain metrics authority.
+func TestDirectBusinessContextAuthorizesMetricsGrant(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
+	business := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
+	created, err := service.CreateWithBusinessSystem(ctx, principalID, "cmd-direct-metrics", "检查商城延迟", nil, nil, business.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Scope tests isolate the trigger from the separate connection admission
+	// ladder: retain this trigger and suspend only unrelated closures while
+	// supplying an exact frozen direct-chat provenance tuple.
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='trigger' AND name <> 'trg_attempt_connection_grants_thanos_query_scope'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var triggers []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		triggers = append(triggers, name)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range triggers {
+		if _, err := db.Exec(`DROP TRIGGER ` + name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The surviving scope trigger is the unit under test. Disable FK checking
+	// only for synthetic tool-call locators required by the table CHECK.
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,credential_generation_id,created_by_tool_call_id,created_at)
+		SELECT ?, 'thanos_query', config.business_system_id, config.metrics_connection_id, connection.current_revision_id, connection.current_credential_generation_id, 1, ?
+		FROM business_system_config_versions config JOIN connections connection ON connection.id=config.metrics_connection_id
+		WHERE config.id=?`, created.AttemptID, testNow(), business.configID); err != nil {
+		t.Fatalf("direct snapshot grant rejected: %v", err)
+	}
+	var occurrences int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?) AND occurrence_id IS NOT NULL`, created.AttemptID).Scan(&occurrences); err != nil || occurrences != 0 {
+		t.Fatalf("direct context occurrence lineage=%d err=%v", occurrences, err)
+	}
+	// A second existing connection cannot be substituted for the selected
+	// metrics connection, even though the direct Investigation has no occurrence.
+	other, err := db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES('unselected','thanos',1,?)`, testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, _ := other.LastInsertId()
+	otherRevision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,'{}',?)`, otherID, testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRevisionID, _ := otherRevision.LastInsertId()
+	otherGeneration, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`, otherID, make([]byte, 12), make([]byte, 32), testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherGenerationID, _ := otherGeneration.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,credential_generation_id,created_by_tool_call_id,created_at)
+		SELECT ?, 'thanos_query', business_system_id, ?, ?, ?, 2, ? FROM business_system_config_versions WHERE id=?`, created.AttemptID, otherID, otherRevisionID, otherGenerationID, testNow(), business.configID); err == nil {
+		t.Fatal("unselected direct metrics connection was authorized")
+	}
+}
+
 func TestCreateRequiresContent(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)

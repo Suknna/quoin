@@ -333,6 +333,25 @@ CREATE TABLE alert_occurrence_labels (
 ) STRICT;
 CREATE INDEX idx_alert_occurrence_labels_name ON alert_occurrence_labels (name);
 
+-- Attribution is immutable delivery-time evidence, not a mutable current-system
+-- lookup. Candidate arrays are aligned by index: position i binds the system ID
+-- to the exact configuration version which caused it to be a candidate.
+CREATE TABLE alert_occurrence_attributions (
+  occurrence_id                    INTEGER PRIMARY KEY REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  status                           TEXT NOT NULL CHECK (status IN ('attributed','unattributed','conflict')),
+  candidate_system_ids_json        TEXT NOT NULL CHECK (json_valid(candidate_system_ids_json) AND json_type(candidate_system_ids_json) = 'array'),
+  candidate_config_version_ids_json TEXT NOT NULL CHECK (json_valid(candidate_config_version_ids_json) AND json_type(candidate_config_version_ids_json) = 'array'),
+  reason_json                      TEXT NOT NULL CHECK (json_valid(reason_json)),
+  evaluated_from_delivery_id       INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evaluated_from_delivery_item_id  INTEGER NOT NULL REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at                       TEXT NOT NULL,
+  CHECK (json_array_length(candidate_system_ids_json) = json_array_length(candidate_config_version_ids_json)),
+  CHECK ((status = 'attributed' AND json_array_length(candidate_system_ids_json) = 1)
+      OR (status = 'unattributed' AND json_array_length(candidate_system_ids_json) = 0)
+      OR (status = 'conflict' AND json_array_length(candidate_system_ids_json) > 1))
+) STRICT;
+CREATE INDEX idx_alert_occurrence_attributions_delivery ON alert_occurrence_attributions (evaluated_from_delivery_id);
+
 CREATE TABLE alert_observations (
   id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   delivery_id      INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -624,7 +643,14 @@ CREATE TABLE business_system_config_versions (
   yaml_body                         TEXT NOT NULL,
   parser_version                    TEXT NOT NULL,
   schema_version                    TEXT NOT NULL,
-  label_contract_version_id         INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 上传时显式目标契约版本；不静默使用当前契约（DATA-CONFIG-003/CFG-CONTRACT-003）
+  -- Historical provenance only. New declaration uploads leave this NULL:
+  -- Label Contracts no longer govern active Business System lifecycle.
+  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  -- Legacy history predating the declaration cutover deliberately has no
+  -- declaration projection. Only appended canonical successors are executable.
+  declaration_json                  TEXT CHECK (declaration_json IS NULL OR json_valid(declaration_json)),
+  description                       TEXT NOT NULL DEFAULT '',
+  discovery_refresh_seconds         INTEGER NOT NULL DEFAULT 300 CHECK (discovery_refresh_seconds BETWEEN 60 AND 86400),
   journey_catalog_digest            TEXT NOT NULL CHECK (length(journey_catalog_digest) = 64 AND journey_catalog_digest NOT GLOB '*[^0-9a-f]*'),  -- 上传时 Quoin 嵌入 Journey Catalog 生成文件原始字节 digest（DATA-CONFIG-008）
   journey_catalog_version           TEXT NOT NULL,
   digest                            TEXT NOT NULL CHECK (length(digest) = 64),
@@ -658,6 +684,30 @@ CREATE TABLE config_alert_label_conditions (
   UNIQUE (config_version_id, label_name)
 ) STRICT;
 
+-- Compiled resource scopes are the execution authority. Legacy discovery rows
+-- remain available only to read historic configurations.
+-- Durable audit link from immutable predecessor history to its appended
+-- canonical successor. It is intentionally append-only alongside the ledger.
+CREATE TABLE legacy_config_version_mappings (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  legacy_config_version_id INTEGER NOT NULL UNIQUE REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  canonical_config_version_id INTEGER NOT NULL UNIQUE REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  migration_id             TEXT NOT NULL REFERENCES migration_ledger(migration_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at               TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE config_resource_scopes (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  resource_key         TEXT NOT NULL,
+  display_name         TEXT NOT NULL,
+  discovery_metric     TEXT NOT NULL,
+  selectors_json       TEXT NOT NULL CHECK (json_valid(selectors_json)),
+  identity_labels_json TEXT NOT NULL CHECK (json_valid(identity_labels_json)),
+  allowed_metrics_json TEXT NOT NULL CHECK (json_valid(allowed_metrics_json)),
+  UNIQUE (config_version_id, resource_key)
+) STRICT;
+
 CREATE TABLE config_discoveries (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -673,6 +723,7 @@ CREATE TABLE config_plans (
   config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   plan_key          TEXT NOT NULL,                  -- 跨版本稳定 key
   display_name      TEXT NOT NULL,
+  timezone          TEXT NOT NULL DEFAULT 'UTC',
   cron              TEXT,                          -- 标准五字段 cron；NULL = 仅人工运行；时区由配置根节点统一提供（DATA-CONFIG-004）
   UNIQUE (config_version_id, plan_key)
 ) STRICT;
@@ -1251,7 +1302,7 @@ CREATE TABLE inspection_runs (
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   plan_key                  TEXT NOT NULL,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   trigger_kind              TEXT NOT NULL CHECK (trigger_kind IN ('schedule','manual')),
   scheduled_for             TEXT,                    -- UTC；NULL = 人工触发
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Completed','CompletedWithGaps','Failed','Cancelled','Interrupted','SkippedOverlap')),
@@ -1304,7 +1355,7 @@ CREATE TABLE config_verification_runs (
   purpose                   TEXT NOT NULL CHECK (purpose IN ('prepublish','deployment_acceptance')),
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   verification_manifest_item_id INTEGER REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Passed','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
@@ -1329,7 +1380,7 @@ CREATE TABLE resource_refresh_runs (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   trigger_kind              TEXT NOT NULL CHECK (trigger_kind IN ('manual','schedule')),
   scheduled_for             TEXT,
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Completed','CompletedWithWarnings','Failed','Cancelled','Interrupted')),
@@ -1455,7 +1506,10 @@ CREATE TABLE verification_config_item_locators (
   item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   business_system_id         INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id          INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id  INTEGER NOT NULL REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT
+  -- New declarations are self-contained, so their locator carries no Label
+  -- Contract. A non-NULL value is retained solely as exact provenance for a
+  -- pre-declaration historical configuration.
+  label_contract_version_id  INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 CREATE TABLE verification_browser_identity_item_locators (
   item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1872,6 +1926,16 @@ CREATE TABLE tool_calls (
       OR (status = 'cancelled' AND ended_at IS NOT NULL AND error_detail IS NOT NULL
                                AND result_json IS NULL AND result_artifact_id IS NULL))
 ) STRICT;
+
+-- Normalized execution arguments are distinct from immutable model-proposed
+-- arguments. This is the audit record for scope injection after authorization.
+CREATE TABLE tool_call_execution_inputs (
+  tool_call_id      INTEGER PRIMARY KEY REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  arguments_json    TEXT NOT NULL CHECK (json_valid(arguments_json) AND json_type(arguments_json) = 'object'),
+  arguments_digest  TEXT NOT NULL CHECK (length(arguments_digest) = 64 AND arguments_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at        TEXT NOT NULL
+) STRICT;
+
 
 CREATE TABLE tool_call_connection_grants (
   tool_call_id       INTEGER NOT NULL REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -2433,26 +2497,49 @@ CREATE TRIGGER trg_alert_observations_no_delete BEFORE DELETE ON alert_observati
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
 -- New model tool grants must bind the immutable Business System configuration
 -- item carried by this Attempt's input snapshot. A later publish cannot change
--- that approved snapshot route. Existing nullable historic grants remain
--- immutable/readable but cannot be newly inserted or executed.
+-- that approved snapshot route. An attributed Investigation additionally proves
+-- its occurrence belongs to the granted business. A source-free direct
+-- Investigation is allowed only when it has the same exact config/contract
+-- pair, uses that pair's selected metrics connection, and is truly direct
+-- (rather than an unrelated source lineage). Existing nullable historic grants
+-- remain immutable/readable but cannot be newly inserted or executed.
 CREATE TRIGGER trg_attempt_connection_grants_thanos_query_scope BEFORE INSERT ON attempt_connection_grants
 WHEN NEW.purpose = 'thanos_query' AND NOT EXISTS (
   SELECT 1 FROM attempt_input_snapshots snapshot
   JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id
   JOIN business_system_config_versions v ON v.id=config_item.business_system_config_version_id
-  JOIN attempt_input_items contract_item ON contract_item.snapshot_id=snapshot.id
-  JOIN attempt_input_items occurrence_item ON occurrence_item.snapshot_id=snapshot.id
-  JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
   WHERE snapshot.attempt_id=NEW.attempt_id
-    AND config_item.item_role='business_config'
-    AND contract_item.item_role='label_contract'
-    AND occurrence_item.item_role='occurrence'
+    AND config_item.item_role IN ('business_config','config_version')
     AND v.business_system_id=NEW.business_system_id
     AND v.metrics_connection_id=NEW.connection_id
-    AND v.label_contract_version_id=contract_item.label_contract_version_id
-    AND occurrence.business_system_id=NEW.business_system_id
+    AND (
+      EXISTS (
+        SELECT 1 FROM attempt_input_items occurrence_item
+        JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
+        WHERE occurrence_item.snapshot_id=snapshot.id
+          AND occurrence_item.item_role='occurrence'
+          AND occurrence.business_system_id=NEW.business_system_id
+      )
+      OR (
+        NOT EXISTS (
+          SELECT 1 FROM attempt_input_items occurrence_item
+          WHERE occurrence_item.snapshot_id=snapshot.id
+            AND occurrence_item.occurrence_id IS NOT NULL
+        )
+        AND EXISTS (
+          SELECT 1 FROM execution_attempts attempt
+          WHERE attempt.id=NEW.attempt_id
+            AND attempt.attempt_type='investigation'
+            AND attempt.scope_type='investigation'
+            AND NOT EXISTS (
+              SELECT 1 FROM investigation_source_links source
+              WHERE source.investigation_id=attempt.scope_id
+            )
+        )
+      )
+    )
 )
-BEGIN SELECT RAISE(ABORT, 'metrics query grant requires its attempt snapshot business config and selected metrics connection'); END;
+BEGIN SELECT RAISE(ABORT, 'metrics query grant requires an attributed or direct investigation frozen business config and selected metrics connection'); END;
 CREATE TRIGGER trg_attempt_connection_grants_config_thanos_closure BEFORE INSERT ON attempt_connection_grants
 WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
   SELECT 1 FROM execution_attempts a
@@ -2727,8 +2814,8 @@ BEGIN SELECT RAISE(ABORT, 'knowledge_import_batches history is not deletable'); 
 -- 12.7 配置版本：只允许 state/published 字段变化，正文与类型化投影不可变
 CREATE TRIGGER trg_business_config_versions_no_content_update BEFORE UPDATE OF
   business_system_id, version_seq, yaml_body, parser_version, schema_version,
-  label_contract_version_id, journey_catalog_digest, journey_catalog_version,
-  system_key, display_name, metrics_connection_id, enabled, timezone,
+  label_contract_version_id, declaration_json, description, discovery_refresh_seconds,
+  journey_catalog_digest, journey_catalog_version, system_key, display_name, metrics_connection_id, enabled, timezone,
   digest, created_by, created_at ON business_system_config_versions
 BEGIN SELECT RAISE(ABORT, 'business_system_config_version content is immutable'); END;
 
@@ -3480,6 +3567,10 @@ CREATE TRIGGER trg_business_systems_no_delete BEFORE DELETE ON business_systems
 BEGIN SELECT RAISE(ABORT, 'business_systems are tombstone-only'); END;
 CREATE TRIGGER trg_business_system_config_versions_no_delete BEFORE DELETE ON business_system_config_versions
 BEGIN SELECT RAISE(ABORT, 'business_system_config_versions history is not deletable'); END;
+CREATE TRIGGER trg_legacy_config_version_mappings_no_update BEFORE UPDATE ON legacy_config_version_mappings
+BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
+CREATE TRIGGER trg_legacy_config_version_mappings_no_delete BEFORE DELETE ON legacy_config_version_mappings
+BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
 CREATE TRIGGER trg_observed_resources_no_delete BEFORE DELETE ON observed_resources
 BEGIN SELECT RAISE(ABORT, 'observed_resources history is not deletable'); END;
 CREATE TRIGGER trg_connections_no_delete BEFORE DELETE ON connections
@@ -3498,6 +3589,10 @@ CREATE TRIGGER trg_model_calls_no_delete BEFORE DELETE ON model_calls
 BEGIN SELECT RAISE(ABORT, 'model_calls trace is not deletable'); END;
 CREATE TRIGGER trg_tool_calls_no_delete BEFORE DELETE ON tool_calls
 BEGIN SELECT RAISE(ABORT, 'tool_calls trace is not deletable'); END;
+CREATE TRIGGER trg_tool_call_execution_inputs_no_update BEFORE UPDATE ON tool_call_execution_inputs
+BEGIN SELECT RAISE(ABORT, 'tool_call execution input is immutable'); END;
+CREATE TRIGGER trg_tool_call_execution_inputs_no_delete BEFORE DELETE ON tool_call_execution_inputs
+BEGIN SELECT RAISE(ABORT, 'tool_call execution input is retained audit history'); END;
 CREATE TRIGGER trg_reusable_knowledge_no_delete BEFORE DELETE ON reusable_knowledge
 BEGIN SELECT RAISE(ABORT, 'reusable_knowledge history is not deletable'); END;
 CREATE TRIGGER trg_knowledge_retrieval_state_no_delete BEFORE DELETE ON knowledge_version_retrieval_state
@@ -3546,23 +3641,7 @@ BEGIN SELECT RAISE(ABORT, 'current config pointer can only move to an unpublishe
 -- 禁止 current 指针从非空变为 NULL（不允许取消发布；DATA-CONFIG-001）。
 -- 普通发布只能选择以当前 Label Contract 为目标的草稿；切向候选 Label Contract 的配置版本
 -- 只能由同一条未应用 activation INSERT 的原子联合激活触发器完成（DATA-CONFIG-001/002）。
-CREATE TRIGGER trg_business_systems_config_contract_fence BEFORE UPDATE OF current_config_version_id ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL
-  AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id)
-  AND NOT EXISTS (
-    SELECT 1 FROM business_system_config_versions v
-    JOIN label_contract_state s ON s.id = 1 AND s.current_contract_id = v.label_contract_version_id
-    WHERE v.id = NEW.current_config_version_id
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM label_contract_activations a
-    JOIN business_system_config_versions v ON v.id = NEW.current_config_version_id AND v.label_contract_version_id = a.contract_id
-    JOIN json_each(a.items_json) je
-    WHERE a.applied_at IS NULL
-      AND CAST(je.value ->> '$.business_system_id' AS INTEGER) = NEW.id
-      AND CAST(je.value ->> '$.config_version_id' AS INTEGER) = NEW.current_config_version_id
-  )
-BEGIN SELECT RAISE(ABORT, 'config targeting a non-current label contract can only be published by that contract atomic activation'); END;
+-- Label Contract provenance is archival-only; publishing a draft never depends on an active contract.
 CREATE TRIGGER trg_business_systems_no_unset_config_pointer BEFORE UPDATE OF current_config_version_id ON business_systems
 WHEN OLD.current_config_version_id IS NOT NULL AND NEW.current_config_version_id IS NULL
 BEGIN SELECT RAISE(ABORT, 'business_systems current_config_version_id cannot be unset (no deactivation)'); END;
@@ -4617,12 +4696,10 @@ WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id
     AND v.business_system_id = NEW.business_system_id
-    AND v.label_contract_version_id = NEW.label_contract_version_id
     AND (
       (NEW.purpose = 'prepublish' AND v.state = 'draft' AND v.published_at IS NULL)
       OR (NEW.purpose = 'deployment_acceptance' AND v.state = 'published' AND v.published_at IS NOT NULL
         AND EXISTS (SELECT 1 FROM business_systems b WHERE b.id = NEW.business_system_id AND b.current_config_version_id = v.id)
-        AND EXISTS (SELECT 1 FROM label_contract_state s WHERE s.id = 1 AND s.current_contract_id = NEW.label_contract_version_id)
         AND EXISTS (
           SELECT 1 FROM verification_invocation_items i
           JOIN verification_invocation_manifests m ON m.id = i.invocation_id
@@ -4630,7 +4707,6 @@ WHEN NOT EXISTS (
           WHERE i.id = NEW.verification_manifest_item_id AND i.object_kind = 'config'
             AND l.business_system_id = NEW.business_system_id
             AND l.config_version_id = NEW.config_version_id
-            AND l.label_contract_version_id = NEW.label_contract_version_id
             AND julianday(NEW.created_at) <= julianday(m.deadline_at)
             AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts fr WHERE fr.invocation_id = m.id))))
 )
@@ -4701,11 +4777,8 @@ CREATE TRIGGER trg_resource_refresh_runs_closure BEFORE INSERT ON resource_refre
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   JOIN business_systems b ON b.id = v.business_system_id
-  JOIN label_contract_state l ON l.id = 1
   WHERE v.id = NEW.config_version_id AND v.business_system_id = NEW.business_system_id
-    AND v.label_contract_version_id = NEW.label_contract_version_id
     AND v.state = 'published' AND b.current_config_version_id = v.id
-    AND l.current_contract_id = NEW.label_contract_version_id
 )
 BEGIN SELECT RAISE(ABORT, 'resource_refresh_run must freeze the business system current published config and label contract'); END;
 CREATE TRIGGER trg_resource_refresh_runs_insert_state BEFORE INSERT ON resource_refresh_runs
@@ -4923,11 +4996,9 @@ WHEN NOT EXISTS (
   SELECT 1 FROM business_systems b
   JOIN business_system_config_versions v ON v.id = b.current_config_version_id AND v.business_system_id = b.id
   JOIN config_plans p ON p.config_version_id = v.id AND p.plan_key = NEW.plan_key
-  JOIN label_contract_state s ON s.id = 1 AND s.current_contract_id = NEW.label_contract_version_id
   WHERE NEW.rerun_of_id IS NULL
     AND b.id = NEW.business_system_id AND b.enabled = 1
     AND v.id = NEW.config_version_id AND v.state = 'published' AND v.published_at IS NOT NULL
-    AND v.label_contract_version_id = NEW.label_contract_version_id
   UNION ALL
   SELECT 1 FROM inspection_runs source
   JOIN business_systems b ON b.id = source.business_system_id
@@ -4938,7 +5009,6 @@ WHEN NOT EXISTS (
     AND source.state IN ('Completed','CompletedWithGaps','Failed','Cancelled','Interrupted')
     AND source.business_system_id = NEW.business_system_id
     AND source.config_version_id = NEW.config_version_id
-    AND source.label_contract_version_id = NEW.label_contract_version_id
     AND source.plan_key = NEW.plan_key
 )
 BEGIN SELECT RAISE(ABORT, 'inspection_run must bind the enabled business system current published config/current label contract, or exactly copy a terminal source Run'); END;
@@ -5015,7 +5085,7 @@ WHEN NOT EXISTS (
             JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
             WHERE t.id = a.scope_id AND c.kind = 'browser') THEN 'inspection_collection_v1'
           ELSE 'config_verification_execution_v1' END
-        WHEN 'resource_refresh_run' THEN 'resource_refresh_execution_v1'
+        WHEN 'resource_refresh_run' THEN 'resource_discovery_execution_v1'
         WHEN 'run_check' THEN CASE WHEN EXISTS (
           SELECT 1 FROM inspection_runs r
           JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
@@ -5213,7 +5283,10 @@ WHEN NOT EXISTS (
         SELECT 1 FROM model_provider_connection_probe_results m
         WHERE m.probe_result_id = p.id AND m.streaming_supported = 1
           AND m.native_tool_calling_supported = 1 AND m.cancellation_observed = 1
-          AND m.usage_observed = 1 AND m.embedding_supported = 1))
+          AND m.usage_observed = 1
+          -- Embeddings are optional for a chat-only current revision. When
+          -- configured, their successful real-call result remains mandatory.
+          AND (json_type((SELECT config_json FROM connection_revisions WHERE id = c.current_revision_id), '$.embeddingModelId') IS NULL OR m.embedding_supported = 1)))
       OR (c.type IN ('prometheus','thanos') AND EXISTS (
         SELECT 1 FROM thanos_connection_probe_results metrics
         WHERE metrics.probe_result_id = p.id))
@@ -5838,13 +5911,22 @@ WHEN NOT EXISTS (
   JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = NEW.connection_id
   WHERE i.id = NEW.item_id AND i.object_kind = 'connection' AND g.key_binding_revision = NEW.root_binding_revision)
 BEGIN SELECT RAISE(ABORT, 'connection locator requires one exact connection binding'); END;
+-- A config locator freezes its exact configuration version. Label Contract
+-- identity is historical provenance only: canonical declarations require NULL,
+-- while a pre-declaration row may retain its matching historical contract.
 CREATE TRIGGER trg_verification_config_locator_kind BEFORE INSERT ON verification_config_item_locators
 WHEN NOT EXISTS (
   SELECT 1 FROM verification_invocation_items i
   JOIN business_system_config_versions v ON v.id = NEW.config_version_id
-  WHERE i.id = NEW.item_id AND i.object_kind = 'config' AND v.business_system_id = NEW.business_system_id
-    AND v.label_contract_version_id = NEW.label_contract_version_id)
-BEGIN SELECT RAISE(ABORT, 'config locator requires one exact config binding'); END;
+  WHERE i.id = NEW.item_id AND i.object_kind = 'config'
+    AND v.business_system_id = NEW.business_system_id
+    AND (
+      (v.declaration_json IS NOT NULL AND NEW.label_contract_version_id IS NULL)
+      OR (v.declaration_json IS NULL
+          AND NEW.label_contract_version_id IS NOT NULL
+          AND v.label_contract_version_id = NEW.label_contract_version_id)
+    ))
+BEGIN SELECT RAISE(ABORT, 'config locator requires one exact frozen declaration or historical contract binding'); END;
 CREATE TRIGGER trg_verification_browser_locator_kind BEFORE INSERT ON verification_browser_identity_item_locators
 WHEN NOT EXISTS (
   SELECT 1 FROM verification_invocation_items i

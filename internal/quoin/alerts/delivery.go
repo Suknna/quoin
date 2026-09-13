@@ -129,9 +129,8 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 		preparedItems = append(preparedItems, item)
 	}
 
-	// The active contract's business_system_label is loaded once per
-	// delivery transaction; every occurrence created below is attributed
-	// under it (T17, write-once at first observation).
+	// First observations share this delivery's writer transaction so declaration
+	// publication cannot change attribution authority midway through the batch.
 	attribution, err := loadAttribution(ctx, conn)
 	if err != nil {
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
@@ -237,7 +236,8 @@ func prepareItem(index int, rawItem struct {
 	EndsAt       string            `json:"endsAt"`
 	Fingerprint  string            `json:"fingerprint"`
 	GeneratorURL string            `json:"generatorURL"`
-}) (prepared, error) {
+},
+) (prepared, error) {
 	wireStatus := rawItem.Status
 	if wireStatus != "firing" && wireStatus != "resolved" {
 		wireStatus = "firing"
@@ -325,13 +325,13 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 			return nil, "", canonicalErr
 		}
 		digest := DigestLabels(labelsCanonical)
-		// Write-once attribution under the contract active at first
-		// observation (T17): missing/unknown label values stay 未归属
-		// (NULL business_system_id) and are never rewritten later.
-		businessSystemID, attrErr := attribution.attribute(ctx, conn, sourceID, item.labels)
+		// Freeze the complete declaration decision with this first delivery item.
+		// A subsequent config publication must not alter an existing occurrence.
+		attributionDecision, attrErr := attribution.attribute(ctx, conn, sourceID, item.labels)
 		if attrErr != nil {
 			return nil, "", attrErr
 		}
+
 		// DATA-ALERT-006: a resolved-first delivery creates the occurrence
 		// already closed (state='Resolved', resolved_at set) with a
 		// resolved_first observation; the schema CHECK on alert_occurrences
@@ -345,13 +345,17 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 			resolvedAt = committedAt
 		}
 		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, business_system_id, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?,?)`,
-			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, nullableID(businessSystemID), committedAt, committedAt, resolvedAt)
+			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, nullableID(attributionDecision.BusinessSystemID), committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
 			return nil, "", insertErr
 		}
 		occurrenceID, _ = result.LastInsertId()
+		if err := persistAttribution(ctx, conn, occurrenceID, deliveryID, itemID, attributionDecision, committedAt); err != nil {
+			return nil, "", err
+		}
 		state = initialState
 		rowVersion = 1
+
 		for name, value := range item.labels {
 			if _, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrence_labels(occurrence_id, name, value) VALUES(?,?,?)`, occurrenceID, name, value); insertErr != nil {
 				return nil, "", insertErr

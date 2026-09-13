@@ -31,6 +31,31 @@ type Config struct {
 	MaxOutputTokens     int    `json:"maxOutputTokens"`
 }
 
+const (
+	// DefaultProbeContextBudgetTokens and DefaultProbeMaxOutputTokens give the
+	// fixed capability probe a valid ledger contract when provider metadata did
+	// not declare budgets. They are probe execution bounds, not a claim about
+	// the provider's full context capacity.
+	DefaultProbeContextBudgetTokens = 32768
+	DefaultProbeMaxOutputTokens     = 4096
+)
+
+// NormalizeProbeConfig supplies the fixed probe bounds only when the revision
+// omitted optional budget metadata. Explicit provider configuration stays
+// authoritative.
+func NormalizeProbeConfig(config Config) Config {
+	if config.ContextBudgetTokens < 1 {
+		config.ContextBudgetTokens = DefaultProbeContextBudgetTokens
+	}
+	if config.MaxOutputTokens < 1 || config.MaxOutputTokens >= config.ContextBudgetTokens {
+		config.MaxOutputTokens = DefaultProbeMaxOutputTokens
+		if config.MaxOutputTokens >= config.ContextBudgetTokens {
+			config.MaxOutputTokens = config.ContextBudgetTokens - 1
+		}
+	}
+	return config
+}
+
 // ProbeCapabilities is the typed qualification matrix (frozen action set).
 type ProbeCapabilities struct {
 	StreamingSupported   bool `json:"streamingSupported"`
@@ -188,17 +213,18 @@ func RunToolCall(ctx context.Context, probe *client, modelID string, parallel bo
 	}
 	response, err := probe.post(ctx, "/v1/chat/completions", map[string]any{
 		"model": modelID,
-		"messages": []map[string]any{
-			{"role": "user", "content": map[string]any{
-				"type": "text",
-				"text": func() string {
-					if parallel {
-						return "Call both probe tools in this turn."
-					}
-					return "Call the probe_noop tool."
-				}(),
-			}},
-		},
+		// OpenAI-compatible providers, including DeepSeek, accept ordinary string
+		// user content for tool turns. The multimodal content-part object caused
+		// a 400 before the provider could demonstrate native tool calling.
+		"messages": []map[string]string{{
+			"role": "user",
+			"content": func() string {
+				if parallel {
+					return "Call both probe tools in this turn."
+				}
+				return "Call the probe_noop tool."
+			}(),
+		}},
 		"tools": tools,
 	}, false)
 	result := ActionResult{Action: ActionToolCall}

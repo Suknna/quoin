@@ -27,18 +27,28 @@ func (service *Service) AttachStreamWithSender(slotName, bootID string, epoch ui
 // with the transient stream owner. Admission was already decided by the Proto
 // authority fingerprint before this point.
 func (service *Service) AttachStreamWithSenderVersion(slotName, bootID string, epoch uint64, releaseVersion string, sender StreamSender) <-chan struct{} {
+	closing, _ := service.attachStream(slotName, bootID, epoch, releaseVersion, sender)
+	return closing
+}
+
+// attachStream serializes the final admission of an already-adjudicated Hello.
+// Concurrent Hellos may both pass Adjudicate before either attaches; only a
+// strictly newer epoch can replace a live owner. The stale loser is rejected
+// before it can close the current stream.
+func (service *Service) attachStream(slotName, bootID string, epoch uint64, releaseVersion string, sender StreamSender) (<-chan struct{}, bool) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	key := slotName + "\x00" + bootID
-	if service.bootEpochs[key] < epoch {
-		service.bootEpochs[key] = epoch
+	if epoch <= service.bootEpochs[key] {
+		return nil, false
 	}
+	service.bootEpochs[key] = epoch
 	if old, live := service.conns[slotName]; live {
 		old.close()
 	}
 	fresh := &connection{bootID: bootID, epoch: epoch, releaseVersion: releaseVersion, updated: service.now(), closing: make(chan struct{}), sender: sender}
 	service.conns[slotName] = fresh
-	return fresh.closing
+	return fresh.closing, true
 }
 
 // NextMessageID allocates the next outbound message id for the slot's live

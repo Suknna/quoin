@@ -212,6 +212,26 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		return stream.Send(proto)
 	}
 	closing := service.Slots.AttachStreamWithSenderVersion(slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion(), sender)
+	// Another concurrently admitted Hello may attach first. Its newer epoch
+	// remains authoritative; this stale stream must terminate before it can
+	// project connection state or send an accepted acknowledgement.
+	if closing == nil {
+		// Attachment is the second, mutex-protected epoch admission point. Send
+		// the normal rejected HelloAck so a concurrently delayed reconnect keeps
+		// the established reconnect protocol rather than observing a bare EOF.
+		stale, staleErr := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+		if staleErr != nil {
+			return status.Error(codes.Internal, "handshake failed")
+		}
+		_ = stream.Send(&runtimev1.ControlEnvelope{
+			MessageId: 1, ConnectionEpoch: hello.GetConnectionEpoch(), BootId: hello.GetBootId(),
+			Msg: &runtimev1.ControlEnvelope_HelloAck{HelloAck: &runtimev1.HelloAck{
+				Accepted: false, RejectReason: runtimev1.HelloRejectReason(runtimev1.HelloRejectReason_value[mapRejectReason(stale.Reason)]),
+				LastConnectionEpoch: stale.LastConnectionEpoch, ProfileReconcileRequired: stale.ProfileReconcileRequired,
+			}},
+		})
+		return status.Error(codes.Unauthenticated, "handshake rejected")
+	}
 	// Every return after attachment must release the stream's transient slot
 	// ownership. In particular, a projection/capacity/ack setup failure must
 	// not strand a phantom connected Runtime.
@@ -327,6 +347,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedVerificationAttempts(context.Background())
+		go service.dispatchQueuedResourceDiscoveryAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedEmbeddings(context.Background())

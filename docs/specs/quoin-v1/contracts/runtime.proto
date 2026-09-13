@@ -687,6 +687,10 @@ message ToolCallAuthorization {
   // return_to_model result and must not fetch a credential or contact a target.
   string preflight_error_code = 6; // target_not_found|target_ambiguous|no_mapping
   string preflight_error_detail = 7; // bounded non-secret user-facing detail
+  // Quoin-authorized execution arguments. When present, Plinth must verify this
+  // digest and execute these bytes rather than the immutable model proposal.
+  bytes execution_arguments_json = 8;
+  bytes execution_arguments_digest = 9;
 }
 
 message CompleteModelCallAck {

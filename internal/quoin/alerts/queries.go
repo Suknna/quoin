@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -11,21 +12,29 @@ import (
 // Queries owns the unified alert read projections. Upstream occurrences and
 // platform faults retain distinct storage and lifecycles but share this safe,
 // non-secret representation for the existing alert list and detail surfaces.
+type AttributionDiagnostic struct {
+	Status                    string `json:"status"`
+	CandidateSystemIDs        string `json:"candidateSystemIdsJson"`
+	CandidateConfigVersionIDs string `json:"candidateConfigVersionIdsJson"`
+	Reason                    string `json:"reasonJson"`
+}
+
 type OccurrenceSummary struct {
 	// ID is an occurrence locator or platform:<fault-id>; Source is mandatory so
 	// consumers cannot mistake an internal fault for an Alertmanager occurrence.
-	ID              string            `json:"id"`
-	Source          string            `json:"source"`
-	State           string            `json:"state"`
-	RowVersion      int64             `json:"rowVersion"`
-	BusinessSystem  *string           `json:"businessSystemKey,omitempty"`
-	Component       string            `json:"component,omitempty"`
-	Reason          string            `json:"reason,omitempty"`
-	FirstSeenAt     string            `json:"firstSeenAt"`
-	LastStateChange string            `json:"lastStateChangeAt"`
-	ResolvedAt      *string           `json:"resolvedAt,omitempty"`
-	Labels          map[string]string `json:"labels"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
+	ID              string                 `json:"id"`
+	Source          string                 `json:"source"`
+	State           string                 `json:"state"`
+	RowVersion      int64                  `json:"rowVersion"`
+	BusinessSystem  *string                `json:"businessSystemKey,omitempty"`
+	Attribution     *AttributionDiagnostic `json:"attribution,omitempty"`
+	Component       string                 `json:"component,omitempty"`
+	Reason          string                 `json:"reason,omitempty"`
+	FirstSeenAt     string                 `json:"firstSeenAt"`
+	LastStateChange string                 `json:"lastStateChangeAt"`
+	ResolvedAt      *string                `json:"resolvedAt,omitempty"`
+	Labels          map[string]string      `json:"labels"`
+	Annotations     map[string]string      `json:"annotations,omitempty"`
 }
 
 type AlertSnapshot struct {
@@ -34,11 +43,17 @@ type AlertSnapshot struct {
 	NextCursor  string              `json:"nextCursor,omitempty"`
 }
 
-func occurrenceSummary(id int64, state string, version int64, businessKey sql.NullString, first, changed string, resolved sql.NullString, labelsJSON string) (OccurrenceSummary, error) {
+func occurrenceSummary(id int64, state string, version int64, businessKey sql.NullString, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason sql.NullString, first, changed string, resolved sql.NullString, labelsJSON string, annotationsJSON sql.NullString) (OccurrenceSummary, error) {
 	summary := OccurrenceSummary{ID: strconv.FormatInt(id, 10), Source: "alertmanager", State: state, RowVersion: version, FirstSeenAt: first, LastStateChange: changed}
 	if businessKey.Valid {
 		value := businessKey.String
 		summary.BusinessSystem = &value
+	}
+	if attributionStatus.Valid {
+		summary.Attribution = &AttributionDiagnostic{
+			Status: attributionStatus.String, CandidateSystemIDs: attributionSystemIDs.String,
+			CandidateConfigVersionIDs: attributionConfigIDs.String, Reason: attributionReason.String,
+		}
 	}
 	if resolved.Valid {
 		value := resolved.String
@@ -46,6 +61,11 @@ func occurrenceSummary(id int64, state string, version int64, businessKey sql.Nu
 	}
 	if err := json.Unmarshal([]byte(labelsJSON), &summary.Labels); err != nil {
 		return OccurrenceSummary{}, err
+	}
+	if annotationsJSON.Valid && annotationsJSON.String != "" {
+		if err := json.Unmarshal([]byte(annotationsJSON.String), &summary.Annotations); err != nil {
+			return OccurrenceSummary{}, err
+		}
 	}
 	return summary, nil
 }
@@ -92,7 +112,18 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		conditions += ` AND o.business_system_id=(SELECT id FROM business_systems WHERE key=?)`
 		args = append(args, businessSystemKey)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical FROM alert_occurrences o LEFT JOIN business_systems bs ON bs.id=o.business_system_id WHERE `+conditions, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+			(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
+
+			 FROM alert_observations observation
+			 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
+			 JOIN alert_deliveries d ON d.id=observation.delivery_id
+			 WHERE observation.occurrence_id=o.id
+			 ORDER BY observation.committed_at ASC, observation.id ASC LIMIT 1)
+			FROM alert_occurrences o
+			LEFT JOIN business_systems bs ON bs.id=o.business_system_id
+			LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
+			WHERE `+conditions, args...)
 	if err != nil {
 		return AlertSnapshot{}, err
 	}
@@ -100,12 +131,13 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 	for rows.Next() {
 		var id, version int64
 		var summaryState, first, changed, labels string
-		var businessKey, resolved sql.NullString
-		if err := rows.Scan(&id, &summaryState, &version, &businessKey, &first, &changed, &resolved, &labels); err != nil {
+		var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
+		if err := rows.Scan(&id, &summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason, &first, &changed, &resolved, &labels, &annotations); err != nil {
+
 			rows.Close()
 			return AlertSnapshot{}, err
 		}
-		summary, err := occurrenceSummary(id, summaryState, version, businessKey, first, changed, resolved, labels)
+		summary, err := occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
 		if err != nil {
 			rows.Close()
 			return AlertSnapshot{}, err
@@ -136,13 +168,12 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 	}
 	// Lexical RFC3339Nano order is chronological UTC order; this keeps the union
 	// deterministic without collapsing its source identities.
-	for i := 0; i < len(items); i++ {
-		for j := i + 1; j < len(items); j++ {
-			if items[j].LastStateChange > items[i].LastStateChange || (items[j].LastStateChange == items[i].LastStateChange && items[j].ID > items[i].ID) {
-				items[i], items[j] = items[j], items[i]
-			}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].LastStateChange == items[j].LastStateChange {
+			return items[i].ID > items[j].ID
 		}
-	}
+		return items[i].LastStateChange > items[j].LastStateChange
+	})
 	if err := tx.Commit(); err != nil {
 		return AlertSnapshot{}, err
 	}
@@ -171,12 +202,22 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 	}
 	var summaryState, first, changed, labels string
 	var version int64
-	var businessKey, resolved sql.NullString
-	err = service.db.QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical FROM alert_occurrences o LEFT JOIN business_systems bs ON bs.id=o.business_system_id WHERE o.id=?`, id).Scan(&summaryState, &version, &businessKey, &first, &changed, &resolved, &labels)
+	var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
+	err = service.db.QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+		(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
+		 FROM alert_observations observation
+		 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
+		 JOIN alert_deliveries d ON d.id=observation.delivery_id
+		 WHERE observation.occurrence_id=o.id
+		 ORDER BY observation.committed_at ASC, observation.id ASC LIMIT 1)
+		FROM alert_occurrences o
+		LEFT JOIN business_systems bs ON bs.id=o.business_system_id
+		LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
+		WHERE o.id=?`, id).Scan(&summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason, &first, &changed, &resolved, &labels, &annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
-	return occurrenceSummary(id, summaryState, version, businessKey, first, changed, resolved, labels)
+	return occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
 }
 
 // GetOccurrence preserves the upstream-only public domain seam for callers
@@ -261,6 +302,7 @@ func (service *Service) ListIntakeIssues(ctx context.Context, acknowledged bool)
 	}
 	return items, rows.Err()
 }
+
 func (service *Service) AcknowledgeIntakeIssue(ctx context.Context, issueID int64, actorID int64, expectedRowVersion int64, timestamp string) (bool, error) {
 	conn, err := service.db.Conn(ctx)
 	if err != nil {

@@ -24,7 +24,6 @@ func TestOperatorCannotCallManagementAPIs(t *testing.T) {
 		"/api/v1/business-systems",
 		"/api/v1/inspections/runs?businessSystemKey=anything",
 		"/api/v1/business-systems/anything/browser-identity",
-		"/api/v1/label-contracts",
 		"/api/v1/journey-catalog",
 		"/api/v1/runtime",
 		"/api/v1/audit-events",

@@ -116,17 +116,18 @@ func (s *Service) ListReports(ctx context.Context, runID int64, limit int) ([]Re
 // GetReport returns one immutable report version with its bound Evidence set.
 func (s *Service) GetReport(ctx context.Context, runID, version int64) (ReportDetail, error) {
 	var detail ReportDetail
-	var runIDValue int64
+	var reportID, runIDValue int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT run_id, version, evidence_digest, model_id, content, created_at
+		SELECT id, run_id, version, evidence_digest, model_id, content, created_at
 		FROM inspection_reports WHERE run_id=? AND version=?`, runID, version).
-		Scan(&runIDValue, &detail.Version, &detail.EvidenceDigest, &detail.ModelID, &detail.Content, &detail.CreatedAt)
+		Scan(&reportID, &runIDValue, &detail.Version, &detail.EvidenceDigest, &detail.ModelID, &detail.Content, &detail.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReportDetail{}, ErrNotFound
 	}
 	if err != nil {
 		return ReportDetail{}, err
 	}
+	detail.ID = locatorID(reportID)
 	detail.RunID = locatorID(runIDValue)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT evidence_id FROM inspection_report_evidence WHERE report_id=(

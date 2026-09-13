@@ -39,14 +39,15 @@ const AgentVersion = "investigation-v1"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
-	ErrNotFound             = errors.New("investigation not found")
-	ErrModelProviderMissing = errors.New("no enabled qualified model provider")
-	ErrCommandReused        = errors.New("client command id reused with a different request")
-	ErrActiveAttempt        = errors.New("an active attempt already owns the investigation")
-	ErrLateResult           = errors.New("result lost the commit-order race")
-	ErrSourceNotFound       = errors.New("investigation source not found")
-	ErrInvalidSource        = errors.New("investigation source invalid")
-	ErrMessageInvalid       = errors.New("message content invalid")
+	ErrNotFound              = errors.New("investigation not found")
+	ErrModelProviderMissing  = errors.New("no enabled qualified model provider")
+	ErrCommandReused         = errors.New("client command id reused with a different request")
+	ErrActiveAttempt         = errors.New("an active attempt already owns the investigation")
+	ErrLateResult            = errors.New("result lost the commit-order race")
+	ErrSourceNotFound        = errors.New("investigation source not found")
+	ErrInvalidSource         = errors.New("investigation source invalid")
+	ErrBusinessSystemInvalid = errors.New("investigation business system has no enabled published configuration")
+	ErrMessageInvalid        = errors.New("message content invalid")
 )
 
 // HeadConflictError reports a stale expected_head_message_id fence miss

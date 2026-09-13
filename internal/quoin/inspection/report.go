@@ -132,10 +132,9 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	}
 	var configVersionID int64
 	var planKey string
-	var contractID int64
 	if err = conn.QueryRowContext(ctx, `
-		SELECT config_version_id, plan_key, label_contract_version_id FROM inspection_runs WHERE id=?`, runID).
-		Scan(&configVersionID, &planKey, &contractID); err != nil {
+		SELECT config_version_id, plan_key FROM inspection_runs WHERE id=?`, runID).
+		Scan(&configVersionID, &planKey); err != nil {
 		return 0, err
 	}
 	var reportVersion int
@@ -265,13 +264,8 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 		VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID); err != nil {
 		return 0, err
 	}
-	contractDigest := sha256.Sum256([]byte(fmt.Sprintf("label-contract-version:%d", contractID)))
-	itemSeq++
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		VALUES(?,?,'label_contract',?,?)`, snapshotID, itemSeq, hex.EncodeToString(contractDigest[:]), contractID); err != nil {
-		return 0, err
-	}
+	// New report analyses retain only config-version lineage. The nullable run
+	// Label Contract locator is historical read metadata, never new authority.
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?, 'chat_model', ?,?,?,?,?)`,

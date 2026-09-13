@@ -27,7 +27,7 @@ func TestParseInputRequiresBusinessContext(t *testing.T) {
 func TestBuildInitialMessagesIncludesFrozenBusinessContext(t *testing.T) {
 	input, err := ParseInput([]byte(`{
 		"occurrence":{"id":"1","labels":{"business_system":"payments"}},
-		"businessContext":{"systemKey":"payments","configVersionId":"8","labelContractVersionId":"3","businessSystemLabel":"business_system"},
+		"businessContext":{"systemKey":"payments","configVersionId":"8","resources":[{"name":"pods","displayName":"Pods","allowedMetrics":["up","http_requests_*"]}]},
 		"modelContract":{"modelId":"fixture"}
 	}`))
 	if err != nil {
@@ -37,8 +37,58 @@ func TestBuildInitialMessagesIncludesFrozenBusinessContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || !strings.Contains(messages[1].Content, "业务配置上下文") || !strings.Contains(messages[1].Content, "payments") {
+	if len(messages) != 3 || !strings.Contains(messages[2].Content, "业务配置上下文") || !strings.Contains(messages[2].Content, "payments") {
 		t.Fatalf("messages = %#v", messages)
+	}
+	for _, required := range []string{`resourceRef`, `pods`, `允许指标：up、http_requests_*`, `query: "up"`} {
+		if !strings.Contains(messages[1].Content, required) {
+			t.Fatalf("initial scope prompt missing %q: %s", required, messages[1].Content)
+		}
+	}
+}
+
+func TestInitialAnalysisPromptGroundsDetectorNamesAndSeparatesHypotheses(t *testing.T) {
+	input, err := ParseInput([]byte(`{
+		"occurrence":{"id":"1","labels":{"alertname":"MallGUIAcceptanceProbe"},"annotations":{"summary":"controlled GUI acceptance probe","description":"No true fault; this is a controlled test annotation."}},
+		"businessContext":{"systemKey":"mall","configVersionId":"8","resources":[{"name":"pods","displayName":"Pods","allowedMetrics":["up"]}]},
+		"modelContract":{"modelId":"fixture"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInitialMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"不得仅因名称、标签或注释推断", "已知事实", "待验证假设", "MallGUIAcceptanceProbe", "No true fault; this is a controlled test annotation."} {
+		if !strings.Contains(messages[0].Content+messages[2].Content, required) {
+			t.Fatalf("initial analysis messages missing %q", required)
+		}
+	}
+}
+
+func TestBuildInvestigationMessagesRendersMandatoryBusinessSelector(t *testing.T) {
+	input, err := ParseInvestigationInput([]byte(`{
+		"messages":[{"role":"user","content":"查询 Java、MySQL 和 Redis 状态"}],
+		"sources":[],
+		"businessContext":{"systemKey":"local-inspection-demo","configVersionId":"17","resources":[{"name":"services","displayName":"Services","allowedMetrics":["up","mysql_up","redis_up"]}]},
+		"modelContract":{"modelId":"fixture-chat-1","contextBudgetTokens":4096,"maxOutputTokens":1024}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInvestigationMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages=%d want system, scope, user", len(messages))
+	}
+	scope := messages[1].Content
+	for _, required := range []string{`业务系统 "local-inspection-demo"`, `resourceRef`, `services`, `允许指标：up、mysql_up、redis_up`, `query: "up"`} {
+		if !strings.Contains(scope, required) {
+			t.Fatalf("scope prompt missing %q: %s", required, scope)
+		}
 	}
 }
 

@@ -20,8 +20,8 @@ import (
 // coordinated-upgrade schema gate. preflight is the same-Release read-only
 // verification the deployment helper runs on the OLD image after stopping
 // the stack; the plain form is the exclusive forward step run by the NEW
-// image. Both enforce the first-release boundary: only an exact zero-history
-// fresh-v1 schema may pass, and no N-1 migration evidence is ever invented.
+// image. The corrected preflight also recognizes the exact released declaration
+// predecessor; the authenticated gate still verifies its pinned migration ledger.
 func runMigrate(arguments []string) {
 	preflight := len(arguments) > 0 && arguments[0] == "preflight"
 	if preflight {
@@ -31,7 +31,7 @@ func runMigrate(arguments []string) {
 	ctx := context.Background()
 	if preflight {
 		if version, digest, ok := bootstrap.PeekSchemaState(config.DataDirectory); ok {
-			if reason, mismatch := schemaMismatchReason(version, digest); mismatch {
+			if reason, mismatch := schemaMismatchReason(version, digest); mismatch && !upgrade.IsDeclarationPredecessor(version, digest) {
 				failStable(errors.New(reason), reason)
 			}
 		}

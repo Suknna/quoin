@@ -7,6 +7,7 @@ package worker
 // workspace and the fixed tool schema.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -349,33 +350,18 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 				ModelCallId: callID, AssistantText: assistantText, ResponseDigest: responseDigest,
 				Usage: &workerv1.ModelUsage{},
 			}
-			for _, authorization := range authorizations {
-				var matched *model.ProposedTool
-				for index := range proposed {
-					if proposed[index].ProviderIndex == authorization.ProviderIndex {
-						matched = &proposed[index]
-						break
-					}
-				}
-				if matched == nil {
-					return fmt.Errorf("authorization index %d has no proposed tool", authorization.ProviderIndex)
-				}
-				mode := ExecutionModeFor(matched.ToolName)
-				if runner.tools == nil {
-					runner.tools = map[int64]toolMeta{}
-				}
-				var arguments map[string]any
-				_ = json.Unmarshal(matched.ArgumentsJSON, &arguments)
-				runner.tools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode, arguments: arguments, argumentsJSON: append([]byte(nil), matched.ArgumentsJSON...), argumentsDigest: append([]byte(nil), matched.ArgumentsDigest...), grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode, preflightDetail: authorization.PreflightErrorDetail}
-				completed.ToolCalls = append(completed.ToolCalls, &workerv1.PreparedToolCall{
-					ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
-					ProviderToolCallId: matched.ProviderToolCallID,
-					ToolName:           matched.ToolName, ArgumentsJson: matched.ArgumentsJSON,
-					ArgumentsDigest: []byte(matched.ArgumentsDigest),
-					ExecutionMode:   runtimev1.ToolExecutionMode(runtimev1.ToolExecutionMode_value[mode]),
-					FailureMode:     runtimev1.ToolFailureMode(runtimev1.ToolFailureMode_value[authorization.FailureMode]),
-				})
+			prepared, authorizedTools, err := prepareAuthorizedToolCalls(proposed, authorizations)
+			if err != nil {
+				return err
 			}
+			if runner.tools == nil {
+				runner.tools = map[int64]toolMeta{}
+			}
+			for toolCallID, meta := range authorizedTools {
+				runner.tools[toolCallID] = meta
+			}
+			completed.ToolCalls = prepared
+
 			if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_ChatModelCompleted{
 				ChatModelCompleted: completed,
 			}}); err != nil {
@@ -435,6 +421,58 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 // (RUNTIME-TASK-008/012). The frozen dispatch binding identifies the
 // attempt on Quoin even after same-boot reconnects; a rejected ack means
 // the attempt was already terminal through another commit-order winner.
+// prepareAuthorizedToolCalls preserves the original model proposal in the
+// worker-visible prepared call while keeping the separately authorized execution
+// JSON private to supervisor-side tool metadata. Thanos must never fall back to
+// the proposal because Quoin scopes its query before authorizing execution.
+func prepareAuthorizedToolCalls(proposed []model.ProposedTool, authorizations []model.Authorization) ([]*workerv1.PreparedToolCall, map[int64]toolMeta, error) {
+	prepared := make([]*workerv1.PreparedToolCall, 0, len(authorizations))
+	authorizedTools := make(map[int64]toolMeta, len(authorizations))
+	for _, authorization := range authorizations {
+		var matched *model.ProposedTool
+		for index := range proposed {
+			if proposed[index].ProviderIndex == authorization.ProviderIndex {
+				matched = &proposed[index]
+				break
+			}
+		}
+		if matched == nil {
+			return nil, nil, fmt.Errorf("authorization index %d has no proposed tool", authorization.ProviderIndex)
+		}
+		executionJSON := matched.ArgumentsJSON
+		executionDigest := matched.ArgumentsDigest
+		if len(authorization.ExecutionArgumentsJSON) != 0 {
+			sum := sha256.Sum256(authorization.ExecutionArgumentsJSON)
+			if len(authorization.ExecutionArgumentsDigest) != sha256.Size || !bytes.Equal(sum[:], authorization.ExecutionArgumentsDigest) {
+				return nil, nil, fmt.Errorf("tool %d execution arguments digest mismatch", authorization.ToolCallID)
+			}
+			executionJSON = authorization.ExecutionArgumentsJSON
+			executionDigest = hex.EncodeToString(authorization.ExecutionArgumentsDigest)
+		} else if matched.ToolName == "thanos_query" {
+			return nil, nil, fmt.Errorf("thanos_query %d lacks Quoin-authorized execution arguments", authorization.ToolCallID)
+		}
+		var arguments map[string]any
+		if err := json.Unmarshal(executionJSON, &arguments); err != nil {
+			return nil, nil, fmt.Errorf("tool %d execution arguments invalid: %w", authorization.ToolCallID, err)
+		}
+		mode := ExecutionModeFor(matched.ToolName)
+		authorizedTools[authorization.ToolCallID] = toolMeta{
+			name: matched.ToolName, mode: mode, arguments: arguments,
+			argumentsJSON: append([]byte(nil), executionJSON...), argumentsDigest: []byte(executionDigest),
+			grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode,
+			preflightDetail: authorization.PreflightErrorDetail,
+		}
+		prepared = append(prepared, &workerv1.PreparedToolCall{
+			ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
+			ProviderToolCallId: matched.ProviderToolCallID, ToolName: matched.ToolName,
+			ArgumentsJson: matched.ArgumentsJSON, ArgumentsDigest: []byte(matched.ArgumentsDigest),
+			ExecutionMode: runtimev1.ToolExecutionMode(runtimev1.ToolExecutionMode_value[mode]),
+			FailureMode:   runtimev1.ToolFailureMode(runtimev1.ToolFailureMode_value[authorization.FailureMode]),
+		})
+	}
+	return prepared, authorizedTools, nil
+}
+
 func (runner *Runner) commitResult(ctx context.Context, attemptID int64, proposal *workerv1.WorkerResultProposal) (*runtimev1.ResultAck, error) {
 	ack, err := runner.Channel.ProposeResult(ctx, &runtimev1.ResultProposal{
 		AttemptId:       attemptID,

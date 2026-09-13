@@ -17,11 +17,10 @@ import (
 	"golang.org/x/text/message"
 )
 
-// Schema document names accepted by ValidateSchema.
-const (
-	SchemaBusinessSystemConfig = "business-system-config"
-	SchemaLabelContract        = "label-contract"
-)
+// SchemaBusinessSystem is the sole user-facing schema accepted by normal
+// configuration parsing. Historical migrations read their durable JSON facts
+// directly; they never recompile retired YAML schemas.
+const SchemaBusinessSystem = "business-system"
 
 type compiledSchema struct {
 	schema  *jsonschema.Schema
@@ -38,8 +37,7 @@ var (
 func loadSchemas() {
 	schemaOnce.Do(func() {
 		for name, body := range map[string][]byte{
-			SchemaBusinessSystemConfig: contracts.BusinessSystemConfigSchema,
-			SchemaLabelContract:        contracts.LabelContractSchema,
+			SchemaBusinessSystem: contracts.BusinessSystemSchema,
 		} {
 			document, err := jsonschema.UnmarshalJSON(strings.NewReader(string(body)))
 			if err != nil {

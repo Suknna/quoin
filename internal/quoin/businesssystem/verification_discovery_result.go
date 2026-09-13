@@ -35,30 +35,18 @@ func validateDiscoverySeriesScope(ctx context.Context, conn *sql.Conn, configVer
 	Value     string            `json:"value"`
 	Timestamp float64           `json:"timestamp"`
 }) error {
-	var contractJSON, systemKey, identityJSON string
-	if err := conn.QueryRowContext(ctx, `SELECT l.contract_json,v.system_key,d.identity_labels_json FROM business_system_config_versions v JOIN label_contracts l ON l.id=v.label_contract_version_id JOIN config_discoveries d ON d.config_version_id=v.id AND d.discovery_key=? WHERE v.id=?`, discoveryKey, configVersionID).Scan(&contractJSON, &systemKey, &identityJSON); err != nil {
+	var systemKey, identityJSON string
+	if err := conn.QueryRowContext(ctx, `SELECT v.system_key,d.identity_labels_json FROM business_system_config_versions v JOIN config_discoveries d ON d.config_version_id=v.id AND d.discovery_key=? WHERE v.id=?`, discoveryKey, configVersionID).Scan(&systemKey, &identityJSON); err != nil {
 		return err
 	}
-	var contract struct {
-		LabelContract struct {
-			BusinessSystemLabel string `json:"business_system_label"`
-		} `json:"label_contract"`
-	}
-	if err := json.Unmarshal([]byte(contractJSON), &contract); err != nil {
-		return err
-	}
-	label := contract.LabelContract.BusinessSystemLabel
-	if label == "" {
-		return fmt.Errorf("verification discovery has no business label contract")
-	}
+	// Resource scope selectors are already compiler-injected. Validation below
+	// checks identity completeness without a global label-contract authority.
+	_ = systemKey
 	var identityLabels []string
 	if err := json.Unmarshal([]byte(identityJSON), &identityLabels); err != nil {
 		return err
 	}
 	for _, item := range series {
-		if item.Labels[label] != systemKey {
-			return fmt.Errorf("verification discovery series escapes the declared business scope")
-		}
 		for _, identityLabel := range identityLabels {
 			if strings.TrimSpace(item.Labels[identityLabel]) == "" {
 				return fmt.Errorf("verification discovery series lacks a declared identity label")

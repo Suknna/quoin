@@ -32,7 +32,8 @@ type ResourceRefreshRunDetail struct {
 // producer or scheduling semantics.
 func (service *Service) GetResourceRefresh(ctx context.Context, systemKey string, runID int64) (ResourceRefreshRunDetail, error) {
 	var detail ResourceRefreshRunDetail
-	var id, systemID, versionID, contractID int64
+	var id, systemID, versionID int64
+	var contractID sql.NullInt64
 	var evidenceAt, resultDetail sql.NullString
 	err := service.db.QueryRowContext(ctx, `
 		SELECT r.id,r.business_system_id,r.config_version_id,r.label_contract_version_id,
@@ -51,7 +52,9 @@ func (service *Service) GetResourceRefresh(ctx context.Context, systemKey string
 	detail.ID = fmt.Sprint(id)
 	detail.BusinessSystemID = fmt.Sprint(systemID)
 	detail.ConfigVersionID = fmt.Sprint(versionID)
-	detail.LabelContractVersionID = fmt.Sprint(contractID)
+	if contractID.Valid {
+		detail.LabelContractVersionID = fmt.Sprint(contractID.Int64)
+	}
 	if evidenceAt.Valid {
 		detail.EvidenceAt = &evidenceAt.String
 	}
@@ -101,12 +104,6 @@ func (service *Service) CommitResourceRefreshProposal(ctx context.Context, attem
 		}
 	default:
 		return fmt.Errorf("resource refresh result has invalid outcome")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, p.ObservedAt); err != nil {
-		return err
-	}
-	if p.Outcome != "success" && p.Outcome != "gap" && p.Outcome != "error" {
-		return fmt.Errorf("invalid resource refresh outcome")
 	}
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
@@ -162,19 +159,16 @@ func (service *Service) CommitResourceRefreshProposal(ctx context.Context, attem
 			}
 			labelsJSON, _ := json.Marshal(series.Labels)
 			idDigest := sha256.Sum256([]byte(identityKey))
-			insert, err := conn.ExecContext(ctx, `INSERT INTO observed_resources(business_system_id,discovery_key,identity_key,identity_digest,labels_json,observed_at,current,last_successful_refresh_at,created_at) VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(business_system_id,discovery_key,identity_key) DO UPDATE SET labels_json=excluded.labels_json,observed_at=excluded.observed_at,current=1,last_successful_refresh_at=excluded.last_successful_refresh_at`, systemID, key, identityKey, fmt.Sprintf("%x", idDigest), string(labelsJSON), p.ObservedAt, p.ObservedAt, service.nowText())
-			if err != nil {
+			// SQLite preserves a stale last_insert_rowid() on the conflict-update
+			// path. RETURNING identifies this UPSERT's actual row in either path,
+			// keeping the immutable identity-label facts attached to that resource.
+			var resourceID int64
+			if err := conn.QueryRowContext(ctx, `INSERT INTO observed_resources(business_system_id,discovery_key,identity_key,identity_digest,labels_json,observed_at,current,last_successful_refresh_at,created_at) VALUES(?,?,?,?,?,?,1,?,?) ON CONFLICT(business_system_id,discovery_key,identity_key) DO UPDATE SET labels_json=excluded.labels_json,observed_at=excluded.observed_at,current=1,last_successful_refresh_at=excluded.last_successful_refresh_at RETURNING id`, systemID, key, identityKey, fmt.Sprintf("%x", idDigest), string(labelsJSON), p.ObservedAt, p.ObservedAt, service.nowText()).Scan(&resourceID); err != nil {
 				return err
 			}
-			resourceID, err := insert.LastInsertId()
-			if err != nil {
-				return err
-			}
-			if resourceID != 0 {
-				for _, name := range identities {
-					if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO observed_resource_identity_labels(observed_resource_id,name,value) VALUES(?,?,?)`, resourceID, name, identityLabels[name]); err != nil {
-						return err
-					}
+			for _, name := range identities {
+				if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO observed_resource_identity_labels(observed_resource_id,name,value) VALUES(?,?,?)`, resourceID, name, identityLabels[name]); err != nil {
+					return err
 				}
 			}
 		}

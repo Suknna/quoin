@@ -69,7 +69,7 @@ var plans = map[string]plan{
 					{Name: "plinth-adversarial", Pkg: "./internal/plinth/..."},
 					{Name: "http-matrix", Pkg: "./internal/quoin/app ./test/contract/contracts"},
 					{Name: "dispatch-closure", Pkg: "./internal/quoin/analysis ./internal/quoin/attempt ./internal/quoin/connections"},
-					{Name: "persistence-adversarial", Pkg: "./internal/quoin/alerts ./internal/quoin/feedback ./internal/quoin/investigation ./internal/quoin/labelcontract ./internal/quoin/knowledge ./internal/quoin/artifact"},
+					{Name: "persistence-adversarial", Pkg: "./internal/quoin/alerts ./internal/quoin/feedback ./internal/quoin/investigation ./internal/quoin/knowledge ./internal/quoin/artifact"},
 					{Name: "security-adversarial", Pkg: "./internal/quoin/auth ./internal/quoin/maintenance ./internal/quoin/recovery"},
 					{Name: "runtime-protocol", Pkg: "./internal/quoin/runtime ./internal/quoin/browser"},
 				},
@@ -81,7 +81,7 @@ var plans = map[string]plan{
 		Cells: map[string]cellPlan{
 			"default": {
 				Groups: []group{
-					{Name: "strict-yaml", Pkg: "./internal/quoin/config ./internal/quoin/labelcontract"},
+					{Name: "strict-yaml", Pkg: "./internal/quoin/config"},
 					{Name: "promql-and-projection", Pkg: "./internal/quoin/businesssystem"},
 					{Name: "config-verification-runs", Pkg: "./internal/quoin/inspection"},
 				},

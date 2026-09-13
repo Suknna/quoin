@@ -25,6 +25,7 @@ import (
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
+	jsonschema "github.com/eino-contrib/jsonschema"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -85,13 +86,15 @@ type Failure struct {
 // tools (ARCH-INPUT-003); the supervisor fetches the credential through
 // exactly these grants before executing the tool.
 type Authorization struct {
-	ToolCallID           int64
-	ProviderIndex        uint32
-	ProviderToolCallID   string
-	FailureMode          string
-	ConnectionGrants     []*runtimev1.ConnectionGrant
-	PreflightErrorCode   string
-	PreflightErrorDetail string
+	ToolCallID               int64
+	ProviderIndex            uint32
+	ProviderToolCallID       string
+	FailureMode              string
+	ConnectionGrants         []*runtimev1.ConnectionGrant
+	PreflightErrorCode       string
+	PreflightErrorDetail     string
+	ExecutionArgumentsJSON   []byte
+	ExecutionArgumentsDigest []byte
 }
 
 // promptDigestFor uses the mode-selected prompt carried by the supervisor.
@@ -171,10 +174,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 	started := time.Now()
 	assistantText, toolCalls, usage, finishReason, chunkSeen, partialText, callErr := executor.callProvider(ctx, chatModel, messages, contract)
 	if callErr != nil {
-		reason, retryable := classifyProviderError(callErr)
-		if chunkSeen {
-			retryable = false
-		}
+		reason, retryable := classifyStreamError(callErr, chunkSeen)
 		return fail(reason, callErr.Error(), retryable, capture.RequestID(), partialText)
 	}
 	latency := time.Since(started).Milliseconds()
@@ -237,6 +237,7 @@ func (executor *Executor) Execute(ctx context.Context, attemptID int64, callSeq,
 			ToolCallID: wire.GetToolCallId(), ProviderIndex: wire.GetProviderIndex(),
 			ProviderToolCallID: wire.GetProviderToolCallId(), FailureMode: wire.GetFailureMode().String(),
 			ConnectionGrants: wire.GetConnectionGrants(), PreflightErrorCode: wire.GetPreflightErrorCode(), PreflightErrorDetail: wire.GetPreflightErrorDetail(),
+			ExecutionArgumentsJSON: wire.GetExecutionArgumentsJson(), ExecutionArgumentsDigest: wire.GetExecutionArgumentsDigest(),
 		})
 	}
 	return callID, assistantText, proposed, authorizations, responseDigestRaw, nil, nil
@@ -326,13 +327,16 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 		// the concatenation of the visible deltas (the final message only
 		// carries the last delta plus finish_reason/usage).
 		if message.Content != "" {
+			// Expose the retry fence before invoking the hook: the hook may
+			// deliver this text to the worker and then fail, so retrying would
+			// duplicate visible output. Keep the same text for failure sealing.
 			accumulated += message.Content
+			chunkSeen = true
 			if executor.DeltaHook != nil {
 				if err := executor.DeltaHook(ctx, message.Content); err != nil {
 					return "", nil, nil, "", chunkSeen, accumulated, err
 				}
 			}
-			chunkSeen = true
 		}
 		for _, call := range message.ToolCalls {
 			index := 0
@@ -378,6 +382,16 @@ func (executor *Executor) callProvider(ctx context.Context, chatModel *openai.Ch
 	return accumulated, merged, usage, finish, chunkSeen, "", nil
 }
 
+// classifyStreamError applies the visible-output fence to every streaming
+// failure, including a DeltaHook error after the worker received text.
+func classifyStreamError(err error, chunkSeen bool) (reason string, retryable bool) {
+	reason, retryable = classifyProviderError(err)
+	if chunkSeen {
+		retryable = false
+	}
+	return reason, retryable
+}
+
 // classifyProviderError maps adapter errors onto the frozen failure
 // reasons (ARCH-AGENT-004: retry only before any visible chunk).
 func classifyProviderError(err error) (reason string, retryable bool) {
@@ -390,7 +404,12 @@ func classifyProviderError(err error) (reason string, retryable bool) {
 		case 429:
 			return "rate_limited", true
 		case 400:
-			return "context_overflow", false
+			if isContextOverflow(apiErr) {
+				return "context_overflow", false
+			}
+			// A generic HTTP 400 is a provider validation rejection (for example
+			// malformed tools), not evidence that retrying with fewer turns can help.
+			return "invalid_response", false
 		default:
 			return "provider_unavailable", false
 		}
@@ -401,6 +420,20 @@ func classifyProviderError(err error) (reason string, retryable bool) {
 	default:
 		return "transport_error", true
 	}
+}
+
+// isContextOverflow recognizes only explicit provider context-limit signals;
+// arbitrary 400 validation errors must remain invalid_response.
+func isContextOverflow(apiErr *openai.APIError) bool {
+	message := strings.ToLower(apiErr.Message)
+	typeName := strings.ToLower(apiErr.Type)
+	code := strings.ToLower(fmt.Sprint(apiErr.Code))
+	return strings.Contains(message, "context length") ||
+		strings.Contains(message, "context window") ||
+		strings.Contains(message, "maximum context") ||
+		strings.Contains(message, "too many tokens") ||
+		strings.Contains(typeName, "context_length") ||
+		strings.Contains(code, "context_length")
 }
 
 // fetchGrant resolves the attempt-scoped credential over the authenticated
@@ -489,14 +522,86 @@ func newAdapter(ctx context.Context, toolsJSON []byte, apiKey string, contract C
 	if err != nil {
 		return nil, nil, fmt.Errorf("openai adapter: %w", err)
 	}
-	var tools []*schema.ToolInfo
-	if err := json.Unmarshal(toolsJSON, &tools); err != nil {
-		return nil, nil, fmt.Errorf("tools_json unparseable: %w", err)
+	tools, err := openAIToolsFromCanonicalJSON(toolsJSON)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := chatModel.BindTools(tools); err != nil {
 		return nil, nil, fmt.Errorf("bind tools: %w", err)
 	}
 	return chatModel, capture, nil
+}
+
+// openAIToolsFromCanonicalJSON adapts Quoin's authoritative OpenAI nested
+// schema to Eino ToolInfo. ToolInfo's JSON format is Eino-specific (name/desc
+// at the top level), so unmarshalling the authoritative payload directly
+// zeroes every tool name before the OpenAI SDK serializes the request.
+func openAIToolsFromCanonicalJSON(canonical []byte) ([]*schema.ToolInfo, error) {
+	var wireTools []struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(canonical, &wireTools); err != nil {
+		return nil, fmt.Errorf("tools_json unparseable: %w", err)
+	}
+	if len(wireTools) == 0 {
+		return nil, errors.New("tools_json has no tools")
+	}
+	tools := make([]*schema.ToolInfo, 0, len(wireTools))
+	for index, wireTool := range wireTools {
+		if wireTool.Type != "function" || strings.TrimSpace(wireTool.Function.Name) == "" || strings.TrimSpace(wireTool.Function.Description) == "" || len(wireTool.Function.Parameters) == 0 {
+			return nil, fmt.Errorf("tools_json tools[%d] lacks a complete OpenAI function schema", index)
+		}
+		parameters, err := openAIObjectParametersSchema(wireTool.Function.Parameters)
+		if err != nil {
+			return nil, fmt.Errorf("tools_json tools[%d] parameters unparseable: %w", index, err)
+		}
+		tools = append(tools, &schema.ToolInfo{
+			Name:        wireTool.Function.Name,
+			Desc:        wireTool.Function.Description,
+			ParamsOneOf: schema.NewParamsOneOfByJSONSchema(parameters),
+		})
+	}
+	return tools, nil
+}
+
+// openAIObjectParametersSchema preserves Quoin's canonical parameter schema
+// while satisfying OpenAI-compatible providers that reject a combinator-only
+// parameter root. The original canonical bytes remain the ledger digest; this
+// normalization is strictly an adapter wire concern. Nested unions retain their
+// original shape, and Quoin's authoritative ingress validator still validates
+// every returned tool call against the closed schema.
+func openAIObjectParametersSchema(raw json.RawMessage) (*jsonschema.Schema, error) {
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if document == nil {
+		return nil, errors.New("parameters must be a JSON object")
+	}
+	if typeValue, present := document["type"]; present && typeValue != "object" {
+		return nil, fmt.Errorf("parameters root type must be object, got %v", typeValue)
+	}
+	// A root oneOf describes object-shaped variants but has no explicit root
+	// type. Eino serializes the schema verbatim, so add the provider-required
+	// declaration without touching the authoritative catalog or its digest.
+	document["type"] = "object"
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return nil, err
+	}
+	parameters := &jsonschema.Schema{}
+	if err := json.Unmarshal(encoded, parameters); err != nil {
+		return nil, err
+	}
+	if parameters.Type != "object" {
+		return nil, fmt.Errorf("parameters root type must be object, got %q", parameters.Type)
+	}
+	return parameters, nil
 }
 
 func temperaturePointer(value float32) *float32 { return &value }

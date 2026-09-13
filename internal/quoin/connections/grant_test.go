@@ -129,6 +129,42 @@ func TestProbeCancelCommitOrder(t *testing.T) {
 	_ = grantID
 }
 
+func TestInterruptedProbeUsesFrozenRevisionForTerminalChild(t *testing.T) {
+	service, database, attemptID, _, boot, epoch := grantFixture(t)
+	ctx := context.Background()
+	if err := service.AcceptProbe(ctx, attemptID, boot, epoch); err != nil {
+		t.Fatal(err)
+	}
+	var originalRevision int64
+	if err := database.QueryRow(`SELECT connection_revision_id FROM attempt_connection_grants WHERE attempt_id=?`, attemptID).Scan(&originalRevision); err != nil {
+		t.Fatal(err)
+	}
+	var currentVersion int64
+	if err := database.QueryRow(`SELECT row_version FROM connections WHERE name='grant-thanos'`).Scan(&currentVersion); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := service.Rotate(ctx, "grant-thanos", currentVersion, connections.CreateInput{
+		Name: "grant-thanos", Type: connections.TypeThanos,
+		NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"https://thanos.example.com","username":"rotated"}`),
+	}, 1, "cmd-interrupt-rotate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.CurrentRevisionID == originalRevision {
+		t.Fatal("rotation must replace the current revision")
+	}
+	if err := service.InterruptProbe(ctx, attemptID, "revoked"); err != nil {
+		t.Fatalf("interrupted probe must retain its frozen revision: %v", err)
+	}
+	var closedRevision int64
+	if err := database.QueryRow(`SELECT connection_revision_id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&closedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if closedRevision != originalRevision {
+		t.Fatalf("terminal child/header must use frozen revision %d, got %d", originalRevision, closedRevision)
+	}
+}
+
 func TestCreateCommandReplay(t *testing.T) {
 	service, _, _, _ := grantFixtureLight(t)
 	ctx := context.Background()

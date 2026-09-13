@@ -186,10 +186,11 @@ func (handler *Handler) listInvestigations(ctx context.Context, input *struct {
 func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		ClientCommandID string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		Content         string            `json:"content,omitempty"`
-		AttachmentIDs   []string          `json:"attachmentIds,omitempty"`
-		Sources         []sourceInputWire `json:"sources,omitempty"`
+		ClientCommandID   string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		Content           string            `json:"content,omitempty"`
+		AttachmentIDs     []string          `json:"attachmentIds,omitempty"`
+		Sources           []sourceInputWire `json:"sources,omitempty"`
+		BusinessSystemKey string            `json:"businessSystemKey,omitempty"`
 	}
 }) (*investigationDetailBody, error) {
 	principalID, err := handler.principal(ctx, input.Session)
@@ -204,7 +205,7 @@ func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, problemUnprocessable("来源引用无效，请返回告警或分析页面重新发起。")
 	}
-	result, err := handler.Service.Create(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, attachmentIDs, sources)
+	result, err := handler.Service.CreateWithBusinessSystem(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, attachmentIDs, sources, input.Body.BusinessSystemKey)
 	if err != nil {
 		return nil, createSendError(err)
 	}
@@ -410,6 +411,8 @@ func createSendError(err error) error {
 		conflict := problem(409, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起。")
 		conflict.Conflict = map[string]any{"code": "command_id_reused"}
 		return conflict
+	case errors.Is(err, investigation.ErrBusinessSystemInvalid):
+		return problemUnprocessable("所选业务系统不可用于新调查，请选择已启用且已发布的系统。")
 	case errors.Is(err, investigation.ErrMessageInvalid):
 		return problemUnprocessable("消息必须包含正文或至少一个附件。")
 	case errors.Is(err, investigation.ErrAttachmentInvalidRef):

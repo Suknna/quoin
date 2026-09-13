@@ -76,10 +76,6 @@ func createDiscoveryVerificationAttempts(ctx context.Context, conn *sql.Conn, ru
 		if _, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id) VALUES(?,1,'config_version',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
 			return err
 		}
-		contractDigest := sha256.Sum256([]byte(fmt.Sprintf("label-contract-version:%d", contractID)))
-		if _, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id) VALUES(?,2,'label_contract',?,?)`, snapshotID, hex.EncodeToString(contractDigest[:]), contractID); err != nil {
-			return err
-		}
 	}
 	return rows.Err()
 }

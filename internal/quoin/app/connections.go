@@ -90,7 +90,13 @@ func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret
 		}
 		projection := map[string]any{
 			"type": connections.TypeModelProvider, "baseUrl": input.BaseURL,
-			"chatModelId": input.ChatModelID, "embeddingModelId": input.EmbeddingModelID,
+			"chatModelId": input.ChatModelID,
+		}
+		// An embedding model is optional for a chat-only provider. Do not
+		// persist an empty value because the domain validator distinguishes
+		// omitted from explicitly malformed configuration.
+		if input.EmbeddingModelID != "" {
+			projection["embeddingModelId"] = input.EmbeddingModelID
 		}
 		if input.ContextBudgetTokens > 0 {
 			projection["contextBudgetTokens"] = input.ContextBudgetTokens

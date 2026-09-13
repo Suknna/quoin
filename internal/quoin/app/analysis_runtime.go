@@ -37,11 +37,15 @@ func (service *RuntimeService) dispatchAnalysisAttempt(ctx context.Context, atte
 	if !view.Connected || view.ConnectionEpoch == nil {
 		return fmt.Errorf("plinth is not connected")
 	}
-	if err := service.Analyses.Attempts().BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, analysisLeaseWindow(), view.ReleaseVersion); err != nil {
-		return err
-	}
+	// Rebuild and validate the immutable input before changing Queued to
+	// Assigned. A deterministic snapshot error must not manufacture an
+	// Assigned attempt that no worker ever received; normal transport-send
+	// failures remain safely recoverable by the existing reconnect reconciler.
 	input, err := service.Analyses.Attempts().DispatchInputFor(ctx, attemptID)
 	if err != nil {
+		return err
+	}
+	if err := service.Analyses.Attempts().BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, analysisLeaseWindow(), view.ReleaseVersion); err != nil {
 		return err
 	}
 	var scopeID int64

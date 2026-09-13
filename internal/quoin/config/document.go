@@ -14,10 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
-	"time"
-	_ "time/tzdata" // the runtime image is scratch-based; the binary embeds the IANA tz database (CFG-YAML-003)
 
 	"github.com/robfig/cron/v3"
 )
@@ -25,18 +22,27 @@ import (
 // BusinessSystemDocument is the parse-once typed projection persisted as
 // immutable columns (DATA-CONFIG-003); runtime never re-parses the YAML.
 type BusinessSystemDocument struct {
-	SystemKey   string
-	DisplayName string
+	SystemKey   string `json:"systemKey"`
+	DisplayName string `json:"displayName"`
+	// The declaration fields are the JSON-serializable compiled representation
+	// for the quoin/v1 user-facing document. Legacy columns remain below until
+	// orchestration persists declaration_json during the migration.
+	Description                     string               `json:"description,omitempty"`
+	MetricsConnectionRef            string               `json:"metricsConnectionRef,omitempty"`
+	AlertSourceRefs                 []string             `json:"alertSourceRefs,omitempty"`
+	Resources                       []ResourceProjection `json:"resources,omitempty"`
+	DiscoveryRefreshIntervalSeconds int64                `json:"discoveryRefreshIntervalSeconds,omitempty"`
+
 	// MetricsConnectionID is the required, versioned metrics route. It is a
 	// locator rather than a display name so a renamed connection cannot redirect
 	// an already reviewed declaration.
-	MetricsConnectionID int64
-	Enabled             bool
-	Timezone            string
-	AlertSourceIDs      []int64
-	AlertSourceLabels   map[string]string
-	Discoveries         []DiscoveryProjection
-	Plans               []PlanProjection
+	MetricsConnectionID int64                 `json:"metricsConnectionID,omitempty"`
+	Enabled             bool                  `json:"enabled,omitempty"`
+	Timezone            string                `json:"timezone,omitempty"`
+	AlertSourceIDs      []int64               `json:"alertSourceIDs,omitempty"`
+	AlertSourceLabels   map[string]string     `json:"alertSourceLabels,omitempty"`
+	Discoveries         []DiscoveryProjection `json:"discoveries,omitempty"`
+	Plans               []PlanProjection      `json:"plans,omitempty"`
 }
 
 // DiscoveryProjection mirrors one resource_discoveries entry.
@@ -47,12 +53,25 @@ type DiscoveryProjection struct {
 	IdentityLabels []string
 }
 
+// ResourceProjection is the normalized declared metrics scope stored with a
+// configuration version. It is name-based deliberately: resolving stable
+// connection and alert references belongs to orchestration, not parsing.
+type ResourceProjection struct {
+	Name            string            `json:"name"`
+	DisplayName     string            `json:"displayName"`
+	MatchLabels     map[string]string `json:"matchLabels"`
+	DiscoveryMetric string            `json:"discoveryMetric"`
+	IdentityLabels  []string          `json:"identityLabels"`
+	AllowedMetrics  []string          `json:"allowedMetrics"`
+}
+
 // PlanProjection mirrors one inspection_plans entry with its checks.
 type PlanProjection struct {
-	Key         string
-	DisplayName string
-	Cron        *string
-	Checks      []CheckProjection
+	Key         string            `json:"key"`
+	DisplayName string            `json:"displayName"`
+	Cron        *string           `json:"cron,omitempty"`
+	Timezone    string            `json:"timezone,omitempty"`
+	Checks      []CheckProjection `json:"checks"`
 }
 
 // CheckProjection is the closed promql|browser discrimination. For promql,
@@ -60,16 +79,19 @@ type PlanProjection struct {
 // range mode (both zero for instant). For browser, JourneyParams is the
 // normalized (possibly empty) object.
 type CheckProjection struct {
-	Key              string
-	DisplayName      string
-	AnalysisQuestion string
-	Kind             string // promql | browser
-	QueryMode        string // instant | range (promql only)
-	Expression       string // promql only
-	RangeSeconds     int64  // range mode only
-	StepSeconds      int64  // range mode only
-	JourneyID        string // browser only
-	JourneyParams    map[string]any
+	Key              string `json:"key"`
+	DisplayName      string `json:"displayName"`
+	AnalysisQuestion string `json:"question"`
+	// ResourceRef links a frozen inspection check to the compiled resource
+	// policy that bounds every PromQL selector it executes.
+	ResourceRef   string         `json:"resourceRef,omitempty"`
+	Kind          string         `json:"kind"`                   // promql | browser
+	QueryMode     string         `json:"queryMode,omitempty"`    // instant | range (promql only)
+	Expression    string         `json:"expression,omitempty"`   // promql only
+	RangeSeconds  int64          `json:"rangeSeconds,omitempty"` // range mode only
+	StepSeconds   int64          `json:"stepSeconds,omitempty"`  // range mode only
+	JourneyID     string         `json:"journeyID,omitempty"`    // browser only
+	JourneyParams map[string]any `json:"journeyParams,omitempty"`
 }
 
 // Digest returns the SHA-256 over the canonical JSON encoding of the parsed
@@ -99,7 +121,7 @@ func (document BusinessSystemDocument) canonicalValue() map[string]any {
 		for _, check := range plan.Checks {
 			entry := map[string]any{
 				"key": check.Key, "display_name": check.DisplayName,
-				"analysis_question": check.AnalysisQuestion, "kind": check.Kind,
+				"analysis_question": check.AnalysisQuestion, "resource_ref": check.ResourceRef, "kind": check.Kind,
 			}
 			switch check.Kind {
 			case "promql":
@@ -115,11 +137,27 @@ func (document BusinessSystemDocument) canonicalValue() map[string]any {
 			}
 			checks = append(checks, entry)
 		}
-		planValue := map[string]any{"key": plan.Key, "display_name": plan.DisplayName, "checks": checks}
+		planValue := map[string]any{"key": plan.Key, "display_name": plan.DisplayName, "timezone": plan.Timezone, "checks": checks}
 		if plan.Cron != nil {
 			planValue["cron"] = *plan.Cron
 		}
 		plans = append(plans, planValue)
+	}
+	resources := make([]any, 0, len(document.Resources))
+	for _, resource := range document.Resources {
+		selectors := make(map[string]any, len(resource.MatchLabels))
+		for name, value := range resource.MatchLabels {
+			selectors[name] = value
+		}
+		resources = append(resources, map[string]any{
+			"name": resource.Name, "display_name": resource.DisplayName,
+			"match_labels": selectors, "discovery_metric": resource.DiscoveryMetric,
+			"identity_labels": resource.IdentityLabels, "allowed_metrics": resource.AllowedMetrics,
+		})
+	}
+	alertSourceRefs := make([]any, 0, len(document.AlertSourceRefs))
+	for _, ref := range document.AlertSourceRefs {
+		alertSourceRefs = append(alertSourceRefs, ref)
 	}
 	alertSourceIDs := make([]any, 0, len(document.AlertSourceIDs))
 	for _, id := range document.AlertSourceIDs {
@@ -131,41 +169,14 @@ func (document BusinessSystemDocument) canonicalValue() map[string]any {
 	}
 	return map[string]any{
 		"system_key": document.SystemKey, "display_name": document.DisplayName,
+		"description": document.Description, "metrics_connection_ref": document.MetricsConnectionRef,
 		"metrics_connection_id": fmt.Sprint(document.MetricsConnectionID),
 		"enabled":               document.Enabled, "timezone": document.Timezone,
-		"alert_source_ids": alertSourceIDs, "alert_source_labels": alertSourceLabels,
-		"resource_discoveries": discoveries, "inspection_plans": plans,
+		"alert_source_refs": alertSourceRefs, "alert_source_ids": alertSourceIDs,
+		"alert_source_labels": alertSourceLabels, "resources": resources,
+		"discovery_refresh_interval_seconds": document.DiscoveryRefreshIntervalSeconds,
+		"resource_discoveries":               discoveries, "inspection_plans": plans,
 	}
-}
-
-// LabelContractDocument is the parse-once typed projection of a Label
-// Contract YAML.
-type LabelContractDocument struct {
-	BusinessSystemLabel string
-}
-
-func (document LabelContractDocument) canonicalValue() map[string]any {
-	return map[string]any{
-		"label_contract": map[string]any{
-			"business_system_label": document.BusinessSystemLabel,
-		},
-	}
-}
-
-// Digest returns the SHA-256 over the canonical JSON encoding of the parsed
-// Label Contract document.
-func (document LabelContractDocument) Digest() string {
-	return digestOfParsed(document.canonicalValue())
-}
-
-// CanonicalJSON returns the deterministic (sorted-key) JSON encoding of the
-// parsed projection persisted as contract_json.
-func (document LabelContractDocument) CanonicalJSON() string {
-	encoded, err := json.Marshal(document.canonicalValue())
-	if err != nil {
-		return "{}"
-	}
-	return string(encoded)
 }
 
 func digestOfParsed(value any) string {
@@ -178,160 +189,6 @@ func digestOfParsed(value any) string {
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
-}
-
-// ExtractBusinessSystem projects the schema-validated canonical value into
-// the typed document. The schema guarantees the shape; defensive nil guards
-// only prevent panics on impossible input.
-func ExtractBusinessSystem(value any) (BusinessSystemDocument, error) {
-	root, ok := value.(map[string]any)
-	if !ok {
-		return BusinessSystemDocument{}, fmt.Errorf("文档根必须是映射")
-	}
-	document := BusinessSystemDocument{
-		SystemKey:           rootString(root, "system_key"),
-		DisplayName:         rootString(root, "display_name"),
-		MetricsConnectionID: rootLocator(root, "metrics_connection_id"),
-		Enabled:             rootBool(root, "enabled"),
-		Timezone:            rootString(root, "timezone"),
-		AlertSourceIDs:      locatorSlice(root["alert_source_ids"]),
-		AlertSourceLabels:   stringMap(root["alert_source_labels"]),
-	}
-	if rawDiscoveries, ok := root["resource_discoveries"].([]any); ok {
-		for _, item := range rawDiscoveries {
-			entry, _ := item.(map[string]any)
-			if entry == nil {
-				continue
-			}
-			discovery := DiscoveryProjection{
-				Key:            rootString(entry, "key"),
-				DisplayName:    rootString(entry, "display_name"),
-				Selector:       rootString(entry, "selector"),
-				IdentityLabels: stringSlice(entry["identity_labels"]),
-			}
-			document.Discoveries = append(document.Discoveries, discovery)
-		}
-	}
-	if rawPlans, ok := root["inspection_plans"].([]any); ok {
-		for _, item := range rawPlans {
-			entry, _ := item.(map[string]any)
-			if entry == nil {
-				continue
-			}
-			plan := PlanProjection{Key: rootString(entry, "key"), DisplayName: rootString(entry, "display_name")}
-			if rawCron, present := entry["cron"]; present {
-				if text, isString := rawCron.(string); isString {
-					expression := text
-					plan.Cron = &expression
-				}
-			}
-			if rawChecks, ok := entry["checks"].([]any); ok {
-				for _, checkItem := range rawChecks {
-					check, _ := checkItem.(map[string]any)
-					if check == nil {
-						continue
-					}
-					projection := CheckProjection{
-						Key:              rootString(check, "key"),
-						DisplayName:      rootString(check, "display_name"),
-						AnalysisQuestion: rootString(check, "analysis_question"),
-						Kind:             rootString(check, "kind"),
-					}
-					switch projection.Kind {
-					case "promql":
-						query, _ := check["query"].(map[string]any)
-						projection.QueryMode = rootString(query, "mode")
-						projection.Expression = rootString(query, "expression")
-						projection.RangeSeconds = int64(rootInt(query, "range_seconds"))
-						projection.StepSeconds = int64(rootInt(query, "step_seconds"))
-					case "browser":
-						projection.JourneyID = rootString(check, "journey_id")
-						if params, ok := check["journey_params"].(map[string]any); ok {
-							projection.JourneyParams = params
-						} else {
-							// Absent params normalize to the empty object
-							// (frozen schema description, CFG-JOURNEY-003).
-							projection.JourneyParams = map[string]any{}
-						}
-					}
-					plan.Checks = append(plan.Checks, projection)
-				}
-			}
-			document.Plans = append(document.Plans, plan)
-		}
-	}
-	return document, nil
-}
-
-// ExtractLabelContract projects a schema-validated Label Contract value.
-func ExtractLabelContract(value any) (LabelContractDocument, error) {
-	root, ok := value.(map[string]any)
-	if !ok {
-		return LabelContractDocument{}, fmt.Errorf("文档根必须是映射")
-	}
-	contract, _ := root["label_contract"].(map[string]any)
-	if contract == nil {
-		return LabelContractDocument{}, fmt.Errorf("缺少 label_contract")
-	}
-	return LabelContractDocument{BusinessSystemLabel: rootString(contract, "business_system_label")}, nil
-}
-
-// SemanticChecks runs the schema-external validations on the canonical
-// business-system value (CFG-YAML-003): timezone, cron and same-scope key
-// uniqueness, plus the PromQL and Journey static checks. businessSystemLabel
-// comes from the explicitly targeted Label Contract version
-// (CFG-CONTRACT-003).
-func SemanticChecks(document BusinessSystemDocument, businessSystemLabel string) []FieldError {
-	var fields []FieldError
-	if _, err := time.LoadLocation(document.Timezone); err != nil {
-		fields = append(fields, FieldError{
-			Path:        "timezone",
-			Reason:      "时区必须是运行环境可解析的 IANA 名称（" + document.Timezone + " 无效）",
-			Remediation: "使用如 Asia/Shanghai 的 IANA 时区名",
-		})
-	}
-	discoveryKeys := map[string]bool{}
-	for index, discovery := range document.Discoveries {
-		path := fmt.Sprintf("resource_discoveries[%d]", index)
-		if discoveryKeys[discovery.Key] {
-			fields = append(fields, FieldError{Path: path + ".key", Reason: "discovery key 在同一配置内重复: " + discovery.Key, Remediation: "每个 discovery key 必须在本配置内唯一"})
-		}
-		discoveryKeys[discovery.Key] = true
-		fields = append(fields, ValidateDiscoverySelector(discovery.Selector, businessSystemLabel, document.SystemKey, path+".selector")...)
-		seenLabels := map[string]bool{}
-		for labelIndex, label := range discovery.IdentityLabels {
-			if seenLabels[label] {
-				fields = append(fields, FieldError{Path: fmt.Sprintf("%s.identity_labels[%d]", path, labelIndex), Reason: "身份 label 重复: " + label, Remediation: "删除重复的身份 label"})
-			}
-			seenLabels[label] = true
-		}
-	}
-	planKeys := map[string]bool{}
-	for planIndex, plan := range document.Plans {
-		path := fmt.Sprintf("inspection_plans[%d]", planIndex)
-		if planKeys[plan.Key] {
-			fields = append(fields, FieldError{Path: path + ".key", Reason: "plan key 在同一配置内重复: " + plan.Key, Remediation: "每个 plan key 必须在本配置内唯一"})
-		}
-		planKeys[plan.Key] = true
-		if plan.Cron != nil {
-			fields = append(fields, validateCron(*plan.Cron, path+".cron")...)
-		}
-		checkKeys := map[string]bool{}
-		for checkIndex, check := range plan.Checks {
-			checkPath := fmt.Sprintf("%s.checks[%d]", path, checkIndex)
-			if checkKeys[check.Key] {
-				fields = append(fields, FieldError{Path: checkPath + ".key", Reason: "check key 在所属 plan 内重复: " + check.Key, Remediation: "check key 只需在所属 plan 内唯一；重命名或删除重复项"})
-			}
-			checkKeys[check.Key] = true
-			switch check.Kind {
-			case "promql":
-				fields = append(fields, ValidateCheckExpression(check.Expression, businessSystemLabel, document.SystemKey, checkPath+".query.expression")...)
-			case "browser":
-				fields = append(fields, ValidateJourneyReferenceVersion(check.JourneyID, 0, "journey", check.JourneyParams, checkPath)...)
-			}
-		}
-	}
-	return fields
 }
 
 // validateCron enforces the standard five-field form before delegating
@@ -366,29 +223,6 @@ func rootString(root map[string]any, key string) string {
 	return ""
 }
 
-func rootBool(root map[string]any, key string) bool {
-	value, _ := root[key].(bool)
-	return value
-}
-
-func rootLocator(root map[string]any, key string) int64 {
-	value, _ := strconv.ParseInt(rootString(root, key), 10, 64)
-	return value
-}
-
-func locatorSlice(value any) []int64 {
-	items, _ := value.([]any)
-	result := make([]int64, 0, len(items))
-	for _, item := range items {
-		if text, ok := item.(string); ok {
-			if id, err := strconv.ParseInt(text, 10, 64); err == nil && id > 0 {
-				result = append(result, id)
-			}
-		}
-	}
-	return result
-}
-
 func stringMap(value any) map[string]string {
 	items, _ := value.(map[string]any)
 	result := make(map[string]string, len(items))
@@ -400,6 +234,9 @@ func stringMap(value any) map[string]string {
 	return result
 }
 
+// rootInt accepts the JSON decoder's integer representations used by the
+// current declaration extractor. Schema validation has already ruled out
+// fractional values before it reaches this projection.
 func rootInt(root map[string]any, key string) int64 {
 	if value, ok := root[key].(int64); ok {
 		return value

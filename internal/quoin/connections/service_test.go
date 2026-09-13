@@ -19,6 +19,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	providerledger "github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 )
 
@@ -125,6 +126,98 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 	}
 }
 
+// TestChatOnlyModelProviderProbeClosure reproduces the real capability-probe
+// persistence boundary for a provider that omits embeddings. It uses the
+// production ledger, so the typed child can close only after real chat-success
+// and chat-cancellation facts were persisted.
+func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := context.Background()
+	projection, _ := json.Marshal(map[string]any{
+		"type": "model_provider", "baseUrl": "https://api.example.com", "chatModelId": "chat-only",
+		"contextBudgetTokens": 1024, "maxOutputTokens": 256,
+	})
+	secret, _ := json.Marshal(map[string]string{"type": "model_provider", "apiKey": "test-api-key"})
+	provider, err := service.Create(ctx, connections.CreateInput{
+		Name: "chat-only-provider", Type: connections.TypeModelProvider,
+		NonSecretJSON: projection, Secret: secret, SecretPresent: true,
+	}, 1, "cmd-chat-only-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registerPlinthSlot(database); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := service.StartProbe(ctx, provider.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, chatGrantID, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "chat-only-boot", 1, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("bind probe: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(ctx, attemptID, "chat-only-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// A successful chat proves the provider can answer the fixed qualification
+	// calls. The separate cancelled chat is the persisted cancellation fact the
+	// child closure requires; no embedding call is fabricated for this config.
+	for callSeq, completion := range []providerledger.Completion{
+		{Outcome: "succeeded", ProviderRequestID: "req-chat", InputTokens: 1, OutputTokens: 1, TotalTokens: 2, FinishReason: "stop", ResponseJSON: `{"assistantText":"ready","finishReason":"stop","tool_calls":[]}`, ResponseDigest: fmt.Sprintf("%064x", 1), ResponseComplete: true},
+		{Outcome: "cancelled", FailureReason: "cancelled", ProviderRequestID: "req-cancel"},
+		// A failed optional action remains a real ledger fact. It must not
+		// prevent the chat-only child from closing with no embedding claim.
+		{Outcome: "failed", FailureReason: "invalid_response", ProviderRequestID: "req-failed-tool"},
+	} {
+		callID, err := providerledger.Begin(ctx, database, attemptID, chatGrantID, callSeq+1, 0, "chat", "chat-only", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), fmt.Sprintf("%064x", 4), fmt.Sprintf("%064x", 5), 1024, 256, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := providerledger.WriteInputLineage(ctx, database, callID, "chat", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), attemptID); err != nil {
+			t.Fatal(err)
+		}
+		if err := providerledger.Complete(ctx, database, attemptID, callID, completion); err != nil {
+			t.Fatal(err)
+		}
+	}
+	child := &connections.TypedChild{ModelProvider: &connections.ModelProviderProbeChild{
+		ChatModelID: "chat-only", ContextBudgetTokens: 1024, MaxOutputTokens: 256,
+		StreamingSupported: true, NativeToolCallingSupported: true, MultiToolCallSupported: true,
+		CancellationObserved: true, UsageObserved: true, RequestIDObserved: true,
+		EmbeddingSupported: false, DetailJSON: `{"kind":"model_provider","embeddingSupported":false}`,
+	}}
+	result := connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", 6), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
+	if err := service.CommitProbeResult(ctx, attemptID, "chat-only-boot", 1, result, child); err != nil {
+		t.Fatalf("chat-only probe must close with persisted chat and cancellation facts: %v", err)
+	}
+	var state, embeddingModelID string
+	var embeddingSupported int
+	if err := database.QueryRow(`SELECT a.state,COALESCE(m.embedding_model_id,''),m.embedding_supported FROM execution_attempts a JOIN connection_probe_results p ON p.attempt_id=a.id JOIN model_provider_connection_probe_results m ON m.probe_result_id=p.id WHERE a.id=?`, attemptID).Scan(&state, &embeddingModelID, &embeddingSupported); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Succeeded" || embeddingModelID != "" || embeddingSupported != 0 {
+		t.Fatalf("chat-only result persisted wrong: state=%s embedding=%q supported=%d", state, embeddingModelID, embeddingSupported)
+	}
+	var embeddings, failedChats int
+	if err := database.QueryRow(`SELECT COUNT(*),(SELECT COUNT(*) FROM model_calls WHERE attempt_id=? AND operation='chat' AND status='failed') FROM model_calls WHERE attempt_id=? AND operation='embedding'`, attemptID, attemptID).Scan(&embeddings, &failedChats); err != nil {
+		t.Fatal(err)
+	}
+	if embeddings != 0 || failedChats != 1 {
+		t.Fatalf("chat-only probe must retain actual failed chat but not manufacture embeddings: embeddings=%d failedChats=%d", embeddings, failedChats)
+	}
+	var probeResultID int64
+	if err := database.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeResultID); err != nil {
+		t.Fatal(err)
+	}
+	// A configured chat-only provider still needs the same persisted real-call
+	// qualification, but does not claim or require an embedding capability.
+	enabled, err := service.Enable(ctx, provider.Name, provider.RowVersion, probeResultID, 1)
+	if err != nil || !enabled.Enabled {
+		t.Fatalf("chat-only provider must enable from its exact passed probe: %v %+v", err, enabled)
+	}
+}
+
 func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 	service, database, _ := newService(t)
 	ctx := context.Background()
@@ -214,6 +307,39 @@ func passedMetricsProbe(t *testing.T, service *connections.Service, database *sq
 		t.Fatal(err)
 	}
 	return probeID
+}
+
+func TestRotationRequiresAndAcceptsFreshExactProbe(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := context.Background()
+	created, err := service.Create(ctx, thanosInput("first-secret"), 1, "cmd-"+fmt.Sprint(seq.Next()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldProbe := passedMetricsProbe(t, service, database, created, "boot-before-rotation", 1)
+	enabled, err := service.Enable(ctx, created.Name, created.RowVersion, oldProbe, 1)
+	if err != nil || !enabled.Enabled {
+		t.Fatalf("initial enable must accept an exact passed probe: %v %+v", err, enabled)
+	}
+
+	rotatedInput := thanosInput("replacement-secret")
+	rotatedInput.Name = created.Name
+	rotated, err := service.Rotate(ctx, created.Name, enabled.RowVersion, rotatedInput, 1, "cmd-"+fmt.Sprint(seq.Next()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Enabled || !rotated.RevalidationRequired {
+		t.Fatalf("rotated metrics connection must be disabled and require revalidation: %+v", rotated)
+	}
+	if _, err := service.Enable(ctx, rotated.Name, rotated.RowVersion, oldProbe, 1); !errors.Is(err, connections.ErrActiveConflict) {
+		t.Fatalf("a pre-rotation probe must not qualify the new pair, got %v", err)
+	}
+
+	freshProbe := passedMetricsProbe(t, service, database, rotated, "boot-after-rotation", 2)
+	revalidated, err := service.Enable(ctx, rotated.Name, rotated.RowVersion, freshProbe, 1)
+	if err != nil || !revalidated.Enabled || revalidated.RevalidationRequired {
+		t.Fatalf("fresh exact passed probe must restore the rotated connection: %v %+v", err, revalidated)
+	}
 }
 
 func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {

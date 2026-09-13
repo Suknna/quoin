@@ -268,13 +268,15 @@ type ProposedTool struct {
 // pending tool call (ARCH-TOOL-001). Grants are the non-secret connection
 // bindings frozen for observation tools (ARCH-INPUT-003).
 type ToolAuthorization struct {
-	ToolCallID         int64
-	ProviderIndex      uint32
-	ProviderToolCallID string
-	FailureMode        string
-	Grants             []ToolGrant
-	PreflightCode      string
-	PreflightDetail    string
+	ToolCallID               int64
+	ProviderIndex            uint32
+	ProviderToolCallID       string
+	FailureMode              string
+	Grants                   []ToolGrant
+	PreflightCode            string
+	PreflightDetail          string
+	ExecutionArgumentsJSON   []byte
+	ExecutionArgumentsDigest []byte
 }
 
 // CompleteCall seals one model call and creates the pending tool_calls rows
@@ -474,6 +476,18 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 				authorization.Grants = resolution.Grants
 				authorization.PreflightCode = resolution.PreflightCode
 				authorization.PreflightDetail = resolution.PreflightDetail
+				if item.definition.Name == "thanos_query" {
+					var executionJSON, executionDigest string
+					if err := conn.QueryRowContext(ctx, `SELECT arguments_json,arguments_digest FROM tool_call_execution_inputs WHERE tool_call_id=?`, toolCallID).Scan(&executionJSON, &executionDigest); err != nil {
+						return nil, fmt.Errorf("%w: normalized execution arguments missing: %v", ErrLedgerDenied, err)
+					}
+					digest, err := hex.DecodeString(executionDigest)
+					if err != nil || len(digest) != sha256.Size {
+						return nil, fmt.Errorf("%w: normalized execution arguments digest invalid", ErrLedgerDenied)
+					}
+					authorization.ExecutionArgumentsJSON = []byte(executionJSON)
+					authorization.ExecutionArgumentsDigest = digest
+				}
 			}
 			authorizations = append(authorizations, authorization)
 		}
@@ -559,9 +573,7 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 		}
 		// A zero-grant typed observation is the resolver's accepted routing
 		// preflight. It must reach the model without credential validation.
-		// Kubernetes grants are fenced independently at FetchCredentialGrant.
-		// Valid sibling mappings must still execute if another mapping is stale.
-		if grantCount != 0 && definition.Name != "kubernetes_read" {
+		if grantCount != 0 {
 			if service.ToolGrantValidator == nil {
 				return fmt.Errorf("%w: tool %s has no grant validator wired", ErrLedgerDenied, toolName)
 			}
@@ -603,26 +615,6 @@ func (service *Service) ExpectedToolResultSchema(ctx context.Context, toolCallID
 		return "", fmt.Errorf("%w: tool %q has no fixed result schema", ErrLedgerDenied, toolName)
 	}
 	return definition.ResultSchemaKind, nil
-}
-
-// ExpectedKubernetesOperation returns the fixed operation proposed in the
-// persisted tool arguments. The runtime uses it to prevent a supervisor from
-// relabelling a pod read as a broader discovery result.
-func (service *Service) ExpectedKubernetesOperation(ctx context.Context, toolCallID int64) (string, error) {
-	var arguments string
-	if err := service.db.QueryRowContext(ctx, `SELECT arguments_json FROM tool_calls WHERE id=? AND tool_name='kubernetes_read'`, toolCallID).Scan(&arguments); err != nil {
-		return "", err
-	}
-	var parsed struct {
-		Operation string `json:"operation"`
-	}
-	if err := json.Unmarshal([]byte(arguments), &parsed); err != nil || parsed.Operation == "" {
-		if err != nil {
-			return "", fmt.Errorf("decode kubernetes tool arguments: %w", err)
-		}
-		return "", fmt.Errorf("kubernetes tool arguments have no operation")
-	}
-	return parsed.Operation, nil
 }
 
 // ToolResult is the sealed outcome of one tool execution.
@@ -757,7 +749,7 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 // deployment connection per tool call; the model never selects it.
 func needsConnectionGrant(definition ToolDef) bool {
 	// Artifact tools are supervisor typed but do not carry external secrets.
-	return definition.Name == "thanos_query" || definition.Name == "kubernetes_read"
+	return definition.Name == "thanos_query"
 }
 
 // ToolCallView is the read projection of one tool call (used by the tool
@@ -817,5 +809,5 @@ func promptRendererVersionFor(agentVersion string) string {
 	if agentVersion == "investigation-v1" {
 		return "investigation-renderer-v1"
 	}
-	return "initial-analysis-renderer-v1"
+	return "initial-analysis-renderer-v2"
 }

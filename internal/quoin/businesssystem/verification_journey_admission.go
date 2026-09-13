@@ -53,9 +53,9 @@ func (service *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error)
 
 func admitNextJourneyChildOn(ctx context.Context, conn *sql.Conn, now string) (bool, error) {
 	var attemptID int64
-	var runID, configVersionID, contractID int64
+	var runID, configVersionID int64
 	err := conn.QueryRowContext(ctx, `
-		SELECT a.id, a.scope_id, t.config_version_id, t.label_contract_version_id
+		SELECT a.id, a.scope_id, t.config_version_id
 		FROM execution_attempts a
 		JOIN config_verification_runs t ON t.id=a.scope_id AND t.state='Running'
 		JOIN config_plans p ON p.config_version_id=t.config_version_id AND p.plan_key=a.plan_key
@@ -70,7 +70,7 @@ func admitNextJourneyChildOn(ctx context.Context, conn *sql.Conn, now string) (b
 			WHERE active.identity_id=i.id
 			  AND (active.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR active.stop_confirmed_at IS NULL)
 		  )
-		ORDER BY a.id LIMIT 1`).Scan(&attemptID, &runID, &configVersionID, &contractID)
+		ORDER BY a.id LIMIT 1`).Scan(&attemptID, &runID, &configVersionID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -121,7 +121,7 @@ func admitNextJourneyChildOn(ctx context.Context, conn *sql.Conn, now string) (b
 	input.Identity.ProfileGenerationID = identity.ProfileGenerationID.Int64
 	input.Identity.ProfileGeneration = identity.Generation.Int64
 	input.OperationID = &operationID
-	if err := freezeJourneyVerificationInput(ctx, conn, attemptID, configVersionID, contractID, input, now); err != nil {
+	if err := freezeJourneyVerificationInput(ctx, conn, attemptID, configVersionID, input, now); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -251,7 +251,7 @@ func loadBrowserIdentitySnapshot(ctx context.Context, conn *sql.Conn, systemID i
 
 // freezeJourneyVerificationInput seals the child's immutable
 // inspection_collection_v1 snapshot and its config/contract lineage.
-func freezeJourneyVerificationInput(ctx context.Context, conn *sql.Conn, attemptID, configVersionID, contractID int64, input journeyVerificationInput, now string) error {
+func freezeJourneyVerificationInput(ctx context.Context, conn *sql.Conn, attemptID, configVersionID int64, input journeyVerificationInput, now string) error {
 	canonical, err := marshalJourneyVerificationInput(input)
 	if err != nil {
 		return err
@@ -274,9 +274,7 @@ func freezeJourneyVerificationInput(ctx context.Context, conn *sql.Conn, attempt
 	if _, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id) VALUES(?,1,'config_version',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
 		return err
 	}
-	contractDigest := sha256.Sum256(fmt.Appendf(nil, "label-contract-version:%d", contractID))
-	_, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id) VALUES(?,2,'label_contract',?,?)`, snapshotID, hex.EncodeToString(contractDigest[:]), contractID)
-	return err
+	return nil
 }
 
 // rebuildJourneyVerificationInput reconstructs the frozen canonical bytes of

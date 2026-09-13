@@ -74,8 +74,7 @@ func (application *apiServer) upgradeDrainKnowledge() *appknowledge.Handler {
 
 func (application *apiServer) upgradeDrainConfig() *appconfig.Handler {
 	return &appconfig.Handler{
-		Systems:   application.systems,
-		Contracts: application.contracts,
+		Systems: application.systems,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
 			session, err := application.authenticateFull(ctx, cookie, "取消配置验证")
 			if err != nil {

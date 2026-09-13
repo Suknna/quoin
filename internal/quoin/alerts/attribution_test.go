@@ -1,11 +1,8 @@
 package alerts
 
-// Attribution tests (T17): occurrence business_system_id is written once,
-// inside the creating delivery transaction, under the then-active Label
-// Contract; missing/unknown label values route to 未归属 (NULL) and later
-// contract/system changes never rewrite historical attribution (CONTEXT
-//「标签契约」, DATA-ALERT-007 — alert_change_log admits no attribution change
-// type, so a mid-life flip is structurally unsupported).
+// Attribution tests cover the declaration-owned first-observation decision.
+// Only an enabled business system with a pointer-selected published declaration
+// is eligible; later changes cannot rewrite the historical decision.
 
 import (
 	"context"
@@ -18,38 +15,8 @@ import (
 	"time"
 )
 
-const activeContractProjection = `{"label_contract":{"business_system_label":"business_system"}}`
-
-// activateContract drives the real activation INSERT (items_json=[]) through
-// the frozen trigger so the state pointer moves exactly like production.
-func activateContract(t *testing.T, service *Service, version int64, projection string) {
-	t.Helper()
-	ctx := context.Background()
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := conn.ExecContext(ctx, `INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,row_version,created_at) VALUES(?,?,?,?,?,'v1','draft',1,?)`,
-		version, "label_contract: fixture", projection, strings.Repeat("a", 64), "v1", now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO label_contract_activations(contract_id,expected_target_row_version,expected_state_row_version,expected_current_contract_id,items_json,created_at)
-		SELECT id,1,1,NULL,'[]',? FROM label_contracts WHERE version=?`, now, version); err != nil {
-		t.Fatalf("activation insert: %v", err)
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// seedBusinessSystem creates the Disabled aggregate row the frozen insert
-// trigger demands; attribution matches by stable key regardless of enabled.
+// seedBusinessSystem satisfies the schema's fresh-declaration invariant. The
+// pointer update in publishAttributionConfig enables it with its publication.
 func seedBusinessSystem(t *testing.T, service *Service, key string) {
 	t.Helper()
 	if _, err := service.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`, key, key, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -102,13 +69,19 @@ func seedAttributionMetricsConnection(t *testing.T, service *Service) int64 {
 // publishAttributionConfig creates the smallest valid immutable configuration
 // version and advances the real current-version pointer. Attribution must read
 // this pointer, not a draft or an old published row.
-func publishAttributionConfig(t *testing.T, service *Service, key string, sourceIDs []int64, conditions map[string]string) {
+func publishAttributionConfig(t *testing.T, service *Service, key string, enabled bool, sourceIDs []int64, conditions map[string]string) {
 	t.Helper()
-	var systemID, contractID int64
-	if err := service.db.QueryRow(`SELECT id FROM business_systems WHERE key=?`, key).Scan(&systemID); err != nil {
-		t.Fatal(err)
+	// Empty source references are a real declaration state: they must never
+	// silently become source 1, because attribution requires an explicit source.
+	if len(conditions) == 0 {
+		conditions = map[string]string{"business_system": key}
 	}
-	if err := service.db.QueryRow(`SELECT current_contract_id FROM label_contract_state WHERE id=1`).Scan(&contractID); err != nil {
+	enabledValue := 0
+	if enabled {
+		enabledValue = 1
+	}
+	var systemID int64
+	if err := service.db.QueryRow(`SELECT id FROM business_systems WHERE key=?`, key).Scan(&systemID); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -117,7 +90,7 @@ func publishAttributionConfig(t *testing.T, service *Service, key string, source
 	if err := service.db.QueryRow(`SELECT COALESCE(MAX(version_seq), 0) + 1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
 		t.Fatal(err)
 	}
-	insert, err := service.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,'draft','fixture','fixture','v1',?,?,'fixture',?,? ,?,?,?,0,'UTC')`, systemID, versionSeq, contractID, strings.Repeat("b", 64), strings.Repeat("c", 64), now, key, key, metricsConnectionID)
+	insert, err := service.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,declaration_json,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,'draft','fixture','{}','fixture','v1',NULL,?,'fixture',?,? ,?,?,?,?,?)`, systemID, versionSeq, strings.Repeat("b", 64), strings.Repeat("c", 64), now, key, key, metricsConnectionID, enabledValue, "UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +108,7 @@ func publishAttributionConfig(t *testing.T, service *Service, key string, source
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.db.Exec(`UPDATE business_systems SET display_name=?, enabled=0, timezone='UTC', current_config_version_id=?, row_version=row_version+1 WHERE id=?`, key, versionID, systemID); err != nil {
+	if _, err := service.db.Exec(`UPDATE business_systems SET display_name=?, enabled=?, timezone='UTC', current_config_version_id=?, row_version=row_version+1 WHERE id=?`, key, enabledValue, versionID, systemID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -182,10 +155,10 @@ func TestAttributionRoutesUnderActiveContract(t *testing.T) {
 	service, _, done := newTestService(t)
 	defer done()
 	ctx := context.Background()
-	seedSource(t, service, ctx, "src")
+	sourceID, _ := seedSource(t, service, ctx, "src")
 	seedBusinessSystem(t, service, "payments")
 
-	// Before any contract is active everything routes to 未归属.
+	// Attribution is entirely declaration-owned; no global contract is needed.
 	unattributed := deliverWebhook(t, service, "t17-pre-contract", map[string]string{
 		"alertname": "PreContract", "business_system": "payments",
 	}, "2026-09-01T10:00:00Z")
@@ -193,19 +166,18 @@ func TestAttributionRoutesUnderActiveContract(t *testing.T) {
 		t.Fatalf("pre-contract occurrence must stay unattributed, got %d", *id)
 	}
 
-	activateContract(t, service, 1, activeContractProjection)
 	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", nil, nil)
+	publishAttributionConfig(t, service, "payments", true, []int64{sourceID}, map[string]string{"service": "payments"})
 
-	// Known value → attributed; unknown value and missing label → 未归属.
+	// Exact source+labels matches attribute; unrelated labels remain unattributed.
 	known := deliverWebhook(t, service, "t17-known", map[string]string{
-		"alertname": "Known", "business_system": "payments",
+		"alertname": "Known", "service": "payments",
 	}, "2026-09-01T10:01:00Z")
 	if id := occurrenceBusinessID(t, service, known.Occurrences[0].ID); id == nil || *id != 1 {
 		t.Fatalf("known value must attribute to business system 1, got %v", id)
 	}
 	unknownValue := deliverWebhook(t, service, "t17-unknown", map[string]string{
-		"alertname": "Unknown", "business_system": "not-a-system",
+		"alertname": "Unknown", "service": "not-a-system",
 	}, "2026-09-01T10:02:00Z")
 	if id := occurrenceBusinessID(t, service, unknownValue.Occurrences[0].ID); id != nil {
 		t.Fatalf("unknown value must stay unattributed, got %d", *id)
@@ -218,16 +190,80 @@ func TestAttributionRoutesUnderActiveContract(t *testing.T) {
 	}
 }
 
-func TestAttributionRestrictsTheContractSelectedBusiness(t *testing.T) {
+func TestAttributionEmptySourceReferencesNeverMatch(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	seedSource(t, service, ctx, "declared-empty-source")
+	seedBusinessSystem(t, service, "payments")
+	installAttributionProjections(t, service)
+	publishAttributionConfig(t, service, "payments", true, []int64{}, map[string]string{"service": "payments"})
+
+	result := deliverWebhook(t, service, "empty-source-refs", map[string]string{
+		"alertname": "NoSource", "service": "payments",
+	}, "2026-09-01T12:30:00Z")
+	if id := occurrenceBusinessID(t, service, result.Occurrences[0].ID); id != nil {
+		t.Fatalf("empty source references must not attribute, got %d", *id)
+	}
+	detail, err := service.GetOccurrence(ctx, result.Occurrences[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Attribution == nil || detail.Attribution.Status != "unattributed" || detail.Attribution.Reason != `{"code":"source_mismatch"}` {
+		t.Fatalf("empty source diagnostics=%+v, want source mismatch", detail.Attribution)
+	}
+}
+
+func TestAttributionDisabledBusinessCannotMatch(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, _ := seedSource(t, service, ctx, "disabled-business-source")
+	seedBusinessSystem(t, service, "payments")
+	installAttributionProjections(t, service)
+	publishAttributionConfig(t, service, "payments", false, []int64{sourceID}, map[string]string{"service": "payments"})
+
+	result := deliverWebhook(t, service, "disabled-business", map[string]string{
+		"alertname": "DisabledBusiness", "service": "payments",
+	}, "2026-09-01T12:45:00Z")
+	if id := occurrenceBusinessID(t, service, result.Occurrences[0].ID); id != nil {
+		t.Fatalf("disabled business must not attribute, got %d", *id)
+	}
+}
+
+func TestPersistAttributionFailsWhenDiagnosticTableIsMissing(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	if _, err := service.db.Exec(`DROP TABLE alert_occurrence_attributions`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := service.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	err = persistAttribution(ctx, conn, 1, 1, 1, attributionDecision{
+		Status:                 "unattributed",
+		CandidateSystemIDsJSON: "[]",
+		CandidateConfigIDsJSON: "[]",
+		ReasonJSON:             `{"code":"source_mismatch"}`,
+	}, time.Now().UTC().Format(time.RFC3339Nano))
+	if err == nil {
+		t.Fatal("missing attribution diagnostic table must reject persistence")
+	}
+}
+
+func TestAttributionRestrictsTheDeclaredBusiness(t *testing.T) {
 	service, _, done := newTestService(t)
 	defer done()
 	ctx := context.Background()
 	matchingSourceID, matchingCredentialID := seedSource(t, service, ctx, "matching-source")
 	otherSourceID, otherCredentialID := seedSource(t, service, ctx, "other-source")
 	seedBusinessSystem(t, service, "payments")
-	activateContract(t, service, 1, activeContractProjection)
 	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", []int64{matchingSourceID}, map[string]string{"environment": "production", "team": "payments"})
+	publishAttributionConfig(t, service, "payments", true, []int64{matchingSourceID}, map[string]string{"environment": "production", "team": "payments"})
 
 	deliverFrom := func(relayID string, sourceID, credentialID int64, labels map[string]string, startsAt string) *int64 {
 		t.Helper()
@@ -238,9 +274,9 @@ func TestAttributionRestrictsTheContractSelectedBusiness(t *testing.T) {
 		return occurrenceBusinessID(t, service, result.Occurrences[0].ID)
 	}
 
-	// A configured source does not assign alerts without the Label Contract's
-	// mandatory business label, and every configured condition must match.
-	if id := deliverFrom("source-alone", matchingSourceID, matchingCredentialID, map[string]string{"alertname": "SourceOnly", "environment": "production", "team": "payments"}, "2026-09-01T13:00:00Z"); id != nil {
+	// A configured source does not assign alerts without every declared exact
+	// label condition; the declaration itself owns the complete rule.
+	if id := deliverFrom("source-alone", matchingSourceID, matchingCredentialID, map[string]string{"alertname": "SourceOnly", "environment": "production", "team": "other"}, "2026-09-01T13:00:00Z"); id != nil {
 		t.Fatalf("source alone must not attribute, got %d", *id)
 	}
 	if id := deliverFrom("wrong-source", otherSourceID, otherCredentialID, map[string]string{"alertname": "WrongSource", "business_system": "payments", "environment": "production", "team": "payments"}, "2026-09-01T13:01:00Z"); id != nil {
@@ -261,29 +297,66 @@ func TestAttributionUsesOnlyCurrentPublishedRestrictions(t *testing.T) {
 	firstSourceID, firstCredentialID := seedSource(t, service, ctx, "first-source")
 	secondSourceID, secondCredentialID := seedSource(t, service, ctx, "second-source")
 	seedBusinessSystem(t, service, "payments")
-	activateContract(t, service, 1, activeContractProjection)
 	installAttributionProjections(t, service)
 
-	// The initial unrestricted declaration attributes through any source. Its
+	// The initial explicit declaration attributes through its listed source. Its
 	// attribution is a fact even after the new declaration becomes current.
-	publishAttributionConfig(t, service, "payments", nil, nil)
+	publishAttributionConfig(t, service, "payments", true, []int64{firstSourceID}, nil)
 	first := deliverWebhookFrom(t, service, "before-restriction", firstSourceID, firstCredentialID, map[string]string{"alertname": "Before", "business_system": "payments"}, "2026-09-01T14:00:00Z")
 	if id := occurrenceBusinessID(t, service, first.Occurrences[0].ID); id == nil {
 		t.Fatal("unrestricted current declaration must attribute")
 	}
 
 	// Only the pointer-selected published version may govern later first
-	// observations. Empty source refs leave sources unrestricted, while the
-	// exact condition still narrows matches.
-	publishAttributionConfig(t, service, "payments", nil, map[string]string{"environment": "production"})
+	// observations. The new declaration has an explicit source reference and
+	// its exact label condition narrows first observations.
+	publishAttributionConfig(t, service, "payments", true, []int64{secondSourceID}, map[string]string{"environment": "production"})
 	if id := occurrenceBusinessID(t, service, first.Occurrences[0].ID); id == nil {
 		t.Fatal("later declaration must not rewrite historical attribution")
 	}
-	if result := deliverWebhookFrom(t, service, "empty-refs-label-mismatch", secondSourceID, secondCredentialID, map[string]string{"alertname": "Mismatch", "business_system": "payments", "environment": "staging"}, "2026-09-01T14:01:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) != nil {
-		t.Fatal("empty refs must not bypass configured exact labels")
+	if result := deliverWebhookFrom(t, service, "explicit-source-label-mismatch", secondSourceID, secondCredentialID, map[string]string{"alertname": "Mismatch", "business_system": "payments", "environment": "staging"}, "2026-09-01T14:01:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) != nil {
+		t.Fatal("explicit source must not bypass configured exact labels")
 	}
-	if result := deliverWebhookFrom(t, service, "empty-refs-label-match", secondSourceID, secondCredentialID, map[string]string{"alertname": "Match", "business_system": "payments", "environment": "production"}, "2026-09-01T14:02:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) == nil {
-		t.Fatal("empty refs must accept any source when exact labels match")
+	if result := deliverWebhookFrom(t, service, "explicit-source-label-match", secondSourceID, secondCredentialID, map[string]string{"alertname": "Match", "business_system": "payments", "environment": "production"}, "2026-09-01T14:02:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) == nil {
+		t.Fatal("explicit source and exact labels must attribute")
+	}
+}
+
+func TestAttributionConflictFreezesCandidatesAndDiagnostics(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, _ := seedSource(t, service, ctx, "shared-source")
+	seedBusinessSystem(t, service, "payments")
+	seedBusinessSystem(t, service, "billing")
+	installAttributionProjections(t, service)
+	publishAttributionConfig(t, service, "payments", true, []int64{sourceID}, map[string]string{"environment": "production"})
+	publishAttributionConfig(t, service, "billing", true, []int64{sourceID}, map[string]string{"environment": "production"})
+
+	conflict := deliverWebhook(t, service, "overlap", map[string]string{
+		"alertname": "Shared", "environment": "production",
+	}, "2026-09-01T15:00:00Z")
+	if id := occurrenceBusinessID(t, service, conflict.Occurrences[0].ID); id != nil {
+		t.Fatalf("overlapping declarations must not assign a business, got %d", *id)
+	}
+	detail, err := service.GetOccurrence(ctx, conflict.Occurrences[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Attribution == nil || detail.Attribution.Status != "conflict" || detail.Attribution.CandidateSystemIDs != "[1,2]" {
+		t.Fatalf("conflict diagnostics not frozen: %+v", detail.Attribution)
+	}
+	var beforeSystems, beforeVersions, beforeReason string
+	if err := service.db.QueryRow(`SELECT candidate_system_ids_json,candidate_config_version_ids_json,reason_json FROM alert_occurrence_attributions WHERE occurrence_id=?`, conflict.Occurrences[0].ID).Scan(&beforeSystems, &beforeVersions, &beforeReason); err != nil {
+		t.Fatal(err)
+	}
+	publishAttributionConfig(t, service, "billing", true, []int64{sourceID}, map[string]string{"environment": "billing-only"})
+	var afterSystems, afterVersions, afterReason string
+	if err := service.db.QueryRow(`SELECT candidate_system_ids_json,candidate_config_version_ids_json,reason_json FROM alert_occurrence_attributions WHERE occurrence_id=?`, conflict.Occurrences[0].ID).Scan(&afterSystems, &afterVersions, &afterReason); err != nil {
+		t.Fatal(err)
+	}
+	if beforeSystems != afterSystems || beforeVersions != afterVersions || beforeReason != afterReason {
+		t.Fatalf("configuration change rewrote frozen conflict: before=(%s,%s,%s) after=(%s,%s,%s)", beforeSystems, beforeVersions, beforeReason, afterSystems, afterVersions, afterReason)
 	}
 }
 
@@ -301,10 +374,9 @@ func TestAttributionIsWriteOnceAtCreation(t *testing.T) {
 		t.Fatalf("no business system exists yet; must be unattributed, got %d", *id)
 	}
 
-	activateContract(t, service, 1, activeContractProjection)
 	seedBusinessSystem(t, service, "payments")
 	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", nil, nil)
+	publishAttributionConfig(t, service, "payments", true, []int64{1}, nil)
 
 	// A repeat firing for the SAME occurrence must not re-attribute: the
 	// frozen alert_change_log CHECK admits only created|state_changed, so a
@@ -335,10 +407,9 @@ func TestSnapshotFilterAndDetailKey(t *testing.T) {
 	seedSource(t, service, ctx, "src")
 	seedBusinessSystem(t, service, "payments")
 	seedBusinessSystem(t, service, "billing")
-	activateContract(t, service, 1, activeContractProjection)
 	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", nil, nil)
-	publishAttributionConfig(t, service, "billing", nil, nil)
+	publishAttributionConfig(t, service, "payments", true, []int64{1}, nil)
+	publishAttributionConfig(t, service, "billing", true, []int64{1}, nil)
 
 	deliverWebhook(t, service, "t17-pay-1", map[string]string{"alertname": "Pay1", "business_system": "payments"}, "2026-09-01T12:00:00Z")
 	deliverWebhook(t, service, "t17-bill-1", map[string]string{"alertname": "Bill1", "business_system": "billing"}, "2026-09-01T12:01:00Z")

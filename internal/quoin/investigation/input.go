@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/quoin/config"
 )
 
 // Input is the rendered investigation_v1 snapshot: the active-branch
@@ -23,9 +25,18 @@ import (
 // chat contract (ARCH-AGENT-003: the worker renders these values, never
 // selects them).
 type Input struct {
-	Messages      []MessageInput   `json:"messages"`
-	Sources       []RenderedSource `json:"sources"`
-	ModelContract ModelContract    `json:"modelContract"`
+	Messages        []MessageInput           `json:"messages"`
+	Sources         []RenderedSource         `json:"sources"`
+	BusinessContext *RenderedBusinessContext `json:"businessContext,omitempty"`
+	ModelContract   ModelContract            `json:"modelContract"`
+}
+
+// RenderedBusinessContext exposes the frozen declaration's resource choices;
+// credentials, connection routing and mandatory labels remain in Quoin.
+type RenderedBusinessContext struct {
+	SystemKey       string                      `json:"systemKey"`
+	ConfigVersionID string                      `json:"configVersionId"`
+	Resources       []config.ResourceProjection `json:"resources"`
 }
 
 // MessageInput is one active-branch message of the turn; user messages
@@ -163,7 +174,11 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	if err != nil {
 		return nil, err
 	}
-	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, probeResultID)
+	businessContext, err := businessContextForAttempt(ctx, service.db, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, businessContext, probeResultID)
 }
 
 // attemptUserMessage resolves the user message an attempt answers. Send
@@ -200,7 +215,7 @@ func attemptUserMessage(ctx context.Context, queries queryer, attemptID int64) (
 // investigation's durable rows; the message set freezes at the turn's
 // cutoff seq (create/send/retry pass their own user message, dispatch
 // rebuilds resolve it through attemptUserMessage).
-func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq, probeResultID int64) ([]byte, error) {
+func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, probeResultID int64) ([]byte, error) {
 	var input Input
 	rows, err := queries.QueryContext(ctx, `
 		SELECT id, role, content FROM investigation_messages
@@ -236,6 +251,13 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 		return nil, err
 	}
 	input.Sources = sources
+	if businessContext != nil {
+		input.BusinessContext = &RenderedBusinessContext{
+			SystemKey:       businessContext.SystemKey,
+			ConfigVersionID: strconv.FormatInt(businessContext.ConfigVersionID, 10),
+			Resources:       append([]config.ResourceProjection(nil), businessContext.Resources...),
+		}
+	}
 	contract := ModelContract{}
 	if err := queries.QueryRowContext(ctx, `
 		SELECT chat_model_id, context_budget_tokens, max_output_tokens

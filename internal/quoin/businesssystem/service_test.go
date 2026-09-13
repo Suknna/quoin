@@ -19,49 +19,51 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/connections"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	_ "modernc.org/sqlite"
 )
 
-const activeContractYAML = "label_contract:\n  business_system_label: business_system\n"
-
-const validSystemYAML = `system_key: payments
-display_name: 支付系统
-metrics_connection_id: "1"
-enabled: false
-timezone: Asia/Shanghai
-resource_discoveries:
-  - key: web-pods
-    display_name: Web Pods
-    selector: 'up{business_system="payments", job="web"}'
-    identity_labels: [job, instance]
-inspection_plans:
-  - key: daily-check
-    display_name: Daily Check
-    cron: "30 8 * * *"
-    checks:
-      - key: up-instant
-        display_name: Up Instant
-        analysis_question: 当前可用吗？
-        kind: promql
-        query:
-          mode: instant
-          expression: 'up{business_system="payments"}'
-      - key: latency-range
-        display_name: Latency Range
-        analysis_question: 时延趋势？
-        kind: promql
-        query:
-          mode: range
-          expression: 'rate(http_requests_total{business_system="payments"}[5m])'
-          range_seconds: 3600
-          step_seconds: 60
+const validSystemYAML = `apiVersion: quoin/v1
+kind: BusinessSystem
+metadata:
+  name: payments
+  displayName: 支付系统
+  description: 支付业务
+spec:
+  metrics:
+    connectionRef: main-thanos
+    matchLabels: {business_system: payments}
+    resources:
+      - name: web-pods
+        displayName: Web Pods
+        matchLabels: {job: web}
+        discoveryMetric: up
+        identityLabels: [job, instance]
+        allowedMetrics: [up, http_requests_total]
+  alerts:
+    sourceRefs: []
+    matchLabels: {}
+  inspections:
+    - name: daily-check
+      displayName: Daily Check
+      schedule: "30 8 * * *"
+      timezone: Asia/Shanghai
+      checks:
+        - name: up-instant
+          resourceRef: web-pods
+          expression: up
+          question: 当前可用吗？
+        - name: latency-range
+          resourceRef: web-pods
+          expression: rate(http_requests_total[5m])
+          question: 时延趋势？
+          queryMode: range
+          rangeSeconds: 3600
+          stepSeconds: 60
 `
 
 type harness struct {
 	db        *sql.DB
 	systems   *Service
-	contracts *labelcontract.Service
 	principal int64
 }
 
@@ -77,24 +79,13 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	seedPlinthRuntime(t, db, now)
 	seedThanosExecutionPath(t, db, now)
 	seedLintelRuntime(t, db, now)
-	contracts := labelcontract.NewService(db)
-	// Contract v1 active through the real zero-system activation command.
-	if _, err := contracts.CreateDraft(context.Background(), 1, "seed-contract-0001", []byte(activeContractYAML), config.Limits{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := contracts.Activate(context.Background(), 1, "seed-activate-0001", labelcontract.ActivateInput{ContractVersion: 1, ExpectedStateRowVersion: 1, ExpectedTargetRowVersion: 1}); err != nil {
-		t.Fatal(err)
-	}
-	return &harness{db: db, systems: NewService(db), contracts: contracts, principal: 1}
+	return &harness{db: db, systems: NewService(db), principal: 1}
 }
 
 // seedThanosExecutionPath supplies only the non-secret frozen database facts
@@ -177,14 +168,27 @@ func seedPlinthRuntime(t *testing.T, db *sql.DB, now string) {
 	}
 }
 
-func (h *harness) upload(t *testing.T, body string, contractVersion int64, commandID string) (ConfigVersionDetail, error) {
+func (h *harness) upload(t *testing.T, body string, arguments ...any) (ConfigVersionDetail, error) {
 	t.Helper()
-	return h.systems.Upload(context.Background(), h.principal, commandID, UploadInput{YAMLBody: []byte(body), TargetLabelContractVersion: contractVersion}, config.Limits{})
+	// The final value is always the command ID. An obsolete positional version
+	// remains accepted for shared test migration but never affects the upload.
+	commandID, ok := arguments[len(arguments)-1].(string)
+	if !ok {
+		t.Fatalf("upload command ID must be a string: %#v", arguments)
+	}
+	return h.systems.Upload(context.Background(), h.principal, commandID, UploadInput{YAMLBody: []byte(body)}, config.Limits{})
 }
 
-func (h *harness) mustUpload(t *testing.T, body string, contractVersion int64, commandID string) ConfigVersionDetail {
+func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) ConfigVersionDetail {
 	t.Helper()
-	detail, err := h.upload(t, body, contractVersion, commandID)
+	// The final value is always the command ID. Accept the obsolete positional
+	// version only while shared tests are migrated; it is never persisted or
+	// used to synthesize a global Label Contract.
+	commandID, ok := arguments[len(arguments)-1].(string)
+	if !ok {
+		t.Fatalf("upload command ID must be a string: %#v", arguments)
+	}
+	detail, err := h.upload(t, body, commandID)
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -193,19 +197,26 @@ func (h *harness) mustUpload(t *testing.T, body string, contractVersion int64, c
 
 func TestFirstUploadCreatesDisabledSystemWithDraft(t *testing.T) {
 	h := newHarness(t)
-	detail := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0001")
+	detail := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0001")
 	if detail.VersionSeq != 1 || detail.State != "draft" || detail.PublishedAt != nil {
 		t.Fatalf("first draft wrong: %#v", detail)
 	}
-	if detail.SystemKey != "payments" || detail.Timezone != "Asia/Shanghai" || detail.MetricsConnectionID != "1" {
-		t.Fatalf("root projection wrong: %#v", detail)
+	if detail.SystemKey != "payments" || detail.MetricsConnectionID != "1" || detail.LabelContractVersionID != "" {
+		t.Fatalf("declaration root projection wrong: %#v", detail)
 	}
-	if len(detail.Discoveries) != 1 || len(detail.Plans) != 1 || len(detail.Plans[0].Checks) != 2 {
-		t.Fatalf("typed projections missing: %#v", detail)
+	var declaration struct {
+		Description string `json:"description"`
+		Resources   []struct {
+			Name string `json:"name"`
+		} `json:"resources"`
 	}
-	check := detail.Plans[0].Checks[1]
-	if check.QueryMode != "range" || check.RangeSeconds == nil || *check.RangeSeconds != 3600 {
-		t.Fatalf("range check projection wrong: %#v", check)
+	var declarationJSON string
+	if err := h.db.QueryRow(`SELECT declaration_json FROM business_system_config_versions WHERE id=?`, detail.ID).Scan(&declarationJSON); err != nil || json.Unmarshal([]byte(declarationJSON), &declaration) != nil || declaration.Description != "支付业务" || len(declaration.Resources) != 1 {
+		t.Fatalf("compiled declaration missing: err=%v json=%s value=%#v", err, declarationJSON, declaration)
+	}
+	var scopes int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM config_resource_scopes WHERE config_version_id=?`, detail.ID).Scan(&scopes); err != nil || scopes != 1 {
+		t.Fatalf("resource scopes missing: count=%d err=%v", scopes, err)
 	}
 	var enabled int
 	var timezone sql.NullString
@@ -221,18 +232,17 @@ func TestFirstUploadCreatesDisabledSystemWithDraft(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT yaml_body FROM business_system_config_versions WHERE id=?`, detail.ID).Scan(&yamlBody); err != nil || yamlBody != validSystemYAML {
 		t.Fatalf("yaml body must be verbatim: %v", err)
 	}
-	var checks int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM config_checks`).Scan(&checks)
-	if checks != 2 {
-		t.Fatalf("check rows wrong: %d", checks)
+	var allowedMetrics string
+	if err := h.db.QueryRow(`SELECT allowed_metrics_json FROM config_resource_scopes WHERE config_version_id=? AND resource_key='web-pods'`, detail.ID).Scan(&allowedMetrics); err != nil || allowedMetrics != `["up","http_requests_total"]` {
+		t.Fatalf("compiled scope whitelist wrong: value=%s err=%v", allowedMetrics, err)
 	}
 }
 
 func TestSecondUploadAppendsDraft(t *testing.T) {
 	h := newHarness(t)
-	h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0002")
-	modified := strings.Replace(validSystemYAML, "display_name: 支付系统", "display_name: 支付平台", 1)
-	detail := h.mustUpload(t, modified, 1, "cmd-upload-0003")
+	h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0002")
+	modified := strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 支付平台", 1)
+	detail := h.mustUpload(t, modified, 0, "cmd-upload-0003")
 	if detail.VersionSeq != 2 || detail.DisplayName != "支付平台" {
 		t.Fatalf("second draft wrong: %#v", detail)
 	}
@@ -243,24 +253,16 @@ func TestSecondUploadAppendsDraft(t *testing.T) {
 	}
 }
 
-func TestUploadValidatesAgainstTargetContract(t *testing.T) {
+func TestUploadValidatesDeclarationScopeAndCatalog(t *testing.T) {
 	h := newHarness(t)
-	// Missing target contract version.
-	_, err := h.upload(t, validSystemYAML, 99, "cmd-upload-x1")
+	// Scope validation is declaration-local; it must not query a Label Contract.
+	badMetric := strings.Replace(validSystemYAML, `expression: up`, `expression: forbidden_metric`, 1)
+	_, err := h.upload(t, badMetric, 0, "cmd-upload-x1")
 	var validation *config.ValidationError
-	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "targetLabelContractVersion") {
-		t.Fatalf("missing target must be a field error, got %v", err)
+	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "expression") {
+		t.Fatalf("scope violation must be a field error, got %v", err)
 	}
-	// Ownership violations carry YAML paths.
-	badSelector := strings.Replace(validSystemYAML, `selector: 'up{business_system="payments", job="web"}'`, "selector: 'up{job=\"web\"}'", 1)
-	_, err = h.upload(t, badSelector, 1, "cmd-upload-x2")
-	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "resource_discoveries[0].selector") {
-		t.Fatalf("ownership failure must point at the selector: %v", err)
-	}
-	// Wrong optional catalog digest.
-	_, err = h.systems.Upload(context.Background(), 1, "cmd-upload-x3", UploadInput{
-		YAMLBody: []byte(validSystemYAML), TargetLabelContractVersion: 1, JourneyCatalogDigest: strings.Repeat("0", 64),
-	}, config.Limits{})
+	_, err = h.systems.Upload(context.Background(), 1, "cmd-upload-x3", UploadInput{YAMLBody: []byte(validSystemYAML), JourneyCatalogDigest: strings.Repeat("0", 64)}, config.Limits{})
 	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "journeyCatalogDigest") {
 		t.Fatalf("wrong catalog digest must be a field error: %v", err)
 	}
@@ -271,28 +273,9 @@ func TestUploadValidatesAgainstTargetContract(t *testing.T) {
 	}
 }
 
-func TestUploadRetiredContractTargetRejected(t *testing.T) {
-	h := newHarness(t)
-	// Activate a second contract (carrying the current pointer precondition)
-	// so contract v1 becomes retired.
-	if _, err := h.contracts.CreateDraft(context.Background(), 1, "seed-contract-0002", []byte("label_contract:\n  business_system_label: biz\n"), config.Limits{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.contracts.Activate(context.Background(), 1, "seed-activate-0002", labelcontract.ActivateInput{
-		ContractVersion: 2, ExpectedStateRowVersion: 2, ExpectedTargetRowVersion: 1, ExpectedCurrentContractID: ptrInt64(1),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := h.upload(t, validSystemYAML, 1, "cmd-upload-x4")
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Reason, "retired") {
-		t.Fatalf("retired target must be rejected: %v", err)
-	}
-}
-
 func TestPublishSwitchesPointerAndProjection(t *testing.T) {
 	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0010")
+	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0010")
 	detail, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0010", "payments", mustID(t, draft.ID), nil)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
@@ -300,7 +283,7 @@ func TestPublishSwitchesPointerAndProjection(t *testing.T) {
 	if detail.CurrentConfigVersionID == nil || *detail.CurrentConfigVersionID != draft.ID {
 		t.Fatalf("current pointer wrong: %#v", detail)
 	}
-	if detail.RowVersion != 2 || detail.Enabled || detail.Timezone == nil || *detail.Timezone != "Asia/Shanghai" {
+	if detail.RowVersion != 2 || !detail.Enabled || detail.Timezone == nil || *detail.Timezone != "UTC" {
 		t.Fatalf("root projection must sync from the published version: %#v", detail)
 	}
 	// The version derives published with a one-time published_at; the
@@ -326,8 +309,8 @@ func TestPublishSwitchesPointerAndProjection(t *testing.T) {
 
 func TestPublishEnablesSystemThroughProjection(t *testing.T) {
 	h := newHarness(t)
-	enabled := strings.Replace(validSystemYAML, "enabled: false", "enabled: true", 1)
-	draft := h.mustUpload(t, enabled, 1, "cmd-upload-0011")
+	enabled := validSystemYAML
+	draft := h.mustUpload(t, enabled, 0, "cmd-upload-0011")
 	detail, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0011", "payments", mustID(t, draft.ID), nil)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
@@ -339,8 +322,8 @@ func TestPublishEnablesSystemThroughProjection(t *testing.T) {
 
 func TestPublishConflictFences(t *testing.T) {
 	h := newHarness(t)
-	first := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0020")
-	second := h.mustUpload(t, strings.Replace(validSystemYAML, "display_name: 支付系统", "display_name: 支付系统 v2", 1), 1, "cmd-upload-0021")
+	first := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0020")
+	second := h.mustUpload(t, strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 支付系统 v2", 1), 0, "cmd-upload-0021")
 	// Stale expected (null) after the first publish commits.
 	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0020", "payments", mustID(t, first.ID), nil); err != nil {
 		t.Fatalf("first publish: %v", err)
@@ -390,31 +373,18 @@ func TestPublishConflictFences(t *testing.T) {
 	}
 }
 
-func TestPublishContractFenceRejectsNonCurrentTarget(t *testing.T) {
+func TestPublishDoesNotRequireContract(t *testing.T) {
 	h := newHarness(t)
-	// A draft (non-current) contract v2 reusing the same label name: uploads
-	// targeting it exist, but the normal publish path must refuse until its
-	// atomic activation.
-	if _, err := h.contracts.CreateDraft(context.Background(), 1, "seed-contract-0003", []byte(activeContractYAML), config.Limits{}); err != nil {
-		t.Fatal(err)
-	}
-	draft := h.mustUpload(t, validSystemYAML, 2, "cmd-upload-0030")
-	_, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0030", "payments", mustID(t, draft.ID), nil)
-	var conflict *ConflictError
-	if !errors.As(err, &conflict) || !strings.Contains(conflict.Detail, "联合激活") {
-		t.Fatalf("non-current contract target must hit the atomic-activation fence: %v", err)
-	}
-	var current sql.NullInt64
-	_ = h.db.QueryRow(`SELECT current_config_version_id FROM business_systems WHERE key='payments'`).Scan(&current)
-	if current.Valid {
-		t.Fatal("fenced publish must not move the pointer")
+	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0030")
+	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0030", "payments", mustID(t, draft.ID), nil); err != nil {
+		t.Fatalf("publish must not depend on a contract: %v", err)
 	}
 }
 
 func TestUploadCommandReplay(t *testing.T) {
 	h := newHarness(t)
-	first := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0040")
-	replayed, err := h.upload(t, validSystemYAML, 1, "cmd-upload-0040")
+	first := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0040")
+	replayed, err := h.upload(t, validSystemYAML, 0, "cmd-upload-0040")
 	if err != nil || replayed.ID != first.ID {
 		t.Fatalf("replay must return the original draft: %v %#v", err, replayed)
 	}
@@ -423,7 +393,7 @@ func TestUploadCommandReplay(t *testing.T) {
 	if versions != 1 {
 		t.Fatalf("replay must not append a version: %d", versions)
 	}
-	_, err = h.upload(t, strings.Replace(validSystemYAML, "display_name: 支付系统", "display_name: 重放冲突", 1), 1, "cmd-upload-0040")
+	_, err = h.upload(t, strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 重放冲突", 1), 0, "cmd-upload-0040")
 	if !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("same id with different content must conflict: %v", err)
 	}
@@ -431,7 +401,7 @@ func TestUploadCommandReplay(t *testing.T) {
 
 func TestListAndGetProjections(t *testing.T) {
 	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-upload-0050")
+	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0050")
 	items, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 50)
 	if err != nil || nextCursor != "" || len(items) != 1 || items[0].Key != "payments" || items[0].ConfigVersionCount != 1 {
 		t.Fatalf("list wrong: %v %q %#v", err, nextCursor, items)
@@ -458,9 +428,9 @@ func TestListAndGetProjections(t *testing.T) {
 
 func TestListSystemsReturnsIDKeysetCursor(t *testing.T) {
 	h := newHarness(t)
-	h.mustUpload(t, validSystemYAML, 1, "cmd-list-cursor-001")
+	h.mustUpload(t, validSystemYAML, 0, "cmd-list-cursor-001")
 	billingYAML := strings.ReplaceAll(strings.ReplaceAll(validSystemYAML, "payments", "billing"), "支付系统", "账单系统")
-	h.mustUpload(t, billingYAML, 1, "cmd-list-cursor-002")
+	h.mustUpload(t, billingYAML, 0, "cmd-list-cursor-002")
 
 	firstPage, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 1)
 	if err != nil || len(firstPage) != 1 || nextCursor == "" {
@@ -472,6 +442,52 @@ func TestListSystemsReturnsIDKeysetCursor(t *testing.T) {
 	}
 	if firstPage[0].Key == secondPage[0].Key {
 		t.Fatalf("keyset cursor replayed the first row: %q", firstPage[0].Key)
+	}
+}
+
+// TestVerificationConfigLocatorBindsCanonicalDeclarationWithoutContract proves
+// that deployment verification freezes the exact configuration version, not a
+// retired Label Contract. The second insert deliberately pairs one system with
+// another system's declaration and must remain rejected.
+func TestVerificationConfigLocatorBindsCanonicalDeclarationWithoutContract(t *testing.T) {
+	h := newHarness(t)
+	payments := h.mustUpload(t, validSystemYAML, "cmd-locator-payments-001")
+	billingYAML := strings.ReplaceAll(strings.ReplaceAll(validSystemYAML, "payments", "billing"), "支付系统", "账单系统")
+	billing := h.mustUpload(t, billingYAML, "cmd-locator-billing-001")
+
+	const now = "2026-01-01T00:00:00Z"
+	if _, err := h.db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,?,1,'locator test',?,?,?,?)`, make([]byte, 32), now, now, "2026-01-02T00:00:00Z", "2026-01-08T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := h.db.Exec(`INSERT INTO verification_invocation_manifests(admin_session_id,principal_user_id,release_subject_digest,catalog_digest,result_profile_digest,deployment_config_digest,public_origin_digest,applicable_set_digest,item_count,item_set_digest,manifest_digest,canonical_input_digest,started_at,deadline_at,created_at) VALUES(1,1,?,?,?,?,?,?,2,?,?,?,?,?,?)`, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64), strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("0", 64), strings.Repeat("1", 64), strings.Repeat("2", 64), now, "2026-01-01T08:00:00Z", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestID, _ := manifest.LastInsertId()
+	insertItem := func(sequence int64) int64 {
+		t.Helper()
+		item, err := h.db.Exec(`INSERT INTO verification_invocation_items(invocation_id,item_seq,scenario_id,cell_id,object_kind,input_digest,created_at) VALUES(?,?,?,'default','config',?,?)`, manifestID, sequence, "config-locator", strings.Repeat(strconv.FormatInt(sequence, 10), 64), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := item.LastInsertId()
+		return id
+	}
+
+	paymentsItem := insertItem(1)
+	var paymentsSystemID, billingConfigID int64
+	if err := h.db.QueryRow(`SELECT business_system_id FROM business_system_config_versions WHERE id=?`, mustID(t, payments.ID)).Scan(&paymentsSystemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.Exec(`INSERT INTO verification_config_item_locators(item_id,business_system_id,config_version_id,label_contract_version_id) VALUES(?,?,?,NULL)`, paymentsItem, paymentsSystemID, mustID(t, payments.ID)); err != nil {
+		t.Fatalf("canonical declaration locator with NULL contract: %v", err)
+	}
+	billingItem := insertItem(2)
+	if err := h.db.QueryRow(`SELECT id FROM business_system_config_versions WHERE id=?`, mustID(t, billing.ID)).Scan(&billingConfigID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.Exec(`INSERT INTO verification_config_item_locators(item_id,business_system_id,config_version_id,label_contract_version_id) VALUES(?,?,?,NULL)`, billingItem, paymentsSystemID, billingConfigID); err == nil || !strings.Contains(err.Error(), "exact frozen declaration") {
+		t.Fatalf("mismatched canonical configuration must be rejected, err=%v", err)
 	}
 }
 

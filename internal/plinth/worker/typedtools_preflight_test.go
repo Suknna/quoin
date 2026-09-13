@@ -3,19 +3,11 @@ package worker
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"google.golang.org/grpc"
 )
 
@@ -99,196 +91,20 @@ users:
 // supplies a frozen grant and a reachable Kubernetes-looking HTTP endpoint:
 // any regression past the preflight return is observable as a fetch or HTTP
 // request, not inferred from implementation structure.
-func TestKubernetesReadFetchesUsingFrozenDispatchBinding(t *testing.T) {
-	kubernetesAPI := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api" {
-			t.Fatalf("unexpected Kubernetes path %s", request.URL.Path)
-		}
-		_, _ = writer.Write([]byte(`{"versions":["v1"]}`))
-	}))
-	defer kubernetesAPI.Close()
+// Kubernetes dispatch is deliberately absent from the worker while the
+// capability is gated. Unknown typed tools fail before any credential fetch.
+func TestUnavailableKubernetesToolCannotFetchCredentials(t *testing.T) {
 	control := &fakeToolCallChannel{}
-	client := &fetchCountingRuntimeClient{endpoint: kubernetesAPI.URL}
-	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: []*runtimev1.ConnectionGrant{{GrantId: 71}}}
-	runner := &Runner{
-		Client: client, toolCalls: control,
-		Binding:                    plinthruntime.DispatchBinding{BootID: "frozen-boot", Epoch: 7},
-		tools:                      map[int64]toolMeta{73: meta},
-		uploadWorkspaceFileForTest: func(context.Context, int64, int64, string, string) (int64, error) { return 1, nil },
-	}
-	var frames bytes.Buffer
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
+	client := &fetchCountingRuntimeClient{}
+	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", grants: []*runtimev1.ConnectionGrant{{GrantId: 71}}}
+	runner := &Runner{Client: client, toolCalls: control, tools: map[int64]toolMeta{73: meta}}
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 73, meta); err != nil {
 		t.Fatal(err)
 	}
-	if client.fetches.Load() != 1 || client.lastBoot != "frozen-boot" || client.lastEpoch != 7 {
-		t.Fatalf("FetchCredentialGrant binding=%q/%d calls=%d, want frozen-boot/7 and one call", client.lastBoot, client.lastEpoch, client.fetches.Load())
+	if client.fetches.Load() != 0 {
+		t.Fatalf("FetchCredentialGrant calls=%d, want 0", client.fetches.Load())
 	}
-}
-
-func TestKubernetesReadPreflightIsModelVisibleAndCannotReachCredentialsOrAPI(t *testing.T) {
-	var kubernetesRequests atomic.Int64
-	kubernetesAPI := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		kubernetesRequests.Add(1)
-	}))
-	defer kubernetesAPI.Close()
-
-	cases := []struct {
-		name   string
-		code   string
-		detail string
-	}{
-		{name: "target not found", code: "target_not_found", detail: "未找到该业务系统，请提供业务系统 key 或准确名称。"},
-		{name: "target ambiguous", code: "target_ambiguous", detail: "该业务系统名称对应多个对象，请提供业务系统 key。"},
-		{name: "no mapping", code: "no_mapping", detail: "该业务系统尚未绑定可用的 Kubernetes 连接。"},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			control := &fakeToolCallChannel{}
-			client := &fetchCountingRuntimeClient{endpoint: kubernetesAPI.URL}
-			runner := &Runner{
-				Client:    client,
-				toolCalls: control,
-			}
-			meta := toolMeta{
-				name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED",
-				arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"},
-				// A non-empty grant prevents a test from passing merely because the
-				// normal executor would reject an empty grant before attempting it.
-				grants:          []*runtimev1.ConnectionGrant{{GrantId: 71}},
-				preflightCode:   test.code,
-				preflightDetail: test.detail,
-			}
-			var frames bytes.Buffer
-			if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
-				t.Fatal(err)
-			}
-
-			if len(control.begins) != 1 || control.begins[0].GetAttemptId() != 41 || control.begins[0].GetToolCallId() != 73 {
-				t.Fatalf("BeginToolCall requests=%+v", control.begins)
-			}
-			if len(control.completes) != 1 {
-				t.Fatalf("CompleteToolCall requests=%+v", control.completes)
-			}
-			complete := control.completes[0]
-			if complete.GetOutcome() != runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED || complete.GetErrorCode() != test.code || complete.GetErrorDetail() != test.detail {
-				t.Fatalf("model-visible preflight completion=%+v", complete)
-			}
-			if client.fetches.Load() != 0 {
-				t.Fatalf("FetchCredentialGrant calls=%d, want 0", client.fetches.Load())
-			}
-			if kubernetesRequests.Load() != 0 {
-				t.Fatalf("Kubernetes HTTP requests=%d, want 0", kubernetesRequests.Load())
-			}
-
-			reader := NewFrameReader(bytes.NewReader(frames.Bytes()))
-			started, err := reader.Read()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := started.GetToolCallStarted(); got == nil || got.GetToolCallId() != 73 || got.GetExecutionMode() != runtimev1.ToolExecutionMode_TOOL_EXECUTION_MODE_SUPERVISOR_TYPED {
-				t.Fatalf("ToolCallStarted=%+v", started)
-			}
-			result, err := reader.Read()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := result.GetToolResult(); got == nil || got.GetSuccess() || got.GetErrorCode() != test.code || got.GetErrorDetail() != test.detail {
-				t.Fatalf("ToolResult=%+v", result)
-			}
-		})
-	}
-}
-
-func TestKubernetesReadSpillsAggregateArtifact(t *testing.T) {
-	large := `{"versions":["v1"]}` + strings.Repeat("\n", 2100) + strings.Repeat("x", 52*1024)
-	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api" {
-			t.Fatalf("path=%s", request.URL.Path)
-		}
-		_, _ = writer.Write([]byte(large))
-	}))
-	defer api.Close()
-	control := &fakeToolCallChannel{}
-	client := &fetchCountingRuntimeClient{endpoint: api.URL}
-	var uploaded []byte
-	grants := make([]*runtimev1.ConnectionGrant, 65)
-	for index := range grants {
-		grants[index] = &runtimev1.ConnectionGrant{GrantId: int64(index + 1)}
-	}
-	runner := &Runner{Client: client, toolCalls: control, Binding: plinthruntime.DispatchBinding{BootID: "frozen", Epoch: 4}, Config: RunnerConfig{WorkspaceRoot: t.TempDir()}, tools: map[int64]toolMeta{73: {name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: grants}}, uploadWorkspaceFileForTest: func(_ context.Context, attemptID, toolCallID int64, path, media string) (int64, error) {
-		if attemptID != 41 || toolCallID != 73 || media != "application/json" {
-			t.Fatalf("upload=%d/%d %s", attemptID, toolCallID, media)
-		}
-		var err error
-		uploaded, err = os.ReadFile(path)
-		return 99, err
-	}}
-	meta := runner.tools[73]
-	var frames bytes.Buffer
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
-		t.Fatal(err)
-	}
-	if len(uploaded) == 0 || len(control.completes) != 1 {
-		t.Fatalf("uploaded=%d completes=%d", len(uploaded), len(control.completes))
-	}
-	var raw, payload struct {
-		Results []struct {
-			Output string `json:"output"`
-		} `json:"results"`
-		ResultsTruncated bool              `json:"resultsTruncated"`
-		TotalBytes       int               `json:"totalBytes"`
-		TotalLines       int               `json:"totalLines"`
-		SHA256           string            `json:"sha256"`
-		Artifact         map[string]string `json:"artifact"`
-	}
-	if err := json.Unmarshal(uploaded, &raw); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(control.completes[0].GetPayload().GetCanonicalJson(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(uploaded)
-	if payload.TotalBytes != len(uploaded) || payload.TotalLines != bytes.Count(uploaded, []byte("\n"))+1 || payload.SHA256 != fmt.Sprintf("%x", sum[:]) || payload.Artifact["id"] != "99" || !payload.ResultsTruncated || len(payload.Results) != 64 || len(payload.Results[0].Output)+len(payload.Results[1].Output) > 4096 {
-		t.Fatalf("payload=%s", control.completes[0].GetPayload().GetCanonicalJson())
-	}
-}
-
-func TestKubernetesReadContinuesAfterOneGrantFails(t *testing.T) {
-	var requests atomic.Int64
-	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requests.Add(1)
-		_, _ = writer.Write([]byte(`{"versions":["v1"]}`))
-	}))
-	defer api.Close()
-	control := &fakeToolCallChannel{}
-	client := &fetchCountingRuntimeClient{endpoint: api.URL, denyGrantID: 1}
-	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: map[string]any{"businessSystem": "payments", "operation": "discovery"}, grants: []*runtimev1.ConnectionGrant{{GrantId: 1}, {GrantId: 2}}}
-	runner := &Runner{Client: client, toolCalls: control, Binding: plinthruntime.DispatchBinding{BootID: "frozen", Epoch: 4}, tools: map[int64]toolMeta{73: meta}, uploadWorkspaceFileForTest: func(context.Context, int64, int64, string, string) (int64, error) { return 1, nil }}
-	var frames bytes.Buffer
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&frames), 41, 73, meta); err != nil {
-		t.Fatal(err)
-	}
-	if client.fetches.Load() != 2 || requests.Load() != 1 {
-		t.Fatalf("fetches=%d requests=%d, want 2/1", client.fetches.Load(), requests.Load())
-	}
-	if len(control.completes) != 1 {
-		t.Fatalf("completions=%d", len(control.completes))
-	}
-	var payload struct {
-		Success   bool   `json:"success"`
-		ErrorCode string `json:"errorCode"`
-		Results   []struct {
-			Success bool `json:"success"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(control.completes[0].GetPayload().GetCanonicalJson(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	canonical := control.completes[0].GetPayload().GetCanonicalJson()
-	if payload.Success || payload.ErrorCode != "partial_failure" || len(payload.Results) != 2 || payload.Results[0].Success || !payload.Results[1].Success {
-		t.Fatalf("payload=%s", canonical)
-	}
-	if err := attempt.ValidateToolResultPayload("kubernetes_read_result_v1", canonical); err != nil {
-		t.Fatalf("runner partial payload violates Quoin ingress schema: %v; payload=%s", err, canonical)
+	if len(control.completes) != 1 || control.completes[0].GetErrorCode() != "unknown_tool" {
+		t.Fatalf("completions=%+v, want one unknown-tool result", control.completes)
 	}
 }

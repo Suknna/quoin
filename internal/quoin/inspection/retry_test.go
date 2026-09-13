@@ -17,8 +17,7 @@ import (
 
 func completeRunWithFirstReport(t *testing.T, h *testHarness) (RunDetail, []int64, []int64) {
 	t.Helper()
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	h.seedModelProvider(t)
 	store, err := artifact.NewStore(h.db, t.TempDir())
 	if err != nil {
@@ -139,8 +138,7 @@ func TestReanalyzeCreatesNextImmutableReportVersionFromExistingEvidence(t *testi
 
 func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	ctx := context.Background()
 	original, err := h.service.CreateInspectionRun(ctx, h.principal, "create-run-0001", "payments", "mixed-plan")
 	if err != nil {
@@ -155,7 +153,7 @@ func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT config_version_id FROM inspection_runs WHERE id=?`, original.RunID).Scan(&sourceVersion); err != nil {
 		t.Fatal(err)
 	}
-	if current := h.publishMixedPlan(t); current == sourceVersion {
+	if current := h.publishSinglePromQLPlan(t); current == sourceVersion {
 		t.Fatalf("second publish reused source config version %d", current)
 	}
 	if _, err := h.db.Exec(`
@@ -186,12 +184,43 @@ func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='run_check' AND scope_id=?`, rerun.RunID).Scan(&checks); err != nil {
 		t.Fatal(err)
 	}
-	if checks != 2 {
-		t.Fatalf("rerun checks = %d, want 2", checks)
+	if checks != 1 {
+		t.Fatalf("rerun checks = %d, want 1", checks)
 	}
 	replayed, err := h.service.RerunInspection(ctx, h.principal, "rerun-run-0001", "payments", original.RunID)
 	if err != nil || replayed.RunID != rerun.RunID {
 		t.Fatalf("same rerun command must replay its Run: %+v err=%v", replayed, err)
+	}
+}
+
+func TestRerunRejectsFrozenBrowserPlanBeforeCreatingDispatchableRun(t *testing.T) {
+	h := newTestHarness(t)
+	h.publishArchivedBrowserPlan(t)
+	ctx := context.Background()
+	source, err := h.service.CreateInspectionRun(ctx, h.principal, "create-browser-rerun-0001", "payments", "mixed-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.service.CancelRun(ctx, h.principal, "cancel-browser-rerun-0001", "payments", source.RunID, source.RowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.service.RerunInspection(ctx, h.principal, "rerun-browser-0001", "payments", source.RunID); err == nil {
+		t.Fatal("browser-backed source must not rerun while the feature is unavailable")
+	} else {
+		var rejection *RejectionError
+		if !errors.As(err, &rejection) || rejection.Code != "feature_unavailable" {
+			t.Fatalf("browser rerun error = %v, want feature_unavailable", err)
+		}
+	}
+	var runs, attempts int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE scope_type='run_check'`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || attempts != 1 {
+		t.Fatalf("browser rerun must not create a Run or dispatch: runs=%d attempts=%d", runs, attempts)
 	}
 }
 
@@ -227,14 +256,14 @@ func TestCancelRunFencesRunningAnalysisWithoutRewritingTheRun(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT state FROM inspection_runs WHERE id=?`, run.RunID).Scan(&runState); err != nil {
 		t.Fatal(err)
 	}
-	if attemptState != "Cancelling" || runState != "CompletedWithGaps" {
+	if attemptState != "Cancelling" || runState != "Completed" {
 		t.Fatalf("analysis cancel must keep immutable collection result: attempt=%s run=%s", attemptState, runState)
 	}
 }
 
 func TestRerunRejectsSkippedOverlapSourceBeforeSQLiteClosure(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishSinglePromQLPlan(t)
 	ctx := context.Background()
 	result, err := h.db.Exec(`
 		INSERT INTO inspection_runs(

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,11 @@ func seedOccurrence(t *testing.T, db *sql.DB) int64 {
 		t.Fatal(err)
 	}
 	businessID, _ := business.LastInsertId()
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, strings.Repeat("c", 64), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
+	declaration, err := json.Marshal(map[string]any{"systemKey": key, "displayName": key, "MetricsConnectionID": metricsConnectionID, "resources": []any{map[string]any{"name": "default", "displayName": "Default", "matchLabels": map[string]string{"business_system": key}, "discoveryMetric": "up", "identityLabels": []string{"instance"}, "allowedMetrics": []string{"up"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("c", 64), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +345,143 @@ func TestTerminalFaultProjectionSharesAttemptCommitTransaction(t *testing.T) {
 	}
 }
 
+// seedObservationAnnotations attaches one immutable accepted Alertmanager item to
+// an occurrence. The analysis snapshot must receive exactly these supplied
+// annotations instead of inferring meaning from the alert name.
+func seedObservationAnnotations(t *testing.T, db *sql.DB, occurrenceID int64, state string, annotations map[string]string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var sourceID int64
+	if err := db.QueryRow(`SELECT source_id FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := db.Exec(`INSERT INTO alert_source_credentials(source_id,digest,state,created_at) VALUES(?,?, 'Active', ?)`, sourceID, make([]byte, 32), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID, _ := credential.LastInsertId()
+	body, err := json.Marshal(map[string]any{"alerts": []map[string]any{{"annotations": annotations}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := db.Exec(`INSERT INTO alert_deliveries(relay_id,source_id,credential_id,credential_snapshot_version,protocol,body,body_size_bytes,integrity,status,received_at,committed_at) VALUES(?,?,?,?, 'alertmanager',?,?, 'complete','processed',?,?)`, fmt.Sprintf("annotation-relay-%d-%s", occurrenceID, state), sourceID, credentialID, 1, body, len(body), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryID, _ := delivery.LastInsertId()
+	item, err := db.Exec(`INSERT INTO alert_delivery_items(delivery_id,item_index,status,fingerprint,starts_at,labels_canonical) VALUES(?,0,'ok',?,?,?)`, deliveryID, make([]byte, 8), now, `{"alertname":"MallGUIAcceptanceProbe"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemID, _ := item.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO alert_observations(delivery_id,delivery_item_id,occurrence_id,observed_state,starts_at_source,received_at,committed_at,effect) VALUES(?,?,?,?,?,?,?,?)`, deliveryID, itemID, occurrenceID, state, now, now, now, map[string]string{"firing": "initial_firing", "resolved": "resolved_first"}[state]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRebuildInputPreservesSuppliedObservationAnnotations(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		state       string
+		annotations map[string]string
+	}{
+		{name: "firing", state: "firing", annotations: map[string]string{"summary": "controlled GUI acceptance probe", "description": "No true fault; this is a controlled test annotation."}},
+		{name: "resolved", state: "resolved", annotations: map[string]string{"summary": "controlled GUI acceptance probe resolved", "description": "No true fault; this is a controlled test annotation."}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := newTestDB(t)
+			service := NewService(db)
+			occurrenceID := seedOccurrence(t, db)
+			seedObservationAnnotations(t, db, occurrenceID, test.state, test.annotations)
+			seedProviderChain(t, db)
+
+			created, err := service.Create(context.Background(), occurrenceID, 1, "cmd-annotations-"+test.state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, err := service.RebuildInput(context.Background(), created.AttemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Dispatch rebuild is the production fence. It must reproduce the digest
+			// frozen at admission even when Alertmanager supplied annotations.
+			if _, err := service.Attempts().DispatchInputFor(context.Background(), created.AttemptID); err != nil {
+				t.Fatalf("annotation-bearing input must dispatch: %v", err)
+			}
+			var input Input
+			if err := json.Unmarshal(canonical, &input); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(input.Occurrence.Annotations, test.annotations) {
+				t.Fatalf("annotations = %#v, want exact supplied %#v", input.Occurrence.Annotations, test.annotations)
+			}
+		})
+	}
+}
+
+// TestRebuildInputRetainsLegacyAnnotationOmission proves the v1 renderer
+// contract remains byte-stable. It lets already-Assigned attempts created
+// before annotations entered the snapshot resume through reconnect replay.
+func TestRebuildInputRetainsLegacyAnnotationOmission(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	occurrenceID := seedOccurrence(t, db)
+	seedObservationAnnotations(t, db, occurrenceID, "firing", map[string]string{"summary": "new field"})
+	seedProviderChain(t, db)
+	created, err := service.Create(context.Background(), occurrenceID, 1, "cmd-legacy-annotations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := service.RebuildInput(context.Background(), created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy Input
+	if err := json.Unmarshal(canonical, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Occurrence.Annotations = nil
+	legacy.BusinessContext.Resources = nil
+	legacyCanonical, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The production schema correctly freezes snapshots. This fixture models an
+	// already-admitted v1 record from before annotations were part of the input.
+	if _, err := db.Exec(`DROP TRIGGER trg_attempt_input_snapshots_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE attempt_input_snapshots SET renderer_version='initial-analysis-renderer-v1' WHERE attempt_id=?`, created.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	// Model a pre-cutover snapshot completely: legacy rebuilds retain their
+	// independently frozen Label Contract item, unlike all new attempts.
+	if _, err := db.Exec(`
+		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
+		SELECT s.id,3,'label_contract',?,v.label_contract_version_id
+		FROM attempt_input_snapshots s
+		JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.business_system_config_version_id IS NOT NULL
+		JOIN business_system_config_versions v ON v.id=i.business_system_config_version_id
+		WHERE s.attempt_id=?`, strings.Repeat("f", 64), created.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	legacyCanonical, err = service.RebuildInput(context.Background(), created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDigest := sha256.Sum256(legacyCanonical)
+	if _, err := db.Exec(`UPDATE attempt_input_snapshots SET content_digest=? WHERE attempt_id=?`, hex.EncodeToString(legacyDigest[:]), created.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	dispatch, err := service.Attempts().DispatchInputFor(context.Background(), created.AttemptID)
+	if err != nil {
+		t.Fatalf("legacy annotation-free snapshot must resume: %v", err)
+	}
+	if string(dispatch.CanonicalJSON) != string(legacyCanonical) {
+		t.Fatalf("legacy canonical=%s, want=%s", dispatch.CanonicalJSON, legacyCanonical)
+	}
+}
+
 func TestCreateDispatchAcceptSeal(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
@@ -432,18 +574,60 @@ func TestRetryAfterFailure(t *testing.T) {
 	if err := service.AcceptAttempt(ctx, created.AttemptID, "boot-1", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: false, Termination: "timeout"}); err != nil {
+	// A rejected AgentComplete is reported by the runtime as invalid_response.
+	// Once the underlying grant/runtime defect is repaired, this terminal
+	// technical failure must admit a new queued analysis through the real
+	// result-adjudication and retry service seam.
+	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-1", Epoch: 1, Succeeded: false, Termination: "invalid_response"}); err != nil {
 		t.Fatal(err)
 	}
 	detail, _ := service.Get(ctx, created.AnalysisID)
 	if detail.State != "Failed" {
 		t.Fatalf("state=%q", detail.State)
 	}
-	// The frozen schema closes Failed as terminal (see the T10 amendment
-	// comment): same-analysis retry answers the deterministic conflict;
-	// the retry reopen arrives with T12's contract amendment.
-	if _, err := service.Retry(ctx, created.AnalysisID, 1, "cmd-retry-1"); !errors.Is(err, ErrActiveConflict) {
-		t.Fatalf("retry after terminal failure=%v", err)
+	// The original failed record remains terminal and inspectable. Retry creates
+	// a fresh analysis/attempt from the current eligible provider, which is the
+	// recovery path after a repaired model configuration or runtime defect.
+	retried, err := service.Retry(ctx, created.AnalysisID, 1, "cmd-retry-1")
+	if err != nil {
+		t.Fatalf("retry after technical failure: %v", err)
+	}
+	if retried.AnalysisID == created.AnalysisID || retried.AttemptID == created.AttemptID {
+		t.Fatalf("retry must create fresh records: original=%+v retry=%+v", created, retried)
+	}
+	// A command id belongs to this retry and this failed source analysis only.
+	// Reusing it as a create must not return the recovery result for an unrelated
+	// operation, even when the occurrence is the same.
+	if _, err := service.Create(ctx, occurrenceID, 1, "cmd-retry-1"); !errors.Is(err, ErrCommandReplayMismatch) {
+		t.Fatalf("cross-operation replay=%v", err)
+	}
+	// Even the same operation cannot replay against a different requested
+	// failed analysis; it must not return the first recovery's unrelated
+	// records. Drive the recovery attempt to its own technical terminal state
+	// so this exercises retry eligibility rather than an active-state conflict.
+	if err := service.Attempts().BindToStream(ctx, retried.AttemptID, "boot-2", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptAttempt(ctx, retried.AttemptID, "boot-2", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CommitResult(ctx, Result{AttemptID: retried.AttemptID, BootID: "boot-2", Epoch: 1, Succeeded: false, Termination: "invalid_response"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Retry(ctx, retried.AnalysisID, 1, "cmd-retry-1"); !errors.Is(err, ErrCommandReplayMismatch) {
+		t.Fatalf("cross-target replay=%v", err)
+	}
+	if detail, err := service.Get(ctx, created.AnalysisID); err != nil || detail.State != "Failed" {
+		t.Fatalf("original failure must remain immutable: detail=%+v err=%v", detail, err)
+	}
+	if detail, err := service.Get(ctx, retried.AnalysisID); err != nil || detail.State != "Failed" {
+		t.Fatalf("second technical failure=%+v err=%v", detail, err)
+	}
+	// A network retry of the same command must return the same new attempt,
+	// never fabricate another recovery record.
+	again, err := service.Retry(ctx, created.AnalysisID, 1, "cmd-retry-1")
+	if err != nil || again != retried {
+		t.Fatalf("retry replay=%+v want=%+v err=%v", again, retried, err)
 	}
 }
 

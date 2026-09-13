@@ -33,8 +33,22 @@ const activeAttemptStates = "('Queued','Assigned','Running','Cancelling')"
 // and the first attempt in one transaction (DATA-INVEST-001). A replayed
 // client command returns its original result; a reused command id with a
 // different request digest conflicts (HTTP-COMMAND-003).
+// Create preserves the source-only command surface for internal callers. Direct
+// chat callers that deliberately bind a published business system use
+// CreateWithBusinessSystem below.
 func (service *Service) Create(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput) (CreateResult, error) {
-	digest := commandDigest("create", content, nil, attachmentIDs, sources)
+	return service.create(ctx, principalID, clientCommandID, content, attachmentIDs, sources, "")
+}
+
+// CreateWithBusinessSystem creates a direct chat with an explicit system key.
+// The key is resolved to immutable published configuration/contract references
+// in the same transaction; user prompt text never participates in authority.
+func (service *Service) CreateWithBusinessSystem(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput, businessSystemKey string) (CreateResult, error) {
+	return service.create(ctx, principalID, clientCommandID, content, attachmentIDs, sources, businessSystemKey)
+}
+
+func (service *Service) create(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput, businessSystemKey string) (CreateResult, error) {
+	digest := commandDigest("create:"+businessSystemKey, content, nil, attachmentIDs, sources)
 	if entry, ok, err := service.replayLookup(principalID, clientCommandID, digest); err != nil {
 		return CreateResult{}, err
 	} else if ok {
@@ -79,6 +93,10 @@ func (service *Service) Create(ctx context.Context, principalID int64, clientCom
 	if err != nil {
 		return CreateResult{}, err
 	}
+	businessContext, err := resolveBusinessContext(ctx, conn, businessSystemKey)
+	if err != nil {
+		return CreateResult{}, err
+	}
 	now := service.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO investigations(created_by, created_at) VALUES(?,?)`, principalID, now)
@@ -92,7 +110,7 @@ func (service *Service) Create(ctx context.Context, principalID int64, clientCom
 	if err := insertSources(ctx, conn, investigationID, principalID, sources, now); err != nil {
 		return CreateResult{}, err
 	}
-	messageID, attemptID, err := service.insertTurn(ctx, conn, investigationID, principalID, clientCommandID, content, attachments, selected, now)
+	messageID, attemptID, err := service.insertTurn(ctx, conn, investigationID, principalID, clientCommandID, content, attachments, businessContext, selected, now)
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -183,8 +201,12 @@ func (service *Service) Send(ctx context.Context, principalID int64, clientComma
 	if err != nil {
 		return SendResult{}, err
 	}
+	businessContext, err := businessContextForInvestigation(ctx, conn, investigationID)
+	if err != nil {
+		return SendResult{}, err
+	}
 	now := service.nowText()
-	messageID, attemptID, err := service.insertTurn(ctx, conn, investigationID, principalID, clientCommandID, content, attachments, selected, now)
+	messageID, attemptID, err := service.insertTurn(ctx, conn, investigationID, principalID, clientCommandID, content, attachments, businessContext, selected, now)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -211,7 +233,7 @@ func headMatches(current sql.NullInt64, expected *int64) bool {
 // attempt row, the user message with its ordered attachment references
 // and the head move, then the frozen input snapshot and grants
 // (DATA-INVEST-001, DATA-ATTACH-001).
-func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investigationID, principalID int64, clientCommandID, content string, attachments []resolvedAttachment, selected provider, now string) (int64, int64, error) {
+func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investigationID, principalID int64, clientCommandID, content string, attachments []resolvedAttachment, businessContext *frozenBusinessContext, selected provider, now string) (int64, int64, error) {
 	attemptInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
 		VALUES('investigation','investigation',?,'Queued',?,?,?)`, investigationID, attempt.ReleaseVersion(), AgentVersion, now)
@@ -249,7 +271,7 @@ func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investig
 		UPDATE investigations SET current_head_message_id=? WHERE id=?`, messageID, investigationID); err != nil {
 		return 0, 0, err
 	}
-	if err := service.freezeInputSnapshot(ctx, conn, investigationID, attemptID, messageID, attachments, selected, now); err != nil {
+	if err := service.freezeInputSnapshot(ctx, conn, investigationID, attemptID, messageID, attachments, businessContext, selected, now); err != nil {
 		return 0, 0, err
 	}
 	return messageID, attemptID, nil
@@ -265,13 +287,13 @@ func (service *Service) insertTurn(ctx context.Context, conn *sql.Conn, investig
 // message this attempt answers — the newly created attempt of a retry
 // owns no message row of its own, so the cutoff cannot be derived from
 // the attempt at freeze time.
-func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn, investigationID, attemptID, turnMessageID int64, attachments []resolvedAttachment, selected provider, now string) error {
+func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn, investigationID, attemptID, turnMessageID int64, attachments []resolvedAttachment, businessContext *frozenBusinessContext, selected provider, now string) error {
 	var cutoffSeq int64
 	if err := conn.QueryRowContext(ctx, `
 		SELECT seq FROM investigation_messages WHERE id=? AND investigation_id=?`, turnMessageID, investigationID).Scan(&cutoffSeq); err != nil {
 		return err
 	}
-	canonical, err := service.rebuildFor(ctx, conn, investigationID, cutoffSeq, selected.ProbeResultID)
+	canonical, err := service.rebuildFor(ctx, conn, investigationID, cutoffSeq, businessContext, selected.ProbeResultID)
 	if err != nil {
 		return err
 	}
@@ -289,6 +311,15 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn,
 	itemCount, err := insertMessageLineage(ctx, conn, snapshotID, investigationID, cutoffSeq)
 	if err != nil {
 		return err
+	}
+	if businessContext != nil {
+		// The pair is the only direct-chat tool authority. Both immutable IDs are
+		// frozen alongside the message lineage, so later config publication cannot
+		// silently redirect an already accepted Investigation.
+		if err := insertBusinessContextLineage(ctx, conn, snapshotID, itemCount, *businessContext); err != nil {
+			return err
+		}
+		itemCount += 2
 	}
 	// Attachment lineage: one item per referenced artifact continuing the
 	// message lineage's item_seq (the grant closure trigger requires the

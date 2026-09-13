@@ -213,8 +213,7 @@ func reportProposalBody(attemptID, runID, callID int64, content string, evidence
 
 func TestImmutableReportClosure(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	h.seedModelProvider(t)
 	store, err := artifact.NewStore(h.db, t.TempDir())
 	if err != nil {
@@ -246,8 +245,8 @@ func TestImmutableReportClosure(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?)`, analysisID).Scan(&itemCount); err != nil {
 		t.Fatal(err)
 	}
-	// run + 2 check results + 1 evidence + its readable artifact + config + contract.
-	if itemCount != 7 {
+	// run + PromQL check result + evidence + readable artifact + config.
+	if itemCount != 5 {
 		t.Fatalf("analysis frozen items = %d", itemCount)
 	}
 	if err := h.attempts.BindToSlot(ctx, analysisID, "plinth", "plinth-boot", 1, time.Minute); err != nil {
@@ -303,7 +302,7 @@ func TestImmutableReportClosure(t *testing.T) {
 		t.Fatalf("run should expose one report version, got %d", final.ReportCount)
 	}
 	report, err := h.service.GetReport(ctx, detail.RunID, 1)
-	if err != nil || report.Version != 1 || report.Content != "巡检报告正文" || report.ModelID != "fixture-chat-1" || len(report.EvidenceIDs) != 1 || report.EvidenceDigest == "" {
+	if err != nil || report.ID == "" || report.Version != 1 || report.Content != "巡检报告正文" || report.ModelID != "fixture-chat-1" || len(report.EvidenceIDs) != 1 || report.EvidenceDigest == "" {
 		t.Fatalf("immutable report missing or wrong: %+v err=%v", report, err)
 	}
 	var analysisState string

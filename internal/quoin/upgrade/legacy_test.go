@@ -2,12 +2,15 @@ package upgrade
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	// Bootstrap registers the sha256 SQLite scalar required by the frozen schema
 	// triggers. The test runs the released schema, not a hand-built facsimile.
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
@@ -233,6 +236,117 @@ func TestLegacyMigrationRebuildsKnowledgeFTSAndPreservesSequence(t *testing.T) {
 	var sequence int
 	if err := db.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name='knowledge_versions'`).Scan(&sequence); err != nil || sequence < 9 {
 		t.Fatalf("sequence=%d err=%v", sequence, err)
+	}
+}
+
+func TestDirectInvestigationMetricsMigrationPreservesHistoryAndUpdatesDigest(t *testing.T) {
+	db := newLegacyMigrationFixture(t)
+	// Model the immediately preceding rc2 canonical schema, including retained
+	// historical facts that the canonical rebuild must copy byte-for-byte.
+	if _, err := db.Exec(`UPDATE schema_state SET schema_digest=? WHERE id=1`, directInvestigationMetricsSchemaDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO source_materials(id,kind,digest,size_bytes,content,created_at) VALUES(41,'knowledge_import','0000000000000000000000000000000000000000000000000000000000000000',7,'history','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	report, err := migrateDirectInvestigationMetricsOn(context.Background(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.MigrationID != directInvestigationMetricsMigrationID || report.LegacySchemaDigest != directInvestigationMetricsSchemaDigest {
+		t.Fatalf("report=%+v", report)
+	}
+	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := db.QueryRow(`SELECT content FROM source_materials WHERE id=41`).Scan(&content); err != nil || content != "history" {
+		t.Fatalf("preserved history=%q err=%v", content, err)
+	}
+	var ledger int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_ledger WHERE migration_id=?`, directInvestigationMetricsMigrationID).Scan(&ledger); err != nil || ledger != 1 {
+		t.Fatalf("ledger=%d err=%v", ledger, err)
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	target := sha256.Sum256([]byte(gen.SchemaSQL))
+	if stored != hex.EncodeToString(target[:]) {
+		t.Fatalf("schema digest=%s want %x", stored, target)
+	}
+}
+
+func TestReleasedSchemaMigrationRollsBackWhenCompletionCannotExitMaintenance(t *testing.T) {
+	db := newLegacyMigrationFixture(t)
+	if _, err := db.Exec(`UPDATE schema_state SET schema_digest=? WHERE id=1`, directInvestigationMetricsSchemaDigest); err != nil {
+		t.Fatal(err)
+	}
+	// The converter may have rebuilt every table and written its ledger before
+	// completion is reached. A failure there must still retain the predecessor
+	// digest and zero history so the supported Migrate command can retry.
+	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'upgrade-admin','Upgrade Admin','admin',1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,reason,entered_at,entered_by_type,entered_by_id,row_version) VALUES(1,1,'Upgrade','2026-01-01T00:00:00Z','system',0,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(1,'BackupPreflight','pre_upgrade_backup','Safe','backup_verified','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO backups(status,stage,trigger_kind,execution_mode,db_sha256,manifest_sha256,artifact_count,size_bytes,manifest_path,row_version,created_at,updated_at,started_at,completed_at,triggered_by) VALUES('succeeded','completed','upgrade','online',?,?,?,?,?,1,?,?,?,?,1)`, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 0, 1, "/backup/manifest.json", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	completionFailure := errors.New("simulated_crash_before_maintenance_exit")
+	if _, err := migrateReleasedSchemaTransaction(context.Background(), db, migrateDirectInvestigationMetricsOn, func(context.Context, *sql.Conn, LegacyMigrationReport) error { return completionFailure }); !errors.Is(err, completionFailure) {
+		t.Fatalf("migration error=%v", err)
+	}
+	var digest string
+	if err := db.QueryRow(`SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&digest); err != nil || digest != directInvestigationMetricsSchemaDigest {
+		t.Fatalf("schema digest after rollback=%q err=%v", digest, err)
+	}
+	var ledger int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_ledger WHERE migration_id=?`, directInvestigationMetricsMigrationID).Scan(&ledger); err != nil || ledger != 0 {
+		t.Fatalf("ledger after rollback=%d err=%v", ledger, err)
+	}
+	var active int
+	if err := db.QueryRow(`SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil || active != 1 {
+		t.Fatalf("maintenance after rollback active=%d err=%v", active, err)
+	}
+}
+
+func TestDirectInvestigationMetricsMigrationRejectsUnknownDigest(t *testing.T) {
+	db := newLegacyMigrationFixture(t)
+	if _, err := db.Exec(`UPDATE schema_state SET schema_digest='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrateDirectInvestigationMetricsOn(context.Background(), conn); !errors.Is(err, ErrLegacyMigrationBlocked) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+		t.Fatal(err)
 	}
 }
 

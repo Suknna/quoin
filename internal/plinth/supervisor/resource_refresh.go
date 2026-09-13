@@ -12,6 +12,18 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+const resourceDiscoveryExecutionSchemaKind = "resource_discovery_execution_v1"
+
+type resourceDiscoveryInput struct {
+	SchemaKind           string   `json:"schemaKind"`
+	AttemptID            int64    `json:"attemptId"`
+	ResourceRefreshRunID int64    `json:"resourceRefreshRunId"`
+	DiscoveryKey         string   `json:"discoveryKey"`
+	Selector             string   `json:"selector"`
+	IdentityLabels       []string `json:"identityLabels"`
+	GrantID              int64    `json:"grantId"`
+}
+
 func (supervisor *Supervisor) runResourceRefresh(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
@@ -21,16 +33,8 @@ func (supervisor *Supervisor) runResourceRefresh(parent context.Context, sink *r
 	if err := sink.Send(&runtimev1.ControlEnvelope{CorrelationId: uint64(attemptID), Msg: &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: attemptID}}}); err != nil {
 		return
 	}
-	var input struct {
-		SchemaKind           string   `json:"schemaKind"`
-		AttemptID            int64    `json:"attemptId"`
-		ResourceRefreshRunID int64    `json:"resourceRefreshRunId"`
-		DiscoveryKey         string   `json:"discoveryKey"`
-		Selector             string   `json:"selector"`
-		IdentityLabels       []string `json:"identityLabels"`
-		GrantID              int64    `json:"grantId"`
-	}
-	if dispatch.GetInput() == nil || json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &input) != nil || input.SchemaKind != "resource_refresh_execution_v1" || input.AttemptID != attemptID || input.ResourceRefreshRunID != dispatch.GetScopeId() || input.DiscoveryKey == "" || input.Selector == "" {
+	var input resourceDiscoveryInput
+	if dispatch.GetInput() == nil || json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &input) != nil || input.SchemaKind != resourceDiscoveryExecutionSchemaKind || input.AttemptID != attemptID || input.ResourceRefreshRunID != dispatch.GetScopeId() || input.DiscoveryKey == "" || input.Selector == "" {
 		supervisor.proposeResourceRefresh(sink, attemptID, binding, input, "error", nil, []string{"invalid resource discovery input"}, "query_failed")
 		return
 	}
@@ -93,15 +97,7 @@ func (supervisor *Supervisor) runResourceRefresh(parent context.Context, sink *r
 	supervisor.proposeResourceRefresh(sink, attemptID, binding, input, "success", series, nil, "")
 }
 
-func (supervisor *Supervisor) proposeResourceRefresh(sink *runtime.FrameSink, attemptID int64, binding runtime.DispatchBinding, input struct {
-	SchemaKind           string   `json:"schemaKind"`
-	AttemptID            int64    `json:"attemptId"`
-	ResourceRefreshRunID int64    `json:"resourceRefreshRunId"`
-	DiscoveryKey         string   `json:"discoveryKey"`
-	Selector             string   `json:"selector"`
-	IdentityLabels       []string `json:"identityLabels"`
-	GrantID              int64    `json:"grantId"`
-}, outcome string, series any, messages []string, gapReason string) {
+func (supervisor *Supervisor) proposeResourceRefresh(sink *runtime.FrameSink, attemptID int64, binding runtime.DispatchBinding, input resourceDiscoveryInput, outcome string, series any, messages []string, gapReason string) {
 	if series == nil {
 		series = []any{}
 	}

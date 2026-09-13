@@ -90,7 +90,7 @@ func runtimeGOARCH() string {
 // (mirrors the Quoin-side catalog; pinned equal by tools_test.go).
 func ExecutionModeFor(name string) string {
 	switch name {
-	case "artifact_read", "artifact_grep", "thanos_query", "kubernetes_read":
+	case "artifact_read", "artifact_grep", "thanos_query":
 		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
 	case "quoin_browser":
 		return "TOOL_EXECUTION_MODE_QUOIN_BROWSER"

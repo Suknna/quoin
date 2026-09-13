@@ -39,7 +39,8 @@ type PreflightResult struct {
 // Preflight re-reads every gate read-only: the Upgrade maintenance must be
 // active with every checklist item Safe, the window's upgrade backup must
 // have succeeded with a manifest digest, and the database must be an exact
-// zero-history fresh-v1 schema. It is the same-Release offline verification
+// fresh-v1 schema or the exact declaration predecessor with its pinned ledger.
+// It is the authenticated offline verification
 // the deployment helper runs on the OLD image before stopping is considered
 // safe to proceed; Migrate re-verifies under BEGIN IMMEDIATE.
 func Preflight(ctx context.Context, db *sql.DB) (PreflightResult, error) {
@@ -110,6 +111,19 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 	if result.SchemaVersion != "v1" {
 		return fmt.Errorf("%w: found %q", ErrUnsupportedSchema, result.SchemaVersion)
 	}
+	if stored == declarationCutoverSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		var matching int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger WHERE migration_id=? AND digest=?`, directInvestigationMetricsMigrationID, migrationDigest(directInvestigationMetricsMigrationID)).Scan(&matching); err != nil {
+			return err
+		}
+		if result.MigrationHistory != 1 || matching != 1 {
+			return fmt.Errorf("%w: predecessor requires its exact direct-investigation ledger", ErrSchemaHistoryPresent)
+		}
+		return nil
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -123,12 +137,12 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 }
 
 // Migrate is the exclusive forward-migration command run by the NEW Quoin
-// image against the stopped stack's data directory. For the first release
-// the forward migration set is empty by definition: the gate must find the
-// exact fresh-v1 schema already in place. On success the fully-verified
-// Upgrade maintenance is exited by the system actor — the commit-order
-// "accepts new writes" boundary — and the wizard may start normal-mode
-// components (OPS-UPGRADE-002/005).
+// image against the stopped stack's data directory. It accepts the exact
+// current canonical schema plus only named released predecessor digests; each
+// predecessor has a one-shot canonical rebuild and durable migration ledger
+// record. On success the fully-verified Upgrade maintenance is exited by the
+// system actor — the commit-order "accepts new writes" boundary — and the
+// wizard may start normal-mode components (OPS-UPGRADE-002/005).
 func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 	// A released v1 database has one known prior digest. Route it to the
 	// explicit converter instead of treating the digest mismatch as a generic
@@ -138,11 +152,13 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	if digest == legacyMetricsBusinessSchemaDigest {
-		report, err := MigrateLegacyMetricsBusiness(ctx, db)
-		if err != nil {
-			return PreflightResult{}, err
-		}
-		return finishLegacyMigration(ctx, db, report)
+		return migrateReleasedSchemaAndFinish(ctx, db, migrateLegacyMetricsBusinessOn)
+	}
+	if digest == directInvestigationMetricsSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, migrateDirectInvestigationMetricsOn)
+	}
+	if digest == declarationCutoverSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, migrateDeclarationCutoverOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -175,40 +191,43 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 	return result, nil
 }
 
-// finishLegacyMigration exits the guarded maintenance window only after the
-// legacy transaction committed. A failed/blocked conversion leaves Upgrade
-// maintenance active so operators retain the backup-and-blocker recovery path.
-func finishLegacyMigration(ctx context.Context, db *sql.DB, report LegacyMigrationReport) (PreflightResult, error) {
-	conn, err := db.Conn(ctx)
+// migrateReleasedSchemaAndFinish commits a released-schema conversion and the
+// Upgrade maintenance exit together. A crash or failure before COMMIT rolls
+// back both, leaving the known predecessor digest eligible for a safe retry.
+func migrateReleasedSchemaAndFinish(ctx context.Context, db *sql.DB, migrate func(context.Context, *sql.Conn) (LegacyMigrationReport, error)) (PreflightResult, error) {
+	var result PreflightResult
+	_, err := migrateReleasedSchemaTransaction(ctx, db, migrate, func(ctx context.Context, conn *sql.Conn, report LegacyMigrationReport) error {
+		var completionErr error
+		result, completionErr = finishReleasedMigrationOn(ctx, conn, report)
+		return completionErr
+	})
 	if err != nil {
 		return PreflightResult{}, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return PreflightResult{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	return result, nil
+}
+
+// finishReleasedMigrationOn closes the one already-open migration transaction.
+// It intentionally does not re-run the operational gate: the same exclusive
+// transaction already read it before rebuilding the schema.
+func finishReleasedMigrationOn(ctx context.Context, conn *sql.Conn, report LegacyMigrationReport) (PreflightResult, error) {
+	var result PreflightResult
+	if err := conn.QueryRowContext(ctx, `SELECT row_version FROM maintenance_state WHERE id=1 AND active=1 AND reason=?`, Reason).Scan(&result.Revision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PreflightResult{}, ErrNotUpgradeMaintenance
 		}
-	}()
-	result, err := preflightOperationalOn(ctx, conn)
-	if err != nil {
 		return PreflightResult{}, err
 	}
 	result.SchemaVersion = "v1"
-	result.MigrationHistory = 1
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+		return PreflightResult{}, err
+	}
 	if _, err := conn.ExecContext(ctx, `UPDATE maintenance_state SET active=0,reason=NULL,entered_at=NULL,entered_by_type=NULL,entered_by_id=NULL,exited_at=?,exited_by_type='system',exited_by_id=0,row_version=row_version+1 WHERE id=1 AND active=1 AND row_version=?`, timestampNow(), result.Revision); err != nil {
 		return PreflightResult{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('system',0,'maintenance.upgrade.migrate_legacy','success','maintenance',?,?)`, result.Revision, timestampNow()); err != nil {
 		return PreflightResult{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return PreflightResult{}, err
-	}
-	committed = true
 	_ = report // The durable ledger and audit event are the authoritative record.
 	return result, nil
 }

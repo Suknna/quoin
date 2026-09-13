@@ -143,9 +143,16 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 	case TypeModelProvider:
 		baseURL, _ := document["baseUrl"].(string)
 		chat, _ := document["chatModelId"].(string)
-		embed, _ := document["embeddingModelId"].(string)
-		if baseURL == "" || chat == "" || embed == "" {
-			return nil, fmt.Errorf("%w: baseUrl, chatModelId and embeddingModelId are required", ErrValidation)
+		// Embeddings are an optional capability. Chat-only providers remain
+		// suitable for analysis and investigation while knowledge workflows
+		// stay unavailable until a separately qualified embedding model exists.
+		if baseURL == "" || chat == "" {
+			return nil, fmt.Errorf("%w: baseUrl and chatModelId are required", ErrValidation)
+		}
+		if embed, exists := document["embeddingModelId"]; exists {
+			if value, ok := embed.(string); !ok || value == "" {
+				return nil, fmt.Errorf("%w: embeddingModelId must be a non-empty string when configured", ErrValidation)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("%w: unknown connection type", ErrValidation)
@@ -547,14 +554,18 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 		var outcome string
 		var probeRevisionID, probeGenerationID int64
 		var currentRevisionID, currentGenerationID int64
-		var revalidationProbe int
 		if err := conn.QueryRowContext(ctx, `SELECT connection_type,outcome,connection_revision_id,credential_generation_id FROM connection_probe_results WHERE id=?`, qualifiedProbeResultID).Scan(&probeType, &outcome, &probeRevisionID, &probeGenerationID); err != nil {
 			return Summary{}, fmt.Errorf("%w: unknown probe result", ErrValidation)
 		}
-		if err := conn.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id,revalidation_required FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID, &revalidationProbe); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID); err != nil {
 			return Summary{}, err
 		}
-		if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID || revalidationProbe != 0 {
+		// Rotation deliberately leaves an already enabled metrics connection in
+		// revalidation-required state. A passed real probe over its new immutable
+		// revision/generation pair is the event that clears that state; rejecting
+		// it because the flag is set would make recovery impossible. Old results
+		// cannot qualify because their frozen pair no longer matches.
+		if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID {
 			return Summary{}, fmt.Errorf("%w: probe result does not close onto the current pair", ErrActiveConflict)
 		}
 		// The explicit qualification event must close onto the row version
@@ -780,12 +791,11 @@ func (service *Service) Rotate(ctx context.Context, name string, expectedRowVers
 	if err != nil {
 		return Summary{}, err
 	}
-	// v1 semantics: an enabled model provider is disabled by the rotation;
-	// every rotation marks the pair as requiring a fresh passed probe.
+	// A new revision/generation has no qualifying probe yet. Disable every
+	// rotated typed connection before switching the pair so the immutable
+	// qualification trigger cannot let the old proof authorize new credentials.
+	// The later exact-pair passed probe is required to enable it again.
 	nextEnabled := 0
-	if enabled == 1 && connectionType != TypeModelProvider {
-		nextEnabled = 1
-	}
 	if _, err := conn.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,enabled=?,revalidation_required=1,row_version=row_version+1 WHERE id=?`, revisionID, generationID, nextEnabled, id); err != nil {
 		return Summary{}, err
 	}

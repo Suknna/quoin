@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Suknna/quoin/schemas/business-system.schema.json",
+  "title": "Quoin BusinessSystem",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "quoin/v1" },
+    "kind": { "const": "BusinessSystem" },
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "displayName", "description"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string" }
+      }
+    },
+    "spec": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metrics", "alerts", "inspections"],
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "metrics": { "$ref": "#/$defs/metrics" },
+        "alerts": { "$ref": "#/$defs/alerts" },
+        "inspections": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/inspection" } },
+        "discovery": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "refresh": { "type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$" } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+    "labelName": { "type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$" },
+    "labels": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+    "scopeLabels": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "minLength": 1 } },
+    "metric": { "type": "string", "pattern": "^[a-zA-Z_:][a-zA-Z0-9_:]*\\*?$" },
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["connectionRef", "matchLabels", "resources"],
+      "properties": {
+        "connectionRef": { "$ref": "#/$defs/name" },
+        "matchLabels": { "$ref": "#/$defs/scopeLabels" },
+        "resources": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/resource" } }
+      }
+    },
+    "resource": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "displayName", "matchLabels", "discoveryMetric", "identityLabels", "allowedMetrics"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "matchLabels": { "$ref": "#/$defs/scopeLabels" }, "discoveryMetric": { "type": "string", "pattern": "^[a-zA-Z_:][a-zA-Z0-9_:]*$" },
+        "identityLabels": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/labelName" } },
+        "allowedMetrics": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/metric" } }
+      }
+    },
+    "alerts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceRefs", "matchLabels"],
+      "properties": { "sourceRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/name" } }, "matchLabels": { "$ref": "#/$defs/labels" } }
+    },
+    "inspection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "displayName", "schedule", "timezone", "checks"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "schedule": { "type": "string", "minLength": 1 }, "timezone": { "type": "string", "minLength": 1 },
+        "checks": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/check" } }
+      }
+    },
+    "check": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "resourceRef", "expression", "question"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" }, "resourceRef": { "$ref": "#/$defs/name" },
+        "expression": { "type": "string", "minLength": 1 }, "question": { "type": "string", "minLength": 1 },
+        "queryMode": { "enum": ["instant", "range"] }, "rangeSeconds": { "type": "integer", "minimum": 1 }, "stepSeconds": { "type": "integer", "minimum": 1 }
+      },
+      "allOf": [{ "if": { "properties": { "queryMode": { "const": "range" } }, "required": ["queryMode"] }, "then": { "required": ["rangeSeconds", "stepSeconds"] }, "else": { "properties": { "rangeSeconds": false, "stepSeconds": false } } }]
+    }
+  }
+}

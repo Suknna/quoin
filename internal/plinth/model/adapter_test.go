@@ -9,6 +9,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -24,6 +27,141 @@ func sseChunk(t *testing.T, writer http.ResponseWriter, payload string) {
 	fmt.Fprintf(writer, "data: %s\n\n", payload)
 	if flusher, ok := writer.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+// TestAdapterSendsCanonicalOpenAITools exercises the same executor adapter used
+// by inspection and investigation workers. The canonical catalog is already in
+// OpenAI's nested tools format, so decoding it as Eino ToolInfo would silently
+// produce zero-value names and descriptions on the provider wire.
+func TestAdapterSendsCanonicalOpenAITools(t *testing.T) {
+	for _, agentVersion := range []string{"initial-analysis-v1", "investigation-v1"} {
+		t.Run(agentVersion, func(t *testing.T) {
+			toolsJSON, err := attempt.CanonicalToolsJSON(agentVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if agentVersion == "investigation-v1" {
+				var canonical []struct {
+					Function struct {
+						Name       string         `json:"name"`
+						Parameters map[string]any `json:"parameters"`
+					} `json:"function"`
+				}
+				if err := json.Unmarshal(toolsJSON, &canonical); err != nil {
+					t.Fatal(err)
+				}
+				for _, tool := range canonical {
+					if tool.Function.Name == "quoin_browser" && tool.Function.Parameters["type"] != nil {
+						t.Fatalf("canonical quoin_browser schema unexpectedly changed: %#v", tool.Function.Parameters)
+					}
+				}
+			}
+			provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				defer request.Body.Close()
+				var body struct {
+					Tools []struct {
+						Type     string `json:"type"`
+						Function struct {
+							Name        string         `json:"name"`
+							Description string         `json:"description"`
+							Parameters  map[string]any `json:"parameters"`
+						} `json:"function"`
+					} `json:"tools"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+					http.Error(writer, "bad request", http.StatusBadRequest)
+					return
+				}
+				if len(body.Tools) == 0 {
+					t.Error("provider request has no tools")
+				}
+				for index, tool := range body.Tools {
+					if tool.Type != "function" || tool.Function.Name == "" || tool.Function.Description == "" || tool.Function.Parameters == nil {
+						t.Errorf("tools[%d]=%+v: expected nested OpenAI function name, description, and parameters", index, tool)
+						continue
+					}
+					// OpenAI-compatible providers, including DeepSeek, require every
+					// function parameter root to declare object. The investigation
+					// browser tool is a closed oneOf union, so it exercises the
+					// adapter's non-trivial JSON Schema path rather than a flat tool.
+					if tool.Function.Parameters["type"] != "object" {
+						t.Errorf("tools[%d] %q parameters root type=%#v, want object: %#v", index, tool.Function.Name, tool.Function.Parameters["type"], tool.Function.Parameters)
+					}
+					if agentVersion == "investigation-v1" && tool.Function.Name == "quoin_browser" {
+						if _, ok := tool.Function.Parameters["oneOf"]; !ok {
+							t.Errorf("quoin_browser lost its closed oneOf validation on the provider wire: %#v", tool.Function.Parameters)
+						}
+					}
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"id":"completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer provider.Close()
+
+			contract := Contract{ModelID: "m", BaseURL: provider.URL, APIKey: "k", ContextBudget: 4096, MaxOutput: 1024}
+			adapter, _, err := newAdapter(context.Background(), toolsJSON, contract.APIKey, contract)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := &Executor{}
+			text, _, _, finish, _, _, err := executor.callProvider(context.Background(), adapter, []*schema.Message{schema.SystemMessage("s"), schema.UserMessage("u")}, contract)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text != "ok" || finish != "stop" {
+				t.Fatalf("response text=%q finish=%q", text, finish)
+			}
+		})
+	}
+}
+
+func TestClassifyProviderErrorDoesNotTreatGeneric400AsContextOverflow(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  *openai.APIError
+		want string
+	}{
+		{name: "tool validation", err: &openai.APIError{HTTPStatusCode: http.StatusBadRequest, Message: "Invalid tools[0].function.name empty string"}, want: "invalid_response"},
+		{name: "context length", err: &openai.APIError{HTTPStatusCode: http.StatusBadRequest, Type: "context_length_exceeded", Message: "maximum context length exceeded"}, want: "context_overflow"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, retryable := classifyProviderError(test.err)
+			if got != test.want || retryable {
+				t.Fatalf("classifyProviderError() = (%q, %t), want (%q, false)", got, retryable, test.want)
+			}
+		})
+	}
+}
+
+// TestStreamingDeltaHookFailureFencesRetry uses the real SSE adapter path. A
+// hook may have exposed the delta before returning an error, so its failure
+// must retain the partial text and mark the physical call non-retryable.
+func TestStreamingDeltaHookFailureFencesRetry(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		sseChunk(t, writer, `{"id":"c1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"already visible"},"finish_reason":null}]}`)
+		// The callback error stops the executor before the provider completes.
+		fmt.Fprint(writer, "data: [DONE]\\n\\n")
+	}))
+	defer provider.Close()
+
+	contract := Contract{ModelID: "m", BaseURL: strings.TrimSuffix(provider.URL, "/") + "/v1", APIKey: "k", ContextBudget: 4096, MaxOutput: 1024, Streaming: true}
+	toolsJSON := []byte(`[{"type":"function","function":{"name":"noop","description":"test tool","parameters":{"type":"object"}}}]`)
+	adapter, _, err := newAdapter(context.Background(), toolsJSON, contract.APIKey, contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookErr := errors.New("worker delta delivery failed after exposure")
+	executor := &Executor{DeltaHook: func(context.Context, string) error { return hookErr }}
+	_, _, _, _, chunkSeen, partialText, err := executor.callProvider(context.Background(), adapter, []*schema.Message{schema.UserMessage("u")}, contract)
+	if !errors.Is(err, hookErr) || !chunkSeen || partialText != "already visible" {
+		t.Fatalf("callback failure = err=%v chunkSeen=%t partialText=%q", err, chunkSeen, partialText)
+	}
+	_, retryable := classifyStreamError(err, chunkSeen)
+	if retryable {
+		t.Fatal("an exposed delta callback failure must not be retryable")
 	}
 }
 
@@ -63,15 +201,7 @@ func TestAdapterStreamingToolCallAndContent(t *testing.T) {
 	defer provider.Close()
 
 	contract := Contract{ModelID: "m", BaseURL: strings.TrimSuffix(provider.URL, "/") + "/v1", APIKey: "k", ContextBudget: 4096, MaxOutput: 1024, Streaming: true}
-	toolsJSON, err := json.Marshal([]*schema.ToolInfo{{
-		Name: "bash", Desc: "run bash",
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"command": {Type: schema.String, Required: true},
-		}),
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsJSON := []byte(`[{"type":"function","function":{"name":"bash","description":"run bash","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}]`)
 	adapter, _, err := newAdapter(context.Background(), toolsJSON, contract.APIKey, contract)
 	if err != nil {
 		t.Fatal(err)

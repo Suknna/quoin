@@ -16,8 +16,6 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
-	"github.com/Suknna/quoin/internal/quoin/config"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
 )
 
@@ -75,23 +73,19 @@ func seedAttemptWithCheck(t *testing.T, db *sql.DB, attemptType, scopeType strin
 }
 
 // seedInspectionRun builds the minimal published inspection chain so a
-// run_check child can exist under the frozen scope trigger. The label
-// contract activates through the real domain command because its derived
-// state is trigger-owned.
-func seedInspectionRun(t *testing.T, db *sql.DB, adminID int64) int64 {
+// run_check child can exist under the frozen scope trigger. The archived
+// Label Contract record is inserted directly because new runtime paths never
+// activate or consult that historical provenance.
+func seedInspectionRun(t *testing.T, db *sql.DB, _ int64) int64 {
 	t.Helper()
 	now := testNow()
 	digest64 := hex.EncodeToString(make([]byte, 32))
-	contracts := labelcontract.NewService(db)
-	draft, err := contracts.CreateDraft(context.Background(), adminID, "t36-contract-0001", []byte("label_contract:\n  business_system_label: business_system\n"), config.Limits{})
+	contract, err := db.Exec(`INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,created_at) VALUES(1, 'label_contract: {}', '{}', ?, 'archived', 'v1', 'draft', ?)`, digest64, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	currentContractID, stateRowVersion, err := contracts.Current(context.Background())
+	contractID, err := contract.LastInsertId()
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := contracts.Activate(context.Background(), adminID, "t36-contract-0002", labelcontract.ActivateInput{ContractVersion: draft.Version, ExpectedStateRowVersion: stateRowVersion, ExpectedCurrentContractID: currentContractID, ExpectedTargetRowVersion: draft.RowVersion}); err != nil {
 		t.Fatal(err)
 	}
 	system, err := db.Exec(`INSERT INTO business_systems(key,display_name,enabled,created_at) VALUES('t36-system','T36 System',0,?)`, now)
@@ -100,7 +94,7 @@ func seedInspectionRun(t *testing.T, db *sql.DB, adminID int64) int64 {
 	}
 	systemID, _ := system.LastInsertId()
 	metricsConnectionID := seedConnection(t, db, "t36-metrics")
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?,?,'cat-v1',?,?)`, systemID, metricsConnectionID, draft.Version, digest64, digest64, now)
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?, '{}',?,'cat-v1',?,?)`, systemID, metricsConnectionID, contractID, digest64, digest64, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +109,7 @@ func seedInspectionRun(t *testing.T, db *sql.DB, adminID int64) int64 {
 	// publishes it through the frozen owner trigger; the root projection
 	// columns must travel in the same UPDATE.
 	mustExec(t, db, `UPDATE business_systems SET enabled=1,current_config_version_id=?,display_name='T36 System',timezone='UTC',row_version=row_version+1 WHERE id=?`, versionID, systemID)
-	run, err := db.Exec(`INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at) VALUES(?, 'nightly',?,?, 'manual','Queued',?)`, systemID, versionID, draft.Version, now)
+	run, err := db.Exec(`INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at) VALUES(?, 'nightly',?,?, 'manual','Queued',?)`, systemID, versionID, contractID, now)
 	if err != nil {
 		t.Fatal(err)
 	}

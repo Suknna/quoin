@@ -11,7 +11,9 @@ package thanos
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +29,7 @@ import (
 // provider-facing schema digest; internal/quoin/attempt/tools.go).
 const (
 	QueryToolName    = "thanos_query"
-	QueryToolVersion = "1"
+	QueryToolVersion = "2"
 	// QueryResultSchemaKind is the frozen CompleteToolCall payload schema
 	// identifier the supervisor seals (RUNTIME-AGENT-008).
 	QueryResultSchemaKind = "thanos_query_result_v1"
@@ -43,78 +45,108 @@ var ErrThanosUnavailable = errors.New("no enabled thanos connection")
 // execution authorization re-check failed).
 var ErrGrantNotCurrent = errors.New("thanos grant is no longer current")
 
-// ResolveQueryGrant derives authority exclusively from the analysis snapshot:
-// the occurrence must have an immutable attributed business and that business's
-// exact published configuration/versioned Label Contract must be pinned in the
-// attempt input. It rejects a missing, stale, unpublished, disabled, or unsafe
-// context before a grant row exists; the model never chooses a connection or
-// relaxes the Label Contract selector scope.
+// ResolveQueryGrant derives authority solely from the config-version input item
+// frozen for this attempt. New attempts never consult Label Contracts or resolve
+// names: declaration_json carries the reviewed connection locator and compiled
+// resource allowlist. The model must name one resource explicitly; Quoin scopes
+// the query AST before handing the canonical arguments to Plinth.
 func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolGrant, error) {
 	var (
 		businessSystemID, configVersionID, connectionID        int64
-		systemKey, businessLabel, query                        string
+		declarationJSON, resourceRef, query                    string
 		revisionID, generationID, bindingRevision, rootBinding int64
 	)
 	if err := conn.QueryRowContext(ctx, `
-		SELECT occurrence.business_system_id, config_item.business_system_config_version_id,
-		       config.system_key,
-		       json_extract(contract.contract_json, '$.label_contract.business_system_label'),
+		SELECT config.business_system_id, config_item.business_system_config_version_id,
+		       config.declaration_json, json_extract(tool.arguments_json, '$.resourceRef'),
 		       json_extract(tool.arguments_json, '$.query')
 		FROM tool_calls tool
-		JOIN execution_attempts attempt ON attempt.id=tool.attempt_id
-		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=attempt.id
-		JOIN attempt_input_items occurrence_item ON occurrence_item.snapshot_id=snapshot.id AND occurrence_item.occurrence_id IS NOT NULL
-		JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
-		JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id AND config_item.business_system_config_version_id IS NOT NULL
+		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=tool.attempt_id
+		JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id
+			AND config_item.business_system_config_version_id IS NOT NULL
 		JOIN business_system_config_versions config ON config.id=config_item.business_system_config_version_id
-		JOIN attempt_input_items contract_item ON contract_item.snapshot_id=snapshot.id AND contract_item.label_contract_version_id IS NOT NULL
-		JOIN label_contracts contract ON contract.id=contract_item.label_contract_version_id
 		WHERE tool.id=? AND tool.attempt_id=?
-		  AND occurrence.business_system_id=config.business_system_id
-		  AND config.label_contract_version_id=contract.id
-		  -- Publication is immutable; a later publish may supersede this frozen
-		  -- version without changing authority already bound to this attempt.
-		  AND config.published_at IS NOT NULL`,
-		toolCallID, attemptID,
-	).Scan(&businessSystemID, &configVersionID, &systemKey, &businessLabel, &query); err != nil {
-
+		  AND config.published_at IS NOT NULL
+		  AND config.declaration_json IS NOT NULL`, toolCallID, attemptID,
+	).Scan(&businessSystemID, &configVersionID, &declarationJSON, &resourceRef, &query); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ToolGrant{}, fmt.Errorf("%w: analysis has no eligible published business configuration context", ErrThanosUnavailable)
+			return attempt.ToolGrant{}, fmt.Errorf("%w: attempt has no migrated published configuration declaration", ErrThanosUnavailable)
 		}
 		return attempt.ToolGrant{}, err
 	}
-	if fields := config.ValidateCheckExpression(query, businessLabel, systemKey, "query"); len(fields) != 0 {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: query violates business Label Contract scope: %s", ErrThanosUnavailable, fields[0].Reason)
+	var declaration config.BusinessSystemDocument
+	if err := json.Unmarshal([]byte(declarationJSON), &declaration); err != nil {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: frozen declaration is invalid: %v", ErrThanosUnavailable, err)
 	}
+	if declaration.MetricsConnectionID <= 0 || resourceRef == "" || query == "" {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: frozen declaration or explicit resourceRef is missing", ErrThanosUnavailable)
+	}
+	// Every vector selector must satisfy the frozen resource policy before a
+	// connection grant can authorize execution, including nested expressions.
+	scope, err := declaration.CompileResourceScope(resourceRef)
+	if err != nil {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: resourceRef is not declared: %v", ErrThanosUnavailable, err)
+	}
+	normalizedQuery, err := scope.ScopeExpression(query)
+	if err != nil {
+		return attempt.ToolGrant{}, fmt.Errorf("%w: query violates declared resource scope: %v", ErrThanosUnavailable, err)
+	}
+	// Preserve the model proposal on tool_calls and freeze the independently
+	// authorized execution request. Plinth must receive this exact canonical JSON.
+	executionArgs, err := json.Marshal(map[string]string{"resourceRef": resourceRef, "query": normalizedQuery})
+	if err != nil {
+		return attempt.ToolGrant{}, err
+	}
+	digest := sha256.Sum256(executionArgs)
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO tool_call_execution_inputs(tool_call_id,arguments_json,arguments_digest,created_at)
+		VALUES(?,?,?,?)`, toolCallID, string(executionArgs), hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return attempt.ToolGrant{}, err
+	}
+	connectionID = declaration.MetricsConnectionID
 	if err := conn.QueryRowContext(ctx, `
-		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
+		SELECT c.current_revision_id, c.current_credential_generation_id,
 		       g.key_binding_revision, s.binding_revision
-		FROM business_system_config_versions config
-		JOIN connections c ON c.id=config.metrics_connection_id
+		FROM connections c
 		JOIN credential_generations g ON g.id=c.current_credential_generation_id
 		CROSS JOIN root_key_state s
-		WHERE config.id=? AND config.business_system_id=?
-		  AND c.type IN ('thanos','prometheus') AND c.enabled=1 AND c.revalidation_required=0`,
-		configVersionID, businessSystemID,
-	).Scan(&connectionID, &revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
+		WHERE c.id=? AND c.type IN ('thanos','prometheus') AND c.enabled=1 AND c.revalidation_required=0`,
+		connectionID,
+	).Scan(&revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ToolGrant{}, fmt.Errorf("%w: configured metrics connection is unavailable", ErrThanosUnavailable)
+			return attempt.ToolGrant{}, fmt.Errorf("%w: declared metrics connection is unavailable", ErrThanosUnavailable)
 		}
 		return attempt.ToolGrant{}, err
 	}
 	if bindingRevision != rootBinding {
 		return attempt.ToolGrant{}, fmt.Errorf("%w: credential root binding %d does not match %d", ErrGrantNotCurrent, bindingRevision, rootBinding)
 	}
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,
-			credential_generation_id,created_by_tool_call_id,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`,
-		attemptID, "thanos_query", businessSystemID, connectionID, revisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return attempt.ToolGrant{}, err
-	}
-	grantID, err := insert.LastInsertId()
-	if err != nil {
+	// A single AgentComplete can propose several metrics calls. The binding
+	// identity deliberately excludes the Tool Call because every call made by
+	// this Attempt against this exact immutable connection pair has identical
+	// authority. Reuse that one grant and record the per-call relationship in
+	// tool_call_connection_grants; the first creating Tool Call remains auditable
+	// in created_by_tool_call_id without weakening the frozen binding constraint.
+	var grantID int64
+	err = conn.QueryRowContext(ctx, `
+		SELECT id FROM attempt_connection_grants
+		WHERE attempt_id=? AND purpose='thanos_query' AND business_system_id=?
+		  AND connection_id=? AND connection_revision_id=? AND credential_generation_id=?`,
+		attemptID, businessSystemID, connectionID, revisionID, generationID).Scan(&grantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		insert, insertErr := conn.ExecContext(ctx, `
+			INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,
+				credential_generation_id,created_by_tool_call_id,created_at)
+			VALUES(?,?,?,?,?,?,?,?)`,
+			attemptID, "thanos_query", businessSystemID, connectionID, revisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
+		if insertErr != nil {
+			return attempt.ToolGrant{}, insertErr
+		}
+		grantID, insertErr = insert.LastInsertId()
+		if insertErr != nil {
+			return attempt.ToolGrant{}, insertErr
+		}
+	} else if err != nil {
 		return attempt.ToolGrant{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO tool_call_connection_grants(tool_call_id,connection_grant_id,ordinal) VALUES(?,?,0)`, toolCallID, grantID); err != nil {

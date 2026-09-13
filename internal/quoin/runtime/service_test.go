@@ -283,6 +283,31 @@ func TestAcceptedPeerReleaseIsRetainedForDispatchProvenance(t *testing.T) {
 	}
 }
 
+// TestOutOfOrderAcceptedAttachmentsPreserveNewerEpoch reproduces two Hellos
+// that both pass Adjudicate before their handlers reach attachment. The newer
+// handler wins first; the delayed lower epoch must not evict or close it.
+func TestOutOfOrderAcceptedAttachmentsPreserveNewerEpoch(t *testing.T) {
+	service := newService(t)
+	newerDone := service.AttachStreamWithSender("lintel", "boot-a", 2, func(any) error { return nil })
+	if newerDone == nil {
+		t.Fatal("newer accepted epoch was not attached")
+	}
+	if staleDone := service.AttachStreamWithSender("lintel", "boot-a", 1, func(any) error { return nil }); staleDone != nil {
+		t.Fatal("delayed lower epoch must be rejected at attachment")
+	}
+	select {
+	case <-newerDone:
+		t.Fatal("stale attachment closed the newer stream")
+	default:
+	}
+	if err := service.WithCurrent("lintel", "boot-a", 2, func() error { return nil }); err != nil {
+		t.Fatalf("newer epoch lost authority: %v", err)
+	}
+	if err := service.WithCurrent("lintel", "boot-a", 1, func() error { return nil }); !errors.Is(err, qruntime.ErrNotConnected) {
+		t.Fatalf("stale epoch gained authority: %v", err)
+	}
+}
+
 func TestWithCurrentRejectsSupersededStream(t *testing.T) {
 	service := newService(t)
 	service.AttachStream("lintel", "boot-a", 1)

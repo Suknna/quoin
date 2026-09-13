@@ -98,16 +98,24 @@ func (service *RuntimeService) dispatchReadyJourneyAttempts(ctx context.Context)
 		sharedops.LogEvent("quoin", "error", "config_verification.journey_scan", err.Error())
 		return false
 	}
-	defer rows.Close()
+	// Materialize and close before dispatchJourneyAttempt re-enters SQLite. The
+	// production pool intentionally has one connection, so retaining this cursor
+	// would block dispatch while it tries to read the frozen Attempt input.
 	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return false
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		sharedops.LogEvent("quoin", "error", "config_verification.journey_scan", err.Error())
+		return false
+	}
+	if err := rows.Close(); err != nil {
 		sharedops.LogEvent("quoin", "error", "config_verification.journey_scan", err.Error())
 		return false
 	}

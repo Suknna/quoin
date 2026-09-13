@@ -13,32 +13,25 @@ import (
 
 // Attempt lifecycle: technical-failure retry, the cancellation fence, the
 // dispatch accept gate, the first-success seal and failure bookkeeping.
-// Retry creates a fresh attempt for a technical failure (DATA-ANALYSIS-001).
-// The domain input (alert occurrence context) is reused byte-for-byte from
-// the frozen first snapshot; only the model contract may be re-resolved
-// against the current enabled provider so a legitimate rotation does not
-// brick retries. The same client command replays to its original attempt.
-func (service *Service) Retry(ctx context.Context, analysisID, principalID int64, clientCommandID string) (int64, error) {
-	if entry, ok := service.replayLookup(principalID, clientCommandID); ok {
-		return entry.attemptID, nil
-	}
+// Retry preserves the terminal failed analysis and creates a fresh analysis
+// for its occurrence. The schema intentionally makes terminal analyses
+// immutable, so re-opening the old row or copying its historical attempt would
+// both violate the audit boundary. Create re-resolves the currently qualified
+// provider and renders a new immutable input snapshot, allowing an operator to
+// retry after a repaired provider/configuration or repaired runtime software.
+func (service *Service) Retry(ctx context.Context, analysisID, principalID int64, clientCommandID string) (CreateResult, error) {
+	var occurrenceID int64
 	var state string
-	if err := service.db.QueryRowContext(ctx, `SELECT state FROM initial_analyses WHERE id=?`, analysisID).Scan(&state); err != nil {
+	if err := service.db.QueryRowContext(ctx, `SELECT occurrence_id,state FROM initial_analyses WHERE id=?`, analysisID).Scan(&occurrenceID, &state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrNotFound
+			return CreateResult{}, ErrNotFound
 		}
-		return 0, err
+		return CreateResult{}, err
 	}
-	if state != "Failed" {
-		return 0, fmt.Errorf("%w: analysis %d is %s", ErrActiveConflict, analysisID, state)
+	if state != "Failed" && state != "Interrupted" {
+		return CreateResult{}, fmt.Errorf("%w: analysis %d is %s", ErrActiveConflict, analysisID, state)
 	}
-	// The frozen schema closes Failed as terminal (trg_initial_analyses_
-	// terminal_immutable), so same-analysis retry has no legal transition;
-	// the operator retry path is a fresh analysis on the same occurrence
-	// (Create accepts it once the terminal one leaves the active set). The
-	// endpoint answers the deterministic conflict instead of pretending the
-	// reopen happened.
-	return 0, fmt.Errorf("%w: analysis %d is Failed and the frozen schema closes Failed as terminal (operator retry creates a new analysis on the occurrence)", ErrActiveConflict, analysisID)
+	return service.create(ctx, occurrenceID, principalID, clientCommandID, "retry", analysisID)
 }
 
 // CancelOutcome classifies what the cancellation fence decided.
@@ -59,7 +52,9 @@ type CancelOutcome struct {
 // otherwise the active attempt closes to Cancelled/Cancelling and the
 // analysis follows on CancelAck.
 func (service *Service) Cancel(ctx context.Context, analysisID, principalID, expectedRowVersion int64, clientCommandID string) (CancelOutcome, error) {
-	if entry, ok := service.replayLookup(principalID, clientCommandID); ok {
+	if entry, ok, err := service.replayLookup(principalID, clientCommandID, "cancel", analysisID, 0); err != nil {
+		return CancelOutcome{}, err
+	} else if ok {
 		detail, err := service.Get(ctx, analysisID)
 		if err != nil {
 			return CancelOutcome{}, err
@@ -104,7 +99,7 @@ func (service *Service) Cancel(ctx context.Context, analysisID, principalID, exp
 			return CancelOutcome{}, err
 		}
 		committed = true
-		service.replayRemember(principalID, clientCommandID, replayEntry{analysisID: analysisID, attemptID: 0})
+		service.replayRemember(principalID, clientCommandID, replayEntry{operation: "cancel", targetAnalysisID: analysisID, analysisID: analysisID, attemptID: 0})
 		return CancelOutcome{State: "Succeeded", RowVersion: rowVersion}, nil
 	case "Failed", "Cancelled", "Interrupted":
 		return CancelOutcome{}, fmt.Errorf("%w: analysis %d is %s", ErrActiveConflict, analysisID, state)
@@ -142,7 +137,7 @@ func (service *Service) Cancel(ctx context.Context, analysisID, principalID, exp
 		return CancelOutcome{}, err
 	}
 	committed = true
-	service.replayRemember(principalID, clientCommandID, replayEntry{analysisID: analysisID, attemptID: attemptID})
+	service.replayRemember(principalID, clientCommandID, replayEntry{operation: "cancel", targetAnalysisID: analysisID, analysisID: analysisID, attemptID: attemptID})
 	outcome.State = nextState
 	outcome.RowVersion = rowVersion
 	return outcome, nil

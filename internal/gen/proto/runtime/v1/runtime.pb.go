@@ -5099,8 +5099,12 @@ type ToolCallAuthorization struct {
 	// return_to_model result and must not fetch a credential or contact a target.
 	PreflightErrorCode   string `protobuf:"bytes,6,opt,name=preflight_error_code,json=preflightErrorCode,proto3" json:"preflight_error_code,omitempty"`       // target_not_found|target_ambiguous|no_mapping
 	PreflightErrorDetail string `protobuf:"bytes,7,opt,name=preflight_error_detail,json=preflightErrorDetail,proto3" json:"preflight_error_detail,omitempty"` // bounded non-secret user-facing detail
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Quoin-authorized execution arguments. When present, Plinth must verify this
+	// digest and execute these bytes rather than the immutable model proposal.
+	ExecutionArgumentsJson   []byte `protobuf:"bytes,8,opt,name=execution_arguments_json,json=executionArgumentsJson,proto3" json:"execution_arguments_json,omitempty"`
+	ExecutionArgumentsDigest []byte `protobuf:"bytes,9,opt,name=execution_arguments_digest,json=executionArgumentsDigest,proto3" json:"execution_arguments_digest,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ToolCallAuthorization) Reset() {
@@ -5180,6 +5184,20 @@ func (x *ToolCallAuthorization) GetPreflightErrorDetail() string {
 		return x.PreflightErrorDetail
 	}
 	return ""
+}
+
+func (x *ToolCallAuthorization) GetExecutionArgumentsJson() []byte {
+	if x != nil {
+		return x.ExecutionArgumentsJson
+	}
+	return nil
+}
+
+func (x *ToolCallAuthorization) GetExecutionArgumentsDigest() []byte {
+	if x != nil {
+		return x.ExecutionArgumentsDigest
+	}
+	return nil
 }
 
 type CompleteModelCallAck struct {
@@ -10203,7 +10221,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\x15provider_tool_call_id\x18\x02 \x01(\tR\x12providerToolCallId\x12\x1b\n" +
 	"\ttool_name\x18\x03 \x01(\tR\btoolName\x12%\n" +
 	"\x0earguments_json\x18\x04 \x01(\fR\rargumentsJson\x12)\n" +
-	"\x10arguments_digest\x18\x05 \x01(\fR\x0fargumentsDigest\"\x91\x03\n" +
+	"\x10arguments_digest\x18\x05 \x01(\fR\x0fargumentsDigest\"\x89\x04\n" +
 	"\x15ToolCallAuthorization\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\x03R\n" +
 	"toolCallId\x12%\n" +
@@ -10212,7 +10230,9 @@ const file_runtime_proto_rawDesc = "" +
 	"\ffailure_mode\x18\x04 \x01(\x0e2!.quoin.runtime.v1.ToolFailureModeR\vfailureMode\x12N\n" +
 	"\x11connection_grants\x18\x05 \x03(\v2!.quoin.runtime.v1.ConnectionGrantR\x10connectionGrants\x120\n" +
 	"\x14preflight_error_code\x18\x06 \x01(\tR\x12preflightErrorCode\x124\n" +
-	"\x16preflight_error_detail\x18\a \x01(\tR\x14preflightErrorDetail\"\xad\x02\n" +
+	"\x16preflight_error_detail\x18\a \x01(\tR\x14preflightErrorDetail\x128\n" +
+	"\x18execution_arguments_json\x18\b \x01(\fR\x16executionArgumentsJson\x12<\n" +
+	"\x1aexecution_arguments_digest\x18\t \x01(\fR\x18executionArgumentsDigest\"\xad\x02\n" +
 	"\x14CompleteModelCallAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x1d\n" +
 	"\n" +

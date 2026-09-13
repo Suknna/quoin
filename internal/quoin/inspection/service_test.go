@@ -23,40 +23,91 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/connections"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
+	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	_ "modernc.org/sqlite"
 )
 
-const mixedSystemYAML = `system_key: payments
-display_name: 支付系统
-metrics_connection_id: "1"
-enabled: true
-timezone: Asia/Shanghai
-resource_discoveries: []
-inspection_plans:
-  - key: mixed-plan
-    display_name: 混合巡检
-    cron: "* * * * *"
-    checks:
-      - key: up-instant
-        display_name: Up Instant
-        analysis_question: 当前可用吗？
-        kind: promql
-        query:
-          mode: instant
-          expression: 'up{business_system="payments"}'
-      - key: status-page
-        display_name: 状态页
-        analysis_question: 状态页是否正常?
-        kind: browser
-        journey_id: page.status-marker.v1
-        journey_params:
-          path: /status
-  - key: intentionally-empty
-    display_name: 暂无检查的计划
-    cron: "* * * * *"
-    checks: []
+const singlePromQLSystemYAML = `apiVersion: quoin/v1
+kind: BusinessSystem
+metadata:
+  name: payments
+  displayName: 支付系统
+  description: 支付系统巡检
+spec:
+  metrics:
+    connectionRef: fixture-metrics
+    matchLabels:
+      business_system: payments
+    resources:
+      - name: services
+        displayName: 服务
+        matchLabels:
+          job: payments
+        discoveryMetric: up
+        identityLabels: [instance]
+        allowedMetrics: [up]
+  alerts:
+    sourceRefs: []
+    matchLabels: {}
+  inspections:
+    - name: mixed-plan
+      displayName: PromQL 巡检
+      schedule: "* * * * *"
+      timezone: Asia/Shanghai
+      checks:
+        - name: up-instant
+          resourceRef: services
+          expression: up
+          question: 当前可用吗？
+    - name: intentionally-empty
+      displayName: 暂无检查的计划
+      schedule: "* * * * *"
+      timezone: Asia/Shanghai
+      checks: []
+`
+
+const multiPromQLSystemYAML = `apiVersion: quoin/v1
+kind: BusinessSystem
+metadata:
+  name: payments
+  displayName: 支付系统
+  description: 支付系统巡检
+spec:
+  metrics:
+    connectionRef: fixture-metrics
+    matchLabels:
+      business_system: payments
+    resources:
+      - name: services
+        displayName: 服务
+        matchLabels:
+          job: payments
+        discoveryMetric: up
+        identityLabels: [instance]
+        allowedMetrics: [up]
+  alerts:
+    sourceRefs: []
+    matchLabels: {}
+  inspections:
+    - name: mixed-plan
+      displayName: 多 PromQL 巡检
+      schedule: "* * * * *"
+      timezone: Asia/Shanghai
+      checks:
+        - name: up-instant
+          resourceRef: services
+          expression: up
+          question: 当前可用吗？
+        - name: up-secondary
+          resourceRef: services
+          expression: up
+          question: 第二项指标正常吗？
+    - name: intentionally-empty
+      displayName: 暂无检查的计划
+      schedule: "* * * * *"
+      timezone: Asia/Shanghai
+      checks: []
 `
 
 type testHarness struct {
@@ -85,27 +136,75 @@ func newTestHarness(t *testing.T) *testHarness {
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
 	t.Cleanup(func() { connections.ProbeContractSource = previousProbeContractSource })
 	seedMetricsConnection(t, db)
-	contracts := labelcontract.NewService(db)
-	if _, err := contracts.CreateDraft(context.Background(), 1, "seed-contract-0001", []byte("label_contract:\n  business_system_label: business_system\n"), quoinconfig.Limits{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := contracts.Activate(context.Background(), 1, "seed-activate-0001", labelcontract.ActivateInput{ContractVersion: 1, ExpectedStateRowVersion: 1, ExpectedTargetRowVersion: 1}); err != nil {
-		t.Fatal(err)
-	}
 	h := &testHarness{db: db, service: NewService(db), attempts: attempt.NewService(db), systems: businesssystem.NewService(db), principal: 1}
 	h.service.JourneyCore = h.systems.CommitJourneyProposalScoped
 	return h
 }
 
-// publishMixedPlan uploads and publishes the mixed plan through the real
-// business-system path and returns the published version id.
-func (h *testHarness) publishMixedPlan(t *testing.T) int64 {
+// publishSinglePromQLPlan supplies the standard new-schema fixture: exactly one
+// declared PromQL check and no browser capability.
+func (h *testHarness) publishSinglePromQLPlan(t *testing.T) int64 {
 	t.Helper()
-	draft, err := h.systems.Upload(context.Background(), h.principal, "seed-upload-"+fmt.Sprint(time.Now().UnixNano()), businesssystem.UploadInput{
-		YAMLBody: []byte(mixedSystemYAML), TargetLabelContractVersion: 1,
-	}, quoinconfig.Limits{})
+	return h.publishPlan(t, singlePromQLSystemYAML, "single-promql")
+}
+
+// publishMultiPromQLPlan keeps multi-child scheduling coverage declarative while
+// retaining the new schema's PromQL-only browser gate.
+func (h *testHarness) publishMultiPromQLPlan(t *testing.T) int64 {
+	t.Helper()
+	return h.publishPlan(t, multiPromQLSystemYAML, "multi-promql")
+}
+
+// publishArchivedBrowserPlan creates a frozen legacy configuration solely for
+// browser-history tests. New quoin/v1 declarations remain PromQL-only; this
+// fixture models data written before the browser gate closed.
+func (h *testHarness) publishArchivedBrowserPlan(t *testing.T) int64 {
+	t.Helper()
+	h.publishSinglePromQLPlan(t)
+	var systemID, sourceVersionID int64
+	if err := h.db.QueryRow(`SELECT b.id,b.current_config_version_id FROM business_systems b WHERE b.key='payments'`).Scan(&systemID, &sourceVersionID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := h.db.Exec(`
+		INSERT INTO business_system_config_versions(
+			business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,
+			declaration_json,description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,
+			digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone
+		)
+		SELECT business_system_id,version_seq+1,'draft','archived browser configuration','archived','archived',NULL,
+			'{}',description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,
+			digest,created_by,?,system_key,display_name,metrics_connection_id,enabled,timezone
+		FROM business_system_config_versions WHERE id=?`, now, sourceVersionID)
 	if err != nil {
-		t.Fatalf("upload mixed plan: %v", err)
+		t.Fatalf("seed archived browser config: %v", err)
+	}
+	versionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := h.db.Exec(`INSERT INTO config_plans(config_version_id,plan_key,display_name,timezone,cron) VALUES(?,?,?,'Asia/Shanghai','* * * * *')`, versionID, "mixed-plan", "历史浏览器巡检")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planID, err := plan.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,journey_id,journey_params_json) VALUES(?,?,?,?,'browser',?,?)`, planID, "status-page", "状态页", "状态页是否正常?", "page.status-marker.v1", `{"path":"/status"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.db.Exec(`UPDATE business_systems SET current_config_version_id=?,row_version=row_version+1 WHERE id=?`, versionID, systemID); err != nil {
+		t.Fatalf("publish archived browser config: %v", err)
+	}
+	return versionID
+}
+
+func (h *testHarness) publishPlan(t *testing.T, yaml, fixture string) int64 {
+	t.Helper()
+	draft, err := h.systems.Upload(context.Background(), h.principal, "seed-upload-"+fixture+"-"+fmt.Sprint(time.Now().UnixNano()), businesssystem.UploadInput{YAMLBody: []byte(yaml)}, quoinconfig.Limits{})
+	if err != nil {
+		t.Fatalf("upload %s plan: %v", fixture, err)
 	}
 	var versionID int64
 	if _, err := fmt.Sscanf(draft.ID, "%d", &versionID); err != nil {
@@ -119,8 +218,8 @@ func (h *testHarness) publishMixedPlan(t *testing.T) int64 {
 	if current.Valid {
 		expectedCurrent = &current.Int64
 	}
-	if _, err := h.systems.Publish(context.Background(), h.principal, "seed-publish-"+fmt.Sprint(time.Now().UnixNano()), "payments", versionID, expectedCurrent); err != nil {
-		t.Fatalf("publish mixed plan: %v", err)
+	if _, err := h.systems.Publish(context.Background(), h.principal, "seed-publish-"+fixture+"-"+fmt.Sprint(time.Now().UnixNano()), "payments", versionID, expectedCurrent); err != nil {
+		t.Fatalf("publish %s plan: %v", fixture, err)
 	}
 	return versionID
 }
@@ -128,6 +227,7 @@ func (h *testHarness) publishMixedPlan(t *testing.T) int64 {
 // seedBrowserIdentity mirrors the verification-journey harness: a real
 // identity revision with the embedded probe journey, optionally published
 // through the real manual-login/publish path.
+
 func (h *testHarness) seedBrowserIdentity(t *testing.T, withProfile bool) {
 	t.Helper()
 	browsers := browser.NewService(h.db)
@@ -301,10 +401,9 @@ func promqlSuccessProposal(attemptID, runID int64, outcome, mode string) []byte 
 	return body
 }
 
-func TestCreateMixedRunAndPromQLClosure(t *testing.T) {
+func TestCreatePromQLRunAndClosure(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	ctx := context.Background()
 	detail, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "mixed-plan")
 	if err != nil {
@@ -312,18 +411,6 @@ func TestCreateMixedRunAndPromQLClosure(t *testing.T) {
 	}
 	if detail.State != "Running" || detail.EvidenceAt == nil {
 		t.Fatalf("run should be Running with evidence_at, got %+v", detail)
-	}
-	// Without a published profile the browser check settles terminally as an
-	// authentication_required gap while the PromQL child stays Queued.
-	var browserState, browserStatus, browserGap string
-	if err := h.db.QueryRow(`
-		SELECT a.state, x.status, x.gap_reason FROM inspection_check_results x
-		JOIN execution_attempts a ON a.id=x.attempt_id WHERE x.run_id=? AND x.check_key='status-page'`, detail.RunID).
-		Scan(&browserState, &browserStatus, &browserGap); err != nil {
-		t.Fatal(err)
-	}
-	if browserState != "Failed" || browserStatus != "gap" || browserGap != "authentication_required" {
-		t.Fatalf("browser child should settle authentication_required, got %s/%s/%s", browserState, browserStatus, browserGap)
 	}
 	attemptID := h.promqlAttemptID(t, detail.RunID)
 	var kind string
@@ -352,20 +439,23 @@ func TestCreateMixedRunAndPromQLClosure(t *testing.T) {
 	if state != "Succeeded" || checkStatus != "ok" || evidenceID < 1 {
 		t.Fatalf("promql closure = %s/%s/evidence %d", state, checkStatus, evidenceID)
 	}
+	evidenceDetail, err := evidence.NewService(h.db).Get(ctx, evidenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer, ok := evidenceDetail.Producer.(map[string]any)
+	if !ok || producer["kind"] != "plinth_promql" || producer["attemptId"] != fmt.Sprint(attemptID) {
+		t.Fatalf("PromQL evidence producer = %#v, want plinth_promql for attempt %d", evidenceDetail.Producer, attemptID)
+	}
+	if len(evidenceDetail.Connections) != 1 || evidenceDetail.Connections[0].Type != "thanos" {
+		t.Fatalf("PromQL evidence connections = %#v, want frozen Thanos grant", evidenceDetail.Connections)
+	}
 	final, err := h.service.GetRun(ctx, "payments", detail.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.State != "CompletedWithGaps" || final.ReportCount != 0 {
-		t.Fatalf("run should converge CompletedWithGaps without a report yet, got %s reports=%d", final.State, final.ReportCount)
-	}
-	// The browser gap stayed visible instead of erasing the run's evidence.
-	var gaps int
-	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND status='gap'`, detail.RunID).Scan(&gaps); err != nil {
-		t.Fatal(err)
-	}
-	if gaps != 1 {
-		t.Fatalf("expected one persisted gap, got %d", gaps)
+	if final.State != "Completed" || final.ReportCount != 0 {
+		t.Fatalf("run should converge Completed without a report yet, got %s reports=%d", final.State, final.ReportCount)
 	}
 	if err := h.service.CommitPromQLProposal(ctx, attemptID, "plinth-boot", 1, promqlSuccessProposal(attemptID, detail.RunID, "success", "instant")); err != nil {
 		t.Fatalf("identical replay must be idempotent: %v", err)
@@ -377,9 +467,9 @@ func TestCreateMixedRunAndPromQLClosure(t *testing.T) {
 	}
 }
 
-func TestBusyIdentitySettlesLocalGap(t *testing.T) {
+func TestArchivedBrowserBusyIdentitySettlesLocalGap(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishArchivedBrowserPlan(t)
 	h.seedBrowserIdentity(t, true)
 	// An open manual-login operation holds the identity: the browser check
 	// must settle as an identity_busy local gap on its Queued child.
@@ -411,8 +501,7 @@ func TestBusyIdentitySettlesLocalGap(t *testing.T) {
 
 func TestCommitPromQLProposalFences(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	ctx := context.Background()
 	detail, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "mixed-plan")
 	if err != nil {
@@ -443,7 +532,7 @@ func TestCommitPromQLProposalFences(t *testing.T) {
 
 func TestCreateRunRejectionsAndReplay(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishSinglePromQLPlan(t)
 	ctx := context.Background()
 	_, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "missing-plan")
 	var rejection *RejectionError
@@ -469,9 +558,9 @@ func TestCreateRunRejectionsAndReplay(t *testing.T) {
 	}
 }
 
-func TestBrowserChildFreezesRealCatalogBinding(t *testing.T) {
+func TestArchivedBrowserChildFreezesRealCatalogBinding(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishArchivedBrowserPlan(t)
 	h.seedBrowserIdentity(t, true)
 	if _, err := h.db.Exec(`UPDATE browser_operations SET stop_confirmed_at='2026-08-28T00:00:00Z', stop_confirmation_basis='stop_ack' WHERE stop_confirmed_at IS NULL`); err != nil {
 		t.Fatal(err)
@@ -515,7 +604,7 @@ func TestBrowserChildFreezesRealCatalogBinding(t *testing.T) {
 func TestCreateRunThanosUnavailableTyped(t *testing.T) {
 	h := newTestHarness(t)
 	seedAlternateMetricsConnection(t, h.db)
-	h.publishMixedPlan(t)
+	h.publishSinglePromQLPlan(t)
 	// Publish validates the declared connection; disable it afterward so run
 	// creation proves it does not fall back to the alternate metrics connection.
 	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
@@ -542,7 +631,7 @@ func TestCreateRunThanosUnavailableTyped(t *testing.T) {
 func TestCreateScheduledInspectionRunDoesNotMislabelThanosFailure(t *testing.T) {
 	h := newTestHarness(t)
 	seedAlternateMetricsConnection(t, h.db)
-	versionID := h.publishMixedPlan(t)
+	versionID := h.publishSinglePromQLPlan(t)
 	// The frozen config selected ID 1; its later disable must fail scheduling
 	// even though the alternate metrics connection remains enabled.
 	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
@@ -570,7 +659,7 @@ func TestCreateScheduledInspectionRunDoesNotMislabelThanosFailure(t *testing.T) 
 
 func TestCreateScheduledInspectionRunIsDeterministicAndRecordsUnavailableSlots(t *testing.T) {
 	h := newTestHarness(t)
-	versionID := h.publishMixedPlan(t)
+	versionID := h.publishMultiPromQLPlan(t)
 	plans, err := h.service.ScheduledPlans(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -622,7 +711,7 @@ func TestCreateScheduledInspectionRunIsDeterministicAndRecordsUnavailableSlots(t
 
 func TestScheduledPlansIgnorePlansWithoutChecks(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishSinglePromQLPlan(t)
 
 	plans, err := h.service.ScheduledPlans(context.Background())
 	if err != nil {
@@ -635,8 +724,7 @@ func TestScheduledPlansIgnorePlansWithoutChecks(t *testing.T) {
 
 func TestCreateScheduledInspectionRunRecordsOverlapWithoutBackfill(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
-	h.seedBrowserIdentity(t, false)
+	h.publishSinglePromQLPlan(t)
 	manual, err := h.service.CreateInspectionRun(context.Background(), h.principal, "manual-active", "payments", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)

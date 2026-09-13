@@ -1,6 +1,5 @@
-// Config Verification Run and Label Contract readiness routes (T17): the
-// prepublish run command over one immutable draft, the run history/detail
-// reads, the cancel fence and the derived activation readiness view.
+// Config Verification Run routes: the prepublish run command over one
+// immutable draft, its run history/detail reads, and the cancellation fence.
 
 package appconfig
 
@@ -11,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 )
 
 type verificationRunListing struct {
@@ -189,27 +187,4 @@ func (handler *Handler) cancelConfigVerificationRun(ctx context.Context, input *
 		CacheControl string                               `header:"Cache-Control"`
 		Body         businesssystem.VerificationRunDetail `json:"body"`
 	}{CacheControl: noStore(), Body: detail}, nil
-}
-
-// getLabelContractActivationReadiness derives the per-enabled-system
-// candidate/blocker view for one target contract (DATA-CONFIG-002/007); any
-// logged-in user may read it, only Admin can act on it.
-func (handler *Handler) getLabelContractActivationReadiness(ctx context.Context, input *struct {
-	Session         string `cookie:"__Host-quoin-session"`
-	ContractVersion int64  `path:"contractVersion"`
-}) (*struct {
-	CacheControl string                  `header:"Cache-Control"`
-	Body         labelcontract.Readiness `json:"body"`
-}, error) {
-	if _, err := handler.reader(ctx, input.Session); err != nil {
-		return nil, err
-	}
-	readiness, err := handler.Contracts.Readiness(ctx, input.ContractVersion)
-	if err != nil {
-		return nil, mapDomainError(err)
-	}
-	return &struct {
-		CacheControl string                  `header:"Cache-Control"`
-		Body         labelcontract.Readiness `json:"body"`
-	}{CacheControl: noStore(), Body: readiness}, nil
 }

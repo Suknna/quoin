@@ -410,9 +410,14 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": "model_provider", "error": "revision 配置无法解析: " + configErr.Error()})
 			break
 		}
+		// Older/manual revisions can omit budget metadata. Normalize once at the
+		// dispatch boundary so the real BeginModelCall facts and the returned
+		// typed child share the same valid fixed probe bounds.
+		probeConfig := modelprovider.NormalizeProbeConfig(modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens})
+		config.ContextBudgetTokens, config.MaxOutputTokens = probeConfig.ContextBudgetTokens, probeConfig.MaxOutputTokens
 		probeCtx := modelprovider.WithAttempt(ctx, attemptID)
 		ledger := &modelprovider.StreamLedger{Sink: sink, Channel: supervisor.Channel}
-		result := modelprovider.Run(probeCtx, modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens}, secret.APIKey, config.EmbeddingModelID != "", ledger)
+		result := modelprovider.Run(probeCtx, probeConfig, secret.APIKey, config.EmbeddingModelID != "", ledger)
 		outcome = "failed"
 		if result.Passed {
 			outcome = "passed"

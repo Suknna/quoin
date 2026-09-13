@@ -143,7 +143,7 @@ func runThanosAttempt(t *testing.T, db *sql.DB, service *Service, occurrenceID i
 // thanos_query and returns the durable authorization.
 func completeThanosProposalWithQuery(t *testing.T, service *Service, attemptID, callID int64, query string) ([]attempt.ToolAuthorization, error) {
 	t.Helper()
-	arguments := []byte(`{"query":` + strconv.Quote(query) + `}`)
+	arguments := []byte(`{"resourceRef":"default","query":` + strconv.Quote(query) + `}`)
 	proposed := []attempt.ProposedTool{{
 		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
 		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
@@ -172,7 +172,7 @@ func completeThanosProposal(t *testing.T, service *Service, attemptID, callID in
 		WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
 		t.Fatal(err)
 	}
-	arguments := []byte(`{"query":"up{business_system=\"` + systemKey + `\"}"}`)
+	arguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
 	proposed := []attempt.ProposedTool{{
 		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
 		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
@@ -223,17 +223,67 @@ func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
 	}
 }
 
-// TestThanosToolRejectsUnsafeQueryWithoutGrant proves server-side Label
-// Contract enforcement runs before grant creation; prompt text cannot widen a
-// business query into an unscoped selector.
+// TestThanosGrantIsReusedForMultipleCallsInOneResponse covers the production
+// AgentComplete seam behind a real model response with two metrics calls. One
+// immutable attempt binding authorizes both Tool Calls: the grant's frozen
+// revision/generation must be reused, while each Tool Call retains its own
+// authorization link.
+func TestThanosGrantIsReusedForMultipleCallsInOneResponse(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	seedProviderChain(t, db)
+	seedThanosChain(t, db)
+	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-grant-reuse")
+
+	var systemKey string
+	if err := db.QueryRow(`
+		SELECT config.system_key
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL
+		JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id
+		WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
+		t.Fatal(err)
+	}
+	firstArguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
+	secondArguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
+	proposed := []attempt.ProposedTool{
+		{ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos-first", ToolName: "thanos_query", ArgumentsJSON: firstArguments, ArgumentsDigest: sha256Hex(string(firstArguments))},
+		{ProviderIndex: 1, ProviderToolCallID: "call-agent-thanos-second", ToolName: "thanos_query", ArgumentsJSON: secondArguments, ArgumentsDigest: sha256Hex(string(secondArguments))},
+	}
+	_, responseDigest, err := attempt.CanonicalChatResponseJSON("", proposed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizations, err := service.Attempts().CompleteModelCall(context.Background(), attempt.CompleteCall{
+		AttemptID: attemptID, CallID: callID, Outcome: "succeeded", FinishReason: "tool_calls",
+		ProposedTools: proposed, ResponseDigest: responseDigest, ResponseComplete: true,
+		InputTokens: 12, OutputTokens: 8, TotalTokens: 20,
+	})
+	if err != nil {
+		t.Fatalf("complete response with two thanos calls: %v", err)
+	}
+	if len(authorizations) != 2 || len(authorizations[0].Grants) != 1 || len(authorizations[1].Grants) != 1 {
+		t.Fatalf("authorizations=%+v", authorizations)
+	}
+	if authorizations[0].Grants[0] != authorizations[1].Grants[0] {
+		t.Fatalf("grants differ: first=%+v second=%+v", authorizations[0].Grants[0], authorizations[1].Grants[0])
+	}
+	var bindingCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants WHERE connection_grant_id=?`, authorizations[0].Grants[0].GrantID).Scan(&bindingCount); err != nil || bindingCount != 2 {
+		t.Fatalf("grant bindings=%d err=%v", bindingCount, err)
+	}
+}
+
+// A model-supplied conflicting selector must fail before grant creation;
+// prompt text cannot widen the frozen business declaration's resource scope.
 func TestThanosToolRejectsUnsafeQueryWithoutGrant(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-unsafe")
-	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, "up"); err == nil {
-		t.Fatal("complete must reject an unscoped PromQL query")
+	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, "up{business_system=\"other\"}"); err == nil {
+		t.Fatal("complete must reject a conflicting business selector")
 	}
 	var grants int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, attemptID).Scan(&grants); err != nil || grants != 0 {
@@ -291,7 +341,11 @@ func TestThanosQueryUsesAnalysisSnapshotAfterNewPublish(t *testing.T) {
 	}
 	newConnection := seedAdditionalThanosChain(t, db)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, strings.Repeat("c", 64), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
+	declaration, err := json.Marshal(map[string]any{"systemKey": systemKey, "displayName": displayName, "MetricsConnectionID": newConnection, "resources": []any{map[string]any{"name": "default", "displayName": "Default", "matchLabels": map[string]string{"business_system": systemKey}, "discoveryMetric": "up", "identityLabels": []string{"instance"}, "allowedMetrics": []string{"up"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("c", 64), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
 	if err != nil {
 		t.Fatal(err)
 	}

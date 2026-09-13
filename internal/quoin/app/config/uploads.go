@@ -97,7 +97,6 @@ func (handler *Handler) ServeBusinessSystemUpload(writer http.ResponseWriter, re
 	reader := multipart.NewReader(request.Body, params["boundary"])
 	var (
 		commandID    string
-		targetString string
 		catalogInput string
 		document     []byte
 		tooLarge     bool
@@ -123,10 +122,6 @@ func (handler *Handler) ServeBusinessSystemUpload(writer http.ResponseWriter, re
 			body, _ := io.ReadAll(io.LimitReader(part, 129))
 			part.Close()
 			commandID = string(body)
-		case "targetLabelContractVersion":
-			body, _ := io.ReadAll(io.LimitReader(part, 33))
-			part.Close()
-			targetString = string(body)
 		case "journeyCatalogDigest":
 			body, _ := io.ReadAll(io.LimitReader(part, 65))
 			part.Close()
@@ -159,10 +154,6 @@ func (handler *Handler) ServeBusinessSystemUpload(writer http.ResponseWriter, re
 	if len(commandID) < 8 || len(commandID) > 128 {
 		fieldErrors = append(fieldErrors, config.FieldError{Path: "clientCommandId", Reason: "clientCommandId 必须是 8-128 个字符。"})
 	}
-	targetVersion, parseErr := strconv.ParseInt(targetString, 10, 64)
-	if parseErr != nil || targetVersion < 1 {
-		fieldErrors = append(fieldErrors, config.FieldError{Path: "targetLabelContractVersion", Reason: "targetLabelContractVersion 必须是正整数（目标 Label Contract 版本）。", Remediation: "选择一个已上传的契约版本"})
-	}
 	if catalogInput != "" && !isHex64(catalogInput) {
 		fieldErrors = append(fieldErrors, config.FieldError{Path: "journeyCatalogDigest", Reason: "journeyCatalogDigest 必须是 64 位十六进制 digest。"})
 	}
@@ -174,100 +165,9 @@ func (handler *Handler) ServeBusinessSystemUpload(writer http.ResponseWriter, re
 		return
 	}
 	detail, err := handler.Systems.Upload(request.Context(), principalID, commandID, businesssystem.UploadInput{
-		YAMLBody:                   document,
-		TargetLabelContractVersion: targetVersion,
-		JourneyCatalogDigest:       catalogInput,
+		YAMLBody:             document,
+		JourneyCatalogDigest: catalogInput,
 	}, config.Limits{MaxDocumentBytes: configLimitBytes()})
-	writeDetail(writer, err, func() { writeDetailJSON(writer, http.StatusCreated, detail) })
-}
-
-// ServeLabelContractUpload handles POST /api/v1/label-contracts
-// (createLabelContractDraft).
-func (handler *Handler) ServeLabelContractUpload(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writeProblemJSON(writer, http.StatusMethodNotAllowed, "malformed_request", "上传只接受 POST 请求。", nil)
-		return
-	}
-	cookie := sessionCookieOf(request)
-	if cookie == "" {
-		writeProblemJSON(writer, http.StatusUnauthorized, "unauthenticated", "请重新登录后再上传契约。", nil)
-		return
-	}
-	principalID, status := handler.managementReader(request.Context(), cookie)
-	if status != 0 {
-		if status == http.StatusForbidden {
-			writeProblemJSON(writer, status, "forbidden", "该操作需要管理员权限。", nil)
-			return
-		}
-		writeProblemJSON(writer, status, "unauthenticated", "请重新登录后再上传契约。", nil)
-		return
-	}
-	mediaType, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
-	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
-		writeProblemJSON(writer, http.StatusUnsupportedMediaType, "unsupported_media", "契约上传需要 multipart/form-data 请求。", nil)
-		return
-	}
-	reader := multipart.NewReader(request.Body, params["boundary"])
-	var commandID string
-	var document []byte
-	tooLarge := false
-	parts := 0
-	for {
-		part, partErr := reader.NextPart()
-		if partErr == io.EOF {
-			break
-		}
-		if partErr != nil {
-			writeProblemJSON(writer, http.StatusBadRequest, "malformed_request", "上传内容无法解析，请重试。", nil)
-			return
-		}
-		parts++
-		if parts > maxMultipartFields {
-			part.Close()
-			writeProblemJSON(writer, http.StatusUnprocessableEntity, "validation_failed", "上传表单字段过多。", nil)
-			return
-		}
-		switch part.FormName() {
-		case "clientCommandId":
-			body, _ := io.ReadAll(io.LimitReader(part, 129))
-			part.Close()
-			commandID = string(body)
-		case "file":
-			if document != nil {
-				part.Close()
-				writeProblemJSON(writer, http.StatusUnprocessableEntity, "validation_failed", "只能上传一份 YAML 文档。", nil)
-				return
-			}
-			limited := io.LimitReader(part, configLimitBytes()+1)
-			document, err = io.ReadAll(limited)
-			part.Close()
-			if err != nil {
-				writeProblemJSON(writer, http.StatusBadRequest, "malformed_request", "上传内容无法读取，请重试。", nil)
-				return
-			}
-			if int64(len(document)) > configLimitBytes() {
-				tooLarge = true
-			}
-		default:
-			part.Close()
-		}
-	}
-	if tooLarge {
-		writeProblemJSON(writer, http.StatusRequestEntityTooLarge, "payload_too_large", "契约文档超过大小上限（10 MiB），请精简后上传。", nil)
-		return
-	}
-	var fieldErrors []config.FieldError
-	if len(commandID) < 8 || len(commandID) > 128 {
-		fieldErrors = append(fieldErrors, config.FieldError{Path: "clientCommandId", Reason: "clientCommandId 必须是 8-128 个字符。"})
-	}
-	if len(document) == 0 {
-		fieldErrors = append(fieldErrors, config.FieldError{Path: "file", Reason: "缺少 YAML 文档。", Remediation: "选择一份 Label Contract YAML 文件"})
-	}
-	if len(fieldErrors) > 0 {
-		writeProblemJSON(writer, http.StatusUnprocessableEntity, "validation_failed", "上传表单字段不完整或不合法。", fieldErrors)
-		return
-	}
-	detail, err := handler.Contracts.CreateDraft(request.Context(), principalID, commandID, document, config.Limits{MaxDocumentBytes: configLimitBytes()})
 	writeDetail(writer, err, func() { writeDetailJSON(writer, http.StatusCreated, detail) })
 }
 
@@ -325,37 +225,42 @@ func (handler *Handler) ServeBusinessSystemTemplate(writer http.ResponseWriter, 
 	writer.Write([]byte(businessSystemTemplateYAML))
 }
 
-// businessSystemTemplateYAML is the credential-free starter document
-// exercising every closed variant of the frozen schema.
-const businessSystemTemplateYAML = `system_key: example-system
-display_name: 示例业务系统
-enabled: false
-timezone: Asia/Shanghai
-resource_refresh_interval_seconds: 300
-resource_discoveries:
-  - key: example-discovery
-    display_name: 示例资源发现
-    selector: 'up{business_system="example-system", job="example"}'
-    identity_labels: [job, instance]
-inspection_plans:
-  - key: example-plan
-    display_name: 示例巡检计划
-    cron: "30 8 * * *"
-    checks:
-      - key: example-instant-check
-        display_name: 即时查询巡检项
-        analysis_question: 当前服务是否可用？
-        kind: promql
-        query:
-          mode: instant
-          expression: 'up{business_system="example-system"}'
-      - key: example-range-check
-        display_name: 区间查询巡检项
-        analysis_question: 请求速率趋势如何？
-        kind: promql
-        query:
-          mode: range
-          expression: 'rate(http_requests_total{business_system="example-system"}[5m])'
-          range_seconds: 3600
-          step_seconds: 60
+// businessSystemTemplateYAML is the credential-free quoin/v1 starter
+// declaration. The connection and alert names are placeholders resolved only
+// during upload orchestration, never embedded credentials or database IDs.
+const businessSystemTemplateYAML = `apiVersion: quoin/v1
+kind: BusinessSystem
+metadata:
+  name: example-system
+  displayName: 示例业务系统
+  description: 使用已配置的指标和告警连接开始资源发现与巡检。
+spec:
+  enabled: false
+  metrics:
+    connectionRef: observability-main
+    matchLabels:
+      business_system: example-system
+    resources:
+      - name: example-pods
+        displayName: 示例工作负载
+        matchLabels:
+          job: example
+        discoveryMetric: kube_pod_info
+        identityLabels: [namespace, pod]
+        allowedMetrics: [kube_pod_info, http_requests_total]
+  alerts:
+    sourceRefs: [alertmanager-primary]
+    matchLabels: {}
+  discovery:
+    refresh: 5m
+  inspections:
+    - name: example-availability
+      displayName: 示例可用性巡检
+      schedule: "30 8 * * *"
+      timezone: Asia/Shanghai
+      checks:
+        - name: example-requests
+          resourceRef: example-pods
+          expression: sum(rate(http_requests_total{code="500"}[5m]))
+          question: 当前服务错误率是否异常？
 `

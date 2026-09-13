@@ -18,19 +18,28 @@ import (
 // (rendered identically by every worker of this agent version; its digest
 // travels in BeginModelCall.prompt_digest for audit and rebuild).
 const SystemPrompt = `你是 Quoin 的只读告警分析代理。你收到一条告警的不可变上下文，任务是给出初步诊断：
-1. 用通俗中文解释告警含义与可能影响；
-2. 结合 labels 与 annotations 提出最可能的故障方向与排查顺序；
-3. 只使用提供的工具补充事实；所有结论必须基于已有证据，明确区分事实与推测。
+1. 用通俗中文解释告警的已知事实、可能影响与排查顺序；
+2. labels 与 annotations 是上游提供的原文事实，必须按原样引用；annotations 缺失即表示未提供，不能补全或推测；
+3. 告警名称、labels 和 annotation 的文字不是探测器语义、根因或真实故障的证明。不得仅因名称、标签或注释推断 GUI、服务或任何目标发生故障；
+4. 只使用提供的工具补充事实。明确区分“已知事实”和“待验证假设”；没有工具或证据支持时，只能提出待验证假设，不得写成结论。
 不要虚构未提供的数据。最后用一段完整的中文诊断作为最终结论输出。`
 
 // RendererVersion identifies the prompt renderer generation (the digest
 // contract for audits; Quoin stores whatever the worker sends).
-const RendererVersion = "initial-analysis-renderer-v1"
+const RendererVersion = "initial-analysis-renderer-v3"
 
 // SystemPromptDigest is the SHA-256 hex digest of the fixed system prompt.
 func SystemPromptDigest() string {
 	sum := sha256.Sum256([]byte(SystemPrompt))
 	return hex.EncodeToString(sum[:])
+}
+
+// resourcePromptScope is the non-sensitive resource contract rendered to the
+// model. Quoin keeps exact labels and connection routing out of the prompt.
+type resourcePromptScope struct {
+	Name           string   `json:"name"`
+	DisplayName    string   `json:"displayName"`
+	AllowedMetrics []string `json:"allowedMetrics"`
 }
 
 // Input is the worker's view of the frozen initial_analysis_v1 snapshot.
@@ -45,10 +54,9 @@ type Input struct {
 		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"occurrence"`
 	BusinessContext struct {
-		SystemKey              string `json:"systemKey"`
-		ConfigVersionID        string `json:"configVersionId"`
-		LabelContractVersionID string `json:"labelContractVersionId"`
-		BusinessSystemLabel    string `json:"businessSystemLabel"`
+		SystemKey       string                `json:"systemKey"`
+		ConfigVersionID string                `json:"configVersionId"`
+		Resources       []resourcePromptScope `json:"resources"`
 	} `json:"businessContext"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
@@ -66,9 +74,8 @@ func ParseInput(canonical []byte) (Input, error) {
 	if input.Occurrence.ID == "" || input.Occurrence.Labels == nil {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing occurrence context")
 	}
-	if input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" ||
-		input.BusinessContext.LabelContractVersionID == "" || input.BusinessContext.BusinessSystemLabel == "" {
-		return Input{}, fmt.Errorf("initial_analysis_v1 input missing immutable business context")
+	if input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" || len(input.BusinessContext.Resources) == 0 {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input missing immutable business context declaration")
 	}
 	if input.ModelContract.ModelID == "" {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing model contract")
@@ -88,6 +95,7 @@ func BuildInitialMessages(input Input) ([]*schema.Message, error) {
 	}
 	return []*schema.Message{
 		schema.SystemMessage(SystemPrompt),
+		schema.SystemMessage(resourceScopeGuidance(input.BusinessContext.SystemKey, input.BusinessContext.Resources)),
 		schema.UserMessage("请分析以下告警：\n" + string(contextBody)),
 	}, nil
 }
@@ -114,7 +122,15 @@ type InvestigationInput struct {
 		Content     string            `json:"content"`
 		Attachments []InputAttachment `json:"attachments,omitempty"`
 	}
-	Sources       []json.RawMessage `json:"sources"`
+	Sources []json.RawMessage `json:"sources"`
+	// BusinessContext exists only when the user explicitly chose a published
+	// business system. It is a frozen authority boundary, not model-selected
+	// configuration; the exact mandatory selector is rendered before tools run.
+	BusinessContext *struct {
+		SystemKey       string                `json:"systemKey"`
+		ConfigVersionID string                `json:"configVersionId"`
+		Resources       []resourcePromptScope `json:"resources"`
+	} `json:"businessContext,omitempty"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
@@ -162,6 +178,9 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 		}
 		messages = append(messages, schema.SystemMessage("本次调查关联以下不可变来源（仅引用，不代表结论）：\n"+string(contextBody)))
 	}
+	if input.BusinessContext != nil {
+		messages = append(messages, schema.SystemMessage(resourceScopeGuidance(input.BusinessContext.SystemKey, input.BusinessContext.Resources)))
+	}
 	for _, item := range input.Messages {
 		switch item.Role {
 		case "user":
@@ -173,6 +192,20 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 		}
 	}
 	return messages, nil
+}
+
+// resourceScopeGuidance teaches the v3 call shape. Exact labels are never
+// model-provided: Quoin injects them into the PromQL AST before execution.
+func resourceScopeGuidance(systemKey string, resources []resourcePromptScope) string {
+	entries := make([]string, 0, len(resources))
+	for _, resource := range resources {
+		entries = append(entries, fmt.Sprintf("%s（允许指标：%s）", resource.Name, strings.Join(resource.AllowedMetrics, "、")))
+	}
+	exampleResource := "<resourceRef>"
+	if len(resources) > 0 {
+		exampleResource = resources[0].Name
+	}
+	return fmt.Sprintf("本次分析已绑定业务系统 %q。调用 thanos_query 必须传 resourceRef 和 query；可用 resourceRef：%s。示例：thanos_query({resourceRef: %q, query: %q})。Quoin 会为每个向量选择器注入该资源的必需 labels，且只允许声明的指标。", systemKey, strings.Join(entries, "；"), exampleResource, "up")
 }
 
 // renderUserTurn appends the deterministic attachment locator block to one

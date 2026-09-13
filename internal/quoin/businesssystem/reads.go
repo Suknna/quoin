@@ -45,16 +45,19 @@ type PlanView struct {
 // BusinessSystemDetail is BusinessSystemDetail (browser identity arrives with the
 // Lintel stage and projects the frozen `none` state until then).
 type BusinessSystemDetail struct {
-	Key                    string          `json:"key"`
-	DisplayName            string          `json:"displayName"`
-	Enabled                bool            `json:"enabled"`
-	RowVersion             int64           `json:"rowVersion"`
-	CurrentConfigVersionID *string         `json:"currentConfigVersionId"`
-	Timezone               *string         `json:"timezone"`
-	BrowserIdentityState   string          `json:"browserIdentityState"`
-	ConfigVersionCount     int64           `json:"configVersionCount"`
-	Discoveries            []DiscoveryView `json:"discoveries"`
-	Plans                  []PlanView      `json:"plans"`
+	Key                    string  `json:"key"`
+	DisplayName            string  `json:"displayName"`
+	Enabled                bool    `json:"enabled"`
+	RowVersion             int64   `json:"rowVersion"`
+	CurrentConfigVersionID *string `json:"currentConfigVersionId"`
+	Timezone               *string `json:"timezone"`
+	// ResourceRefreshIntervalSeconds is frozen on the current declaration; 300
+	// remains the read fallback for an unconfigured or archived system.
+	ResourceRefreshIntervalSeconds int64           `json:"resourceRefreshIntervalSeconds"`
+	BrowserIdentityState           string          `json:"browserIdentityState"`
+	ConfigVersionCount             int64           `json:"configVersionCount"`
+	Discoveries                    []DiscoveryView `json:"discoveries"`
+	Plans                          []PlanView      `json:"plans"`
 }
 
 // ConfigVersionDetail is ConfigVersionSummary + ConfigVersionDetail.
@@ -136,6 +139,7 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 	}
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
+		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300),
 		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
 		FROM business_systems AS systems WHERE `+joinAnd(conditions)+` ORDER BY systems.id DESC LIMIT ?`,
 		append(args, limit+1)...)
@@ -154,7 +158,8 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 			detail       BusinessSystemDetail
 			enabledFlag  int64
 		)
-		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState); err != nil {
+		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState); err != nil {
+
 			return nil, "", err
 		}
 		detail.Enabled = enabledFlag == 1
@@ -270,6 +275,7 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (BusinessSystemDetail, error) {
 	query := `
 		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
+		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300),
 		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
 		FROM business_systems AS systems WHERE systems.id=?`
 	var (
@@ -282,9 +288,9 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState)
+		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &browserState)
+		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState)
 	}
 	if err != nil {
 		return BusinessSystemDetail{}, err
@@ -331,7 +337,7 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	var (
 		detail      ConfigVersionDetail
 		id          int64
-		contractID  int64
+		contractID  sql.NullInt64
 		publishedAt sql.NullString
 		enabledFlag int64
 	)
@@ -346,7 +352,9 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	detail.Enabled = enabledFlag == 1
-	detail.LabelContractVersionID = strconv.FormatInt(contractID, 10)
+	if contractID.Valid {
+		detail.LabelContractVersionID = strconv.FormatInt(contractID.Int64, 10)
+	}
 	if publishedAt.Valid {
 		value := publishedAt.String
 		detail.PublishedAt = &value
@@ -481,7 +489,7 @@ func scanVersionSummary(rows *sql.Rows) (ConfigVersionSummary, error) {
 	var (
 		summary     ConfigVersionSummary
 		id          int64
-		contractID  int64
+		contractID  sql.NullInt64
 		publishedAt sql.NullString
 		enabledFlag int64
 	)
@@ -490,7 +498,9 @@ func scanVersionSummary(rows *sql.Rows) (ConfigVersionSummary, error) {
 	}
 	summary.ID = strconv.FormatInt(id, 10)
 	summary.Enabled = enabledFlag == 1
-	summary.LabelContractVersionID = strconv.FormatInt(contractID, 10)
+	if contractID.Valid {
+		summary.LabelContractVersionID = strconv.FormatInt(contractID.Int64, 10)
+	}
 	if publishedAt.Valid {
 		value := publishedAt.String
 		summary.PublishedAt = &value

@@ -245,7 +245,7 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 	if err != nil {
 		return err
 	}
-	if err := writeCancelledChild(ctx, conn, headerID, connectionType, scopeID); err != nil {
+	if err := writeCancelledChild(ctx, conn, headerID, connectionType, revisionID); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelling',row_version=row_version+1 WHERE id=? AND state='Running'`, attemptID); err != nil {
@@ -319,7 +319,7 @@ func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, rea
 	if err != nil {
 		return err
 	}
-	if err := writeInterruptedChild(ctx, conn, headerID, connectionType, scopeID); err != nil {
+	if err := writeInterruptedChild(ctx, conn, headerID, connectionType, revisionID); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Running'`, now, reason, attemptID); err != nil {
@@ -372,7 +372,9 @@ func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, co
 // writeTerminalProbeChild preserves a closed typed child for a terminal probe
 // that never produced an upstream observation. Its terminal outcome is
 // explicit in detail_json; no successful capability fact is manufactured.
-func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64, terminal string) error {
+// revisionID is the header's frozen revision, which can differ from the
+// connection's current pointer after an in-flight rotation.
+func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, revisionID int64, terminal string) error {
 	switch connectionType {
 	case TypePrometheus, TypeThanos:
 		_, err := conn.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
@@ -381,7 +383,7 @@ func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64
 	case TypeKubernetes:
 		effective := "default"
 		var configJSON string
-		if err := conn.QueryRowContext(ctx, `SELECT config_json FROM connections c JOIN connection_revisions r ON r.id=c.current_revision_id WHERE c.id=?`, connectionID).Scan(&configJSON); err == nil {
+		if err := conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON); err == nil {
 			var config struct {
 				DefaultNamespace string `json:"defaultNamespace"`
 			}
@@ -394,7 +396,7 @@ func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64
 		return err
 	case TypeModelProvider:
 		var configJSON string
-		_ = conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=(SELECT current_revision_id FROM connections WHERE id=?)`, connectionID).Scan(&configJSON)
+		_ = conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON)
 		var config struct {
 			ChatModelID         string `json:"chatModelId"`
 			EmbeddingModelID    string `json:"embeddingModelId"`
@@ -479,8 +481,20 @@ func (service *Service) BindQueuedToStream(ctx context.Context, attemptID int64,
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=?`, attemptID).Scan(&grantID); err != nil {
 		return Summary{}, 0, nil, false, err
 	}
-	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, bootID, epoch, service.now().UTC().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID); err != nil {
+	// A competing dispatcher can change this attempt after the initial snapshot
+	// read. Commit only if this transaction won the conditional Queued→Assigned
+	// transition; otherwise return the documented no-op instead of dispatching a
+	// grant for an attempt owned by another stream.
+	updated, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, bootID, epoch, service.now().UTC().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID)
+	if err != nil {
 		return Summary{}, 0, nil, false, err
+	}
+	rows, err := updated.RowsAffected()
+	if err != nil {
+		return Summary{}, 0, nil, false, err
+	}
+	if rows != 1 {
+		return Summary{}, 0, nil, false, nil
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return Summary{}, 0, nil, false, err

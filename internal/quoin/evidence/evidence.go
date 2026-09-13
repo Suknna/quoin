@@ -199,6 +199,49 @@ type Conn struct {
 	Type string `json:"type"`
 }
 
+// inspectionProducer resolves the frozen run-check declaration for Evidence
+// committed without a Tool Call. PromQL collection is executed by Plinth with
+// an Attempt-level metrics grant, while Journey collection is executed by
+// Lintel; their shared evidence table intentionally does not duplicate kind.
+func (service *Service) inspectionProducer(ctx context.Context, attemptID int64) (map[string]any, []Conn, error) {
+	var checkKind string
+	err := service.db.QueryRowContext(ctx, `
+		SELECT c.kind
+		FROM execution_attempts a
+		JOIN inspection_runs r ON r.id=a.scope_id
+		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
+		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
+		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&checkKind)
+	if errors.Is(err, sql.ErrNoRows) || checkKind != "promql" {
+		return map[string]any{"kind": "lintel_browser", "attemptId": strconv.FormatInt(attemptID, 10)}, []Conn{}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := service.db.QueryContext(ctx, `
+		SELECT c.name,c.type
+		FROM attempt_connection_grants ag
+		JOIN connections c ON c.id=ag.connection_id
+		WHERE ag.attempt_id=? AND ag.purpose='config_thanos_query'
+		ORDER BY ag.id`, attemptID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	connections := []Conn{}
+	for rows.Next() {
+		var connection Conn
+		if err := rows.Scan(&connection.Key, &connection.Type); err != nil {
+			return nil, nil, err
+		}
+		connections = append(connections, connection)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return map[string]any{"kind": "plinth_promql", "attemptId": strconv.FormatInt(attemptID, 10)}, connections, nil
+}
+
 // Get returns the frozen detail projection of one immutable Evidence row.
 func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error) {
 	var detail View
@@ -266,7 +309,16 @@ func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error)
 			return View{}, err
 		}
 	case attemptID.Valid:
-		detail.Producer = map[string]any{"kind": "lintel_browser", "attemptId": strconv.FormatInt(attemptID.Int64, 10)}
+		// A run_check evidence row without a Tool Call can be either a PromQL
+		// result committed by Plinth or a Journey result committed by Lintel.
+		// Resolve its frozen check kind instead of treating every such row as
+		// browser evidence.
+		producer, connections, err := service.inspectionProducer(ctx, attemptID.Int64)
+		if err != nil {
+			return View{}, err
+		}
+		detail.Producer = producer
+		detail.Connections = connections
 	default:
 		detail.Producer = map[string]any{"kind": "quoin_local"}
 	}

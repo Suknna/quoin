@@ -8,6 +8,7 @@ package businesssystem
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -42,12 +43,10 @@ type ConflictError struct {
 
 func (err *ConflictError) Error() string { return err.Detail }
 
-// UploadInput carries the multipart command fields; YAMLBody is the raw
-// document bytes.
+// UploadInput carries the raw declaration and optional embedded catalog digest.
 type UploadInput struct {
-	YAMLBody                   []byte
-	TargetLabelContractVersion int64
-	JourneyCatalogDigest       string // optional; must equal the embedded digest when set
+	YAMLBody             []byte
+	JourneyCatalogDigest string
 }
 
 // Service owns the Business System SQLite transactions.
@@ -56,92 +55,36 @@ type Service struct {
 	now func() time.Time
 }
 
-// NewService builds the service on the shared database pool.
-func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
-}
-
-// UseClock binds a deterministic clock (test seam; production keeps
-// time.Now from NewService).
+func NewService(db *sql.DB) *Service                   { return &Service{db: db, now: time.Now} }
 func (service *Service) UseClock(now func() time.Time) { service.now = now }
+func (service *Service) DB() *sql.DB                   { return service.db }
+func (service *Service) nowText() string               { return service.now().UTC().Format(time.RFC3339Nano) }
 
-// DB exposes the product database to the runtime dispatcher for read-only
-// attempt routing. Domain mutations remain on Service methods.
-func (service *Service) DB() *sql.DB { return service.db }
-
-func (service *Service) nowText() string { return service.now().UTC().Format(time.RFC3339Nano) }
-
-// Upload parses the strict YAML once, validates it against the explicitly
-// targeted Label Contract version and the embedded Journey Catalog, then
-// persists the immutable draft and its typed projections in one transaction.
-// A first upload of an unknown stable key creates the Disabled Business
-// System in the same transaction (HTTP-CONFIG-001, MUST NOT 404).
+// Upload parses a quoin/v1 declaration once, resolves stable reference names in
+// the serialized writer transaction, and stores that fully resolved declaration
+// as immutable JSON. A Label Contract is not an active upload/publish dependency.
 func (service *Service) Upload(ctx context.Context, principalID int64, clientCommandID string, input UploadInput, limits config.Limits) (ConfigVersionDetail, error) {
-	catalogDocument, catalogVersion, catalogDigest, err := config.JourneyCatalog()
+	declaration, fields := config.ParseBusinessSystem(input.YAMLBody, limits)
+	if len(fields) != 0 {
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: fields}
+	}
+	document, err := config.CompileBusinessSystemDocument(declaration)
+	if err != nil {
+		return ConfigVersionDetail{}, err
+	}
+	_, catalogVersion, catalogDigest, err := config.JourneyCatalog()
 	if err != nil {
 		return ConfigVersionDetail{}, err
 	}
 	if input.JourneyCatalogDigest != "" && input.JourneyCatalogDigest != catalogDigest {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
-			Path:        "journeyCatalogDigest",
-			Reason:      "提供的 Journey Catalog digest 与 Quoin 嵌入版本不一致",
-			Remediation: "删除该字段以记录当前嵌入 digest，或刷新页面后使用当前 catalog digest",
-		}}}
+		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "journeyCatalogDigest", Reason: "提供的 Journey Catalog digest 与 Quoin 嵌入版本不一致", Remediation: "删除该字段以记录当前嵌入 digest，或刷新页面后使用当前 catalog digest"}}}
 	}
-	// Resolve the explicit target contract version before validation: the
-	// PromQL ownership rule needs the contract's business_system_label
-	// (CFG-CONTRACT-003 — never the silently-current contract).
-	var (
-		contractID    int64
-		contractState string
-		contractJSON  string
-	)
-	err = service.db.QueryRowContext(ctx, `SELECT id,state,contract_json FROM label_contracts WHERE version=?`, input.TargetLabelContractVersion).Scan(&contractID, &contractState, &contractJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
-			Path:        "targetLabelContractVersion",
-			Reason:      fmt.Sprintf("目标 Label Contract 版本不存在: %d", input.TargetLabelContractVersion),
-			Remediation: "选择一个已上传的契约版本",
-		}}}
-	}
-	if err != nil {
-		return ConfigVersionDetail{}, err
-	}
-	if contractState == "retired" {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
-			Path:        "targetLabelContractVersion",
-			Reason:      fmt.Sprintf("目标 Label Contract 版本已 retired，不能作为上传目标: %d", input.TargetLabelContractVersion),
-			Remediation: "选择一个 draft 或 active 契约版本",
-		}}}
-	}
-	businessSystemLabel, err := labelOfContract(contractJSON)
-	if err != nil {
-		return ConfigVersionDetail{}, err
-	}
-	value, fieldErrors := config.ParseStrictYAML(input.YAMLBody, limits, "document")
-	if len(fieldErrors) != 0 {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: fieldErrors}
-	}
-	if fields := config.ValidateSchema(value, config.SchemaBusinessSystemConfig); len(fields) != 0 {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: fields}
-	}
-	document, err := config.ExtractBusinessSystem(value)
-	if err != nil {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{Path: "document", Reason: err.Error()}}}
-	}
-	if fields := config.SemanticChecks(document, businessSystemLabel); len(fields) != 0 {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: fields}
-	}
-	_ = catalogDocument
-	digest := document.Digest()
-	commandDigest := auth.DigestCommand("business_system.config.upload", map[string]any{
-		"digest": digest, "labelContractVersion": input.TargetLabelContractVersion, "catalogDigest": catalogDigest,
-	})
+	commandDigest := auth.DigestCommand("business_system.config.upload", map[string]any{"yaml": string(input.YAMLBody), "catalogDigest": catalogDigest})
 	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
 	if err != nil {
 		return ConfigVersionDetail{}, err
 	}
-	if replayed, alreadyCommitted, replayErr := replayCommandResult(record, found, commandDigest, func(detail ConfigVersionDetail) bool { return detail.ID != "" }); alreadyCommitted || replayErr != nil {
+	if replayed, committed, replayErr := replayCommandResult(record, found, commandDigest, func(detail ConfigVersionDetail) bool { return detail.ID != "" }); committed || replayErr != nil {
 		return replayed, replayErr
 	}
 	conn, err := service.db.Conn(ctx)
@@ -149,7 +92,7 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 		return ConfigVersionDetail{}, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return ConfigVersionDetail{}, err
 	}
 	committed := false
@@ -158,8 +101,6 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	// The preflight lookup can become stale while this request waits for the
-	// SQLite writer. Recheck before creating a system or version.
 	record, found, err = auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
 	if err != nil {
 		return ConfigVersionDetail{}, err
@@ -173,29 +114,23 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 		committed = true
 		return replayed, nil
 	}
-	// Re-verify the target contract inside the serialized transaction; a
-	// concurrent activation that retires it must fail this upload.
-	var currentState string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM label_contracts WHERE id=?`, contractID).Scan(&currentState); err != nil {
+	if err := service.resolveDeclarationReferences(ctx, conn, &document); err != nil {
 		return ConfigVersionDetail{}, err
 	}
-	if currentState != contractState {
-		return ConfigVersionDetail{}, &config.ValidationError{Errors: []config.FieldError{{
-			Path:        "targetLabelContractVersion",
-			Reason:      "目标 Label Contract 状态刚发生变化（" + currentState + "），请刷新后重试",
-			Remediation: "重新选择目标契约版本",
-		}}}
+	declarationJSON, err := json.Marshal(document)
+	if err != nil {
+		return ConfigVersionDetail{}, fmt.Errorf("marshal resolved declaration: %w", err)
 	}
+	digestBytes := sha256.Sum256(declarationJSON)
+	digest := fmt.Sprintf("%x", digestBytes)
 	now := service.nowText()
 	var systemID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, document.SystemKey).Scan(&systemID); errors.Is(err, sql.ErrNoRows) {
-		insert, insertErr := conn.ExecContext(ctx, `
-			INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`,
-			document.SystemKey, document.DisplayName, now)
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`, document.SystemKey, document.DisplayName, now)
 		if insertErr != nil {
 			return ConfigVersionDetail{}, insertErr
 		}
-		systemID, _ = insert.LastInsertId()
+		systemID, _ = result.LastInsertId()
 	} else if err != nil {
 		return ConfigVersionDetail{}, err
 	}
@@ -203,25 +138,19 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_seq),0)+1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
 		return ConfigVersionDetail{}, err
 	}
-	versionInsert, err := conn.ExecContext(ctx, `
-		INSERT INTO business_system_config_versions(
-			business_system_id,version_seq,state,yaml_body,parser_version,schema_version,
-			label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,
-			created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
-		VALUES(?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		systemID, versionSeq, string(input.YAMLBody), config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystemConfig),
-		contractID, catalogDigest, catalogVersion, digest, principalID, now,
-		document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
+	result, err := conn.ExecContext(ctx, `INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, systemID, versionSeq, "draft", string(input.YAMLBody), config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, catalogDigest, catalogVersion, digest, principalID, now, document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
 	if err != nil {
 		return ConfigVersionDetail{}, err
 	}
-	versionID, err := versionInsert.LastInsertId()
+	versionID, err := result.LastInsertId()
 	if err != nil {
 		return ConfigVersionDetail{}, err
 	}
-	if err := service.validateDeclarationReferences(ctx, conn, document, false); err != nil {
+	if err := insertResourceScopes(ctx, conn, versionID, document.Resources); err != nil {
 		return ConfigVersionDetail{}, err
 	}
+	// Existing execution paths consume these typed projections. They duplicate
+	// only compiled declaration data, never require a Label Contract gate.
 	if err := insertProjections(ctx, conn, versionID, document); err != nil {
 		return ConfigVersionDetail{}, err
 	}
@@ -240,6 +169,51 @@ func (service *Service) Upload(ctx context.Context, principalID int64, clientCom
 	}
 	committed = true
 	return detail, nil
+}
+
+// resolveDeclarationReferences turns names into immutable database locators and
+// validates every resource scope using the compiler's AST-safe scope seam.
+func (service *Service) resolveDeclarationReferences(ctx context.Context, conn *sql.Conn, document *config.BusinessSystemDocument) error {
+	var kind string
+	if err := conn.QueryRowContext(ctx, `SELECT id,type FROM connections WHERE name=?`, document.MetricsConnectionRef).Scan(&document.MetricsConnectionID, &kind); errors.Is(err, sql.ErrNoRows) {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "spec.metrics.connectionRef", Reason: "引用的指标连接不存在", Remediation: "选择已创建的 Prometheus 或 Thanos 接入"}}}
+	} else if err != nil {
+		return err
+	}
+	if kind != "prometheus" && kind != "thanos" {
+		return &config.ValidationError{Errors: []config.FieldError{{Path: "spec.metrics.connectionRef", Reason: "引用的连接不是 Prometheus 或 Thanos 指标接入", Remediation: "选择指标类型的接入"}}}
+	}
+	for i, ref := range document.AlertSourceRefs {
+		var id int64
+		if err := conn.QueryRowContext(ctx, `SELECT id FROM alert_sources WHERE source_key=?`, ref).Scan(&id); errors.Is(err, sql.ErrNoRows) {
+			return &config.ValidationError{Errors: []config.FieldError{{Path: fmt.Sprintf("spec.alerts.sourceRefs[%d]", i), Reason: "引用的告警来源不存在", Remediation: "选择已创建的 Alertmanager 来源"}}}
+		} else if err != nil {
+			return err
+		}
+		document.AlertSourceIDs = append(document.AlertSourceIDs, id)
+	}
+	return nil
+}
+
+func insertResourceScopes(ctx context.Context, conn *sql.Conn, versionID int64, resources []config.ResourceProjection) error {
+	for _, resource := range resources {
+		selectors, err := json.Marshal(resource.MatchLabels)
+		if err != nil {
+			return err
+		}
+		identity, err := json.Marshal(resource.IdentityLabels)
+		if err != nil {
+			return err
+		}
+		allowed, err := json.Marshal(resource.AllowedMetrics)
+		if err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `INSERT INTO config_resource_scopes(config_version_id,resource_key,display_name,discovery_metric,selectors_json,identity_labels_json,allowed_metrics_json) VALUES(?,?,?,?,?,?,?)`, versionID, resource.Name, resource.DisplayName, resource.DiscoveryMetric, string(selectors), string(identity), string(allowed)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // insertProjections persists the typed discovery/plan/check columns
@@ -309,8 +283,8 @@ func insertProjections(ctx context.Context, conn *sql.Conn, versionID int64, doc
 	}
 	for _, plan := range document.Plans {
 		planInsert, err := conn.ExecContext(ctx, `
-			INSERT INTO config_plans(config_version_id,plan_key,display_name,cron) VALUES(?,?,?,?)`,
-			versionID, plan.Key, plan.DisplayName, nullableString(plan.Cron))
+			INSERT INTO config_plans(config_version_id,plan_key,display_name,timezone,cron) VALUES(?,?,?,?,?)`,
+			versionID, plan.Key, plan.DisplayName, plan.Timezone, nullableString(plan.Cron))
 		if err != nil {
 			return err
 		}
@@ -429,6 +403,12 @@ func (service *Service) Publish(ctx context.Context, principalID int64, clientCo
 			SystemKey: systemKey, ObjectID: versionID, CurrentVersion: nullInt64Ptr(current),
 		}
 	}
+	// Keep duplicate attribution validation in the same serialized transaction
+	// and before the pointer mutation, so a rejected command leaves no published
+	// state, audit event, or replay record behind.
+	if err := rejectDuplicatePublishedAlertRule(ctx, conn, systemID, versionID, projection.Enabled == 1); err != nil {
+		return BusinessSystemDetail{}, err
+	}
 	update, err := conn.ExecContext(ctx, `
 		UPDATE business_systems SET
 			current_config_version_id=?,
@@ -479,12 +459,6 @@ func (service *Service) audit(ctx context.Context, conn *sql.Conn, principalID i
 func mapPublishAbort(err error, systemKey string, versionID int64) error {
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "can only be published by that contract atomic activation"):
-		return &ConflictError{
-			Code:      "current_pointer_conflict",
-			Detail:    "该配置版本以非当前 Label Contract 为目标，只能随该契约的原子联合激活切换",
-			SystemKey: systemKey, ObjectID: versionID,
-		}
 	case strings.Contains(message, "current config pointer can only move to an unpublished version"):
 		return &ConflictError{Code: "current_pointer_conflict", Detail: "发布指针只能移动到同系统的未发布版本", SystemKey: systemKey, ObjectID: versionID}
 	case strings.Contains(message, "root projection must equal"):
@@ -492,23 +466,6 @@ func mapPublishAbort(err error, systemKey string, versionID int64) error {
 	default:
 		return err
 	}
-}
-
-// labelOfContract extracts business_system_label from a stored contract
-// projection.
-func labelOfContract(contractJSON string) (string, error) {
-	var projection struct {
-		LabelContract struct {
-			BusinessSystemLabel string `json:"business_system_label"`
-		} `json:"label_contract"`
-	}
-	if err := json.Unmarshal([]byte(contractJSON), &projection); err != nil {
-		return "", fmt.Errorf("contract projection decode: %w", err)
-	}
-	if projection.LabelContract.BusinessSystemLabel == "" {
-		return "", errors.New("contract projection missing business_system_label")
-	}
-	return projection.LabelContract.BusinessSystemLabel, nil
 }
 
 func nullableString(value *string) any {

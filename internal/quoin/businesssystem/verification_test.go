@@ -17,13 +17,13 @@ import (
 	"time"
 )
 
-const zeroCheckSystemYAML = `system_key: checks-free
-display_name: 无检查系统
-enabled: false
-timezone: Asia/Shanghai
-metrics_connection_id: "1"
-resource_discoveries: []
-inspection_plans: []
+const zeroCheckSystemYAML = `apiVersion: quoin/v1
+kind: BusinessSystem
+metadata: {name: checks-free, displayName: 无检查系统, description: 无检查}
+spec:
+  metrics: {connectionRef: main-thanos, matchLabels: {business_system: checks-free}, resources: []}
+  alerts: {sourceRefs: [], matchLabels: {}}
+  inspections: []
 `
 
 func TestRunVerificationZeroCheckDraftPassesInCommand(t *testing.T) {
@@ -87,7 +87,7 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttemptsForPrometheus(t *tes
 	if err := h.db.QueryRow(`SELECT id FROM connections WHERE name='main-prometheus'`).Scan(&metricsConnectionID); err != nil {
 		t.Fatal(err)
 	}
-	yaml := strings.Replace(validSystemYAML, `metrics_connection_id: "1"`, `metrics_connection_id: "`+strconv.FormatInt(metricsConnectionID, 10)+`"`, 1)
+	yaml := strings.Replace(validSystemYAML, `connectionRef: main-thanos`, `connectionRef: main-prometheus`, 1)
 	draft := h.mustUpload(t, yaml, 1, "cmd-t17-prometheus-0001")
 	detail, err := h.systems.RunVerification(context.Background(), h.principal, "cmd-t17-prometheus-0002", "payments", versionID(t, draft))
 	if err != nil {

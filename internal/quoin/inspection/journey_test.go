@@ -36,7 +36,7 @@ func journeyInspectionResult(attemptID, operationID int64) []byte {
 
 func TestRunCheckJourneyResultClosure(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishMixedPlan(t)
+	h.publishArchivedBrowserPlan(t)
 	h.seedBrowserIdentity(t, true)
 	h.seedModelProvider(t)
 	ctx := context.Background()
@@ -73,12 +73,6 @@ func TestRunCheckJourneyResultClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := h.attempts.Accept(ctx, browserAttempt, "boot-j1", 1); err != nil {
-		t.Fatal(err)
-	}
-	// Settle the PromQL child too so the run can converge all-ok.
-	promqlAttempt := h.promqlAttemptID(t, detail.RunID)
-	h.dispatchPromQL(t, promqlAttempt)
-	if err := h.service.CommitPromQLProposal(ctx, promqlAttempt, "plinth-boot", 1, promqlSuccessProposal(promqlAttempt, detail.RunID, "success", "instant")); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.service.CommitJourneyProposal(ctx, browserAttempt, "boot-j1", 1, journeyInspectionResult(browserAttempt, operationID)); err != nil {

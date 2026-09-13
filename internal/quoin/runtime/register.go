@@ -337,22 +337,13 @@ func (service *Service) Adjudicate(ctx context.Context, bearer string, slotName,
 	return decision, nil
 }
 
-// AttachStream records the accepted control stream as the slot's single
-// active connection; a replaced stream is signalled to end
-// (RUNTIME-CTRL-001).
+// AttachStream records an accepted control stream as the slot's single active
+// connection. Adjudicate and attachment are intentionally separate because two
+// admitted Hellos can reach this boundary out of order. A stale attachment
+// returns nil and, crucially, leaves the current owner open (RUNTIME-CTRL-001/004).
 func (service *Service) AttachStream(slotName, bootID string, epoch uint64) <-chan struct{} {
-	service.mu.Lock()
-	defer service.mu.Unlock()
-	key := slotName + "\x00" + bootID
-	if service.bootEpochs[key] < epoch {
-		service.bootEpochs[key] = epoch
-	}
-	if old, live := service.conns[slotName]; live {
-		old.close()
-	}
-	fresh := &connection{bootID: bootID, epoch: epoch, updated: time.Now(), closing: make(chan struct{})}
-	service.conns[slotName] = fresh
-	return fresh.closing
+	closing, _ := service.attachStream(slotName, bootID, epoch, "", nil)
+	return closing
 }
 
 // Touch updates the transient lastSeen projection (Heartbeat) without any

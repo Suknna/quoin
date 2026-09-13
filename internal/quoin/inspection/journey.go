@@ -40,7 +40,8 @@ func (s *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error) {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-	var attemptID, runID, versionID, contractID, systemID int64
+	var attemptID, runID, versionID, systemID int64
+	var contractID sql.NullInt64
 	err = conn.QueryRowContext(ctx, `
 		SELECT a.id,a.scope_id,r.config_version_id,r.label_contract_version_id,r.business_system_id
 		FROM execution_attempts a
@@ -91,7 +92,7 @@ func (s *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err = freezeInput(ctx, conn, attemptID, "inspection_collection_v1", body, versionID, contractID, now); err != nil {
+	if err = freezeInput(ctx, conn, attemptID, "inspection_collection_v1", body, versionID, contractID.Int64, now); err != nil {
 		return false, err
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

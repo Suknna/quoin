@@ -38,7 +38,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
@@ -70,7 +69,6 @@ type apiServer struct {
 	investigations                *investigation.Service
 	systems                       *businesssystem.Service
 	inspections                   *inspection.Service
-	contracts                     *labelcontract.Service
 	feedbackService               *feedback.Service
 	knowledgeService              *knowledge.Service
 	browsers                      *browser.Service
@@ -89,6 +87,7 @@ type apiServer struct {
 	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
 	inspectionDispatchFunc        func(ctx context.Context)
 	verificationDispatchFunc      func(ctx context.Context)
+	resourceRefreshDispatchFunc   func(ctx context.Context)
 	browserOperationsDispatchFunc func(ctx context.Context)
 	inspectionCancelDispatchFunc  func(ctx context.Context, attemptID int64) error
 	browserPublishDispatchFunc    func(ctx context.Context, request browser.PublishRequest) error
@@ -160,7 +159,6 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		investigations:   investigation.NewService(db),
 		systems:          businesssystem.NewService(db),
 		inspections:      inspection.NewService(db),
-		contracts:        labelcontract.NewService(db),
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
@@ -318,7 +316,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err != nil {
 		return fmt.Errorf("read Stele service token: %w", err)
 	}
-	serverSet.relay = grpc.NewServer()
+	// Plinth probes network partitions every 20 seconds. Accept those idle
+	// HTTP/2 pings: the default gRPC server minimum is five minutes and sends
+	// GOAWAY(too_many_pings), which otherwise prevents every runtime task.
+	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()))
 	serverSet.beforeShutdown = application.runtime.CloseAll
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
 	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
@@ -460,6 +461,13 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// disappeared without reconnecting (RUNTIME-TASK-006).
 	go controlService.RunLeaseSweeper(ctx)
 	go controlService.RunInspectionScheduler(ctx)
+	// Current published declarations are admitted immediately and thereafter by
+	// a process-owned poller. The domain command supplies durable interval,
+	// current-pointer, active-run, and command-key fences; maintenance returns
+	// above before this normal-runtime loop can start.
+	go NewResourceDiscoveryScheduler(application.systems, controlService.dispatchQueuedResourceDiscoveryAttempts).Run(ctx, func(err error) {
+		sharedops.LogEvent("quoin", "error", "resource_discovery.scheduler", err.Error())
+	})
 	application.upgradeGate = serverSet.upgradeGate
 	application.setReadiness = serverSet.ops.SetReadiness
 	application.setMaintenanceReason = serverSet.ops.SetMaintenanceReason
@@ -527,7 +535,6 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	// The strict-YAML config uploads and the template download own their
 	// response heads the same way (T16).
 	mux.HandleFunc("POST /api/v1/business-systems", configHandler.ServeBusinessSystemUpload)
-	mux.HandleFunc("POST /api/v1/label-contracts", configHandler.ServeLabelContractUpload)
 	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
 
 	csrf := http.NewCrossOriginProtection()
@@ -592,8 +599,7 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	}
 	investigationHandler.Register(api)
 	configHandler := &appconfig.Handler{
-		Systems:   application.systems,
-		Contracts: application.contracts,
+		Systems: application.systems,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
 			session, err := application.authenticateAdmin(ctx, cookie, "读取配置")
 			if err != nil {
@@ -619,6 +625,13 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 			// inspection scheduling cannot discover draft-owned verification work.
 			if application.verificationDispatchFunc != nil {
 				go application.verificationDispatchFunc(ctx)
+			}
+		},
+		DispatchResourceRefresh: func(ctx context.Context) {
+			// Resource-discovery attempts are scoped to durable refresh runs and
+			// dispatched through the live Plinth control service.
+			if application.resourceRefreshDispatchFunc != nil {
+				go application.resourceRefreshDispatchFunc(ctx)
 			}
 		},
 	}

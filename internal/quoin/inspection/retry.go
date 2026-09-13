@@ -140,16 +140,16 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		}
 		return detail, err
 	}
-	var systemID, configVersionID, contractID, planID int64
+	var systemID, configVersionID, planID int64
 	var planKey, sourceState string
 	var systemEnabled bool
 	err = conn.QueryRowContext(ctx, `
-		SELECT r.business_system_id,r.config_version_id,r.label_contract_version_id,p.id,r.plan_key,r.state,b.enabled
+		SELECT r.business_system_id,r.config_version_id,p.id,r.plan_key,r.state,b.enabled
 		FROM inspection_runs r
 		JOIN business_systems b ON b.id=r.business_system_id AND b.key=?
 		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
 		WHERE r.id=?`, systemKey, sourceRunID).
-		Scan(&systemID, &configVersionID, &contractID, &planID, &planKey, &sourceState, &systemEnabled)
+		Scan(&systemID, &configVersionID, &planID, &planKey, &sourceState, &systemEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
 			&RejectionError{Code: "not_found", Detail: "巡检 Run 不存在", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
@@ -180,6 +180,14 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
 			&RejectionError{Code: "empty_plan", Detail: "源巡检 Run 的计划没有检查项", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
 	}
+	// Reruns use the source Run's immutable configuration, so reject browser
+	// checks before inserting any child Run or dispatchable execution attempt.
+	for _, check := range checks {
+		if check.kind == "browser" {
+			return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
+				&RejectionError{Code: "feature_unavailable", Detail: "浏览器巡检开发中，暂不可重新采证", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+		}
+	}
 	var metricsConnectionID int64
 	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
 		return RunDetail{}, err
@@ -187,7 +195,7 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,rerun_of_id,created_at)
-		VALUES(?,?,?,?,'manual','Queued',?,?)`, systemID, planKey, configVersionID, contractID, sourceRunID, now)
+		VALUES(?,?,?,NULL,'manual','Queued',?,?)`, systemID, planKey, configVersionID, sourceRunID, now)
 	if err != nil {
 		var active int64
 		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, planKey).Scan(&active)
@@ -203,9 +211,9 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 	}
 	for _, check := range checks {
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, configVersionID, contractID, metricsConnectionID, check, now)
+			err = s.promqlChild(ctx, conn, runID, configVersionID, 0, metricsConnectionID, check, now)
 		} else {
-			err = s.browserChild(ctx, conn, runID, configVersionID, contractID, planKey, systemID, check, now)
+			err = s.browserChild(ctx, conn, runID, configVersionID, 0, planKey, systemID, check, now)
 		}
 		if err != nil {
 			if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {

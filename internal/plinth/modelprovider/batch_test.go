@@ -18,6 +18,7 @@ import (
 type recordingLedger struct {
 	mu        sync.Mutex
 	begins    int
+	budgets   [][2]uint32
 	completes []*runtimev1.CompleteModelCall
 }
 
@@ -25,6 +26,7 @@ func (ledger *recordingLedger) Begin(ctx context.Context, callSeq int, operation
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	ledger.begins++
+	ledger.budgets = append(ledger.budgets, [2]uint32{contextBudget, maxOutput})
 	return int64(ledger.begins), &runtimev1.ConnectionGrant{Purpose: "embedding"}, true
 }
 
@@ -60,6 +62,121 @@ func fixtureServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+// TestRunToolCallUsesStringContent pins the OpenAI-compatible chat wire shape
+// required by DeepSeek: a tool-only turn is ordinary text, not a multimodal
+// content-part object. The provider then has a chance to demonstrate a native
+// tool call instead of rejecting the request before capability evaluation.
+func TestRunToolCallUsesStringContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/chat/completions" {
+			http.Error(writer, "unexpected path", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+			Tools []json.RawMessage `json:"tools"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(writer, "bad body", http.StatusBadRequest)
+			return
+		}
+		if len(body.Messages) != 1 || body.Messages[0].Role != "user" || !json.Valid(body.Messages[0].Content) || body.Messages[0].Content[0] != '"' {
+			http.Error(writer, "tool prompt content must be a JSON string", http.StatusBadRequest)
+			return
+		}
+		if len(body.Tools) != 1 {
+			http.Error(writer, "expected one tool", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("X-Request-Id", "req-tool-1")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"tool_calls": []any{
+							map[string]any{
+								"id": "call-1", "type": "function", "function": map[string]string{"name": "probe_noop", "arguments": `{}`},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	result, _, err := RunToolCall(context.Background(), newClient(Config{BaseURL: server.URL}, "test-key"), "fixture-chat", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.RequestID != "req-tool-1" {
+		t.Fatalf("tool capability observation wrong: %+v", result)
+	}
+}
+
+// TestRunNormalizesOmittedBudgets exercises the real probe entrypoint rather
+// than hand-seeded ledger rows. A revision without metadata must record every
+// chat ModelCall with valid bounds, so Quoin accepts the real-call facts before
+// it evaluates the probe's typed child.
+func TestRunNormalizesOmittedBudgets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/chat/completions" {
+			http.Error(writer, "unexpected path", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Stream   bool              `json:"stream"`
+			Tools    []json.RawMessage `json:"tools"`
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(writer, "bad body", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("X-Request-Id", "req-probe")
+		if body.Stream {
+			if len(body.Messages) == 1 && body.Messages[0].Content == cancelPrompt {
+				_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}\n\n"))
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-request.Context().Done()
+				return
+			}
+			_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"rea\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"dy\"}}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		if len(body.Tools) > 0 {
+			calls := []any{map[string]any{"id": "call-1", "type": "function", "function": map[string]string{"name": "probe_noop", "arguments": `{}`}}}
+			if len(body.Tools) == 2 {
+				calls = append(calls, map[string]any{"id": "call-2", "type": "function", "function": map[string]string{"name": "probe_noop_second", "arguments": `{}`}})
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": calls}}}, "usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"id": "req-usage", "usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+	}))
+	t.Cleanup(server.Close)
+	ledger := &recordingLedger{}
+	result := Run(WithAttempt(context.Background(), 17), Config{BaseURL: server.URL, ChatModelID: "fixture-chat"}, "test-key", false, ledger)
+	if !result.Passed {
+		t.Fatalf("probe with supported fixture must pass: %s", result.Detail)
+	}
+	if len(ledger.budgets) != 5 {
+		t.Fatalf("chat probe ledger calls=%d, want 5", len(ledger.budgets))
+	}
+	for index, budget := range ledger.budgets {
+		if budget != [2]uint32{DefaultProbeContextBudgetTokens, DefaultProbeMaxOutputTokens} {
+			t.Fatalf("ledger call %d budget=%v, want default valid bounds", index+1, budget)
+		}
+	}
 }
 
 func TestRunBatchRebuildProducesClosedResultWithOneLedgerPair(t *testing.T) {

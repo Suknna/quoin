@@ -42,6 +42,7 @@ type Outcome struct {
 // action marks its capability false instead of aborting the set (the
 // frozen child row requires the real-call evidence of the full run).
 func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured bool, ledger Ledger) Outcome {
+	config = NormalizeProbeConfig(config)
 	probe := newClient(config, apiKey)
 	outcome := Outcome{ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID}
 	failures := []string{}

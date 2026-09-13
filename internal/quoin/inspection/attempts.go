@@ -186,7 +186,9 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// Release this cursor before fetching artifact grants below. Production has
+	// one SQLite connection, so a second pool query while rows remains open
+	// waits forever and prevents the completed PromQL Run's report dispatch.
 	evidenceIDs := []int64{}
 	type settledCheck struct {
 		resultID int64
@@ -196,6 +198,7 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	for rows.Next() {
 		var check settledCheck
 		if err := rows.Scan(&check.resultID, &check.evidence); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		checks = append(checks, check)
@@ -204,22 +207,30 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	grantRows, err := s.db.QueryContext(ctx, `SELECT g.artifact_id FROM attempt_artifact_grants g JOIN attempt_input_snapshots s ON s.id=g.source_id JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.artifact_id=g.artifact_id WHERE g.attempt_id=? AND g.source_kind='input_snapshot' AND s.attempt_id=? ORDER BY i.item_seq`, attemptID, attemptID)
 	if err != nil {
 		return nil, err
 	}
-	defer grantRows.Close()
 	artifactIDs := []int64{}
 	for grantRows.Next() {
 		var id int64
 		if err := grantRows.Scan(&id); err != nil {
+			_ = grantRows.Close()
 			return nil, err
 		}
 		artifactIDs = append(artifactIDs, id)
 	}
 	if err := grantRows.Err(); err != nil {
+		_ = grantRows.Close()
+		return nil, err
+	}
+	if err := grantRows.Close(); err != nil {
 		return nil, err
 	}
 	return json.Marshal(reportInput{

@@ -80,9 +80,13 @@ func (application *apiServer) createInitialAnalysis(ctx context.Context, input *
 		return nil, huma.Error500InternalServerError("暂时无法发起初步分析，请重试。", err)
 	}
 	// Dispatch immediately when Plinth is attached; otherwise the attempt
-	// stays Queued and the connect-path dispatcher picks it up.
+	// stays Queued and the connect-path dispatcher picks it up. A failed kick
+	// is non-terminal, but must be observable because the reconnect reconciler
+	// owns eventual recovery of a bound transport send.
 	if application.analysisDispatchFunc != nil {
-		_ = application.analysisDispatchFunc(ctx, result.AttemptID)
+		if err := application.analysisDispatchFunc(ctx, result.AttemptID); err != nil {
+			sharedops.LogEvent("quoin", "error", "analysis.dispatch", fmt.Sprintf("attempt=%d error=%v", result.AttemptID, err))
+		}
 	}
 	detail, err := application.analyses.Get(ctx, result.AnalysisID)
 	if err != nil {
@@ -192,8 +196,8 @@ func (application *apiServer) listInitialAnalysisAttempts(ctx context.Context, i
 	return output, nil
 }
 
-// retryInitialAnalysis creates a new Attempt for a technical failure and
-// reuses the frozen input snapshot (DATA-ANALYSIS-001).
+// retryInitialAnalysis preserves the terminal history and creates a fresh
+// analysis/attempt for a technical failure or interruption (DATA-ANALYSIS-001).
 func (application *apiServer) retryInitialAnalysis(ctx context.Context, input *struct {
 	Session      string `cookie:"__Host-quoin-session"`
 	OccurrenceID string `path:"occurrenceId"`
@@ -220,13 +224,13 @@ func (application *apiServer) retryInitialAnalysis(ctx context.Context, input *s
 		}
 		return nil, huma.Error500InternalServerError("暂时无法重试初步分析，请重试。", err)
 	}
-	attemptID, err := application.analyses.Retry(ctx, analysisID, session.User.ID, input.Body.ClientCommandID)
+	result, err := application.analyses.Retry(ctx, analysisID, session.User.ID, input.Body.ClientCommandID)
 	if err != nil {
 		if errors.Is(err, analysis.ErrNotFound) {
 			return nil, huma.Error404NotFound("初步分析不存在", nil)
 		}
 		if errors.Is(err, analysis.ErrActiveConflict) {
-			return nil, huma.Error409Conflict("只有技术失败的初步分析可以重试。")
+			return nil, huma.Error409Conflict("只有技术失败或中断的初步分析可以重试。")
 		}
 		if errors.Is(err, analysis.ErrModelProviderMissing) {
 			return nil, huma.Error503ServiceUnavailable("模型供应商尚未启用并通过能力探测，请管理员完成设置后再重试。", err)
@@ -234,9 +238,11 @@ func (application *apiServer) retryInitialAnalysis(ctx context.Context, input *s
 		return nil, huma.Error500InternalServerError("暂时无法重试初步分析，请重试。", err)
 	}
 	if application.analysisDispatchFunc != nil {
-		_ = application.analysisDispatchFunc(ctx, attemptID)
+		if err := application.analysisDispatchFunc(ctx, result.AttemptID); err != nil {
+			sharedops.LogEvent("quoin", "error", "analysis.retry_dispatch", fmt.Sprintf("attempt=%d error=%v", result.AttemptID, err))
+		}
 	}
-	detail, err := application.analyses.Get(ctx, analysisID)
+	detail, err := application.analyses.Get(ctx, result.AnalysisID)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("无法读取初步分析", err)
 	}

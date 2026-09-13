@@ -18,12 +18,11 @@
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaKind", "attemptId", "resourceRefreshRunId", "configVersionId", "discoveryKey", "selector", "identityLabels", "grantId"],
+      "required": ["schemaKind", "attemptId", "resourceRefreshRunId", "discoveryKey", "selector", "identityLabels", "grantId"],
       "properties": {
-        "schemaKind": { "const": "resource_refresh_execution_v1" },
+        "schemaKind": { "const": "resource_discovery_execution_v1" },
         "attemptId": { "$ref": "#/$defs/locatorId" },
         "resourceRefreshRunId": { "$ref": "#/$defs/locatorId" },
-        "configVersionId": { "$ref": "#/$defs/locatorId" },
         "discoveryKey": { "type": "string", "minLength": 1, "maxLength": 200 },
         "selector": { "type": "string", "minLength": 1, "maxLength": 100000 },
         "identityLabels": {

@@ -93,6 +93,9 @@ type ReportSummaryItem struct {
 }
 
 type ReportDetail struct {
+	// ID is the immutable report locator consumed by diagnosis feedback, unlike
+	// the human-facing (runId, version) route locator.
+	ID             string   `json:"id"`
 	RunID          string   `json:"runId"`
 	Version        int64    `json:"version"`
 	EvidenceDigest string   `json:"evidenceDigest"`
@@ -144,13 +147,13 @@ func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, cl
 		}
 		return d, err
 	}
-	var systemID, versionID, contractID, planID int64
+	var systemID, versionID, planID int64
 	err = conn.QueryRowContext(ctx, `
-		SELECT s.id, s.current_config_version_id, v.label_contract_version_id, p.id
+		SELECT s.id, s.current_config_version_id, p.id
 		FROM business_systems s
 		JOIN business_system_config_versions v ON v.id = s.current_config_version_id AND v.state='published'
 		JOIN config_plans p ON p.config_version_id = v.id AND p.plan_key = ?
-		WHERE s.key = ?`, planKey, systemKey).Scan(&systemID, &versionID, &contractID, &planID)
+		WHERE s.key = ?`, planKey, systemKey).Scan(&systemID, &versionID, &planID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "not_found", Detail: "找不到已发布的巡检计划", SystemKey: systemKey}, &committed)
 	}
@@ -167,7 +170,7 @@ func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, cl
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at)
-		VALUES(?,?,?,?,'manual','Queued',?)`, systemID, planKey, versionID, contractID, now)
+		VALUES(?,?,?,NULL,'manual','Queued',?)`, systemID, planKey, versionID, now)
 	if err != nil {
 		var active int64
 		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, planKey).Scan(&active)
@@ -186,9 +189,9 @@ func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, cl
 	}
 	for _, check := range checks {
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, contractID, metricsConnectionID, check, now)
+			err = s.promqlChild(ctx, conn, runID, versionID, 0, metricsConnectionID, check, now)
 		} else {
-			err = s.browserChild(ctx, conn, runID, versionID, contractID, planKey, systemID, check, now)
+			err = s.browserChild(ctx, conn, runID, versionID, 0, planKey, systemID, check, now)
 		}
 		if err != nil {
 			// A plan carrying PromQL checks cannot claim execution without an
@@ -411,11 +414,9 @@ func freezeInput(ctx context.Context, conn *sql.Conn, attemptID int64, kind stri
 		VALUES(?,1,'config_version',?,?)`, snapshotID, hex.EncodeToString(versionDigest[:]), versionID); err != nil {
 		return err
 	}
-	contractDigest := sha256.Sum256([]byte(fmt.Sprintf("label-contract-version:%d", contractID)))
-	_, err = conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		VALUES(?,2,'label_contract',?,?)`, snapshotID, hex.EncodeToString(contractDigest[:]), contractID)
-	return err
+	// New inspection children carry only config-version lineage. contractID stays
+	// in the function signature while historical run rows still reference it.
+	return nil
 }
 
 // convergeOn closes the Run once every configured plan check has settled:
@@ -627,14 +628,14 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 		return RunDetail{}, err
 	}
 
-	var systemID, versionID, contractID, planID int64
+	var systemID, versionID, planID int64
 	err = conn.QueryRowContext(ctx, `
-		SELECT b.id,v.id,v.label_contract_version_id,p.id
+		SELECT b.id,v.id,p.id
 		FROM business_systems b
 		JOIN business_system_config_versions v ON v.id=b.current_config_version_id AND v.state='published'
 		JOIN config_plans p ON p.config_version_id=v.id AND p.plan_key=? AND p.cron IS NOT NULL
 		WHERE b.key=? AND b.enabled=1 AND v.id=?`, plan.PlanKey, plan.SystemKey, plan.ConfigVersionID).
-		Scan(&systemID, &versionID, &contractID, &planID)
+		Scan(&systemID, &versionID, &planID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A concurrent publish/disable made the earlier read stale. This is not
 		// an error and must not turn the previous configuration into a Run.
@@ -662,7 +663,7 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
-		VALUES(?,?,?,?, 'schedule',?,'Queued',?)`, systemID, plan.PlanKey, versionID, contractID, scheduledText, now)
+		VALUES(?,?,?,NULL, 'schedule',?,'Queued',?)`, systemID, plan.PlanKey, versionID, scheduledText, now)
 	if err != nil {
 		// The active unique index is the commit-order overlap decision. Only an
 		// actual active Run converts this boundary into SkippedOverlap; never
@@ -680,7 +681,7 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 		}
 		if _, err = conn.ExecContext(ctx, `
 			INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
-			VALUES(?,?,?,?, 'schedule',?,'SkippedOverlap',?)`, systemID, plan.PlanKey, versionID, contractID, scheduledText, now); err != nil {
+			VALUES(?,?,?,NULL, 'schedule',?,'SkippedOverlap',?)`, systemID, plan.PlanKey, versionID, scheduledText, now); err != nil {
 			return RunDetail{}, err
 		}
 		if err = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND scheduled_for=?`, systemID, plan.PlanKey, scheduledText).Scan(&existingID); err != nil {
@@ -711,9 +712,9 @@ func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan Schedul
 			continue
 		}
 		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, contractID, metricsConnectionID, check, now)
+			err = s.promqlChild(ctx, conn, runID, versionID, 0, metricsConnectionID, check, now)
 		} else {
-			err = s.browserChild(ctx, conn, runID, versionID, contractID, plan.PlanKey, systemID, check, now)
+			err = s.browserChild(ctx, conn, runID, versionID, 0, plan.PlanKey, systemID, check, now)
 		}
 		if err != nil {
 			// A missing or stale Thanos grant is a configuration failure, not a

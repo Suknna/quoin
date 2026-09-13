@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
@@ -33,7 +34,9 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 
 // RendererVersion identifies the input renderer generation both sides
 // agree on (ARCH-CONTEXT-006).
-const RendererVersion = "initial-analysis-renderer-v1"
+// Renderer v3 replaces Label Contract context with declaration resource scopes.
+// Rebuild retains v1/v2 paths so historical snapshot bytes stay exact.
+const RendererVersion = "initial-analysis-renderer-v3"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
@@ -41,6 +44,7 @@ var (
 	ErrModelProviderMissing   = errors.New("no enabled qualified model provider")
 	ErrBusinessContextMissing = errors.New("alert occurrence has no eligible published business configuration")
 	ErrActiveConflict         = errors.New("initial analysis is not retryable or the fence lost the race")
+	ErrCommandReplayMismatch  = errors.New("client command id is already bound to a different analysis operation or target")
 	ErrNoOutput               = errors.New("initial analysis has no sealed output")
 	ErrLateResult             = errors.New("result proposal lost the commit-order race")
 	ErrOutputSealed           = errors.New("initial analysis already sealed an output")
@@ -74,8 +78,13 @@ type Service struct {
 }
 
 type replayEntry struct {
+	operation  string
 	analysisID int64
 	attemptID  int64
+	// targetAnalysisID distinguishes a retry/cancel command's requested
+	// historical record from the newly created recovery analysis it returns.
+	targetAnalysisID int64
+	occurrenceID     int64
 }
 
 // NewService builds the analysis service on the product database and
@@ -129,11 +138,21 @@ func (service *Service) replayKey(principalID int64, commandID string) string {
 	return strconv.FormatInt(principalID, 10) + ":" + commandID
 }
 
-func (service *Service) replayLookup(principalID int64, commandID string) (replayEntry, bool) {
+func (service *Service) replayLookup(principalID int64, commandID, operation string, targetAnalysisID, occurrenceID int64) (replayEntry, bool, error) {
 	service.replayMu.Lock()
 	defer service.replayMu.Unlock()
 	entry, ok := service.replay[service.replayKey(principalID, commandID)]
-	return entry, ok
+	if !ok {
+		return replayEntry{}, false, nil
+	}
+	// A client command id is an idempotency key for exactly one semantic
+	// operation and target. Returning a prior create/cancel/retry result for a
+	// different request would direct a caller to unrelated mutable work.
+	if entry.operation != operation || entry.targetAnalysisID != targetAnalysisID ||
+		(occurrenceID != 0 && entry.occurrenceID != occurrenceID) {
+		return replayEntry{}, false, ErrCommandReplayMismatch
+	}
+	return entry, true, nil
 }
 
 func (service *Service) replayRemember(principalID int64, commandID string, entry replayEntry) {
@@ -160,14 +179,16 @@ type Input struct {
 	ModelContract   ModelContract     `json:"modelContract"`
 }
 
-// BusinessContext names immutable configuration facts, never a secret or a
-// mutable connection locator. The resolver later reads its frozen input-item
-// references and snapshots the referenced connection revision/generation.
+// BusinessContext is the declaration-derived scope exposed to the model. It
+// excludes connections and secrets; resource policies are frozen inside the
+// version's declaration_json and are the only metrics authority for new work.
 type BusinessContext struct {
-	SystemKey              string `json:"systemKey"`
-	ConfigVersionID        string `json:"configVersionId"`
-	LabelContractVersionID string `json:"labelContractVersionId"`
-	BusinessSystemLabel    string `json:"businessSystemLabel"`
+	SystemKey       string                      `json:"systemKey"`
+	ConfigVersionID string                      `json:"configVersionId"`
+	Resources       []config.ResourceProjection `json:"resources,omitempty"`
+	// Historical snapshots retain these fields solely for byte-exact rebuild.
+	LabelContractVersionID string `json:"labelContractVersionId,omitempty"`
+	BusinessSystemLabel    string `json:"businessSystemLabel,omitempty"`
 }
 
 // OccurrenceContext is the frozen alert context the model receives.
@@ -239,7 +260,15 @@ type CreateResult struct {
 // partial index is the authority; DATA-ANALYSIS-001), and a replayed
 // client command returns its original record.
 func (service *Service) Create(ctx context.Context, occurrenceID, principalID int64, clientCommandID string) (CreateResult, error) {
-	if entry, ok := service.replayLookup(principalID, clientCommandID); ok {
+	return service.create(ctx, occurrenceID, principalID, clientCommandID, "create", 0)
+}
+
+// create performs a create or recovery-retry using the same durable admission
+// path, while keeping their idempotency identities distinct.
+func (service *Service) create(ctx context.Context, occurrenceID, principalID int64, clientCommandID, operation string, targetAnalysisID int64) (CreateResult, error) {
+	if entry, ok, err := service.replayLookup(principalID, clientCommandID, operation, targetAnalysisID, occurrenceID); err != nil {
+		return CreateResult{}, err
+	} else if ok {
 		return CreateResult{AnalysisID: entry.analysisID, AttemptID: entry.attemptID}, nil
 	}
 	conn, err := service.db.Conn(ctx)
@@ -275,7 +304,7 @@ func (service *Service) Create(ctx context.Context, occurrenceID, principalID in
 		}
 		committed = true
 		result := CreateResult{AnalysisID: activeID, AttemptID: attemptID}
-		service.replayRemember(principalID, clientCommandID, replayEntry{analysisID: activeID, attemptID: attemptID})
+		service.replayRemember(principalID, clientCommandID, replayEntry{operation: operation, targetAnalysisID: targetAnalysisID, occurrenceID: occurrenceID, analysisID: activeID, attemptID: attemptID})
 		return result, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -314,7 +343,7 @@ func (service *Service) Create(ctx context.Context, occurrenceID, principalID in
 	}
 	committed = true
 	result := CreateResult{AnalysisID: analysisID, AttemptID: attemptID}
-	service.replayRemember(principalID, clientCommandID, replayEntry{analysisID: analysisID, attemptID: attemptID})
+	service.replayRemember(principalID, clientCommandID, replayEntry{operation: operation, targetAnalysisID: targetAnalysisID, occurrenceID: occurrenceID, analysisID: analysisID, attemptID: attemptID})
 	return result, nil
 }
 
@@ -349,6 +378,12 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	if err := json.Unmarshal([]byte(labelsJSON), &input.Occurrence.Labels); err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
+	// Creation and dispatch rebuild must project the exact same first accepted
+	// Alertmanager item. Otherwise its frozen digest cannot pass the dispatch
+	// immutability fence after annotations are added to the input contract.
+	if err := populateOccurrenceAnnotations(ctx, conn, occurrenceID, &input.Occurrence); err != nil {
+		return Input{}, ModelContract{}, provider{}, err
+	}
 	if err := resolveBusinessContext(ctx, conn, occurrenceID, &input.BusinessContext); err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
@@ -365,32 +400,36 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	return input, contract, selected, nil
 }
 
-// resolveBusinessContext admits analysis only when the immutable occurrence
-// attribution closes onto the business's current published declaration and its
-// active Label Contract. A later draft cannot affect this input because the
-// exact version references are frozen as attempt input items.
+// resolveBusinessContext admits analysis only when occurrence attribution closes
+// onto a migrated published declaration. New work has no Label Contract gate:
+// the frozen config version itself defines every usable resource scope.
 func resolveBusinessContext(ctx context.Context, conn *sql.Conn, occurrenceID int64, context *BusinessContext) error {
-	var configVersionID, contractVersionID int64
+	var configVersionID int64
+	var declarationJSON string
 	err := conn.QueryRowContext(ctx, `
-		SELECT config.id, contract.id, config.system_key,
-		       json_extract(contract.contract_json, '$.label_contract.business_system_label')
+		SELECT config.id, config.declaration_json
 		FROM alert_occurrences occurrence
 		JOIN business_systems business ON business.id=occurrence.business_system_id
 		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
-		JOIN label_contracts contract ON contract.id=config.label_contract_version_id
-		WHERE occurrence.id=? AND business.enabled=1 AND config.state='published' AND contract.state='active'`, occurrenceID).
-		Scan(&configVersionID, &contractVersionID, &context.SystemKey, &context.BusinessSystemLabel)
+		WHERE occurrence.id=? AND business.enabled=1 AND config.state='published'
+		  AND config.published_at IS NOT NULL AND config.declaration_json IS NOT NULL`, occurrenceID).
+		Scan(&configVersionID, &declarationJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrBusinessContextMissing
 	}
 	if err != nil {
 		return err
 	}
-	if context.SystemKey == "" || context.BusinessSystemLabel == "" {
+	var declaration config.BusinessSystemDocument
+	if err := json.Unmarshal([]byte(declarationJSON), &declaration); err != nil {
+		return fmt.Errorf("decode frozen business declaration: %w", err)
+	}
+	if declaration.SystemKey == "" || declaration.MetricsConnectionID <= 0 || len(declaration.Resources) == 0 {
 		return ErrBusinessContextMissing
 	}
+	context.SystemKey = declaration.SystemKey
 	context.ConfigVersionID = strconv.FormatInt(configVersionID, 10)
-	context.LabelContractVersionID = strconv.FormatInt(contractVersionID, 10)
+	context.Resources = append([]config.ResourceProjection(nil), declaration.Resources...)
 	return nil
 }
 
@@ -478,16 +517,9 @@ func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digest
 		VALUES(?,2,'business_config',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
 		return 0, err
 	}
-	contractVersionID, err := strconv.ParseInt(input.BusinessContext.LabelContractVersionID, 10, 64)
-	if err != nil || contractVersionID <= 0 {
-		return 0, fmt.Errorf("analysis Label Contract context is missing")
-	}
-	contractDigest := sha256.Sum256([]byte("label-contract-version:" + input.BusinessContext.LabelContractVersionID))
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		VALUES(?,3,'label_contract',?,?)`, snapshotID, hex.EncodeToString(contractDigest[:]), contractVersionID); err != nil {
-		return 0, err
-	}
+	// Config-version lineage is the sole authority for new analysis attempts.
+	// Historical snapshots may retain their independent Label Contract item, but
+	// no new item is written after the declaration runtime cutover.
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?,?,?,?,?,?,?)`,

@@ -131,8 +131,8 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 	now := service.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO config_verification_runs(purpose,business_system_id,config_version_id,label_contract_version_id,state,row_version,created_by,created_at)
-		VALUES('prepublish',?,?,?,'Queued',1,?,?)`,
-		systemID, versionID, contractID, principalID, now)
+		VALUES('prepublish',?,?,NULL,'Queued',1,?,?)`,
+		systemID, versionID, principalID, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "ux_config_verification_run_active") || strings.Contains(err.Error(), "UNIQUE constraint failed: config_verification_runs") {
 			// Surface the active run itself so the client can open it
@@ -552,13 +552,12 @@ func draftBinding(ctx context.Context, conn *sql.Conn, systemKey string, version
 		return 0, 0, err
 	}
 	var (
-		contractID int64
-		state      string
-		published  sql.NullString
+		state     string
+		published sql.NullString
 	)
 	err := conn.QueryRowContext(ctx, `
-		SELECT label_contract_version_id,state,published_at FROM business_system_config_versions
-		WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(&contractID, &state, &published)
+		SELECT state,published_at FROM business_system_config_versions
+		WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(&state, &published)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, ErrNotFound
 	}
@@ -572,7 +571,7 @@ func draftBinding(ctx context.Context, conn *sql.Conn, systemKey string, version
 			SystemKey: systemKey, ObjectID: versionID,
 		}
 	}
-	return systemID, contractID, nil
+	return systemID, 0, nil
 }
 
 // ownedVersion resolves the system row for a version that belongs to it,
@@ -586,15 +585,15 @@ func ownedVersion(ctx context.Context, conn *sql.Conn, systemKey string, version
 		}
 		return 0, 0, err
 	}
-	var contractID int64
-	err := conn.QueryRowContext(ctx, `SELECT label_contract_version_id FROM business_system_config_versions WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(&contractID)
+	var exists int
+	err := conn.QueryRowContext(ctx, `SELECT 1 FROM business_system_config_versions WHERE id=? AND business_system_id=?`, versionID, systemID).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, 0, err
 	}
-	return systemID, contractID, nil
+	return systemID, 0, nil
 }
 
 func verificationRow(ctx context.Context, conn *sql.Conn, systemID, versionID, runID int64) (int64, error) {
@@ -611,7 +610,7 @@ func scanVerificationSummary(rows *sql.Rows) (VerificationRunSummary, error) {
 		summary    VerificationRunSummary
 		id         int64
 		versionID  int64
-		contractID int64
+		contractID sql.NullInt64
 		evidenceAt sql.NullString
 	)
 	if err := rows.Scan(&id, &summary.Purpose, &versionID, &contractID, &summary.State, &summary.RowVersion, &evidenceAt, &summary.CreatedAt); err != nil {
@@ -619,7 +618,9 @@ func scanVerificationSummary(rows *sql.Rows) (VerificationRunSummary, error) {
 	}
 	summary.ID = strconv.FormatInt(id, 10)
 	summary.ConfigVersionID = strconv.FormatInt(versionID, 10)
-	summary.LabelContractVersionID = strconv.FormatInt(contractID, 10)
+	if contractID.Valid {
+		summary.LabelContractVersionID = strconv.FormatInt(contractID.Int64, 10)
+	}
 	if evidenceAt.Valid {
 		value := evidenceAt.String
 		summary.EvidenceAt = &value
@@ -631,7 +632,7 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 	var (
 		detail       VerificationRunDetail
 		id           int64
-		contractID   int64
+		contractID   sql.NullInt64
 		evidenceAt   sql.NullString
 		resultDetail sql.NullString
 	)
@@ -648,7 +649,9 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	detail.ConfigVersionID = strconv.FormatInt(versionID, 10)
-	detail.LabelContractVersionID = strconv.FormatInt(contractID, 10)
+	if contractID.Valid {
+		detail.LabelContractVersionID = strconv.FormatInt(contractID.Int64, 10)
+	}
 	if evidenceAt.Valid {
 		value := evidenceAt.String
 		detail.EvidenceAt = &value

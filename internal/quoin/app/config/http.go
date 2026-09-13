@@ -1,7 +1,6 @@
-// Package appconfig owns the configuration HTTP surface (T16): the frozen
-// business-system routes (list/detail/upload/publish), the Label Contract
-// draft/activation routes required to reach a current contract, the
-// read-only Journey Catalog view and the business-system YAML template. The
+// Package appconfig owns the configuration HTTP surface: the frozen
+// business-system routes (list/detail/upload/publish), the read-only Journey
+// Catalog view, and the business-system YAML template. The
 // Handler is a seam wired by the app package exactly like the investigation
 // surface; it owns no SQL.
 package appconfig
@@ -15,15 +14,13 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/config"
-	"github.com/Suknna/quoin/internal/quoin/labelcontract"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	"github.com/danielgtaylor/huma/v2"
 )
 
 // Handler wires the configuration domain services into the HTTP surface.
 type Handler struct {
-	Systems   *businesssystem.Service
-	Contracts *labelcontract.Service
+	Systems *businesssystem.Service
 	// Authenticate resolves any full (non-restricted) session to its
 	// principal id; every logged-in user may read the config surface (Q209).
 	Authenticate func(ctx context.Context, cookie string) (int64, error)
@@ -36,6 +33,9 @@ type Handler struct {
 	// DispatchConfigVerification scans and dispatches committed queued
 	// PromQL verification attempts (created while Plinth is already connected).
 	DispatchConfigVerification func(ctx context.Context)
+	// DispatchResourceRefresh scans and dispatches committed resource-discovery
+	// attempts. The durable run exists before this best-effort runtime kick.
+	DispatchResourceRefresh func(ctx context.Context)
 }
 
 // RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
@@ -63,12 +63,9 @@ func (handler *Handler) Register(api huma.API) {
 	// Historical refresh runs remain auditable, but their former POST producer is
 	// deliberately absent: only retained facts can be read from this route.
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/resources:refresh", OperationID: "startResourceRefresh"}, handler.startResourceRefresh)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts", OperationID: "listLabelContracts"}, handler.listLabelContracts)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}", OperationID: "getLabelContract"}, handler.getLabelContract)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/label-contracts/{contractVersion}/activate", OperationID: "activateLabelContract"}, handler.activateLabelContract)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/label-contracts/{contractVersion}/readiness", OperationID: "getLabelContractActivationReadiness"}, handler.getLabelContractActivationReadiness)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/journey-catalog", OperationID: "getJourneyCatalog"}, handler.getJourneyCatalog)
 }
 
@@ -105,11 +102,11 @@ func mapDomainError(err error) error {
 		return nil
 	case errors.As(err, &validation):
 		return validationProblem(validation)
-	case errors.Is(err, businesssystem.ErrCommandReused), errors.Is(err, labelcontract.ErrCommandReused):
+	case errors.Is(err, businesssystem.ErrCommandReused):
 		conflict := problem(http.StatusConflict, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起操作。")
 		conflict.Conflict = map[string]any{"code": "command_id_reused"}
 		return conflict
-	case errors.Is(err, businesssystem.ErrNotFound), errors.Is(err, labelcontract.ErrNotFound):
+	case errors.Is(err, businesssystem.ErrNotFound):
 		return problem(http.StatusNotFound, "not_found", "目标对象不存在，可能刚被删除或路径不正确。")
 	case errors.Is(err, businesssystem.ErrBrowserIdentityMissing):
 		return problem(http.StatusConflict, "browser_identity_missing", "该配置包含浏览器检查，但业务系统尚未配置浏览器身份，请先完成浏览器身份配置。")
@@ -119,14 +116,6 @@ func mapDomainError(err error) error {
 	var systemsConflict *businesssystem.ConflictError
 	if errors.As(err, &systemsConflict) {
 		return conflictProblem("business_system", systemsConflict.Code, systemsConflict.Detail, systemsConflict.ObjectID, systemsConflict.CurrentVersion)
-	}
-	var contractConflict *labelcontract.ConflictError
-	if errors.As(err, &contractConflict) {
-		return conflictProblem("label_contract", contractConflict.Code, contractConflict.Detail, contractConflict.ObjectID, contractConflict.CurrentVersion)
-	}
-	var badRequest *labelcontract.BadRequestError
-	if errors.As(err, &badRequest) {
-		return problem(http.StatusBadRequest, "malformed_request", badRequest.Reason)
 	}
 	return problem(http.StatusInternalServerError, "unavailable", "暂时无法完成操作，请稍后重试。")
 }
