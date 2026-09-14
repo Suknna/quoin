@@ -1,8 +1,7 @@
 // Package appconfig owns the configuration HTTP surface: the frozen
-// business-system routes (list/detail/upload/publish), the read-only Journey
-// Catalog view, and the business-system YAML template. The
-// Handler is a seam wired by the app package exactly like the investigation
-// surface; it owns no SQL.
+// business-system routes (list/detail/upload/publish) and the business-system
+// YAML template. The Handler is a seam wired by the app package exactly like
+// the investigation surface; it owns no SQL.
 package appconfig
 
 import (
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
@@ -23,50 +21,27 @@ type Handler struct {
 	Systems *businesssystem.Service
 	// Authenticate resolves any full (non-restricted) session to its
 	// principal id; every logged-in user may read the config surface (Q209).
-	Authenticate func(ctx context.Context, cookie string) (int64, error)
-	// AuthenticateAdmin additionally enforces the Admin role for the frozen
-	// write commands (HTTP-CONFIG-001/002/004).
-	AuthenticateAdmin func(ctx context.Context, cookie string) (int64, error)
-	// CancelDispatch sends a committed, bound cancellation fence to Plinth.
-	// The domain service commits the fence before this best-effort delivery.
-	CancelDispatch func(ctx context.Context, attemptID int64) error
-	// DispatchConfigVerification scans and dispatches committed queued
-	// PromQL verification attempts (created while Plinth is already connected).
-	DispatchConfigVerification func(ctx context.Context)
-	// DispatchResourceRefresh scans and dispatches committed resource-discovery
-	// attempts. The durable run exists before this best-effort runtime kick.
-	DispatchResourceRefresh func(ctx context.Context)
+	Authenticate   func(ctx context.Context, cookie string) (int64, error)
+	BrowserEnabled func() bool
 }
 
-// RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
-// cancel operation (openapi x-quoin-maintenance-access: upgrade-drain).
-func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}/cancel", OperationID: "cancelConfigVerificationRun"}, handler.cancelConfigVerificationRun)
-}
-
-// Register mounts the huma-owned routes; the two multipart uploads and the
-// YAML template own their response heads and are mounted by the app package
-// on the raw mux.
+// Register exposes retained declaration history; plugin plans own all new execution.
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems", OperationID: "listBusinessSystems"}, handler.listBusinessSystems)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}", OperationID: "getBusinessSystem"}, handler.getBusinessSystem)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections", OperationID: "listBusinessSystemKubernetesConnections"}, handler.listKubernetesConnections)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections", OperationID: "createBusinessSystemKubernetesConnection"}, handler.createKubernetesConnection)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections/{mappingId}/retire", OperationID: "retireBusinessSystemKubernetesConnection"}, handler.retireKubernetesConnection)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config", OperationID: "listBusinessSystemConfigs"}, handler.listBusinessSystemConfigs)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}", OperationID: "getBusinessSystemConfig"}, handler.getBusinessSystemConfig)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/publish", OperationID: "publishBusinessSystemConfig"}, handler.publishBusinessSystemConfig)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "listConfigVerificationRuns"}, handler.listConfigVerificationRuns)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "runConfigVerificationRun"}, handler.runConfigVerificationRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", OperationID: "getConfigVerificationRun"}, handler.getConfigVerificationRun)
-	handler.RegisterUpgradeDrain(api)
 	// Historical refresh runs remain auditable, but their former POST producer is
 	// deliberately absent: only retained facts can be read from this route.
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/business-systems/{systemKey}/resources:refresh", OperationID: "startResourceRefresh"}, handler.startResourceRefresh)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/journey-catalog", OperationID: "getJourneyCatalog"}, handler.getJourneyCatalog)
+	// The journey-catalog view is retired with the browser business
+	// (受控浏览器退役): getJourneyCatalog stays as retained implementation but
+	// is deliberately not mounted, so the old URL 404s.
 }
 
 // problemError is the frozen ErrorModel envelope (HTTP-ERROR-002/004).
@@ -145,31 +120,6 @@ func (handler *Handler) reader(ctx context.Context, cookie string) (int64, error
 		return 0, errors.New("config handler not wired")
 	}
 	return handler.Authenticate(ctx, cookie)
-}
-
-// managementReader keeps the public HTTP distinction between an expired
-// session (401) and an authenticated Operator denied a management API (403).
-// The raw multipart routes cannot rely on Huma to preserve this mapping.
-func (handler *Handler) managementReader(ctx context.Context, cookie string) (int64, int) {
-	principalID, err := handler.admin(ctx, cookie)
-	if err == nil {
-		return principalID, 0
-	}
-	var authorization interface{ GetStatus() int }
-	if errors.As(err, &authorization) && authorization.GetStatus() == http.StatusForbidden {
-		return 0, http.StatusForbidden
-	}
-	if errors.Is(err, auth.ErrUnauthenticated) {
-		return 0, http.StatusUnauthorized
-	}
-	return 0, http.StatusInternalServerError
-}
-
-func (handler *Handler) admin(ctx context.Context, cookie string) (int64, error) {
-	if handler.AuthenticateAdmin == nil {
-		return 0, errors.New("config handler not wired")
-	}
-	return handler.AuthenticateAdmin(ctx, cookie)
 }
 
 func parseLocator(raw string) (int64, *problemError) {

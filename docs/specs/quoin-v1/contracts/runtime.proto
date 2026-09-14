@@ -115,6 +115,7 @@ enum ScopeType {
   SCOPE_TYPE_EMBEDDING_GENERATION = 7;
   SCOPE_TYPE_CONNECTION = 8;
   SCOPE_TYPE_RESOURCE_REFRESH_RUN = 9; // 已发布配置的资源发现子 Attempt（DATA-OBSERVED-004）
+  SCOPE_TYPE_OBSERVATION_RUN = 10; // 来源级观测子 Attempt（ADR-0004 接入即有界观测）
 }
 
 // execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。

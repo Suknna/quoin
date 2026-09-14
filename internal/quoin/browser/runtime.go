@@ -389,10 +389,20 @@ func profileUnavailableTerminalReason(ctx context.Context, conn *sql.Conn, opera
 
 // PreparePublish persists idempotency before the control message leaves Quoin.
 func (service *Service) PreparePublish(ctx context.Context, systemKey string, operationID, actorID, expectedVersion int64, commandID string) (PublishRequest, error) {
+	return service.preparePublish(ctx, businessIdentityScope(systemKey), operationID, actorID, expectedVersion, commandID)
+}
+
+// PrepareStandalonePublish is the identity_key-located PreparePublish for
+// plugin-owned identities (ADR-0004); the idempotency fences are shared.
+func (service *Service) PrepareStandalonePublish(ctx context.Context, identityKey string, operationID, actorID, expectedVersion int64, commandID string) (PublishRequest, error) {
+	return service.preparePublish(ctx, standaloneIdentityScope(identityKey), operationID, actorID, expectedVersion, commandID)
+}
+
+func (service *Service) preparePublish(ctx context.Context, scope identityScope, operationID, actorID, expectedVersion int64, commandID string) (PublishRequest, error) {
 	if commandID == "" {
 		return PublishRequest{}, ErrInvalid
 	}
-	digest := commandDigest(systemKey, operationID, expectedVersion)
+	digest := commandDigest(scope.digestSeed, operationID, expectedVersion)
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
 		return PublishRequest{}, err
@@ -415,11 +425,23 @@ func (service *Service) PreparePublish(ctx context.Context, systemKey string, op
 	if replayed {
 		// The command was accepted but Lintel's result may have been lost.
 		// Reconstruct the same deterministic generation for a safe resend.
-		var profileID sql.NullInt64
-		var maxGeneration uint64
-		if err = conn.QueryRowContext(ctx, `SELECT o.id,o.identity_id,o.identity_revision_id,i.current_profile_generation_id,COALESCE((SELECT MAX(generation) FROM browser_profile_generations WHERE identity_id=o.identity_id),0) FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id JOIN business_systems s ON s.id=i.business_system_id WHERE o.id=? AND s.key=?`, operationID, systemKey).Scan(&r.OperationID, &r.IdentityID, &r.RevisionID, &profileID, &maxGeneration); err != nil {
+		identityID, _, _, _, _, err := resolveIdentityOn(ctx, conn, scope)
+		if err != nil {
 			return PublishRequest{}, err
 		}
+		owned, err := operationOwnedOn(ctx, conn, identityID, operationID)
+		if err != nil {
+			return PublishRequest{}, err
+		}
+		if !owned {
+			return PublishRequest{}, ErrNotFound
+		}
+		var profileID sql.NullInt64
+		var maxGeneration uint64
+		if err = conn.QueryRowContext(ctx, `SELECT o.identity_id,o.identity_revision_id,i.current_profile_generation_id,COALESCE((SELECT MAX(generation) FROM browser_profile_generations WHERE identity_id=o.identity_id),0) FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id WHERE o.id=?`, operationID).Scan(&r.IdentityID, &r.RevisionID, &profileID, &maxGeneration); err != nil {
+			return PublishRequest{}, err
+		}
+		r.OperationID = operationID
 		if profileID.Valid {
 			r.ExpectedGenerationID = profileID.Int64
 		}
@@ -436,14 +458,23 @@ func (service *Service) PreparePublish(ctx context.Context, systemKey string, op
 		committed = true
 		return r, nil
 	}
-	var userID sql.NullInt64
-	err = conn.QueryRowContext(ctx, `SELECT o.id,o.identity_id,o.identity_revision_id,o.actor_user_id,o.state,o.row_version,COALESCE(i.current_profile_generation_id,0),COALESCE((SELECT MAX(generation) FROM browser_profile_generations WHERE identity_id=o.identity_id),0)+1 FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id JOIN business_systems s ON s.id=i.business_system_id WHERE o.id=? AND s.key=?`, operationID, systemKey).Scan(&r.OperationID, &r.IdentityID, &r.RevisionID, &userID, new(string), new(int64), &r.ExpectedGenerationID, &r.NewGeneration)
+	identityID, _, _, _, _, err := resolveIdentityOn(ctx, conn, scope)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return PublishRequest{}, ErrNotFound
-		}
 		return PublishRequest{}, err
 	}
+	owned, err := operationOwnedOn(ctx, conn, identityID, operationID)
+	if err != nil {
+		return PublishRequest{}, err
+	}
+	if !owned {
+		return PublishRequest{}, ErrNotFound
+	}
+	var userID sql.NullInt64
+	err = conn.QueryRowContext(ctx, `SELECT o.identity_id,o.identity_revision_id,o.actor_user_id,COALESCE(i.current_profile_generation_id,0),COALESCE((SELECT MAX(generation) FROM browser_profile_generations WHERE identity_id=o.identity_id),0)+1 FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id WHERE o.id=?`, operationID).Scan(&r.IdentityID, &r.RevisionID, &userID, &r.ExpectedGenerationID, &r.NewGeneration)
+	if err != nil {
+		return PublishRequest{}, err
+	}
+	r.OperationID = operationID
 	var state string
 	var version int64
 	if err = conn.QueryRowContext(ctx, `SELECT state,row_version FROM browser_operations WHERE id=?`, operationID).Scan(&state, &version); err != nil {

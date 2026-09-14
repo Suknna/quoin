@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/config"
 )
 
@@ -28,7 +29,23 @@ type Input struct {
 	Messages        []MessageInput           `json:"messages"`
 	Sources         []RenderedSource         `json:"sources"`
 	BusinessContext *RenderedBusinessContext `json:"businessContext,omitempty"`
-	ModelContract   ModelContract            `json:"modelContract"`
+	// Integrations is the frozen source-level authority (ADR-0004): the
+	// admin-enabled integrations at creation, rendered exactly when the
+	// attempt has no business context. The declaration view narrows; this
+	// list is the whole read-only scope.
+	Integrations  []RenderedIntegration `json:"integrations,omitempty"`
+	ModelContract ModelContract         `json:"modelContract"`
+	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
+	// the snapshot digest covers it via this embedding.
+	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
+}
+
+// RenderedIntegration is one admin-enabled integration frozen into the
+// attempt input. Kind is "metrics" (Prometheus/Thanos) or "kubernetes";
+// credentials and endpoints never appear.
+type RenderedIntegration struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
 }
 
 // RenderedBusinessContext exposes the frozen declaration's resource choices;
@@ -158,15 +175,18 @@ type provider struct {
 // RebuildInput rebuilds the canonical investigation_v1 input for one
 // attempt from its message lineage and the attempt's frozen chat_model
 // grant. The dispatch path verifies the digest against the snapshot row,
-// so any drift here fails dispatch instead of silently diverging.
+// so any drift here fails dispatch instead of silently diverging. The
+// frozen tool catalog is read from the stored column, never re-derived
+// from current enablement.
 func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]byte, error) {
-	var investigationID int64
-	var probeResultID int64
+	var investigationID, probeResultID int64
+	var rendererVersion string
 	err := service.db.QueryRowContext(ctx, `
-		SELECT a.scope_id, g.qualified_probe_result_id
+		SELECT a.scope_id, g.qualified_probe_result_id, s.renderer_version
 		FROM execution_attempts a
 		JOIN attempt_connection_grants g ON g.attempt_id=a.id AND g.purpose='chat_model'
-		WHERE a.id=? AND a.attempt_type='investigation'`, attemptID).Scan(&investigationID, &probeResultID)
+		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
+		WHERE a.id=? AND a.attempt_type='investigation'`, attemptID).Scan(&investigationID, &probeResultID, &rendererVersion)
 	if err != nil {
 		return nil, fmt.Errorf("attempt %d investigation binding missing: %w", attemptID, err)
 	}
@@ -178,7 +198,50 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	if err != nil {
 		return nil, err
 	}
-	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, businessContext, probeResultID)
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.db, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	// Renderer v2 renders the frozen integrations — the source-level
+	// authority of every new attempt (ADR-0004). v1 snapshots keep their
+	// exact historical bytes; old attempts are never re-interpreted.
+	var integrations []RenderedIntegration
+	if rendererVersion != "investigation-renderer-v1" {
+		integrations, err = frozenIntegrations(ctx, service.db, attemptID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, businessContext, integrations, probeResultID, toolCatalog)
+}
+
+// frozenIntegrations reconstructs the frozen source-level authority from the
+// attempt's item lineage: the exact connections and revisions frozen at
+// creation, so later enablement churn cannot re-interpret the snapshot.
+func frozenIntegrations(ctx context.Context, queries queryer, attemptID int64) ([]RenderedIntegration, error) {
+	rows, err := queries.QueryContext(ctx, `
+		SELECT CASE WHEN c.type='kubernetes' THEN 'kubernetes' ELSE 'metrics' END AS kind, c.name
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id
+			AND item.item_role IN ('metrics_source','kubernetes_source')
+			AND item.connection_revision_id IS NOT NULL
+		JOIN connection_revisions r ON r.id=item.connection_revision_id
+		JOIN connections c ON c.id=r.connection_id
+		WHERE snapshot.attempt_id=?
+		ORDER BY c.name, kind`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var integrations []RenderedIntegration
+	for rows.Next() {
+		var integration RenderedIntegration
+		if err := rows.Scan(&integration.Kind, &integration.Name); err != nil {
+			return nil, err
+		}
+		integrations = append(integrations, integration)
+	}
+	return integrations, rows.Err()
 }
 
 // attemptUserMessage resolves the user message an attempt answers. Send
@@ -215,7 +278,7 @@ func attemptUserMessage(ctx context.Context, queries queryer, attemptID int64) (
 // investigation's durable rows; the message set freezes at the turn's
 // cutoff seq (create/send/retry pass their own user message, dispatch
 // rebuilds resolve it through attemptUserMessage).
-func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, probeResultID int64) ([]byte, error) {
+func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, integrations []RenderedIntegration, probeResultID int64, toolCatalog *attempt.FrozenCatalog) ([]byte, error) {
 	var input Input
 	rows, err := queries.QueryContext(ctx, `
 		SELECT id, role, content FROM investigation_messages
@@ -258,6 +321,7 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 			Resources:       append([]config.ResourceProjection(nil), businessContext.Resources...),
 		}
 	}
+	input.Integrations = integrations
 	contract := ModelContract{}
 	if err := queries.QueryRowContext(ctx, `
 		SELECT chat_model_id, context_budget_tokens, max_output_tokens
@@ -266,6 +330,7 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 		return nil, err
 	}
 	input.ModelContract = contract
+	input.ToolCatalog = toolCatalog
 	return json.Marshal(input)
 }
 

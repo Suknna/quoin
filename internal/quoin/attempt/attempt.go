@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Suknna/quoin/internal/plugins"
 	"time"
 )
 
@@ -55,6 +56,10 @@ var ErrLateResult = errors.New("attempt is not running; late result rejected")
 type Service struct {
 	db  *sql.DB
 	now func() time.Time
+	// Catalogs is the boot-frozen per-generation tool catalog source
+	// (ADR-0004), assembled once by the wiring layer from the plugin
+	// registry and the resolved enablement; creation freezes its documents.
+	Catalogs *Catalogs
 	// SnapshotRebuilder rebuilds the canonical input bytes of one attempt
 	// from its durable item references; the scope domain wires it (the
 	// snapshot row stores only the digest).
@@ -86,7 +91,27 @@ func ReleaseVersion() string { return releaseVersion }
 
 // NewService builds the attempt service on the product database.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{db: db, now: func() time.Time { return time.Now().UTC() }, Catalogs: DefaultCatalogs()}
+}
+
+// DefaultCatalogs is the unwired-wiring fallback: the built-in descriptors
+// under their default enablement. The application wiring replaces it with a
+// registry-built set resolved from the deployment configuration; tests and
+// minimal hosts get the deterministic default mainline.
+func DefaultCatalogs() *Catalogs {
+	registry := plugins.NewRegistry()
+	for _, descriptor := range BuiltinDescriptors() {
+		_ = registry.RegisterDescriptor(descriptor)
+	}
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil {
+		panic("builtin descriptors must always resolve: " + err.Error())
+	}
+	catalogs, err := BuildCatalogs(registry, enabled)
+	if err != nil {
+		panic("builtin descriptors must always build: " + err.Error())
+	}
+	return catalogs
 }
 
 // nowText formats the service clock for SQLite timestamps.

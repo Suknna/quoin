@@ -124,6 +124,25 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return nil
 	}
+	// The ADR-0004 predecessor is reached both by fresh installs of that release
+	// (empty ledger) and by declaration-cutover migrations (exactly one cutover
+	// ledger row). No other history is admissible.
+	if stored == pluginRegistrySchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		if result.MigrationHistory == 0 {
+			return nil
+		}
+		var matching int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger WHERE migration_id=? AND digest=?`, declarationCutoverMigrationID, migrationDigest(declarationCutoverMigrationID)).Scan(&matching); err != nil {
+			return err
+		}
+		if result.MigrationHistory == 1 && matching == 1 {
+			return nil
+		}
+		return fmt.Errorf("%w: plugin registry predecessor requires an empty ledger or exactly the declaration cutover ledger", ErrSchemaHistoryPresent)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -159,6 +178,9 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 	}
 	if digest == declarationCutoverSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, migrateDeclarationCutoverOn)
+	}
+	if digest == pluginRegistrySchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, migratePluginRegistryOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

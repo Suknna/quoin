@@ -14,17 +14,17 @@ type recordingService struct {
 }
 
 type scheduledCall struct {
-	systemKey, planKey string
-	scheduledFor       time.Time
-	availability       inspection.RuntimeAvailability
+	planKey      string
+	scheduledFor time.Time
+	availability inspection.RuntimeAvailability
 }
 
 func (s *recordingService) ScheduledPlans(context.Context) ([]inspection.ScheduledPlan, error) {
 	return s.plans, nil
 }
 
-func (s *recordingService) CreateScheduledInspectionRun(_ context.Context, plan inspection.ScheduledPlan, scheduledFor time.Time, availability inspection.RuntimeAvailability) (inspection.RunDetail, error) {
-	s.calls = append(s.calls, scheduledCall{systemKey: plan.SystemKey, planKey: plan.PlanKey, scheduledFor: scheduledFor, availability: availability})
+func (s *recordingService) CreateScheduledPlanRun(_ context.Context, plan inspection.ScheduledPlan, scheduledFor time.Time, availability inspection.RuntimeAvailability) (inspection.RunDetail, error) {
+	s.calls = append(s.calls, scheduledCall{planKey: plan.PlanKey, scheduledFor: scheduledFor, availability: availability})
 	return inspection.RunDetail{}, nil
 }
 
@@ -74,7 +74,7 @@ func (c *oneBoundaryClock) After(time.Duration) <-chan time.Time {
 
 func TestTickSchedulesCurrentBoundaryInPlanTimezone(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "morning", Cron: "30 8 * * *", Timezone: "Asia/Shanghai",
+		PlanKey: "morning", Cron: "30 8 * * *", Timezone: "Asia/Shanghai",
 	}}}
 	at := time.Date(2026, time.August, 28, 0, 30, 0, 0, time.UTC)
 	scheduler := newScheduler(service, fixedClock{now: at}, func(context.Context) inspection.RuntimeAvailability {
@@ -92,14 +92,14 @@ func TestTickSchedulesCurrentBoundaryInPlanTimezone(t *testing.T) {
 	if call.scheduledFor != want {
 		t.Fatalf("scheduled_for = %s, want canonical UTC boundary %s", call.scheduledFor, want)
 	}
-	if call.systemKey != "payments" || call.planKey != "morning" {
-		t.Fatalf("scheduled plan = %s/%s", call.systemKey, call.planKey)
+	if call.planKey != "morning" {
+		t.Fatalf("scheduled plan = %s", call.planKey)
 	}
 }
 
 func TestRunDoesNotBackfillStartupMinute(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "every-minute", Cron: "* * * * *", Timezone: "UTC",
+		PlanKey: "every-minute", Cron: "* * * * *", Timezone: "UTC",
 	}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,7 +123,7 @@ func TestRunDoesNotBackfillStartupMinute(t *testing.T) {
 
 func TestRunSkipsLateWakeupWithoutBackfill(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "every-minute", Cron: "* * * * *", Timezone: "UTC",
+		PlanKey: "every-minute", Cron: "* * * * *", Timezone: "UTC",
 	}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -149,7 +149,7 @@ func TestRunSkipsLateWakeupWithoutBackfill(t *testing.T) {
 
 func TestTickKeepsRepeatedDSTOccurrencesDistinctByUTC(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "fall-back", Cron: "30 1 * * *", Timezone: "America/New_York",
+		PlanKey: "fall-back", Cron: "30 1 * * *", Timezone: "America/New_York",
 	}}}
 	availability := func(context.Context) inspection.RuntimeAvailability { return inspection.RuntimeAvailability{} }
 
@@ -171,7 +171,7 @@ func TestTickKeepsRepeatedDSTOccurrencesDistinctByUTC(t *testing.T) {
 
 func TestTickSkipsSpringForwardNonexistentWallTime(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "spring-forward", Cron: "30 2 * * *", Timezone: "America/New_York",
+		PlanKey: "spring-forward", Cron: "30 2 * * *", Timezone: "America/New_York",
 	}}}
 	// 2026-03-08T07:30Z is 03:30 EDT: 02:30 never exists on this date.
 	at := time.Date(2026, time.March, 8, 7, 30, 0, 0, time.UTC)
@@ -186,7 +186,7 @@ func TestTickSkipsSpringForwardNonexistentWallTime(t *testing.T) {
 
 func TestRunDispatchesCommittedScheduledWorkAfterTick(t *testing.T) {
 	service := &recordingService{plans: []inspection.ScheduledPlan{{
-		SystemKey: "payments", PlanKey: "minute", Cron: "* * * * *", Timezone: "UTC",
+		PlanKey: "minute", Cron: "* * * * *", Timezone: "UTC",
 	}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

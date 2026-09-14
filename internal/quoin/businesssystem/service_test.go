@@ -1,12 +1,16 @@
 package businesssystem
 
-// SQLite harness tests over the frozen schema: the first-upload Disabled
-// creation, immutable version appends, the publish pointer transaction with
-// its projection sync and contract fence, and command replay semantics
+// SQLite harness tests over the frozen schema. The retired upload/publish
+// write commands are gone (ADR0004): tests build lawful historical state
+// through test-only SQL fixtures (mustUpload/publishFixture) that reuse the
+// production parser/compile seam and satisfy every frozen trigger. What
+// remains under test are the retained reads, deployment verification
+// acceptance, and the historical read/convergence surfaces
 // (DATA-CONFIG-001/003/004, HTTP-CONFIG-001/002).
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -168,235 +172,172 @@ func seedPlinthRuntime(t *testing.T, db *sql.DB, now string) {
 	}
 }
 
-func (h *harness) upload(t *testing.T, body string, arguments ...any) (ConfigVersionDetail, error) {
-	t.Helper()
-	// The final value is always the command ID. An obsolete positional version
-	// remains accepted for shared test migration but never affects the upload.
-	commandID, ok := arguments[len(arguments)-1].(string)
-	if !ok {
-		t.Fatalf("upload command ID must be a string: %#v", arguments)
-	}
-	return h.systems.Upload(context.Background(), h.principal, commandID, UploadInput{YAMLBody: []byte(body)}, config.Limits{})
-}
-
+// mustUpload recreates the retired upload's persisted historical state with
+// test-only SQL. It parses and compiles the declaration through the production
+// config seam, then writes exactly the immutable rows the retired producer
+// wrote (Disabled system, draft version, scopes, typed projections) so the
+// frozen triggers stay in force. Call sites keep their historical command IDs;
+// the fixture persists no command ledger row because retained reads never
+// consult one.
 func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) ConfigVersionDetail {
 	t.Helper()
-	// The final value is always the command ID. Accept the obsolete positional
-	// version only while shared tests are migrated; it is never persisted or
-	// used to synthesize a global Label Contract.
-	commandID, ok := arguments[len(arguments)-1].(string)
-	if !ok {
-		t.Fatalf("upload command ID must be a string: %#v", arguments)
+	declaration, fields := config.ParseBusinessSystem([]byte(body), config.Limits{})
+	if len(fields) != 0 {
+		t.Fatalf("historical fixture declaration must parse: %v", fields)
 	}
-	detail, err := h.upload(t, body, commandID)
+	document, err := config.CompileBusinessSystemDocument(declaration)
 	if err != nil {
-		t.Fatalf("upload: %v", err)
+		t.Fatalf("historical fixture declaration must compile: %v", err)
+	}
+	_, catalogVersion, catalogDigest, err := config.JourneyCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolve stable reference names into immutable locators, exactly as the
+	// retired upload did inside its serialized transaction.
+	if err := h.db.QueryRow(`SELECT id,type FROM connections WHERE name=?`, document.MetricsConnectionRef).Scan(&document.MetricsConnectionID, new(string)); err != nil {
+		t.Fatalf("fixture metrics connection %q: %v", document.MetricsConnectionRef, err)
+	}
+	for index, ref := range document.AlertSourceRefs {
+		var sourceID int64
+		if err := h.db.QueryRow(`SELECT id FROM alert_sources WHERE source_key=?`, ref).Scan(&sourceID); err != nil {
+			t.Fatalf("fixture alert source[%d] %q: %v", index, ref, err)
+		}
+		document.AlertSourceIDs = append(document.AlertSourceIDs, sourceID)
+	}
+	declarationJSON, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal resolved fixture declaration: %v", err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(declarationJSON))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var systemID int64
+	if err := h.db.QueryRow(`SELECT id FROM business_systems WHERE key=?`, document.SystemKey).Scan(&systemID); errors.Is(err, sql.ErrNoRows) {
+		result, insertErr := h.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`, document.SystemKey, document.DisplayName, now)
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		systemID, _ = result.LastInsertId()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	var versionSeq int64
+	if err := h.db.QueryRow(`SELECT COALESCE(MAX(version_seq),0)+1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
+		t.Fatal(err)
+	}
+	result, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		systemID, versionSeq, "draft", body, config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, catalogDigest, catalogVersion, digest, h.principal, now, document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedFixtureProjections(t, h.db, versionID, document); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := h.systems.GetVersion(context.Background(), document.SystemKey, versionID)
+	if err != nil {
+		t.Fatalf("read back historical fixture draft: %v", err)
 	}
 	return detail
 }
 
-func TestFirstUploadCreatesDisabledSystemWithDraft(t *testing.T) {
-	h := newHarness(t)
-	detail := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0001")
-	if detail.VersionSeq != 1 || detail.State != "draft" || detail.PublishedAt != nil {
-		t.Fatalf("first draft wrong: %#v", detail)
-	}
-	if detail.SystemKey != "payments" || detail.MetricsConnectionID != "1" || detail.LabelContractVersionID != "" {
-		t.Fatalf("declaration root projection wrong: %#v", detail)
-	}
-	var declaration struct {
-		Description string `json:"description"`
-		Resources   []struct {
-			Name string `json:"name"`
-		} `json:"resources"`
-	}
-	var declarationJSON string
-	if err := h.db.QueryRow(`SELECT declaration_json FROM business_system_config_versions WHERE id=?`, detail.ID).Scan(&declarationJSON); err != nil || json.Unmarshal([]byte(declarationJSON), &declaration) != nil || declaration.Description != "支付业务" || len(declaration.Resources) != 1 {
-		t.Fatalf("compiled declaration missing: err=%v json=%s value=%#v", err, declarationJSON, declaration)
-	}
-	var scopes int
-	if err := h.db.QueryRow(`SELECT COUNT(*) FROM config_resource_scopes WHERE config_version_id=?`, detail.ID).Scan(&scopes); err != nil || scopes != 1 {
-		t.Fatalf("resource scopes missing: count=%d err=%v", scopes, err)
-	}
-	var enabled int
-	var timezone sql.NullString
-	var current sql.NullInt64
-	if err := h.db.QueryRow(`SELECT enabled,timezone,current_config_version_id FROM business_systems WHERE key='payments'`).Scan(&enabled, &timezone, &current); err != nil {
-		t.Fatal(err)
-	}
-	if enabled != 0 || timezone.Valid || current.Valid {
-		t.Fatalf("new system must be Disabled and unconfigured: enabled=%d tz=%v current=%v", enabled, timezone, current)
-	}
-	// The stored YAML is byte-exact and the projection rows persist.
-	var yamlBody string
-	if err := h.db.QueryRow(`SELECT yaml_body FROM business_system_config_versions WHERE id=?`, detail.ID).Scan(&yamlBody); err != nil || yamlBody != validSystemYAML {
-		t.Fatalf("yaml body must be verbatim: %v", err)
-	}
-	var allowedMetrics string
-	if err := h.db.QueryRow(`SELECT allowed_metrics_json FROM config_resource_scopes WHERE config_version_id=? AND resource_key='web-pods'`, detail.ID).Scan(&allowedMetrics); err != nil || allowedMetrics != `["up","http_requests_total"]` {
-		t.Fatalf("compiled scope whitelist wrong: value=%s err=%v", allowedMetrics, err)
-	}
-}
-
-func TestSecondUploadAppendsDraft(t *testing.T) {
-	h := newHarness(t)
-	h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0002")
-	modified := strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 支付平台", 1)
-	detail := h.mustUpload(t, modified, 0, "cmd-upload-0003")
-	if detail.VersionSeq != 2 || detail.DisplayName != "支付平台" {
-		t.Fatalf("second draft wrong: %#v", detail)
-	}
-	var systems int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM business_systems`).Scan(&systems)
-	if systems != 1 {
-		t.Fatalf("same system_key must not create a second system: %d", systems)
-	}
-}
-
-func TestUploadValidatesDeclarationScopeAndCatalog(t *testing.T) {
-	h := newHarness(t)
-	// Scope validation is declaration-local; it must not query a Label Contract.
-	badMetric := strings.Replace(validSystemYAML, `expression: up`, `expression: forbidden_metric`, 1)
-	_, err := h.upload(t, badMetric, 0, "cmd-upload-x1")
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "expression") {
-		t.Fatalf("scope violation must be a field error, got %v", err)
-	}
-	_, err = h.systems.Upload(context.Background(), 1, "cmd-upload-x3", UploadInput{YAMLBody: []byte(validSystemYAML), JourneyCatalogDigest: strings.Repeat("0", 64)}, config.Limits{})
-	if !errors.As(err, &validation) || !strings.Contains(validation.Errors[0].Path, "journeyCatalogDigest") {
-		t.Fatalf("wrong catalog digest must be a field error: %v", err)
-	}
-	var versions int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM business_system_config_versions`).Scan(&versions)
-	if versions != 0 {
-		t.Fatalf("rejected uploads must not persist: %d", versions)
-	}
-}
-
-func TestPublishSwitchesPointerAndProjection(t *testing.T) {
-	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0010")
-	detail, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0010", "payments", mustID(t, draft.ID), nil)
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	if detail.CurrentConfigVersionID == nil || *detail.CurrentConfigVersionID != draft.ID {
-		t.Fatalf("current pointer wrong: %#v", detail)
-	}
-	if detail.RowVersion != 2 || !detail.Enabled || detail.Timezone == nil || *detail.Timezone != "UTC" {
-		t.Fatalf("root projection must sync from the published version: %#v", detail)
-	}
-	// The version derives published with a one-time published_at; the
-	// projection rows are readable through the current pointer.
-	published, err := h.systems.GetVersion(context.Background(), "payments", mustID(t, draft.ID))
-	if err != nil || published.State != "published" || published.PublishedAt == nil {
-		t.Fatalf("published derivation wrong: %v %#v", err, published)
-	}
-	if len(published.Discoveries) != 1 || len(published.Plans[0].Checks) != 2 {
-		t.Fatalf("current projections missing: %#v", published)
-	}
-	var publishedCount int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM business_system_config_versions WHERE state='published' AND published_at IS NOT NULL`).Scan(&publishedCount)
-	if publishedCount != 1 {
-		t.Fatalf("exactly one published version: %d", publishedCount)
-	}
-	var auditCount int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='business_system.config.publish' AND outcome='success'`).Scan(&auditCount)
-	if auditCount != 1 {
-		t.Fatalf("publish audit missing: %d", auditCount)
-	}
-}
-
-func TestPublishEnablesSystemThroughProjection(t *testing.T) {
-	h := newHarness(t)
-	enabled := validSystemYAML
-	draft := h.mustUpload(t, enabled, 0, "cmd-upload-0011")
-	detail, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0011", "payments", mustID(t, draft.ID), nil)
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	if !detail.Enabled {
-		t.Fatal("publishing an enabled=true version must enable the system")
-	}
-}
-
-func TestPublishConflictFences(t *testing.T) {
-	h := newHarness(t)
-	first := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0020")
-	second := h.mustUpload(t, strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 支付系统 v2", 1), 0, "cmd-upload-0021")
-	// Stale expected (null) after the first publish commits.
-	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0020", "payments", mustID(t, first.ID), nil); err != nil {
-		t.Fatalf("first publish: %v", err)
-	}
-	_, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0022", "payments", mustID(t, second.ID), nil)
-	var conflict *ConflictError
-	if !errors.As(err, &conflict) || conflict.Code != "current_pointer_conflict" || conflict.CurrentVersion == nil || *conflict.CurrentVersion != mustID(t, first.ID) {
-		t.Fatalf("stale fence must conflict with the actual current: %v", err)
-	}
-	// Publishing an already-published version is a pointer conflict.
-	_, err = h.systems.Publish(context.Background(), 1, "cmd-publish-0023", "payments", mustID(t, first.ID), ptrInt64(mustID(t, first.ID)))
-	if !errors.As(err, &conflict) {
-		t.Fatalf("re-publish must conflict: %v", err)
-	}
-	// Correct fence advances and supersedes the old version.
-	detail, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0024", "payments", mustID(t, second.ID), ptrInt64(mustID(t, first.ID)))
-	if err != nil {
-		t.Fatalf("second publish: %v", err)
-	}
-	if detail.RowVersion != 3 || *detail.CurrentConfigVersionID != second.ID {
-		t.Fatalf("second publish wrong: %#v", detail)
-	}
-	states := map[string]string{}
-	rows, err := h.db.Query(`SELECT id,state FROM business_system_config_versions`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var id, state string
-		if err := rows.Scan(&id, &state); err != nil {
-			rows.Close()
-			t.Fatal(err)
+// seedFixtureProjections writes the same typed projection rows the retired
+// upload persisted (DATA-CONFIG-003): scopes, alert attribution, discoveries
+// and plan/check columns.
+func seedFixtureProjections(t *testing.T, db *sql.DB, versionID int64, document config.BusinessSystemDocument) error {
+	t.Helper()
+	for _, resource := range document.Resources {
+		selectors, err := json.Marshal(resource.MatchLabels)
+		if err != nil {
+			return err
 		}
-		states[id] = state
+		identity, err := json.Marshal(resource.IdentityLabels)
+		if err != nil {
+			return err
+		}
+		allowed, err := json.Marshal(resource.AllowedMetrics)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(`INSERT INTO config_resource_scopes(config_version_id,resource_key,display_name,discovery_metric,selectors_json,identity_labels_json,allowed_metrics_json) VALUES(?,?,?,?,?,?,?)`, versionID, resource.Name, resource.DisplayName, resource.DiscoveryMetric, string(selectors), string(identity), string(allowed)); err != nil {
+			return err
+		}
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		t.Fatal(err)
+	for _, sourceID := range document.AlertSourceIDs {
+		if _, err := db.Exec(`INSERT INTO config_alert_source_refs(config_version_id,alert_source_id) VALUES(?,?)`, versionID, sourceID); err != nil {
+			return err
+		}
 	}
-	rows.Close()
-	if states[first.ID] != "superseded" || states[second.ID] != "published" {
-		t.Fatalf("state derivation wrong: %v", states)
+	for labelName, labelValue := range document.AlertSourceLabels {
+		if _, err := db.Exec(`INSERT INTO config_alert_label_conditions(config_version_id,label_name,label_value) VALUES(?,?,?)`, versionID, labelName, labelValue); err != nil {
+			return err
+		}
 	}
-	// Missing system or version is NotFound.
-	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0025", "nope", 1, nil); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unknown system must be NotFound: %v", err)
+	for _, discovery := range document.Discoveries {
+		labels, err := json.Marshal(discovery.IdentityLabels)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(`INSERT INTO config_discoveries(config_version_id,discovery_key,display_name,selector,identity_labels_json) VALUES(?,?,?,?,?)`, versionID, discovery.Key, discovery.DisplayName, discovery.Selector, string(labels)); err != nil {
+			return err
+		}
 	}
+	for _, plan := range document.Plans {
+		planInsert, err := db.Exec(`INSERT INTO config_plans(config_version_id,plan_key,display_name,timezone,cron) VALUES(?,?,?,?,?)`, versionID, plan.Key, plan.DisplayName, plan.Timezone, nullableString(plan.Cron))
+		if err != nil {
+			return err
+		}
+		planID, err := planInsert.LastInsertId()
+		if err != nil {
+			return err
+		}
+		for _, check := range plan.Checks {
+			var queryMode, expression, journeyID, journeyParams any
+			var rangeSeconds, stepSeconds any
+			if check.Kind == "promql" {
+				queryMode, expression = check.QueryMode, check.Expression
+				if check.QueryMode == "range" {
+					rangeSeconds, stepSeconds = check.RangeSeconds, check.StepSeconds
+				}
+			} else {
+				journeyID = check.JourneyID
+				params, err := json.Marshal(check.JourneyParams)
+				if err != nil {
+					return err
+				}
+				journeyParams = string(params)
+			}
+			if _, err := db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds,journey_id,journey_params_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, planID, check.Key, check.DisplayName, check.AnalysisQuestion, check.Kind, queryMode, expression, rangeSeconds, stepSeconds, journeyID, journeyParams); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func TestPublishDoesNotRequireContract(t *testing.T) {
-	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0030")
-	if _, err := h.systems.Publish(context.Background(), 1, "cmd-publish-0030", "payments", mustID(t, draft.ID), nil); err != nil {
-		t.Fatalf("publish must not depend on a contract: %v", err)
+// publishFixture derives a historical published pointer through the same
+// lawful single UPDATE the retired publish command ran: the target version's
+// root projection travels in the same UPDATE, so the frozen pointer,
+// projection, and derived-state triggers validate the mutation and write the
+// published/superseded history. No trigger or constraint is disabled.
+func (h *harness) publishFixture(t *testing.T, systemKey string, versionID int64) BusinessSystemDetail {
+	t.Helper()
+	var displayName, timezone string
+	var enabled int64
+	if err := h.db.QueryRow(`SELECT display_name,enabled,timezone FROM business_system_config_versions WHERE id=? AND business_system_id=(SELECT id FROM business_systems WHERE key=?)`, versionID, systemKey).Scan(&displayName, &enabled, &timezone); err != nil {
+		t.Fatalf("publish fixture target version: %v", err)
 	}
-}
-
-func TestUploadCommandReplay(t *testing.T) {
-	h := newHarness(t)
-	first := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0040")
-	replayed, err := h.upload(t, validSystemYAML, 0, "cmd-upload-0040")
-	if err != nil || replayed.ID != first.ID {
-		t.Fatalf("replay must return the original draft: %v %#v", err, replayed)
+	if _, err := h.db.Exec(`UPDATE business_systems SET current_config_version_id=?, display_name=?, enabled=?, timezone=?, row_version=row_version+1 WHERE key=? AND current_config_version_id IS NULL`, versionID, displayName, enabled, timezone, systemKey); err != nil {
+		t.Fatalf("publish fixture pointer move: %v", err)
 	}
-	var versions int
-	_ = h.db.QueryRow(`SELECT COUNT(*) FROM business_system_config_versions`).Scan(&versions)
-	if versions != 1 {
-		t.Fatalf("replay must not append a version: %d", versions)
+	detail, err := h.systems.GetSystem(context.Background(), systemKey)
+	if err != nil {
+		t.Fatalf("publish fixture readback: %v", err)
 	}
-	_, err = h.upload(t, strings.Replace(validSystemYAML, "displayName: 支付系统", "displayName: 重放冲突", 1), 0, "cmd-upload-0040")
-	if !errors.Is(err, ErrCommandReused) {
-		t.Fatalf("same id with different content must conflict: %v", err)
-	}
+	return detail
 }
 
 func TestListAndGetProjections(t *testing.T) {
@@ -499,5 +440,3 @@ func mustID(t *testing.T, locator string) int64 {
 	}
 	return parsed
 }
-
-func ptrInt64(value int64) *int64 { return &value }

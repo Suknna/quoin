@@ -87,12 +87,19 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 	if begin.ContextBudget != contextBudget || begin.MaxOutput != maxOutput {
 		return 0, fmt.Errorf("%w: budget override refused (contract %d/%d, request %d/%d)", ErrLedgerDenied, contextBudget, maxOutput, begin.ContextBudget, begin.MaxOutput)
 	}
-	wantToolDigest, err := CanonicalToolsDigest(agentVersion)
+	// The offered catalog is THIS attempt's frozen document (ADR-0004):
+	// recovery re-renders the original bytes, so enablement changes never
+	// drift a historical active attempt's digest.
+	catalog, err := frozenToolCatalogOn(ctx, conn, begin.AttemptID)
+	if err != nil {
+		return 0, fmt.Errorf("%w: frozen tool catalog: %v", ErrLedgerDenied, err)
+	}
+	wantToolDigest, err := catalog.Digest()
 	if err != nil {
 		return 0, err
 	}
 	if begin.ToolSchemaDigest != wantToolDigest {
-		return 0, fmt.Errorf("%w: tool schema digest mismatch (worker renders %s, catalog %s)", ErrLedgerDenied, begin.ToolSchemaDigest, wantToolDigest)
+		return 0, fmt.Errorf("%w: tool schema digest mismatch (worker renders %s, frozen catalog %s)", ErrLedgerDenied, begin.ToolSchemaDigest, wantToolDigest)
 	}
 	var grantID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose='chat_model' ORDER BY id LIMIT 1`, begin.AttemptID).Scan(&grantID); err != nil {
@@ -159,7 +166,7 @@ func (service *Service) BeginModelCall(ctx context.Context, begin BeginCall) (in
 			estimated_input_tokens,evicted_turn_count,status,started_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'running', ?)`,
 		begin.AttemptID, begin.CallSeq, begin.RetrySeq, "chat", begin.ModelID, grantID,
-		promptRendererVersionFor(agentVersion), agentVersion, begin.PromptDigest, toolSchemaVersionFor(agentVersion), begin.ToolSchemaDigest,
+		promptRendererVersionFor(agentVersion), agentVersion, begin.PromptDigest, catalog.SchemaVersion, begin.ToolSchemaDigest,
 		begin.InputDigest, begin.RenderedDigest, begin.ContextBudget, begin.MaxOutput,
 		begin.EstimatedInput, begin.EvictedTurns, now)
 	if err != nil {
@@ -394,10 +401,20 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 			definition ToolDef
 		}
 		validated := make([]validatedTool, 0, len(completion.ProposedTools))
+		catalog, err := frozenToolCatalogOn(ctx, conn, completion.AttemptID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: frozen tool catalog: %v", ErrLedgerDenied, err)
+		}
 		for _, tool := range completion.ProposedTools {
-			def, known := LookupToolForAgentVersion(agentVersion, tool.ToolName)
+			frozen, known := catalog.Lookup(tool.ToolName)
 			if !known {
-				return nil, fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, tool.ToolName)
+				return nil, fmt.Errorf("%w: tool %q is not in the attempt's frozen catalog", ErrLedgerDenied, tool.ToolName)
+			}
+			// Compatibility verification against the installed executor; the
+			// frozen bytes stay the Model Call provenance (ADR-0004).
+			def, err := frozen.InstalledDefinition()
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrLedgerDenied, err)
 			}
 			if err := ValidateToolArguments(def, tool.ArgumentsJSON); err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrLedgerDenied, err)
@@ -476,7 +493,12 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 				authorization.Grants = resolution.Grants
 				authorization.PreflightCode = resolution.PreflightCode
 				authorization.PreflightDetail = resolution.PreflightDetail
-				if item.definition.Name == "thanos_query" {
+				// A recoverable preflight (e.g. ambiguous source) carries NO
+				// normalized execution inputs by design: reading them here
+				// would fail the whole response instead of returning the
+				// preflight question to the model. Only a real grant
+				// resolution freezes execution arguments.
+				if item.definition.Name == "thanos_query" && authorization.PreflightCode == "" {
 					var executionJSON, executionDigest string
 					if err := conn.QueryRowContext(ctx, `SELECT arguments_json,arguments_digest FROM tool_call_execution_inputs WHERE tool_call_id=?`, toolCallID).Scan(&executionJSON, &executionDigest); err != nil {
 						return nil, fmt.Errorf("%w: normalized execution arguments missing: %v", ErrLedgerDenied, err)
@@ -562,9 +584,17 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 	if status != "pending" {
 		return fmt.Errorf("%w: tool call %d is %s", ErrLedgerDenied, toolCallID, status)
 	}
-	definition, known := LookupToolForAgentVersion(agentVersion, toolName)
+	catalog, err := frozenToolCatalogOn(ctx, conn, attemptID)
+	if err != nil {
+		return fmt.Errorf("%w: frozen tool catalog: %v", ErrLedgerDenied, err)
+	}
+	frozen, known := catalog.Lookup(toolName)
 	if !known {
-		return fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
+		return fmt.Errorf("%w: tool %q is not in the attempt's frozen catalog", ErrLedgerDenied, toolName)
+	}
+	definition, err := frozen.InstalledDefinition()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrLedgerDenied, err)
 	}
 	if needsConnectionGrant(definition) {
 		var grantCount int
@@ -604,17 +634,22 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 // another contract.
 func (service *Service) ExpectedToolResultSchema(ctx context.Context, toolCallID int64) (string, error) {
 	var toolName, agentVersion string
+	var attemptID int64
 	if err := service.db.QueryRowContext(ctx, `
-		SELECT t.tool_name,a.agent_version
+		SELECT t.tool_name,t.attempt_id,a.agent_version
 		FROM tool_calls t JOIN execution_attempts a ON a.id=t.attempt_id
-		WHERE t.id=?`, toolCallID).Scan(&toolName, &agentVersion); err != nil {
+		WHERE t.id=?`, toolCallID).Scan(&toolName, &attemptID, &agentVersion); err != nil {
 		return "", err
 	}
-	definition, known := LookupToolForAgentVersion(agentVersion, toolName)
-	if !known || definition.ResultSchemaKind == "" {
+	catalog, err := service.FrozenToolCatalog(ctx, attemptID)
+	if err != nil {
+		return "", err
+	}
+	frozen, known := catalog.Lookup(toolName)
+	if !known || frozen.ResultSchemaKind == "" {
 		return "", fmt.Errorf("%w: tool %q has no fixed result schema", ErrLedgerDenied, toolName)
 	}
-	return definition.ResultSchemaKind, nil
+	return frozen.ResultSchemaKind, nil
 }
 
 // ToolResult is the sealed outcome of one tool execution.
@@ -749,7 +784,11 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 // deployment connection per tool call; the model never selects it.
 func needsConnectionGrant(definition ToolDef) bool {
 	// Artifact tools are supervisor typed but do not carry external secrets.
-	return definition.Name == "thanos_query"
+	switch definition.Name {
+	case "thanos_query", "kubernetes_read":
+		return true
+	}
+	return false
 }
 
 // ToolCallView is the read projection of one tool call (used by the tool
@@ -805,9 +844,14 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 
 // promptRendererVersionFor records the immutable input renderer independently
 // from the executor generation carried by the attempt.
+// promptRendererVersionFor records the immutable input renderer
+// independently from the executor generation carried by the attempt. The
+// literals MUST match the snapshot renderer_version constants the owning
+// scope writes (analysis.RendererVersion / investigation.RendererVersion):
+// b58's source-integration input shape is renderer v4 / investigation v2.
 func promptRendererVersionFor(agentVersion string) string {
 	if agentVersion == "investigation-v1" {
-		return "investigation-renderer-v1"
+		return "investigation-renderer-v2"
 	}
-	return "initial-analysis-renderer-v2"
+	return "initial-analysis-renderer-v4"
 }

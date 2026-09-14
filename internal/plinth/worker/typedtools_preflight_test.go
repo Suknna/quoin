@@ -86,25 +86,49 @@ users:
 	}, nil
 }
 
-// TestKubernetesReadPreflightIsModelVisibleAndCannotReachCredentialsOrAPI
-// drives Runner.executeTool rather than a helper branch. It deliberately
-// supplies a frozen grant and a reachable Kubernetes-looking HTTP endpoint:
-// any regression past the preflight return is observable as a fetch or HTTP
-// request, not inferred from implementation structure.
-// Kubernetes dispatch is deliberately absent from the worker while the
-// capability is gated. Unknown typed tools fail before any credential fetch.
-func TestUnavailableKubernetesToolCannotFetchCredentials(t *testing.T) {
-	control := &fakeToolCallChannel{}
-	client := &fetchCountingRuntimeClient{}
-	meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", grants: []*runtimev1.ConnectionGrant{{GrantId: 71}}}
-	runner := &Runner{Client: client, toolCalls: control, tools: map[int64]toolMeta{73: meta}}
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 73, meta); err != nil {
-		t.Fatal(err)
+// TestKubernetesReadInvalidOrUngrantableCannotFetchCredentials drives
+// Runner.executeTool rather than a helper branch. The capability shipped its
+// real executor, so the security boundary moved from "tool unknown" to the
+// executor's own preflight ordering: an INVALID request and an UNGRANTED
+// call must both seal their model-visible failure BEFORE any credential
+// fetch. The client would happily answer with a reachable Kubernetes-looking
+// endpoint, so any regression past the preflight return is observable as a
+// fetch, not inferred from implementation structure.
+func TestKubernetesReadInvalidOrUngrantableCannotFetchCredentials(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          map[string]any
+		grants        []*runtimev1.ConnectionGrant
+		wantErrorCode string
+	}{
+		{
+			name:          "invalid request without operation",
+			args:          map[string]any{},
+			grants:        []*runtimev1.ConnectionGrant{{GrantId: 71}},
+			wantErrorCode: "invalid_arguments",
+		},
+		{
+			name:          "valid request without frozen grant",
+			args:          map[string]any{"operation": "get", "namespace": "default", "name": "api"},
+			grants:        nil,
+			wantErrorCode: "grant_missing",
+		},
 	}
-	if client.fetches.Load() != 0 {
-		t.Fatalf("FetchCredentialGrant calls=%d, want 0", client.fetches.Load())
-	}
-	if len(control.completes) != 1 || control.completes[0].GetErrorCode() != "unknown_tool" {
-		t.Fatalf("completions=%+v, want one unknown-tool result", control.completes)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			control := &fakeToolCallChannel{}
+			client := &fetchCountingRuntimeClient{}
+			meta := toolMeta{name: "kubernetes_read", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED", arguments: testCase.args, grants: testCase.grants}
+			runner := &Runner{Client: client, toolCalls: control, tools: map[int64]toolMeta{73: meta}}
+			if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 73, meta); err != nil {
+				t.Fatal(err)
+			}
+			if client.fetches.Load() != 0 {
+				t.Fatalf("FetchCredentialGrant calls=%d, want 0", client.fetches.Load())
+			}
+			if len(control.completes) != 1 || control.completes[0].GetErrorCode() != testCase.wantErrorCode {
+				t.Fatalf("completions=%+v, want one %s result", control.completes, testCase.wantErrorCode)
+			}
+		})
 	}
 }

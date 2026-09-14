@@ -94,7 +94,8 @@ func actionFields(name string) (map[string]bool, []string) {
 	session := []string{"action", "sessionId"}
 	switch name {
 	case "open":
-		return with("businessSystemKey"), []string{"action", "businessSystemKey"}
+		// ADR-0004: the identity locator is the standalone identityKey.
+		return with("identityKey"), []string{"action", "identityKey"}
 	case "close_session", "back", "forward", "reload":
 		return with("sessionId"), session
 	case "read":
@@ -142,7 +143,7 @@ func validateFields(name string, fields map[string]json.RawMessage) error {
 	}
 	switch name {
 	case "open":
-		_, err := stringField("businessSystemKey", 200, true)
+		_, err := stringField("identityKey", 64, true)
 		return err
 	case "switch_page", "close_page":
 		_, err := stringField("pageId", 100, true)

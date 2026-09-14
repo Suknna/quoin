@@ -120,6 +120,10 @@ var investigationMode = attemptMode{
 func Run(ctx context.Context, config Config) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// Boot-fences the typed executor registry (ADR-0004): after this point a
+	// plugin executor registration is a wiring failure, and unknown tools
+	// fail their tool call explicitly.
+	freezeTypedExecutors()
 	if err := os.MkdirAll(config.WorkspaceDir, 0o700); err != nil {
 		return fmt.Errorf("workspace: %w", err)
 	}
@@ -205,7 +209,7 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 		fmt.Fprintf(config.Stderr, "input_rejected: %v\n", err)
 		return err
 	}
-	toolsJSON, err := ProviderToolsJSON(start.GetAgentVersion())
+	toolsJSON, err := ProviderToolsJSONForInput(start.GetCanonicalJson(), start.GetAgentVersion())
 	if err != nil {
 		return err
 	}

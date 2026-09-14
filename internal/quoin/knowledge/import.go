@@ -87,6 +87,9 @@ type importInput struct {
 		ContextBudgetTokens int64  `json:"contextBudgetTokens"`
 		MaxOutputTokens     int64  `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
+	// the snapshot digest covers it via this embedding.
+	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
 }
 
 // extractionProposal is intentionally closed: the worker returns only the
@@ -243,13 +246,19 @@ func (service *Service) insertImportAttempt(ctx context.Context, conn *sql.Conn,
 	}
 	input := importInput{SchemaKind: importInputKind, AttemptID: attemptID, BatchID: batchID, Generation: 1, SourceMaterialID: materialID, Text: text}
 	input.ModelContract.ModelID, input.ModelContract.ContextBudgetTokens, input.ModelContract.MaxOutputTokens = provider.ChatModelID, provider.ContextBudget, provider.MaxOutput
+	// Freeze THIS attempt's tool catalog at creation (ADR-0004).
+	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(service.attempts.Catalogs, attempt.AgentVersion)
+	if err != nil {
+		return 0, err
+	}
+	input.ToolCatalog = catalog
 	canonical, err := json.Marshal(input)
 	if err != nil {
 		return 0, err
 	}
 	sum := sha256.Sum256(canonical)
-	snapshot, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
-		VALUES(?,?,?,?,?)`, attemptID, importInputKind, importRendererVersion, hex.EncodeToString(sum[:]), now)
+	snapshot, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
+		VALUES(?,?,?,?,?,?)`, attemptID, importInputKind, importRendererVersion, hex.EncodeToString(sum[:]), string(catalogDocument), now)
 	if err != nil {
 		return 0, err
 	}
@@ -289,6 +298,13 @@ func (service *Service) RebuildImportInput(ctx context.Context, attemptID int64)
 	}
 	input.SchemaKind = importInputKind
 	input.ModelContract.ModelID, input.ModelContract.ContextBudgetTokens, input.ModelContract.MaxOutputTokens = modelID, budget, maximum
+	// The frozen catalog travels with the attempt: stored document only,
+	// never re-derived from current enablement.
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.db, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	input.ToolCatalog = toolCatalog
 	return json.Marshal(input)
 }
 

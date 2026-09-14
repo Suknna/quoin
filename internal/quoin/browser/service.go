@@ -117,7 +117,12 @@ type Operation struct {
 }
 
 type Identity struct {
-	ID               int64        `json:"id,string"`
+	ID int64 `json:"id,string"`
+	// IdentityKey is the stable user-facing key of a standalone (plugin)
+	// identity; business-bound historical identities leave it empty. The
+	// numeric ID remains the durable row identity — the two are never
+	// conflated.
+	IdentityKey      string       `json:"identityKey,omitempty"`
 	RowVersion       int64        `json:"rowVersion"`
 	State            string       `json:"state"`
 	Revision         Revision     `json:"currentRevision"`
@@ -289,6 +294,17 @@ func (service *Service) Configure(ctx context.Context, actorID int64, input Conf
 // StartManualLogin reserves the identity before asking Lintel to create a
 // headed browser. This makes duplicate login starts structurally impossible.
 func (service *Service) StartManualLogin(ctx context.Context, systemKey string, actorUserID, actorSessionID, expectedRowVersion int64, clientCommandID string) (Operation, error) {
+	return service.startManualLogin(ctx, businessIdentityScope(systemKey), actorUserID, actorSessionID, expectedRowVersion, clientCommandID)
+}
+
+// StartStandaloneManualLogin is the identity_key-located StartManualLogin for
+// plugin-owned identities (ADR-0004): the identical durable fences, session
+// recheck and global FIFO entry, scoped without any business-system join.
+func (service *Service) StartStandaloneManualLogin(ctx context.Context, identityKey string, actorUserID, actorSessionID, expectedRowVersion int64, clientCommandID string) (Operation, error) {
+	return service.startManualLogin(ctx, standaloneIdentityScope(identityKey), actorUserID, actorSessionID, expectedRowVersion, clientCommandID)
+}
+
+func (service *Service) startManualLogin(ctx context.Context, scope identityScope, actorUserID, actorSessionID, expectedRowVersion int64, clientCommandID string) (Operation, error) {
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
 		return Operation{}, err
@@ -317,19 +333,15 @@ func (service *Service) StartManualLogin(ctx context.Context, systemKey string, 
 	if sessionUserID != actorUserID || revoked.Valid || enabled != 1 || issuedRevision != currentRevision {
 		return Operation{}, ErrSessionRevoked
 	}
-	replayed, resultID, err := replayCommand(ctx, conn, actorUserID, clientCommandID, "start_browser_manual_login", commandDigest(systemKey, expectedRowVersion))
+	digestOfCommand := commandDigest(scope.digestSeed, expectedRowVersion)
+	replayed, resultID, err := replayCommand(ctx, conn, actorUserID, clientCommandID, "start_browser_manual_login", digestOfCommand)
 	if err != nil {
 		return Operation{}, err
 	}
 	if replayed {
 		return service.operationOn(ctx, conn, resultID)
 	}
-	var identityID, revisionID, rowVersion int64
-	var digest, version string
-	err = conn.QueryRowContext(ctx, `SELECT i.id,i.current_revision_id,i.row_version,r.journey_catalog_digest,r.journey_catalog_version FROM browser_identities i JOIN business_systems s ON s.id=i.business_system_id JOIN browser_identity_revisions r ON r.id=i.current_revision_id WHERE s.key=?`, systemKey).Scan(&identityID, &revisionID, &rowVersion, &digest, &version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Operation{}, ErrNotFound
-	}
+	identityID, revisionID, rowVersion, digest, version, err := resolveIdentityOn(ctx, conn, scope)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -348,7 +360,7 @@ func (service *Service) StartManualLogin(ctx context.Context, systemKey string, 
 		return Operation{}, err
 	}
 	id, _ := result.LastInsertId()
-	if err = recordCommand(ctx, conn, actorUserID, clientCommandID, "start_browser_manual_login", commandDigest(systemKey, expectedRowVersion), "browser_operation", id, now); err != nil {
+	if err = recordCommand(ctx, conn, actorUserID, clientCommandID, "start_browser_manual_login", digestOfCommand, "browser_operation", id, now); err != nil {
 		return Operation{}, err
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
@@ -405,26 +417,103 @@ func (service *Service) ExpectedInventory(ctx context.Context) ([]InventoryItem,
 	return items, rows.Err()
 }
 
+// identityScope locates the one durable browser identity row a command
+// addresses. The historical business-bound scope joins business_systems by
+// its key; the standalone scope (ADR-0004) selects the unique identity_key
+// with no business join. Every lifecycle state machine below is
+// scope-agnostic — only this lookup and the command digest seed differ.
+type identityScope struct {
+	// lookupSQL resolves (id, current_revision_id, row_version, catalog
+	// digest, catalog version) of the scoped identity.
+	lookupSQL string
+	args      []any
+	// digestSeed is the stable locator value folded into client command
+	// digests, so a replayed command is bound to the locator it used.
+	digestSeed any
+}
+
+func businessIdentityScope(systemKey string) identityScope {
+	return identityScope{
+		lookupSQL:  `SELECT i.id,i.current_revision_id,i.row_version,r.journey_catalog_digest,r.journey_catalog_version FROM browser_identities i JOIN business_systems s ON s.id=i.business_system_id JOIN browser_identity_revisions r ON r.id=i.current_revision_id WHERE s.key=?`,
+		args:       []any{systemKey},
+		digestSeed: systemKey,
+	}
+}
+
+func standaloneIdentityScope(identityKey string) identityScope {
+	return identityScope{
+		lookupSQL:  `SELECT i.id,i.current_revision_id,i.row_version,r.journey_catalog_digest,r.journey_catalog_version FROM browser_identities i JOIN browser_identity_revisions r ON r.id=i.current_revision_id WHERE i.identity_key=?`,
+		args:       []any{identityKey},
+		digestSeed: identityKey,
+	}
+}
+
+// resolveIdentityOn runs the scoped lookup inside the caller's transaction
+// (or the read pool); ErrNotFound when the locator matches no identity.
+func resolveIdentityOn(ctx context.Context, db sqlQueryer, scope identityScope) (identityID, revisionID, rowVersion int64, digest, version string, err error) {
+	err = db.QueryRowContext(ctx, scope.lookupSQL, scope.args...).Scan(&identityID, &revisionID, &rowVersion, &digest, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, 0, "", "", ErrNotFound
+	}
+	if err != nil {
+		return 0, 0, 0, "", "", err
+	}
+	return identityID, revisionID, rowVersion, digest, version, nil
+}
+
+// operationOwnedOn reports whether the operation row belongs to the already
+// resolved scoped identity.
+func operationOwnedOn(ctx context.Context, db sqlQueryer, identityID, operationID int64) (bool, error) {
+	var matches int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE identity_id=? AND id=?`, identityID, operationID).Scan(&matches); err != nil {
+		return false, err
+	}
+	return matches == 1, nil
+}
+
 func (service *Service) GetIdentity(ctx context.Context, systemKey string) (Identity, error) {
 	return service.identityOn(ctx, service.db, systemKey)
 }
 func (service *Service) GetOperation(ctx context.Context, systemKey string, id int64) (Operation, error) {
-	var matched int
-	err := service.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id JOIN business_systems s ON s.id=i.business_system_id WHERE s.key=? AND o.id=?`, systemKey, id).Scan(&matched)
+	return service.getOperation(ctx, businessIdentityScope(systemKey), id)
+}
+
+// GetStandaloneOperation is the identity_key-located GetOperation for
+// plugin-owned identities (ADR-0004).
+func (service *Service) GetStandaloneOperation(ctx context.Context, identityKey string, id int64) (Operation, error) {
+	return service.getOperation(ctx, standaloneIdentityScope(identityKey), id)
+}
+
+func (service *Service) getOperation(ctx context.Context, scope identityScope, id int64) (Operation, error) {
+	identityID, _, _, _, _, err := resolveIdentityOn(ctx, service.db, scope)
 	if err != nil {
 		return Operation{}, err
 	}
-	if matched != 1 {
+	owned, err := operationOwnedOn(ctx, service.db, identityID, id)
+	if err != nil {
+		return Operation{}, err
+	}
+	if !owned {
 		return Operation{}, ErrNotFound
 	}
 	return service.operationOn(ctx, service.db, id)
 }
 
 func (service *Service) Cancel(ctx context.Context, systemKey string, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
+	return service.cancel(ctx, businessIdentityScope(systemKey), operationID, actorID, expectedVersion, clientCommandID)
+}
+
+// CancelStandalone is the identity_key-located Cancel for plugin-owned
+// identities (ADR-0004); the terminal state machine is shared.
+func (service *Service) CancelStandalone(ctx context.Context, identityKey string, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
+	return service.cancel(ctx, standaloneIdentityScope(identityKey), operationID, actorID, expectedVersion, clientCommandID)
+}
+
+func (service *Service) cancel(ctx context.Context, scope identityScope, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
 	if clientCommandID == "" {
 		return Operation{}, ErrInvalid
 	}
-	digest := commandDigest(systemKey, operationID, expectedVersion)
+	digest := commandDigest(scope.digestSeed, operationID, expectedVersion)
 	conn, err := service.db.Conn(ctx)
 	if err != nil {
 		return Operation{}, err
@@ -446,11 +535,15 @@ func (service *Service) Cancel(ctx context.Context, systemKey string, operationI
 	if replayed {
 		return service.operationOn(ctx, conn, resultID)
 	}
-	var matches int
-	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id JOIN business_systems s ON s.id=i.business_system_id WHERE s.key=? AND o.id=?`, systemKey, operationID).Scan(&matches); err != nil {
+	identityID, _, _, _, _, err := resolveIdentityOn(ctx, conn, scope)
+	if err != nil {
 		return Operation{}, err
 	}
-	if matches != 1 {
+	owned, err := operationOwnedOn(ctx, conn, identityID, operationID)
+	if err != nil {
+		return Operation{}, err
+	}
+	if !owned {
 		return Operation{}, ErrNotFound
 	}
 	op, err := service.operationOn(ctx, conn, operationID)

@@ -18,10 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
-	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 )
 
@@ -45,100 +45,132 @@ var ErrThanosUnavailable = errors.New("no enabled thanos connection")
 // execution authorization re-check failed).
 var ErrGrantNotCurrent = errors.New("thanos grant is no longer current")
 
-// ResolveQueryGrant derives authority solely from the config-version input item
-// frozen for this attempt. New attempts never consult Label Contracts or resolve
-// names: declaration_json carries the reviewed connection locator and compiled
-// resource allowlist. The model must name one resource explicitly; Quoin scopes
-// the query AST before handing the canonical arguments to Plinth.
-func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolGrant, error) {
-	var (
-		businessSystemID, configVersionID, connectionID        int64
-		declarationJSON, resourceRef, query                    string
-		revisionID, generationID, bindingRevision, rootBinding int64
-	)
-	if err := conn.QueryRowContext(ctx, `
-		SELECT config.business_system_id, config_item.business_system_config_version_id,
-		       config.declaration_json, json_extract(tool.arguments_json, '$.resourceRef'),
-		       json_extract(tool.arguments_json, '$.query')
-		FROM tool_calls tool
-		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=tool.attempt_id
-		JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id
-			AND config_item.business_system_config_version_id IS NOT NULL
-		JOIN business_system_config_versions config ON config.id=config_item.business_system_config_version_id
-		WHERE tool.id=? AND tool.attempt_id=?
-		  AND config.published_at IS NOT NULL
-		  AND config.declaration_json IS NOT NULL`, toolCallID, attemptID,
-	).Scan(&businessSystemID, &configVersionID, &declarationJSON, &resourceRef, &query); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ToolGrant{}, fmt.Errorf("%w: attempt has no migrated published configuration declaration", ErrThanosUnavailable)
+// Recoverable preflight codes (the frozen tool_calls.preflight_error_code
+// vocabulary): routing misses return these as model-visible Tool Results
+// instead of failing the attempt, so the model can ask the user or retry
+// with an explicit sourceRef (ADR-0004: ambiguity is never resolved by
+// picking the first source or querying all of them).
+const (
+	PreflightTargetNotFound  = "target_not_found"
+	PreflightTargetAmbiguous = "target_ambiguous"
+	PreflightNoMapping       = "no_mapping"
+)
+
+// QueryToolPurpose is the grant purpose of per-tool-call thanos_query
+// authorizations.
+const QueryToolPurpose = "thanos_query"
+
+// frozenSource is one source binding frozen as an attempt input item when
+// the attempt was created: the exact connection revision that was current
+// and enabled at freeze time.
+type frozenSource struct {
+	ConnectionID int64
+	RevisionID   int64
+	Name         string
+}
+
+// frozenDeclarationSourceItems loads the attempt's frozen source items of
+// one role, joined to their stable connection names.
+func frozenDeclarationSourceItems(ctx context.Context, conn *sql.Conn, attemptID int64, itemRole string) ([]frozenSource, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT c.id, item.connection_revision_id, c.name
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.connection_revision_id IS NOT NULL
+		JOIN connection_revisions r ON r.id=item.connection_revision_id
+		JOIN connections c ON c.id=r.connection_id
+		WHERE snapshot.attempt_id=? AND item.item_role=?
+		ORDER BY c.name`, attemptID, itemRole)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sources []frozenSource
+	for rows.Next() {
+		var source frozenSource
+		if err := rows.Scan(&source.ConnectionID, &source.RevisionID, &source.Name); err != nil {
+			return nil, err
 		}
-		return attempt.ToolGrant{}, err
+		sources = append(sources, source)
 	}
-	var declaration config.BusinessSystemDocument
-	if err := json.Unmarshal([]byte(declarationJSON), &declaration); err != nil {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: frozen declaration is invalid: %v", ErrThanosUnavailable, err)
+	return sources, rows.Err()
+}
+
+// sourcePreflight renders a recoverable routing miss.
+func sourcePreflight(code string, detail string) attempt.ToolResolution {
+	return attempt.ToolResolution{PreflightCode: code, PreflightDetail: detail}
+}
+
+// namesOf renders the bounded candidate list carried by preflight details.
+func namesOf(sources []frozenSource) string {
+	names := make([]string, 0, len(sources))
+	for _, source := range sources {
+		names = append(names, source.Name)
 	}
-	if declaration.MetricsConnectionID <= 0 || resourceRef == "" || query == "" {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: frozen declaration or explicit resourceRef is missing", ErrThanosUnavailable)
-	}
-	// Every vector selector must satisfy the frozen resource policy before a
-	// connection grant can authorize execution, including nested expressions.
-	scope, err := declaration.CompileResourceScope(resourceRef)
-	if err != nil {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: resourceRef is not declared: %v", ErrThanosUnavailable, err)
-	}
-	normalizedQuery, err := scope.ScopeExpression(query)
-	if err != nil {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: query violates declared resource scope: %v", ErrThanosUnavailable, err)
-	}
-	// Preserve the model proposal on tool_calls and freeze the independently
-	// authorized execution request. Plinth must receive this exact canonical JSON.
-	executionArgs, err := json.Marshal(map[string]string{"resourceRef": resourceRef, "query": normalizedQuery})
-	if err != nil {
-		return attempt.ToolGrant{}, err
-	}
-	digest := sha256.Sum256(executionArgs)
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO tool_call_execution_inputs(tool_call_id,arguments_json,arguments_digest,created_at)
-		VALUES(?,?,?,?)`, toolCallID, string(executionArgs), hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return attempt.ToolGrant{}, err
-	}
-	connectionID = declaration.MetricsConnectionID
-	if err := conn.QueryRowContext(ctx, `
-		SELECT c.current_revision_id, c.current_credential_generation_id,
+	return strings.Join(names, "、")
+}
+
+// currentConnectionPair re-reads the connection's current binding and root
+// state inside the caller's transaction. enabled=false reports an admin
+// disable/revalidation without an error so callers can preflight.
+func currentConnectionPair(ctx context.Context, conn *sql.Conn, connectionID int64) (revisionID, generationID int64, enabled bool, err error) {
+	var (
+		revalidation int
+		bindingRev   int64
+		rootBinding  int64
+	)
+	err = conn.QueryRowContext(ctx, `
+		SELECT c.current_revision_id, c.current_credential_generation_id, c.enabled, c.revalidation_required,
 		       g.key_binding_revision, s.binding_revision
 		FROM connections c
 		JOIN credential_generations g ON g.id=c.current_credential_generation_id
 		CROSS JOIN root_key_state s
-		WHERE c.id=? AND c.type IN ('thanos','prometheus') AND c.enabled=1 AND c.revalidation_required=0`,
-		connectionID,
-	).Scan(&revisionID, &generationID, &bindingRevision, &rootBinding); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ToolGrant{}, fmt.Errorf("%w: declared metrics connection is unavailable", ErrThanosUnavailable)
-		}
+		WHERE c.id=?`, connectionID).
+		Scan(&revisionID, &generationID, &enabled, &revalidation, &bindingRev, &rootBinding)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if !enabled || revalidation != 0 {
+		return 0, 0, false, nil
+	}
+	if bindingRev != rootBinding {
+		return 0, 0, false, fmt.Errorf("%w: credential root binding %d does not match %d", ErrGrantNotCurrent, bindingRev, rootBinding)
+	}
+	return revisionID, generationID, true, nil
+}
+
+// freezeSourceExecution persists the canonical execution request and the
+// per-call grant binding for one resolved source. The grant deliberately
+// reuses the frozen (connection, revision, generation) triple: one binding
+// per attempt and connection authorizes every identical call, while each
+// Tool Call keeps its own auditable association row. businessSystemID=0
+// marks a source-level grant (NULL in the schema).
+func freezeSourceExecution(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, executionArgs any, source frozenSource, generationID, frozenRevisionID, businessSystemID int64) (attempt.ToolGrant, error) {
+	canonical, err := json.Marshal(executionArgs)
+	if err != nil {
 		return attempt.ToolGrant{}, err
 	}
-	if bindingRevision != rootBinding {
-		return attempt.ToolGrant{}, fmt.Errorf("%w: credential root binding %d does not match %d", ErrGrantNotCurrent, bindingRevision, rootBinding)
+	digest := sha256.Sum256(canonical)
+	if _, err := conn.ExecContext(ctx, `
+		INSERT INTO tool_call_execution_inputs(tool_call_id,arguments_json,arguments_digest,created_at)
+		VALUES(?,?,?,?)`, toolCallID, string(canonical), hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return attempt.ToolGrant{}, err
 	}
-	// A single AgentComplete can propose several metrics calls. The binding
-	// identity deliberately excludes the Tool Call because every call made by
-	// this Attempt against this exact immutable connection pair has identical
-	// authority. Reuse that one grant and record the per-call relationship in
-	// tool_call_connection_grants; the first creating Tool Call remains auditable
-	// in created_by_tool_call_id without weakening the frozen binding constraint.
+	businessColumn, businessValue := "business_system_id", any(businessSystemID)
+	if businessSystemID == 0 {
+		businessColumn, businessValue = "business_system_id", nil
+	}
 	var grantID int64
 	err = conn.QueryRowContext(ctx, `
 		SELECT id FROM attempt_connection_grants
-		WHERE attempt_id=? AND purpose='thanos_query' AND business_system_id=?
+		WHERE attempt_id=? AND purpose=? AND `+businessColumn+` IS ?
 		  AND connection_id=? AND connection_revision_id=? AND credential_generation_id=?`,
-		attemptID, businessSystemID, connectionID, revisionID, generationID).Scan(&grantID)
+		attemptID, QueryToolPurpose, businessValue, source.ConnectionID, frozenRevisionID, generationID).Scan(&grantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		insert, insertErr := conn.ExecContext(ctx, `
 			INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,
 				credential_generation_id,created_by_tool_call_id,created_at)
 			VALUES(?,?,?,?,?,?,?,?)`,
-			attemptID, "thanos_query", businessSystemID, connectionID, revisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
+			attemptID, QueryToolPurpose, businessValue, source.ConnectionID, frozenRevisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
 		if insertErr != nil {
 			return attempt.ToolGrant{}, insertErr
 		}
@@ -152,7 +184,89 @@ func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallI
 	if _, err := conn.ExecContext(ctx, `INSERT INTO tool_call_connection_grants(tool_call_id,connection_grant_id,ordinal) VALUES(?,?,0)`, toolCallID, grantID); err != nil {
 		return attempt.ToolGrant{}, err
 	}
-	return attempt.ToolGrant{GrantID: grantID, ConnectionRevisionID: revisionID, CredentialGenerationID: generationID, Purpose: "thanos_query"}, nil
+	return attempt.ToolGrant{GrantID: grantID, ConnectionRevisionID: frozenRevisionID, CredentialGenerationID: generationID, Purpose: QueryToolPurpose}, nil
+}
+
+// ResolveQueryGrant authorizes one proposed thanos_query call inside the
+// Tool Call persistence transaction. Authority derives solely from the
+// attempt's frozen metrics_source items (ADR-0004): one per admin-enabled
+// metrics connection at creation. Historical declarations never grant new
+// authority — a published declaration cannot scope or widen a new attempt.
+// The model names the source explicitly (sourceRef) whenever the frozen
+// list is ambiguous; zero or several candidates without a name is a
+// recoverable preflight result, never a silent first-pick.
+func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
+	var resourceRef, sourceRef, query sql.NullString
+	if err := conn.QueryRowContext(ctx, `
+		SELECT json_extract(arguments_json, '$.resourceRef'),
+		       json_extract(arguments_json, '$.sourceRef'),
+		       json_extract(arguments_json, '$.query')
+		FROM tool_calls WHERE id=? AND attempt_id=?`, toolCallID, attemptID).
+		Scan(&resourceRef, &sourceRef, &query); err != nil {
+		return attempt.ToolResolution{}, err
+	}
+	if !query.Valid || query.String == "" {
+		return attempt.ToolResolution{}, fmt.Errorf("%w: proposed query is empty", ErrThanosUnavailable)
+	}
+	// Defense in depth: even a raw low-level proposal (frozen catalog drift,
+	// historical catalogs) must meet the same v3 shape the offered catalog
+	// enforces — the removed resourceRef vocabulary can never route again.
+	if resourceRef.Valid && resourceRef.String != "" {
+		return sourcePreflight(PreflightTargetNotFound, "resourceRef 已从 thanos_query 移除；请改用 sourceRef 指明指标接入。"), nil
+	}
+	return resolveSourceQueryGrant(ctx, conn, attemptID, toolCallID, sourceRef.String, query.String)
+}
+
+// resolveSourceQueryGrant authorizes the only thanos_query path: the
+// admin-enabled integrations frozen as metrics_source items are the
+// read-only scope.
+func resolveSourceQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, sourceRef, query string) (attempt.ToolResolution, error) {
+	sources, err := frozenDeclarationSourceItems(ctx, conn, attemptID, "metrics_source")
+	if err != nil {
+		return attempt.ToolResolution{}, err
+	}
+	if sourceRef != "" {
+		var matched []frozenSource
+		for _, source := range sources {
+			if source.Name == sourceRef {
+				matched = append(matched, source)
+			}
+		}
+		if len(matched) == 0 {
+			if len(sources) == 0 {
+				return sourcePreflight(PreflightNoMapping, "本次分析没有已授权的指标接入；请管理员先启用 Thanos/Prometheus 接入。"), nil
+			}
+			return sourcePreflight(PreflightTargetNotFound, "未找到该指标接入，可用来源："+namesOf(sources)+"。"), nil
+		}
+		sources = matched
+	} else {
+		switch len(sources) {
+		case 0:
+			return sourcePreflight(PreflightNoMapping, "本次分析没有已授权的指标接入；请管理员先启用 Thanos/Prometheus 接入。"), nil
+		case 1:
+		default:
+			return sourcePreflight(PreflightTargetAmbiguous, "存在多个已授权的指标接入，请用 sourceRef 明确指定："+namesOf(sources)+"。"), nil
+		}
+	}
+	selected := sources[0]
+	// The grant must close onto the exact frozen revision while that
+	// revision is still the enabled current pair; anything else is a
+	// recoverable routing miss (a fresh analysis re-freezes sources).
+	revisionID, generationID, enabled, err := currentConnectionPair(ctx, conn, selected.ConnectionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return attempt.ToolResolution{}, fmt.Errorf("%w: source connection disappeared", ErrThanosUnavailable)
+	}
+	if err != nil {
+		return attempt.ToolResolution{}, err
+	}
+	if !enabled || revisionID != selected.RevisionID {
+		return sourcePreflight(PreflightNoMapping, fmt.Sprintf("指标接入 %q 已停用或已轮换；请管理员重新启用后发起新的分析。", selected.Name)), nil
+	}
+	grant, err := freezeSourceExecution(ctx, conn, attemptID, toolCallID, map[string]string{"query": query, "sourceRef": selected.Name}, selected, generationID, selected.RevisionID, 0)
+	if err != nil {
+		return attempt.ToolResolution{}, err
+	}
+	return attempt.ToolResolution{Grants: []attempt.ToolGrant{grant}}, nil
 }
 
 // ResolveConfigGrantForConnection freezes one exact Prometheus-compatible

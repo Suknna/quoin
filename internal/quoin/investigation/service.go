@@ -30,8 +30,10 @@ const SchemaKind = "investigation_v1"
 const OutputSchemaKind = "investigation_output_v1"
 
 // RendererVersion identifies the investigation input renderer generation
-// (ARCH-CONTEXT-006).
-const RendererVersion = "investigation-renderer-v1"
+// (ARCH-CONTEXT-006). v2 renders the frozen integrations for blank-key
+// (source-level) attempts (ADR-0004); v1 snapshots keep their exact
+// historical rebuild path.
+const RendererVersion = "investigation-renderer-v2"
 
 // AgentVersion is the frozen investigation agent generation recorded on
 // the attempt row; the worker binary pins its own copy equal to this.
@@ -138,11 +140,8 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
 		switch tool.Name {
 		case thanos.QueryToolName:
-			grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-			if err != nil {
-				return attempt.ToolResolution{}, err
-			}
-			return attempt.ToolResolution{Grants: []attempt.ToolGrant{grant}}, nil
+			// ResolveQueryGrant returns the full resolution (grants + preflight).
+			return thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
 		case kubernetes.ReadToolName:
 			return kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
 		default:
@@ -154,10 +153,14 @@ func NewService(db *sql.DB) *Service {
 		case thanos.QueryToolName:
 			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
 		case kubernetes.ReadToolName:
-			// Each mapping is fenced by ValidateGrantForFulfillment inside the
-			// credential transaction. Checking every mapping here would make one
-			// invalid connection reject a valid sibling before partial results can
-			// be returned to the model.
+			// The TOCTOU fence lives at fulfillment, not here: every
+			// FetchCredentialGrant for purpose kubernetes_read re-validates
+			// enabled/revision/generation/root binding per grant inside
+			// FulfillGrant's IMMEDIATE transaction (connections/grant.go ->
+			// kubernetes.ValidateGrantForFulfillment, pinned by
+			// TestValidateGrantForFulfillment*). Checking every mapping here
+			// would let one invalid connection reject valid siblings before
+			// partial results reach the model.
 			return nil
 		default:
 			return errors.New("tool " + tool.Name + " has no grant validator")

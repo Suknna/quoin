@@ -23,11 +23,10 @@ func TestOperatorCannotCallManagementAPIs(t *testing.T) {
 		"/api/v1/connections",
 		"/api/v1/business-systems",
 		"/api/v1/inspections/runs?businessSystemKey=anything",
-		"/api/v1/business-systems/anything/browser-identity",
-		"/api/v1/journey-catalog",
 		"/api/v1/runtime",
 		"/api/v1/audit-events",
-		"/api/v1/templates/business-system",
+		"/api/v1/integrations/plugins",
+		"/api/v1/inspections/plans",
 	} {
 		response := mustRequest(t, server, operator, path, http.StatusForbidden)
 		var problem struct {

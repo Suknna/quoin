@@ -14,16 +14,85 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestParseInputRequiresBusinessContext(t *testing.T) {
+func TestParseInputRequiresBusinessContextOrSources(t *testing.T) {
+	// ADR-0004: an attempt without a business declaration must carry the
+	// frozen integrations as its source-level authority; neither is invalid.
 	_, err := ParseInput([]byte(`{
 		"occurrence":{"id":"1","labels":{}},
 		"modelContract":{"modelId":"fixture"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "business context") {
-		t.Fatalf("ParseInput error = %v, want missing business context", err)
+	if err == nil || !strings.Contains(err.Error(), "integrations") {
+		t.Fatalf("ParseInput error = %v, want missing integrations", err)
 	}
 }
 
+// TestSourceIntegrationsRenderIntoModelPrompt proves the source names the
+// model needs for sourceRef actually reach the rendered prompt (not only
+// the canonical JSON) while endpoint/secret facts never do.
+func TestSourceIntegrationsRenderIntoModelPrompt(t *testing.T) {
+	input, err := ParseInput([]byte(`{
+		"occurrence":{"id":"1","labels":{"alertname":"HighErrorRate"}},
+		"integrations":[{"kind":"metrics","name":"thanos-prod"},{"kind":"kubernetes","name":"k8s-prod"}],
+		"modelContract":{"modelId":"fixture"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInitialMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, message := range messages {
+		joined += message.Content
+	}
+	for _, required := range []string{"thanos-prod", "k8s-prod", "sourceRef", "resourceRef 在此模式不可用", `thanos_query({sourceRef: "thanos-prod", query: "up"})`} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("source prompt missing %q in: %s", required, joined)
+		}
+	}
+	for _, secret := range []string{"baseUrl", "http://thanos.test", "password", "bearerToken", "kubeconfig"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("source prompt leaked %q", secret)
+		}
+	}
+}
+
+// TestSourceIntegrationsRenderIntoInvestigationPrompt proves the same
+// source-level visibility for direct chat prompts.
+func TestSourceIntegrationsRenderIntoInvestigationPrompt(t *testing.T) {
+	canonical := []byte(`{
+	  "messages": [{"role": "user", "content": "查一下错误率"}],
+	  "sources": [],
+	  "integrations": [{"kind": "metrics", "name": "thanos-prod"}],
+	  "modelContract": {"modelId": "fixture-chat-1", "contextBudgetTokens": 4096, "maxOutputTokens": 1024}
+	}`)
+	input, err := ParseInvestigationInput(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInvestigationMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, message := range messages {
+		joined += message.Content
+	}
+	for _, required := range []string{"thanos-prod", "sourceRef", "resourceRef 在此模式不可用"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("investigation source prompt missing %q in: %s", required, joined)
+		}
+	}
+	if strings.Contains(joined, "http://thanos.test") || strings.Contains(joined, "kubeconfig") {
+		t.Fatal("investigation source prompt leaked endpoint or credential facts")
+	}
+}
+
+// TestBuildInitialMessagesIncludesFrozenBusinessContext proves the business
+// view still reaches the model as descriptive context while the tool call
+// shape stays the source-level one (ADR-0004): no resourceRef guidance may
+// return, and scope guidance only renders for frozen integrations.
 func TestBuildInitialMessagesIncludesFrozenBusinessContext(t *testing.T) {
 	input, err := ParseInput([]byte(`{
 		"occurrence":{"id":"1","labels":{"business_system":"payments"}},
@@ -37,20 +106,24 @@ func TestBuildInitialMessagesIncludesFrozenBusinessContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || !strings.Contains(messages[2].Content, "业务配置上下文") || !strings.Contains(messages[2].Content, "payments") {
+	// Business context alone: exactly system + user, the declaration renders
+	// as context, and the removed resourceRef vocabulary never appears.
+	if len(messages) != 2 || !strings.Contains(messages[1].Content, "业务配置上下文") || !strings.Contains(messages[1].Content, "payments") {
 		t.Fatalf("messages = %#v", messages)
 	}
-	for _, required := range []string{`resourceRef`, `pods`, `允许指标：up、http_requests_*`, `query: "up"`} {
-		if !strings.Contains(messages[1].Content, required) {
-			t.Fatalf("initial scope prompt missing %q: %s", required, messages[1].Content)
-		}
+	joined := ""
+	for _, message := range messages {
+		joined += message.Content
+	}
+	if strings.Contains(joined, "resourceRef") {
+		t.Fatalf("declared context must not resurrect resourceRef guidance: %s", joined)
 	}
 }
 
 func TestInitialAnalysisPromptGroundsDetectorNamesAndSeparatesHypotheses(t *testing.T) {
 	input, err := ParseInput([]byte(`{
 		"occurrence":{"id":"1","labels":{"alertname":"MallGUIAcceptanceProbe"},"annotations":{"summary":"controlled GUI acceptance probe","description":"No true fault; this is a controlled test annotation."}},
-		"businessContext":{"systemKey":"mall","configVersionId":"8","resources":[{"name":"pods","displayName":"Pods","allowedMetrics":["up"]}]},
+		"integrations":[{"kind":"metrics","name":"thanos-prod"}],
 		"modelContract":{"modelId":"fixture"}
 	}`))
 	if err != nil {
@@ -67,11 +140,16 @@ func TestInitialAnalysisPromptGroundsDetectorNamesAndSeparatesHypotheses(t *test
 	}
 }
 
-func TestBuildInvestigationMessagesRendersMandatoryBusinessSelector(t *testing.T) {
+// TestBuildInvestigationMessagesRendersSourceScopeForDeclaredAttempts proves
+// the cutover: even a business-attributed conversation resolves tools by
+// sourceRef against the frozen integrations; the declaration's resourceRef
+// vocabulary is gone from prompts (ADR-0004).
+func TestBuildInvestigationMessagesRendersSourceScopeForDeclaredAttempts(t *testing.T) {
 	input, err := ParseInvestigationInput([]byte(`{
 		"messages":[{"role":"user","content":"查询 Java、MySQL 和 Redis 状态"}],
 		"sources":[],
 		"businessContext":{"systemKey":"local-inspection-demo","configVersionId":"17","resources":[{"name":"services","displayName":"Services","allowedMetrics":["up","mysql_up","redis_up"]}]},
+		"integrations":[{"kind":"metrics","name":"thanos-demo"},{"kind":"kubernetes","name":"k8s-demo"}],
 		"modelContract":{"modelId":"fixture-chat-1","contextBudgetTokens":4096,"maxOutputTokens":1024}
 	}`))
 	if err != nil {
@@ -85,9 +163,14 @@ func TestBuildInvestigationMessagesRendersMandatoryBusinessSelector(t *testing.T
 		t.Fatalf("messages=%d want system, scope, user", len(messages))
 	}
 	scope := messages[1].Content
-	for _, required := range []string{`业务系统 "local-inspection-demo"`, `resourceRef`, `services`, `允许指标：up、mysql_up、redis_up`, `query: "up"`} {
+	for _, required := range []string{"sourceRef", "thanos-demo", "k8s-demo", "resourceRef 在此模式不可用"} {
 		if !strings.Contains(scope, required) {
 			t.Fatalf("scope prompt missing %q: %s", required, scope)
+		}
+	}
+	for _, removed := range []string{"resourceRef 和 query", `可用 resourceRef`, `业务系统 "local-inspection-demo"`} {
+		if strings.Contains(scope, removed) {
+			t.Fatalf("scope prompt resurrects the removed declaration shape %q: %s", removed, scope)
 		}
 	}
 }

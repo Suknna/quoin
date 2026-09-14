@@ -20,6 +20,7 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
@@ -33,12 +34,14 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
+	"github.com/Suknna/quoin/internal/quoin/businessview"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/feedback"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
+	"github.com/Suknna/quoin/internal/quoin/observation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
@@ -69,6 +72,8 @@ type apiServer struct {
 	investigations                *investigation.Service
 	systems                       *businesssystem.Service
 	inspections                   *inspection.Service
+	views                         *businessview.Service
+	observations                  *observation.Service
 	feedbackService               *feedback.Service
 	knowledgeService              *knowledge.Service
 	browsers                      *browser.Service
@@ -85,14 +90,19 @@ type apiServer struct {
 	analysisDispatchFunc          func(ctx context.Context, attemptID int64) error
 	knowledgeDispatchFunc         func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
-	inspectionDispatchFunc        func(ctx context.Context)
-	verificationDispatchFunc      func(ctx context.Context)
-	resourceRefreshDispatchFunc   func(ctx context.Context)
-	browserOperationsDispatchFunc func(ctx context.Context)
-	inspectionCancelDispatchFunc  func(ctx context.Context, attemptID int64) error
-	browserPublishDispatchFunc    func(ctx context.Context, request browser.PublishRequest) error
-	browserStopDispatchFunc       func(ctx context.Context, operationID int64) error
-	browserTunnels                *browserTunnelHub
+	inspectionDispatchFunc       func(ctx context.Context)
+	verificationDispatchFunc     func(ctx context.Context)
+	resourceRefreshDispatchFunc  func(ctx context.Context)
+	observationDispatchFunc      func(ctx context.Context)
+	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
+	// Browser publish/stop dispatch stay declared for the retained recovery
+	// implementations (standalone/reconnect/session convergence); the retired
+	// browser business never assigns them, so those paths fail closed.
+	browserPublishDispatchFunc func(ctx context.Context, request browser.PublishRequest) error
+	browserStopDispatchFunc    func(ctx context.Context, operationID int64) error
+	browserTunnels             *browserTunnelHub
+	pluginRegistry             *plugins.Registry
+	enabledPlugins             []string
 	// Upgrade maintenance authorities (T36): the prepare command, the drain
 	// reconciler, and the live HTTP surface swap hooks.
 	upgradeService              *upgrade.Service
@@ -159,6 +169,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		investigations:   investigation.NewService(db),
 		systems:          businesssystem.NewService(db),
 		inspections:      inspection.NewService(db),
+		views:            businessview.NewService(db),
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		browsers:         browser.NewService(db),
@@ -166,13 +177,29 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		upgradeService:   upgrade.NewService(db),
 		browserTunnels:   newBrowserTunnelHub(),
 	}
+	application.initPluginRegistry()
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
 			return nil, fmt.Errorf("root key file not configured")
 		}
 		return os.ReadFile(rootKeyFile)
 	}
+	// The silent-deployment default keeps tests and the maintenance surface
+	// working; Run re-resolves the deployment YAML before any serving starts.
+	if service, err := newSourceObservationService(db, nil); err == nil {
+		application.observations = service
+	}
 	application.connections = connections.NewService(db, application.rootKey)
+	// ADR-0004：接入启用即用。默认基础巡检计划在启用事务内幂等创建（仅人工
+	// 运行，不产生定时模型费用）；失败回滚整个启用，确保不会出现"已启用却
+	// 无即用计划"的中间态。
+	application.connections.SetPostEnableInTx(func(ctx context.Context, conn *sql.Conn, name string) error {
+		var connectionID int64
+		if err := conn.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, name).Scan(&connectionID); err != nil {
+			return err
+		}
+		return application.inspections.EnsureDefaultPlanOn(ctx, conn, connectionID, name)
+	})
 	connections.SetReleaseVersion(buildinfo.Release)
 	attempt.SetReleaseVersion(buildinfo.Release)
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
@@ -234,8 +261,9 @@ type runtimeSlot struct {
 }
 
 type runtimeStatus struct {
+	// The browser business is retired (受控浏览器退役): only the Plinth slot
+	// exists; there is no Lintel slot to project.
 	Plinth runtimeSlot `json:"plinth"`
-	Lintel runtimeSlot `json:"lintel"`
 }
 
 // aboutStatus is the admin-only product projection of real runtime and
@@ -306,11 +334,17 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
+	application.ConfigureSourceObservation(config.EnabledPlugins)
 	application.SetStelePublicURL(config.StelePublicURL)
 	serverSet, err := application.newServers(config)
-
 	if err != nil {
 		return err
+	}
+	// ADR-0004: deployment YAML selects plugin enablement; the resolved
+	// state feeds the management catalog, the frozen tool catalogs of every
+	// agent slice and the fault-origin eligibility in one authoritative pass.
+	if _, err := application.configurePlugins(config.EnabledPlugins); err != nil {
+		return fmt.Errorf("configure plugins: %w", err)
 	}
 	serviceToken, err := os.ReadFile(config.SteleServiceTokenFile)
 	if err != nil {
@@ -412,10 +446,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.Investigations = application.investigations
 	controlService.Knowledge = application.knowledgeService
 	controlService.Artifacts = artifactStore
-	controlService.Browsers = application.browsers
-	application.browsers.Dispatch = controlService.dispatchBrowserOperation
-	application.browserPublishDispatchFunc = controlService.dispatchBrowserPublish
-	application.browserStopDispatchFunc = controlService.dispatchBrowserStop
 	application.probeDispatchFunc = controlService.dispatchAttempt
 	// The semantic search channel embeds the query through the same real
 	// dispatch path; the kick is best effort (failures leave the query
@@ -446,16 +476,13 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
-	application.browserOperationsDispatchFunc = controlService.dispatchQueuedBrowserOperations
 	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
 	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
+	controlService.Observations = application.observations
+	application.observationDispatchFunc = controlService.dispatchQueuedSourceObservationAttempts
 	application.inspectionCancelDispatchFunc = controlService.dispatchInspectionCancellation
 	RegisterRuntimeControl(serverSet.relay, controlService)
-	// A BrowserTunnel is only transient Runtime transport. A user WebSocket
-	// disconnect is what enters AwaitingReconnect; a tunnel reconnect must not
-	// terminate an otherwise active manual-login operation.
-	runtimev1.RegisterBrowserTunnelServer(serverSet.relay, &BrowserTunnelService{Slots: application.runtime, Browsers: application.browsers, Hub: application.browserTunnels})
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	// T12: the periodic lease sweeper converges attempts whose runtime
 	// disappeared without reconnecting (RUNTIME-TASK-006).
@@ -465,8 +492,8 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// a process-owned poller. The domain command supplies durable interval,
 	// current-pointer, active-run, and command-key fences; maintenance returns
 	// above before this normal-runtime loop can start.
-	go NewResourceDiscoveryScheduler(application.systems, controlService.dispatchQueuedResourceDiscoveryAttempts).Run(ctx, func(err error) {
-		sharedops.LogEvent("quoin", "error", "resource_discovery.scheduler", err.Error())
+	go NewSourceObservationScheduler(application.observations, controlService.dispatchQueuedSourceObservationAttempts).Run(ctx, func(err error) {
+		sharedops.LogEvent("quoin", "error", "source_observation.scheduler", err.Error())
 	})
 	application.upgradeGate = serverSet.upgradeGate
 	application.setReadiness = serverSet.ops.SetReadiness
@@ -521,10 +548,9 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	apiConfig.Transformers = []huma.Transformer{}
 	apiConfig.CreateHooks = nil
 	api := humago.New(mux, apiConfig)
-	configHandler := application.register(api)
+	application.register(api)
 	application.registerAlertStream(mux)
 	application.registerTaskStream(mux)
-	application.registerBrowserWebSocket(mux, publicOrigin)
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
 	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
@@ -532,10 +558,6 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	// The attachment upload streams multipart parts into staging without
 	// whole-body buffering (HTTP-FILE-001); it also owns its response head.
 	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
-	// The strict-YAML config uploads and the template download own their
-	// response heads the same way (T16).
-	mux.HandleFunc("POST /api/v1/business-systems", configHandler.ServeBusinessSystemUpload)
-	mux.HandleFunc("GET /api/v1/templates/business-system", configHandler.ServeBusinessSystemTemplate)
 
 	csrf := http.NewCrossOriginProtection()
 	if err := csrf.AddTrustedOrigin(publicOrigin); err != nil {
@@ -555,11 +577,12 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/admin/about", OperationID: "getAdminAbout"}, application.aboutPlatform)
 	application.registerBusinessContextRoute(api)
+	application.registerObservationRoutes(api)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
 	application.registerRuntimeRoutes(api)
 	application.registerConnectionRoutes(api)
-	application.registerBrowserRoutes(api)
+	application.registerPluginRoutes(api)
 	application.registerAnalysisRoutes(api)
 	application.registerTaskSnapshot(api)
 	application.registerEvidenceRoutes(api)
@@ -601,40 +624,14 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	configHandler := &appconfig.Handler{
 		Systems: application.systems,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateAdmin(ctx, cookie, "读取配置")
+			session, err := application.authenticateAdmin(ctx, cookie, "查看历史业务配置")
 			if err != nil {
 				return 0, err
 			}
 			return session.User.ID, nil
-		},
-		AuthenticateAdmin: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateAdmin(ctx, cookie, "管理配置")
-			if err != nil {
-				return 0, err
-			}
-			return session.User.ID, nil
-		},
-		CancelDispatch: func(ctx context.Context, attemptID int64) error {
-			if application.cancelDispatchFunc == nil {
-				return errors.New("cancel dispatch not wired")
-			}
-			return application.cancelDispatchFunc(ctx, attemptID)
-		},
-		DispatchConfigVerification: func(ctx context.Context) {
-			// Verification attempts have their own snapshot schema and dispatcher;
-			// inspection scheduling cannot discover draft-owned verification work.
-			if application.verificationDispatchFunc != nil {
-				go application.verificationDispatchFunc(ctx)
-			}
-		},
-		DispatchResourceRefresh: func(ctx context.Context) {
-			// Resource-discovery attempts are scoped to durable refresh runs and
-			// dispatched through the live Plinth control service.
-			if application.resourceRefreshDispatchFunc != nil {
-				go application.resourceRefreshDispatchFunc(ctx)
-			}
 		},
 	}
+
 	configHandler.Register(api)
 	inspectionHandler := &appinspection.Handler{
 		Inspections: application.inspections,
@@ -658,6 +655,18 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 		},
 	}
 	inspectionHandler.Register(api)
+	// 业务视图（ADR-0004）：可选组织能力，仅 Admin 可管理。
+	viewHandler := &businessview.Handler{
+		Views: application.views,
+		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
+			session, err := application.authenticateAdmin(ctx, cookie, "管理业务视图")
+			if err != nil {
+				return 0, err
+			}
+			return session.User.ID, nil
+		},
+	}
+	viewHandler.Register(api)
 	knowledgeHandler := &appknowledge.Handler{
 		Feedback:  application.feedbackService,
 		Knowledge: application.knowledgeService,
@@ -782,16 +791,14 @@ func (application *apiServer) runtimeStatus(ctx context.Context, input *authInpu
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Runtime 状态"); err != nil {
 		return nil, err
 	}
+	views, err := application.runtimeSlotViews(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
+	}
 	output := &runtimeOutput{}
-	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
-		view, err := application.runtime.View(ctx, slot)
-		if err != nil {
-			return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
-		}
-		if slot == qruntime.SlotPlinth {
-			output.Body.Plinth = runtimeSlotProjection(view)
-		} else {
-			output.Body.Lintel = runtimeSlotProjection(view)
+	for i := range views {
+		if views[i].Slot == qruntime.SlotPlinth {
+			output.Body.Plinth = views[i]
 		}
 	}
 	return output, nil
@@ -802,7 +809,8 @@ func (application *apiServer) runtimeStatus(ctx context.Context, input *authInpu
 // established protected commands; Operators cannot call this endpoint.
 func (application *apiServer) aboutPlatform(ctx context.Context, input *authInput) (*struct {
 	Body aboutStatus `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "查看平台关于信息"); err != nil {
 		return nil, err
 	}
@@ -811,13 +819,14 @@ func (application *apiServer) aboutPlatform(ctx context.Context, input *authInpu
 		return nil, huma.Error500InternalServerError("无法读取维护状态", err)
 	}
 	output := aboutStatus{ReleaseVersion: buildinfo.Release, Maintenance: aboutMaintenance{Active: maintenanceState.Active, Reason: maintenanceState.Reason, RowVersion: maintenanceState.RowVersion}, Components: []runtimeSlot{}}
-	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
-		view, err := application.runtime.View(ctx, slot)
-		if err != nil {
-			return nil, huma.Error500InternalServerError("无法读取组件状态", err)
-		}
-		output.Components = append(output.Components, runtimeSlotProjection(view))
+	// A disabled plugin's component is not part of this deployment and must
+	// not read as a perpetually degraded slot on the About page; the
+	// unresolved maintenance surface keeps every historical slot visible.
+	components, err := application.runtimeSlotViews(ctx)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("无法读取组件状态", err)
 	}
+	output.Components = components
 	return &struct {
 		Body aboutStatus `json:"body"`
 	}{Body: output}, nil

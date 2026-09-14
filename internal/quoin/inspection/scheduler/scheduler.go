@@ -16,7 +16,7 @@ import (
 
 type service interface {
 	ScheduledPlans(context.Context) ([]inspection.ScheduledPlan, error)
-	CreateScheduledInspectionRun(context.Context, inspection.ScheduledPlan, time.Time, inspection.RuntimeAvailability) (inspection.RunDetail, error)
+	CreateScheduledPlanRun(context.Context, inspection.ScheduledPlan, time.Time, inspection.RuntimeAvailability) (inspection.RunDetail, error)
 }
 
 // source is intentionally package-private: tests control time through this
@@ -105,13 +105,13 @@ func (s *Scheduler) tickAt(ctx context.Context, boundary time.Time) error {
 	for _, plan := range plans {
 		scheduledFor, due, err := dueAt(plan, boundary)
 		if err != nil {
-			return fmt.Errorf("plan %s/%s: %w", plan.SystemKey, plan.PlanKey, err)
+			return fmt.Errorf("plan %s: %w", plan.PlanKey, err)
 		}
 		if !due {
 			continue
 		}
-		if _, err := s.service.CreateScheduledInspectionRun(ctx, plan, scheduledFor, availability); err != nil {
-			scheduleErrors = append(scheduleErrors, fmt.Errorf("schedule %s/%s at %s: %w", plan.SystemKey, plan.PlanKey, scheduledFor.Format(time.RFC3339Nano), err))
+		if _, err := s.service.CreateScheduledPlanRun(ctx, plan, scheduledFor, availability); err != nil {
+			scheduleErrors = append(scheduleErrors, fmt.Errorf("schedule %s at %s: %w", plan.PlanKey, scheduledFor.Format(time.RFC3339Nano), err))
 		}
 	}
 	return errors.Join(scheduleErrors...)

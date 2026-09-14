@@ -42,6 +42,13 @@ type QuoinConfig struct {
 	// manifest and deployment input bytes. It is absent for local development
 	// projections; Deployment Acceptance is then simply unavailable.
 	DeploymentBinding *DeploymentBinding `json:"deploymentBinding,omitempty" yaml:"deploymentBinding,omitempty"`
+	// EnabledPlugins is the deployment's explicit plugin enablement
+	// whitelist (ADR-0004). Absent selects every plugin whose descriptor
+	// defaults to enabled (prometheus/thanos/alertmanager/kubernetes); the
+	// browser plugin is opt-in and must be listed explicitly. Unknown ids
+	// fail component startup; the same field drives Quoin's catalog and the
+	// frozen model tool directory.
+	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
 }
 
 // DeploymentBinding is the immutable runtime authority for what this process
@@ -62,6 +69,12 @@ type PlinthConfig struct {
 	WorkspaceDirectory   string `json:"workspaceDirectory" yaml:"workspaceDirectory"`
 	QuoinRuntimeEndpoint string `json:"quoinRuntimeEndpoint" yaml:"quoinRuntimeEndpoint"`
 	QuoinRuntimeCAFile   string `json:"quoinRuntimeCaFile" yaml:"quoinRuntimeCaFile"`
+	// EnabledPlugins must mirror quoinConfig.enabledPlugins from the same
+	// deployment input: the disposable worker renders the provider-facing
+	// tool schema from the frozen catalog, and BeginModelCall rejects any
+	// digest drift, so a split deployment fails loudly instead of offering
+	// divergent tools.
+	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
 }
 
 type LintelConfig struct {

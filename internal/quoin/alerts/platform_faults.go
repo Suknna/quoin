@@ -13,6 +13,12 @@ import (
 type PlatformFaultReporter struct {
 	service *Service
 	now     func() time.Time
+	// FaultOriginEligible gates whether a component's disconnect may open a
+	// NEW fault (ADR-0004: a disabled plugin's absent component is not a
+	// fault). Nil means every component is eligible. An ineligible
+	// component's existing lifecycle still converges to Resolved so a
+	// plugin disabled mid-life does not fire forever; history stays readable.
+	FaultOriginEligible func(component string) bool
 }
 
 func NewPlatformFaultReporter(service *Service) *PlatformFaultReporter {
@@ -28,6 +34,14 @@ func (reporter *PlatformFaultReporter) ObserveRuntimeConnection(ctx context.Cont
 	}
 	const reason = "runtime_control_stream_disconnected"
 	now := reporter.now().UTC().Format(time.RFC3339Nano)
+	if !connected && reporter.FaultOriginEligible != nil && !reporter.FaultOriginEligible(component) {
+		// The component is not part of the enabled deployment: converge any
+		// stale lifecycle and never originate a new fault.
+		_, err := reporter.service.db.ExecContext(ctx, `UPDATE platform_faults
+			SET state='Resolved', resolved_at=?, last_seen_at=?, row_version=row_version+1
+			WHERE component=? AND reason=? AND state='Firing'`, now, now, component, reason)
+		return err
+	}
 	if connected {
 		_, err := reporter.service.db.ExecContext(ctx, `UPDATE platform_faults
 			SET state='Resolved', resolved_at=?, last_seen_at=?, row_version=row_version+1

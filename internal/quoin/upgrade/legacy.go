@@ -32,6 +32,14 @@ const (
 	directInvestigationMetricsSchemaDigest = "f8adbfd4285eb5fd76acbf33f32b26fdc217ef08c6104aab0f6e5c0beb28d5c9"
 	declarationCutoverMigrationID          = "20260911_declaration_cutover_v1"
 	declarationCutoverSchemaDigest         = "3a95baf7b2ecab6a5f81fe084334fe953a5c23a3a71db3de1cc1d8c0ee107eb2"
+
+	// pluginRegistrySchemaDigest is the released ADR-0004 predecessor: the last
+	// declaration-governed canonical schema. Its conversion is purely additive
+	// (source-scoped observation, independent inspection plans, business views
+	// and standalone browser identities appear as empty capacity); every
+	// retained row survives the canonical rebuild unchanged.
+	pluginRegistryMigrationID  = "20260913_plugin_capability_registry_v1"
+	pluginRegistrySchemaDigest = "a7d990238e110625ef38ed42b9993bb97745f2de559c3125ad291d60cd1c3608"
 )
 
 var (
@@ -181,6 +189,29 @@ func migrateDeclarationCutoverOn(ctx context.Context, conn *sql.Conn) (LegacyMig
 	}
 	if err := cutoverCurrentLegacyConfigurations(ctx, conn); err != nil {
 		return report, fmt.Errorf("append declaration successors: %w", err)
+	}
+	digest := sha256.Sum256([]byte(gen.SchemaSQL))
+	if _, err := conn.ExecContext(ctx, `UPDATE schema_state SET schema_digest=?,upgraded_at=? WHERE id=1`, hex.EncodeToString(digest[:]), migrationNow()); err != nil {
+		return report, err
+	}
+	return report, nil
+}
+
+// migratePluginRegistryOn converts the last declaration-governed release. The
+// rebuild is copy-safe by construction: every schema change is an additive
+// table, a widened nullable column or a re-derived unique index that existing
+// rows already satisfy, so history is neither rewritten nor reinterpreted.
+func migratePluginRegistryOn(ctx context.Context, conn *sql.Conn) (LegacyMigrationReport, error) {
+	stored, report, err := beginReleasedSchemaMigration(ctx, conn, pluginRegistryMigrationID, pluginRegistrySchemaDigest)
+	if err != nil {
+		return LegacyMigrationReport{}, err
+	}
+	report.LegacySchemaDigest = stored
+	if err := rebuildCanonicalSchema(ctx, conn, nil, false); err != nil {
+		return report, err
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO migration_ledger(migration_id,digest,applied_at) VALUES(?,?,?)`, pluginRegistryMigrationID, migrationDigest(pluginRegistryMigrationID), migrationNow()); err != nil {
+		return report, err
 	}
 	digest := sha256.Sum256([]byte(gen.SchemaSQL))
 	if _, err := conn.ExecContext(ctx, `UPDATE schema_state SET schema_digest=?,upgraded_at=? WHERE id=1`, hex.EncodeToString(digest[:]), migrationNow()); err != nil {

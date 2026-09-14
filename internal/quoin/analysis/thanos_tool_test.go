@@ -116,7 +116,13 @@ func runThanosAttempt(t *testing.T, db *sql.DB, service *Service, occurrenceID i
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolsDigest, err := attempt.CanonicalToolsDigest()
+	// The worker renders the attempt's FROZEN catalog (ADR-0004); the digest
+	// gate compares against that document, not the live catalog rendering.
+	frozen, err := service.Attempts().FrozenToolCatalog(context.Background(), attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsDigest, err := frozen.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +149,7 @@ func runThanosAttempt(t *testing.T, db *sql.DB, service *Service, occurrenceID i
 // thanos_query and returns the durable authorization.
 func completeThanosProposalWithQuery(t *testing.T, service *Service, attemptID, callID int64, query string) ([]attempt.ToolAuthorization, error) {
 	t.Helper()
-	arguments := []byte(`{"resourceRef":"default","query":` + strconv.Quote(query) + `}`)
+	arguments := []byte(`{"query":` + strconv.Quote(query) + `}`)
 	proposed := []attempt.ProposedTool{{
 		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
 		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
@@ -163,16 +169,7 @@ func completeThanosProposalWithQuery(t *testing.T, service *Service, attemptID, 
 
 func completeThanosProposal(t *testing.T, service *Service, attemptID, callID int64) attempt.ToolAuthorization {
 	t.Helper()
-	var systemKey string
-	if err := service.DB().QueryRow(`
-		SELECT config.system_key
-		FROM attempt_input_snapshots snapshot
-		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL
-		JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id
-		WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
-		t.Fatal(err)
-	}
-	arguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
+	arguments := []byte(`{"query":"up"}`)
 	proposed := []attempt.ProposedTool{{
 		ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos",
 		ToolName: "thanos_query", ArgumentsJSON: arguments, ArgumentsDigest: sha256Hex(string(arguments)),
@@ -214,12 +211,19 @@ func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants WHERE tool_call_id=? AND connection_grant_id=?`, authorization.ToolCallID, authorization.Grants[0].GrantID).Scan(&bindings); err != nil || bindings != 1 {
 		t.Fatalf("bindings=%d err=%v", bindings, err)
 	}
-	var grantedBusiness, expectedBusiness int64
-	if err := db.QueryRow(`SELECT business_system_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedBusiness); err != nil {
+	// ADR-0004: thanos_query grants never carry a business system; authority
+	// is the frozen metrics_source connection only.
+	var grantedBusiness sql.NullInt64
+	var grantedConnection int64
+	if err := db.QueryRow(`SELECT business_system_id,connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedBusiness, &grantedConnection); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT occurrence.business_system_id FROM alert_occurrences occurrence JOIN initial_analyses analysis ON analysis.occurrence_id=occurrence.id JOIN execution_attempts attempt ON attempt.scope_id=analysis.id WHERE attempt.id=?`, attemptID).Scan(&expectedBusiness); err != nil || grantedBusiness != expectedBusiness {
-		t.Fatalf("grant business=%d expected=%d err=%v", grantedBusiness, expectedBusiness, err)
+	if grantedBusiness.Valid {
+		t.Fatalf("grant carries a business system: %d", grantedBusiness.Int64)
+	}
+	expectedConnection, _, _ := seedThanosChain(t, db)
+	if grantedConnection != expectedConnection {
+		t.Fatalf("grant connection=%d, want the frozen metrics source %d", grantedConnection, expectedConnection)
 	}
 }
 
@@ -235,17 +239,8 @@ func TestThanosGrantIsReusedForMultipleCallsInOneResponse(t *testing.T) {
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-grant-reuse")
 
-	var systemKey string
-	if err := db.QueryRow(`
-		SELECT config.system_key
-		FROM attempt_input_snapshots snapshot
-		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL
-		JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id
-		WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
-		t.Fatal(err)
-	}
-	firstArguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
-	secondArguments := []byte(`{"resourceRef":"default","query":"up{business_system=\"` + systemKey + `\"}"}`)
+	firstArguments := []byte(`{"query":"up"}`)
+	secondArguments := []byte(`{"query":"up"}`)
 	proposed := []attempt.ProposedTool{
 		{ProviderIndex: 0, ProviderToolCallID: "call-agent-thanos-first", ToolName: "thanos_query", ArgumentsJSON: firstArguments, ArgumentsDigest: sha256Hex(string(firstArguments))},
 		{ProviderIndex: 1, ProviderToolCallID: "call-agent-thanos-second", ToolName: "thanos_query", ArgumentsJSON: secondArguments, ArgumentsDigest: sha256Hex(string(secondArguments))},
@@ -274,45 +269,33 @@ func TestThanosGrantIsReusedForMultipleCallsInOneResponse(t *testing.T) {
 	}
 }
 
-// A model-supplied conflicting selector must fail before grant creation;
-// prompt text cannot widen the frozen business declaration's resource scope.
-func TestThanosToolRejectsUnsafeQueryWithoutGrant(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	seedProviderChain(t, db)
-	seedThanosChain(t, db)
-	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-unsafe")
-	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, "up{business_system=\"other\"}"); err == nil {
-		t.Fatal("complete must reject a conflicting business selector")
-	}
-	var grants int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, attemptID).Scan(&grants); err != nil || grants != 0 {
-		t.Fatalf("grants=%d err=%v", grants, err)
-	}
-}
-
-// TestThanosToolRejectedWithoutAuthorizationTarget proves the
-// tool-before-authorization rejection: without an enabled Thanos
-// connection the whole model call is refused and no tool call rows exist
-// (RUNTIME-AGENT-005: an unresolvable tool route is invalid_response).
+// TestThanosToolRejectedWithoutAuthorizationTarget proves a disabled frozen
+// source never yields a grant: the routing miss is a recoverable preflight
+// result on the persisted Tool Call, and no grant row exists.
 func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
 	seedProviderChain(t, db)
+	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-reject")
-	var systemKey string
-	if err := db.QueryRow(`SELECT config.system_key FROM attempt_input_snapshots snapshot JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id WHERE snapshot.attempt_id=?`, attemptID).Scan(&systemKey); err != nil {
+	frozenConnection, _, _ := seedThanosChain(t, db)
+	if _, err := db.Exec(`UPDATE connections SET enabled=0,row_version=row_version+1 WHERE id=?`, frozenConnection); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE connections SET enabled=0,row_version=row_version+1 WHERE id=(SELECT config.metrics_connection_id FROM attempt_input_snapshots snapshot JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id WHERE snapshot.attempt_id=?)`, attemptID); err != nil {
-		t.Fatal(err)
+	// Exercised at the resolver seam: the preflight persistence inside
+	// CompleteModelCall is the attempt package's contract; the authorization
+	// decision under test is the resolver's.
+	toolCallID := pendingSourceThanosCall(t, db, attemptID, callID, 1, thanosSourceArguments("", "up", false))
+	resolution, resolveErr := resolveThanosCall(t, db, service, attemptID, toolCallID)
+	if resolveErr != nil {
+		t.Fatalf("routing miss must stay a recoverable preflight, not a failed call: %v", resolveErr)
 	}
-	if _, err := completeThanosProposalWithQuery(t, service, attemptID, callID, `up{business_system="`+systemKey+`"}`); err == nil {
-		t.Fatal("complete must reject a thanos_query without an enabled connection")
+	if resolution.PreflightCode == "" || len(resolution.Grants) != 0 {
+		t.Fatalf("resolution=%+v, want a grantless preflight", resolution)
 	}
-	var toolRows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE attempt_id=?`, attemptID).Scan(&toolRows); err != nil || toolRows != 0 {
-		t.Fatalf("toolRows=%d err=%v", toolRows, err)
+	var grants int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, attemptID).Scan(&grants); err != nil || grants != 0 {
+		t.Fatalf("grants=%d err=%v", grants, err)
 	}
 }
 

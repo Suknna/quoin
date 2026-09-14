@@ -391,3 +391,77 @@ func TestProbeClosureCommitOrder(t *testing.T) {
 		t.Fatalf("second active probe must conflict, got %v", err)
 	}
 }
+
+// TestEnableInTxHookCreatesDefaultPlan (ADR-0004): the enablement-coupled
+// hook runs inside the enable transaction — the default basic inspection plan
+// commits atomically with the enable, and a hook failure rolls both back.
+func TestEnableInTxHookCreatesDefaultPlan(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := context.Background()
+	hookInput := thanosInput("")
+	hookInput.Name = "hook-thanos"
+	created, err := service.Create(ctx, hookInput, 1, "cmd-"+fmt.Sprint(seq.Next()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdPlans := 0
+	seen := map[string]bool{}
+	service.SetPostEnableInTx(func(ctx context.Context, conn *sql.Conn, name string) error {
+		var connectionID int64
+		if err := conn.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, name).Scan(&connectionID); err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := conn.ExecContext(ctx, `INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
+			VALUES('basic-'||?, '基础巡检', 1, ?, 'thanos', 'promql_instant', '1', '{"expression":"up"}', '{"kind":"integration"}', 'integration', NULL, 'UTC', 1, 1, ?, ?)`,
+			name, connectionID, now, now); err != nil {
+			return err
+		}
+		createdPlans++
+		seen[name] = true
+		return nil
+	})
+	probe := passedMetricsProbe(t, service, database, created, "boot-hook", 1)
+	enabled, err := service.Enable(ctx, created.Name, created.RowVersion, probe, 1)
+	if err != nil || !enabled.Enabled {
+		t.Fatalf("enable with hook: %v %+v", err, enabled)
+	}
+	var plans int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, "basic-"+created.Name).Scan(&plans); err != nil {
+		t.Fatal(err)
+	}
+	if plans != 1 || createdPlans != 1 || !seen[created.Name] {
+		t.Fatalf("hook must commit with the enable: plans=%d calls=%d", plans, createdPlans)
+	}
+	// Semantic re-enable replays the same hook contract; idempotent hooks keep
+	// the single default plan row.
+	probe2 := passedMetricsProbe(t, service, database, enabled, "boot-hook2", 2)
+	if _, err := service.Enable(ctx, enabled.Name, enabled.RowVersion, probe2, 1); err != nil {
+		t.Fatalf("idempotent re-enable: %v", err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, "basic-"+created.Name).Scan(&plans); err != nil {
+		t.Fatal(err)
+	}
+	if plans != 1 {
+		t.Fatalf("idempotent hook must keep exactly one default plan, got %d", plans)
+	}
+	// A hook failure must roll the enable back atomically.
+	failingInput := thanosInput("")
+	failingInput.Name = "failing-thanos"
+	failing, err := service.Create(ctx, failingInput, 1, "cmd-"+fmt.Sprint(seq.Next()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingProbe := passedMetricsProbe(t, service, database, failing, "boot-hook-fail", 3)
+	service.SetPostEnableInTx(func(context.Context, *sql.Conn, string) error { return errors.New("hook refused") })
+	if _, err := service.Enable(ctx, failing.Name, failing.RowVersion, failingProbe, 1); err == nil {
+		t.Fatal("hook failure must fail the enable")
+	}
+	var enabledCount int
+	if err := database.QueryRow(`SELECT enabled FROM connections WHERE id=?`, failing.ID).Scan(&enabledCount); err != nil {
+		t.Fatal(err)
+	}
+	if enabledCount != 0 {
+		t.Fatalf("hook failure must roll back the enable, enabled=%d", enabledCount)
+	}
+}

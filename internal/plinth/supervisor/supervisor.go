@@ -59,10 +59,19 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 			} else {
 				supervisor.runConfigVerification(parent, sink, client, dispatch, binding, stopTask)
 			}
-		case runtimev1.ScopeType_SCOPE_TYPE_RESOURCE_REFRESH_RUN:
-			supervisor.runResourceRefresh(parent, sink, client, dispatch, binding, stopTask)
+		case runtimev1.ScopeType_SCOPE_TYPE_OBSERVATION_RUN:
+			supervisor.runSourceObservation(parent, sink, client, dispatch, binding, stopTask)
 		case runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK:
-			supervisor.runInspectionPromQL(parent, sink, client, dispatch, binding, stopTask)
+			// 独立计划 Run（ADR-0004）的插件采集输入与历史声明 PromQL 输入
+			// 共用 run_check 作用域，按冻结 schemaKind 路由。
+			var routeInput struct {
+				SchemaKind string `json:"schemaKind"`
+			}
+			if dispatch.GetInput() != nil && json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &routeInput) == nil && routeInput.SchemaKind == "inspection_plugin_execution_v1" {
+				supervisor.runInspectionPluginCollection(parent, sink, client, dispatch, binding, stopTask)
+			} else {
+				supervisor.runInspectionPromQL(parent, sink, client, dispatch, binding, stopTask)
+			}
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
 		}

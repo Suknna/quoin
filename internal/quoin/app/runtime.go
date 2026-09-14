@@ -41,6 +41,29 @@ func (application *apiServer) registerRuntimeRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/runtime-slots/{slot}/retiring-credential/retire", OperationID: "retireRuntimeCredential"}, application.retireRuntimeCredential)
 }
 
+// The browser business is retired (受控浏览器退役): the Lintel slot is no
+// longer part of any deployment, so the public projection exposes only the
+// Plinth slot and the Lintel registration commands behave as absent routes.
+// The upgrade drain reads slots through the upgrade reconciler, not through
+// this projection.
+
+// runtimeSlotViews projects exactly the slots this deployment exposes, in the
+// canonical order.
+func (application *apiServer) runtimeSlotViews(ctx context.Context) ([]runtimeSlot, error) {
+	view, err := application.runtime.View(ctx, qruntime.SlotPlinth)
+	if err != nil {
+		return nil, err
+	}
+	return []runtimeSlot{runtimeSlotProjection(view)}, nil
+}
+
+// lintelSlotRetired is the registration gate for the retired Lintel slot:
+// there is no browser runtime to register, so the command behaves as an
+// absent route instead of minting an unusable token.
+func lintelSlotRetired() error {
+	return problem(http.StatusNotFound, "not_found", "受控浏览器业务已下线，Lintel 组件不再注册。")
+}
+
 func (application *apiServer) prepareRuntimeRegistration(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Slot    string `path:"slot"`
@@ -62,7 +85,10 @@ func (application *apiServer) prepareRuntimeRegistration(ctx context.Context, in
 		return nil, err
 	}
 	if !qruntime.ValidSlot(input.Slot) {
-		return nil, problem(http.StatusBadRequest, "malformed_request", "slot 必须是 plinth 或 lintel。")
+		return nil, problem(http.StatusBadRequest, "malformed_request", "slot 必须是 plinth。")
+	}
+	if input.Slot == qruntime.SlotLintel {
+		return nil, lintelSlotRetired()
 	}
 	view, handle, available, err := application.runtime.PrepareRegistration(ctx, input.Slot, input.Body.ExpectedRow, secrets.SessionDigest(input.Session))
 	if err != nil {
@@ -109,6 +135,11 @@ func (application *apiServer) revealRuntimeRegistrationToken(ctx context.Context
 	if revealErr != nil {
 		return nil, runtimeConflict(revealErr)
 	}
+	// A Lintel handle cannot be minted any more (受控浏览器退役); reject a
+	// stale one before any audit record or secret leaves the server.
+	if slot == qruntime.SlotLintel {
+		return nil, lintelSlotRetired()
+	}
 	// Audit the reveal without the handle or raw token (SEC-REVEAL-004).
 	if auditErr := application.alerts.RecordRevealAudit(ctx, session.User.ID, generation, "success", nowTimestamp()); auditErr != nil {
 		return nil, problem(http.StatusInternalServerError, "unavailable", "暂时无法记录审计，请重试。")
@@ -138,6 +169,9 @@ func (application *apiServer) retireRuntimeCredential(ctx context.Context, input
 }, error) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "退休 Runtime 旧凭据"); err != nil {
 		return nil, err
+	}
+	if input.Slot == qruntime.SlotLintel {
+		return nil, lintelSlotRetired()
 	}
 	view, err := application.runtime.Retire(ctx, input.Slot, input.Body.ExpectedRow)
 	if err != nil {

@@ -18,7 +18,6 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 var ErrNotFound = errors.New("inspection run source not found")
@@ -61,9 +60,11 @@ type CheckResult struct {
 }
 
 type RunDetail struct {
-	RunID             int64                    `json:"-"`
-	ID                string                   `json:"id"`
-	BusinessSystemKey string                   `json:"businessSystemKey"`
+	RunID int64 `json:"-"`
+	ID    string `json:"id"`
+	// BusinessSystemKey 仅历史 Run（旧业务声明计划）携带；计划 Run 为空。
+	BusinessSystemKey *string                  `json:"businessSystemKey,omitempty"`
+	ConnectionName    *string                  `json:"connectionName,omitempty"`
 	PlanKey           string                   `json:"planKey"`
 	State             string                   `json:"state"`
 	RowVersion        int64                    `json:"rowVersion"`
@@ -107,295 +108,6 @@ type ReportDetail struct {
 
 func locatorID(id int64) string { return strconv.FormatInt(id, 10) }
 
-type planCheck struct {
-	key, kind, mode, expression, journeyID, params string
-	rangeSeconds, stepSeconds                      sql.NullInt64
-}
-
-// CreateInspectionRun starts one manual Run of a published plan. Every check
-// becomes a run_check child in the same transaction: PromQL children freeze
-// inspection_promql_execution_v1 plus their config_thanos_query grant, browser
-// children freeze the real inspection_collection_v1 journey input and settle
-// deterministically (identity_busy / authentication_required) or stay Queued
-// for admission.
-func (s *Service) CreateInspectionRun(ctx context.Context, principalID int64, clientCommandID, systemKey, planKey string) (RunDetail, error) {
-	const command = "inspection_run.create"
-	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "planKey": planKey})
-	if d, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
-		return d, err
-	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return RunDetail{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	if d, replayed, err := s.replayOn(ctx, conn, principalID, clientCommandID, digest); replayed || err != nil {
-		if replayed {
-			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return RunDetail{}, err
-			}
-			committed = true
-		}
-		return d, err
-	}
-	var systemID, versionID, planID int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT s.id, s.current_config_version_id, p.id
-		FROM business_systems s
-		JOIN business_system_config_versions v ON v.id = s.current_config_version_id AND v.state='published'
-		JOIN config_plans p ON p.config_version_id = v.id AND p.plan_key = ?
-		WHERE s.key = ?`, planKey, systemKey).Scan(&systemID, &versionID, &planID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "not_found", Detail: "找不到已发布的巡检计划", SystemKey: systemKey}, &committed)
-	}
-	if err != nil {
-		return RunDetail{}, err
-	}
-	checks, err := loadChecks(ctx, conn, planID)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if len(checks) == 0 {
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "empty_plan", Detail: "巡检计划没有检查项", SystemKey: systemKey}, &committed)
-	}
-	now := s.nowText()
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at)
-		VALUES(?,?,?,NULL,'manual','Queued',?)`, systemID, planKey, versionID, now)
-	if err != nil {
-		var active int64
-		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, planKey).Scan(&active)
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", SystemKey: systemKey, ObjectID: active}, &committed)
-	}
-	runID, err := insert.LastInsertId()
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running', evidence_at=?, row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
-		return RunDetail{}, err
-	}
-	var metricsConnectionID int64
-	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, versionID).Scan(&metricsConnectionID); err != nil {
-		return RunDetail{}, err
-	}
-	for _, check := range checks {
-		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, 0, metricsConnectionID, check, now)
-		} else {
-			err = s.browserChild(ctx, conn, runID, versionID, 0, planKey, systemID, check, now)
-		}
-		if err != nil {
-			// A plan carrying PromQL checks cannot claim execution without an
-			// authorized Thanos path. The whole creation rolls back (no orphan
-			// run or children) and the typed error surfaces as a retryable
-			// 503, mirroring Config Verification.
-			if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
-				return RunDetail{}, fmt.Errorf("%w: %s", err, "尚无可用的 Thanos 指标连接，请先创建并启用连接后重试")
-			}
-			return RunDetail{}, err
-		}
-	}
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
-		return RunDetail{}, err
-	}
-	detail, err := s.detailOn(ctx, conn, systemKey, runID)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if err = s.audit(ctx, conn, principalID, clientCommandID, command, runID, now); err != nil {
-		return RunDetail{}, err
-	}
-	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, runID, detail); err != nil {
-		return RunDetail{}, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return RunDetail{}, err
-	}
-	committed = true
-	return detail, nil
-}
-
-func loadChecks(ctx context.Context, conn *sql.Conn, planID int64) ([]planCheck, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT check_key, kind, COALESCE(query_mode,''), COALESCE(expression,''), COALESCE(journey_id,''), COALESCE(journey_params_json,'{}'), range_seconds, step_seconds
-		FROM config_checks WHERE plan_id=? ORDER BY check_key`, planID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []planCheck
-	for rows.Next() {
-		var c planCheck
-		if err = rows.Scan(&c.key, &c.kind, &c.mode, &c.expression, &c.journeyID, &c.params, &c.rangeSeconds, &c.stepSeconds); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-// promqlChild freezes one run_check PromQL attempt: the deployment Thanos
-// grant and the typed input carrying the run's evidence_at.
-func (s *Service) promqlChild(ctx context.Context, conn *sql.Conn, runID, versionID, contractID, metricsConnectionID int64, check planCheck, now string) error {
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,created_at)
-		VALUES('inspection_collection','run_check',?,?,'Queued',?,?)`, runID, check.key, attempt.ReleaseVersion(), now)
-	if err != nil {
-		return err
-	}
-	attemptID, err := insert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	grant, err := thanos.ResolveConfigGrantForConnection(ctx, conn, attemptID, metricsConnectionID)
-	if err != nil {
-		return err
-	}
-	var rangeSeconds, stepSeconds *int64
-	if check.rangeSeconds.Valid {
-		rangeSeconds = &check.rangeSeconds.Int64
-	}
-	if check.stepSeconds.Valid {
-		stepSeconds = &check.stepSeconds.Int64
-	}
-	var evidenceAt string
-	if err = conn.QueryRowContext(ctx, `SELECT evidence_at FROM inspection_runs WHERE id=?`, runID).Scan(&evidenceAt); err != nil {
-		return err
-	}
-	body, err := json.Marshal(map[string]any{
-		"schemaKind": "inspection_promql_execution_v1", "attemptId": attemptID, "inspectionRunId": runID,
-		"checkKey": check.key, "evidenceAt": evidenceAt, "grantId": grant.GrantID,
-		"query": map[string]any{"mode": check.mode, "expression": check.expression, "rangeSeconds": rangeSeconds, "stepSeconds": stepSeconds},
-	})
-	if err != nil {
-		return err
-	}
-	return freezeInput(ctx, conn, attemptID, "inspection_promql_execution_v1", body, versionID, contractID, now)
-}
-
-// browserChild freezes the real inspection_collection_v1 journey input and
-// settles the deterministic local outcomes the frozen SQL admits:
-// identity_busy closes as a Queued local gap (transport-successful), an
-// identity without any published profile terminal-fails as an
-// authentication_required gap, and a ready free identity leaves the child
-// Queued for journey admission.
-func (s *Service) browserChild(ctx context.Context, conn *sql.Conn, runID, versionID, contractID int64, planKey string, systemID int64, check planCheck, now string) error {
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,created_at)
-		VALUES('inspection_collection','run_check',?,?,'Queued',?,?)`, runID, check.key, attempt.ReleaseVersion(), now)
-	if err != nil {
-		return err
-	}
-	attemptID, err := insert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	identity, hasIdentity, err := loadBrowserIdentity(ctx, conn, systemID)
-	if err != nil {
-		return err
-	}
-	if !hasIdentity {
-		// No browser identity at all: freeze the check/catalog binding and
-		// settle terminally, exactly like a profile-less identity.
-		catalogDigest, catalogVersion, _, err := resolveJourneyBinding(check.journeyID)
-		if err != nil {
-			return err
-		}
-		body, err := json.Marshal(map[string]any{
-			"schemaKind": "inspection_collection_v1", "attemptId": attemptID, "operationId": nil,
-			"identity": nil, "journey": nil, "authenticationProbe": nil,
-			"catalog": map[string]any{"digest": catalogDigest, "version": catalogVersion},
-			"planKey": planKey, "checkKey": check.key,
-		})
-		if err != nil {
-			return err
-		}
-		if err = freezeInput(ctx, conn, attemptID, "inspection_collection_v1", body, versionID, contractID, now); err != nil {
-			return err
-		}
-		if _, err = conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed', ended_at=?, row_version=row_version+1 WHERE id=? AND state='Queued'`, now, attemptID); err != nil {
-			return err
-		}
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-			VALUES(?,?,'gap',NULL,?,NULL,'authentication_required',?)`, runID, check.key, attemptID, now)
-		return err
-	}
-	catalogDigest, catalogVersion, journeyVersion, err := resolveJourneyBinding(check.journeyID)
-	if err != nil {
-		return err
-	}
-	probeParams := json.RawMessage(identity.ProbeParams)
-	if len(probeParams) == 0 || string(probeParams) == "null" {
-		probeParams = json.RawMessage("{}")
-	}
-	params := json.RawMessage(check.params)
-	if len(params) == 0 || string(params) == "null" {
-		params = json.RawMessage("{}")
-	}
-	binding := func(id string, version int64, raw json.RawMessage) map[string]any {
-		return map[string]any{"id": id, "version": version, "params": raw,
-			"catalog": map[string]any{"digest": catalogDigest, "version": catalogVersion}}
-	}
-	body, err := json.Marshal(map[string]any{
-		"schemaKind": "inspection_collection_v1", "attemptId": attemptID, "operationId": nil,
-		"identity": map[string]any{
-			"identityId": identity.IdentityID, "identityRevisionId": identity.RevisionID,
-			"profileGenerationId": identity.ProfileGenerationID, "profileGeneration": identity.Generation,
-			"startUrl": identity.StartURL,
-		},
-		"journey":             binding(check.journeyID, journeyVersion, params),
-		"authenticationProbe": binding(identity.ProbeJourneyID, identity.ProbeVersion, probeParams),
-		"planKey":             planKey, "checkKey": check.key,
-	})
-	if err != nil {
-		return err
-	}
-	ready := identity.ProfileGenerationID.Valid && identity.Generation.Valid
-	if !ready {
-		// No published profile can never authenticate; settle terminally so
-		// the Run keeps a converging path (terminal browser arm of
-		// trg_inspection_check_results_closure).
-		if _, err = conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed', ended_at=?, row_version=row_version+1 WHERE id=? AND state='Queued'`, now, attemptID); err != nil {
-			return err
-		}
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-			VALUES(?,?,'gap',NULL,?,NULL,'authentication_required',?)`, runID, check.key, attemptID, now)
-		return err
-	}
-	var busy bool
-	if err = conn.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM browser_operations WHERE identity_id=? AND (state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR stop_confirmed_at IS NULL))`,
-		identity.IdentityID).Scan(&busy); err != nil {
-		return err
-	}
-	if busy {
-		// A busy identity is a local identity_busy gap on the still-Queued
-		// child; the local-journey commit trigger closes the attempt.
-		inputDigest := sha256.Sum256(body)
-		if _, err = conn.ExecContext(ctx, `
-			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-			VALUES(?,?,'gap',NULL,?,?, 'identity_busy',?)`, runID, check.key, attemptID, inputDigest[:], now); err != nil {
-			return err
-		}
-	}
-	// A ready, free identity remains a bare Queued child. Identity-serial
-	// admission creates its browser operation and freezes the operation-bound
-	// inspection_collection_v1 snapshot in one transaction; the immutable
-	// dispatch input must carry the real operationId.
-	return nil
-}
-
 func freezeInput(ctx context.Context, conn *sql.Conn, attemptID int64, kind string, body []byte, versionID, contractID int64, now string) error {
 	digest := sha256.Sum256(body)
 	insert, err := conn.ExecContext(ctx, `
@@ -419,18 +131,23 @@ func freezeInput(ctx context.Context, conn *sql.Conn, attemptID int64, kind stri
 	return nil
 }
 
-// convergeOn closes the Run once every configured plan check has settled:
+// convergeOn closes the Run once every configured check has settled:
 // Completed requires all-ok coverage, CompletedWithGaps at least one explicit
-// gap (trg_inspection_runs_result_set_complete re-validates both).
+// gap (trg_inspection_runs_result_set_complete re-validates both). Plan runs
+// count their run-frozen catalog; legacy declaration runs keep their
+// config_checks join.
 func (s *Service) convergeOn(ctx context.Context, conn *sql.Conn, runID int64) error {
 	var pending, gaps int
 	err := conn.QueryRowContext(ctx, `
 		SELECT
-		  (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
-		   JOIN inspection_runs r ON r.config_version_id=p.config_version_id AND r.plan_key=p.plan_key
-		   WHERE r.id=?) - (SELECT COUNT(*) FROM inspection_check_results x WHERE x.run_id=?),
+		  CASE WHEN r.plan_id IS NOT NULL
+		    THEN (SELECT COUNT(*) FROM inspection_run_checks c WHERE c.run_id=r.id)
+		    ELSE (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
+		          WHERE p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key)
+		  END
+		  - (SELECT COUNT(*) FROM inspection_check_results x WHERE x.run_id=?),
 		  (SELECT COUNT(*) FROM inspection_check_results x WHERE x.run_id=? AND x.status <> 'ok')
-		FROM inspection_runs WHERE id=?`, runID, runID, runID, runID).Scan(&pending, &gaps)
+		FROM inspection_runs r WHERE r.id=?`, runID, runID, runID).Scan(&pending, &gaps)
 	if err != nil {
 		return err
 	}
@@ -529,7 +246,8 @@ func (s *Service) recordCommand(ctx context.Context, conn *sql.Conn, principalID
 
 type RunSummary struct {
 	ID                string  `json:"id"`
-	BusinessSystemKey string  `json:"businessSystemKey"`
+	BusinessSystemKey *string `json:"businessSystemKey,omitempty"`
+	ConnectionName    *string `json:"connectionName,omitempty"`
 	PlanKey           string  `json:"planKey"`
 	State             string  `json:"state"`
 	RowVersion        int64   `json:"rowVersion"`
@@ -539,202 +257,12 @@ type RunSummary struct {
 	CreatedAt         string  `json:"createdAt"`
 }
 
-// ScheduledPlan is a current, already-validated typed plan projection. Cron
-// remains parsed by the scheduler, but the scheduler never reparses YAML.
-type ScheduledPlan struct {
-	SystemKey       string
-	PlanKey         string
-	Cron            string
-	Timezone        string
-	ConfigVersionID int64
-}
-
 // RuntimeAvailability is sampled by the scheduling runtime at the boundary.
 // A false slot produces a durable runtime_unavailable check gap rather than a
 // queued execution that would silently run later.
 type RuntimeAvailability struct {
 	Plinth bool
 	Lintel bool
-}
-
-// ScheduledPlans lists only plans that are active through the current
-// published configuration pointer. It deliberately has no scheduler cursor:
-// immutable inspection_runs rows are the duplicate authority.
-func (s *Service) ScheduledPlans(ctx context.Context) ([]ScheduledPlan, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT b.key,p.plan_key,p.cron,v.timezone,v.id
-		FROM business_systems b
-		JOIN business_system_config_versions v ON v.id=b.current_config_version_id AND v.state='published'
-		JOIN config_plans p ON p.config_version_id=v.id
-		WHERE b.enabled=1 AND p.cron IS NOT NULL
-		  AND EXISTS (SELECT 1 FROM config_checks c WHERE c.plan_id=p.id)
-		ORDER BY b.id,p.plan_key`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	plans := []ScheduledPlan{}
-	for rows.Next() {
-		var plan ScheduledPlan
-		if err := rows.Scan(&plan.SystemKey, &plan.PlanKey, &plan.Cron, &plan.Timezone, &plan.ConfigVersionID); err != nil {
-			return nil, err
-		}
-		plans = append(plans, plan)
-	}
-	return plans, rows.Err()
-}
-
-// CreateScheduledInspectionRun commits one due UTC occurrence. The scheduler
-// supplies the immutable config version it observed; the transaction refuses
-// to create an old-plan occurrence if publication changed before commit.
-func (s *Service) CreateScheduledInspectionRun(ctx context.Context, plan ScheduledPlan, scheduledFor time.Time, availability RuntimeAvailability) (RunDetail, error) {
-	scheduledFor = scheduledFor.UTC()
-	if scheduledFor.Nanosecond() != 0 || scheduledFor.Second() != 0 {
-		return RunDetail{}, fmt.Errorf("scheduled_for must be a minute boundary")
-	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return RunDetail{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-
-	scheduledText := scheduledFor.Format(time.RFC3339Nano)
-	var existingID int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT r.id FROM inspection_runs r
-		JOIN business_systems b ON b.id=r.business_system_id
-		WHERE b.key=? AND r.plan_key=? AND r.scheduled_for=?`, plan.SystemKey, plan.PlanKey, scheduledText).Scan(&existingID)
-	if err == nil {
-		detail, detailErr := s.detailOn(ctx, conn, plan.SystemKey, existingID)
-		if detailErr != nil {
-			return RunDetail{}, detailErr
-		}
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return RunDetail{}, err
-		}
-		committed = true
-		return detail, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return RunDetail{}, err
-	}
-
-	var systemID, versionID, planID int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT b.id,v.id,p.id
-		FROM business_systems b
-		JOIN business_system_config_versions v ON v.id=b.current_config_version_id AND v.state='published'
-		JOIN config_plans p ON p.config_version_id=v.id AND p.plan_key=? AND p.cron IS NOT NULL
-		WHERE b.key=? AND b.enabled=1 AND v.id=?`, plan.PlanKey, plan.SystemKey, plan.ConfigVersionID).
-		Scan(&systemID, &versionID, &planID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// A concurrent publish/disable made the earlier read stale. This is not
-		// an error and must not turn the previous configuration into a Run.
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return RunDetail{}, err
-		}
-		committed = true
-		return RunDetail{}, nil
-	}
-	if err != nil {
-		return RunDetail{}, err
-	}
-	checks, err := loadChecks(ctx, conn, planID)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if len(checks) == 0 {
-		return RunDetail{}, fmt.Errorf("scheduled plan %s/%s has no checks", plan.SystemKey, plan.PlanKey)
-	}
-	var metricsConnectionID int64
-	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, versionID).Scan(&metricsConnectionID); err != nil {
-		return RunDetail{}, err
-	}
-
-	now := s.nowText()
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
-		VALUES(?,?,?,NULL, 'schedule',?,'Queued',?)`, systemID, plan.PlanKey, versionID, scheduledText, now)
-	if err != nil {
-		// The active unique index is the commit-order overlap decision. Only an
-		// actual active Run converts this boundary into SkippedOverlap; never
-		// disguise an unrelated database failure as a scheduling decision.
-		var activeID int64
-		activeErr := conn.QueryRowContext(ctx, `
-			SELECT id FROM inspection_runs
-			WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, plan.PlanKey).
-			Scan(&activeID)
-		if errors.Is(activeErr, sql.ErrNoRows) {
-			return RunDetail{}, err
-		}
-		if activeErr != nil {
-			return RunDetail{}, activeErr
-		}
-		if _, err = conn.ExecContext(ctx, `
-			INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,scheduled_for,state,created_at)
-			VALUES(?,?,?,NULL, 'schedule',?,'SkippedOverlap',?)`, systemID, plan.PlanKey, versionID, scheduledText, now); err != nil {
-			return RunDetail{}, err
-		}
-		if err = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND scheduled_for=?`, systemID, plan.PlanKey, scheduledText).Scan(&existingID); err != nil {
-			return RunDetail{}, err
-		}
-		detail, err := s.detailOn(ctx, conn, plan.SystemKey, existingID)
-		if err != nil {
-			return RunDetail{}, err
-		}
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return RunDetail{}, err
-		}
-		committed = true
-		return detail, nil
-	}
-	runID, err := insert.LastInsertId()
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
-		return RunDetail{}, err
-	}
-	for _, check := range checks {
-		if (check.kind == "promql" && !availability.Plinth) || (check.kind == "browser" && !availability.Lintel) {
-			if err = s.runtimeUnavailableChild(ctx, conn, runID, check.key, now); err != nil {
-				return RunDetail{}, err
-			}
-			continue
-		}
-		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, versionID, 0, metricsConnectionID, check, now)
-		} else {
-			err = s.browserChild(ctx, conn, runID, versionID, 0, plan.PlanKey, systemID, check, now)
-		}
-		if err != nil {
-			// A missing or stale Thanos grant is a configuration failure, not a
-			// Runtime-slot outage. Roll this occurrence back rather than forging a
-			// boundary-time runtime_unavailable gap.
-			return RunDetail{}, err
-		}
-	}
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
-		return RunDetail{}, err
-	}
-	detail, err := s.detailOn(ctx, conn, plan.SystemKey, runID)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return RunDetail{}, err
-	}
-	committed = true
-	return detail, nil
 }
 
 // runtimeUnavailableChild records a boundary-time Runtime outage as a terminal

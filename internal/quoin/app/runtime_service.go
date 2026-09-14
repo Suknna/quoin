@@ -25,6 +25,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
+	"github.com/Suknna/quoin/internal/quoin/observation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -77,6 +78,9 @@ type RuntimeService struct {
 	// inspection_analysis report attempts (T24); nil keeps the handshake-only
 	// behaviour for tests that do not exercise it.
 	Inspections *inspection.Service
+	// Observations owns source observation children (ADR-0004); nil keeps the
+	// handshake-only behaviour for tests that do not exercise it.
+	Observations *observation.Service
 	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
 	// Lintel must agree on (RUNTIME-CTRL-010); empty means no catalog
 	// embedded yet, which keeps lintel handshake-rejected with CATALOG_
@@ -93,12 +97,14 @@ type RuntimeService struct {
 	browserExplorationSlotView func(context.Context) (qruntime.SlotView, error)
 }
 
+// slotName resolves the proto slot enum onto the runtime authority. The
+// browser business is retired (受控浏览器退役): LINTEL deliberately no longer
+// maps, so Register/Connect reject it as an unsupported slot before any
+// credential check — a long-lived Lintel token can never reconnect.
 func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {
 	switch slot {
 	case runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH:
 		return qruntime.SlotPlinth
-	case runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL:
-		return qruntime.SlotLintel
 	default:
 		return ""
 	}
@@ -137,7 +143,7 @@ func registerStatus(err error) error {
 func (service *RuntimeService) Register(ctx context.Context, request *runtimev1.RegisterRuntimeRequest) (*runtimev1.RegisterRuntimeResponse, error) {
 	slot := service.slotName(request.GetSlot())
 	if slot == "" {
-		return nil, status.Error(codes.InvalidArgument, "slot must be plinth or lintel")
+		return nil, status.Error(codes.InvalidArgument, "unsupported slot")
 	}
 	token, generation, err := service.Slots.Register(ctx, slot, request.GetOneTimeToken(), int64(request.GetGeneration()), request.GetBootId(), request.GetContractFingerprint(), contract.ProtoAuthorityFingerprint)
 	if err != nil {
@@ -173,7 +179,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	}
 	slot := service.slotName(hello.GetSlot())
 	if slot == "" {
-		return status.Error(codes.InvalidArgument, "slot must be plinth or lintel")
+		return status.Error(codes.InvalidArgument, "unsupported slot")
 	}
 	if slot == qruntime.SlotLintel && hello.GetBrowserCapacitySlots() == 0 {
 		return status.Error(codes.InvalidArgument, "lintel browser capacity must be positive")
@@ -347,7 +353,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
 		go service.dispatchQueuedVerificationAttempts(context.Background())
-		go service.dispatchQueuedResourceDiscoveryAttempts(context.Background())
+		go service.dispatchQueuedSourceObservationAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedEmbeddings(context.Background())

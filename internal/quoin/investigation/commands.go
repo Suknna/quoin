@@ -293,14 +293,29 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn,
 		SELECT seq FROM investigation_messages WHERE id=? AND investigation_id=?`, turnMessageID, investigationID).Scan(&cutoffSeq); err != nil {
 		return err
 	}
-	canonical, err := service.rebuildFor(ctx, conn, investigationID, cutoffSeq, businessContext, selected.ProbeResultID)
+	// Freeze THIS attempt's tool catalog at creation (ADR-0004): the same
+	// document is embedded in the digested input and stored on the snapshot
+	// row, so later executions re-render the original bytes.
+	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(service.attempts.Catalogs, AgentVersion)
+	if err != nil {
+		return err
+	}
+	// ADR-0004: the enabled integrations are ALWAYS the attempt's source-
+	// level authority — frozen as grant-eligible input items and rendered so
+	// the model can name sourceRef. An explicit business key only adds
+	// descriptive context; it can never grant or scope new work.
+	integrations, err := enabledIntegrations(ctx, conn)
+	if err != nil {
+		return err
+	}
+	canonical, err := service.rebuildFor(ctx, conn, investigationID, cutoffSeq, businessContext, integrations, selected.ProbeResultID, catalog)
 	if err != nil {
 		return err
 	}
 	digest := sha256.Sum256(canonical)
 	snapshotInsert, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
-		VALUES(?,?,?,?,?)`, attemptID, SchemaKind, RendererVersion, hex.EncodeToString(digest[:]), now)
+		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
+		VALUES(?,?,?,?,?,?)`, attemptID, SchemaKind, RendererVersion, hex.EncodeToString(digest[:]), string(catalogDocument), now)
 	if err != nil {
 		return err
 	}
@@ -313,14 +328,18 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, conn *sql.Conn,
 		return err
 	}
 	if businessContext != nil {
-		// The pair is the only direct-chat tool authority. Both immutable IDs are
-		// frozen alongside the message lineage, so later config publication cannot
-		// silently redirect an already accepted Investigation.
+		// The declaration pair is frozen as descriptive context only; later
+		// config publication cannot silently redirect an accepted Investigation.
 		if err := insertBusinessContextLineage(ctx, conn, snapshotID, itemCount, *businessContext); err != nil {
 			return err
 		}
 		itemCount += 2
 	}
+	written, err := insertSourceLineageItems(ctx, conn, snapshotID, int64(itemCount)+1)
+	if err != nil {
+		return err
+	}
+	itemCount += int(written)
 	// Attachment lineage: one item per referenced artifact continuing the
 	// message lineage's item_seq (the grant closure trigger requires the
 	// (snapshot, artifact) pair; ARCH-CONTEXT-006 keeps the digest

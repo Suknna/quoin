@@ -26,7 +26,9 @@ type browserWebSocketTunnelContext struct {
 
 // registerBrowserWebSocket installs the only browser-facing byte relay. The
 // HTTP handler authorizes before upgrade; after upgrade it forwards opaque RFB
-// payloads and never interprets or persists them.
+// payloads and never interprets or persists them. Since ADR-0004 the relay is
+// addressed by the standalone identity key: legacy business-bound identities
+// are read-only and no longer open a controlled browser.
 func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publicOrigin string) {
 	handler := websocket.Handler(func(conn *websocket.Conn) {
 		request := conn.Request()
@@ -35,7 +37,7 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			_ = conn.Close()
 			return
 		}
-		systemKey := parts[3]
+		identityKey := parts[3]
 		operationID, err := strconv.ParseInt(parts[5], 10, 64)
 		if err != nil || operationID < 1 {
 			_ = conn.Close()
@@ -51,7 +53,11 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			_ = conn.Close()
 			return
 		}
-		op, err := application.browsers.GetOperation(request.Context(), systemKey, operationID)
+		if !application.browserStandaloneWritesEnabled() {
+			_ = conn.Close()
+			return
+		}
+		op, err := application.browsers.GetStandaloneOperation(request.Context(), identityKey, operationID)
 		if err != nil || op.ActorUserID == nil || op.ActorSessionID == nil || *op.ActorUserID != session.User.ID || *op.ActorSessionID != session.ID || (op.State != "Running" && op.State != "AwaitingReconnect") {
 			_ = conn.Close()
 			return
@@ -82,7 +88,7 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 		}()
 		bridgeWebSocket(request.Context(), conn, tunnel)
 	})
-	mux.HandleFunc("GET /api/v1/browser-login/{systemKey}/operations/{browserOperationId}/ws", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("GET /api/v1/browser-identities/{identityKey}/operations/{browserOperationId}/ws", func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Origin") != publicOrigin {
 			http.Error(writer, "browser websocket origin is not allowed", http.StatusForbidden)
 			return
@@ -100,6 +106,10 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			http.Error(writer, "browser operation is invalid", http.StatusUnprocessableEntity)
 			return
 		}
+		if !application.browserStandaloneWritesEnabled() {
+			http.Error(writer, "the browser plugin is not enabled", http.StatusNotFound)
+			return
+		}
 		cookie, ok := findSessionCookie(request)
 		if !ok {
 			http.Error(writer, "browser login requires an authenticated Session", http.StatusUnauthorized)
@@ -110,7 +120,7 @@ func (application *apiServer) registerBrowserWebSocket(mux *http.ServeMux, publi
 			http.Error(writer, "browser login Session is not authorized", http.StatusUnauthorized)
 			return
 		}
-		op, err := application.browsers.GetOperation(request.Context(), parts[3], operationID)
+		op, err := application.browsers.GetStandaloneOperation(request.Context(), parts[3], operationID)
 		if err != nil || op.ActorUserID == nil || op.ActorSessionID == nil || *op.ActorUserID != session.User.ID || *op.ActorSessionID != session.ID || (op.State != "Running" && op.State != "AwaitingReconnect") {
 			http.Error(writer, "browser operation is not attachable", http.StatusForbidden)
 			return

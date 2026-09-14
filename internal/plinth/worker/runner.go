@@ -227,7 +227,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 			SizeBytes: ref.GetSizeBytes(), Sha256: ref.GetSha256(), BodyExpired: ref.GetBodyExpired(),
 		})
 	}
-	toolsDigest, err := ProviderToolsDigest(input.GetAgentVersion())
+	toolsDigest, err := ProviderToolsDigestForInput(input.GetCanonicalJson(), input.GetAgentVersion())
 	if err != nil {
 		process.Process.Kill()
 		return err

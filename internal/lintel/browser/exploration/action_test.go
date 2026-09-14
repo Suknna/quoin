@@ -27,7 +27,7 @@ func TestParseRejectsUntypedBrowserInstruction(t *testing.T) {
 }
 
 func TestParseRejectsTamperedDigest(t *testing.T) {
-	body := []byte(`{"action":"open","businessSystemKey":"payments"}`)
+	body := []byte(`{"action":"open","identityKey":"ops-console"}`)
 	if _, err := Parse(body, make([]byte, sha256.Size)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("Parse tampered action error = %v, want ErrInvalidInput", err)
 	}

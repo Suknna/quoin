@@ -59,6 +59,29 @@ func ProviderToolsDigest(agentVersions ...string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ProviderToolsJSONForInput renders the provider tool schema of ONE attempt:
+// attempts created with per-attempt freezing carry their frozen catalog
+// inside the canonical input document (ADR-0004) and render exactly those
+// bytes; legacy inputs fall back to the historical generation rendering.
+func ProviderToolsJSONForInput(canonicalInput []byte, agentVersion string) ([]byte, error) {
+	if catalog, ok := attempt.CatalogFromInputDocument(canonicalInput); ok {
+		return catalog.ProviderToolsJSON()
+	}
+	return ProviderToolsJSON(agentVersion)
+}
+
+// ProviderToolsDigestForInput is the SHA-256 hex of
+// ProviderToolsJSONForInput — the value the StartAttempt frame seals and
+// BeginModelCall re-derives from the attempt's stored catalog.
+func ProviderToolsDigestForInput(canonicalInput []byte, agentVersion string) (string, error) {
+	body, err := ProviderToolsJSONForInput(canonicalInput, agentVersion)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // ReadOnlyRuntimePaths mirrors the frozen plinth-worker-tools.yaml
 // readonly_runtime_paths for the compiled architecture; the worker uses
 // them for the Landlock ruleset (ARCH-WORKER-003/007).

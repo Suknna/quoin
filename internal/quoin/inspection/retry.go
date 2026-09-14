@@ -28,9 +28,9 @@ type AttemptSummary struct {
 
 // ReanalyzeRun queues one fresh analysis against the Run's existing immutable
 // check results and Evidence. It does not recollect or alter an old report.
-func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID int64) (AttemptSummary, error) {
+func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCommandID string, runID int64) (AttemptSummary, error) {
 	const command = "inspection_run.reanalyze"
-	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "runId": runID})
+	digest := auth.DigestCommand(command, map[string]any{"runId": runID})
 	if result, replayed, err := s.replayAttempt(ctx, principalID, clientCommandID, digest); replayed || err != nil {
 		return result, err
 	}
@@ -59,17 +59,15 @@ func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCom
 	}
 	var state string
 	if err = conn.QueryRowContext(ctx, `
-		SELECT r.state FROM inspection_runs r
-		JOIN business_systems b ON b.id=r.business_system_id
-		WHERE r.id=? AND b.key=?`, runID, systemKey).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+		SELECT r.state FROM inspection_runs r WHERE r.id=?`, runID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
 		return s.rejectAttempt(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "not_found", Detail: "巡检 Run 不存在", SystemKey: systemKey, ObjectID: runID}, &committed)
+			&RejectionError{Code: "not_found", Detail: "巡检 Run 不存在", ObjectID: runID}, &committed)
 	} else if err != nil {
 		return AttemptSummary{}, err
 	}
 	if state != "Completed" && state != "CompletedWithGaps" {
 		return s.rejectAttempt(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "active_conflict", Detail: "巡检采证尚未完成，不能重新分析", SystemKey: systemKey, ObjectID: runID}, &committed)
+			&RejectionError{Code: "active_conflict", Detail: "巡检采证尚未完成，不能重新分析", ObjectID: runID}, &committed)
 	}
 	var activeID int64
 	err = conn.QueryRowContext(ctx, `
@@ -79,7 +77,7 @@ func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCom
 		ORDER BY id DESC LIMIT 1`, runID).Scan(&activeID)
 	if err == nil {
 		return s.rejectAttempt(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "active_conflict", Detail: "该巡检 Run 已有进行中的分析", SystemKey: systemKey, ObjectID: activeID}, &committed)
+			&RejectionError{Code: "active_conflict", Detail: "该巡检 Run 已有进行中的分析", ObjectID: activeID}, &committed)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return AttemptSummary{}, err
@@ -108,12 +106,13 @@ func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCom
 	return result, nil
 }
 
-// RerunInspection creates a new manual collection run bound to the exact
-// immutable configuration and label-contract snapshots of sourceRunID. The
-// new run starts a new evidence chain and records its sole lineage pointer.
-func (s *Service) RerunInspection(ctx context.Context, principalID int64, clientCommandID, systemKey string, sourceRunID int64) (RunDetail, error) {
+// RerunInspection creates a new manual collection run copying the source
+// run's frozen plan binding (template, params, scope, connection). Legacy
+// declaration runs are history: their producer was removed, so re-collection
+// requires a real plan instead of resurrecting a retired declaration.
+func (s *Service) RerunInspection(ctx context.Context, principalID int64, clientCommandID string, sourceRunID int64) (RunDetail, error) {
 	const command = "inspection_run.rerun"
-	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "runId": sourceRunID})
+	digest := auth.DigestCommand(command, map[string]any{"runId": sourceRunID})
 	if detail, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
 		return detail, err
 	}
@@ -140,67 +139,57 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		}
 		return detail, err
 	}
-	var systemID, configVersionID, planID int64
-	var planKey, sourceState string
-	var systemEnabled bool
+	var sourceState string
+	var planID, connectionID sql.NullInt64
+	var planKey string
 	err = conn.QueryRowContext(ctx, `
-		SELECT r.business_system_id,r.config_version_id,p.id,r.plan_key,r.state,b.enabled
-		FROM inspection_runs r
-		JOIN business_systems b ON b.id=r.business_system_id AND b.key=?
-		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-		WHERE r.id=?`, systemKey, sourceRunID).
-		Scan(&systemID, &configVersionID, &planID, &planKey, &sourceState, &systemEnabled)
+		SELECT r.state, r.plan_id, r.connection_id, r.plan_key
+		FROM inspection_runs r WHERE r.id=?`, sourceRunID).
+		Scan(&sourceState, &planID, &connectionID, &planKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "not_found", Detail: "巡检 Run 不存在", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+			&RejectionError{Code: "not_found", Detail: "巡检 Run 不存在", ObjectID: sourceRunID}, &committed)
 	}
 	if err != nil {
 		return RunDetail{}, err
 	}
-	if !systemEnabled {
+	if !planID.Valid {
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "state_conflict", Detail: "业务系统已禁用，不能重新采证", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+			&RejectionError{Code: "legacy_run", Detail: "该 Run 来自历史业务声明计划，不支持重新采证；请创建巡检计划后重试", ObjectID: sourceRunID}, &committed)
 	}
 	switch sourceState {
 	case "Queued", "Running":
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "active_conflict", Detail: "进行中的巡检 Run 不能重新采证", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+			&RejectionError{Code: "active_conflict", Detail: "进行中的巡检 Run 不能重新采证", ObjectID: sourceRunID}, &committed)
 	case "Completed", "CompletedWithGaps", "Failed", "Cancelled", "Interrupted":
-		// These are exactly the immutable terminal source states admitted by
+		// Exactly the terminal source states admitted by
 		// trg_inspection_runs_closure for a re-collection lineage.
 	default:
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "state_conflict", Detail: "该巡检 Run 没有可重新采证的终态结果", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+			&RejectionError{Code: "state_conflict", Detail: "该巡检 Run 没有可重新采证的终态结果", ObjectID: sourceRunID}, &committed)
 	}
-	checks, err := loadChecks(ctx, conn, planID)
+	var planEnabled, connectionEnabled int
+	err = conn.QueryRowContext(ctx, `
+		SELECT p.enabled, c.enabled FROM inspection_plans p JOIN connections c ON c.id=p.connection_id WHERE p.id=?`, planID.Int64).
+		Scan(&planEnabled, &connectionEnabled)
 	if err != nil {
 		return RunDetail{}, err
 	}
-	if len(checks) == 0 {
+	if planEnabled == 0 || connectionEnabled == 0 {
 		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "empty_plan", Detail: "源巡检 Run 的计划没有检查项", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
+			&RejectionError{Code: "plan_disabled", Detail: "计划或其来源接入未启用，不能重新采证", ObjectID: sourceRunID}, &committed)
 	}
-	// Reruns use the source Run's immutable configuration, so reject browser
-	// checks before inserting any child Run or dispatchable execution attempt.
-	for _, check := range checks {
-		if check.kind == "browser" {
-			return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-				&RejectionError{Code: "feature_unavailable", Detail: "浏览器巡检开发中，暂不可重新采证", SystemKey: systemKey, ObjectID: sourceRunID}, &committed)
-		}
-	}
-	var metricsConnectionID int64
-	if err = conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
-		return RunDetail{}, err
-	}
+	// 重新采证逐字段复制源 Run 的冻结绑定（模板/参数/范围/接入），不受计划
+	// 当前定义影响；展开的检查目录同样来自源 Run。
 	now := s.nowText()
 	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,rerun_of_id,created_at)
-		VALUES(?,?,?,NULL,'manual','Queued',?,?)`, systemID, planKey, configVersionID, sourceRunID, now)
+		INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,rerun_of_id,state,created_at)
+		SELECT plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,'manual',id,'Queued',?
+		FROM inspection_runs WHERE id=?`, now, sourceRunID)
 	if err != nil {
 		var active int64
-		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE business_system_id=? AND plan_key=? AND state IN ('Queued','Running')`, systemID, planKey).Scan(&active)
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest,
-			&RejectionError{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", SystemKey: systemKey, ObjectID: active}, &committed)
+		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID.Int64).Scan(&active)
+		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", ObjectID: active}, &committed)
 	}
 	runID, err := insert.LastInsertId()
 	if err != nil {
@@ -209,15 +198,30 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
 		return RunDetail{}, err
 	}
-	for _, check := range checks {
-		if check.kind == "promql" {
-			err = s.promqlChild(ctx, conn, runID, configVersionID, 0, metricsConnectionID, check, now)
-		} else {
-			err = s.browserChild(ctx, conn, runID, configVersionID, 0, planKey, systemID, check, now)
+	if _, err = conn.ExecContext(ctx, `
+		INSERT INTO inspection_run_checks(run_id,check_key,display_name,plugin_id,template_id,template_version,params_json,target_json,created_at)
+		SELECT ?,check_key,display_name,plugin_id,template_id,template_version,params_json,target_json,?
+		FROM inspection_run_checks WHERE run_id=?`, runID, now, sourceRunID); err != nil {
+		return RunDetail{}, err
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT check_key FROM inspection_run_checks WHERE run_id=? ORDER BY check_key`, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	var checkKeys []string
+	for rows.Next() {
+		var key string
+		if err = rows.Scan(&key); err != nil {
+			rows.Close()
+			return RunDetail{}, err
 		}
-		if err != nil {
+		checkKeys = append(checkKeys, key)
+	}
+	rows.Close()
+	for _, key := range checkKeys {
+		if err = s.pluginChildForRerun(ctx, conn, runID, sourceRunID, key, now); err != nil {
 			if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
-				return RunDetail{}, fmt.Errorf("%w: 尚无可用的 Thanos 指标连接，请先创建并启用连接后重试", err)
+				return RunDetail{}, fmt.Errorf("%w: 尚无可用的指标连接，请先创建并启用连接后重试", err)
 			}
 			return RunDetail{}, err
 		}
@@ -225,14 +229,14 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 	if err = s.convergeOn(ctx, conn, runID); err != nil {
 		return RunDetail{}, err
 	}
-	detail, err := s.detailOn(ctx, conn, systemKey, runID)
+	detail, err := s.detailOn(ctx, conn, runID)
 	if err != nil {
 		return RunDetail{}, err
 	}
-	if err = s.audit(ctx, conn, principalID, clientCommandID, command, runID, now); err != nil {
+	if err = s.audit(ctx, conn, principalID, clientCommandID, command, detail.RunID, s.nowText()); err != nil {
 		return RunDetail{}, err
 	}
-	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, runID, detail); err != nil {
+	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, detail.RunID, detail); err != nil {
 		return RunDetail{}, err
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

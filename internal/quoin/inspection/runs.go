@@ -16,25 +16,33 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 )
 
-// GetRun returns one run detail bound to the system key.
-func (s *Service) GetRun(ctx context.Context, systemKey string, runID int64) (RunDetail, error) {
+// GetRun returns one run detail located by its immutable run id. Legacy
+// declaration runs and plan runs share the same projection.
+func (s *Service) GetRun(ctx context.Context, runID int64) (RunDetail, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return RunDetail{}, err
 	}
 	defer conn.Close()
-	return s.detailOn(ctx, conn, systemKey, runID)
+	return s.detailOn(ctx, conn, runID)
 }
 
-// ListRuns returns the system's runs newest first with a (created_at, id)
-// keyset cursor (HTTP-PAGE-005 order).
-func (s *Service) ListRuns(ctx context.Context, systemKey, cursor string, limit int) ([]RunSummary, bool, error) {
+// ListRuns returns all runs newest first with a (created_at, id) keyset
+// cursor (HTTP-PAGE-005 order); planKey optionally filters one plan.
+func (s *Service) ListRuns(ctx context.Context, planKey, cursor string, limit int) ([]RunSummary, bool, error) {
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
-	query := `SELECT r.id, r.plan_key, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
-		FROM inspection_runs r JOIN business_systems s ON s.id=r.business_system_id WHERE s.key=?`
-	args := []any{systemKey}
+	query := `SELECT r.id, r.plan_key, bs.key, c.name, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
+		FROM inspection_runs r
+		LEFT JOIN business_systems bs ON bs.id = r.business_system_id
+		LEFT JOIN connections c ON c.id = r.connection_id
+		WHERE 1=1`
+	args := []any{}
+	if planKey != "" {
+		query += ` AND r.plan_key=?`
+		args = append(args, planKey)
+	}
 	if cursor != "" {
 		createdAt, lastID, err := parseRunCursor(cursor)
 		if err != nil {
@@ -49,33 +57,38 @@ func (s *Service) ListRuns(ctx context.Context, systemKey, cursor string, limit 
 	if err != nil {
 		return nil, false, err
 	}
-	defer rows.Close()
-	items := []RunSummary{}
+	summaries := []RunSummary{}
 	for rows.Next() {
 		var item RunSummary
 		var id int64
+		var systemKey, connectionName sql.NullString
 		var scheduledFor, evidenceAt sql.NullString
-		if err = rows.Scan(&id, &item.PlanKey, &item.State, &item.RowVersion, &item.TriggerKind, &scheduledFor, &evidenceAt, &item.CreatedAt); err != nil {
+		if err = rows.Scan(&id, &item.PlanKey, &systemKey, &connectionName, &item.State, &item.RowVersion, &item.TriggerKind, &scheduledFor, &evidenceAt, &item.CreatedAt); err != nil {
 			return nil, false, err
 		}
 		item.ID = locatorID(id)
-		item.BusinessSystemKey = systemKey
+		if systemKey.Valid {
+			item.BusinessSystemKey = &systemKey.String
+		}
+		if connectionName.Valid {
+			item.ConnectionName = &connectionName.String
+		}
 		if scheduledFor.Valid {
 			item.ScheduledFor = &scheduledFor.String
 		}
 		if evidenceAt.Valid {
 			item.EvidenceAt = &evidenceAt.String
 		}
-		items = append(items, item)
+		summaries = append(summaries, item)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, false, err
 	}
-	more := len(items) > limit
+	more := len(summaries) > limit
 	if more {
-		items = items[:limit]
+		summaries = summaries[:limit]
 	}
-	return items, more, nil
+	return summaries, more, nil
 }
 
 func parseRunCursor(cursor string) (string, int64, error) {
@@ -156,8 +169,8 @@ type CancelOutcome struct {
 
 // CancelRun preserves the original domain API for callers that only need the
 // current authoritative Run projection.
-func (s *Service) CancelRun(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID, expectedRowVersion int64) (RunDetail, error) {
-	outcome, err := s.CancelRunWithDispatch(ctx, principalID, clientCommandID, systemKey, runID, expectedRowVersion)
+func (s *Service) CancelRun(ctx context.Context, principalID int64, clientCommandID string, runID, expectedRowVersion int64) (RunDetail, error) {
+	outcome, err := s.CancelRunWithDispatch(ctx, principalID, clientCommandID, runID, expectedRowVersion)
 	return outcome.Detail, err
 }
 
@@ -165,9 +178,9 @@ func (s *Service) CancelRun(ctx context.Context, principalID int64, clientComman
 // children of an active Run or its active report analysis. Only Cancelling
 // attempts are returned for external delivery; only Queued work closes in
 // this transaction, while an Assigned DispatchAttempt may already be in flight.
-func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, clientCommandID, systemKey string, runID, expectedRowVersion int64) (CancelOutcome, error) {
+func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, clientCommandID string, runID, expectedRowVersion int64) (CancelOutcome, error) {
 	const command = "inspection_run.cancel"
-	digest := auth.DigestCommand(command, map[string]any{"systemKey": systemKey, "runId": runID, "expectedRowVersion": expectedRowVersion})
+	digest := auth.DigestCommand(command, map[string]any{"runId": runID, "expectedRowVersion": expectedRowVersion})
 	if d, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
 		return CancelOutcome{Detail: d}, err
 	}
@@ -194,19 +207,16 @@ func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, 
 		}
 		return CancelOutcome{Detail: d}, err
 	}
-	var systemID int64
 	var runState string
 	var rowVersion int64
 	if err = conn.QueryRowContext(ctx, `
-		SELECT r.business_system_id,r.state,r.row_version FROM inspection_runs r
-		JOIN business_systems s ON s.id=r.business_system_id
-		WHERE r.id=? AND s.key=?`, runID, systemKey).Scan(&systemID, &runState, &rowVersion); errors.Is(err, sql.ErrNoRows) {
+		SELECT r.state,r.row_version FROM inspection_runs r WHERE r.id=?`, runID).Scan(&runState, &rowVersion); errors.Is(err, sql.ErrNoRows) {
 		return CancelOutcome{}, ErrNotFound
 	} else if err != nil {
 		return CancelOutcome{}, err
 	}
 	if rowVersion != expectedRowVersion {
-		return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, systemKey, runID, &committed)
+		return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, runID, &committed)
 	}
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id FROM execution_attempts
@@ -239,9 +249,9 @@ func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, 
 		// command as a successful observation of the winner rather than turning
 		// a result-vs-cancel race into a spurious 409.
 		if runState != "Completed" && runState != "CompletedWithGaps" {
-			return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, systemKey, runID, &committed)
+			return s.rejectCancel(ctx, conn, principalID, clientCommandID, command, digest, runID, &committed)
 		}
-		detail, detailErr := s.detailOn(ctx, conn, systemKey, runID)
+		detail, detailErr := s.detailOn(ctx, conn, runID)
 		if detailErr != nil {
 			return CancelOutcome{}, detailErr
 		}
@@ -271,11 +281,11 @@ func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, 
 	if runState == "Queued" || runState == "Running" {
 		if _, err = conn.ExecContext(ctx, `
 			UPDATE inspection_runs SET state='Cancelled',row_version=row_version+1
-			WHERE id=? AND business_system_id=? AND row_version=? AND state IN ('Queued','Running')`, runID, systemID, expectedRowVersion); err != nil {
+			WHERE id=? AND row_version=? AND state IN ('Queued','Running')`, runID, expectedRowVersion); err != nil {
 			return CancelOutcome{}, err
 		}
 	}
-	detail, err := s.detailOn(ctx, conn, systemKey, runID)
+	detail, err := s.detailOn(ctx, conn, runID)
 	if err != nil {
 		return CancelOutcome{}, err
 	}
@@ -292,19 +302,39 @@ func (s *Service) CancelRunWithDispatch(ctx context.Context, principalID int64, 
 	return CancelOutcome{Detail: detail, DispatchAttemptIDs: dispatchIDs}, nil
 }
 
-func (s *Service) rejectCancel(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command, digest, systemKey string, runID int64, committed *bool) (CancelOutcome, error) {
-	detail, err := s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "row_version_conflict", Detail: "巡检 Run 已变化或已进入终态，请刷新后重试", SystemKey: systemKey, ObjectID: runID}, committed)
+func (s *Service) rejectCancel(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command, digest string, runID int64, committed *bool) (CancelOutcome, error) {
+	detail, err := s.reject(ctx, conn, principalID, clientCommandID, command, digest, &RejectionError{Code: "row_version_conflict", Detail: "巡检 Run 已变化或已进入终态，请刷新后重试", ObjectID: runID}, committed)
 	return CancelOutcome{Detail: detail}, err
 }
 
-func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string, runID int64) (RunDetail, error) {
+// rowQuerier abstracts the one-connection pool so legacy/plan locator reads
+// work identically on *sql.DB and the caller's exclusive *sql.Conn.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// businessSystemKeyByID and connectionNameByID resolve display locators for
+// the mixed legacy/plan run projection.
+func businessSystemKeyByID(ctx context.Context, db rowQuerier, id int64) (string, error) {
+	var key string
+	err := db.QueryRowContext(ctx, `SELECT key FROM business_systems WHERE id=?`, id).Scan(&key)
+	return key, err
+}
+
+func connectionNameByID(ctx context.Context, db rowQuerier, id int64) (string, error) {
+	var name string
+	err := db.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, id).Scan(&name)
+	return name, err
+}
+
+func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, runID int64) (RunDetail, error) {
 	var detail RunDetail
 	var evidenceAt, scheduledFor sql.NullString
+	var systemID, connectionID sql.NullInt64
 	err := conn.QueryRowContext(ctx, `
-		SELECT r.id, r.plan_key, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
-		FROM inspection_runs r JOIN business_systems b ON b.id=r.business_system_id
-		WHERE b.key=? AND r.id=?`, systemKey, runID).
-		Scan(&detail.RunID, &detail.PlanKey, &detail.State, &detail.RowVersion, &detail.TriggerKind, &scheduledFor, &evidenceAt, &detail.CreatedAt)
+		SELECT r.id, r.plan_key, r.business_system_id, r.connection_id, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
+		FROM inspection_runs r WHERE r.id=?`, runID).
+		Scan(&detail.RunID, &detail.PlanKey, &systemID, &connectionID, &detail.State, &detail.RowVersion, &detail.TriggerKind, &scheduledFor, &evidenceAt, &detail.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunDetail{}, ErrNotFound
 	}
@@ -312,7 +342,20 @@ func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string
 		return RunDetail{}, err
 	}
 	detail.ID = locatorID(detail.RunID)
-	detail.BusinessSystemKey = systemKey
+	if systemID.Valid {
+		key, err := businessSystemKeyByID(ctx, conn, systemID.Int64)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		detail.BusinessSystemKey = &key
+	}
+	if connectionID.Valid {
+		name, err := connectionNameByID(ctx, conn, connectionID.Int64)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		detail.ConnectionName = &name
+	}
 	if scheduledFor.Valid {
 		detail.ScheduledFor = &scheduledFor.String
 	}
@@ -320,15 +363,13 @@ func (s *Service) detailOn(ctx context.Context, conn *sql.Conn, systemKey string
 		detail.EvidenceAt = &evidenceAt.String
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT c.check_key,
+		SELECT k.check_key,
 			COALESCE(x.status, CASE a.state WHEN 'Cancelling' THEN 'cancelling' WHEN 'Cancelled' THEN 'gap' ELSE '' END),
 			x.evidence_id, COALESCE(x.gap_reason, CASE WHEN a.state='Cancelled' THEN 'cancelled' END)
-		FROM config_checks c
-		JOIN config_plans p ON p.id=c.plan_id
-		JOIN inspection_runs r ON r.config_version_id=p.config_version_id AND r.plan_key=p.plan_key
-		LEFT JOIN inspection_check_results x ON x.run_id=r.id AND x.check_key=c.check_key
-		LEFT JOIN execution_attempts a ON a.scope_type='run_check' AND a.scope_id=r.id AND a.check_key=c.check_key
-		WHERE r.id=? ORDER BY c.check_key`, runID)
+		FROM inspection_run_checks k
+		LEFT JOIN inspection_check_results x ON x.run_id=k.run_id AND x.check_key=k.check_key
+		LEFT JOIN execution_attempts a ON a.scope_type='run_check' AND a.scope_id=k.run_id AND a.check_key=k.check_key
+		WHERE k.run_id=? ORDER BY k.check_key`, runID)
 	if err != nil {
 		return detail, err
 	}

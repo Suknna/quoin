@@ -53,11 +53,15 @@ type Input struct {
 		Labels          map[string]string `json:"labels"`
 		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"occurrence"`
-	BusinessContext struct {
+	// BusinessContext exists only when the occurrence closes onto a published
+	// business declaration (the narrowing view); source-level attempts carry
+	// Integrations instead (ADR-0004).
+	BusinessContext *struct {
 		SystemKey       string                `json:"systemKey"`
 		ConfigVersionID string                `json:"configVersionId"`
 		Resources       []resourcePromptScope `json:"resources"`
-	} `json:"businessContext"`
+	} `json:"businessContext,omitempty"`
+	Integrations  []integrationPromptScope `json:"integrations,omitempty"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
@@ -74,8 +78,11 @@ func ParseInput(canonical []byte) (Input, error) {
 	if input.Occurrence.ID == "" || input.Occurrence.Labels == nil {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing occurrence context")
 	}
-	if input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" || len(input.BusinessContext.Resources) == 0 {
-		return Input{}, fmt.Errorf("initial_analysis_v1 input missing immutable business context declaration")
+	if input.BusinessContext == nil && len(input.Integrations) == 0 {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input carries neither business context nor authorized integrations")
+	}
+	if input.BusinessContext != nil && (input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" || len(input.BusinessContext.Resources) == 0) {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input carries an incomplete business context declaration")
 	}
 	if input.ModelContract.ModelID == "" {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input missing model contract")
@@ -84,20 +91,27 @@ func ParseInput(canonical []byte) (Input, error) {
 }
 
 // BuildInitialMessages assembles the first request: the fixed system
-// contract plus the rendered occurrence context (ARCH-CONTEXT-002).
+// contract, the scope guidance (declaration view or source-level view) and
+// the rendered occurrence context (ARCH-CONTEXT-002).
 func BuildInitialMessages(input Input) ([]*schema.Message, error) {
-	contextBody, err := json.MarshalIndent(map[string]any{
-		"告警":      input.Occurrence,
-		"业务配置上下文": input.BusinessContext,
-	}, "", "  ")
+	context := map[string]any{"告警": input.Occurrence}
+	// The business view is descriptive context; the tool call shape is always
+	// the source-level one (ADR-0004). Scope guidance renders only when the
+	// attempt actually froze integrations.
+	if input.BusinessContext != nil {
+		context["业务配置上下文"] = input.BusinessContext
+	} else {
+		context["授权来源"] = input.Integrations
+	}
+	contextBody, err := json.MarshalIndent(context, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	return []*schema.Message{
-		schema.SystemMessage(SystemPrompt),
-		schema.SystemMessage(resourceScopeGuidance(input.BusinessContext.SystemKey, input.BusinessContext.Resources)),
-		schema.UserMessage("请分析以下告警：\n" + string(contextBody)),
-	}, nil
+	messages := []*schema.Message{schema.SystemMessage(SystemPrompt)}
+	if len(input.Integrations) > 0 {
+		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
+	}
+	return append(messages, schema.UserMessage("请分析以下告警：\n"+string(contextBody))), nil
 }
 
 // InvestigationSystemPrompt is the fixed agent contract for investigation
@@ -109,8 +123,8 @@ const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。�
 3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据。`
 
 // InvestigationRendererVersion identifies the investigation prompt renderer
-// generation.
-const InvestigationRendererVersion = "investigation-renderer-v1"
+// generation. v2 renders the source-level scope guidance (ADR-0004).
+const InvestigationRendererVersion = "investigation-renderer-v2"
 
 // InvestigationInput is the worker's view of the frozen investigation_v1
 // snapshot: the active-branch messages (user messages may carry their
@@ -131,6 +145,9 @@ type InvestigationInput struct {
 		ConfigVersionID string                `json:"configVersionId"`
 		Resources       []resourcePromptScope `json:"resources"`
 	} `json:"businessContext,omitempty"`
+	// Integrations replaces the business context for blank-key attempts: the
+	// admin-enabled sources are the whole read-only scope (ADR-0004).
+	Integrations  []integrationPromptScope `json:"integrations,omitempty"`
 	ModelContract struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
@@ -178,8 +195,8 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 		}
 		messages = append(messages, schema.SystemMessage("本次调查关联以下不可变来源（仅引用，不代表结论）：\n"+string(contextBody)))
 	}
-	if input.BusinessContext != nil {
-		messages = append(messages, schema.SystemMessage(resourceScopeGuidance(input.BusinessContext.SystemKey, input.BusinessContext.Resources)))
+	if len(input.Integrations) > 0 {
+		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
 	}
 	for _, item := range input.Messages {
 		switch item.Role {
@@ -194,18 +211,39 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 	return messages, nil
 }
 
-// resourceScopeGuidance teaches the v3 call shape. Exact labels are never
-// model-provided: Quoin injects them into the PromQL AST before execution.
-func resourceScopeGuidance(systemKey string, resources []resourcePromptScope) string {
-	entries := make([]string, 0, len(resources))
-	for _, resource := range resources {
-		entries = append(entries, fmt.Sprintf("%s（允许指标：%s）", resource.Name, strings.Join(resource.AllowedMetrics, "、")))
+// integrationPromptScope is one authorized integration as rendered into the
+// prompt: kind ("metrics" | "kubernetes") plus the stable connection name the
+// model passes as sourceRef. No endpoint, credential or secret is included.
+type integrationPromptScope struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// sourceScopeGuidance teaches the sourceRef call shape for attempts without
+// a business declaration (ADR-0004): the frozen integrations are the entire
+// read-only scope, ambiguity must be resolved by asking, never by guessing.
+func sourceScopeGuidance(integrations []integrationPromptScope) string {
+	var metrics, kubernetes []string
+	for _, integration := range integrations {
+		if integration.Kind == "kubernetes" {
+			kubernetes = append(kubernetes, integration.Name)
+		} else {
+			metrics = append(metrics, integration.Name)
+		}
 	}
-	exampleResource := "<resourceRef>"
-	if len(resources) > 0 {
-		exampleResource = resources[0].Name
+	builder := strings.Builder{}
+	builder.WriteString("本次执行未绑定业务声明；下列已启用来源就是全部只读授权范围。")
+	builder.WriteString("调用 thanos_query 时用 sourceRef 指明指标来源，resourceRef 在此模式不可用；仅当只有一个来源时才可省略 sourceRef，多个来源未指明将被拒绝。")
+	if len(metrics) > 0 {
+		builder.WriteString("可用指标来源：" + strings.Join(metrics, "、") + "。")
 	}
-	return fmt.Sprintf("本次分析已绑定业务系统 %q。调用 thanos_query 必须传 resourceRef 和 query；可用 resourceRef：%s。示例：thanos_query({resourceRef: %q, query: %q})。Quoin 会为每个向量选择器注入该资源的必需 labels，且只允许声明的指标。", systemKey, strings.Join(entries, "；"), exampleResource, "up")
+	if len(kubernetes) > 0 {
+		builder.WriteString("可用 Kubernetes 来源：" + strings.Join(kubernetes, "、") + "（kubernetes_read 同样用 sourceRef 选择）。")
+	}
+	if len(metrics) > 0 {
+		builder.WriteString(fmt.Sprintf("示例：thanos_query({sourceRef: %q, query: %q})。", metrics[0], "up"))
+	}
+	return builder.String()
 }
 
 // renderUserTurn appends the deterministic attachment locator block to one

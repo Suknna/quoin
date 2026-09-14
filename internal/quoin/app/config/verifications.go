@@ -73,44 +73,6 @@ func decodeVerificationCursor(raw string) (string, *problemError) {
 	return cursor, nil
 }
 
-func (handler *Handler) runConfigVerificationRun(ctx context.Context, input *struct {
-	Session   string `cookie:"__Host-quoin-session"`
-	SystemKey string `path:"systemKey"`
-	VersionID string `path:"versionId"`
-	Body      struct {
-		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		Purpose         string `json:"purpose" enum:"prepublish"`
-	}
-}) (*struct {
-	Status       int                                  `header:"-"`
-	CacheControl string                               `header:"Cache-Control"`
-	Body         businesssystem.VerificationRunDetail `json:"body"`
-}, error) {
-	principalID, err := handler.admin(ctx, input.Session)
-	if err != nil {
-		return nil, err
-	}
-	versionID, locatorProblem := parseLocator(input.VersionID)
-	if locatorProblem != nil {
-		return nil, locatorProblem
-	}
-	if input.Body.Purpose != "prepublish" {
-		return nil, problem(http.StatusUnprocessableEntity, "validation_failed", "本端点只接受 purpose=prepublish 的验证 Run。")
-	}
-	detail, err := handler.Systems.RunVerification(ctx, principalID, input.Body.ClientCommandID, input.SystemKey, versionID)
-	if err != nil {
-		return nil, mapDomainError(err)
-	}
-	if handler.DispatchConfigVerification != nil {
-		go handler.DispatchConfigVerification(context.Background())
-	}
-	return &struct {
-		Status       int                                  `header:"-"`
-		CacheControl string                               `header:"Cache-Control"`
-		Body         businesssystem.VerificationRunDetail `json:"body"`
-	}{Status: http.StatusAccepted, CacheControl: noStore(), Body: detail}, nil
-}
-
 func (handler *Handler) getConfigVerificationRun(ctx context.Context, input *struct {
 	Session           string `cookie:"__Host-quoin-session"`
 	SystemKey         string `path:"systemKey"`
@@ -134,54 +96,6 @@ func (handler *Handler) getConfigVerificationRun(ctx context.Context, input *str
 	detail, err := handler.Systems.GetVerification(ctx, input.SystemKey, versionID, runID)
 	if err != nil {
 		return nil, mapDomainError(err)
-	}
-	return &struct {
-		CacheControl string                               `header:"Cache-Control"`
-		Body         businesssystem.VerificationRunDetail `json:"body"`
-	}{CacheControl: noStore(), Body: detail}, nil
-}
-
-func (handler *Handler) cancelConfigVerificationRun(ctx context.Context, input *struct {
-	// Flattened rather than embedded: huma v2.39.1 does not bind cookie
-	// parameters from embedded structs when the input also has a Body (same
-	// frozen workaround as publishBody).
-	Session           string `cookie:"__Host-quoin-session"`
-	SystemKey         string `path:"systemKey"`
-	VersionID         string `path:"versionId"`
-	VerificationRunID string `path:"verificationRunId"`
-	Body              struct {
-		ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
-	}
-}) (*struct {
-	CacheControl string                               `header:"Cache-Control"`
-	Body         businesssystem.VerificationRunDetail `json:"body"`
-}, error) {
-	principalID, err := handler.admin(ctx, input.Session)
-	if err != nil {
-		return nil, err
-	}
-	versionID, locatorProblem := parseLocator(input.VersionID)
-	if locatorProblem != nil {
-		return nil, locatorProblem
-	}
-	runID, runProblem := parseLocator(input.VerificationRunID)
-	if runProblem != nil {
-		return nil, runProblem
-	}
-	detail, err := handler.Systems.CancelVerification(ctx, principalID, input.Body.ClientCommandID, input.SystemKey, versionID, runID, input.Body.ExpectedRowVersion)
-	if err != nil {
-		return nil, mapDomainError(err)
-	}
-	// The cancellation state fence is committed before delivery; querying the
-	// child IDs afterwards is safe because every surviving bound child is now
-	// Cancelling and a late ResultProposal is rejected by the Attempt authority.
-	if handler.CancelDispatch != nil {
-		for _, attemptID := range detail.CancellingAttemptIDs {
-			if err := handler.CancelDispatch(ctx, attemptID); err != nil {
-				return nil, err
-			}
-		}
 	}
 	return &struct {
 		CacheControl string                               `header:"Cache-Control"`

@@ -21,6 +21,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
+	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -34,20 +35,22 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 
 // RendererVersion identifies the input renderer generation both sides
 // agree on (ARCH-CONTEXT-006).
-// Renderer v3 replaces Label Contract context with declaration resource scopes.
-// Rebuild retains v1/v2 paths so historical snapshot bytes stay exact.
-const RendererVersion = "initial-analysis-renderer-v3"
+// Renderer v3 replaced Label Contract context with declaration resource scopes.
+// Renderer v4 makes the declaration optional (ADR-0004): attempts created
+// without an eligible business view freeze the enabled integrations as their
+// source-level authority instead. Rebuild retains v1/v2/v3 paths so
+// historical snapshot bytes stay exact.
+const RendererVersion = "initial-analysis-renderer-v4"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
-	ErrNotFound               = errors.New("initial analysis not found")
-	ErrModelProviderMissing   = errors.New("no enabled qualified model provider")
-	ErrBusinessContextMissing = errors.New("alert occurrence has no eligible published business configuration")
-	ErrActiveConflict         = errors.New("initial analysis is not retryable or the fence lost the race")
-	ErrCommandReplayMismatch  = errors.New("client command id is already bound to a different analysis operation or target")
-	ErrNoOutput               = errors.New("initial analysis has no sealed output")
-	ErrLateResult             = errors.New("result proposal lost the commit-order race")
-	ErrOutputSealed           = errors.New("initial analysis already sealed an output")
+	ErrNotFound              = errors.New("initial analysis not found")
+	ErrModelProviderMissing  = errors.New("no enabled qualified model provider")
+	ErrActiveConflict        = errors.New("initial analysis is not retryable or the fence lost the race")
+	ErrCommandReplayMismatch = errors.New("client command id is already bound to a different analysis operation or target")
+	ErrNoOutput              = errors.New("initial analysis has no sealed output")
+	ErrLateResult            = errors.New("result proposal lost the commit-order race")
+	ErrOutputSealed          = errors.New("initial analysis already sealed an output")
 )
 
 // RowVersionError reports a stale expected_row_version fence miss.
@@ -101,21 +104,35 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
 	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
+	service.evidence.RegisterProjector(kubernetes.ReadToolName, kubernetes.EvidenceFor)
 	service.attempts.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
-		if tool.Name != thanos.QueryToolName {
+		switch tool.Name {
+		case thanos.QueryToolName:
+			// ResolveQueryGrant returns the full resolution (grants + preflight).
+			return thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
+		case kubernetes.ReadToolName:
+			return kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
+		default:
 			return attempt.ToolResolution{}, fmt.Errorf("tool %s has no grant resolver", tool.Name)
 		}
-		grant, err := thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-		if err != nil {
-			return attempt.ToolResolution{}, err
-		}
-		return attempt.ToolResolution{Grants: []attempt.ToolGrant{grant}}, nil
 	}
 	service.attempts.ToolGrantValidator = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool attempt.ToolDef) error {
-		if tool.Name != thanos.QueryToolName {
+		switch tool.Name {
+		case thanos.QueryToolName:
+			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
+		case kubernetes.ReadToolName:
+			// The TOCTOU fence lives at fulfillment, not here: every
+			// FetchCredentialGrant for purpose kubernetes_read re-validates
+			// enabled/revision/generation/root binding per grant inside
+			// FulfillGrant's IMMEDIATE transaction (connections/grant.go ->
+			// kubernetes.ValidateGrantForFulfillment, pinned by
+			// TestValidateGrantForFulfillment*). Checking every mapping here
+			// would let one invalid connection reject valid siblings before
+			// partial results reach the model.
+			return nil
+		default:
 			return fmt.Errorf("tool %s has no grant validator", tool.Name)
 		}
-		return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
 	}
 	service.attempts.EvidenceWriter = service.evidence.WriteForToolCall
 	return service
@@ -171,12 +188,27 @@ func (service *Service) replayRemember(principalID int64, commandID string, entr
 }
 
 // Input is the rendered, immutable input of one analysis. BusinessContext is
-// the published declaration and Label Contract pair that scopes every metrics
-// observation proposed by this attempt.
+// the published declaration that scopes every metrics observation proposed by
+// this attempt; when no eligible business view exists (ADR-0004) it is absent
+// and Integrations carries the source-level authority instead.
 type Input struct {
-	Occurrence      OccurrenceContext `json:"occurrence"`
-	BusinessContext BusinessContext   `json:"businessContext"`
-	ModelContract   ModelContract     `json:"modelContract"`
+	Occurrence OccurrenceContext `json:"occurrence"`
+	// BusinessContext stays nil exactly when the attempt froze integrations;
+	// the declaration view narrows, it never widens source-level authority.
+	BusinessContext *BusinessContext      `json:"businessContext,omitempty"`
+	Integrations    []RenderedIntegration `json:"integrations,omitempty"`
+	ModelContract   ModelContract         `json:"modelContract"`
+	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
+	// the snapshot digest covers it via this embedding.
+	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
+}
+
+// RenderedIntegration is one admin-enabled integration frozen into the
+// attempt input as its source-level read-only authority. Kind is
+// "metrics" (Prometheus/Thanos) or "kubernetes"; credentials never appear.
+type RenderedIntegration struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
 }
 
 // BusinessContext is the declaration-derived scope exposed to the model. It
@@ -314,6 +346,13 @@ func (service *Service) create(ctx context.Context, occurrenceID, principalID in
 	if err != nil {
 		return CreateResult{}, err
 	}
+	// Freeze THIS attempt's tool catalog at creation: the identical document
+	// travels in the digested input and in attempt_input_snapshots.
+	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(service.attempts.Catalogs, attempt.AgentVersion)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	input.ToolCatalog = catalog
 	canonical, err := json.Marshal(input)
 	if err != nil {
 		return CreateResult{}, err
@@ -331,7 +370,7 @@ func (service *Service) create(ctx context.Context, occurrenceID, principalID in
 	if err != nil {
 		return CreateResult{}, err
 	}
-	attemptID, err := insertAttempt(ctx, conn, analysisID, digestHex, input, selected, now)
+	attemptID, err := insertAttempt(ctx, conn, analysisID, digestHex, input, selected, now, string(catalogDocument))
 	if err != nil {
 		return CreateResult{}, err
 	}
@@ -384,9 +423,19 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	if err := populateOccurrenceAnnotations(ctx, conn, occurrenceID, &input.Occurrence); err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
-	if err := resolveBusinessContext(ctx, conn, occurrenceID, &input.BusinessContext); err != nil {
+	// ADR-0004: the business view is descriptive context only; the enabled
+	// integrations are ALWAYS the attempt's source-level authority. A
+	// published declaration can never grant or scope new work.
+	integrations, err := enabledIntegrations(ctx, conn)
+	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
+	input.Integrations = integrations
+	businessContext, err := resolveBusinessContext(ctx, conn, occurrenceID)
+	if err != nil {
+		return Input{}, ModelContract{}, provider{}, err
+	}
+	input.BusinessContext = businessContext
 	selected, err := selectModelProvider(ctx, conn)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
@@ -400,10 +449,11 @@ func (service *Service) renderInput(ctx context.Context, conn *sql.Conn, occurre
 	return input, contract, selected, nil
 }
 
-// resolveBusinessContext admits analysis only when occurrence attribution closes
-// onto a migrated published declaration. New work has no Label Contract gate:
-// the frozen config version itself defines every usable resource scope.
-func resolveBusinessContext(ctx context.Context, conn *sql.Conn, occurrenceID int64, context *BusinessContext) error {
+// resolveBusinessContext closes occurrence attribution onto an eligible
+// published declaration. ADR-0004: a missing or structurally empty view is
+// the source-level mainline (nil, nil) — no longer an admission error. A
+// malformed frozen declaration stays a hard error.
+func resolveBusinessContext(ctx context.Context, conn *sql.Conn, occurrenceID int64) (*BusinessContext, error) {
 	var configVersionID int64
 	var declarationJSON string
 	err := conn.QueryRowContext(ctx, `
@@ -415,22 +465,51 @@ func resolveBusinessContext(ctx context.Context, conn *sql.Conn, occurrenceID in
 		  AND config.published_at IS NOT NULL AND config.declaration_json IS NOT NULL`, occurrenceID).
 		Scan(&configVersionID, &declarationJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrBusinessContextMissing
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var declaration config.BusinessSystemDocument
 	if err := json.Unmarshal([]byte(declarationJSON), &declaration); err != nil {
-		return fmt.Errorf("decode frozen business declaration: %w", err)
+		return nil, fmt.Errorf("decode frozen business declaration: %w", err)
 	}
 	if declaration.SystemKey == "" || declaration.MetricsConnectionID <= 0 || len(declaration.Resources) == 0 {
-		return ErrBusinessContextMissing
+		return nil, nil
 	}
-	context.SystemKey = declaration.SystemKey
-	context.ConfigVersionID = strconv.FormatInt(configVersionID, 10)
-	context.Resources = append([]config.ResourceProjection(nil), declaration.Resources...)
-	return nil
+	return &BusinessContext{
+		SystemKey:       declaration.SystemKey,
+		ConfigVersionID: strconv.FormatInt(configVersionID, 10),
+		Resources:       append([]config.ResourceProjection(nil), declaration.Resources...),
+	}, nil
+}
+
+// enabledIntegrations lists the admin-enabled observation integrations in
+// deterministic name order. Each entry freezes the connection's current
+// revision when the attempt items are written, so the model-visible source
+// authority is exactly the grant-eligible set.
+func enabledIntegrations(ctx context.Context, conn *sql.Conn) ([]RenderedIntegration, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT name, type FROM connections
+		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
+		ORDER BY name, type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var integrations []RenderedIntegration
+	for rows.Next() {
+		var name, connectionType string
+		if err := rows.Scan(&name, &connectionType); err != nil {
+			return nil, err
+		}
+		kind := "metrics"
+		if connectionType == "kubernetes" {
+			kind = "kubernetes"
+		}
+		integrations = append(integrations, RenderedIntegration{Kind: kind, Name: name})
+	}
+	return integrations, rows.Err()
 }
 
 // selectModelProvider resolves the single enabled model provider and its
@@ -476,7 +555,7 @@ func selectModelProvider(ctx context.Context, conn *sql.Conn) (provider, error) 
 
 // insertAttempt persists one Queued attempt with its frozen input snapshot,
 // input items and chat_model grant (DATA-ATTEMPT-001/002).
-func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digestHex string, input Input, selected provider, now string) (int64, error) {
+func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digestHex string, input Input, selected provider, now, toolCatalogJSON string) (int64, error) {
 	attemptInsert, err := conn.ExecContext(ctx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
 		VALUES('initial_analysis','analysis',?,'Queued',?,?,?)`, analysisID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
@@ -488,8 +567,8 @@ func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digest
 		return 0, err
 	}
 	snapshotInsert, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
-		VALUES(?,?,?,?,?)`, attemptID, SchemaKind, RendererVersion, digestHex, now)
+		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
+		VALUES(?,?,?,?,?,?)`, attemptID, SchemaKind, RendererVersion, digestHex, toolCatalogJSON, now)
 	if err != nil {
 		return 0, err
 	}
@@ -507,19 +586,25 @@ func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digest
 		VALUES(?,1,'occurrence',?,?)`, snapshotID, hex.EncodeToString(occurrenceDigest[:]), occurrenceID); err != nil {
 		return 0, err
 	}
-	configVersionID, err := strconv.ParseInt(input.BusinessContext.ConfigVersionID, 10, 64)
-	if err != nil || configVersionID <= 0 {
-		return 0, fmt.Errorf("analysis business configuration context is missing")
+	// Every attempt freezes the enabled integrations at their current
+	// revisions — the authoritative grant-eligible set (ADR-0004). An
+	// attributed occurrence additionally freezes its business config version
+	// lineage as descriptive model context; it never grants authority.
+	if input.BusinessContext != nil {
+		configVersionID, err := strconv.ParseInt(input.BusinessContext.ConfigVersionID, 10, 64)
+		if err != nil || configVersionID <= 0 {
+			return 0, fmt.Errorf("analysis business configuration context is missing")
+		}
+		configDigest := sha256.Sum256([]byte("business-system-config-version:" + input.BusinessContext.ConfigVersionID))
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
+			VALUES(?,2,'business_config',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
+			return 0, err
+		}
 	}
-	configDigest := sha256.Sum256([]byte("business-system-config-version:" + input.BusinessContext.ConfigVersionID))
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
-		VALUES(?,2,'business_config',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
+	if err := insertSourceLineageItems(ctx, conn, snapshotID, 3, input.Integrations); err != nil {
 		return 0, err
 	}
-	// Config-version lineage is the sole authority for new analysis attempts.
-	// Historical snapshots may retain their independent Label Contract item, but
-	// no new item is written after the declaration runtime cutover.
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?,?,?,?,?,?,?)`,
@@ -527,6 +612,59 @@ func insertAttempt(ctx context.Context, conn *sql.Conn, analysisID int64, digest
 		return 0, err
 	}
 	return attemptID, nil
+}
+
+// insertSourceLineageItems freezes one input item per enabled integration at
+// its current revision. The revision pointer is the frozen fact: later
+// rotations create new revisions, so the attempt's authorized set stays
+// reconstructible byte-for-byte (and later grants must match these items).
+func insertSourceLineageItems(ctx context.Context, conn *sql.Conn, snapshotID, firstSeq int64, integrations []RenderedIntegration) error {
+	if len(integrations) == 0 {
+		return nil
+	}
+	rows, err := conn.QueryContext(ctx, `
+		SELECT name, current_revision_id FROM connections
+		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
+		ORDER BY name, type`)
+	if err != nil {
+		return err
+	}
+	type frozen struct {
+		name       string
+		revisionID int64
+	}
+	var frozenIntegrations []frozen
+	for rows.Next() {
+		var item frozen
+		if err := rows.Scan(&item.name, &item.revisionID); err != nil {
+			rows.Close()
+			return err
+		}
+		frozenIntegrations = append(frozenIntegrations, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// The integration list rendered into the digest and the frozen items must
+	// be the same set; a concurrent enablement inside this IMMEDIATE
+	// transaction is impossible, so a size mismatch is a programming error.
+	if len(frozenIntegrations) != len(integrations) {
+		return fmt.Errorf("integration snapshot drift: %d rendered vs %d frozen", len(integrations), len(frozenIntegrations))
+	}
+	for index, item := range frozenIntegrations {
+		role := "metrics_source"
+		if integrations[index].Kind == "kubernetes" {
+			role = "kubernetes_source"
+		}
+		digest := sha256.Sum256([]byte("connection-revision:" + strconv.FormatInt(item.revisionID, 10)))
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id)
+			VALUES(?,?,?, ?,?)`, snapshotID, firstSeq+int64(index), role, hex.EncodeToString(digest[:]), item.revisionID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // recordAudit appends the narrow audit event in the caller's transaction

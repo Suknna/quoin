@@ -1,0 +1,219 @@
+package supervisor
+
+// Cross-wire roundtrip: the canonical proposal bytes this supervisor seals
+// are exactly what the Quoin control plane (observation.CommitProposal)
+// adjudicates. The partial/warnings case is the review regression: a gap
+// proposal must arrive with empty objects so the Run converges instead of
+// being rejected into a permanent Running state.
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/observation"
+	_ "modernc.org/sqlite"
+)
+
+func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string) observation.SourceObservationRun) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/roundtrip.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('plinth',1,?,?,?,1)`, make([]byte, 32), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID, _ := credential.LastInsertId()
+	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='plinth'`, credentialID); err != nil {
+		t.Fatal(err)
+	}
+	// An isolated but identical discovery catalog keeps the roundtrip focused
+	// on the wire shape rather than the shared catalog's tool-schema churn.
+	registry := plugins.NewRegistry()
+	if err := registry.RegisterDescriptor(plugins.Descriptor{
+		ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
+		DefaultEnabled: true,
+		Capabilities:   []plugins.Capability{plugins.CapabilityDiscover},
+		ConnectionKind: "prometheus",
+		DiscoverObjects: []plugins.DiscoverObject{
+			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := observation.NewService(db, registry, enabled)
+	// The real probe→enable path so the frozen source grant resolves.
+	connService := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
+	configJSON, _ := json.Marshal(map[string]any{"type": "prometheus", "baseUrl": "https://metrics.test", "authType": "none"})
+	summary, err := connService.Create(context.Background(), connections.CreateInput{Name: "roundtrip-prometheus", Type: "prometheus", NonSecretJSON: configJSON}, 1, "roundtrip-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeID, err := connService.StartProbe(context.Background(), summary.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := connService.BindQueuedToStream(context.Background(), probeID, "roundtrip-boot", 1, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind probe: %v ok=%v", err, ok)
+	}
+	if err := connService.AcceptProbe(context.Background(), probeID, "roundtrip-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := connService.CommitProbeResult(context.Background(), probeID, "roundtrip-boot", 1, connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", probeID), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}, &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"prometheus"}`}}); err != nil {
+		t.Fatal(err)
+	}
+	var qualified int64
+	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, probeID).Scan(&qualified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connService.Enable(context.Background(), summary.Name, summary.RowVersion, qualified, 1); err != nil {
+		t.Fatal(err)
+	}
+	return service, func(commandID string) observation.SourceObservationRun {
+		run, err := service.StartRun(context.Background(), 1, commandID, "roundtrip-prometheus", "manual", nil)
+		if err != nil {
+			t.Fatalf("start run: %v", err)
+		}
+		queued, err := service.QueuedObservationAttempts(context.Background())
+		if err != nil || len(queued) != 1 {
+			t.Fatalf("queued children = %v, %v", queued, err)
+		}
+		attempts := service.Attempts()
+		if err := attempts.BindToStream(context.Background(), queued[0], "roundtrip-boot", 1, time.Minute, "test"); err != nil {
+			t.Fatalf("bind child: %v", err)
+		}
+		if err := attempts.Accept(context.Background(), queued[0], "roundtrip-boot", 1); err != nil {
+			t.Fatalf("accept child: %v", err)
+		}
+		return run
+	}
+}
+
+func TestSourceObservationProposalRoundtripGapConverges(t *testing.T) {
+	service, startRun := roundtripHarness(t)
+	run := startRun("roundtrip-gap-0001")
+	runID := parseRoundtripID(t, run.ID)
+	// Seal the proposal exactly as proposeSourceObservation does for an
+	// incomplete pass carrying partial facts: the marshal authority clears
+	// the objects and the control plane must accept and converge.
+	input := sourceObservationInput{ObservationRunID: runID, ObjectType: "target"}
+	attemptID := roundtripAttemptID(t, service, runID)
+	canonical, err := marshalSourceObservationProposal(attemptID, input, "gap", []observedTarget{
+		{Identity: map[string]string{"job": "web", "instance": "one:80"}},
+	}, []string{"storage throttled"}, "partial_response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape struct {
+		Objects []json.RawMessage `json:"objects"`
+	}
+	if err := json.Unmarshal(canonical, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if len(shape.Objects) != 0 {
+		t.Fatalf("gap proposal carried %d objects; only success may propose objects", len(shape.Objects))
+	}
+	if err := service.CommitProposal(context.Background(), attemptID, "roundtrip-boot", 1, canonical); err != nil {
+		t.Fatalf("gap proposal rejected by the control plane: %v", err)
+	}
+	detail, err := service.GetRun(context.Background(), "roundtrip-prometheus", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Run converged instead of wedging in Running, the child kept the
+	// honest gap reason, and no partial fact touched the identity projection.
+	if detail.State != "CompletedWithWarnings" {
+		t.Fatalf("run state = %s, want CompletedWithWarnings", detail.State)
+	}
+	if len(detail.Objects) != 1 || detail.Objects[0].Status != "gap" || detail.Objects[0].GapReason == nil || *detail.Objects[0].GapReason != "partial_response" {
+		t.Fatalf("gap object wrong: %#v", detail.Objects)
+	}
+	resources, _, err := service.ListResources(context.Background(), "roundtrip-prometheus", "", "", 0, 50)
+	if err != nil || len(resources) != 0 {
+		t.Fatalf("gap pass projected resources: %v %v", resources, err)
+	}
+}
+
+func TestSourceObservationProposalRoundtripSuccessProjects(t *testing.T) {
+	service, startRun := roundtripHarness(t)
+	run := startRun("roundtrip-success-0001")
+	runID := parseRoundtripID(t, run.ID)
+	input := sourceObservationInput{ObservationRunID: runID, ObjectType: "target"}
+	attemptID := roundtripAttemptID(t, service, runID)
+	canonical, err := marshalSourceObservationProposal(attemptID, input, "success", []observedTarget{
+		{
+			Identity:    map[string]string{"job": "web", "instance": "one:80"},
+			Labels:      map[string]string{"job": "web", "instance": "one:80"},
+			DisplayName: "web/one:80",
+		},
+	}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CommitProposal(context.Background(), attemptID, "roundtrip-boot", 1, canonical); err != nil {
+		t.Fatalf("success proposal rejected by the control plane: %v", err)
+	}
+	detail, err := service.GetRun(context.Background(), "roundtrip-prometheus", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "Completed" || len(detail.Objects) != 1 || detail.Objects[0].Status != "ok" || detail.Objects[0].EvidenceID == nil {
+		t.Fatalf("success run wrong: %#v", detail)
+	}
+	items, _, err := service.ListResources(context.Background(), "roundtrip-prometheus", "", "observed", 0, 50)
+	if err != nil || len(items) != 1 || items[0].IdentityLabels["instance"] != "one:80" {
+		t.Fatalf("identity projection wrong: %#v %v", items, err)
+	}
+}
+
+func parseRoundtripID(t *testing.T, raw string) int64 {
+	t.Helper()
+	var id int64
+	if _, err := fmt.Sscan(raw, &id); err != nil {
+		t.Fatalf("parse locator %q: %v", raw, err)
+	}
+	return id
+}
+
+func roundtripAttemptID(t *testing.T, service *observation.Service, runID int64) int64 {
+	t.Helper()
+	detail, err := service.GetRun(context.Background(), "roundtrip-prometheus", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Objects) != 1 || detail.Objects[0].AttemptID == nil {
+		t.Fatalf("run children wrong: %#v", detail.Objects)
+	}
+	return parseRoundtripID(t, *detail.Objects[0].AttemptID)
+}

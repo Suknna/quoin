@@ -79,6 +79,9 @@ type Service struct {
 	db      *sql.DB
 	now     func() time.Time
 	rootKey RootKeyProvider
+	// postEnableInTx 在启用事务提交前运行（ADR-0004 默认基础计划等启用耦合
+	// 副作用必须与启用原子提交）；由 app 层通过 SetPostEnableInTx 注册。
+	postEnableInTx func(ctx context.Context, conn *sql.Conn, name string) error
 }
 
 func NewService(db *sql.DB, rootKey RootKeyProvider) *Service {
@@ -588,12 +591,24 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		return Summary{}, &RowVersionError{Current: rowVersion, ID: id}
 	}
+	if service.postEnableInTx != nil {
+		if err := service.postEnableInTx(ctx, conn, name); err != nil {
+			return Summary{}, err
+		}
+	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return Summary{}, err
 	}
 	committed = true
 	conn.Close()
 	return service.Get(ctx, name)
+}
+
+// SetPostEnableInTx registers a hook invoked inside the enable transaction
+// after the connection row advanced but before commit. A hook error rolls the
+// whole enable back, so enablement-coupled invariants stay atomic.
+func (service *Service) SetPostEnableInTx(hook func(ctx context.Context, conn *sql.Conn, name string) error) {
+	service.postEnableInTx = hook
 }
 
 // Disable blocks new dispatches; already accepted attempts finish. During a

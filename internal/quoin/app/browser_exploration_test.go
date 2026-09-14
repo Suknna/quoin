@@ -234,7 +234,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	ctx := context.Background()
 	db, rootKeyFile := newBrowserExplorationFixture(t, ctx)
 	defer db.Close()
-	arguments := []byte(`{"action":"open","businessSystemKey":"payments"}`)
+	arguments := []byte(`{"action":"open","identityKey":"ops-console"}`)
 	digest := sha256.Sum256(arguments)
 	// The fixture uses the complete frozen schema: no browser, Tool Call, or
 	// execution Attempt trigger is removed or bypassed.
@@ -243,14 +243,12 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	// The fixture intentionally executes the frozen schema, including its
 	// browser_exploration_actions and row-version triggers. Foreign-key checks
 	// are disabled only to avoid unrelated model-provider bootstrap records.
-	mustExec(t, db, `INSERT INTO business_systems(id,key,display_name,enabled,created_at) VALUES(1,'payments','Payments',0,?)`, now)
-	mustExec(t, db, `UPDATE business_systems SET enabled=1,row_version=row_version+1 WHERE id=1`)
 	mustExec(t, db, `INSERT INTO users(id,username,display_name,role,enabled,password_phc,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',?,?)`, now, now)
 	mustExec(t, db, `INSERT INTO source_materials(id,kind,digest,size_bytes,content,created_at) VALUES(1,'knowledge_import',?,0,'fixture',?)`, d64, now)
 	seedQualifiedModelProvider(t, ctx, db, rootKeyFile, now)
-	mustExec(t, db, `INSERT INTO browser_identity_revisions(id,business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_at) VALUES(1,1,1,'readonly','https://payments.example','authentication.url-prefix.v1',1,'{}',?,'v1',?)`, d64, now)
+	mustExec(t, db, `INSERT INTO browser_identity_revisions(id,business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_at) VALUES(1,NULL,1,'readonly','https://payments.example','authentication.url-prefix.v1',1,'{}',?,'v1',?)`, d64, now)
 	mustExec(t, db, `INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,?,1,'test',?,?,?,?)`, make([]byte, 32), now, now, now, now)
-	mustExec(t, db, `INSERT INTO browser_identities(id,business_system_id,current_revision_id,state,created_at) VALUES(1,1,1,'AuthenticationRequired',?)`, now)
+	mustExec(t, db, `INSERT INTO browser_identities(id,business_system_id,identity_key,current_revision_id,state,created_at) VALUES(1,NULL,'ops-console',1,'AuthenticationRequired',?)`, now)
 	mustExec(t, db, `INSERT INTO browser_operations(id,identity_id,identity_revision_id,kind,actor_user_id,actor_session_id,state,journey_catalog_digest,journey_catalog_version,requested_at) VALUES(1,1,1,'manual_login',1,1,'Queued',?,'v1',?)`, d64, now)
 	mustExec(t, db, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id='lintel-boot',lintel_connection_epoch=7,row_version=row_version+1 WHERE id=1`, now)
 	mustExec(t, db, `UPDATE browser_operations SET state='Running',started_at=?,row_version=row_version+1 WHERE id=1`, now)
@@ -272,7 +270,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	mustExec(t, db, `INSERT INTO model_calls(id,attempt_id,call_seq,retry_seq,operation,model_id,connection_grant_id,prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest,input_snapshot_digest,rendered_request_digest,context_budget_tokens,max_output_tokens,estimated_input_tokens,status,started_at) VALUES(4,2,1,0,'chat','model',3,'p','investigation-v1',?,'t',?,?,?,10,1,0,'running',?)`, d64, d64, d64, d64, now)
 	mustExec(t, db, `INSERT INTO model_call_input_items(model_call_id,item_seq,item_role,source_digest,synthetic_kind) VALUES(4,1,'system',?,'system_contract'),(4,2,'system',?,'tool_schema')`, d64, d64)
 	mustExec(t, db, `INSERT INTO model_call_input_items(model_call_id,item_seq,item_role,source_digest,attempt_input_snapshot_id) VALUES(4,3,'system',?,2)`, d64)
-	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(4,1,?,?, 'tool_calls',?)`, `{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"provider-open","name":"quoin_browser","arguments":{"action":"open","businessSystemKey":"payments"}}]}`, d64, now)
+	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(4,1,?,?, 'tool_calls',?)`, `{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"provider-open","name":"quoin_browser","arguments":{"action":"open","identityKey":"ops-console"}}]}`, d64, now)
 	mustExec(t, db, `UPDATE model_calls SET status='succeeded',ended_at=?,usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}' WHERE id=4`, now)
 	mustExec(t, db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at) VALUES(1,2,4,1,0,'provider-open','quoin_browser','1',?,?, 'quoin_browser','return_to_model','pending',?)`, string(arguments), fmt.Sprintf("%x", digest), now)
 	mustExec(t, db, `UPDATE tool_calls SET status='running',started_at=?,row_version=row_version+1 WHERE id=1`, now)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
 	appinspection "github.com/Suknna/quoin/internal/quoin/app/inspection"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	appknowledge "github.com/Suknna/quoin/internal/quoin/app/knowledge"
@@ -41,7 +40,7 @@ func (application *apiServer) upgradeDrainInspections() *appinspection.Handler {
 	return &appinspection.Handler{
 		Inspections: application.inspections,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateFull(ctx, cookie, "取消巡检")
+			session, err := application.authenticateAdmin(ctx, cookie, "取消巡检")
 			if err != nil {
 				return 0, err
 			}
@@ -68,32 +67,6 @@ func (application *apiServer) upgradeDrainKnowledge() *appknowledge.Handler {
 		},
 		Authenticate: func(ctx context.Context, cookie string) (auth.Session, error) {
 			return application.authenticateFull(ctx, cookie, "取消知识导入")
-		},
-	}
-}
-
-func (application *apiServer) upgradeDrainConfig() *appconfig.Handler {
-	return &appconfig.Handler{
-		Systems: application.systems,
-		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateFull(ctx, cookie, "取消配置验证")
-			if err != nil {
-				return 0, err
-			}
-			return session.User.ID, nil
-		},
-		AuthenticateAdmin: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateAdmin(ctx, cookie, "取消配置验证")
-			if err != nil {
-				return 0, err
-			}
-			return session.User.ID, nil
-		},
-		CancelDispatch: func(ctx context.Context, attemptID int64) error {
-			if application.cancelDispatchFunc == nil {
-				return errors.New("cancel dispatch not wired")
-			}
-			return application.cancelDispatchFunc(ctx, attemptID)
 		},
 	}
 }

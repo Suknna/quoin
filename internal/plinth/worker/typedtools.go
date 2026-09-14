@@ -137,78 +137,101 @@ func (runner *Runner) executeTypedTool(ctx context.Context, writer *FrameWriter,
 	if err != nil {
 		return err
 	}
-	var payload map[string]any
-	schemaKind := toolName + "_result_v1"
-	switch toolName {
-	case "artifact_read", "artifact_grep":
-		// The locator pre-parse is exclusive to the artifact tools: the
-		// thanos_query arguments carry no artifactId and must reach the
-		// query executor untouched.
-		artifactIDText, _ := args["artifactId"].(string)
-		artifactID, err := parseLocator(artifactIDText)
-		if err != nil {
-			return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "invalid_arguments", err.Error())
-		}
-		if toolName == "artifact_grep" {
-			pattern, _ := args["pattern"].(string)
-			if pattern == "" {
-				return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "invalid_arguments", "pattern 必须是非空字符串")
-			}
-			rpcCtx, err := runner.artifactContext(ctx)
-			if err != nil {
-				return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "grant_missing", "读取状态卷 token 失败")
-			}
-			response, rpcErr := runner.Artifacts.GrepText(rpcCtx, &runtimev1.ArtifactGrepTextRequest{
-				AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
-				ConnectionEpoch: runner.Sink.Epoch(), Re2Pattern: pattern,
-				MaxMatches: 200, ContextLines: 5,
-			})
-			if rpcErr != nil {
-				return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "artifact_grep_failed", rpcErr.Error())
-			}
-			var lines []string
-			for _, match := range response.GetMatches() {
-				lines = append(lines, fmt.Sprintf("%d:%s", match.GetLine(), string(match.GetContent())))
-			}
-			payload = map[string]any{
-				"success": true, "output": joinLines(lines),
-				"matchCount": len(lines), "truncated": response.GetTruncated(),
-				"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
-				"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
-			}
-		} else {
-			startLine := int64(1)
-			maxLines := int64(2000)
-			if offset, ok := args["offset"].(float64); ok && offset >= 1 {
-				startLine = int64(offset)
-			}
-			if limit, ok := args["limit"].(float64); ok && limit >= 1 && limit <= 2000 {
-				maxLines = int64(limit)
-			}
-			rpcCtx, err := runner.artifactContext(ctx)
-			if err != nil {
-				return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "grant_missing", "读取状态卷 token 失败")
-			}
-			response, rpcErr := runner.Artifacts.ReadText(rpcCtx, &runtimev1.ArtifactReadTextRequest{
-				AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
-				ConnectionEpoch: runner.Sink.Epoch(), StartLine: uint64(startLine), MaxLines: uint32(maxLines),
-			})
-			if rpcErr != nil {
-				return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "artifact_read_failed", rpcErr.Error())
-			}
-			payload = map[string]any{
-				"success": true, "output": string(response.GetContent()),
-				"startLine": response.GetStartLine(), "nextLine": response.GetNextLine(), "eof": response.GetEof(),
-				"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
-				"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
-			}
-		}
-	case "thanos_query":
-		return runner.executeThanosQuery(ctx, writer, attemptID, toolCallID, args)
-	default:
+	executor, known := lookupTypedExecutor(toolName)
+	if !known {
 		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "unknown_tool", "supervisor tool "+toolName+" is not in the fixed catalog")
 	}
-	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, schemaKind, payload, 0)
+	return executor(&TypedToolContext{
+		BaseCtx: ctx, Runner: runner, Writer: writer,
+		AttemptID: attemptID, ToolCallID: toolCallID, ToolName: toolName, Args: args,
+	})
+}
+
+// executeArtifactRead executes the artifact_read typed tool (registered in
+// typedexecutors.go like every plugin-owned executor).
+func executeArtifactRead(execution *TypedToolContext) error {
+	ctx, runner := execution.BaseCtx, execution.Runner
+	attemptID, args := execution.AttemptID, execution.Args
+	artifactIDText, _ := args["artifactId"].(string)
+	artifactID, err := parseLocator(artifactIDText)
+	if err != nil {
+		return execution.Fail("invalid_arguments", err.Error())
+	}
+	startLine := int64(1)
+	maxLines := int64(2000)
+	if offset, ok := args["offset"].(float64); ok && offset >= 1 {
+		startLine = int64(offset)
+	}
+	if limit, ok := args["limit"].(float64); ok && limit >= 1 && limit <= 2000 {
+		maxLines = int64(limit)
+	}
+	rpcCtx, err := runner.artifactContext(ctx)
+	if err != nil {
+		return execution.Fail("grant_missing", "读取状态卷 token 失败")
+	}
+	response, rpcErr := runner.Artifacts.ReadText(rpcCtx, &runtimev1.ArtifactReadTextRequest{
+		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
+		ConnectionEpoch: runner.Sink.Epoch(), StartLine: uint64(startLine), MaxLines: uint32(maxLines),
+	})
+	if rpcErr != nil {
+		return execution.Fail("artifact_read_failed", rpcErr.Error())
+	}
+	payload := map[string]any{
+		"success": true, "output": string(response.GetContent()),
+		"startLine": response.GetStartLine(), "nextLine": response.GetNextLine(), "eof": response.GetEof(),
+		"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
+		"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
+	}
+	return execution.Succeed(execution.DefaultResultSchemaKind(), payload, 0)
+}
+
+// executeArtifactGrep executes the artifact_grep typed tool.
+func executeArtifactGrep(execution *TypedToolContext) error {
+	ctx, runner := execution.BaseCtx, execution.Runner
+	attemptID, args := execution.AttemptID, execution.Args
+	artifactIDText, _ := args["artifactId"].(string)
+	artifactID, err := parseLocator(artifactIDText)
+	if err != nil {
+		return execution.Fail("invalid_arguments", err.Error())
+	}
+	pattern, _ := args["pattern"].(string)
+	if pattern == "" {
+		return execution.Fail("invalid_arguments", "pattern 必须是非空字符串")
+	}
+	rpcCtx, err := runner.artifactContext(ctx)
+	if err != nil {
+		return execution.Fail("grant_missing", "读取状态卷 token 失败")
+	}
+	response, rpcErr := runner.Artifacts.GrepText(rpcCtx, &runtimev1.ArtifactGrepTextRequest{
+		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
+		ConnectionEpoch: runner.Sink.Epoch(), Re2Pattern: pattern,
+		MaxMatches: 200, ContextLines: 5,
+	})
+	if rpcErr != nil {
+		return execution.Fail("artifact_grep_failed", rpcErr.Error())
+	}
+	var lines []string
+	for _, match := range response.GetMatches() {
+		lines = append(lines, fmt.Sprintf("%d:%s", match.GetLine(), string(match.GetContent())))
+	}
+	payload := map[string]any{
+		"success": true, "output": joinLines(lines),
+		"matchCount": len(lines), "truncated": response.GetTruncated(),
+		"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
+		"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
+	}
+	return execution.Succeed(execution.DefaultResultSchemaKind(), payload, 0)
+}
+
+// executeThanosQueryTyped adapts the frozen typed read-only Thanos
+// observation to the executor registry (ARCH-WORKER-003/ARCH-CHAT-005);
+// executeThanosQuery seals its own terminal state on every path.
+func executeThanosQueryTyped(execution *TypedToolContext) error {
+	executeThanosQuery(execution.BaseCtx, execution.Runner, execution.Writer,
+		execution.AttemptID, execution.ToolCallID, execution.Args)
+	// executeThanosQuery seals its own terminal state through
+	// failTypedTool/commitTypedTool on every path.
+	return nil
 }
 
 // executeThanosQuery drives the frozen typed read-only Thanos observation
@@ -216,11 +239,12 @@ func (runner *Runner) executeTypedTool(ctx context.Context, writer *FrameWriter,
 // through the tool's frozen grant, executes the instant query, streams
 // long raw bodies into the tool_result Artifact store and seals the
 // frozen thanos_query_result_v1 payload (ARCH-OUTPUT-001/005).
-func (runner *Runner) executeThanosQuery(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, args map[string]any) error {
+func executeThanosQuery(ctx context.Context, runner *Runner, writer *FrameWriter, attemptID, toolCallID int64, args map[string]any) error {
+	// v3 契约：模型只给 query（sourceRef 仅在来源有歧义时出现）；来源连接
+	// 由授权事务冻结的 grant 决定，resourceRef 不再是执行入参。
 	query, _ := args["query"].(string)
-	resourceRef, _ := args["resourceRef"].(string)
-	if query == "" || resourceRef == "" {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_arguments", "resourceRef 和 query 必须是非空字符串")
+	if query == "" {
+		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_arguments", "query 必须是非空字符串")
 	}
 	meta, ok := runner.tools[toolCallID]
 	if !ok || len(meta.grants) == 0 {

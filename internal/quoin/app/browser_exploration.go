@@ -109,11 +109,11 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 		return
 	}
 	var action struct {
-		Action            string `json:"action"`
-		BusinessSystemKey string `json:"businessSystemKey"`
-		SessionID         string `json:"sessionId"`
-		PageID            string `json:"pageId"`
-		URL               string `json:"url"`
+		Action      string `json:"action"`
+		IdentityKey string `json:"identityKey"`
+		SessionID   string `json:"sessionId"`
+		PageID      string `json:"pageId"`
+		URL         string `json:"url"`
 	}
 	if err = json.Unmarshal(input.GetCanonicalJson(), &action); err != nil {
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
@@ -123,10 +123,13 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 	var identityID, revisionID, profileID int64
 	var catalogDigest, catalogVersion string
 	if action.Action == "open" {
+		// ADR-0004: the tool addresses the identity by its stable standalone
+		// identityKey. There is no business-system dependency — a published
+		// (Ready) profile is the only usability gate.
 		var identityState string
 		err = conn.QueryRowContext(ctx, `SELECT i.id,i.current_revision_id,i.current_profile_generation_id,i.state,r.journey_catalog_digest,r.journey_catalog_version
-			FROM browser_identities i JOIN browser_identity_revisions r ON r.id=i.current_revision_id JOIN business_systems b ON b.id=i.business_system_id
-			WHERE b.key=? AND b.enabled=1`, action.BusinessSystemKey).Scan(&identityID, &revisionID, &profileID, &identityState, &catalogDigest, &catalogVersion)
+			FROM browser_identities i JOIN browser_identity_revisions r ON r.id=i.current_revision_id
+			WHERE i.identity_key=?`, action.IdentityKey).Scan(&identityID, &revisionID, &profileID, &identityState, &catalogDigest, &catalogVersion)
 		if err != nil || identityState != "Ready" || profileID < 1 {
 			code := "ProfileUnavailable"
 			if err == nil && identityState == "AuthenticationRequired" {
@@ -342,7 +345,7 @@ type identityBusy struct {
 // currentIdentityBusy projects the one durable operation that owns this
 // identity. IdentityBusy is not retryable in the current browser session: no
 // session has been admitted, and the model needs the concrete occupancy facts
-// to decide whether to wait or use another business system.
+// to decide whether to wait or target another browser identity.
 func currentIdentityBusy(ctx context.Context, conn *sql.Conn, identityID int64) (*identityBusy, error) {
 	var busy identityBusy
 	err := conn.QueryRowContext(ctx, `SELECT id,kind,COALESCE(started_at,start_dispatched_at,requested_at)

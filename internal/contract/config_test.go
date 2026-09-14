@@ -90,3 +90,78 @@ func TestDecodeRejectsInvalidDeploymentBinding(t *testing.T) {
 		})
 	}
 }
+
+const pluginsQuoin = validQuoin + `enabledPlugins:
+  - prometheus
+  - thanos
+  - alertmanager
+  - kubernetes
+  - browser
+`
+
+func TestDecodeAcceptsEnabledPluginsWhitelist(t *testing.T) {
+	var config contract.QuoinConfig
+	if err := contract.Decode([]byte(pluginsQuoin), &config); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prometheus", "thanos", "alertmanager", "kubernetes", "browser"}
+	if len(config.EnabledPlugins) != len(want) {
+		t.Fatalf("EnabledPlugins = %v, want %v", config.EnabledPlugins, want)
+	}
+	for index, id := range want {
+		if config.EnabledPlugins[index] != id {
+			t.Fatalf("EnabledPlugins = %v, want %v", config.EnabledPlugins, want)
+		}
+	}
+}
+
+func TestDecodeRejectsInvalidEnabledPlugins(t *testing.T) {
+	cases := map[string]string{
+		"unknown-shape":   validQuoin + "enabledPlugins: [Prometheus]\n",
+		"duplicate":       validQuoin + "enabledPlugins: [prometheus, prometheus]\n",
+		"not-a-list":      validQuoin + "enabledPlugins: prometheus\n",
+		"non-string-item": validQuoin + "enabledPlugins: [1]\n",
+		"too-long":        validQuoin + "enabledPlugins: [" + strings.Repeat("a", 65) + "]\n",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			var config contract.QuoinConfig
+			if err := contract.Decode([]byte(input), &config); err == nil {
+				t.Fatal("invalid enabledPlugins was accepted")
+			}
+		})
+	}
+}
+
+const pluginsPlinth = `component: plinth
+stateDirectory: /var/lib/plinth/state
+workspaceDirectory: /var/lib/plinth/workspaces
+quoinRuntimeEndpoint: https://quoin.example.com:8443
+quoinRuntimeCaFile: /run/secrets/quoin-runtime-ca.crt
+enabledPlugins: [browser]
+`
+
+func TestDecodeEmptyEnabledPluginsIsAnExplicitEmptyWhitelist(t *testing.T) {
+	var config contract.QuoinConfig
+	if err := contract.Decode([]byte(validQuoin+"enabledPlugins: []\n"), &config); err != nil {
+		t.Fatal(err)
+	}
+	// Omission (nil) selects the default mainline; an explicit empty array
+	// disables every plugin. The decoder must preserve the distinction.
+	if config.EnabledPlugins == nil {
+		t.Fatal("explicit empty enabledPlugins decoded as nil (omitted)")
+	}
+	if len(config.EnabledPlugins) != 0 {
+		t.Fatalf("EnabledPlugins = %v, want empty", config.EnabledPlugins)
+	}
+}
+
+func TestDecodePlinthEnabledPlugins(t *testing.T) {
+	var config contract.PlinthConfig
+	if err := contract.Decode([]byte(pluginsPlinth), &config); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.EnabledPlugins) != 1 || config.EnabledPlugins[0] != "browser" {
+		t.Fatalf("EnabledPlugins = %v, want [browser]", config.EnabledPlugins)
+	}
+}

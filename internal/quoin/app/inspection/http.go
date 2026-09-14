@@ -1,8 +1,6 @@
-// Package appinspection owns the manual Inspection HTTP surface (T24): the
-// mixed-plan run command over one published config version, the run
-// list/detail reads with their immutable report projection, and the cancel
-// fence. The Handler is a seam wired by the app package exactly like the
-// configuration surface; it owns no SQL.
+// Package appinspection exposes independent inspection plans, run commands,
+// immutable evidence/report reads and cancellation fences. The application
+// supplies authentication and runtime dispatch; this HTTP layer owns no SQL.
 package appinspection
 
 import (
@@ -31,7 +29,7 @@ type runListing struct {
 type Handler struct {
 	Inspections *inspection.Service
 	// Authenticate resolves any full (non-restricted) session to its
-	// principal id; Operators may run and read manual inspections (Q209).
+	// principal id after the application enforces the Admin boundary.
 	Authenticate func(ctx context.Context, cookie string) (int64, error)
 	// DispatchInspections scans and dispatches committed queued inspection
 	// work (created while the runtime is already connected).
@@ -57,6 +55,17 @@ func problem(status int, code, message string) *problemError {
 }
 
 func mapDomainError(err error) *problemError {
+	var planError *inspection.PlanConflictError
+	if errors.As(err, &planError) {
+		status := http.StatusUnprocessableEntity
+		switch planError.Code {
+		case "not_found":
+			status = http.StatusNotFound
+		case "plan_exists", "row_version_conflict", "command_reused":
+			status = http.StatusConflict
+		}
+		return problem(status, planError.Code, planError.Detail)
+	}
 	var rejection *inspection.RejectionError
 	if errors.As(err, &rejection) {
 		status := http.StatusUnprocessableEntity
@@ -83,25 +92,23 @@ func mapDomainError(err error) *problemError {
 }
 
 func (handler *Handler) listRuns(ctx context.Context, input *struct {
-	Session           string `cookie:"__Host-quoin-session"`
-	BusinessSystemKey string `query:"businessSystemKey"`
-	Cursor            string `query:"cursor"`
-	Limit             int    `query:"limit"`
+	Session string `cookie:"__Host-quoin-session"`
+	PlanKey string `query:"planKey"`
+	Cursor  string `query:"cursor"`
+	Limit   int    `query:"limit"`
 }) (*struct {
 	CacheControl string     `header:"Cache-Control"`
 	Body         runListing `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
-	}
-	if input.BusinessSystemKey == "" {
-		return nil, problem(http.StatusBadRequest, "malformed_request", "缺少 businessSystemKey 查询参数。")
 	}
 	cursor, cursorProblem := decodeCursor(input.Cursor)
 	if cursorProblem != nil {
 		return nil, cursorProblem
 	}
-	items, more, err := handler.Inspections.ListRuns(ctx, input.BusinessSystemKey, cursor, input.Limit)
+	items, more, err := handler.Inspections.ListRuns(ctx, input.PlanKey, cursor, input.Limit)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -157,20 +164,20 @@ func decodeCursor(raw string) (string, *problemError) {
 func (handler *Handler) createRun(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		BusinessSystemKey string `json:"businessSystemKey" minLength:"1" maxLength:"200"`
-		PlanKey           string `json:"planKey" minLength:"1" maxLength:"200"`
-		ClientCommandID   string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		PlanKey         string `json:"planKey" minLength:"1" maxLength:"200"`
+		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
 }) (*struct {
 	Status       int                  `header:"-"`
 	CacheControl string               `header:"Cache-Control"`
 	Body         inspection.RunDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	principalID, err := handler.reader(ctx, input.Session)
 	if err != nil {
 		return nil, err
 	}
-	detail, err := handler.Inspections.CreateInspectionRun(ctx, principalID, input.Body.ClientCommandID, input.Body.BusinessSystemKey, input.Body.PlanKey)
+	detail, err := handler.Inspections.CreatePlanRun(ctx, principalID, input.Body.ClientCommandID, input.Body.PlanKey)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -190,7 +197,8 @@ func (handler *Handler) getRun(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string               `header:"Cache-Control"`
 	Body         inspection.RunDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -198,12 +206,7 @@ func (handler *Handler) getRun(ctx context.Context, input *struct {
 	if parseErr != nil || runID < 1 {
 		return nil, problem(http.StatusBadRequest, "malformed_request", "巡检 Run 标识无效。")
 	}
-	var systemKey string
-	if err := handler.Inspections.DB().QueryRowContext(ctx, `
-		SELECT s.key FROM business_systems s JOIN inspection_runs r ON r.business_system_id=s.id WHERE r.id=?`, runID).Scan(&systemKey); err != nil {
-		return nil, problem(http.StatusNotFound, "not_found", "巡检 Run 不存在")
-	}
-	detail, err := handler.Inspections.GetRun(ctx, systemKey, runID)
+	detail, err := handler.Inspections.GetRun(ctx, runID)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -220,7 +223,8 @@ func (handler *Handler) listReports(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string        `header:"Cache-Control"`
 	Body         reportListing `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -245,7 +249,8 @@ func (handler *Handler) getReport(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string                  `header:"Cache-Control"`
 	Body         inspection.ReportDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := handler.reader(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -287,7 +292,8 @@ func (handler *Handler) cancelRun(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string               `header:"Cache-Control"`
 	Body         inspection.RunDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	principalID, err := handler.reader(ctx, input.Session)
 	if err != nil {
 		return nil, err
@@ -296,12 +302,7 @@ func (handler *Handler) cancelRun(ctx context.Context, input *struct {
 	if parseErr != nil || runID < 1 {
 		return nil, problem(http.StatusBadRequest, "malformed_request", "巡检 Run 标识无效。")
 	}
-	var systemKey string
-	if err := handler.Inspections.DB().QueryRowContext(ctx, `
-		SELECT s.key FROM business_systems s JOIN inspection_runs r ON r.business_system_id=s.id WHERE r.id=?`, runID).Scan(&systemKey); err != nil {
-		return nil, problem(http.StatusNotFound, "not_found", "巡检 Run 不存在")
-	}
-	outcome, err := handler.Inspections.CancelRunWithDispatch(ctx, principalID, input.Body.ClientCommandID, systemKey, runID, input.Body.ExpectedRowVersion)
+	outcome, err := handler.Inspections.CancelRunWithDispatch(ctx, principalID, input.Body.ClientCommandID, runID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -324,16 +325,17 @@ func (handler *Handler) reanalyzeRun(ctx context.Context, input *struct {
 	Status       int                       `header:"-"`
 	CacheControl string                    `header:"Cache-Control"`
 	Body         inspection.AttemptSummary `json:"body"`
-}, error) {
+}, error,
+) {
 	principalID, err := handler.reader(ctx, input.Session)
 	if err != nil {
 		return nil, err
 	}
-	runID, systemKey, err := handler.runScope(ctx, input.RunID)
+	runID, err := handler.runScope(ctx, input.RunID)
 	if err != nil {
 		return nil, err
 	}
-	result, err := handler.Inspections.ReanalyzeRun(ctx, principalID, input.Body.ClientCommandID, systemKey, runID)
+	result, err := handler.Inspections.ReanalyzeRun(ctx, principalID, input.Body.ClientCommandID, runID)
 	if errors.Is(err, inspection.ErrModelProviderMissing) {
 		return nil, problem(http.StatusServiceUnavailable, "model_unavailable", "尚无可用的模型连接，请先完成连接探测并启用后重试。")
 	}
@@ -360,16 +362,17 @@ func (handler *Handler) rerunInspection(ctx context.Context, input *struct {
 	Status       int                  `header:"-"`
 	CacheControl string               `header:"Cache-Control"`
 	Body         inspection.RunDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	principalID, err := handler.reader(ctx, input.Session)
 	if err != nil {
 		return nil, err
 	}
-	runID, systemKey, err := handler.runScope(ctx, input.RunID)
+	runID, err := handler.runScope(ctx, input.RunID)
 	if err != nil {
 		return nil, err
 	}
-	detail, err := handler.Inspections.RerunInspection(ctx, principalID, input.Body.ClientCommandID, systemKey, runID)
+	detail, err := handler.Inspections.RerunInspection(ctx, principalID, input.Body.ClientCommandID, runID)
 	if err != nil {
 		return nil, mapDomainError(err)
 	}
@@ -383,17 +386,15 @@ func (handler *Handler) rerunInspection(ctx context.Context, input *struct {
 	}{Status: http.StatusAccepted, CacheControl: noStore(), Body: detail}, nil
 }
 
-func (handler *Handler) runScope(ctx context.Context, rawRunID string) (int64, string, error) {
+func (handler *Handler) runScope(ctx context.Context, rawRunID string) (int64, error) {
 	runID, parseErr := strconv.ParseInt(rawRunID, 10, 64)
 	if parseErr != nil || runID < 1 {
-		return 0, "", problem(http.StatusBadRequest, "malformed_request", "巡检 Run 标识无效。")
+		return 0, problem(http.StatusBadRequest, "malformed_request", "巡检 Run 标识无效。")
 	}
-	var systemKey string
-	if err := handler.Inspections.DB().QueryRowContext(ctx, `
-		SELECT s.key FROM business_systems s JOIN inspection_runs r ON r.business_system_id=s.id WHERE r.id=?`, runID).Scan(&systemKey); err != nil {
-		return 0, "", problem(http.StatusNotFound, "not_found", "巡检 Run 不存在")
+	if _, err := handler.Inspections.GetRun(ctx, runID); err != nil {
+		return 0, mapDomainError(err)
 	}
-	return runID, systemKey, nil
+	return runID, nil
 }
 
 // RegisterUpgradeDrain mounts only this surface's frozen upgrade-drain
@@ -404,6 +405,7 @@ func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
 
 // Register mounts the manual inspection routes (HTTP-INSPECT surface, T24).
 func (handler *Handler) Register(api huma.API) {
+	handler.registerPlans(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs", OperationID: "listInspectionRuns"}, handler.listRuns)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs", OperationID: "createInspectionRun"}, handler.createRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}", OperationID: "getInspectionRun"}, handler.getRun)

@@ -16,7 +16,7 @@ func TestBrowserToolRejectsArbitraryArguments(t *testing.T) {
 	for _, body := range [][]byte{
 		[]byte(`{"action":"evaluate","sessionId":"42","script":"alert(1)"}`),
 		[]byte(`{"action":"fill","sessionId":"42","locator":{"kind":"css","selector":"#x"},"value":"x"}`),
-		[]byte(`{"action":"open","businessSystemKey":"payments","extra":true}`),
+		[]byte(`{"action":"open","identityKey":"ops-console","extra":true}`),
 	} {
 		if err := ValidateToolArguments(BrowserTool, body); err == nil {
 			t.Fatalf("unsupported browser shape was accepted: %s", body)
@@ -28,7 +28,7 @@ func TestBrowserToolIngressUsesCompleteFrozenRequestSchema(t *testing.T) {
 	// These shapes pass the legacy hand-written structural checks but violate
 	// limits/type constraints that exist only in the authoritative JSON Schema.
 	for _, body := range [][]byte{
-		[]byte(`{"action":"open","businessSystemKey":"` + string(bytes.Repeat([]byte("x"), 201)) + `"}`),
+		[]byte(`{"action":"open","identityKey":"` + string(bytes.Repeat([]byte("x"), 65)) + `"}`),
 		[]byte(`{"action":"scroll","sessionId":"42","deltaX":100001,"deltaY":0}`),
 		[]byte(`{"action":"fill","sessionId":"42","locator":{"kind":"role","role":"textbox"},"value":` + string(mustJSONText(t, bytes.Repeat([]byte("x"), 16385))) + `}`),
 	} {

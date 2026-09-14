@@ -25,7 +25,9 @@ func browserToolParameters() map[string]any {
 	page := map[string]any{"type": "string", "minLength": 1, "maxLength": 100}
 	locator := browserToolLocatorSchema()
 	return map[string]any{"oneOf": []any{
-		request(map[string]any{"const": "open"}, []string{"action", "businessSystemKey"}, map[string]any{"businessSystemKey": map[string]any{"type": "string", "minLength": 1, "maxLength": 200}}),
+		// ADR-0004: the browser identity is addressed by its stable standalone
+		// identityKey; the locator never travels through a business system.
+		request(map[string]any{"const": "open"}, []string{"action", "identityKey"}, map[string]any{"identityKey": map[string]any{"type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"}}),
 		request(map[string]any{"enum": []string{"close_session", "back", "forward", "reload", "read"}}, []string{"action", "sessionId"}, map[string]any{"sessionId": session}),
 		// The frozen request union permits both a whole-session read and an
 		// explicitly targeted read. Keep these separate so the provider schema
@@ -86,7 +88,7 @@ func validateBrowserToolArguments(body []byte) error {
 		return fmt.Errorf("quoin_browser requires action")
 	}
 	allowed := map[string]map[string]bool{
-		"open":          {"action": true, "businessSystemKey": true},
+		"open":          {"action": true, "identityKey": true},
 		"close_session": {"action": true, "sessionId": true}, "back": {"action": true, "sessionId": true}, "forward": {"action": true, "sessionId": true}, "reload": {"action": true, "sessionId": true}, "read": {"action": true, "sessionId": true, "locator": true},
 		"switch_page": {"action": true, "sessionId": true, "pageId": true}, "close_page": {"action": true, "sessionId": true, "pageId": true},
 		"goto":  {"action": true, "sessionId": true, "url": true},
@@ -112,7 +114,7 @@ func validateBrowserToolArguments(body []byte) error {
 		return nil
 	}
 	if action == "open" {
-		return need("businessSystemKey")
+		return need("identityKey")
 	}
 	if err := need("sessionId"); err != nil {
 		return err

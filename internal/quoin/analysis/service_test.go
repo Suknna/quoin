@@ -458,7 +458,7 @@ func TestRebuildInputRetainsLegacyAnnotationOmission(t *testing.T) {
 	// independently frozen Label Contract item, unlike all new attempts.
 	if _, err := db.Exec(`
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		SELECT s.id,3,'label_contract',?,v.label_contract_version_id
+		SELECT s.id,(SELECT COALESCE(MAX(item_seq),0)+1 FROM attempt_input_items WHERE snapshot_id=s.id),'label_contract',?,v.label_contract_version_id
 		FROM attempt_input_snapshots s
 		JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.business_system_config_version_id IS NOT NULL
 		JOIN business_system_config_versions v ON v.id=i.business_system_config_version_id

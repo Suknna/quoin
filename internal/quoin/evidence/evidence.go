@@ -204,6 +204,42 @@ type Conn struct {
 // an Attempt-level metrics grant, while Journey collection is executed by
 // Lintel; their shared evidence table intentionally does not duplicate kind.
 func (service *Service) inspectionProducer(ctx context.Context, attemptID int64) (map[string]any, []Conn, error) {
+	// 独立计划 Run（ADR-0004）：插件采集由 Plinth supervisor 执行，连接来自
+	// Run 冻结的接入授权；插件身份随 producer 事实一并冻结。
+	var pluginID string
+	pluginErr := service.db.QueryRowContext(ctx, `
+		SELECT c.plugin_id
+		FROM execution_attempts a
+		JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
+		JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
+		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&pluginID)
+	if pluginErr == nil {
+		rows, grantErr := service.db.QueryContext(ctx, `
+			SELECT c.name,c.type
+			FROM attempt_connection_grants ag
+			JOIN connections c ON c.id=ag.connection_id
+			WHERE ag.attempt_id=? AND ag.purpose='config_thanos_query'
+			ORDER BY ag.id`, attemptID)
+		if grantErr != nil {
+			return nil, nil, grantErr
+		}
+		defer rows.Close()
+		connections := []Conn{}
+		for rows.Next() {
+			var connection Conn
+			if err := rows.Scan(&connection.Key, &connection.Type); err != nil {
+				return nil, nil, err
+			}
+			connections = append(connections, connection)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, nil, err
+		}
+		return map[string]any{"kind": "plinth_plugin", "pluginId": pluginID, "attemptId": strconv.FormatInt(attemptID, 10)}, connections, nil
+	}
+	if !errors.Is(pluginErr, sql.ErrNoRows) {
+		return nil, nil, pluginErr
+	}
 	var checkKind string
 	err := service.db.QueryRowContext(ctx, `
 		SELECT c.kind

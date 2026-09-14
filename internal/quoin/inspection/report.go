@@ -39,6 +39,19 @@ type reportInput struct {
 	ArtifactIDs        []int64             `json:"artifactIds"`
 	KnowledgeVersionID []int64             `json:"knowledgeVersionIds"`
 	ModelContract      reportModelContract `json:"modelContract"`
+	// 独立计划 Run（ADR-0004）的冻结绑定上下文；历史声明 Run 不携带这些字段
+	//（omitempty 保持其重建摘要逐字节不变）。
+	Plan             *planReportContext `json:"plan,omitempty"`
+	ConnectionName   string             `json:"connectionName,omitempty"`
+	TemplateID       string             `json:"templateId,omitempty"`
+	TemplateVersion  string             `json:"templateVersion,omitempty"`
+}
+
+// planReportContext 是模型可见的计划事实摘要（非秘密、非正文）。
+type planReportContext struct {
+	Key    string         `json:"key"`
+	Params map[string]any `json:"params"`
+	Scope  map[string]any `json:"scope"`
 }
 
 // modelProviderSelection mirrors the single enabled model provider resolution
@@ -130,12 +143,34 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	if err != nil {
 		return 0, err
 	}
-	var configVersionID int64
+	var configVersionID, planID, connectionID sql.NullInt64
 	var planKey string
 	if err = conn.QueryRowContext(ctx, `
-		SELECT config_version_id, plan_key FROM inspection_runs WHERE id=?`, runID).
-		Scan(&configVersionID, &planKey); err != nil {
+		SELECT config_version_id, plan_key, plan_id, connection_id FROM inspection_runs WHERE id=?`, runID).
+		Scan(&configVersionID, &planKey, &planID, &connectionID); err != nil {
 		return 0, err
+	}
+	// 计划 Run：模型上下文携带 Run 冻结的计划绑定（连接与模板）；在任何快照
+	// 写入前读取完毕，快照行保持 append-only。
+	var planContext *planReportContext
+	var planConnectionName, planTemplateID, planTemplateVersion string
+	if planID.Valid {
+		if connectionID.Valid {
+			if err = conn.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&planConnectionName); err != nil {
+				return 0, err
+			}
+		}
+		var paramsRaw, scopeRaw string
+		if err = conn.QueryRowContext(ctx, `
+			SELECT frozen_params_json, frozen_scope_json, template_id, template_version FROM inspection_runs WHERE id=?`, runID).
+			Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion); err != nil {
+			return 0, err
+		}
+		params := map[string]any{}
+		_ = json.Unmarshal([]byte(paramsRaw), &params)
+		scope := map[string]any{}
+		_ = json.Unmarshal([]byte(scopeRaw), &scope)
+		planContext = &planReportContext{Key: planKey, Params: params, Scope: scope}
 	}
 	var reportVersion int
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
@@ -203,9 +238,10 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
-		ReportVersion: int64(reportVersion + 1), ConfigVersionID: configVersionID, PlanKey: planKey,
+		ReportVersion: int64(reportVersion + 1), ConfigVersionID: configVersionID.Int64, PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
+		Plan: planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -257,12 +293,14 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 			return 0, err
 		}
 	}
-	versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", configVersionID)))
-	itemSeq++
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
-		VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID); err != nil {
-		return 0, err
+	if !planID.Valid {
+		versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", configVersionID.Int64)))
+		itemSeq++
+		if _, err = conn.ExecContext(ctx, `
+			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
+			VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID.Int64); err != nil {
+			return 0, err
+		}
 	}
 	// New report analyses retain only config-version lineage. The nullable run
 	// Label Contract locator is historical read metadata, never new authority.

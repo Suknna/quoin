@@ -1,0 +1,489 @@
+package investigation
+
+// Source-level thanos_query authorization for direct chat (ADR-0004): a
+// blank business key no longer means "no metrics authority". The enabled
+// integrations are frozen into the attempt (input items + rendered input),
+// and the thanos_query grant resolves against that frozen list with
+// explicit-source semantics — ambiguity stays a recoverable Tool Result.
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
+	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
+)
+
+// seedThanosIntegration drives the production metrics lifecycle through the
+// connections service (create -> probe -> passed -> qualified enable), the
+// same server-side admission fence the analysis harness uses. Admin
+// enablement IS the source authorization this slice relies on.
+func seedThanosIntegration(t *testing.T, db *sql.DB, name string) (connectionID, revisionID, generationID int64) {
+	t.Helper()
+	now := testNow()
+	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state == "unregistered" {
+		credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), now, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		credentialID, _ := credential.LastInsertId()
+		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credentialID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
+		t.Fatal(err)
+	}
+	connections.ProbeContractSource = func() string { return "investigation-source-test-probe-v1" }
+	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "investigation-metrics-create-"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeEpoch := uint64(time.Now().UnixNano())
+	probeAttemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), probeAttemptID, "investigation-probe", probeEpoch, time.Minute); err != nil || !ok {
+		t.Fatalf("bind metrics probe: ok=%v err=%v", ok, err)
+	}
+	if err := service.AcceptProbe(context.Background(), probeAttemptID, "investigation-probe", probeEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CommitProbeResult(context.Background(), probeAttemptID, "investigation-probe", probeEpoch, connections.TypedProbeResult{Outcome: "passed", ResultDigest: strings.Repeat("a", 64), StartedAt: now, FinishedAt: now}, &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`}}); err != nil {
+		t.Fatal(err)
+	}
+	var probeID int64
+	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, probeAttemptID).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enabled.ID, enabled.CurrentRevisionID, enabled.CurrentGenerationID
+}
+
+func enabledSourceNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM connections WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0 ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// driveFirstCall opens the attempt's first chat call and returns the call id.
+func driveFirstCall(t *testing.T, db *sql.DB, service *Service, attemptID int64) int64 {
+	t.Helper()
+	if err := bindRunning(t, db, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := service.Attempts().FrozenToolCatalog(context.Background(), attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsDigest, err := frozen.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshotDigest string
+	if err := db.QueryRow(`SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&snapshotDigest); err != nil {
+		t.Fatal(err)
+	}
+	callID, err := service.Attempts().BeginModelCall(context.Background(), attempt.BeginCall{
+		AttemptID: attemptID, CallSeq: 1, ModelID: "fixture-chat-1",
+		PromptDigest: strings.Repeat("a", 64), ToolSchemaDigest: toolsDigest,
+		InputDigest: strings.Repeat("b", 64), RenderedDigest: strings.Repeat("c", 64),
+		InputItems: []attempt.ModelInputItem{
+			{Sequence: 1, ItemKind: "system_contract", ContentDigest: strings.Repeat("d", 64), Role: "system"},
+			{Sequence: 2, ItemKind: "tool_schema", ContentDigest: strings.Repeat("e", 64), Role: "system"},
+			{Sequence: 3, ItemKind: "snapshot", ContentDigest: snapshotDigest, Role: "system"},
+		},
+		ContextBudget: 4096, MaxOutput: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return callID
+}
+
+// pendingSourceThanosCall seals the anchor model call and inserts one raw
+// pending thanos_query Tool Call with the proposal verbatim.
+func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, callID int64, arguments string) int64 {
+	t.Helper()
+	now := testNow()
+	response, err := json.Marshal(map[string]any{
+		"assistantText": "", "finishReason": "tool_calls",
+		"tool_calls": []any{map[string]any{
+			"id": "raw-source-thanos", "name": thanos.QueryToolName,
+			"arguments": json.RawMessage(arguments),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
+		t.Fatal(err)
+	}
+	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		attemptID, callID, 1, 0, "raw-source-thanos", thanos.QueryToolName, thanos.QueryToolVersion, arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "supervisor_typed", "return_to_model", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCallID, _ := insert.LastInsertId()
+	return toolCallID
+}
+
+func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
+	t.Helper()
+	tool, ok := attempt.LookupToolForAgentVersion(AgentVersion, thanos.QueryToolName)
+	if !ok {
+		t.Fatal("thanos_query missing from the investigation catalog")
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	return service.Attempts().ToolGrantResolver(context.Background(), conn, attemptID, toolCallID, tool)
+}
+
+// TestSourceInvestigationFreezesIntegrations proves the blank-key mainline:
+// the enabled integrations are frozen as input items and rendered into the
+// canonical input, later enablement churn cannot re-interpret the snapshot,
+// and the rebuild reproduces the frozen digest exactly.
+func TestSourceInvestigationFreezesIntegrations(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	seedThanosIntegration(t, db, "thanos-source-a")
+	created, err := service.Create(ctx, principalID, "cmd-source-investigation", "查一下流量错误率", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frozenDigest string
+	if err := db.QueryRow(`SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, created.AttemptID).Scan(&frozenDigest); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(rebuilt)
+	if hex.EncodeToString(sum[:]) != frozenDigest {
+		t.Fatalf("source investigation rebuild drifted: %s != %s", hex.EncodeToString(sum[:]), frozenDigest)
+	}
+	var input struct {
+		BusinessContext *map[string]any     `json:"businessContext"`
+		Integrations    []map[string]string `json:"integrations"`
+	}
+	if err := json.Unmarshal(rebuilt, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.BusinessContext != nil {
+		t.Fatalf("blank-key investigation leaked a business context: %v", input.BusinessContext)
+	}
+	if len(input.Integrations) != 1 || input.Integrations[0]["kind"] != "metrics" || input.Integrations[0]["name"] != "thanos-source-a" {
+		t.Fatalf("integrations=%+v, want the single enabled metrics source", input.Integrations)
+	}
+	var sourceItems int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?) AND item_role='metrics_source'`, created.AttemptID).Scan(&sourceItems); err != nil || sourceItems != 1 {
+		t.Fatalf("metrics_source items=%d err=%v", sourceItems, err)
+	}
+	// Later enablement must not re-interpret the frozen snapshot.
+	seedThanosIntegration(t, db, "thanos-source-b")
+	again, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(rebuilt) {
+		t.Fatalf("frozen integrations changed after a new enablement")
+	}
+}
+
+// TestSourceInvestigationThanosGrantResolvesBySourceRef proves the explicit
+// source path end to end through the investigation resolver wiring.
+func TestSourceInvestigationThanosGrantResolvesBySourceRef(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	connectionID, _, _ := seedThanosIntegration(t, db, "thanos-source-a")
+	created, err := service.Create(ctx, principalID, "cmd-source-grant", "查一下流量错误率", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID := driveFirstCall(t, db, service, created.AttemptID)
+	toolCallID := pendingSourceThanosCall(t, db, created.AttemptID, callID, `{"sourceRef":"thanos-source-a","query":"up"}`)
+
+	resolution, err := resolveSourceThanosCall(t, db, service, created.AttemptID, toolCallID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.PreflightCode != "" || len(resolution.Grants) != 1 {
+		t.Fatalf("resolution=%+v, want one grant", resolution)
+	}
+	var purpose string
+	var grantedConnection, grantedBusiness sql.NullInt64
+	if err := db.QueryRow(`SELECT purpose,connection_id,business_system_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection, &grantedBusiness); err != nil {
+		t.Fatal(err)
+	}
+	if purpose != thanos.QueryToolPurpose || grantedConnection.Int64 != connectionID || grantedBusiness.Valid {
+		t.Fatalf("grant purpose=%s connection=%v business=%v", purpose, grantedConnection, grantedBusiness)
+	}
+	var executionJSON string
+	if err := db.QueryRow(`SELECT arguments_json FROM tool_call_execution_inputs WHERE tool_call_id=?`, toolCallID).Scan(&executionJSON); err != nil {
+		t.Fatal(err)
+	}
+	var execution map[string]string
+	if err := json.Unmarshal([]byte(executionJSON), &execution); err != nil {
+		t.Fatal(err)
+	}
+	if execution["query"] != "up" || execution["sourceRef"] != "thanos-source-a" {
+		t.Fatalf("execution args=%v, want query+sourceRef", execution)
+	}
+}
+
+// TestSourceInvestigationAmbiguousSourcesPreflight proves the frozen two-
+// source list without an explicit name stays a recoverable Tool Result.
+func TestSourceInvestigationAmbiguousSourcesPreflight(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	seedThanosIntegration(t, db, "thanos-source-a")
+	seedThanosIntegration(t, db, "thanos-source-b")
+	names := enabledSourceNames(t, db)
+	if len(names) != 2 {
+		t.Fatalf("fixture needs two enabled sources, got %v", names)
+	}
+	created, err := service.Create(ctx, principalID, "cmd-source-ambiguous", "查一下流量错误率", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID := driveFirstCall(t, db, service, created.AttemptID)
+	toolCallID := pendingSourceThanosCall(t, db, created.AttemptID, callID, `{"query":"up"}`)
+
+	resolution, err := resolveSourceThanosCall(t, db, service, created.AttemptID, toolCallID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.PreflightCode != thanos.PreflightTargetAmbiguous {
+		t.Fatalf("preflight=%+v, want target_ambiguous", resolution)
+	}
+	for _, name := range names {
+		if !strings.Contains(resolution.PreflightDetail, name) {
+			t.Fatalf("preflight detail %q must list %q", resolution.PreflightDetail, name)
+		}
+	}
+	var grants int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, created.AttemptID).Scan(&grants); err != nil || grants != 0 {
+		t.Fatalf("ambiguous routing created %d grants (err=%v)", grants, err)
+	}
+}
+
+// seedKubernetesIntegration drives the production create+enable path for one
+// Kubernetes connection (enable needs no probe; credentials are mandatory).
+func seedKubernetesIntegration(t *testing.T, db *sql.DB, name string) int64 {
+	t.Helper()
+	now := testNow()
+	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	summary, err := service.Create(context.Background(), connections.CreateInput{
+		Name: name, Type: connections.TypeKubernetes,
+		NonSecretJSON: []byte(`{"type":"kubernetes"}`),
+		Secret:        []byte(`{"type":"kubernetes","kubernetes":{"kubeconfig":"apiVersion: v1\nkind: Config"}}`), SecretPresent: true,
+	}, 1, "investigation-k8s-create-"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enabled.ID
+}
+
+// TestKubernetesSourceGrantResolvesBySourceRef proves source-level
+// kubernetes_read authorization: the frozen kubernetes_source item is the
+// authority, the grant carries no business system, and the exact frozen
+// revision is reused.
+func TestKubernetesSourceGrantResolvesBySourceRef(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	seedKubernetesIntegration(t, db, "k8s-source-a")
+	created, err := service.Create(ctx, principalID, "cmd-k8s-source", "看下集群状态", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID := driveFirstCall(t, db, service, created.AttemptID)
+	now := testNow()
+	response, err := json.Marshal(map[string]any{
+		"assistantText": "", "finishReason": "tool_calls",
+		"tool_calls": []any{map[string]any{
+			"id": "raw-source-k8s", "name": kubernetes.ReadToolName,
+			"arguments": map[string]any{"sourceRef": "k8s-source-a", "operation": "discovery"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
+		t.Fatal(err)
+	}
+	arguments := `{"sourceRef":"k8s-source-a","operation":"discovery"}`
+	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		created.AttemptID, callID, 1, 0, "raw-source-k8s", kubernetes.ReadToolName, "1", arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "supervisor_typed", "return_to_model", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCallID, _ := insert.LastInsertId()
+
+	// The resolver is exercised directly: the offered catalog gains
+	// kubernetes_read in b084's versioned schema bump, while this slice owns
+	// the authorization resolution underneath it. The single connection is
+	// released before the pool-bound verification reads below.
+	resolution := resolveKubernetesSourceCall(t, db, created.AttemptID, toolCallID)
+	if resolution.PreflightCode != "" || len(resolution.Grants) != 1 {
+		t.Fatalf("resolution=%+v, want one grant", resolution)
+	}
+	var purpose string
+	var grantedConnection, grantedBusiness sql.NullInt64
+	var grantedRevision int64
+	if err := db.QueryRow(`SELECT purpose,connection_id,business_system_id,connection_revision_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection, &grantedBusiness, &grantedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if purpose != kubernetes.ReadPurpose || grantedConnection.Int64 != connectionIDFixture(t, db, "k8s-source-a") || grantedBusiness.Valid {
+		t.Fatalf("grant purpose=%s connection=%v business=%v", purpose, grantedConnection, grantedBusiness)
+	}
+	_ = grantedRevision
+}
+
+// resolveKubernetesSourceCall drives the production kubernetes_read resolver
+// on its own connection and releases that connection before returning, so the
+// single-writer pool stays available to the verification reads.
+func resolveKubernetesSourceCall(t *testing.T, db *sql.DB, attemptID, toolCallID int64) attempt.ToolResolution {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
+	if closeErr := conn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolution
+}
+
+func connectionIDFixture(t *testing.T, db *sql.DB, name string) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM connections WHERE name=?`, name).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestKubernetesSourceAmbiguityPreflight proves multiple frozen kubernetes
+// sources without an explicit name stay a recoverable preflight result.
+func TestKubernetesSourceAmbiguityPreflight(t *testing.T) {
+	db := newTestDB(t)
+	service := NewService(db)
+	ctx := context.Background()
+	principalID := seedUser(t, db)
+	seedProviderChain(t, db)
+	seedKubernetesIntegration(t, db, "k8s-source-a")
+	seedKubernetesIntegration(t, db, "k8s-source-b")
+	created, err := service.Create(ctx, principalID, "cmd-k8s-ambiguous", "看下集群状态", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callID := driveFirstCall(t, db, service, created.AttemptID)
+	now := testNow()
+	response, err := json.Marshal(map[string]any{
+		"assistantText": "", "finishReason": "tool_calls",
+		"tool_calls": []any{map[string]any{
+			"id": "raw-source-k8s", "name": kubernetes.ReadToolName,
+			"arguments": map[string]any{"operation": "discovery"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
+		t.Fatal(err)
+	}
+	arguments := `{"operation":"discovery"}`
+	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		created.AttemptID, callID, 1, 0, "raw-source-k8s", kubernetes.ReadToolName, "1", arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "supervisor_typed", "return_to_model", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCallID, _ := insert.LastInsertId()
+
+	resolution := resolveKubernetesSourceCall(t, db, created.AttemptID, toolCallID)
+	if resolution.PreflightCode != "target_ambiguous" || !strings.Contains(resolution.PreflightDetail, "k8s-source-a") || !strings.Contains(resolution.PreflightDetail, "k8s-source-b") {
+		t.Fatalf("preflight=%+v, want target_ambiguous listing both sources", resolution)
+	}
+}

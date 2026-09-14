@@ -244,9 +244,9 @@ func TestCommitVerificationProposalWritesEvidenceAndClosesRun(t *testing.T) {
 func TestRunVerificationRejectsPublishedVersion(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-pub-0001")
-	if _, err := h.systems.Publish(context.Background(), h.principal, "cmd-t17-pub-0002", "payments", versionID(t, draft), nil); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	// The publish command is retired; the published state arrives through the
+	// test-only SQL fixture and the admission fence must still refuse it.
+	h.publishFixture(t, "payments", versionID(t, draft))
 	_, err := h.systems.RunVerification(context.Background(), h.principal, "cmd-t17-run-0007", "payments", versionID(t, draft))
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || !strings.Contains(conflict.Detail, "未发布草稿") {

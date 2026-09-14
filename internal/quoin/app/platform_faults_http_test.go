@@ -39,8 +39,11 @@ func TestAdminAboutBoundaryAndSanitization(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &about); err != nil {
 		t.Fatal(err)
 	}
-	if about.Components == nil || len(about.Components) != 2 {
-		t.Fatalf("components=%+v, want the two fixed slots", about.Components)
+	// ADR-0004: the browser plugin is default-disabled, so the Lintel slot is
+	// not part of the default deployment projection and must not read as a
+	// perpetually degraded component.
+	if about.Components == nil || len(about.Components) != 1 || about.Components[0].Slot != "plinth" {
+		t.Fatalf("components=%+v, want the default mainline plinth slot only", about.Components)
 	}
 	for _, component := range about.Components {
 		if component.Connected || component.ReleaseVersion != "" || component.LastSeenAt != "" {

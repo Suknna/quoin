@@ -186,12 +186,14 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	if attemptType == "inspection_collection" {
 		if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "config_verification_discovery_result_v1" {
 			service.handleVerificationDiscoveryResultProposal(ctx, envelope, proposal)
-		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "resource_discovery_result_v1" {
-			service.handleResourceRefreshResultProposal(ctx, envelope, proposal)
+		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "source_observation_result_v1" {
+			service.handleSourceObservationResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "browser_journey_result_v1" {
 			service.handleJourneyResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_promql_result_v1" {
 			service.handleInspectionPromQLResultProposal(ctx, envelope, proposal)
+		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_plugin_result_v1" {
+			service.handleInspectionPluginResultProposal(ctx, envelope, proposal)
 		} else {
 			service.handleVerificationResultProposal(ctx, envelope, proposal)
 		}

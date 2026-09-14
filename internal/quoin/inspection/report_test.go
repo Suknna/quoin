@@ -213,7 +213,7 @@ func reportProposalBody(attemptID, runID, callID int64, content string, evidence
 
 func TestImmutableReportClosure(t *testing.T) {
 	h := newTestHarness(t)
-	h.publishSinglePromQLPlan(t)
+	h.seedPlan(t, "mixed-plan")
 	h.seedModelProvider(t)
 	store, err := artifact.NewStore(h.db, t.TempDir())
 	if err != nil {
@@ -221,13 +221,13 @@ func TestImmutableReportClosure(t *testing.T) {
 	}
 	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
 	ctx := context.Background()
-	detail, err := h.service.CreateInspectionRun(ctx, h.principal, "cmd-1", "payments", "mixed-plan")
+	detail, err := h.service.CreatePlanRun(ctx, h.principal, "cmd-1", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
 	}
 	attemptID := h.promqlAttemptID(t, detail.RunID)
 	h.dispatchPromQL(t, attemptID)
-	if err := h.service.CommitPromQLProposal(ctx, attemptID, "plinth-boot", 1, promqlSuccessProposal(attemptID, detail.RunID, "success", "instant")); err != nil {
+	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	// Convergence created exactly one analysis attempt with the structured
@@ -245,8 +245,9 @@ func TestImmutableReportClosure(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?)`, analysisID).Scan(&itemCount); err != nil {
 		t.Fatal(err)
 	}
-	// run + PromQL check result + evidence + readable artifact + config.
-	if itemCount != 5 {
+	// run + plugin check result + evidence + readable artifact；计划 Run 不引用
+	// 任何业务声明版本谱系项。
+	if itemCount != 4 {
 		t.Fatalf("analysis frozen items = %d", itemCount)
 	}
 	if err := h.attempts.BindToSlot(ctx, analysisID, "plinth", "plinth-boot", 1, time.Minute); err != nil {
@@ -294,7 +295,7 @@ func TestImmutableReportClosure(t *testing.T) {
 	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
-	final, err := h.service.GetRun(ctx, "payments", detail.RunID)
+	final, err := h.service.GetRun(ctx, detail.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}

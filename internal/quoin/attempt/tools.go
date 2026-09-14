@@ -14,6 +14,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
+
+	"github.com/Suknna/quoin/internal/plugins"
 )
 
 // AgentVersion is the frozen executor generation for the T10 vertical. Both
@@ -101,31 +104,156 @@ var InitialAnalysisTools = []ToolDef{
 		Required:    []string{"artifactId", "pattern"},
 	},
 	{
-		Name: "thanos_query", Version: "2", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "thanos_query_result_v1", ProducesEvidence: true,
-		Description: "在当前尝试冻结的业务配置资源范围内执行只读 PromQL 即时查询。必须提供 resourceRef 和 query；Quoin 从不可变配置版本解析连接、允许指标和必需 labels，结果作为不可变 Evidence 封存。",
+		Name: "kubernetes_read", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "kubernetes_read_result_v1", ProducesEvidence: true,
+		Description: "对已启用 Kubernetes 来源执行只读观察动作。operation 必填；namespace/name/container 按动作需要提供；来源有歧义时用 sourceRef 显式命名，或提供 businessSystem 按业务视图收窄。Quoin 逐个冻结 grant 独立执行，结果作为不可变 Evidence 封存。",
 
-		Arguments: map[string]ArgumentKind{"resourceRef": KindString, "query": KindString},
-		Required:  []string{"resourceRef", "query"},
+		Arguments: map[string]ArgumentKind{
+			"operation": KindString, "namespace": KindString, "name": KindString,
+			"container": KindString, "businessSystem": KindString, "sourceRef": KindString,
+		},
+		Required: []string{"operation"},
+	},
+	{
+		Name: "thanos_query", Version: "3", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "thanos_query_result_v1", ProducesEvidence: true,
+		Description: "执行只读 PromQL 即时查询。必须提供 query；sourceRef 可选，仅在来源有歧义时显式命名来源连接，Quoin 按冻结授权解析连接、范围与必需 labels，结果作为不可变 Evidence 封存。",
+
+		Arguments: map[string]ArgumentKind{"query": KindString, "sourceRef": KindString},
+		Required:  []string{"query"},
 	},
 }
 
 // BrowserTool is available only to investigations. It is executed by Quoin,
 // never by the Plinth supervisor: requests are frozen and forwarded to a
-// Lintel-owned, closed browser-action executor.
+// Lintel-owned, closed browser-action executor. It enters the offered
+// catalog only while the browser plugin is enabled (ADR-0004); its
+// description/implementation stay compiled in for ingress validation of
+// frozen historical executions. v2 is a breaking locator change (ADR-0004):
+// open addresses the identity by its standalone identityKey instead of the
+// retired businessSystemKey, so a frozen v1 catalog drift-rejects explicitly
+// instead of being reinterpreted.
 var BrowserTool = ToolDef{
-	Name: "quoin_browser", Version: "1", ExecutionMode: "quoin_browser", FailureMode: "return_to_model", ResultSchemaKind: "browser_tool_result_v1",
-	Description: "在已授权的浏览器身份中执行一个封闭的探索动作。只接受 open、页面导航、元素交互、受限读取、截图和会话关闭；不接受 JavaScript、HTTP、CDP 或 Playwright 指令。",
+	Name: "quoin_browser", Version: "2", ExecutionMode: "quoin_browser", FailureMode: "return_to_model", ResultSchemaKind: "browser_tool_result_v1",
+	Description: "在已授权的浏览器身份中执行一个封闭的探索动作。open 通过独立身份的稳定 identityKey 定位身份（不再使用业务系统）。只接受 open、页面导航、元素交互、受限读取、截图和会话关闭；不接受 JavaScript、HTTP、CDP 或 Playwright 指令。",
 	Parameters:  browserToolParameters(), ValidateArguments: validateBrowserToolArguments,
 }
 
-// InvestigationTools retains chat-specific browser exploration while excluding
-// Kubernetes from every model-callable schema during the development gate.
-var InvestigationTools = append(append([]ToolDef{}, InitialAnalysisTools...), BrowserTool)
+// CompiledToolDefinition resolves one compiled implementation by tool name.
+// Execution-binding hosts verify registering plugin bundles against it.
+func CompiledToolDefinition(name string) (ToolDef, bool) {
+	return compiledToolByName(name)
+}
 
-// ToolsForAgentVersion returns the only catalog valid for an agent generation.
+// compiledToolByName resolves one compiled definition by tool name.
+func compiledToolByName(name string) (ToolDef, bool) {
+	for _, def := range ImplementationTools() {
+		if def.Name == name {
+			return def, true
+		}
+	}
+	return ToolDef{}, false
+}
+
+// implementationRegistry is the extension point for PLUGIN-OWNED tool
+// implementations (ADR-0004): a plugin package declares its ToolDefs next
+// to its executor and registers them at process wiring; the attempt core is
+// never edited to add a plugin. Registration is boot-only and
+// duplicate-rejecting; BuildCatalogs freezes the table.
+var implementationRegistry struct {
+	mu      sync.Mutex
+	entries []ToolDef
+	frozen  bool
+}
+
+// RegisterImplementation adds one plugin-owned tool implementation to the
+// process implementation table. It must be called during wiring, before
+// BuildCatalogs; a duplicate tool name or a post-freeze registration is a
+// deterministic wiring failure.
+func RegisterImplementation(def ToolDef) error {
+	implementationRegistry.mu.Lock()
+	defer implementationRegistry.mu.Unlock()
+	if implementationRegistry.frozen {
+		return fmt.Errorf("implementation registry frozen: tool %s rejected", def.Name)
+	}
+	for _, existing := range implementationRegistry.entries {
+		if existing.Name == def.Name {
+			return fmt.Errorf("tool %s is already implemented", def.Name)
+		}
+	}
+	implementationRegistry.entries = append(implementationRegistry.entries, def)
+	return nil
+}
+
+// freezeImplementations locks the table against further registration.
+func freezeImplementations() {
+	implementationRegistry.mu.Lock()
+	defer implementationRegistry.mu.Unlock()
+	implementationRegistry.frozen = true
+}
+
+// ImplementationTools is the complete implementation table — the platform
+// core plus every registered plugin-owned ToolDef — independent of
+// deployment enablement. VerifyDescriptorTools and authorization pin plugin
+// declarations against it; it is never the offered catalog.
+func ImplementationTools() []ToolDef {
+	return append(append([]ToolDef{}, InitialAnalysisTools...), BrowserTool)
+}
+
+// LocationExecutionModes maps the plugin descriptor execution-location
+// vocabulary onto the frozen ToolDef execution modes. A location without a
+// mapping cannot be served by this generation's compiled tools.
+func LocationExecutionModes(location plugins.ExecutionLocation) string {
+	switch location {
+	case plugins.LocationWorkerLocal:
+		return "worker_local"
+	case plugins.LocationPlinthSupervisor:
+		return "supervisor_typed"
+	case plugins.LocationLintel:
+		return "quoin_browser"
+	default:
+		return ""
+	}
+}
+
+// VerifyDescriptorTools enforces the descriptor/implementation agreement
+// (ADR-0004: 声明不能伪装不存在的实现). Every tool a plugin declares must
+// exist in the compiled implementation table with identical version,
+// execution mode and model-facing description; otherwise boot fails
+// deterministically instead of advertising a tool nobody executes.
+func VerifyDescriptorTools(descriptor plugins.Descriptor) error {
+	known := map[string]ToolDef{}
+	for _, tool := range ImplementationTools() {
+		known[tool.Name] = tool
+	}
+	for _, tool := range descriptor.Tools {
+		implementation, exists := known[tool.Name]
+		if !exists {
+			return fmt.Errorf("plugin %s declares tool %s without a compiled implementation", descriptor.ID, tool.Name)
+		}
+		mode := LocationExecutionModes(tool.ExecutionLocation)
+		if mode == "" || implementation.ExecutionMode != mode {
+			return fmt.Errorf("plugin %s tool %s declares execution location %q, implementation runs as %q", descriptor.ID, tool.Name, tool.ExecutionLocation, implementation.ExecutionMode)
+		}
+		if implementation.Version != tool.Version {
+			return fmt.Errorf("plugin %s tool %s declares version %s, implementation is %s", descriptor.ID, tool.Name, tool.Version, implementation.Version)
+		}
+		if implementation.FailureMode != tool.FailureMode {
+			return fmt.Errorf("plugin %s tool %s declares failure mode %q, implementation uses %q", descriptor.ID, tool.Name, tool.FailureMode, implementation.FailureMode)
+		}
+		if implementation.Description != tool.Description {
+			return fmt.Errorf("plugin %s tool %s description drifts from the compiled implementation", descriptor.ID, tool.Name)
+		}
+	}
+	return nil
+}
+
+// ToolsForAgentVersion returns the complete compiled catalog of one agent
+// generation — the CREATION-time view used to freeze per-attempt catalogs
+// (FrozenCatalogForGeneration applies deployment enablement). Runtime
+// authorization never consults this function; it reads the attempt's frozen
+// catalog document instead.
 func ToolsForAgentVersion(agentVersion string) []ToolDef {
 	if agentVersion == "investigation-v1" {
-		return InvestigationTools
+		return append(append([]ToolDef{}, InitialAnalysisTools...), BrowserTool)
 	}
 	return InitialAnalysisTools
 }

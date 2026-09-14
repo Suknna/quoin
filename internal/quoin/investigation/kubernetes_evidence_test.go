@@ -3,12 +3,14 @@ package investigation
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	plinthagent "github.com/Suknna/quoin/internal/plinth/agent"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 )
 
 func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
@@ -24,7 +26,13 @@ func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
 	if err := bindRunning(t, db, created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	toolsDigest, err := attempt.CanonicalToolsDigest(AgentVersion)
+	// The worker renders the attempt's FROZEN catalog (ADR-0004); the test
+	// derives the digest exactly as the real worker does.
+	frozen, err := service.Attempts().FrozenToolCatalog(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsDigest, err := frozen.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +55,18 @@ func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
 	if err := db.QueryRow(`SELECT prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest FROM model_calls WHERE id=?`, callID).Scan(&renderer, &version, &storedPrompt, &schemaVersion, &schemaDigest); err != nil {
 		t.Fatal(err)
 	}
-	if renderer != RendererVersion || version != AgentVersion || storedPrompt != fmt.Sprintf("%x", promptSum[:]) || schemaVersion != "investigation-tools-v1" || schemaDigest != toolsDigest {
+	// The prompt renderer generation is owned by the worker prompt package and
+	// must track the input renderer cutover (ADR-0004 source guidance); assert
+	// against the worker-pinned constant, not the Quoin-side mapping function.
+	if renderer != plinthagent.InvestigationRendererVersion || version != AgentVersion || storedPrompt != fmt.Sprintf("%x", promptSum[:]) || schemaVersion != "investigation-tools-v3" || schemaDigest != toolsDigest {
 		t.Fatalf("provenance renderer=%q version=%q prompt=%q schema=%q/%q", renderer, version, storedPrompt, schemaVersion, schemaDigest)
 	}
 }
 
-// Kubernetes remains a stored connection domain, but must never become a model
-// capability during the development gate. Rejection happens before tool-call
-// persistence, so it cannot create an execution or Evidence side effect.
+// TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence proves the
+// source-level admission: kubernetes_read is now a legal tool (ADR-0004),
+// but a routing miss against an attempt with no frozen kubernetes source is
+// only a recoverable preflight — no grant, no execution, no Evidence.
 func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
@@ -68,10 +80,14 @@ func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T)
 	if err := bindRunning(t, db, created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if _, registered := attempt.LookupToolForAgentVersion(AgentVersion, "kubernetes_read"); registered {
-		t.Fatal("kubernetes_read remains registered for investigations")
+	if _, registered := attempt.LookupToolForAgentVersion(AgentVersion, "kubernetes_read"); !registered {
+		t.Fatal("kubernetes_read must be offered to investigations (ADR-0004)")
 	}
-	toolsDigest, err := attempt.CanonicalToolsDigest(AgentVersion)
+	frozen, err := service.Attempts().FrozenToolCatalog(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolsDigest, err := frozen.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,20 +106,55 @@ func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := []byte(`{"businessSystem":"payments","operation":"discovery"}`)
-	proposed := []attempt.ProposedTool{{ProviderIndex: 0, ProviderToolCallID: "kubernetes-disabled", ToolName: "kubernetes_read", ArgumentsJSON: arguments, ArgumentsDigest: fmt.Sprintf("%x", sha256.Sum256(arguments))}}
-	_, responseDigest, err := attempt.CanonicalChatResponseJSON("", proposed)
+	// Seal the anchor call and persist one pending kubernetes_read proposal
+	// carrying a businessSystem target that cannot resolve: the attempt froze
+	// no kubernetes source, so the routing miss must stay a recoverable
+	// preflight with zero grants and zero evidence. (Driven at the resolver
+	// seam until the frozen per-attempt catalog ships kubernetes_read.)
+	now := testNow()
+	response, err := json.Marshal(map[string]any{
+		"assistantText": "", "finishReason": "tool_calls",
+		"tool_calls": []any{map[string]any{
+			"id": "kubernetes-disabled", "name": "kubernetes_read",
+			"arguments": map[string]any{"businessSystem": "payments", "operation": "discovery"},
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Attempts().CompleteModelCall(ctx, attempt.CompleteCall{AttemptID: created.AttemptID, CallID: callID, Outcome: "succeeded", FinishReason: "tool_calls", ProposedTools: proposed, ResponseDigest: responseDigest, ResponseComplete: true}); err == nil {
-		t.Fatal("Kubernetes tool proposal was accepted")
+	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
+		t.Fatal(err)
 	}
-	var toolCalls, evidence int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE attempt_id=?`, created.AttemptID).Scan(&toolCalls); err != nil || toolCalls != 0 {
-		t.Fatalf("tool calls=%d err=%v, want none", toolCalls, err)
+	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
+		t.Fatal(err)
 	}
+	arguments := []byte(`{"businessSystem":"payments","operation":"discovery"}`)
+	if _, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		created.AttemptID, callID, 1, 0, "kubernetes-disabled", "kubernetes_read", "1", string(arguments), fmt.Sprintf("%x", sha256.Sum256(arguments)), "supervisor_typed", "return_to_model", now); err != nil {
+		t.Fatal(err)
+	}
+	var toolCallID int64
+	_ = db.QueryRow(`SELECT id FROM tool_calls WHERE attempt_id=?`, created.AttemptID).Scan(&toolCallID)
+	conn, connErr := db.Conn(ctx)
+	if connErr != nil {
+		t.Fatal(connErr)
+	}
+	resolution, resolveErr := kubernetes.ResolveRead(ctx, conn, created.AttemptID, toolCallID)
+	if closeErr := conn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if resolveErr != nil {
+		t.Fatalf("routing miss must stay a recoverable preflight: %v", resolveErr)
+	}
+	if resolution.PreflightCode == "" || len(resolution.Grants) != 0 {
+		t.Fatalf("resolution=%+v, want one grantless preflight", resolution)
+	}
+	var evidence, grants int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM evidence WHERE attempt_id=?`, created.AttemptID).Scan(&evidence); err != nil || evidence != 0 {
 		t.Fatalf("evidence=%d err=%v, want none", evidence, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='kubernetes_read'`, created.AttemptID).Scan(&grants); err != nil || grants != 0 {
+		t.Fatalf("grants=%d err=%v, want none", grants, err)
 	}
 }
