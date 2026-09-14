@@ -4,7 +4,11 @@
 
 **Non-normative：** 本目录承载 Quoin v1 的规范性技术契约。目标是把 [`CONTEXT.md`](../../../CONTEXT.md) 中已经冻结的领域语言与业务边界，落实为可供后续实施规划和验证直接使用的数据、API、组件协议、配置、前端、安全、运维与验收规格；本目录不包含生产实现或实施任务拆分。
 
-> **状态提示（2026-09-10）：** [GitHub #95](https://github.com/Suknna/quoin/issues/95) 与 ADR-0002 按切片实施。`6b62904` 已交付管理员关于页、平台故障独立来源、权限边界，以及复用既有 Alertmanager 服务的接入入口和真实 E2E 基础；相关 OpenAPI、SQL 与部署配置契约已同步。#97 已交付以 `metrics_connection_id` 显式引用 Prometheus/Thanos 接入的版本化业务声明、`none`/HTTP Basic/Bearer 认证、受控 Config Verification 查询和 discovery，以及独立刷新退役与历史保留；机器契约、迁移与运行实现同步更新。独立浏览器接入等其余 #95 目标并未因该切片自动交付。平台故障仍沿用首版 fresh-v1/zero-history Schema 门，不支持旧库原地迁移。#97 最终真实测试仍待记录；手调边界见 [Issue #97 手调说明](../../issue-97-validation.md)。
+> **状态提示（2026-09-13，受控浏览器退役）：** 受控浏览器业务已整体下线：`browser` 插件描述符已从目录移除，Lintel slot 不再接受 Register/Connect（长期凭据一律被拒），全部浏览器 HTTP/WebSocket 路由、journey-catalog 视图与 OpenAPI 操作已拆除（旧 URL 一律 404），Runtime 状态与 About 只投影 plinth 槽位。Lintel 相关实现代码与历史部署工件保留作恢复参考（部署工件见 `deploy/retired/browser`）；各主题文件与历史验收中涉及浏览器的条款仅作历史解读，其活动路由以当前 OpenAPI 为准。
+
+> **状态提示（2026-09-13，ADR-0004 主线）：** [ADR-0004](../../adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即获得来源级观测、`sourceRef` 授权工具与独立巡检计划（scope integration/objects/businessView），业务视图可选，浏览器插件默认停用（独立浏览器身份 `identity_key`）。`BusinessSystem` 声明写入、配置发布、Label Contract 与独立资源刷新界面及 OpenAPI 操作已退役，仅保留只读历史资源；相关条款在各主题文件中以「历史」标注。真实部署验收进行中，逐项结果见 [docs/plugin-real-deployment-acceptance.md](../../../docs/plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。
+
+> **状态提示（2026-09-10）：** [GitHub #95](https://github.com/Suknna/quoin/issues/95) 与 ADR-0002 按切片实施。`6b62904` 已交付管理员关于页、平台故障独立来源、权限边界，以及复用既有 Alertmanager 服务的接入入口和真实 E2E 基础；相关 OpenAPI、SQL 与部署配置契约已同步。#97 已交付以 `metrics_connection_id` 显式引用 Prometheus/Thanos 接入的版本化业务声明、`none`/HTTP Basic/Bearer 认证、受控 Config Verification 查询和 discovery，以及独立刷新退役与历史保留；机器契约、迁移与运行实现同步更新。独立浏览器接入等其余 #95 目标并未因该切片自动交付。平台故障仍沿用首版 fresh-v1/zero-history Schema 门，不支持旧库原地迁移。#97 最终真实测试仍待记录；手调边界见 [Issue #97 手调说明](../../issue-97-validation.md)。本条记录 #97 切片当时状态；其中业务声明写面已随后续 ADR-0004 切片退役，仅作历史解读。
 
 全部 Wayfinder 决策、依据与研究索引见 [Quoin v1 技术规格地图](https://github.com/Suknna/quoin/issues/1)。本文件的规范条款使用 `SPEC` 类别，来源均为已关闭的 [确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)。
 
@@ -16,7 +20,7 @@
 2. `persistence.md`：SQLite 数据模型、聚合关系、唯一约束、事务、迁移、Artifact 与派生索引。
 3. `http-api.md`：Huma HTTP API、认证授权、命令幂等、错误、分页、快照、SSE 与对话流。
 4. `runtime-protocol.md`：Quoin、Plinth、Lintel、Stele 的身份、Proto 契约指纹握手、控制流、任务、lease、fencing、浏览器会话、文件上传与告警接入。
-5. `inspection-config.md`：业务系统 YAML、Label Contract、Resource Discovery、Inspection Plan/Check 与 Journey Catalog。
+5. `inspection-config.md`：独立巡检计划、来源级观测、Journey Catalog，以及历史业务声明 YAML、Label Contract 与 Config Verification Run 材料的解读边界。
 6. `frontend.md`：三栏工作台、URL、核心流程、状态反馈、可访问性和可执行 UI 验收场景。
 7. `security.md`：威胁路径、用户与服务身份、Session、CSRF、权限、秘密、审计和恢复后的信任重建。
 8. `operations.md`：Kubernetes YAML 与 Compose、存储卷、锁、健康检查、备份恢复、保留、升级、配置与可观测性。
@@ -72,8 +76,8 @@ contracts/
 | `contracts/schemas/verification-evidence.schema.json` | Scenario/cell 结果、断言、附件、cleanup 与 typed observation 的结构化证据索引 |
 | `contracts/schemas/deployment-verification.schema.json` | Deployment Acceptance helper request/report 与服务端生成 typed locator 的唯一交换格式；OpenAPI 直接引用其中 `helperRequest` / `helperReport` 定义 |
 | `contracts/schemas/connection-probes.schema.json` | Connection Probe action catalog 的严格文档形状 |
-| `contracts/schemas/business-system.schema.json` | 目标态 `quoin/v1` `BusinessSystem` 声明的唯一机器格式；其部署与验收仍待未来迁移切片完成 |
-| `contracts/schemas/*.schema.json` | 其他独立 JSON 文档格式；历史 `business-system-config.schema.json` 与 `label-contract.schema.json` 仅保留以解读既有记录，不是目标态配置权威 |
+| `contracts/schemas/business-system.schema.json` | 历史 `quoin/v1` `BusinessSystem` 声明的机器格式（ADR-0003）；声明写入与发布已随 ADR-0004 退役，仅保留以解读既有声明、Run 与迁移映射，不是现行配置权威 |
+| `contracts/schemas/*.schema.json` | 其他独立 JSON 文档格式；历史 `business-system-config.schema.json` 与 `label-contract.schema.json` 仅保留以解读既有记录，不是现行配置权威 |
 | `contracts/sql/schema.sql` | SQLite 表、列、索引、外键、检查约束和可由数据库表达的唯一约束 |
 
 - **SPEC-STRUCTURE-003 —** 九份主题 Markdown **MUST** 保持在 `docs/specs/quoin-v1/` 根目录；机器契约 **MUST** 使用上表所列的 `contracts/` 路径，并按 `SPEC-STRUCTURE-001` 延迟创建。（来源：[确定 v1 规格结构与规范资产边界](https://github.com/Suknna/quoin/issues/8)）

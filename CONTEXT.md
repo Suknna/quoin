@@ -2,6 +2,8 @@
 
 Quoin 帮助内部运维团队基于监控证据调查告警、执行巡检并沉淀经过确认的运维知识。它面向单一组织，不承担 CMDB 或事故管理系统的职责。
 
+> **受控浏览器退役（2026-09）：** 受控浏览器业务已整体下线：`browser` 插件从目录移除（配置中显式列出即启动失败）、Lintel slot 不再接受 Register/Connect（长期凭据一律被拒）、浏览器 HTTP/WebSocket 路由与 journey-catalog 已拆除（旧 URL 一律 404）。Lintel 相关实现代码保留作恢复参考；部署工件历史见 `deploy/retired/browser`。本文其余涉及浏览器的条款仅作历史解读，不再描述活动行为。
+
 ## 契约术语
 
 **Proto 权威契约**：
@@ -22,8 +24,8 @@ _Avoid_: Agent Runtime、浏览器 Runtime
 一个 Quoin 部署所使用的唯一 Agent Runtime，通过主动建立的运行通道领取调查和分析任务，并在每次 Execution Attempt 的全新可丢弃工作区中调用模型与工具。输入只从 Quoin 当前有效历史和 Artifact 重建；只有显式返回并提交到 Quoin 的消息、Evidence 和 Artifact 可以跨 Attempt 存活。
 _Avoid_: Quoin、浏览器 Runtime、跨轮持久工作区、第二份调查历史
 
-**Lintel**：
-一个 Quoin 部署所使用的唯一浏览器 Runtime，通过主动建立的运行通道接收任务，拥有独占 `lintel-state` 持久卷中的浏览器身份和长期 service token，并执行人工登录、确定性巡检和可审计探索。它声明可同时承载的浏览器操作总容量；人工登录、Journey 和 Exploration 共享该容量，同一身份仍严格独占，容量不足只在 Quoin 排队。Trace、staging 和 Attempt 工作区可丢弃，需长期保存的结果上传 Quoin。
+**Lintel**（已退役）：
+一个 Quoin 部署所使用的唯一浏览器 Runtime，通过主动建立的运行通道接收任务，拥有独占 `lintel-state` 持久卷中的浏览器身份和长期 service token，并执行人工登录、确定性巡检和可审计探索。它声明可同时承载的浏览器操作总容量；人工登录、Journey 和 Exploration 共享该容量，同一身份仍严格独占，容量不足只在 Quoin 排队。Trace、staging 和 Attempt 工作区可丢弃，需长期保存的结果上传 Quoin。受控浏览器退役后 Lintel 不再部署或连接，本定义仅作历史与恢复解读。
 _Avoid_: Quoin、Agent Runtime、Quoin 数据卷、浏览器 profile 备份源
 
 **Stele**：
@@ -37,7 +39,7 @@ _Avoid_: Quoin、告警存储、Agent Runtime、消息队列、先返回 2xx 再
 _Avoid_: 只读观察者、系统管理员、按业务系统隔离的角色、人工登录例外
 
 **Admin**：
-管理员负责全部接入、凭据、浏览器登录、业务定义、配置发布、巡检配置、平台维护及用户/角色/Session、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。目标态中，业务范围与标签由业务声明自身拥有，不再管理活动的全局标签契约。系统始终必须保留至少一个有效 Admin。
+管理员负责全部接入、凭据、浏览器登录、巡检配置、业务视图、平台维护及用户/角色/Session、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。业务声明管理与配置发布已随 ADR 0004 退出主线，历史记录只读保留；活动的全局标签契约已退役，业务范围由来源接入与业务视图组织。系统始终必须保留至少一个有效 Admin。
 _Avoid_: 超级租户、外部身份提供方、日常任务专属角色
 
 ## 认证与服务身份
@@ -52,7 +54,7 @@ React、HTTP API、SSE 和 noVNC WebSocket 由同一 Quoin Origin 提供。浏�
 首个 Admin 创建和全部 Admin 无法登录时的密码重置都只能通过停止长期 Quoin 后独占 SQLite 的本地命令完成：`quoin admin create` 只接受无 `users` 行的空白库，`quoin admin reset-password` 只修改已存在 Admin；部署安装向导只可在启动长期 workload 前以 attached TTY 包装前者。临时密码不进入参数、环境变量、Secret、history 或日志，创建/重置后要求首次登录修改，重置还撤销该账号全部 Session。
 
 **服务身份**：
-Plinth、Lintel 和 Stele 分别使用类型固定、只能访问自身 RPC 的长期 service token；TLS 只承担服务端身份和传输保护，不另建 mTLS 客户端身份。Quoin 固定只有 `plinth` 和 `lintel` 两个逻辑 Runtime slot；空库中的两个 slot 起始为 `unregistered`，Admin 可直接为其准备首次注册令牌，无需先“替换”不存在的凭据。一次性注册令牌绑定 slot 与 credential generation，supervisor 将换得的长期 token 原子保存到权限 `0600` 的专用持久状态卷，Plinth worker 不得读取。状态卷丢失时由 Admin 为原 slot 准备替换注册，不创建第二个 Runtime。轮换采用“下发新 token→Runtime 持久化确认→原子提升新 current 并把旧 generation 放入可认证 retiring 角色→新 token 首次成功认证后显示 Pending Retirement→Admin 显式吊销旧 token”的两阶段切换；新值首次认证前旧值仍可恢复连接但同一 slot 只有一个生效 connection epoch，不设置自动 TTL，记录新 token 首次成功使用时间、操作者和未收口状态。Token 吊销时 Quoin 立即关闭对应长期控制流、浏览器流和上传流并拒绝重连；Stele 不注册为 Runtime，其 service token 由部署 Secret 文件提供，普通 SQLite 备份恢复不改变该外部部署身份，只有 Secret 泄漏或安全事件响应才轮换。
+Plinth、Lintel 和 Stele 分别使用类型固定、只能访问自身 RPC 的长期 service token；TLS 只承担服务端身份和传输保护，不另建 mTLS 客户端身份。Quoin 固定只有 `plinth` 和 `lintel` 两个逻辑 Runtime slot；`lintel` slot 已随受控浏览器退役：注册命令对其返回 404，Runtime 控制面拒绝其 Register/Connect，只有 `plinth` 接受注册。空库中的两个 slot 起始为 `unregistered`，Admin 可直接为 plinth 准备首次注册令牌，无需先“替换”不存在的凭据。一次性注册令牌绑定 slot 与 credential generation，supervisor 将换得的长期 token 原子保存到权限 `0600` 的专用持久状态卷，Plinth worker 不得读取。状态卷丢失时由 Admin 为原 slot 准备替换注册，不创建第二个 Runtime。轮换采用“下发新 token→Runtime 持久化确认→原子提升新 current 并把旧 generation 放入可认证 retiring 角色→新 token 首次成功认证后显示 Pending Retirement→Admin 显式吊销旧 token”的两阶段切换；新值首次认证前旧值仍可恢复连接但同一 slot 只有一个生效 connection epoch，不设置自动 TTL，记录新 token 首次成功使用时间、操作者和未收口状态。Token 吊销时 Quoin 立即关闭对应长期控制流、浏览器流和上传流并拒绝重连；Stele 不注册为 Runtime，其 service token 由部署 Secret 文件提供，普通 SQLite 备份恢复不改变该外部部署身份，只有 Secret 泄漏或安全事件响应才轮换。
 
 **告警源凭据投影**：
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 通过自身 service token 获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多同时保留新旧两个有效凭据；新值首次成功使用后进入 Pending Retirement，由 Admin 显式吊销旧值，不设自动 TTL，并持续显示与审计未收口状态。
@@ -70,7 +72,7 @@ Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵
 v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处理 Attempt 输入前必须 fail-closed 建立 `no_new_privs`、Landlock ABI >= 6 与进程内 seccomp，只能访问既定只读运行时路径、当前一次性工作区和 framed stdio，不能读取 supervisor 的敏感 `/proc` 文件、发域外信号、建立外部网络连接、写工作区外路径或继承非 stdio FD。Plinth readiness 与每个 worker Ack 前都实际执行这些对抗检查，任一失败即 `sandbox_unavailable`，不得静默降级。v1 接受同 PID namespace 下世界可读的非秘密进程元数据可见，不引入 user namespace、bubblewrap、额外 worker daemon 或第二套本地协议。
 
 **领域写命令契约**：
-所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。目标态调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定当时生效的 BusinessSystem 声明；历史执行继续保留其旧绑定。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
+所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定计划当前冻结的接入与模板；历史执行继续保留其旧绑定。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
 _Avoid_: 每个 handler 自定义重试语义、最后写入者静默覆盖、把内部 Runtime 围栏混为客户端命令键
 
 **审计与执行溯源**：
@@ -111,7 +113,7 @@ _Avoid_: 第三种告警状态、自动恢复、事故
 _Avoid_: 调查、对话、可覆盖结果、已验证诊断
 
 **调查（Investigation）**：
-围绕一个运维问题展开的一条对话线程，可以引用一个或多个告警发生、初步分析及相关证据，并形成诊断。Investigation 页面就是主流 Chat 页面：直接新建后立即输入自然语言，不要求先选业务系统、连接、告警、Evidence、模型或工具；从既有告警、Initial Analysis、Evidence 或 Inspection 入口进入时自动保留来源引用。模型只识别人类领域对象，Quoin 才按业务声明的显式授权接入引用确定性路由 Tool 参数；真实歧义由模型在对话中追问。
+围绕一个运维问题展开的一条对话线程，可以引用一个或多个告警发生、初步分析及相关证据，并形成诊断。Investigation 页面就是主流 Chat 页面：直接新建后立即输入自然语言，不要求先选业务系统、连接、告警、Evidence、模型或工具；从既有告警、Initial Analysis、Evidence 或 Inspection 入口进入时自动保留来源引用。模型只识别人类领域对象并以 `sourceRef` 等人类可读定位指名来源，Quoin 才按已启用接入与冻结授权确定性路由 Tool 参数；真实歧义由模型在对话中追问。
 _Avoid_: 初步分析、事故、跨问题聊天、进入 Chat 前的配置向导、让模型选择连接或凭据
 
 **模型上下文投影（Model Context Projection）**：
@@ -137,18 +139,18 @@ _Avoid_: 事实、告警、整个调查、可覆盖的当前结论
 ## 工作台投影
 
 **三栏工作台**：
-第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；全局入口只有运维中心、AI SRE 和管理员设置。运维中心包含告警列表、故障复盘、巡检、业务纳管和接入管理子页，不建设独立全局接入中心；AI SRE 包含对话和知识子页；管理员设置仅对 Admin 可见。告警列表以 URL query `id` 选中统一告警读模型中的对象时在右侧覆盖式详情中打开；上游 Alertmanager Occurrence 与平台故障保留各自来源和生命周期，不能混淆。业务纳管提供表单和 YAML 两种同声明编辑视图；接入管理先展示支持的平台目录与已接入实例，进入平台专属配置表单及说明。内部组件管理不面向普通用户；管理员在设置“关于”查看组件版本和连接状态，平台故障仍在统一告警中可见。页面位置不放宽服务端权限。工作台直接启用所选 shadcn `sidebar-09`/Sidebar 与 Resizable primitives 已有的展开、折叠、隐藏、拖动调整、键盘调整和浏览器本地布局恢复能力，不另造平行布局系统；第一栏保持图标导航语义，第二栏可折叠或调整宽度，第三栏使用剩余空间。URL 未选择对象时不自动选择列表第一项，第三栏使用 shadcn `Empty` 的图标、标题、自然语言描述和至多一个主操作说明当前可做什么；不得留白或伪装成 Dashboard。窄屏时第一栏变抽屉，告警详情及列表在需要时分别全屏显示且详情内容独立滚动；复杂 noVNC 登录明确提示优先使用桌面，但不禁用入口，也不增加复制秘密的替代流程。
+第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；全局入口只有运维中心、AI SRE 和管理员设置。运维中心包含告警列表、故障复盘、巡检、业务视图和接入管理子页，不建设独立全局接入中心；AI SRE 包含对话和知识子页；管理员设置仅对 Admin 可见。告警列表以 URL query `id` 选中统一告警读模型中的对象时在右侧覆盖式详情中打开；上游 Alertmanager Occurrence 与平台故障保留各自来源和生命周期，不能混淆。业务视图提供表单和 YAML 编辑同一对象的可选范围组织；接入管理先展示支持的平台目录与已接入实例，进入平台专属配置表单及说明。内部组件管理不面向普通用户；管理员在设置“关于”查看组件版本和连接状态，平台故障仍在统一告警中可见。页面位置不放宽服务端权限。工作台直接启用所选 shadcn `sidebar-09`/Sidebar 与 Resizable primitives 已有的展开、折叠、隐藏、拖动调整、键盘调整和浏览器本地布局恢复能力，不另造平行布局系统；第一栏保持图标导航语义，第二栏可折叠或调整宽度，第三栏使用剩余空间。URL 未选择对象时不自动选择列表第一项，第三栏使用 shadcn `Empty` 的图标、标题、自然语言描述和至多一个主操作说明当前可做什么；不得留白或伪装成 Dashboard。窄屏时第一栏变抽屉，告警详情及列表在需要时分别全屏显示且详情内容独立滚动；复杂 noVNC 登录明确提示优先使用桌面，但不禁用入口，也不增加复制秘密的替代流程。
 
 **工作台展示约定**：
 界面使用紧凑但不拥挤的运维信息密度，列表优先展示状态、对象名、关键时间和业务系统，完整内容进入详情，不提供密度设置。颜色跟随系统明暗偏好，不提供应用内主题设置。v1 界面使用简体中文，代码、labels、annotations、协议状态、日志和上游错误保留原文，不建立无实际消费者的 i18n 机制。业务筛选与实际存在的可切换排序进入 URL query，形成可刷新和可分享的确定性视图；v1 当前列表排序由领域契约固定，不暴露没有服务端契约的统一排序控件。分页游标、滚动位置、临时展开和选中状态属于当前浏览器历史项，返回时恢复并用服务端快照/SSE 调和。cursor 列表首次只读取一页，底部由明确的“加载更多”触发下一页，不伪造页码、不自动无限滚动；加载后仍是同一连续列表。实时新项目到达且用户不在顶部时，保持当前可视内容与焦点不动并显示“有 N 条新内容”，用户触发后合并并回到顶部；已在顶部时可直接合并，但不得抢焦点或自动打开详情。跨模块关联跳转使用浏览器原生历史，返回到来源详情，不维护第二套面包屑栈，也不默认新开标签页。
 _Avoid_: 大卡片列表、密度/主题配置页、把滚动像素写进可分享 URL、自定义导航历史、自动无限滚动、实时插入导致阅读位置跳动
 
 **首次设置投影**：
-空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、Thanos/Kubernetes Connection、Plinth/Lintel、Label Contract、Business System 配置、Browser Identity 登录、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可在管理模块直接处理；Operator 不显示管理入口，只在告警等相关模块看到“需要管理员完成”的结果与影响，不暴露不可进入的配置清单。设置清单始终由权威状态派生且保留：全部就绪时折叠为一行“核心能力已就绪”，有故障或未完成依赖时自动展开受影响项并直达对应连接、Runtime、业务系统、Browser Identity、告警源或备份详情；不保存用户勾选的完成状态。
+空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、接入验证与启用、Plinth/Lintel（浏览器插件显式启用）、浏览器身份登录、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可在管理模块直接处理；Operator 不显示管理入口，只在告警等相关模块看到“需要管理员完成”的结果与影响，不暴露不可进入的配置清单。设置清单始终由权威状态派生且保留：全部就绪时折叠为一行“核心能力已就绪”，有故障或未完成依赖时自动展开受影响项并直达对应接入、Runtime、浏览器身份、告警源或备份详情；不保存用户勾选的完成状态。
 _Avoid_: 空页面、强制线性向导、把内部对象依赖留给用户推导、所有能力全配齐才允许使用
 
 **管理工作区**：
-管理模块只对 Admin 出现在全局导航中；第二栏按设置清单、用户、Label Contract/Journey Catalog、模型供应商、备份、安全、审计和“关于”分组，第三栏显示所选列表、详情或设置，不增加第四栏或卡片墙管理首页。“关于”向管理员展示平台及内部组件的版本、连接状态和受保护维护入口；它不是独立平台异常中心。运维中心的业务纳管和接入管理承担业务配置、接入及浏览器身份的操作入口；权限始终由服务端裁决，前端隐藏不是权限边界。
+管理模块只对 Admin 出现在全局导航中；第二栏按设置清单、用户、Journey Catalog、模型供应商、备份、安全、审计和“关于”分组，第三栏显示所选列表、详情或设置，不增加第四栏或卡片墙管理首页。“关于”向管理员展示平台及内部组件的版本、连接状态和受保护维护入口；它不是独立平台异常中心。运维中心的业务视图和接入管理承担视图组织、接入及浏览器身份的操作入口；权限始终由服务端裁决，前端隐藏不是权限边界。
 _Avoid_: Operator 管理入口、普通用户内部组件管理、独立平台异常中心、第四栏、管理 Dashboard 卡片墙
 
 **操作、表单与反馈**：
@@ -158,12 +160,12 @@ _Avoid_: 每次写操作确认、仅 toast 表达结果、自动保存半完成�
 **跨模块交互状态**：
 Evidence、Initial Analysis、Inspection Report、Knowledge、配置版本和 Observed Resource 等已持久化长内容使用确定性嵌套路由铺满工作台；浏览器后退关闭阅读层，刷新和分享恢复同一对象。一次性秘密、未提交上传和未保存表单不进入可分享 URL。Stop/Cancel 提交后按钮立即变为不可重复触发的“正在停止”，保留当前阶段和已完成内容；只有服务端确认 cancellation fence/终态后才显示 `Cancelled`，失败则恢复合法操作并说明原因，用户可离开等待。部分完成不发明统一领域状态，而是并列显示父对象真实状态、每个子步骤终态和机械计数，已完成 Evidence/Artifact 继续可读，失败项原位提供合法恢复动作，程序不按比例生成健康结论。
 
-无权执行的写动作不显示；直接访问受限 URL 时显示工作区级 403，使用普通语言说明所需角色和返回入口，不伪装为对象不存在，也不建设申请权限流程。Session 失效时以不可绕过的重新登录层遮蔽应用，受保护内容不再可见；仅在当前页面内存暂存非秘密正文、附件引用和表单输入，不写浏览器持久存储，同一 principal 重新登录后恢复原 URL 与输入，principal 变化或刷新则丢弃，一次性秘密永不恢复。临时密码登录始终停留在登录页的第二阶段：先验证临时凭据，再在同一认证页面要求设置新密码，成功建立正常 Session 后才加载工作台数据。
+无权执行的写动作不显示；直接访问受限 URL 时显示工作区级 403，使用普通语言说明所需角色和返回入口，不伪装为对象不存在，也不建设申请权限流程。Session 失效时立即卸载工作区并直接进入完整登录页面：受保护内容、未提交草稿和页面内存中的秘密随之丢弃，不保留遮蔽层，也不做同用户草稿恢复；重新登录（无论 principal 是否相同）都从全新工作区开始，会话草稿不写浏览器持久存储。临时密码登录始终停留在登录页的第二阶段：先验证临时凭据，再在同一认证页面要求设置新密码，成功建立正常 Session 后才加载工作台数据。
 
 对网络中断、429、可恢复 5xx 和结果不确定的命令默认自动恢复：读取与复用同一 `client_command_id` 的命令总计尝试三次，重试间隔 1 秒、2 秒；验证失败、权限不足等确定性错误不重试。三次失败后显示“内部错误”、普通语言原因、“如持续发生请联系管理员”和可复制诊断；停留 10 秒后自动重读当前对象一次，仍失败则回到所属列表上一层。倒计时只存在当前页面内存，用户主动刷新、后退、离开或成功重试后立即取消，绝不在新页面继续旧回退。错误默认先用自然语言说明发生了什么、影响和下一步，并在表单页首或对象状态中持续显示；可展开技术详情只包含稳定错误码、request/Attempt ID、阶段、必要上游原文与复制诊断，禁止堆栈、Authorization、Cookie、秘密或整份无关请求正文。
 
 普通对象列表使用语义化链接/按钮与自然 Tab 顺序，`Tab` 可到达控件、`Enter/Space` 可操作；Sidebar、Dialog、Tabs、Resizable 等沿用 shadcn/Radix/APG 键盘行为，不把整个页面做成 application/grid，也不发明隐藏快捷键。抽屉/确认框打开时焦点不进入背后页面，关闭后回到触发控件；全工作台内容打开时焦点进入标题，关闭/后退后回到原消息或列表行及原滚动位置；未保存输入继续遵循丢弃确认。窄屏详情顶部始终提供明确“返回列表”，不依赖浏览器手势。普通模式的全工作台层使用简短、可中断的从右向左渐入/渐出；`prefers-reduced-motion` 时关闭位移、淡入淡出、列表重排和循环装饰动效，直接显示相同终态，同时保留静态阶段图标、文字和真实进度。
-_Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、按失败比例判健康、403 伪装 404、Session 草稿持久化、临时密码进入工作台、确定性错误重试、换 command ID 重试、跨页面遗留回退定时器、原始堆栈主错误、全局隐藏快捷键、reduced-motion 丢失等待反馈
+_Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、按失败比例判健康、403 伪装 404、Session 草稿持久化、会话过期遮罩层与同用户草稿恢复、临时密码进入工作台、确定性错误重试、换 command ID 重试、跨页面遗留回退定时器、原始堆栈主错误、全局隐藏快捷键、reduced-motion 丢失等待反馈
 
 **告警列表与详情**：
 告警列表默认显示 Firing Occurrence，并按真正状态转换的 Quoin commit 时间倒序；Resolved 进入历史筛选。列表项使用紧凑两行而不是横向表格或大卡片：主行显示状态图标与文字、alertname 和关键时间，次行显示业务系统、可用的 severity 原值和必要状态徽标，选中/hover/focus/变化不只靠颜色表达。列表顶部固定“当前/历史”分段控件与业务系统可搜索 combobox，有筛选时可直接清除；不展示服务端不支持的任意 label 构造器、全文查询或 severity 顺序。统一列表通过 items 和 columns 配置标题、状态、次要信息、时间和受支持操作，加载、空和失败状态与真实数据区分。详情以右侧覆盖式抽屉显示，概览 Tab 响应式双列展示真实描述/注释和完整 labels/annotations，时间线 Tab 只展示真实 Alert Observation；没有独立历史数据时不伪造历史 Tab。AI 分析 Tab 才读取、创建或复用 Initial Analysis：首次进入仅在成功读取到没有分析时创建，活跃任务优先附着并轮询至终态，成功或较新的失败结果按真实时间选择，失败/中断提供显式重试。关闭详情不取消任务，不提供认领、手动关闭、聊天或 Investigation 创建；输出保留 Evidence/Attempt 状态和现有 Evidence 阅读能力。severity 只是原样展示和筛选的普通 label，Quoin 不定义顺序，模型不推断。普通列表不显示 IdentityConflict 等接入问题；接入问题迁至 Admin 管理模块的“告警接入问题”入口，保留查看和确认，确认不删除或改写历史，后续再次发生会重新出现。详情选中状态使用 `id` query，而非 `/alerts/:occurrence` 路径；Occurrence resolved 后当前 URL 仍可查看并明确显示已恢复。
@@ -175,7 +177,7 @@ _Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、
 调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，既有调查 URL 为 `/investigations/:investigation`。列表标题由程序从当前分支第一条有效用户消息机械生成，空白时回退为关联来源或“新调查 + 创建时间”，不持久化独立标题、不调用模型；列表按当前分支最后消息/Attempt 活动时间倒序。点击新建先进入 `/investigations/new` 空白对话，第一条消息被服务端接受时才原子创建 Investigation、消息和 Attempt；未发送即离开不产生空记录，也不先要求标题、业务系统、告警、模型或工具。从告警进入时在发送框上方显示当前 Occurrence 与用户选中 Initial Analysis 的不可变来源项并直接聚焦输入，第一条消息提交时与来源原子写入。用户位于底部时跟随新 token/message；用户向上阅读后停止自动滚动并显示“查看新回复”，不得抢焦点或改变阅读位置。失败 Attempt 对应的用户消息左侧显示环形重试按钮，点击后按既有消息创建新 Attempt；active Attempt 期间发送按钮变为方形停止按钮，点击提交 cancellation fence，终态后恢复发送按钮。Tool Call 在对话中显示为可折叠状态卡片，默认展示工具名、真实阶段、耗时或终态与人类可读摘要，原始参数、输出和诊断详情原位展开；窄屏不为工具调用增加第二页面或上下分屏。点击 Evidence 引用后，内容从右向左渐入并铺满整个工作台，关闭后恢复原消息与滚动位置；Initial Analysis 完整正文与 Inspection Report 也使用同一全工作台阅读层，详情只保留状态、摘要和版本入口；减少动态效果模式直接切换到同一终态。巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。noVNC 瞬断进入短暂 `AwaitingReconnect`，同一 Session 可重附着，宽限期后关闭 BrowserSession 释放身份锁，且不自动发布 profile generation。
 
 **巡检工作台投影**：
-巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示业务系统、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的业务系统和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择业务系统及其已发布计划，从业务系统详情进入时预填；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，按状态与时间、检查结果、Evidence 缺口、分析状态、报告版本排列，并提供简短页内 section navigation，不拆成隐藏上下文的多 tab。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。`AuthenticationRequired` 直达该业务系统 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
+巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示来源接入、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的计划和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合），从接入详情进入时按接入预选；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，按状态与时间、检查结果、Evidence 缺口、分析状态、报告版本排列，并提供简短页内 section navigation，不拆成隐藏上下文的多 tab。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。历史 Journey Run 的 `AuthenticationRequired` 直达对应浏览器身份的 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
 _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试、登录后改写或自动补跑旧 Run
 
 **知识工作台投影**：
@@ -184,13 +186,11 @@ _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试�
 每个不可变 Diagnosis 正文底部提供“记录实际结果”：已采纳、已执行、验证有效、不采纳。反馈精确绑定 Initial Analysis 输出、Inspection Report 版本或具体 Investigation assistant message，追加不可变事件并原位显示最新投影与历史；程序不强制四种反馈必须按顺序经过，也不维护 Investigation 级总反馈。每次反馈可选填简短说明；正向反馈直接追加，“不采纳”须确认相关 Candidate 将变为 SourceInvalid、已确认 KnowledgeVersion 将永久退出检索。知识详情展示当前版本、范围、来源诊断、反馈、检索/index 状态和不可变历史；“修订”以当前版本预填待确认草稿，确认后创建下一不可变版本，不原地覆盖；一次修订 Candidate 被排除后保留历史，但同一 current version 仍可重新发起新修订，不能形成永久死路；“停止复用”经影响确认使该版本粘性退出，恢复只能修订并重新确认新版本。
 _Avoid_: 混排正式知识与候选、索引实现选择器、程序融合排名、窄弹窗编辑长正文、模型自动写入、逐条跨页面确认
 
-**业务系统工作台投影**：
-业务系统模块第二栏使用紧凑两行列表：主行显示系统名称与 `Enabled|Disabled`，次行显示当前配置版本、资源数据新鲜度、Browser Identity 状态和待处理徽标；顶部只有状态筛选和名称搜索。第三栏为连续详情页，依次展示当前状态、配置版本、巡检计划、Observed Resource 与 Browser Identity，并用简短页内 section navigation；关联 Run、资源和不可变版本使用确定性子路由或全工作台阅读层，返回后恢复原位置。该模块仅 Admin 可直接访问和管理。Admin 从列表标题或配置 section 进入业务声明编辑层，可在等价表单与 YAML 视图之间切换、下载或导入 YAML，并查看目标 Label Contract 与 Journey Catalog provenance；两种视图共享同一草稿、校验、版本和发布路径。失败保留非秘密输入，并按字段或 YAML path 显示原因和修复方法，不提供竞争性编辑器、平行表单保存路径或第二声明。版本历史逐项显示真实状态，不发明“当前草稿”；版本详情机械展示相对当前发布版本的 YAML diff、静态校验、Config Verification Run 历史和契约兼容性。“运行测试”创建独立 Config Verification Run；“发布”经一次影响确认原子切换，冲突后重新读取权威指针且不覆盖其他版本。业务系统启停只由同一声明版本的 `enabled` 状态发布完成，不增加独立开关；Operator 仅能在告警与 AI SRE 的授权上下文使用必要业务信息，不能直接访问业务系统或巡检管理页面。
+**业务纳管历史投影**：
+业务系统模块已退出运维中心导航，其运维职责由接入管理与业务视图承接；既有业务系统、配置版本、验证 Run 与 Observed Resource 经只读入口保留，用于追溯旧声明与旧 Run 的绑定关系，不提供新的声明编辑、发布或启停操作，也不发明“当前草稿”。Observed Resource 历史列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，不把未观测到解释为删除；新的观测事实由来源级观测拥有，观测范围来自接入。浏览器身份改由接入管理按独立 `identity_key` 配置：只有 Admin 可配置显示名、起始 URL、authentication probe 与类型化参数、创建新 revision，并发起和发布人工浏览器登录。noVNC 铺满工作台，顶部固定窄工具条显示业务系统或身份、真实 operation 状态、重连提示、发布与取消；发布成功关闭远程桌面并回到来源详情，关闭页面不隐式取消，窄屏保留入口并提示桌面体验更可靠。Operator 不得进入或调用该流程，服务端必须强制拒绝。
 
-Observed Resource 列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，显示 discovery、身份 labels、最后成功刷新与最后见到时间；点击后铺满工作台查看完整 labels、discovery、观测时间与当前/陈旧状态，不把未观测到解释为删除；v1 没有资源历史引用数据模型，不制造该列表。Browser Identity section 显示当前状态、revision、profile generation、最近 probe 与占用情况；只有 Admin 可配置显示名、起始 URL、authentication probe 与类型化参数、创建新 revision，并发起和发布人工浏览器登录。`/business-systems/:system/browser-login` 中 noVNC 铺满工作台，顶部固定窄工具条显示业务系统、真实 operation 状态、重连提示、发布与取消；发布成功关闭远程桌面并回到来源详情，关闭页面不隐式取消，窄屏保留入口并提示桌面体验更可靠。Operator 不得进入或调用该流程，服务端必须强制拒绝。
-
-**Label Contract 激活投影**：
-管理页使用全工作台 readiness 视图，展示目标契约、每个已启用业务系统的全部合法“配置版本 + Passed Config Verification Run”候选和阻塞原因；多个合法候选必须由 Admin 明确选择，不以“最新”代替。全部系统选择完整后经一次影响确认原子激活；阻塞项直接跳转对应业务系统版本或 Config Verification Run，禁止先切契约再逐系统修复。
+**Label Contract 激活投影（历史）**：
+全局契约的联合激活界面已随业务声明一同退出主线；既有激活记录与相关 Run 只读保留，用于解读历史配置切换，不得作为新配置或标签语义的入口。
 _Avoid_: 双配置入口、Business System 卡片墙、latest draft、上传即发布、可编辑 CMDB、Cookie/profile 文件编辑、部分激活
 
 **账号、Session 与审计投影**：
@@ -204,16 +204,36 @@ _Avoid_: 个人设置全局模块、通用连接 JSON、秘密持久化、自动
 
 ## 资源与巡检
 
+### 插件化接入、观测与巡检（ADR 0004，主线已实施）
+
+[ADR 0004](docs/adr/0004-plugin-capability-registry.md) 把接入、自动观测、模型工具、巡检与可选业务视图从业务声明前置中解耦。主线链路——接入验证并启用→启用接入的默认来源级观测→Agent 工具按冻结授权与 `sourceRef` 定来源→独立巡检计划按整个接入／显式对象／业务视图定范围→基于 Evidence 的不可变报告——已随实现落地并由主线集成验证覆盖；真实部署验收进行中，实际点击记录与遗留缺陷见 [docs/plugin-real-deployment-acceptance.md](docs/plugin-real-deployment-acceptance.md)，该记录未全通过前不宣称部署验收完成。旧声明、Run 与 Evidence 保持其历史解释，禁止按新模型重写过去事实。
+
+**插件（Plugin）**：随组件构建发布的可信能力实现，以稳定 ID、版本、封闭配置和能力描述显式注册。插件按需提供 Probe、Discover、模型 Tools、ExecuteTool、巡检模板及 Collect；控制面描述与运行时执行分离。部署 YAML 选择启用集合；缺省启用 prometheus、thanos、alertmanager、kubernetes，浏览器插件默认停用，显式加入启用集合并部署 Lintel 后才可用（缺省字段与空数组是不同的部署事实：空数组表示全部停用）。不提供动态 `.so`、在线安装任意代码或另一套插件 RPC。
+
+**接入启用（Integration Enablement）**：接入先经真实 probe 验证再显式启用；启用是接入从“已配置”进入“可观测、可授权、可巡检”的唯一门槛。启用事务内幂等创建该接入仅人工运行的默认基础巡检计划，失败整体回滚，不会出现“已启用却无即用计划”的中间态；停用只阻止新派发。启用不要求任何业务声明。
+
+**插件工具目录（Plugin Tool Catalog）**：由已启用插件及本次 Agent 授权生成的规范有序工具集合，冻结参数／结果 Schema、工具版本、执行位置与摘要。模型和 worker 使用同一目录；每次执行仍重新验证接入授权、插件启用和取消状态。初步分析与调查把已启用接入冻结为来源级授权输入：模型只能以 `sourceRef` 等人类可读定位指名来源，来源连接由 Tool Call 事务冻结的 grant 决定，来源歧义返回可恢复的预检结果，绝不回退“第一个”接入。目录不包含秘密，不允许模型扩大权限或注入工具。
+
+**业务视图（Business View）**：对来源接入范围与明确标签条件的可选版本化组织，可附加业务说明；表单与 YAML 编辑同一对象，按 row version 冲突裁决。视图不拥有资源身份、凭据或额外权限，只收窄候选。没有业务视图也可接收告警、观测对象、使用已授权工具和执行基础巡检；消费者（当前是巡检计划）在各自创建时冻结所用视图内容，视图后续修改不改写历史。
+
+**来源级观测（Source-scoped Observation）**：已验证并启用的接入通过其插件 Discoverer 执行的有界观测；启用、手动刷新与默认周期调度共用同一准入，同一接入同时最多一个观测 Run，定时去重键为 `scheduled_for`。观测对象身份由接入、对象类型和规范来源身份（按插件声明 identity labels 规范编码）确定，不依赖业务分组，跨来源同名对象不合并；只有同一冻结范围完整成功才能把未再见到的对象标记为未观测。失败、截断和局部结果不得清空资源或推断物理删除；陈旧是显式标注的事实，不是观测推断。
+
+**独立巡检计划（Inspection Plan）**：直接绑定一个来源接入与一个插件巡检模板的计划，不再内嵌于业务声明。范围三选一：整个接入、显式对象集合或业务视图（业务视图仍固定与计划自己的接入相交，绝不全源查询）。Run 创建时确定性展开并冻结目标、模板版本、参数、查询窗口、接入修订与授权；执行中不扩大目标，重新采证必须创建新 Run。定时巡检需要显式启用计划并配置标准五字段 cron（时区由计划自身提供），同一计划同时最多一个 Run，重叠定时周期 SkippedOverlap 且不补跑。
+
+**插件巡检模板（Plugin Inspection Template）**：插件贡献的版本化确定性采证定义，参数是封闭字面量并经 AST 静态校验。检查由程序机械执行并形成 Evidence；模型基于持久化 Evidence 与缺口生成不可变报告，不直接写权威报告。定时巡检／模型报告需要明确启用，采证成功不等于业务健康。
+
+下述「历史标签契约」「业务系统」「观测资源」「业务系统配置版本」属于已被替换的旧活动模型条款：BusinessSystem 声明的写入与发布入口、独立资源刷新调度和业务绑定巡检计划均已按 ADR 0004 移除，相关历史数据只读保留；其余既有条款只描述既有记录的解读方式。
+
 **历史标签契约（Historical Label Contract）**：
-曾作为部署级、版本化 Prometheus 业务归属 label 语义的配置模型。它及其版本、激活、关联 Run 和 E2E 记录只为解读和保留既有历史而存在，不能充当目标态的活动全局标签权威，也不能覆盖新业务声明的范围。目标态以每份 BusinessSystem 声明自身的指标与告警 labels 定义语义；实施迁移前不宣称历史记录已经转换。
+曾作为部署级、版本化 Prometheus 业务归属 label 语义的配置模型。它及其版本、激活、关联 Run 和 E2E 记录只为解读和保留既有历史而存在，不能充当活动全局标签权威。它先被 ADR 0003 的按声明标签语义取代，随后又被 ADR 0004 的来源级接入与业务视图取代；这些层次只用于按当时模型解读历史记录。
 _Avoid_: 把历史契约当当前权威、从旧记录推断新声明、多个当前契约、部分切换
 
-**业务系统（Business System）**：
-由一份版本化 `quoin/v1` `BusinessSystem` 声明界定的稳定运维范围，生命周期只有 `Enabled | Disabled`。该声明是目标态唯一业务配置权威；未来的表单和 YAML 只是编辑同一声明的两种视图，不形成第二份权威或秘密副本。声明自身引用指标接入、定义指标范围和资源 labels、资源身份规则、告警来源及告警自身 labels、以及巡检计划；它不依赖活动全局 Label Contract。草稿不改变正式范围，只有显式发布才切换当前声明及 enabled 状态。停用后不启动新的定时巡检或普通人工 Inspection Run，已接受只读 Run 可完成并允许取消，告警和历史保留。该目标仍待迁移实施和接受。
+**业务系统（Business System，历史模型）**：
+曾由一份版本化 `quoin/v1` `BusinessSystem` 声明界定并承担业务配置唯一权威的稳定运维范围，生命周期只有 `Enabled | Disabled`。ADR 0004 后业务声明不再拥有接入选择、资源范围、查询授权和巡检计划，声明的创建、编辑与发布入口已移除；既有系统、配置版本及其 Run、Evidence 按当时冻结的声明只读保留，停用系统的告警与历史继续可见。业务归属只作为来源描述进入告警与调查，不再派生任何采集、授权或调度。
 _Avoid_: YAML 与数据库双配置权威、接入即扫描、租户、Kubernetes 集群、自动推断服务、停用删除历史
 
-**观测资源（Observed Resource）**：
-由具有合法业务身份声明的已发布任务产生、带业务、观测时间、来源任务和配置版本的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map`；显示名称、数组顺序和非身份 labels 不参与身份。已声明的定时巡检、告警分析和对话工具调用可以按需采集并形成正式观测；显式验证/试运行只形成独立的 Run 证据，绝不写入 Observed Resource。接入、发布、打开页面和独立周期刷新不采集。完整范围内的成功观测才能表达未再观测到；局部查询、失败或缺口不得清空其他资源或推断物理删除。
+**观测资源（Observed Resource，历史模型）**：
+旧模型中由具有业务身份声明的已发布任务产生、稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map` 的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。独立资源刷新调度已随 ADR 0004 移除，新的观测一律写入来源级观测对象；既有 Observed Resource 及其观测时间、来源任务与配置版本保持只读历史，不按来源身份合并或改写。“只有完整范围成功观测才能表达未再观测到，失败或缺口不得清空资源或推断物理删除”的规则继续适用于新模型。
 _Avoid_: 资产、CMDB 条目、Kubernetes 对象快照、独立周期资源刷新、用 `/series` 元数据证明当前资源状态、完整 labels fingerprint 身份
 
 **Kubernetes 运行时状态（Kubernetes Runtime State）**：
@@ -225,27 +245,23 @@ Quoin 访问一个外部运行系统时使用的稳定命名身份与访问边�
 _Avoid_: 无类型 URL+凭据、可覆盖配置、长期可下发旧秘密、用户凭据、巡检计划、Runtime 身份
 
 **指标接入（Metrics Integration）**：
-用户配置的 Prometheus 或 Thanos 查询能力，保存访问能力而不代表任何业务用途；同一平台可有多个接入。每份目标态业务系统声明以一个明确的 `metrics.connectionRef` 引用确定接入；执行必须解析为该引用，不能回退到全局或“第一个”接入。Prometheus 与 Thanos 是不同的平台类型；认证模式只限 `none`、HTTP Basic 和 Bearer，TLS 仍使用接入的既有类型化配置，不能以跳过证书校验替代 TLS 配置。业务声明及其引用不内嵌地址、凭据或 TLS 秘密，凭据仍在接入边界管理。PromQL 校验使用 AST 而非正则，并按声明的资源范围和 allowed metrics 强制约束，不依赖活动全局 Label Contract。
+Prometheus 或 Thanos 类型的接入（Connection），保存访问能力而不代表任何业务用途；同一平台可有多个接入。工具、观测与巡检引用必须解析到明确的接入，缺失或歧义时显式失败，不能回退到全局或“第一个”接入。Prometheus 与 Thanos 是不同的平台类型；认证模式只限 `none`、HTTP Basic 和 Bearer，TLS 仍使用接入的既有类型化配置，不能以跳过证书校验替代 TLS 配置。接入地址、凭据与 TLS 秘密只在接入边界管理。模板 PromQL 使用 AST 校验并受插件模板声明约束，不依赖业务声明或全局标签语义。
 _Avoid_: 全局唯一 Thanos、缺失或歧义引用时回退、每业务系统私有凭据、Grafana 数据源、Thanos StoreAPI、字符串改写 PromQL
 
 **接入（Integration）**：
-用户从支持的平台目录配置并管理的访问能力，包括 Alertmanager、Prometheus、Thanos、Kubernetes 和浏览器。接入保存平台特有的访问配置、凭据边界和验证状态；业务系统声明接入的用途与范围，Run/Attempt 冻结实际使用的已授权接入修订。接入的保存、浏览和启用本身不采集业务资源。
+用户从支持的平台目录配置并管理的访问能力，包括 Alertmanager、Prometheus、Thanos、Kubernetes 和浏览器；接入本身是配置、验证、启用、观测与授权的直接对象。接入的保存和浏览不采集业务资源；验证并启用后按其插件能力开始来源级观测，并进入 Agent 工具授权与巡检计划范围。Run/Attempt 冻结实际使用的接入修订。浏览器接入默认停用，显式启用才部署并注册 Lintel。
 _Avoid_: 全局接入中心、业务配置中的秘密副本、接入即扫描、强行统一的存储类型
 
-**巡检计划（Inspection Plan）**：
-用户为一个业务系统明确配置的一组类型化巡检项，具有跨版本稳定的用户可读 key 和可修改显示名。每个计划可配置一个标准五字段 cron；缺少 cron 表示仅人工运行，时区由该业务系统配置根节点统一提供。一个计划同时最多一个 active Run。
-_Avoid_: 巡检报告、调查、跨业务系统的自动推断模板、任意 Agent 提示词、每检查独立调度
-
 **巡检项（Inspection Check）**：
-巡检计划中的一个独立检查，具有跨版本稳定 key、可修改显示名和明确 `analysis_question`，第一版选择 PromQL 或浏览器巡检；程序校验后机械执行，模型统一分析全部证据。每个 check 在一次 Run 中恰好执行一次，表达式和 Journey 参数均为字面量，不支持模板、环境变量、循环或按 ObservedResource 动态展开；多个目标必须显式写多条 check。Kubernetes 只供人工调查按需查询，不进入定时配置。PromQL 支持 instant 与 range query；range 以真实开始采证的 `evidence_at` 为终点并保存实际 start/end/step。YAML 不提供 `expect` 或断言规则；Journey 只保留完成浏览器动作所必需的内部检查。
-_Avoid_: 诊断、巡检报告、由程序猜测的检查、Kubernetes 定时检查、健康阈值规则引擎、动态 fan-out、通用模板或 DSL
+一次 Run 中由计划按其范围确定性展开并冻结的独立检查，具有跨版本稳定 key 和真实采证结果。模板参数（如 PromQL 表达式与窗口秒数）是封闭字面量并经 AST 静态校验，不支持模板变量、环境变量、循环或按对象动态展开；多个目标必须显式展开为多条 check。程序机械执行检查并形成 Evidence，模型统一分析全部证据；range 查询以真实开始采证的 `evidence_at` 为终点并保存实际 start/end/step。YAML 不提供 `expect` 或断言规则；Journey 只保留完成浏览器动作所必需的内部检查。浏览器 Journey 检查只在显式启用的浏览器能力下可用，历史声明 Run 的 Journey 检查按其冻结绑定解读。Kubernetes 只供人工调查按需查询，不进入定时配置。
+_Avoid_: 诊断、巡检报告、由程序猜测的检查、健康阈值规则引擎、动态 fan-out、通用模板或 DSL
 
-**业务系统配置版本（Business System Configuration Version）**：
-每个业务系统的一份完整、版本化权威声明原子包含稳定业务系统 name/enabled、接入引用、指标与资源范围、资源身份规则、告警来源和告警 labels、以及全部巡检计划；每个系统只有一个当前已发布版本。目标态机器形状由 `business-system.schema.json` 唯一拥有：根为 `apiVersion: quoin/v1`、`kind: BusinessSystem`，指标能力由 `metrics.connectionRef` 明确引用，告警来源由 `alerts.sourceRefs` 引用，检查以 `resourceRef` 指向声明的资源。该模型没有活动全局 Label Contract 或联合激活。等价表单和 YAML 视图编辑同一草稿，Config Verification Run 精确绑定该草稿；发布命令携带 version ID 与 expected current published version ID，事务中重验并切换，不匹配则冲突。声明中的巡检使用 IANA 时区，资源、plan、check 使用稳定 name。YAML 导入/导出时只接受一个 UTF-8 文档，拒绝重复 key、anchor/alias、merge、自定义 tag、非字符串字段名、第二文档和尾随内容，并设输入/AST/深度上限；YAML 输入只解析一次，保存原文、parser/schema 版本、类型结构和 digest，运行只使用类型结构。表单与 YAML 共享同一 Schema 校验结果；未知字段或重复 key 必须拒绝，不得在表单往返中静默丢失。该目标态仍待同步迁移并接受，历史声明及其执行记录不因此改写。
-_Avoid_: 页面隐式归属、缺失指标引用、共享可覆盖草稿、资源与计划分别发布、运行时重新解析、自动热加载、表单与 YAML 双权威、要求用户先读内部 Schema
+**业务系统配置版本（Business System Configuration Version，历史模型）**：
+旧模型中每个业务系统的完整版本化权威声明，原子包含业务系统 name/enabled、接入引用、指标与资源范围、资源身份规则、告警来源和告警 labels、以及全部巡检计划；每个系统只有一个当前已发布版本，机器形状由 `business-system.schema.json` 拥有。该写入、发布与联合激活主面已随 ADR 0004 移除；既有版本及其 Schema、严格 YAML 解析与 Config Verification Run 记录仍用于解读历史声明、历史 Run 和迁移映射，不接受新草稿或发布，也不得被当作新配置的权威。
+_Avoid_: 页面隐式归属、缺失指标引用、共享可覆盖草稿、运行时重新解析、表单与 YAML 双权威、要求用户先读内部 Schema
 
 **浏览器身份（Browser Identity）**：
-受控浏览器运行侧保存的持久登录身份，保存稳定身份和当前配置 revision/profile generation/状态指针；它作为浏览器接入独立配置，并由业务系统以显式授权引用，而非只能从业务内创建。身份复用默认不跨业务，只有明确授权的引用可复用。Revision 包含起始 URL、版本化 authentication probe 与类型化参数；每个 Browser Operation 冻结实际 revision。人工登录仅 Admin 可发起、操作及发布，绑定发起用户和 Web Session，单一身份互斥，其他用户不得旁观或接管；Operator 没有重新登录或其他浏览器身份管理例外，服务端必须拒绝其直接请求。关闭操作页不保存也不隐式取消，只有仍有效会话经 probe 成功后的显式保存才能发布新 Profile Generation，失败不覆盖旧有效版本。Cookie、storage state 与 profile 字节只保存在受控浏览器侧，不进入前端、数据库、模型、Artifact、日志或备份；Quoin 只保留引用、清单、状态、时间和运行引用。技术故障与明确未登录仍须区分，且不将前者伪造成凭据失效。
+受控浏览器运行侧保存的持久登录身份，保存稳定身份和当前配置 revision/profile generation/状态指针；它作为浏览器接入的独立配置以稳定 `identity_key` 定位创建，不要求业务系统存在。浏览器插件默认停用，显式启用并部署 Lintel 后才能配置身份。旧模型中业务系统对身份的显式授权引用保留为只读历史与显式迁移状态，身份复用默认不跨对象，旧引用关系不因迁移自动扩大。Revision 包含起始 URL、版本化 authentication probe 与类型化参数；每个 Browser Operation 冻结实际 revision。人工登录仅 Admin 可发起、操作及发布，绑定发起用户和 Web Session，单一身份互斥，其他用户不得旁观或接管；Operator 没有重新登录或其他浏览器身份管理例外，服务端必须拒绝其直接请求。关闭操作页不保存也不隐式取消，只有仍有效会话经 probe 成功后的显式保存才能发布新 Profile Generation，失败不覆盖旧有效版本。Cookie、storage state 与 profile 字节只保存在受控浏览器侧，不进入前端、数据库、模型、Artifact、日志或备份；Quoin 只保留引用、清单、状态、时间和运行引用。技术故障与明确未登录仍须区分，且不将前者伪造成凭据失效。
 _Avoid_: 用户密码、业务配置中的 profile/Cookie、任意 YAML 绝对 URL、Playwright 脚本、Runtime 管理页登录、每次运行回滚状态、把 profile 当 Artifact、默认全局共享身份、跨 Runtime 重启恢复登录会话
 
 **浏览器探索会话（Browser Exploration Session）**：
@@ -261,7 +277,7 @@ _Avoid_: 任意 Journey 字符串、Quoin 分发用户代码、旧配置绑定�
 _Avoid_: 三种操作共用全量录制、录制人工登录秘密、同一页面多份重复正文
 
 **巡检运行（Inspection Run）**：
-一个已发布计划在调度时刻或人工触发下产生的不可变机械采证记录。权威状态只描述采证：`Queued | Running | Completed | CompletedWithGaps | Failed | Cancelled | Interrupted | SkippedOverlap`。Completed 表示全部检查形成完整 Evidence，不表示系统健康；CompletedWithGaps 表示采证已结束并冻结结果，但存在 RuntimeUnavailable、AuthenticationRequired、部分响应或检查失败等缺口，即使没有成功检查，只要完整记录每项缺口仍属此状态；Failed 只表示无法形成并提交有效冻结结果集合。模型分析 Attempt/Report 使用独立状态，分析失败不回写 Run，页面可显示“采证部分完成/分析失败”。同一计划不并发：重叠定时周期 SkippedOverlap且不补跑，人工触发展示当前 active Run。定时创建时 Runtime 离线则相应检查 RuntimeUnavailable、其他继续；在线无浏览器容量时 Run 已进入 `Running` 并生成 `evidence_at`，只有对应 Browser Operation 进入 `WaitingForCapacity`，队列只在 Quoin。重试分析引用同一 Run，重新采证创建新 Run/evidence_at并以 rerun_of 引用旧 Run。
+一个独立巡检计划在调度时刻或人工触发下产生的不可变机械采证记录，Run 创建时冻结计划绑定与接入修订；旧业务声明计划的 Run 以其冻结声明版本解释，新 Run 一律来自独立计划。权威状态只描述采证：`Queued | Running | Completed | CompletedWithGaps | Failed | Cancelled | Interrupted | SkippedOverlap`。Completed 表示全部检查形成完整 Evidence，不表示系统健康；CompletedWithGaps 表示采证已结束并冻结结果，但存在 RuntimeUnavailable、AuthenticationRequired、部分响应或检查失败等缺口，即使没有成功检查，只要完整记录每项缺口仍属此状态；Failed 只表示无法形成并提交有效冻结结果集合。模型分析 Attempt/Report 使用独立状态，分析失败不回写 Run，页面可显示“采证部分完成/分析失败”。同一计划不并发：重叠定时周期 SkippedOverlap且不补跑，人工触发展示当前 active Run。定时创建时 Runtime 离线则相应检查 RuntimeUnavailable、其他继续；在线无浏览器容量时 Run 已进入 `Running` 并生成 `evidence_at`，只有对应 Browser Operation 进入 `WaitingForCapacity`，队列只在 Quoin。重试分析引用同一 Run，重新采证创建新 Run/evidence_at并以 rerun_of 引用旧 Run。
 _Avoid_: 巡检计划、巡检报告、混合采证/分析状态、Succeeded=健康、离线补跑、Runtime 队列、跨时间追加
 
 **执行尝试（Execution Attempt）**：
