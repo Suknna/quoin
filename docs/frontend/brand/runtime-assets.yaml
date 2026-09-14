@@ -1,0 +1,133 @@
+# Runtime brand asset provenance for the Quoin web workspace.
+#
+# Source of truth is material/ready (user-approved exports; see
+# material/ready/README.md). This file records how each runtime copy in
+# web/public/brand was produced and where the web app references it.
+# Hashes are sha256 over exact file bytes at integration time (2026-09-14).
+generated: "2026-09-14"
+source_dir: material/ready
+runtime_dir: web/public/brand
+transformations:
+  downsample: "Pillow LANCZOS resize to the listed display size (>=2x the largest rendered CSS size), saved as optimized PNG."
+  copy: "Byte-identical copy of the source file."
+
+assets:
+  - file: lockup-light.png
+    source: lockup-light.png
+    transform: downsample
+    rendered_size: 480x135
+    usage: "Login/auth header wordmark via BrandLockup (web/src/app/Brand.tsx); also the light-theme variant of the adaptive pair."
+    source_sha256: f3055bd9c82c47d7e1c632a8abd0288721e17cd25e56ffce276bc032d62f55de
+    runtime_sha256: f6d930a103eaafa52f192ede80371a653e858d8a5d0a6468a5d71d53697a557c
+  - file: lockup-dark.png
+    source: lockup-dark.png
+    transform: downsample
+    rendered_size: 480x137
+    usage: "Dark-theme lockup variant and the fixed wordmark in the auth right-panel eyebrow (AuthBrandPanel.tsx, alt 'quoin')."
+    source_sha256: a90d3ef771629e7d86bdc6f6686df3c51802cce72094d63011f3b49942a5d82b
+    runtime_sha256: 7cd532f1bcf8350cf104218d774be6677d4a5ce60c4abec00de6579fee77d3f5
+  - file: mark-light.png
+    source: mark-light.png
+    transform: downsample
+    rendered_size: 110x128
+    usage: "Sidebar rail mark, light theme (WorkspaceShell.tsx, decorative)."
+    source_sha256: 35aa1707855671771dc2c5f0cc3a642ca03319c7c926a0dec9b1209ed89040f6
+    runtime_sha256: c547149a1efd6dff07d06ad42d513af364825f708ac9e2fe91cf103a722aae9b
+  - file: mark-dark.png
+    source: mark-dark.png
+    transform: downsample
+    rendered_size: 110x128
+    usage: "Sidebar rail mark, dark theme (WorkspaceShell.tsx, decorative)."
+    source_sha256: 27bd0cd066f327b1a1c613643c02265688cd5250468209f2f600d68ae6eea3d6
+    runtime_sha256: c32c3aeaee2723015ee5b66785b2f083f2d919bc6ec6245ed4cfea51b0386ce3
+  - file: illustration-core.png
+    source: illustration-core.png
+    transform: downsample
+    rendered_size: 320x317
+    usage: "Central platform in the auth illustration compose (AuthBrandPanel.tsx)."
+    source_sha256: 198cc12d75cea23cfc3bcd6bd1eaaa4136e28824324198c5ee44d8fcfb259970
+    runtime_sha256: ae93eef1b548bb48fc0966db0bd24cfc8c33b2a9de260bbf16ea5f230aba684e
+  - file: evidence-monitoring.png
+    source: evidence-monitoring.png
+    transform: downsample
+    rendered_size: 480x167
+    usage: "Auth illustration source node '监控指标' (AuthBrandPanel.tsx); label is HTML text, not bitmap."
+    source_sha256: 298b63d517246db05e2943fe4553ffb2b885bd16796aec60eda6b5fdef567fd4
+    runtime_sha256: 06ab087c2487a2bebc341084b7d2237abe55f00dd6c5eec0d12d85c0fc09294d
+  - file: evidence-events.png
+    source: evidence-events.png
+    transform: downsample
+    rendered_size: 480x167
+    usage: "Auth illustration source node '事件线索' (AuthBrandPanel.tsx); label is HTML text, not bitmap."
+    source_sha256: 78c4b31c39c815de655986b5e18173e46a143c40141d6a087b3607009145da74
+    runtime_sha256: 834328cee8dccd575d2048aa9f2064402225e9a4cd45260cba170feb5e3412ab
+  - file: evidence-knowledge.png
+    source: evidence-knowledge.png
+    transform: downsample
+    rendered_size: 480x167
+    usage: "Auth illustration source node '历史知识' (AuthBrandPanel.tsx); label is HTML text, not bitmap."
+    source_sha256: 25ea121343c78590e9d9509d7ea552299e1dd3a401d12cb2cc432f7f28f115fc
+    runtime_sha256: 4bfaf75e231e4b34a217d10855fc5405b9938d281b8c1be1f543ba03a0efdcf1
+  - file: investigation-record.png
+    source: investigation-record.png
+    transform: downsample
+    rendered_size: 320x352
+    usage: "Auth illustration record card '调查记录' (AuthBrandPanel.tsx)."
+    source_sha256: a828addffec18d844eed804507821156c4767573b697ca28882d1251677f4e1f
+    runtime_sha256: 9c494a714d20b83deadbc0f08f952f73b5fcd05dfd80e2376e6d5178eb91eebb
+  - file: favicon.ico
+    source: favicon.ico
+    transform: copy
+    rendered_size: 16/32/48 ico frames
+    usage: "Browser fallback icon (web/index.html)."
+    source_sha256: 17445347241412ced99603958f394e87c134ecc2b8835b2543932409ad7a6582
+    runtime_sha256: 17445347241412ced99603958f394e87c134ecc2b8835b2543932409ad7a6582
+  - file: icon-16.png
+    source: icon-16.png
+    transform: copy
+    usage: "PNG favicon 16px (web/index.html)."
+    source_sha256: 64b67a71d596581fc5279939bbc4873c018e5537037f2810f45bd36a81f35d70
+    runtime_sha256: 64b67a71d596581fc5279939bbc4873c018e5537037f2810f45bd36a81f35d70
+  - file: icon-32.png
+    source: icon-32.png
+    transform: copy
+    usage: "PNG favicon 32px (web/index.html)."
+    source_sha256: f7b850a208cadab19fc56653e6200906fc0f492463fc4d858c92be56b38c8fab
+    runtime_sha256: f7b850a208cadab19fc56653e6200906fc0f492463fc4d858c92be56b38c8fab
+  - file: icon-48.png
+    source: icon-48.png
+    transform: copy
+    usage: "PNG favicon 48px (web/index.html)."
+    source_sha256: 1d4a1a6b111b7dde3a3b041459b82cf0ce3e5cb165b3f9507cfea457cfadc5e6
+    runtime_sha256: 1d4a1a6b111b7dde3a3b041459b82cf0ce3e5cb165b3f9507cfea457cfadc5e6
+  - file: icon-180.png
+    source: icon-180.png
+    transform: copy
+    usage: "Apple touch icon (web/index.html)."
+    source_sha256: 56547e64c1d66b64e55990bf9fc03153eed4ef81fb636e40b6dc9a7f03107acb
+    runtime_sha256: 56547e64c1d66b64e55990bf9fc03153eed4ef81fb636e40b6dc9a7f03107acb
+  - file: icon-192.png
+    source: icon-192.png
+    transform: copy
+    usage: "PNG favicon 192px (web/index.html)."
+    source_sha256: 14d99384b4b4616c0e5a58a16078a3d8d17024898f4b914c66e824aa9fc76cb8
+    runtime_sha256: 14d99384b4b4616c0e5a58a16078a3d8d17024898f4b914c66e824aa9fc76cb8
+  - file: app-icon-512.png
+    source: app-icon-512.png
+    transform: copy
+    usage: "PNG favicon 512px / largest icon (web/index.html)."
+    source_sha256: 522f3863ef1f4cf5407e6e47ed7dfdc4ad781c75861c63b8b4a3e36c24ca2472
+    runtime_sha256: 522f3863ef1f4cf5407e6e47ed7dfdc4ad781c75861c63b8b4a3e36c24ca2472
+
+not_runtime:
+  - file: app-icon-light-512.png
+    reason: "Reserved light-background app icon; no runtime surface uses a 512px light icon yet (no web app manifest exists)."
+  - file: mark-black.png
+    reason: "Monochrome mark for single-colour print/branding scenarios; the UI always uses the colour mark."
+  - file: mark-white.png
+    reason: "Monochrome mark for single-colour branding scenarios; the UI always uses the colour mark."
+
+notes:
+  - "There is no vector source for any asset; every runtime image is a raster PNG derived from material/ready (prompts in docs/frontend/brand/prompts/)."
+  - "Auth illustration node labels and the record caption are rendered as HTML text on top of/next to the bitmaps; the PNGs contain no text."
+  - "web/src/app/Brand.test.tsx asserts that every file referenced by BRAND_ASSET_FILES exists in web/public/brand."
