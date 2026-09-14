@@ -18,6 +18,19 @@ function renderShell(route: string, navigate = vi.fn()) {
 }
 
 describe("WorkspaceShell navigation", () => {
+	it("brands the rail with the mark assets while keeping the Quoin accessible name", () => {
+		renderShell("/alerts/list");
+		const brandButton = screen.getByRole("button", { name: "Quoin" });
+		expect(brandButton).toBeInTheDocument();
+		const sources = [...brandButton.querySelectorAll("img")].map((img) =>
+			img.getAttribute("src"),
+		);
+		expect(sources).toEqual(["/brand/mark-light.png", "/brand/mark-dark.png"]);
+		for (const img of brandButton.querySelectorAll("img")) {
+			expect(img).toHaveAttribute("alt", "");
+		}
+	});
+
 	it("renders two persistent labelled module buttons without a switch dropdown", () => {
 		renderShell("/alerts/list");
 		expect(screen.getByRole("button", { name: "运维中心" })).toBeInTheDocument();

@@ -1,131 +1,108 @@
-import { Activity, BookOpen, FileSearch, ListTree } from "lucide-react";
+import { BrandLockup } from "./Brand";
+
+/**
+ * The five exported brand bitmaps (see material/ready/README.md) composed in a
+ * fixed 512x352 design space. Percentage geometry keeps the SVG connectors and
+ * the raster nodes aligned at any rendered width; captions stay real text so
+ * the labels are never baked into a bitmap.
+ */
+const SOURCE_NODES = [
+	{
+		label: "监控指标",
+		asset: "/brand/evidence-monitoring.png",
+		top: "9.2%",
+		delay: 300,
+	},
+	{
+		label: "事件线索",
+		asset: "/brand/evidence-events.png",
+		top: "39.9%",
+		delay: 440,
+	},
+	{
+		label: "历史知识",
+		asset: "/brand/evidence-knowledge.png",
+		top: "70.5%",
+		delay: 580,
+	},
+] as const;
+
+const CONNECTOR_PATHS = [
+	"M205 68C222 68 214 176 230 176",
+	"M205 176H230",
+	"M205 284C222 284 214 176 230 176",
+] as const;
 
 function EvidenceIllustration() {
 	return (
-		<svg
-			viewBox="0 0 480 260"
-			fill="none"
-			className="w-full max-w-md"
+		<div
 			aria-hidden="true"
-			focusable="false"
+			className="relative mx-auto aspect-[16/11] w-full max-w-[512px]"
 		>
-			<g className="stroke-border" strokeWidth="1.5">
-				{[
-					"M148 58H180Q204 58 204 82V106Q204 130 228 130H272",
-					"M148 130H272",
-					"M148 202H180Q204 202 204 178V154Q204 130 228 130H272",
-				].map((d, index) => (
-					<path
-						key={d}
-						d={d}
-						pathLength="1"
-						className="auth-brand-link"
-						style={{ animationDelay: `${550 + index * 140}ms` }}
-					/>
-				))}
-			</g>
-			<path
-				d="M228 130H272"
-				pathLength="1"
-				className="auth-brand-link stroke-chart-1/60"
-				strokeWidth="1.5"
-				style={{ animationDelay: "1000ms" }}
-			/>
-			<circle
-				cx="228"
-				cy="130"
-				r="4"
-				className="auth-brand-enter fill-chart-1"
-				style={{ animationDelay: "900ms" }}
-			/>
-			{[
-				{ label: "监控指标", icon: Activity, y: 34 },
-				{ label: "事件线索", icon: ListTree, y: 106 },
-				{ label: "历史知识", icon: BookOpen, y: 178 },
-			].map(({ label, icon: Icon, y }, index) => (
-				<g key={label} transform={`translate(8 ${y})`}>
-					<g
-						className="auth-brand-enter"
-						style={{ animationDelay: `${300 + index * 140}ms` }}
-					>
-						<rect
-							width="140"
-							height="48"
-							rx="10"
-							className="fill-card stroke-border"
+			<svg
+				viewBox="0 0 512 352"
+				fill="none"
+				className="absolute inset-0 h-full w-full"
+				focusable="false"
+			>
+				<g className="stroke-border" strokeWidth="1.5">
+					{CONNECTOR_PATHS.map((d, index) => (
+						<path
+							key={d}
+							d={d}
+							pathLength="1"
+							className="auth-brand-link"
+							style={{ animationDelay: `${550 + index * 140}ms` }}
 						/>
-						<Icon
-							x="17"
-							y="15"
-							width="18"
-							height="18"
-							strokeWidth="1.5"
-							className="text-muted-foreground"
-						/>
-						<text
-							x="48"
-							y="29"
-							fontSize="13"
-							className="fill-current text-foreground/85"
-						>
-							{label}
-						</text>
-					</g>
+					))}
 				</g>
-			))}
-			<g className="auth-brand-enter" style={{ animationDelay: "1000ms" }}>
-				<rect
-					x="280"
-					y="62"
-					width="184"
-					height="152"
-					rx="12"
-					className="stroke-border"
-				/>
-				<rect
-					x="272"
-					y="54"
-					width="184"
-					height="152"
-					rx="12"
-					className="fill-card stroke-border"
-				/>
-				<FileSearch
-					x="292"
-					y="75"
-					width="20"
-					height="20"
+				<path
+					d="M344 176H388"
+					pathLength="1"
+					className="auth-brand-link stroke-chart-1/60"
 					strokeWidth="1.5"
-					className="text-chart-1"
+					style={{ animationDelay: "1000ms" }}
 				/>
-				<text
-					x="324"
-					y="90"
-					fontSize="14"
-					fontWeight="500"
-					className="fill-current"
+				<circle
+					cx="234"
+					cy="176"
+					r="4"
+					className="auth-brand-enter fill-chart-1"
+					style={{ animationDelay: "900ms" }}
+				/>
+			</svg>
+			{SOURCE_NODES.map(({ label, asset, top, delay }) => (
+				<div
+					key={asset}
+					className="auth-brand-enter absolute left-0 flex w-[40%] flex-col gap-1.5"
+					style={{ top, animationDelay: `${delay}ms` }}
 				>
-					调查记录
-				</text>
-				<path d="M292 111H436" className="stroke-border" />
-				<g
-					className="stroke-muted-foreground/30"
-					strokeLinecap="round"
-					strokeWidth="3"
-				>
-					<path d="M293 131H421" />
-					<path d="M293 145H390" />
-				</g>
-				<text
-					x="292"
-					y="182"
-					fontSize="11"
-					className="fill-current text-muted-foreground"
-				>
-					证据关联 · 分析留痕
-				</text>
-			</g>
-		</svg>
+					<img src={asset} alt="" className="w-full object-contain" />
+					<span className="text-xs text-muted-foreground">{label}</span>
+				</div>
+			))}
+			<div
+				className="auth-brand-enter absolute left-[46.1%] top-[35.2%] w-[20.3%]"
+				style={{ animationDelay: "700ms" }}
+			>
+				<img
+					src="/brand/illustration-core.png"
+					alt=""
+					className="w-full object-contain"
+				/>
+			</div>
+			<div
+				className="auth-brand-enter absolute left-[75.8%] top-[30.7%] flex w-[24.2%] flex-col gap-1.5"
+				style={{ animationDelay: "1000ms" }}
+			>
+				<img
+					src="/brand/investigation-record.png"
+					alt=""
+					className="w-full object-contain"
+				/>
+				<span className="text-xs text-muted-foreground">调查记录</span>
+			</div>
+		</div>
 	);
 }
 
@@ -138,7 +115,7 @@ export function AuthBrandPanel() {
 			<div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center gap-10 py-10 2xl:gap-14">
 				<div className="flex flex-col gap-6">
 					<p className="auth-brand-enter flex items-center gap-3 text-xs text-muted-foreground">
-						<span className="font-medium tracking-[0.2em]">quoin</span>
+						<BrandLockup background="dark" alt="quoin" className="h-4" />
 						<span aria-hidden="true" className="text-muted-foreground/50">
 							|
 						</span>

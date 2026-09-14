@@ -4,7 +4,6 @@ import {
 	Bot,
 	ClipboardCheck,
 	FileText,
-	GalleryVerticalEnd,
 	LayoutDashboard,
 	LogOut,
 	SearchCheck,
@@ -50,6 +49,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { WorkspaceModuleView } from "./module-contract";
+import { BrandMark } from "./Brand";
 
 type OperationItem = {
 	title: string;
@@ -279,9 +279,7 @@ export function WorkspaceShell({
 									onClick={() => navigate("/alerts/list")}
 									className="size-9 p-0"
 								>
-									<div className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-										<GalleryVerticalEnd className="size-4" />
-									</div>
+									<BrandMark className="size-7" />
 									<span className="sr-only">Quoin</span>
 								</SidebarMenuButton>
 							</SidebarMenuItem>

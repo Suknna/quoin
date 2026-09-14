@@ -75,12 +75,47 @@ describe("authentication workflow", () => {
 		expect(
 			within(brandPanel).getByRole("heading", { level: 2 }),
 		).toHaveTextContent("让每次一判断，都有据可寻。");
-		expect(brandPanel).toHaveTextContent(/quoin\s*\|\s*运维工作台/);
+		expect(
+			within(brandPanel).getByRole("img", { name: "quoin" }),
+		).toHaveAttribute("src", "/brand/lockup-dark.png");
+		expect(brandPanel).toHaveTextContent(/运维工作台/);
 		expect(brandPanel).not.toHaveTextContent(
 			/汇集监控证据|沉淀经过确认|告警调查|定期巡检|知识沉淀/,
 		);
 		expect(within(brandPanel).queryByRole("button")).not.toBeInTheDocument();
 		expect(me).toHaveBeenCalledTimes(2);
+	});
+
+	it("brands the login screen with the wordmark lockup and the composed illustration assets", async () => {
+		vi.spyOn(workbenchApi, "currentUser").mockRejectedValue(
+			new WorkbenchApiError(401, "未登录"),
+		);
+		render(<App />);
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.getByRole("img", { name: "Quoin" }).querySelector("img"))
+			.toHaveAttribute("src", "/brand/lockup-light.png");
+		const brandPanel = screen.getByRole("complementary", {
+			name: "关于 Quoin",
+		});
+		for (const asset of [
+			"illustration-core",
+			"evidence-monitoring",
+			"evidence-events",
+			"evidence-knowledge",
+			"investigation-record",
+		]) {
+			expect(
+				brandPanel.querySelector(`img[src="/brand/${asset}.png"]`),
+			).not.toBeNull();
+		}
+		for (const label of ["监控指标", "事件线索", "历史知识", "调查记录"]) {
+			expect(within(brandPanel).getByText(label)).toBeInTheDocument();
+		}
+		// Staged entrance survives the bitmap compose: nodes, connectors, hub and record.
+		expect(brandPanel.querySelectorAll("path.auth-brand-link")).toHaveLength(4);
+		expect(
+			brandPanel.querySelectorAll(".auth-brand-enter").length,
+		).toBeGreaterThanOrEqual(6);
 	});
 
 	it("uses the password-change stage before requesting protected connections", async () => {

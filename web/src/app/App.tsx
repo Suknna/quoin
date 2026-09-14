@@ -1,4 +1,3 @@
-import { GalleryVerticalEnd } from "lucide-react";
 import {
 	type FormEvent,
 	lazy,
@@ -33,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { EvidenceReader } from "@/features/evidence/ui";
 import { AuthBrandPanel } from "./AuthBrandPanel";
+import { BrandLockup } from "./Brand";
 import type { WorkspaceModuleProps } from "./module-contract";
 import {
 	consolidatedRouteTarget,
@@ -61,14 +61,7 @@ const routeHostComponents = {
 type AuthScreen = "loading" | "login" | "password-change" | "workbench";
 
 function Brand() {
-	return (
-		<div className="flex items-center gap-2 font-medium">
-			<div className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-				<GalleryVerticalEnd className="size-4" />
-			</div>
-			Quoin
-		</div>
-	);
+	return <BrandLockup className="h-7" />;
 }
 function AuthLayout({ children }: { children: ReactNode }) {
 	return (
