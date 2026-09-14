@@ -42,6 +42,19 @@ describe('investigations module', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建并发送' }))
     await waitFor(() => expect(api.create).toHaveBeenCalledWith('排查 CPU', [], [], ''))
   })
+  it('describes default enabled-source authorization and treats business binding as historical context', async () => {
+    // Copy contract (ADR-0004): enabled integrations are always the attempt's
+    // source-level authority, so an unbound conversation is not "generic only";
+    // an explicit business key is frozen descriptive context, never a grant.
+    api.list.mockResolvedValue({ items: [] })
+    render(<View route="/investigations/new" />)
+    expect(await screen.findByRole('combobox', { name: '业务系统' })).toBeInTheDocument()
+    expect(screen.getByText('不绑定业务系统')).toBeInTheDocument()
+    expect(screen.getByText(/默认可使用已启用接入授权的只读指标/)).toBeInTheDocument()
+    expect(screen.getByText(/历史上下文，并非授权前提/)).toBeInTheDocument()
+    expect(screen.queryByText(/仅通用对话/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/才能使用该系统已授权的只读指标/)).not.toBeInTheDocument()
+  })
   it('sends the explicit business-system selection with the first message', async () => {
     api.list.mockResolvedValue({ items: [] }); api.businessSystems.mockResolvedValue([{ key: 'mall-live-prometheus', displayName: 'Mall Live Prometheus' }]); api.create.mockResolvedValue({ ...detail, id: 'i2' })
     render(<View route="/investigations/new" />)

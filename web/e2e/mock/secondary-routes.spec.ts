@@ -21,7 +21,7 @@ test("secondary and detail routes render their declared projections without fall
 		["/alerts/list?id=alert-checkout-latency", "CheckoutLatencyHigh"],
 		["/postmortems", "能力建设中"],
 		["/investigations/investigation-checkout", "结算延迟调查"],
-		["/inspections/inspection-run-1", "checkout-health"],
+		["/inspections/runs/inspection-run-1", "checkout-health"],
 		["/knowledge/items/knowledge-1", "结算延迟排查"],
 		["/knowledge/candidates/candidate-1", "编辑知识候选"],
 		["/knowledge/imports/new", "导入原文"],

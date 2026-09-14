@@ -48,7 +48,7 @@ describe("WorkspaceShell navigation", () => {
 	it("shows each administrator operations entry once with only the route-matching item active", () => {
 		renderShell("/inspections/run-1");
 		expect(screen.getAllByText("运维中心")).toHaveLength(4);
-		for (const name of ["告警列表", "故障复盘", "巡检", "业务纳管", "接入管理"]) expect(screen.getByRole("button", { name })).toBeInTheDocument();
+		for (const name of ["告警列表", "故障复盘", "巡检", "业务视图", "接入管理"]) expect(screen.getByRole("button", { name })).toBeInTheDocument();
 		expect(screen.getAllByRole("button", { name: "接入管理" })).toHaveLength(1);
 		expect(screen.getByRole("button", { name: "巡检" })).toHaveAttribute("aria-current", "page");
 		expect(screen.getByRole("button", { name: "告警列表" })).not.toHaveAttribute("aria-current");
@@ -59,7 +59,7 @@ describe("WorkspaceShell navigation", () => {
 		const operator = { ...user, role: "operator" as const };
 		render(<WorkspaceShell user={operator} route="/alerts/list" view={view} navigate={vi.fn()} onLogout={vi.fn()} />);
 		expect(screen.getByRole("button", { name: "告警列表" })).toBeInTheDocument();
-		for (const name of ["巡检", "业务纳管", "接入管理"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+		for (const name of ["巡检", "业务视图", "接入管理"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
 		cleanup();
 		render(<WorkspaceShell user={operator} route="/integrations" view={view} navigate={vi.fn()} onLogout={vi.fn()} />);
 		expect(screen.getByRole("alert")).toHaveTextContent("此页面仅向管理员开放");

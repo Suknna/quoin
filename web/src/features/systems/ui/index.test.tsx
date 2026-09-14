@@ -1,173 +1,217 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const api = vi.hoisted(() => ({ upload: vi.fn() }));
-vi.mock("@/features/admin/business-systems/api", async (original) => ({ ...(await original<typeof import("@/features/admin/business-systems/api")>()), uploadBusinessSystemConfig: api.upload }));
 import type { WorkspaceModuleProps } from "@/app/module-contract";
-import type { BusinessSystemDetail } from "@/features/admin/business-systems/api";
-import { DeclarationDraft, parseDeclaration, SystemDetail } from "./index";
+import type { BusinessView } from "../api";
+import { useSystemsModule } from "./index";
 
-const declaration = `apiVersion: quoin/v1
-kind: BusinessSystem
-metadata:
-  name: checkout
-  displayName: Checkout
-  description: Checkout workloads
-spec:
-  metrics:
-    connectionRef: thanos-primary
-    matchLabels: {service: checkout}
-    resources:
-      - name: pods
-        displayName: Checkout pods
-        matchLabels: {component: api}
-        discoveryMetric: up
-        identityLabels: [namespace, pod]
-        allowedMetrics: [up, http_requests_total]
-  alerts:
-    sourceRefs: [demo-alertmanager]
-    matchLabels: {severity: critical}
-  inspections:
-    - name: health
-      displayName: Health
-      schedule: '*/5 * * * *'
-      timezone: Asia/Shanghai
-      checks:
-        - name: availability
-          resourceRef: pods
-          expression: up
-          question: Is checkout available?
-`;
+const checkoutView: BusinessView = {
+  viewKey: "checkout",
+  displayName: "结算",
+  description: "结算业务范围说明",
+  scope: { connectionName: "thanos-primary", labelConditions: { service: "checkout" } },
+  rowVersion: 3,
+  createdAt: "2026-09-13T01:00:00.000Z",
+  updatedAt: "2026-09-13T02:00:00.000Z",
+};
 
-afterEach(() => { vi.useRealTimers(); cleanup(); });
-beforeEach(() => {
-  HTMLElement.prototype.scrollIntoView = vi.fn();
-  api.upload.mockReset();
-  vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+const connection = { id: "conn-1", name: "thanos-primary", type: "thanos", enabled: true, config: {}, rowVersion: 1 };
+
+const navigate = vi.fn();
+let posted: Array<{ url: string; init: RequestInit }> = [];
+
+function stubApi(overrides: Record<string, (init?: RequestInit) => Response> = {}) {
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url.includes("/connections")) return Response.json({ items: [{ id: "connection-1", name: "thanos-primary", type: "thanos", enabled: true, config: {} }] });
-    if (url.includes("/alert-sources")) return Response.json({ items: [{ key: "demo-alertmanager", protocol: "alertmanager", enabled: true, rowVersion: 1 }] });
-    return Response.json({ items: [] });
+    const method = init?.method ?? "GET";
+    if (method !== "GET") posted.push({ url, init: init ?? {} });
+    const handler = overrides[`${method} ${url}`];
+    if (handler) return handler(init);
+    if (method === "GET" && url === "/api/v1/business-views") return Response.json({ items: [checkoutView] });
+    if (method === "GET" && url === "/api/v1/business-views/checkout") return Response.json(checkoutView);
+    if (method === "GET" && url === "/api/v1/connections?limit=100") return Response.json({ items: [connection] });
+    throw new Error(`Unexpected API request: ${method} ${url}`);
   }));
-});
-
-const system: BusinessSystemDetail = {
-  key: "checkout",
-  displayName: "Checkout",
-  enabled: true,
-  rowVersion: 1,
-  configVersionCount: 0,
-  discoveries: [],
-  plans: [],
-  resourceRefreshIntervalSeconds: 300,
-  browserIdentityState: "none",
-};
-
-const moduleProps: WorkspaceModuleProps = {
-  user: {} as WorkspaceModuleProps["user"],
-  route: "/business-systems?system=checkout",
-  navigate: vi.fn(),
-  suspended: false,
-  openEvidence: vi.fn(),
-};
-
-function apiRequestUrls() {
-  return (fetch as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => String(input));
 }
 
-describe("System detail", () => {
-  it("tracks a manual refresh through completion, reloads resources, and avoids Kubernetes APIs", async () => {
-    vi.useFakeTimers();
-    let resourceReads = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/config?limit=100")) return Response.json({ items: [] });
-      if (url.includes("/resources?current=true&limit=100")) { resourceReads++; return Response.json({ items: resourceReads === 1 ? [] : [{ id: "resource-1", discoveryKey: "pods", identityLabels: { namespace: "default" }, current: true, stale: false, lastSuccessfulRefreshAt: "2026-09-11T10:00:00.000Z" }] }); }
-      if (url.endsWith("/resources:refresh") && init?.method === "POST") return Response.json({ id: "refresh-1", businessSystemId: "checkout", configVersionId: "config-1", labelContractVersionId: "labels-1", triggerKind: "manual", state: "Queued", rowVersion: 1, createdAt: "2026-09-11T10:00:00.000Z" });
-      if (url.endsWith("/resource-refresh-runs/refresh-1")) return Response.json({ id: "refresh-1", businessSystemId: "checkout", configVersionId: "config-1", labelContractVersionId: "labels-1", triggerKind: "manual", state: "Completed", rowVersion: 2, resultDetail: "匹配到 1 个资源。", createdAt: "2026-09-11T10:00:00.000Z" });
-      throw new Error(`Unexpected API request: ${url}`);
-    }));
+function ModuleHarness({ route, suspended = false }: { route: string; suspended?: boolean }) {
+  const props: WorkspaceModuleProps = { user: { role: "admin" } as WorkspaceModuleProps["user"], route, navigate, suspended, openEvidence: vi.fn() };
+  const view = useSystemsModule(props);
+  return (
+    <div>
+      <aside aria-label="模块列表">{view.list}</aside>
+      <main aria-label="模块内容">{view.content}</main>
+    </div>
+  );
+}
 
-    render(<SystemDetail system={system} props={moduleProps} onChanged={vi.fn()} />);
-    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
-    expect(screen.getByText("尚未发现资源")).toBeInTheDocument();
-    expect(screen.queryByText("绑定 Kubernetes 连接")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "绑定" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "解除" })).not.toBeInTheDocument();
+function requestBody(call: number): Record<string, unknown> {
+  return JSON.parse(String(posted[call].init.body)) as Record<string, unknown>;
+}
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新资源" }));
-    await act(async () => { await Promise.resolve(); });
-    expect(screen.getByText("资源刷新：Queued")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "正在刷新…" })).toBeDisabled();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-    expect(screen.getByText("资源刷新：Completed")).toBeInTheDocument();
-    expect(screen.getByText("匹配到 1 个资源。")).toBeInTheDocument();
-    expect(screen.getByText("pods")).toBeInTheDocument();
-    expect(screen.getByText("最近成功刷新")).toBeInTheDocument();
-    expect(apiRequestUrls().some((url) => url.includes("/kubernetes-connections"))).toBe(false);
-    vi.useRealTimers();
-  });
-
-  it("shows the failed refresh result detail and explains a completed no-match refresh", async () => {
-    vi.useFakeTimers();
-    let runReads = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/config?limit=100") || url.includes("/resources?current=true&limit=100")) return Response.json({ items: [] });
-      if (url.endsWith("/resources:refresh") && init?.method === "POST") return Response.json({ id: "refresh-2", businessSystemId: "checkout", configVersionId: "config-1", labelContractVersionId: "labels-1", triggerKind: "manual", state: "Running", rowVersion: 1, createdAt: "2026-09-11T10:00:00.000Z" });
-      if (url.endsWith("/resource-refresh-runs/refresh-2")) { runReads++; return Response.json({ id: "refresh-2", businessSystemId: "checkout", configVersionId: "config-1", labelContractVersionId: "labels-1", triggerKind: "manual", state: runReads === 1 ? "Failed" : "Completed", rowVersion: 2, resultDetail: runReads === 1 ? "指标连接不可用。" : "未匹配资源。", createdAt: "2026-09-11T10:00:00.000Z" }); }
-      throw new Error(`Unexpected API request: ${url}`);
-    }));
-
-    render(<SystemDetail system={system} props={moduleProps} onChanged={vi.fn()} />);
-    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
-    fireEvent.click(screen.getByRole("button", { name: "刷新资源" }));
-    await act(async () => { await Promise.resolve(); });
-    expect(screen.getByText("资源刷新：Running")).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-    expect(screen.getByText("资源刷新：Failed")).toBeInTheDocument();
-    expect(screen.getByText("指标连接不可用。")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "刷新资源" }));
-    await act(async () => { await Promise.resolve(); });
-    expect(screen.getByText("资源刷新：Running")).toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-    expect(screen.getByText("资源刷新：Completed")).toBeInTheDocument();
-    expect(screen.getByText("未匹配资源。")).toBeInTheDocument();
-    expect(screen.getByText("本次刷新未匹配到声明的资源；请检查发现指标和标签选择器。")).toBeInTheDocument();
-    expect(apiRequestUrls().some((url) => url.includes("/kubernetes-connections"))).toBe(false);
-    vi.useRealTimers();
-  });
+beforeEach(() => {
+  navigate.mockReset();
+  posted = [];
+  HTMLElement.prototype.scrollIntoView = vi.fn();
 });
 
-describe("Kubernetes-style business system declaration", () => {
-  it("parses explicit resources, selector scopes, and metric allowlists", () => {
-    const parsed = parseDeclaration(declaration);
-    expect(parsed.metadata).toMatchObject({ name: "checkout", displayName: "Checkout" });
-    expect(parsed.spec.metrics.resources[0]).toMatchObject({ name: "pods", identityLabels: ["namespace", "pod"], allowedMetrics: ["up", "http_requests_total"] });
-    expect(parsed.spec.inspections[0].checks[0]).toMatchObject({ resourceRef: "pods", expression: "up" });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe("business views module", () => {
+  it("renders the view list, explains optional organization, and routes selection", async () => {
+    stubApi();
+    render(<ModuleHarness route="/business-views" />);
+    const list = within(screen.getByLabelText("模块列表"));
+    expect(await list.findByText("结算")).toBeInTheDocument();
+    expect(list.getByText("checkout")).toBeInTheDocument();
+    expect(list.getByText("thanos-primary")).toBeInTheDocument();
+    const main = within(screen.getByLabelText("模块内容"));
+    expect(main.getByText("选择一个业务视图")).toBeInTheDocument();
+    expect(main.getByText(/可选的组织方式/)).toBeInTheDocument();
+    fireEvent.click(list.getByRole("button", { name: /结算/ }));
+    expect(navigate).toHaveBeenCalledWith("/business-views?view=checkout");
+    fireEvent.click(list.getByRole("button", { name: "新建" }));
+    expect(navigate).toHaveBeenCalledWith("/business-views/new");
   });
 
-  it("allows applying and submitting new YAML without Label Contracts", async () => {
-    api.upload.mockResolvedValue({ systemKey: "checkout" });
-    render(<DeclarationDraft suspended={false} navigate={vi.fn()} onUploaded={vi.fn()} />);
-    await screen.findByLabelText("权威 YAML 声明");
-    fireEvent.change(screen.getByLabelText("权威 YAML 声明"), { target: { value: declaration } });
-    fireEvent.click(screen.getByRole("button", { name: "应用 YAML" }));
-    expect(await screen.findByLabelText("编译预览")).toHaveTextContent(/允许指标：up, http_requests_total/);
-    fireEvent.click(screen.getByRole("button", { name: "创建版本化草稿" }));
-    await waitFor(() => expect(api.upload).toHaveBeenCalledTimes(1));
-    const input = api.upload.mock.calls[0][0];
-    expect(await input.file.text()).toBe(declaration);
-    expect(input).not.toHaveProperty("targetLabelContractVersion");
+  it("shows view scope, label conditions and routes to the editor", async () => {
+    stubApi();
+    render(<ModuleHarness route="/business-views?view=checkout" />);
+    const main = within(screen.getByLabelText("模块内容"));
+    expect(await main.findByRole("heading", { name: "结算" })).toBeInTheDocument();
+    expect(main.getByText("结算业务范围说明")).toBeInTheDocument();
+    expect(main.getByText("thanos-primary")).toBeInTheDocument();
+    expect(main.getByText("service")).toBeInTheDocument();
+    expect(main.getByText("checkout")).toBeInTheDocument();
+    expect(main.getByText("更新时间")).toBeInTheDocument();
+    fireEvent.click(main.getByRole("button", { name: "编辑" }));
+    expect(navigate).toHaveBeenCalledWith("/business-views?view=checkout&edit=1");
   });
 
-  it("generates a new template from a selectable connection name", async () => {
-    render(<DeclarationDraft suspended={false} navigate={vi.fn()} onUploaded={vi.fn()} />);
-    await screen.findByLabelText("从指标连接生成模板");
-    fireEvent.click(screen.getByLabelText("从指标连接生成模板"));
-    fireEvent.click(await screen.findByText("thanos-primary"));
-    await waitFor(() => expect((screen.getByLabelText("权威 YAML 声明") as HTMLTextAreaElement).value).toContain("connectionRef: thanos-primary"));
+  it("offers an inspection entry carrying the view scope for preselection", async () => {
+    stubApi();
+    render(<ModuleHarness route="/business-views?view=checkout" />);
+    const main = within(screen.getByLabelText("模块内容"));
+    fireEvent.click(await main.findByRole("button", { name: /按此视图巡检/ }));
+    expect(navigate).toHaveBeenCalledWith("/inspections?businessViewKey=checkout&connectionName=thanos-primary");
+  });
+
+  it("omits the inspection connection parameter when the view scopes all sources", async () => {
+    stubApi({ "GET /api/v1/business-views/checkout": () => Response.json({ ...checkoutView, scope: { labelConditions: { service: "checkout" } } }) });
+    render(<ModuleHarness route="/business-views?view=checkout" />);
+    const main = within(screen.getByLabelText("模块内容"));
+    fireEvent.click(await main.findByRole("button", { name: /按此视图巡检/ }));
+    expect(navigate).toHaveBeenCalledWith("/inspections?businessViewKey=checkout");
+  });
+
+  it("creates a view through the shared draft and routes to its detail", async () => {
+    stubApi({ "POST /api/v1/business-views": () => Response.json({ ...checkoutView, rowVersion: 1 }) });
+    render(<ModuleHarness route="/business-views/new" />);
+    fireEvent.change(await screen.findByLabelText("视图标识"), { target: { value: "checkout" } });
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "结算" } });
+    fireEvent.change(screen.getByLabelText("业务说明"), { target: { value: "结算业务范围说明" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加条件" }));
+    fireEvent.change(screen.getByLabelText("标签"), { target: { value: "service" } });
+    fireEvent.change(screen.getByLabelText("值"), { target: { value: "checkout" } });
+    fireEvent.click(screen.getByLabelText("来源接入"));
+    fireEvent.click(await screen.findByRole("option", { name: "thanos-primary" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存业务视图" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].url).toBe("/api/v1/business-views");
+    expect(posted[0].init.method).toBe("POST");
+    const body = requestBody(0);
+    expect(body.clientCommandId).toBeTruthy();
+    expect(body).toMatchObject({
+      viewKey: "checkout",
+      displayName: "结算",
+      description: "结算业务范围说明",
+      scope: { connectionName: "thanos-primary", labelConditions: { service: "checkout" } },
+    });
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/business-views?view=checkout"));
+  });
+
+  it("keeps the form and YAML on one draft through one save path", async () => {
+    stubApi({ "POST /api/v1/business-views": () => Response.json({ ...checkoutView, rowVersion: 1 }) });
+    render(<ModuleHarness route="/business-views/new" />);
+    fireEvent.change(await screen.findByLabelText("显示名称"), { target: { value: "结算" } });
+    // Radix Tabs triggers activate on mousedown, not click.
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "YAML" }));
+    const yaml = screen.getByLabelText("业务视图 YAML") as HTMLTextAreaElement;
+    await waitFor(() => expect(yaml.value).toContain("kind: BusinessView"));
+    expect(yaml.value).toContain("displayName: 结算");
+    fireEvent.change(yaml, {
+      target: { value: "apiVersion: quoin/v1\nkind: BusinessView\nmetadata:\n  name: checkout\n  displayName: 结算系统\nspec:\n  scope:\n    labelConditions:\n      env: prod\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存业务视图" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    const scope = requestBody(0).scope as Record<string, unknown>;
+    expect(scope.labelConditions).toEqual({ env: "prod" });
+    expect("connectionName" in scope).toBe(false);
+    expect(requestBody(0)).toMatchObject({ viewKey: "checkout", displayName: "结算系统" });
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "表单" }));
+    expect((screen.getByLabelText("显示名称") as HTMLInputElement).value).toBe("结算系统");
+  });
+
+  it("updates an existing view with optimistic row-version fencing and a frozen key", async () => {
+    stubApi({ "PUT /api/v1/business-views/checkout": () => Response.json({ ...checkoutView, rowVersion: 4 }) });
+    render(<ModuleHarness route="/business-views?view=checkout&edit=1" />);
+    const key = (await screen.findByLabelText("视图标识")) as HTMLInputElement;
+    expect(key.value).toBe("checkout");
+    expect(key).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "结算系统" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存业务视图" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].url).toBe("/api/v1/business-views/checkout");
+    expect(posted[0].init.method).toBe("PUT");
+    expect(requestBody(0).expectedRowVersion).toBe(3);
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/business-views?view=checkout"));
+  });
+
+  it("surfaces save conflicts without destroying the draft", async () => {
+    stubApi({ "PUT /api/v1/business-views/checkout": () => Response.json({ message: "视图已被其他人更新，请刷新后重试。" }, { status: 409 }) });
+    render(<ModuleHarness route="/business-views?view=checkout&edit=1" />);
+    fireEvent.change(await screen.findByLabelText("显示名称"), { target: { value: "结算系统" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存业务视图" }));
+    expect(await screen.findByText("视图已被其他人更新，请刷新后重试。")).toBeInTheDocument();
+    expect((screen.getByLabelText("显示名称") as HTMLInputElement).value).toBe("结算系统");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("blocks saving an invalid view key and explains the rule", async () => {
+    stubApi();
+    render(<ModuleHarness route="/business-views/new" />);
+    fireEvent.change(await screen.findByLabelText("视图标识"), { target: { value: "Bad Key" } });
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "结算" } });
+    expect(screen.getByRole("button", { name: "保存业务视图" })).toBeDisabled();
+    expect(screen.getByText(/小写字母、数字或连字符/)).toBeInTheDocument();
+    expect(posted).toHaveLength(0);
+  });
+
+  it("stays usable when the metrics connection list is unavailable", async () => {
+    stubApi({
+      "GET /api/v1/connections?limit=100": () => Response.json({ message: "无法读取连接。" }, { status: 503 }),
+      "POST /api/v1/business-views": (init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ ...checkoutView, viewKey: body.viewKey, displayName: body.displayName, description: body.description, scope: body.scope, rowVersion: 1 });
+      },
+    });
+    render(<ModuleHarness route="/business-views/new" />);
+    fireEvent.change(await screen.findByLabelText("视图标识"), { target: { value: "all" } });
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "全部来源视图" } });
+    await waitFor(() => expect(screen.getByText(/候选来源为全部接入/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "保存业务视图" }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(requestBody(0).scope).toEqual({ labelConditions: {} });
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/business-views?view=all"));
+  });
+
+  it("disables saving while the workspace is suspended", async () => {
+    stubApi();
+    render(<ModuleHarness route="/business-views/new" suspended />);
+    await screen.findByLabelText("视图标识");
+    expect(screen.getByRole("button", { name: "保存业务视图" })).toBeDisabled();
   });
 });

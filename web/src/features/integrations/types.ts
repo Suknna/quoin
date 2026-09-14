@@ -1,4 +1,4 @@
-/** Supported integrations intentionally describe user-facing capabilities, not a plugin contract. */
+/** Platform form identities are independent of server-authoritative plugin enablement. */
 export type IntegrationPlatform =
 	| "alertmanager"
 	| "prometheus"
@@ -6,13 +6,13 @@ export type IntegrationPlatform =
 	| "kubernetes"
 	| "browser";
 
-export type IntegrationAvailability = "available" | "unavailable";
-
 export interface IntegrationCatalogItem {
-	platform: IntegrationPlatform;
+	id: string;
 	displayName: string;
 	description: string;
-	availability: IntegrationAvailability;
+	enabled: boolean;
+	version: string;
+	capabilities: string[];
 }
 
 /** A non-secret projection of a configured platform instance. */
@@ -20,43 +20,9 @@ export interface IntegrationInstance {
 	id: string;
 	platform: IntegrationPlatform;
 	displayName: string;
-	// Metrics rotations surface an explicit recovery state until a fresh
-	// current-pair probe requalifies the connection.
+	// Rotation withholds dispatch until the current revision and credential pair is verified.
 	status: "active" | "revalidation_required" | "disabled" | "unavailable";
 	createdAt?: string;
 	latestValidEventAt?: string | null;
 	rowVersion?: number;
 }
-
-export const integrationCatalog: readonly IntegrationCatalogItem[] = [
-	{
-		platform: "alertmanager",
-		displayName: "Alertmanager",
-		description: "接收上游告警，并保留可轮换的来源凭据。",
-		availability: "available",
-	},
-		{
-			platform: "prometheus",
-			displayName: "Prometheus",
-			description: "配置面向业务声明的 PromQL 指标查询接入。",
-			availability: "available",
-		},
-		{
-			platform: "thanos",
-			displayName: "Thanos",
-			description: "配置面向业务声明的全局 PromQL 查询接入。",
-			availability: "available",
-		},
-	{
-		platform: "kubernetes",
-		displayName: "Kubernetes",
-		description: "受限集群访问接入将在后续切片提供。",
-		availability: "unavailable",
-	},
-	{
-		platform: "browser",
-		displayName: "受控浏览器",
-		description: "人工登录身份接入将在后续切片提供。",
-		availability: "unavailable",
-	},
-] as const;

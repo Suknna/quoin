@@ -1,96 +1,121 @@
-/* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
-import { useCallback, useEffect, useRef, useState } from "react";
-import RFB from "@novnc/novnc";
-import { diffLines } from "diff";
-import { ChevronRight, Network } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+// Business views module (route /business-views). A business view is an
+// optional, versioned scope-and-description organization (ADR 0004): nothing
+// here is a precondition for alerts, observations, tools or basic inspections.
+// The former business-declaration write mainline (upload/publish/refresh) is
+// gone; its history stays readable through the admin/inspection APIs only.
+
+import { useCallback, useEffect, useState } from "react";
+import { ChevronRight, Layers } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
-import { FeatureUnderConstruction } from "@/components/FeatureUnderConstruction";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { WorkspaceModuleProps, WorkspaceModuleView } from "@/app/module-contract";
 import { messageOf } from "@/app/shared";
-import {
-  cancelBrowserOperation, cancelVerification, formatTime, getBrowserIdentity, getBrowserOperation, getBusinessSystem, getConfigVersion, getJourneyCatalog, getResourceRefreshRun, getVerificationDetail, listBusinessSystems, listConfigVersions, listObservedResources, listVerificationRuns, publishBrowserProfile, publishBusinessSystemConfig, runVerification, startBrowserManualLogin, startResourceRefresh,
-  type BrowserIdentity, type BrowserOperation, type BusinessSystemDetail, type JourneyCatalogView, type BusinessSystemSummary, type ConfigVersionDetail, type ConfigVersionSummary, type ObservedResourceSummary, type ResourceRefreshRunDetail, type VerificationRunDetail, type VerificationRunSummary,
-} from "@/features/admin/business-systems/api";
-
-const active = (state: string) => ["Queued", "Running", "WaitingForCapacity", "Starting", "AwaitingReconnect"].includes(state);
-const bounded = (value: string) => value.slice(0, 200_000);
-
-type CatalogProperty = { type?: string; title?: string; enum?: unknown[]; default?: unknown };
-type CatalogJourney = { purpose?: string; version?: number; summary?: string; params_schema?: { properties?: Record<string, CatalogProperty> } };
-
-/** Uses the versioned server catalog, never free-form journey IDs or versions. */
-function authenticationJourneys(catalog: Record<string, unknown> | undefined): Array<[string, CatalogJourney]> {
-  const journeys = catalog?.journeys;
-  if (!journeys || typeof journeys !== "object") return [];
-  return Object.entries(journeys as Record<string, CatalogJourney>).filter(([, item]) => item.purpose === "authentication_probe");
-}
-
-export async function configureBrowserIdentity(systemKey: string, input: { name: string; startUrl: string; authenticationProbe: { journeyId: string; journeyVersion: number; params: Record<string, unknown> }; expectedRowVersion?: number }): Promise<BrowserIdentity> {
-  const response = await fetch(`/api/v1/business-systems/${encodeURIComponent(systemKey)}/browser-identity`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientCommandId: crypto.randomUUID(), ...input }) });
-  if (!response.ok) { let message = "无法保存浏览器身份。"; try { message = ((await response.json()) as { message?: string }).message ?? message; } catch { /* retain safe fallback */ } const error = Object.assign(new Error(message), { status: response.status }); throw error; }
-  const body = (await response.json()) as { identity?: BrowserIdentity } | BrowserIdentity;
-  return "identity" in body && body.identity ? body.identity : body as BrowserIdentity;
-}
-
-export { DeclarationDraft, declarationYaml, parseDeclaration, type Declaration } from "./declaration-editor";
-import { DeclarationDraft } from "./declaration-editor";
-
-/** Trial results belong to the selected verification Run and deliberately never modify the formal resource table. */
-function TrialResults({ run }: { run: VerificationRunDetail }) {
-	return <section className="mt-5 space-y-3" aria-label="试运行结果"><div><h3 className="text-base font-semibold">试运行结果</h3><p className="mt-1 text-sm text-muted-foreground">使用接入 {run.metricsConnectionId ?? "未记录"}。这些身份样例和查询摘要仅属于本次验证，不是正式资源投影。</p></div>{run.queryResults?.length ? <Table><TableHeader><TableRow><TableHead>巡检</TableHead><TableHead>检查</TableHead><TableHead>结果类型</TableHead><TableHead>样本数</TableHead></TableRow></TableHeader><TableBody>{run.queryResults.map((result) => <TableRow key={`${result.planKey}/${result.checkKey}`}><TableCell>{result.planKey}</TableCell><TableCell>{result.checkKey}</TableCell><TableCell>{result.resultType}</TableCell><TableCell>{result.sampleCount}</TableCell></TableRow>)}</TableBody></Table> : <Empty className="min-h-28"><EmptyHeader><EmptyTitle>尚无查询摘要</EmptyTitle><EmptyDescription>验证结束后显示 Run 实际返回的查询结果摘要。</EmptyDescription></EmptyHeader></Empty>}{run.identitySamples?.length ? <Table><TableHeader><TableRow><TableHead>身份规则</TableHead><TableHead>标签样例</TableHead></TableRow></TableHeader><TableBody>{run.identitySamples.map((sample, index) => <TableRow key={`${sample.discoveryKey}-${index}`}><TableCell>{sample.discoveryKey}</TableCell><TableCell className="break-all">{Object.entries(sample.labels).map(([key, value]) => `${key}=${value}`).join(", ")}</TableCell></TableRow>)}</TableBody></Table> : <Empty className="min-h-28"><EmptyHeader><EmptyTitle>尚无身份样例</EmptyTitle><EmptyDescription>身份样例会在受控试运行结果中单独显示。</EmptyDescription></EmptyHeader></Empty>}</section>;
-}
-
-export function Version({ system: current, version, versions, props, onPublished }: { system: BusinessSystemDetail; version: ConfigVersionSummary; versions: ConfigVersionSummary[]; props: WorkspaceModuleProps; onPublished: (detail: BusinessSystemDetail) => void }) {
-  const [detail, setDetail] = useState<ConfigVersionDetail>(); const [compare, setCompare] = useState<ConfigVersionDetail>(); const [runs, setRuns] = useState<VerificationRunSummary[]>([]); const [running, setRunning] = useState<VerificationRunDetail>(); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
-  const load = useCallback(async () => { try { const [config, verification] = await Promise.all([getConfigVersion(current.key, version.id), listVerificationRuns(current.key, version.id)]); setDetail(config); setRuns(verification); } catch (e) { setError(messageOf(e, "无法读取配置版本。")); } }, [current.key, version.id]);
-  useEffect(() => { void load(); }, [load]); useEffect(() => { if (props.suspended || !running || !active(running.state)) return; const timer = setTimeout(() => void getVerificationDetail(current.key, version.id, running.id).then(setRunning).catch(() => undefined), 1500); return () => clearTimeout(timer); }, [current.key, props.suspended, running, version.id]);
-  async function verify() { if (props.suspended) return; setBusy(true); try { setRunning(await runVerification(current.key, version.id)); await load(); } catch (e) { setError(messageOf(e, "无法启动验证。")); } finally { setBusy(false); } }
-  async function publish() { if (props.suspended) return; setBusy(true); try { onPublished(await publishBusinessSystemConfig(current.key, version.id, current.currentConfigVersionId ?? null)); } catch (e) { setError(`${messageOf(e, "发布冲突或失败。")} 草稿和输入保持不变，请刷新后重试。`); } finally { setBusy(false); } }
-  const diff = detail && compare ? diffLines(bounded(compare.yamlBody), bounded(detail.yamlBody), { newlineIsToken: true }) : [];
-  return <section className="space-y-4 rounded-lg border p-4"><header className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">v{version.versionSeq} · {version.state}</h3><p className="text-xs text-muted-foreground">{formatTime(version.createdAt)} · {version.digest.slice(0, 12)}</p></div><div className="flex gap-2"><Button variant="outline" size="sm" disabled={busy || props.suspended} onClick={() => void verify()}>运行验证</Button>{version.state === "draft" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" disabled={busy || props.suspended}>发布</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>发布配置版本？</AlertDialogTitle><AlertDialogDescription>发布会以此 YAML 的 enabled 值更新系统状态，并受当前发布版本栅栏保护。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => void publish()}>确认发布</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div></header>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}<Accordion type="multiple"><AccordionItem value="yaml"><AccordionTrigger>原始 YAML</AccordionTrigger><AccordionContent><ScrollArea className="max-h-72 rounded border"><pre className="p-3 text-xs">{detail?.yamlBody ?? "正在读取…"}</pre></ScrollArea></AccordionContent></AccordionItem><AccordionItem value="diff"><AccordionTrigger>与另一版本比较</AccordionTrigger><AccordionContent><Select value={compare?.id ?? ""} onValueChange={(id) => void getConfigVersion(current.key, id).then(setCompare).catch((e) => setError(messageOf(e, "无法读取比较版本。")))}><SelectTrigger><SelectValue placeholder="选择版本" /></SelectTrigger><SelectContent>{versions.filter((item) => item.id !== version.id).map((item) => <SelectItem value={item.id} key={item.id}>v{item.versionSeq} · {item.state}</SelectItem>)}</SelectContent></Select>{compare ? <ScrollArea className="mt-3 max-h-72 rounded border"><pre className="p-3 text-xs">{diff.map((part, index) => <span key={index} className={part.added ? "bg-emerald-100" : part.removed ? "bg-red-100" : ""}>{part.value}</span>)}</pre></ScrollArea> : null}</AccordionContent></AccordionItem><AccordionItem value="verification"><AccordionTrigger>验证运行与发布栅栏</AccordionTrigger><AccordionContent>{running ? <p className="mb-2 text-sm">当前验证：{running.state} {running.resultDetail ? `· ${running.resultDetail}` : ""}{active(running.state) ? <Button className="ml-2" size="sm" variant="outline" disabled={props.suspended} onClick={() => void cancelVerification(current.key, version.id, running.id, running.rowVersion).then(setRunning).catch((e) => setError(messageOf(e, "无法取消验证。")))}>取消</Button> : null}</p> : null}<Table><TableHeader><TableRow><TableHead>Run</TableHead><TableHead>状态</TableHead><TableHead>时间</TableHead><TableHead><span className="sr-only">查看结果</span></TableHead></TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.id}><TableCell>{run.id}</TableCell><TableCell>{run.state}</TableCell><TableCell>{formatTime(run.createdAt)}</TableCell><TableCell><Button size="sm" variant="ghost" disabled={props.suspended} onClick={() => void getVerificationDetail(current.key, version.id, run.id).then(setRunning).catch((e) => setError(messageOf(e, "无法读取验证结果。")))}>查看结果</Button></TableCell></TableRow>)}</TableBody></Table>{running && <TrialResults run={running} />}</AccordionContent></AccordionItem></Accordion></section>;
-}
-
-export function BrowserIdentityPanel({ systemKey, suspended }: { systemKey: string; suspended: boolean }) {
-  const viewport = useRef<HTMLDivElement>(null); const client = useRef<RFB | null>(null);
-  const [identity, setIdentity] = useState<BrowserIdentity | null>(null); const [catalog, setCatalog] = useState<JourneyCatalogView>(); const [missing, setMissing] = useState(false);
-  const [operation, setOperation] = useState<BrowserOperation>(); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [name, setName] = useState(""); const [startUrl, setStartUrl] = useState(""); const [journeyId, setJourneyId] = useState(""); const [params, setParams] = useState<Record<string, string>>({}); const [saving, setSaving] = useState(false);
-  const journeys = authenticationJourneys(catalog?.catalogJson); const selectedJourney = journeys.find(([id]) => id === journeyId)?.[1];
-  const load = useCallback(async () => { try { const [nextCatalog, nextIdentity] = await Promise.all([getJourneyCatalog(), getBrowserIdentity(systemKey)]); setCatalog(nextCatalog); setIdentity(nextIdentity); setMissing(false); setOperation(nextIdentity.currentOperation ?? undefined); setName(nextIdentity.currentRevision.name); setStartUrl(nextIdentity.currentRevision.startUrl); setJourneyId(nextIdentity.currentRevision.authenticationProbe.journeyId); setParams(Object.fromEntries(Object.entries(nextIdentity.currentRevision.authenticationProbe.params).map(([key, value]) => [key, String(value)]))); } catch (e) { const status = (e as { status?: number }).status; if (status === 404) { try { const nextCatalog = await getJourneyCatalog(); setCatalog(nextCatalog); setMissing(true); setIdentity(null); setJourneyId((current) => current || authenticationJourneys(nextCatalog.catalogJson)[0]?.[0] || ""); } catch (catalogError) { setError(messageOf(catalogError, "无法读取 Journey Catalog。")); } } else setError(messageOf(e, "无法读取浏览器身份。")); } }, [systemKey]);
-  useEffect(() => { const timer = setTimeout(() => void load(), 0); return () => clearTimeout(timer); }, [load]);
-  useEffect(() => { if (suspended || !operation || !active(operation.state)) return; const timer = setTimeout(() => void getBrowserOperation(systemKey, operation.id).then(setOperation).catch(() => undefined), 1000); return () => clearTimeout(timer); }, [operation, suspended, systemKey]);
-  useEffect(() => { if (!operation?.canAttach || !viewport.current || client.current) return; const scheme = location.protocol === "https:" ? "wss" : "ws"; const rfb = new RFB(viewport.current, `${scheme}://${location.host}/api/v1/browser-login/${encodeURIComponent(systemKey)}/operations/${encodeURIComponent(operation.id)}/ws`, { shared: false }); rfb.scaleViewport = true; rfb.viewOnly = false; rfb.addEventListener("connect", () => setMessage("安全浏览器已连接。登录输入不会被记录。")); rfb.addEventListener("disconnect", () => setMessage("远程浏览器已断开，可等待重连或取消操作。")); client.current = rfb; return () => { rfb.disconnect(); if (client.current === rfb) client.current = null; }; }, [operation?.canAttach, operation?.id, systemKey]);
-  useEffect(() => { if (!selectedJourney) return; const properties = selectedJourney.params_schema?.properties ?? {}; setParams((current) => Object.fromEntries(Object.entries(properties).map(([key, schema]) => [key, current[key] ?? (schema.default === undefined ? "" : String(schema.default))]))); }, [journeyId, selectedJourney]);
-  async function save() { if (suspended || !selectedJourney || !name.trim() || !startUrl.trim()) return; setSaving(true); setError(""); try { const typedParams = Object.fromEntries(Object.entries(selectedJourney.params_schema?.properties ?? {}).map(([key, schema]) => { const raw = params[key] ?? ""; if (schema.type === "integer" || schema.type === "number") return [key, Number(raw)]; if (schema.type === "boolean") return [key, raw === "true"]; return [key, raw]; })); const next = await configureBrowserIdentity(systemKey, { name: name.trim(), startUrl: startUrl.trim(), authenticationProbe: { journeyId, journeyVersion: selectedJourney.version ?? 1, params: typedParams }, ...(identity ? { expectedRowVersion: identity.rowVersion } : {}) }); setIdentity(next); setMissing(false); setMessage("浏览器身份修订已保存；请在需要时执行人工登录。"); } catch (e) { setError(`${messageOf(e, "无法保存浏览器身份。")} 输入保持不变，请刷新后重试。`); } finally { setSaving(false); } }
-  async function start() { if (!identity || suspended) return; try { setOperation(await startBrowserManualLogin(systemKey, identity.rowVersion)); } catch (e) { setError(messageOf(e, "无法开始浏览器登录。")); } }
-  async function command(kind: "publish" | "cancel") { if (!operation || suspended) return; try { setOperation(kind === "publish" ? await publishBrowserProfile(systemKey, operation) : await cancelBrowserOperation(systemKey, operation)); } catch (e) { setError(messageOf(e, "浏览器操作失败。")); } }
-  return <section className="space-y-3"><div><h3 className="font-semibold">浏览器身份</h3><p className="text-sm text-muted-foreground">{missing ? "尚未配置。管理员可使用当前 Journey Catalog 创建首个身份。" : identity ? `${identity.currentRevision.name} · revision ${identity.currentRevision.revision} · ${identity.state}` : "正在读取身份配置…"}</p></div>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{message && <Alert><AlertDescription>{message}</AlertDescription></Alert>}<Accordion type="single" collapsible defaultValue={missing ? "configure" : undefined}><AccordionItem value="configure"><AccordionTrigger>{missing ? "配置浏览器身份" : "编辑身份修订"}</AccordionTrigger><AccordionContent><div className="space-y-3"><Field><FieldLabel htmlFor={`${systemKey}-identity-name`}>名称</FieldLabel><Input id={`${systemKey}-identity-name`} value={name} onChange={(e) => setName(e.target.value)} disabled={suspended || saving} /></Field><Field><FieldLabel htmlFor={`${systemKey}-identity-url`}>起始 URL</FieldLabel><Input id={`${systemKey}-identity-url`} type="url" value={startUrl} onChange={(e) => setStartUrl(e.target.value)} disabled={suspended || saving} placeholder="https://target.example" /></Field><Field><FieldLabel>认证探测 Journey</FieldLabel><Select value={journeyId} onValueChange={setJourneyId} disabled={suspended || saving || !journeys.length}><SelectTrigger><SelectValue placeholder="选择认证探测" /></SelectTrigger><SelectContent>{journeys.map(([id, journey]) => <SelectItem key={id} value={id}>{journey.summary ?? id} · v{journey.version}</SelectItem>)}</SelectContent></Select><FieldDescription>仅显示 Journey Catalog 中的 authentication_probe；保存会冻结其 ID、版本和类型化参数。</FieldDescription></Field>{Object.entries(selectedJourney?.params_schema?.properties ?? {}).map(([key, schema]) => <Field key={key}><FieldLabel htmlFor={`${systemKey}-probe-${key}`}>{schema.title ?? key}</FieldLabel>{schema.enum ? <Select value={params[key] ?? ""} onValueChange={(value) => setParams((current) => ({ ...current, [key]: value }))} disabled={suspended || saving}><SelectTrigger id={`${systemKey}-probe-${key}`}><SelectValue /></SelectTrigger><SelectContent>{schema.enum.map((value) => <SelectItem key={String(value)} value={String(value)}>{String(value)}</SelectItem>)}</SelectContent></Select> : schema.type === "boolean" ? <Select value={params[key] ?? "false"} onValueChange={(value) => setParams((current) => ({ ...current, [key]: value }))} disabled={suspended || saving}><SelectTrigger id={`${systemKey}-probe-${key}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="true">true</SelectItem><SelectItem value="false">false</SelectItem></SelectContent></Select> : <Input id={`${systemKey}-probe-${key}`} type={schema.type === "integer" || schema.type === "number" ? "number" : "text"} value={params[key] ?? ""} onChange={(e) => setParams((current) => ({ ...current, [key]: e.target.value }))} disabled={suspended || saving} />}</Field>)}{!journeys.length ? <Alert variant="destructive"><AlertDescription>Journey Catalog 中没有可用的认证探测，无法安全配置身份。</AlertDescription></Alert> : null}<Button disabled={suspended || saving || !journeyId || !name.trim() || !startUrl.trim()} onClick={() => void save()}>{saving ? "正在保存…" : missing ? "创建身份" : "保存新修订"}</Button></div></AccordionContent></AccordionItem></Accordion>{identity?.lastProbe ? <p className="text-xs">最近探测：{identity.lastProbe.result} · {formatTime(identity.lastProbe.observedAt)}</p> : null}{identity && (!operation || !active(operation.state) ? <Button disabled={suspended} onClick={() => void start()}>开始人工登录</Button> : <><p className="text-sm">操作 {operation.state}{operation.reconnectDeadline ? `，重连截止 ${formatTime(operation.reconnectDeadline)}` : ""}</p>{operation.canAttach ? <><div ref={viewport} aria-label="安全远程浏览器" className="h-80 rounded border bg-muted" /><p className="text-xs text-muted-foreground">使用远程窗口完成登录；不会保存或显示秘密内容。</p></> : <p className="text-sm text-muted-foreground">运行时正在准备远程浏览器…</p>}<div className="flex gap-2">{operation.canPublish ? <Button disabled={suspended} onClick={() => void command("publish")}>完成并发布</Button> : null}{operation.canCancel ? <Button variant="outline" disabled={suspended} onClick={() => void command("cancel")}>取消</Button> : null}</div></>)}</section>;
-}
-
-export function SystemDetail({ system, props, onChanged }: { system: BusinessSystemDetail; props: WorkspaceModuleProps; onChanged: (item: BusinessSystemDetail) => void }) {
-  const [versions, setVersions] = useState<ConfigVersionSummary[]>([]); const [resources, setResources] = useState<ObservedResourceSummary[]>([]); const [refreshRun, setRefreshRun] = useState<ResourceRefreshRunDetail>(); const [refreshing, setRefreshing] = useState(false); const [error, setError] = useState("");
-  const load = useCallback(async () => { try { const [versionItems, resourceItems] = await Promise.all([listConfigVersions(system.key), listObservedResources(system.key)]); setVersions(versionItems); setResources(resourceItems); } catch (e) { setError(messageOf(e, "无法读取系统投影。")); } }, [system.key]); useEffect(() => { const timer = setTimeout(() => void load(), 0); return () => clearTimeout(timer); }, [load]);
-  useEffect(() => { if (props.suspended || !refreshRun || !active(refreshRun.state)) return; const timer = window.setTimeout(() => void getResourceRefreshRun(system.key, refreshRun.id).then(async (next) => { setRefreshRun(next); if (!active(next.state)) await load(); }).catch((e) => setError(messageOf(e, "无法读取资源刷新状态。"))), 1500); return () => window.clearTimeout(timer); }, [load, props.suspended, refreshRun, system.key]);
-  async function refreshResources() { if (props.suspended) return; setRefreshing(true); setError(""); try { setRefreshRun(await startResourceRefresh(system.key)); } catch (e) { setError(messageOf(e, "无法启动资源刷新。")); } finally { setRefreshing(false); } }
-  const refreshActive = Boolean(refreshRun && active(refreshRun.state));
-  const refreshStatus = refreshRun ? <Alert variant={refreshRun.state === "Failed" ? "destructive" : "default"}><AlertTitle>资源刷新：{refreshRun.state}</AlertTitle><AlertDescription>{refreshRun.resultDetail ?? (refreshActive ? "正在等待刷新完成…" : refreshRun.state === "Completed" ? "刷新已完成。" : "刷新未完成。")}</AlertDescription></Alert> : null;
-  return <div className="space-y-6 p-6"><header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{system.displayName}</h2><p className="text-sm text-muted-foreground">key {system.key} · 当前配置 {system.currentConfigVersionId ?? "未发布"}</p></div><Button variant="outline" onClick={() => props.navigate(`/business-systems/new?edit=${encodeURIComponent(system.key)}`)}>编辑声明</Button></header>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}<Accordion type="multiple" defaultValue={["plans", "resources", "kubernetes", "identity", "versions"]}><AccordionItem value="plans"><AccordionTrigger>巡检计划</AccordionTrigger><AccordionContent>{system.plans.map((plan) => <div className="mb-3 rounded border p-3" key={plan.planKey}><strong>{plan.displayName}</strong><p className="text-xs text-muted-foreground">{plan.cron ?? "仅人工"}</p><ul className="mt-2 list-inside list-disc text-sm">{plan.checks.map((check) => <li key={check.checkKey}>{check.displayName} · {check.kind} · {check.analysisQuestion}</li>)}</ul></div>)}{!system.plans.length ? <p className="text-sm text-muted-foreground">当前配置没有计划。</p> : null}</AccordionContent></AccordionItem><AccordionItem value="resources"><AccordionTrigger>资源</AccordionTrigger><AccordionContent><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-muted-foreground">资源按声明的刷新周期同步；当前周期为 {system.resourceRefreshIntervalSeconds ?? 300} 秒（后端默认 300 秒）。</p><Button size="sm" variant="outline" disabled={props.suspended || refreshing || refreshActive} onClick={() => void refreshResources()}>{refreshing || refreshActive ? "正在刷新…" : "刷新资源"}</Button></div>{refreshStatus}<Table><TableHeader><TableRow><TableHead>发现项</TableHead><TableHead>身份</TableHead><TableHead>观测</TableHead><TableHead>最近成功刷新</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{resources.map((item) => <TableRow key={item.id}><TableCell>{item.discoveryKey}</TableCell><TableCell>{Object.entries(item.identityLabels).map(([key, value]) => `${key}=${value}`).join(", ")}</TableCell><TableCell>{item.observedAt ? formatTime(item.observedAt) : "未观测"}</TableCell><TableCell>{item.lastSuccessfulRefreshAt ? formatTime(item.lastSuccessfulRefreshAt) : "暂无成功刷新"}</TableCell><TableCell>{item.stale ? "已过期" : item.current ? "当前" : "非当前"}</TableCell></TableRow>)}</TableBody></Table>{!resources.length ? <Empty className="min-h-32"><EmptyHeader><EmptyTitle>尚未发现资源</EmptyTitle><EmptyDescription>{refreshRun?.state === "Completed" ? "本次刷新未匹配到声明的资源；请检查发现指标和标签选择器。" : "尚无当前资源。可手动刷新；若仍无结果，请检查发现指标和标签选择器。"}</EmptyDescription></EmptyHeader></Empty> : null}</AccordionContent></AccordionItem><AccordionItem value="kubernetes"><AccordionTrigger>Kubernetes（开发中）</AccordionTrigger><AccordionContent><FeatureUnderConstruction title="Kubernetes 开发中" description="Kubernetes 连接绑定和映射暂未开放；已存储的连接和映射数据不会被删除或修改。" /></AccordionContent></AccordionItem><AccordionItem value="identity"><AccordionTrigger>浏览器巡检（开发中）</AccordionTrigger><AccordionContent><FeatureUnderConstruction title="浏览器巡检开发中" description="浏览器身份配置、人工登录和 Journey 执行暂未开放；已存储的身份、配置和巡检数据不会被删除或修改。" /></AccordionContent></AccordionItem><AccordionItem value="versions"><AccordionTrigger>配置版本</AccordionTrigger><AccordionContent><div className="space-y-4">{versions.map((version) => <Version key={version.id} system={system} version={version} versions={versions} props={props} onPublished={(item) => { onChanged(item); void load(); }} />)}</div></AccordionContent></AccordionItem></Accordion></div>;
-}
+import { listBusinessViews, type BusinessView } from "../api";
+import { ViewDetail } from "./view-detail";
+import { ViewEditor } from "./view-editor";
 
 export function useSystemsModule(props: WorkspaceModuleProps): WorkspaceModuleView {
-  const [systems, setSystems] = useState<BusinessSystemSummary[]>([]); const [selected, setSelected] = useState<BusinessSystemDetail>(); const [loaded, setLoaded] = useState(false); const [error, setError] = useState("");
-  const routeUrl = new URL(props.route, "https://workbench.invalid"); const selectedKey = routeUrl.searchParams.get("system"); const editKey = routeUrl.searchParams.get("edit"); const creating = routeUrl.pathname.endsWith("/new");
-  const load = useCallback(async () => { setLoaded(false); try { const items = await listBusinessSystems(); setSystems(items); if (selectedKey) setSelected(await getBusinessSystem(selectedKey)); else setSelected(undefined); } catch (e) { setError(messageOf(e, "无法读取业务系统。")); } finally { setLoaded(true); } }, [selectedKey]); useEffect(() => { const timer = setTimeout(() => void load(), 0); return () => clearTimeout(timer); }, [load]);
-  const list = <div className="flex h-full min-w-0 flex-col gap-3 p-3"><div className="flex items-center justify-between gap-2"><div className="truncate font-medium">业务系统</div><Button size="sm" onClick={() => props.navigate("/business-systems/new")}>新建</Button></div><ScrollArea className="min-h-0 min-w-0 flex-1 overflow-x-hidden [&_[data-slot=scroll-area-viewport]]:overflow-x-hidden">{systems.length === 0 ? <Empty className="min-h-40"><EmptyHeader><EmptyTitle>尚无业务系统</EmptyTitle><EmptyDescription>新建声明后会显示在这里。</EmptyDescription></EmptyHeader></Empty> : <ItemGroup aria-label="业务系统列表" className="w-full min-w-0 max-w-full overflow-hidden">{systems.map((item) => <Item asChild key={item.key} size="sm" className={selected?.key === item.key ? "w-full min-w-0 max-w-full gap-2 overflow-hidden px-2 py-2 bg-accent" : "w-full min-w-0 max-w-full gap-2 overflow-hidden px-2 py-2 hover:bg-accent/50"}><button type="button" className="flex w-full min-w-0 max-w-full overflow-hidden items-center gap-2 text-left" onClick={() => props.navigate(`/business-systems?system=${encodeURIComponent(item.key)}`)}><ItemMedia variant="icon" className="size-7 shrink-0 [&_svg]:size-3.5"><Network aria-hidden="true" /></ItemMedia><ItemContent className="min-w-0 max-w-full overflow-hidden"><ItemTitle className="!w-full !min-w-0 truncate" title={item.displayName}>{item.displayName}</ItemTitle><div className="flex min-w-0 items-center gap-1.5"><Badge className="shrink-0 px-1.5 py-0 text-[10px]" variant={item.enabled ? "default" : "secondary"}>{item.enabled ? "已发布" : "未启用"}</Badge><ItemDescription className="min-w-0 flex-1 truncate" title={item.key}>{item.key}</ItemDescription></div></ItemContent><ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" /></button></Item>)}</ItemGroup>}</ScrollArea></div>;
-  return { title: "业务纳管", list, actions: null, content: creating ? <DeclarationDraft suspended={props.suspended} navigate={props.navigate} editKey={editKey ?? undefined} onUploaded={async (detail) => { props.navigate(`/business-systems?system=${encodeURIComponent(detail.systemKey)}`); }} /> : selected ? <SystemDetail system={selected} props={props} onChanged={setSelected} /> : <div className="p-6">{error ? <Alert variant="destructive"><AlertTitle>无法读取系统</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : !loaded ? "正在读取业务系统…" : <Empty className="min-h-56"><EmptyHeader><EmptyTitle>{systems.length ? "选择一个业务系统" : "尚无业务系统"}</EmptyTitle><EmptyDescription>{systems.length ? "从左侧列表选择业务系统，或新建一份声明。" : "新建第一份业务声明后会在这里显示。"}</EmptyDescription></EmptyHeader></Empty>}</div> };
+  const [views, setViews] = useState<BusinessView[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const routeUrl = new URL(props.route, "https://workbench.invalid");
+  const selectedKey = routeUrl.searchParams.get("view");
+  const editing = routeUrl.searchParams.get("edit") === "1";
+  const creating = routeUrl.pathname.endsWith("/new");
+
+  const load = useCallback(async () => {
+    try {
+      setViews(await listBusinessViews());
+      setError("");
+    } catch (reason) {
+      setError(messageOf(reason, "无法读取业务视图。"));
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+  useEffect(() => {
+    const timer = setTimeout(() => void load(), 0);
+    return () => clearTimeout(timer);
+  }, [load]);
+
+  const saved = (view: BusinessView) => {
+    void load();
+    props.navigate(`/business-views?view=${encodeURIComponent(view.viewKey)}`);
+  };
+
+  const list = (
+    <div className="flex h-full min-w-0 flex-col gap-3 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="truncate font-medium">业务视图</div>
+        <Button size="sm" onClick={() => props.navigate("/business-views/new")}>新建</Button>
+      </div>
+      <ScrollArea className="min-h-0 min-w-0 flex-1 overflow-x-hidden [&_[data-slot=scroll-area-viewport]]:overflow-x-hidden">
+        {views.length === 0 ? (
+          <Empty className="min-h-40">
+            <EmptyHeader>
+              <EmptyTitle>尚无业务视图</EmptyTitle>
+              <EmptyDescription>业务视图是可选的；新建一个后它会显示在这里。</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <ItemGroup aria-label="业务视图列表" className="w-full min-w-0 max-w-full overflow-hidden">
+            {views.map((view) => (
+              <Item asChild key={view.viewKey} size="sm" className="w-full min-w-0 max-w-full gap-2 overflow-hidden px-2 py-2 hover:bg-accent/50">
+                <button
+                  type="button"
+                  className="flex w-full min-w-0 max-w-full overflow-hidden items-center gap-2 text-left"
+                  onClick={() => props.navigate(`/business-views?view=${encodeURIComponent(view.viewKey)}`)}
+                >
+                  <ItemMedia variant="icon" className="size-7 shrink-0 [&_svg]:size-3.5"><Layers aria-hidden="true" /></ItemMedia>
+                  <ItemContent className="min-w-0 max-w-full overflow-hidden">
+                    <ItemTitle className="!w-full !min-w-0 truncate" title={view.displayName}>{view.displayName}</ItemTitle>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <Badge className="shrink-0 px-1.5 py-0 text-[10px]" variant={view.scope.connectionName ? "default" : "secondary"}>
+                        {view.scope.connectionName ?? "全部来源"}
+                      </Badge>
+                      <ItemDescription className="min-w-0 flex-1 truncate" title={view.viewKey}>{view.viewKey}</ItemDescription>
+                    </div>
+                  </ItemContent>
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                </button>
+              </Item>
+            ))}
+          </ItemGroup>
+        )}
+      </ScrollArea>
+    </div>
+  );
+
+  const content = creating ? (
+    <ViewEditor suspended={props.suspended} navigate={props.navigate} onSaved={saved} />
+  ) : selectedKey && editing ? (
+    <div className="p-6"><ViewEditor suspended={props.suspended} navigate={props.navigate} editKey={selectedKey} onSaved={saved} /></div>
+  ) : selectedKey ? (
+    <ViewDetail viewKey={selectedKey} suspended={props.suspended} navigate={props.navigate} />
+  ) : (
+    <div className="p-6">
+      {error ? (
+        <Alert variant="destructive"><AlertTitle>无法读取业务视图</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>
+      ) : !loaded ? (
+        <p role="status">正在读取业务视图…</p>
+      ) : (
+        <Empty className="min-h-56">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><Layers aria-hidden="true" /></EmptyMedia>
+            <EmptyTitle>{views.length ? "选择一个业务视图" : "尚无业务视图"}</EmptyTitle>
+            <EmptyDescription>
+              业务视图是可选的组织方式：没有业务视图也可以接收告警、观测对象、使用已授权工具和执行基础巡检。
+              {views.length ? " 从左侧选择一个视图，或新建一个。" : " 新建第一个业务视图后会在这里显示。"}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
+    </div>
+  );
+
+  return { title: "业务视图", list, content };
 }

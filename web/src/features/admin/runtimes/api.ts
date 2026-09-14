@@ -18,7 +18,29 @@ export interface RuntimeSlotView {
 
 export interface RuntimeStatusView {
   plinth: RuntimeSlotView
-  lintel: RuntimeSlotView
+  /** 部署解析的插件启用集不含 browser（ADR-0004 默认主线）时缺省：没有可注册的 Lintel。 */
+  lintel?: RuntimeSlotView
+}
+
+/**
+ * Type guard for a server slot projection. Runtime slots are projected per
+ * deployment enablement (ADR-0004): the lintel field may be absent or, on a
+ * contract-skewing proxy, malformed — a row that fails this guard must be
+ * dropped instead of rendered as an unusable registration entry.
+ */
+export function isRuntimeSlotView(value: unknown): value is RuntimeSlotView {
+  if (typeof value !== 'object' || value === null) return false;
+  const slot = value as Partial<RuntimeSlotView>;
+  return (
+    (slot.slot === 'plinth' || slot.slot === 'lintel') &&
+    (slot.state === 'unregistered' || slot.state === 'registered' || slot.state === 'revoked') &&
+    typeof slot.currentGeneration === 'number' &&
+    Number.isFinite(slot.currentGeneration) &&
+    typeof slot.rowVersion === 'number' &&
+    Number.isFinite(slot.rowVersion) &&
+    slot.rowVersion >= 1 &&
+    typeof slot.connected === 'boolean'
+  );
 }
 
 export interface RegistrationPreparation {

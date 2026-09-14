@@ -61,16 +61,91 @@ describe('offline domain mock handlers', () => {
     expect((await response('/api/v1/admin/about')).status).toBe(403)
     setMockScenario('administrator')
     const about = await (await response('/api/v1/admin/about')).json() as { releaseVersion: string; components: Array<{ slot: string; releaseVersion: string }> }
-    expect(about).toEqual(expect.objectContaining({ releaseVersion: 'mock-preview', components: [expect.objectContaining({ slot: 'plinth', releaseVersion: 'mock-plinth' }), expect.objectContaining({ slot: 'lintel', releaseVersion: 'mock-lintel' })] }))
+    expect(about).toEqual(expect.objectContaining({ releaseVersion: 'mock-preview', components: [expect.objectContaining({ slot: 'plinth', releaseVersion: 'mock-plinth' })] }))
     const source = await response('/api/v1/alert-sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'stateful-source', protocol: 'alertmanager' }) })
     expect(source.status).toBe(201)
     const createdSource = await source.json() as { credentialId: string }
     const credentials = await (await response('/api/v1/alert-sources/stateful-source/credentials')).json() as { items: Array<{ id: string; rowVersion: number }> }
     expect(credentials.items[0].id).toBe(createdSource.credentialId)
     expect((await response(`/api/v1/alert-sources/stateful-source/credentials/${createdSource.credentialId}/retire`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRowVersion: 1 }) })).status).toBe(200)
-    const mapping = await response('/api/v1/business-systems/checkout/kubernetes-connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: 'connection-kubernetes-prod' }) })
-    expect(mapping.status).toBe(201)
-    expect((await (await response('/api/v1/business-systems/checkout/kubernetes-connections')).json() as Array<{ connectionId: string }>).some(item => item.connectionId === 'connection-kubernetes-prod')).toBe(true)
+  })
+
+  test('statefully serves business views behind the admin boundary with row-version fencing', async () => {
+    setMockScenario('operator')
+    expect((await response('/api/v1/business-views')).status).toBe(403)
+    expect((await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-1', viewKey: 'checkout', displayName: '结算', description: '', scope: { labelConditions: {} } }) })).status).toBe(403)
+    setMockScenario('administrator')
+    const list = await (await response('/api/v1/business-views')).json() as { items: Array<{ viewKey: string; scope: { connectionName?: string; labelConditions: Record<string, string> } }> }
+    expect(list.items[0]).toMatchObject({ viewKey: 'checkout', scope: { connectionName: 'thanos-primary', labelConditions: { service: 'checkout' } } })
+    const created = await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-2', viewKey: 'payment', displayName: '支付', description: '支付业务范围', scope: { labelConditions: { service: 'payment' } } }) })
+    expect(created.status).toBe(201)
+    expect((await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-3', viewKey: 'payment', displayName: '重复标识', description: '', scope: { labelConditions: {} } }) })).status).toBe(409)
+    expect((await response('/api/v1/business-views/payment', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-4', displayName: '支付系统', description: '', scope: { labelConditions: {} }, expectedRowVersion: 99 }) })).status).toBe(409)
+    const updated = await response('/api/v1/business-views/payment', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-5', displayName: '支付系统', description: '支付业务范围', scope: { connectionName: 'thanos-primary', labelConditions: { service: 'payment' } }, expectedRowVersion: 1 }) })
+    expect(updated.status).toBe(200)
+    expect(await updated.json() as { rowVersion: number }).toMatchObject({ rowVersion: 2 })
+    expect((await (await response('/api/v1/business-views/payment')).json() as { displayName: string }).displayName).toBe('支付系统')
+    expect((await response('/api/v1/business-views/missing-view')).status).toBe(404)
+  })
+
+  test('replays identical commands from the stateful cache and conflicts on changed payloads', async () => {
+    const command = { clientCommandId: 'idem-view-1', viewKey: 'idem', displayName: '幂等视图', description: '', scope: { labelConditions: {} } }
+    expect((await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) })).status).toBe(201)
+    // The identical replay returns the original 201 result, not a duplicate-key conflict.
+    const replay = await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) })
+    expect(replay.status).toBe(201)
+    expect(await replay.json() as { viewKey: string }).toMatchObject({ viewKey: 'idem' })
+    // The same ID carrying a different request conflicts per the command contract.
+    const changed = await response('/api/v1/business-views', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...command, displayName: '改过的请求' }) })
+    expect(changed.status).toBe(409)
+    expect((await changed.json() as { code: string }).code).toBe('command_id_conflict')
+    // An idempotent update replay returns the stored result without re-applying it.
+    const update = { clientCommandId: 'idem-put-1', displayName: '幂等视图二版', description: '', scope: { labelConditions: {} }, expectedRowVersion: 1 }
+    expect((await (await response('/api/v1/business-views/idem', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update) })).json() as { rowVersion: number }).rowVersion).toBe(2)
+    const updateReplay = await response('/api/v1/business-views/idem', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(update) })
+    expect(updateReplay.status).toBe(200)
+    expect(await updateReplay.json() as { rowVersion: number }).toMatchObject({ rowVersion: 2 })
+    expect((await (await response('/api/v1/business-views/idem')).json() as { rowVersion: number }).rowVersion).toBe(2)
+    // Run creation replays return the original run instead of creating a duplicate.
+    const run = await (await response('/api/v1/inspections/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'idem-run-1', planKey: 'checkout-latency-watch' }) })).json() as { id: string }
+    const runReplay = await (await response('/api/v1/inspections/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'idem-run-1', planKey: 'checkout-latency-watch' }) })).json() as { id: string }
+    expect(runReplay.id).toBe(run.id)
+    expect((await (await response('/api/v1/inspections/runs?planKey=checkout-latency-watch')).json() as { items: Array<{ id: string }> }).items.filter((item) => item.id === run.id)).toHaveLength(1)
+  })
+
+  test('serves plugin inspection plans and freezes run scope from planKey only', async () => {
+    // The whole inspection handler group sits behind the Admin boundary, matching the real reader.
+    setMockScenario('operator')
+    expect((await response('/api/v1/inspections/plans')).status).toBe(403)
+    expect((await response('/api/v1/inspections/runs')).status).toBe(403)
+    expect((await response('/api/v1/inspections/runs/inspection-run-1')).status).toBe(403)
+    expect((await response('/api/v1/inspections/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p0', planKey: 'operator-plan', displayName: '越权计划', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'integration' }, timezone: 'UTC' }) })).status).toBe(403)
+    setMockScenario('administrator')
+    const plans = await (await response('/api/v1/inspections/plans')).json() as { items: Array<{ planKey: string; scope: { kind: string; businessViewKey?: string }; connectionName: string }> }
+    expect(plans.items[0]).toMatchObject({ planKey: 'checkout-latency-watch', connectionName: 'thanos-primary', scope: { kind: 'businessView', businessViewKey: 'checkout' } })
+    setMockScenario('administrator')
+    expect((await response('/api/v1/inspections/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p1', planKey: 'bad-connection', displayName: '未知接入', enabled: true, connectionName: 'missing-connection', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'integration' }, timezone: 'UTC' }) })).status).toBe(422)
+    expect((await response('/api/v1/inspections/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p2', planKey: 'bad-view', displayName: '未知视图', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'businessView', businessViewKey: 'missing-view' }, timezone: 'UTC' }) })).status).toBe(422)
+    const created = await response('/api/v1/inspections/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p3', planKey: 'checkout-error-watch', displayName: '结算错误观测', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', templateVersion: '1', params: { query: 'up' }, scope: { kind: 'businessView', businessViewKey: 'checkout' }, cron: '*/10 * * * *', timezone: 'Asia/Shanghai' }) })
+    expect(created.status).toBe(201)
+    expect((await response('/api/v1/inspections/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p4', planKey: 'checkout-error-watch', displayName: '重复计划', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'integration' }, timezone: 'UTC' }) })).status).toBe(409)
+    expect((await response('/api/v1/inspections/plans/checkout-error-watch', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p5', displayName: '结算错误观测二版', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'integration' }, timezone: 'UTC', expectedRowVersion: 99 }) })).status).toBe(409)
+    const updated = await (await response('/api/v1/inspections/plans/checkout-error-watch', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-p6', displayName: '结算错误观测二版', enabled: true, connectionName: 'thanos-primary', pluginId: 'thanos', templateId: 'latency', params: {}, scope: { kind: 'integration' }, timezone: 'UTC', expectedRowVersion: 1 }) })).json() as { rowVersion: number }
+    expect(updated.rowVersion).toBe(2)
+    const runResponse = await response('/api/v1/inspections/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-r1', planKey: 'checkout-error-watch' }) })
+    expect(runResponse.status).toBe(201)
+    const run = await runResponse.json() as { id: string; planKey: string; connectionName?: string; businessSystemKey?: string | null; state: string; rowVersion: number }
+    expect(run).toMatchObject({ planKey: 'checkout-error-watch', connectionName: 'thanos-primary', state: 'Completed' })
+    expect(run.businessSystemKey ?? null).toBeNull()
+    expect((await response('/api/v1/inspections/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-r2', planKey: 'missing-plan' }) })).status).toBe(404)
+    const filtered = await (await response('/api/v1/inspections/runs?planKey=checkout-error-watch')).json() as { items: Array<{ planKey: string }> }
+    expect(filtered.items.map((item) => item.planKey)).toEqual(['checkout-error-watch'])
+    // Cancel fencing is exercised against the seeded active plan-scoped run, not the terminal preview result.
+    expect((await response('/api/v1/inspections/runs/inspection-run-2/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-r3', expectedRowVersion: 99 }) })).status).toBe(409)
+    const cancelled = await response('/api/v1/inspections/runs/inspection-run-2/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-r4', expectedRowVersion: 1 }) })
+    expect(cancelled.status).toBe(200)
+    expect(await cancelled.json() as { state: string }).toMatchObject({ state: 'Cancelled' })
+    expect((await response('/api/v1/inspections/runs/inspection-run-2/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: 'cmd-r5', expectedRowVersion: 2 }) })).status).toBe(409)
   })
 
   test('supplies admin-only platform boundary fixtures without changing production API behavior', async () => {
@@ -100,6 +175,8 @@ describe('offline domain mock handlers', () => {
     setMockScenario('empty')
     expect((await (await response('/api/v1/connections')).json() as { items: unknown[] }).items).toEqual([])
     expect((await (await response('/api/v1/business-systems')).json() as { items: unknown[] }).items).toEqual([])
+    expect((await (await response('/api/v1/business-views')).json() as { items: unknown[] }).items).toEqual([])
+    expect((await (await response('/api/v1/inspections/plans')).json() as { items: unknown[] }).items).toEqual([])
     expect((await (await response('/api/v1/alert-intake-issues')).json() as { items: unknown[] }).items).toEqual([])
   })
 

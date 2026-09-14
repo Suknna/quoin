@@ -1,4 +1,20 @@
-import { newClientCommandId, type BusinessSystemDetail, type BusinessSystemSummary, getBusinessSystem, listBusinessSystems } from '../admin/business-systems/api'
+// Inspection feature API: standalone integration-scoped plans and their runs.
+// Plans no longer hang off a BusinessSystem declaration — a plan selects its
+// range via scope (whole integration, a business view, or explicit objects).
+// Wire shapes come from the generated OpenAPI authority; failures surface the
+// server's ordinary-language message (problem+json).
+import type {
+  AttemptSummary,
+  CheckResultSummary,
+  InspectionAnalysisStatus,
+  InspectionRunDetail,
+  InspectionRunSummary,
+  PluginInspectionPlan,
+  PluginInspectionPlanInput,
+  PluginInspectionScope,
+  ReportDetail,
+  ReportSummary,
+} from "@/api/generated/types";
 
 export class InspectionApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -19,88 +35,87 @@ async function failure(response: Response): Promise<InspectionApiError> {
   return new InspectionApiError(message, response.status, code)
 }
 
-export type InspectionRunState = 'Queued' | 'Running' | 'Completed' | 'CompletedWithGaps' | 'Failed' | 'Cancelled' | 'Interrupted' | 'SkippedOverlap'
-
-export interface InspectionRunSummary {
-  id: string
-  businessSystemKey: string
-  planKey: string
-  state: InspectionRunState
-  rowVersion: number
-  triggerKind: 'schedule' | 'manual'
-  scheduledFor?: string
-  evidenceAt?: string
-  createdAt: string
+/** Idempotency marker carried by every mutating inspection command. */
+export function newClientCommandId(): string {
+  const raw = crypto.getRandomValues(new Uint8Array(18))
+  return Array.from(raw, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/** Frozen CheckResultSummary union: ok 携带 Evidence locator；error/gap 携带缺口原因。 */
-export type InspectionCheckResult =
-  | { checkKey: string; status: 'ok'; evidenceId: string }
-  | { checkKey: string; status: 'error' | 'gap'; gapReason: string }
-  | { checkKey: string; status: 'cancelling' }
+export type InspectionRunState = InspectionRunSummary['state']
+export type InspectionCheckResult = CheckResultSummary
+export type InspectionAnalysisAttempt = AttemptSummary
 
-export interface InspectionRunDetail extends InspectionRunSummary {
-  checks: InspectionCheckResult[]
-  reportCount: number
-  analysisActive: boolean
-  latestAnalysis?: InspectionAnalysisStatus
+/**
+ * Plan scope resolved at run creation: the whole integration, one versioned
+ * business view, or an explicit object list ({objectType, identityKey}).
+ */
+export type InspectionPlanScope = PluginInspectionScope
+export type InspectionPlan = PluginInspectionPlan
+
+/** Editable plan projection sent on create; server owns rowVersion/createdAt/updatedAt. */
+export type InspectionPlanInput = Omit<PluginInspectionPlanInput, 'clientCommandId' | 'expectedRowVersion'>
+/** Full editable projection plus the optimistic-concurrency marker for PUT. */
+export type InspectionPlanUpdate = Omit<PluginInspectionPlanInput, 'clientCommandId' | 'planKey'> & { expectedRowVersion: number }
+
+/**
+ * The server includes `id`, the immutable report locator consumed by diagnosis
+ * feedback, on top of the human-facing (runId, version) route locator.
+ */
+export type InspectionReportDetail = ReportDetail & { id: string }
+export type InspectionReportSummary = ReportSummary
+export type { InspectionAnalysisStatus, InspectionRunDetail, InspectionRunSummary }
+
+/** Lists the first server page of plans; callers filter client-side (e.g. by connectionName). */
+export async function listInspectionPlans(): Promise<InspectionPlan[]> {
+  const response = await fetch('/api/v1/inspections/plans?limit=100', { credentials: 'include' })
+  if (!response.ok) throw await failure(response)
+  const page = (await response.json()) as { items?: InspectionPlan[] }
+  return page.items ?? []
 }
 
-/** Safe lifecycle projection for the latest immutable report-analysis Attempt. */
-export interface InspectionAnalysisStatus {
-  id: string
-  state: 'Queued' | 'Assigned' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
-  terminationReason?: string
+export async function getInspectionPlan(planKey: string): Promise<InspectionPlan> {
+  const response = await fetch(`/api/v1/inspections/plans/${encodeURIComponent(planKey)}`, { credentials: 'include' })
+  if (!response.ok) throw await failure(response)
+  return (await response.json()) as InspectionPlan
 }
 
-export interface InspectionAttemptSummary {
-  id: string
-  type: 'inspection_analysis' | 'inspection_collection'
-  state: 'Queued' | 'Assigned' | 'Running' | 'Cancelling' | 'Succeeded' | 'Failed' | 'Cancelled' | 'Interrupted'
-  rowVersion: number
-  createdAt: string
+export async function createInspectionPlan(input: InspectionPlanInput): Promise<InspectionPlan> {
+  const response = await fetch('/api/v1/inspections/plans', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), ...input }),
+  })
+  if (!response.ok) throw await failure(response)
+  return (await response.json()) as InspectionPlan
 }
 
-export interface InspectionReportSummary {
-  version: number
-  modelId: string
-  createdAt: string
+export async function updateInspectionPlan(planKey: string, update: InspectionPlanUpdate): Promise<InspectionPlan> {
+  const response = await fetch(`/api/v1/inspections/plans/${encodeURIComponent(planKey)}`, {
+    method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), ...update }),
+  })
+  if (!response.ok) throw await failure(response)
+  return (await response.json()) as InspectionPlan
 }
 
-export interface InspectionReportDetail {
-  /** Immutable report locator required by the diagnosis-feedback target contract. */
-  id: string
-  runId: string
-  version: number
-  evidenceDigest: string
-  evidenceIds: string[]
-  modelId: string
-  content: string
-  createdAt: string
+/**
+ * Reads one server page of runs. Filtering by plan happens server-side;
+ * callers must not walk the full cursor chain defensively.
+ */
+export async function listInspectionRuns(options: { planKey?: string; cursor?: string; limit?: number } = {}): Promise<{ items: InspectionRunSummary[]; nextCursor?: string }> {
+  const query = new URLSearchParams({ limit: String(options.limit ?? 100) })
+  if (options.planKey) query.set('planKey', options.planKey)
+  if (options.cursor) query.set('cursor', options.cursor)
+  const response = await fetch(`/api/v1/inspections/runs?${query.toString()}`, { credentials: 'include' })
+  if (!response.ok) throw await failure(response)
+  const page = (await response.json()) as { items?: InspectionRunSummary[]; nextCursor?: string }
+  return { items: page.items ?? [], nextCursor: page.nextCursor }
 }
 
-export { getBusinessSystem, listBusinessSystems }
-export type { BusinessSystemDetail, BusinessSystemSummary }
-
-export async function listInspectionRuns(businessSystemKey: string): Promise<InspectionRunSummary[]> {
-  const query = new URLSearchParams({ businessSystemKey, limit: '100' })
-  const runs: InspectionRunSummary[] = []
-  let cursor = ''
-  do {
-    if (cursor) query.set('cursor', cursor)
-    const response = await fetch(`/api/v1/inspections/runs?${query.toString()}`, { credentials: 'include' })
-    if (!response.ok) throw await failure(response)
-    const page = (await response.json()) as { items?: InspectionRunSummary[]; nextCursor?: string }
-    runs.push(...(page.items ?? []))
-    cursor = page.nextCursor ?? ''
-  } while (cursor)
-  return runs
-}
-
-export async function createInspectionRun(businessSystemKey: string, planKey: string): Promise<InspectionRunDetail> {
+/** Manual trigger: only the plan identity — scope and connection are frozen server-side. */
+export async function createInspectionRun(planKey: string): Promise<InspectionRunDetail> {
   const response = await fetch('/api/v1/inspections/runs', {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ businessSystemKey, planKey, clientCommandId: newClientCommandId() }),
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), planKey }),
   })
   if (!response.ok) throw await failure(response)
   return (await response.json()) as InspectionRunDetail
@@ -122,13 +137,13 @@ export async function cancelInspectionRun(runId: string, expectedRowVersion: num
 }
 
 /** Reuses this Run's immutable collected Evidence to create its next Report version. */
-export async function reanalyzeInspectionRun(runId: string): Promise<InspectionAttemptSummary> {
+export async function reanalyzeInspectionRun(runId: string): Promise<InspectionAnalysisAttempt> {
   const response = await fetch(`/api/v1/inspections/runs/${encodeURIComponent(runId)}/analyze`, {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ clientCommandId: newClientCommandId() }),
   })
   if (!response.ok) throw await failure(response)
-  return (await response.json()) as InspectionAttemptSummary
+  return (await response.json()) as InspectionAnalysisAttempt
 }
 
 /** Starts a distinct Run that recollects evidence from this Run's frozen plan. */
@@ -165,3 +180,19 @@ export const inspectionGapReasonText: Record<string, string> = {
   query_failed: '指标查询失败', partial_response: '部分响应', no_data: '无数据', cancelled: '已取消', interrupted: '已中断',
 }
 export function formatInspectionTime(value?: string): string { return value ? (Number.isNaN(new Date(value).getTime()) ? value : new Date(value).toLocaleString()) : '—' }
+
+export const inspectionScopeKindText: Record<InspectionPlanScope['kind'], string> = {
+  integration: '整个接入', businessView: '业务视图', objects: '指定对象',
+}
+
+/** One-line human projection of a scope for lists and tables. */
+export function inspectionScopeText(scope: InspectionPlanScope): string {
+  if (scope.kind === 'businessView') return `${inspectionScopeKindText.businessView} ${scope.businessViewKey}`
+  if (scope.kind === 'objects') return `${inspectionScopeKindText.objects}（${scope.objects.length} 个）`
+  return inspectionScopeKindText.integration
+}
+
+/** Scheduling projection: cron plus timezone, or an explicit manual-only marker. */
+export function inspectionScheduleText(plan: Pick<InspectionPlan, 'cron' | 'timezone'>): string {
+  return plan.cron ? `${plan.cron} · ${plan.timezone}` : '仅人工运行'
+}

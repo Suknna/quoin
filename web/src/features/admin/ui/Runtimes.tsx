@@ -3,14 +3,15 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchRuntimeStatus, formatRuntimeTime, prepareRegistration, revealRegistrationToken, retireRuntimeCredential, type RuntimeSlotView } from "@/features/admin/runtimes/api";
+import { fetchRuntimeStatus, formatRuntimeTime, isRuntimeSlotView, prepareRegistration, revealRegistrationToken, retireRuntimeCredential, type RuntimeSlotView } from "@/features/admin/runtimes/api";
 import { ConfirmAction } from "./controls";
 
 /** In-memory secrets are epoch-fenced and removed when this surface closes, suspends, or replaces one. */
 export function Runtimes({ suspended, refreshRevision = 0, onChanged }: { suspended: boolean; refreshRevision?: number; onChanged?: () => Promise<void> }) {
  const [items, setItems] = useState<RuntimeSlotView[]>([]); const [secret, setSecret] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(false); const [pending, setPending] = useState<string>(); const epoch = useRef(0);
  const clearSecret = useCallback(() => { epoch.current += 1; setSecret(""); }, []);
- const load = useCallback(async () => { if (suspended) return; try { setLoading(true); setError(""); const status = await fetchRuntimeStatus(); setItems([status.plinth, status.lintel]); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法读取运行时状态。"); } finally { setLoading(false); } }, [suspended]);
+ const load = useCallback(async () => { if (suspended) return; try { setLoading(true); setError(""); const status = await fetchRuntimeStatus(); // 受控浏览器退役：只有 Plinth 槽位可注册；任何残留的 lintel 投影都不再渲染。
+setItems([status.plinth].filter(isRuntimeSlotView)); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法读取运行时状态。"); } finally { setLoading(false); } }, [suspended]);
  useEffect(() => { void load(); }, [load, refreshRevision]);
  useEffect(() => { if (suspended) clearSecret(); return clearSecret; }, [clearSecret, suspended]);
  async function refresh() { await load(); await onChanged?.(); }
