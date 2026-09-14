@@ -15,6 +15,39 @@
   }
 }
 
+/* The brand surface stays graphite independently of the workspace theme. */
+.auth-brand-panel {
+  --background: oklch(0.215 0.008 260);
+  --foreground: oklch(0.96 0.003 260);
+  --card: oklch(0.245 0.009 260);
+  --border: oklch(0.37 0.012 260);
+  --muted-foreground: oklch(0.72 0.015 260);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .auth-brand-enter {
+    @apply animate-in fade-in slide-in-from-bottom-2 fill-mode-backwards;
+    animation-duration: 600ms;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .auth-brand-link {
+    stroke-dasharray: 1;
+    animation: auth-brand-connect 650ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+}
+
+@keyframes auth-brand-connect {
+  from {
+    stroke-dashoffset: 1;
+    opacity: 0;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

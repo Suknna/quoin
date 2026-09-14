@@ -32,11 +32,12 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { EvidenceReader } from "@/features/evidence/ui";
+import { AuthBrandPanel } from "./AuthBrandPanel";
 import type { WorkspaceModuleProps } from "./module-contract";
 import {
-		consolidatedRouteTarget,
-		migrateLegacyHash,
-		navigateWorkspace,
+	consolidatedRouteTarget,
+	migrateLegacyHash,
+	navigateWorkspace,
 	readWorkspaceRoute,
 } from "./router";
 import { type RouteHostComponents, RouteHosts } from "./routes/RouteHosts";
@@ -80,13 +81,7 @@ function AuthLayout({ children }: { children: ReactNode }) {
 					<div className="w-full max-w-xs">{children}</div>
 				</div>
 			</div>
-			<div className="relative hidden bg-muted lg:block" aria-hidden="true">
-				<img
-					src="/placeholder.svg"
-					alt=""
-					className="absolute inset-0 h-full w-full object-cover dark:brightness-[0.2] dark:grayscale"
-				/>
-			</div>
+			<AuthBrandPanel />
 		</div>
 	);
 }
@@ -322,13 +317,13 @@ function Workspace({
 		window.addEventListener("popstate", listen);
 		return () => window.removeEventListener("popstate", listen);
 	}, []);
-		const navigate = (to: string) => {
-			navigateWorkspace(to);
-		};
-		useEffect(() => {
-			const destination = consolidatedRouteTarget(route.pathname);
-			if (destination) navigateWorkspace(destination, true);
-		}, [route.pathname]);
+	const navigate = (to: string) => {
+		navigateWorkspace(to);
+	};
+	useEffect(() => {
+		const destination = consolidatedRouteTarget(route.pathname);
+		if (destination) navigateWorkspace(destination, true);
+	}, [route.pathname]);
 
 	const evidenceId = route.pathname.match(/^\/evidence\/([^/]+)$/)?.[1];
 	const requestedSource = new URLSearchParams(route.search).get("from");

@@ -69,6 +69,17 @@ describe("authentication workflow", () => {
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
 		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		const brandPanel = screen.getByRole("complementary", {
+			name: "关于 Quoin",
+		});
+		expect(
+			within(brandPanel).getByRole("heading", { level: 2 }),
+		).toHaveTextContent("让每次一判断，都有据可寻。");
+		expect(brandPanel).toHaveTextContent(/quoin\s*\|\s*运维工作台/);
+		expect(brandPanel).not.toHaveTextContent(
+			/汇集监控证据|沉淀经过确认|告警调查|定期巡检|知识沉淀/,
+		);
+		expect(within(brandPanel).queryByRole("button")).not.toBeInTheDocument();
 		expect(me).toHaveBeenCalledTimes(2);
 	});
 
@@ -80,6 +91,9 @@ describe("authentication workflow", () => {
 		const list = vi.spyOn(workbenchApi, "listConnections");
 		render(<App />);
 		expect(await screen.findByLabelText("当前临时密码")).toBeInTheDocument();
+		expect(
+			screen.getByRole("complementary", { name: "关于 Quoin" }),
+		).toHaveTextContent("让每次一判断，都有据可寻。");
 		expect(list).not.toHaveBeenCalled();
 		fireEvent.change(screen.getByLabelText("当前临时密码"), {
 			target: { value: "current password long enough" },
@@ -107,9 +121,15 @@ describe("authentication workflow", () => {
 		const create = vi.spyOn(workbenchApi, "createConnection");
 		render(<App />);
 		// Operators have no administration action surface, even when entering an admin URL directly.
-		expect(await screen.findByRole("alert")).toHaveTextContent("仅向管理员开放");
-		expect(screen.queryByRole("button", { name: "新建" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "创建连接" })).not.toBeInTheDocument();
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"仅向管理员开放",
+		);
+		expect(
+			screen.queryByRole("button", { name: "新建" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "创建连接" }),
+		).not.toBeInTheDocument();
 		expect(create).not.toHaveBeenCalled();
 	});
 
@@ -357,8 +377,12 @@ describe("authentication workflow", () => {
 		const enable = vi
 			.spyOn(workbenchApi, "enableConnection")
 			.mockResolvedValue({ ...modelProviderDetail, enabled: true });
-			window.history.replaceState(null, "", "/admin/model_provider/models%2Fmain");
-			render(<App />);
+		window.history.replaceState(
+			null,
+			"",
+			"/admin/model_provider/models%2Fmain",
+		);
+		render(<App />);
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "启用连接" })).toBeEnabled(),
 		);
@@ -369,7 +393,7 @@ describe("authentication workflow", () => {
 		);
 	});
 
-		it("returns to login after logout receives an already-expired 401", async () => {
+	it("returns to login after logout receives an already-expired 401", async () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
