@@ -30,17 +30,28 @@ func TestBuildKubernetesBundlePinsEveryApplicationImage(t *testing.T) {
 			t.Fatalf("bundle misses required manifest %s", required)
 		}
 	}
-	body := readBundleEntry(t, bundlePath, "quoin.yaml")
-	for _, component := range subjects.Components {
+	pinned := func(component string) string {
 		image := inventory.Images[component]
-		want := image.Repository + "@" + image.IndexDigest
-		if !strings.Contains(string(body), want) {
-			t.Fatalf("bundle misses %s image %q", component, want)
+		return image.Repository + "@" + image.IndexDigest
+	}
+	// The default manifest is browser-free (ADR 0004): it pins exactly the
+	// four mainline components and must not reference the browser runtime at
+	// all — the retired Lintel overlay (deploy/retired/browser/) ships in no
+	// bundle, so a plain kubectl apply of quoin.yaml + ops-services.yaml can
+	// never start Lintel.
+	body := readBundleEntry(t, bundlePath, "quoin.yaml")
+	for _, component := range []string{"frontend", "plinth", "quoin", "stele"} {
+		if !strings.Contains(string(body), pinned(component)) {
+			t.Fatalf("default manifest misses %s image %q", component, pinned(component))
 		}
 	}
+	if strings.Contains(string(body), pinned("lintel")) {
+		t.Fatal("default manifest must not deploy the browser runtime; it is retired")
+	}
+	rendered := string(readBundleEntry(t, bundlePath, "quoin.yaml"))
 	for _, forbidden := range []string{"quoin/web:v0.1.0-dev", "quoin/quoin:v0.1.0-dev", "quoin/plinth:v0.1.0-dev", "quoin/lintel:v0.1.0-dev", "quoin/stele:v0.1.0-dev"} {
-		if strings.Contains(string(body), forbidden) {
-			t.Fatalf("bundle retains development image %q", forbidden)
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("quoin.yaml retains development image %q", forbidden)
 		}
 	}
 }

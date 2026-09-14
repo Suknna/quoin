@@ -1,10 +1,11 @@
+# Explicit browser-enabled variant of config/quoin.yaml, mounted only by the
+# compose.browser.yaml override together with the `browser` profile. Keep the
+# two files in sync: they differ ONLY in enabledPlugins (browser added here).
 # Set publicOrigin to the exact externally visible HTTPS origin before first start.
 component: quoin
-# Enabled plugins (ADR 0004): the deployment YAML selects the enabled set.
-# The mainline enables exactly the four source plugins; the browser plugin is
-# retired (historical variant in deploy/retired/browser/). IDs must match the
-# well-known IDs in internal/plugins.
-enabledPlugins: [alertmanager, kubernetes, prometheus, thanos]
+# Same four source plugins as the default, plus the explicit browser plugin
+# (ADR 0004: the browser plugin is never enabled by a default deployment).
+enabledPlugins: [alertmanager, browser, kubernetes, prometheus, thanos]
 publicOrigin: https://quoin.example.com
 # Exact public Alertmanager receiver; never an internal container endpoint.
 stelePublicURL: https://quoin.example.com/stele/alerts

@@ -204,7 +204,10 @@ func yamlMapValue(node *yaml.Node, key string) string {
 // buildComposeBundle assembles the digest-pinned Compose bundle: the
 // canonical compose projection with the measured image digests, the minimal
 // input template, the deployment-config schema and the quoin-deploy wizard
-// entry (OPS-RELEASE-003). The bundle never contains a release manifest.
+// entry (OPS-RELEASE-003). The bundle never contains a release manifest. The
+// browser plugin and its Lintel runtime are retired, so no browser override
+// ships beside the default compose file (historical reference lives in
+// deploy/retired/browser/).
 func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 	names, err := subjects.Names(options.version)
 	if err != nil {
@@ -251,8 +254,11 @@ func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 }
 
 // pinComposeImages projects the canonical direct Compose file into a release
-// artifact by replacing only the five application service image scalars with
-// immutable measured indexes. Relative config and secrets paths are preserved.
+// artifact by replacing every declared application service's image scalar
+// with its immutable measured index. Relative config and secrets paths are
+// preserved. The retired Lintel component intentionally has no service in the
+// default compose file; a declared application service without a measured
+// subject remains a hard error.
 func pinComposeImages(source []byte, images map[string]subjects.ImageSubject) ([]byte, error) {
 	var document yaml.Node
 	if err := yaml.Unmarshal(source, &document); err != nil {
@@ -263,14 +269,30 @@ func pinComposeImages(source []byte, images map[string]subjects.ImageSubject) ([
 	if services == nil || services.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("compose.yaml has no services mapping")
 	}
-	for _, component := range subjects.Components {
-		service := yamlMapNode(services, component)
+	pinned := 0
+	for index := 0; index+1 < len(services.Content); index += 2 {
+		key, service := services.Content[index], services.Content[index+1]
+		if key.Kind != yaml.ScalarNode || service.Kind != yaml.MappingNode {
+			continue
+		}
 		imageNode := yamlMapNode(service, "image")
-		image, ok := images[component]
-		if service == nil || imageNode == nil || imageNode.Kind != yaml.ScalarNode || !ok || image.Repository == "" || image.IndexDigest == "" {
+		if imageNode == nil || imageNode.Kind != yaml.ScalarNode {
+			continue
+		}
+		component := applicationImageComponent(key.Value, imageNode.Value, images)
+		if component == "" {
+			// Stock third-party images such as Caddy remain untouched.
+			continue
+		}
+		image := images[component]
+		if image.Repository == "" || image.IndexDigest == "" {
 			return nil, fmt.Errorf("compose service %q has no measured image subject", component)
 		}
 		imageNode.Value = image.Repository + "@" + image.IndexDigest
+		pinned++
+	}
+	if pinned == 0 {
+		return nil, fmt.Errorf("compose.yaml declares no measurable application image")
 	}
 	var rendered bytes.Buffer
 	encoder := yaml.NewEncoder(&rendered)

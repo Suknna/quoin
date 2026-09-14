@@ -2,12 +2,12 @@ package offline
 
 import (
 	"bytes"
-	"path/filepath"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )

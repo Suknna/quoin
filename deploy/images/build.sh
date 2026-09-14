@@ -2,13 +2,19 @@
 # Builds selected independently publishable application images. The frontend
 # compiles its own assets inside Docker, so backend image builds never need host
 # Node tooling or an existing frontend dist directory.
+#
+# The default component set is the browser-free mainline (ADR 0004): Lintel is
+# NOT built by default because its image pulls the Playwright Chromium
+# toolchain. Pass QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,lintel,stele to
+# build the browser runtime explicitly; "all" is available only as this
+# explicit parameter, never as a default.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
 image_namespace="${QUOIN_IMAGE_NAMESPACE:-quoin}"
 default_tag="${QUOIN_IMAGE_TAG:-v0.1.0-dev}"
-components="${QUOIN_IMAGE_COMPONENTS:-frontend,quoin,plinth,lintel,stele}"
+components="${QUOIN_IMAGE_COMPONENTS:-frontend,quoin,plinth,stele}"
 versions="${QUOIN_IMAGE_VERSIONS:-}"
 
 component_tag() {

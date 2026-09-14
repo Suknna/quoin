@@ -1,5 +1,7 @@
 # Internal-only operational listeners for in-cluster verification and monitoring.
 # They are never routed by gateway and deliberately have no public exposure.
+# Covers the whole default stack; the retired Lintel browser runtime ships its
+# own lintel-ops listener in deploy/retired/browser/kubernetes/lintel.yaml.
 ---
 apiVersion: v1
 kind: Service
@@ -16,15 +18,6 @@ spec:
   type: ClusterIP
   publishNotReadyAddresses: true
   selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: plinth}
-  ports: [{name: ops, port: 9090, targetPort: ops}]
----
-apiVersion: v1
-kind: Service
-metadata: {name: lintel-ops}
-spec:
-  type: ClusterIP
-  publishNotReadyAddresses: true
-  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: lintel}
   ports: [{name: ops, port: 9090, targetPort: ops}]
 ---
 apiVersion: v1

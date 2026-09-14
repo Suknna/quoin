@@ -1,0 +1,10 @@
+# Component configuration for the optional Lintel browser runtime. Only used
+# when the browser deployment is explicitly enabled (Compose `browser` profile
+# or the deploy/kubernetes/lintel.yaml overlay); the default stack never reads
+# this file.
+component: lintel
+stateDirectory: /var/lib/lintel
+quoinRuntimeEndpoint: https://quoin:8443
+quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+browserSlots: 1
+minimumShmBytes: 1073741824
