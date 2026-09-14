@@ -16,7 +16,7 @@ const time = (value?: string) => {
 }
 
 /** Admin-only About gathers bounded, non-secret platform facts and the actions that maintain them. */
-export function About({ suspended, authenticationSuspended = false }: { suspended: boolean; authenticationSuspended?: boolean }) {
+export function About({ suspended }: { suspended: boolean }) {
   const [status, setStatus] = useState<AboutStatus | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -52,7 +52,7 @@ export function About({ suspended, authenticationSuspended = false }: { suspende
       <Separator />
       <Runtimes suspended={suspended} refreshRevision={refreshRevision} onChanged={load} />
       <Separator />
-      <Maintenance authenticationSuspended={authenticationSuspended} refreshRevision={refreshRevision} onChanged={load} />
+      <Maintenance refreshRevision={refreshRevision} onChanged={load} />
     </div>}
   </section>
 }

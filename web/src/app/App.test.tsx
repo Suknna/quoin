@@ -113,7 +113,7 @@ describe("authentication workflow", () => {
 		expect(create).not.toHaveBeenCalled();
 	});
 
-	it("opens the non-dismissible reauthentication dialog after a protected 401", async () => {
+	it("returns to the full login screen and unmounts the workspace after a protected 401", async () => {
 		// Capture the callback App registers instead of calling API internals directly.
 		appApiState.unauthorized = undefined;
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
@@ -124,55 +124,57 @@ describe("authentication workflow", () => {
 
 		act(() => appApiState.unauthorized?.());
 
-		expect(await screen.findByRole("dialog")).toHaveTextContent("会话已失效");
-		expect(screen.getByRole("dialog")).toHaveTextContent("请重新登录后继续");
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+		expect(screen.queryByText("会话已失效")).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "创建模型提供方" }),
+		).not.toBeInTheDocument();
 	});
 
-	it("clears a suspended credential draft while retaining harmless fields", async () => {
+	it("clears the whole workspace including drafts and secrets on session expiry", async () => {
 		appApiState.unauthorized = undefined;
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		const name = await screen.findByLabelText("名称");
-		const baseUrl = screen.getByLabelText("Base URL");
-		const apiKey = screen.getByLabelText("API Key");
-		fireEvent.change(name, { target: { value: "main" } });
-		fireEvent.change(baseUrl, { target: { value: "https://provider.example" } });
-		fireEvent.change(apiKey, { target: { value: "top secret" } });
+		fireEvent.change(await screen.findByLabelText("名称"), {
+			target: { value: "main" },
+		});
+		fireEvent.change(screen.getByLabelText("API Key"), {
+			target: { value: "top secret" },
+		});
 
 		act(() => appApiState.unauthorized?.());
 
-		await screen.findByRole("dialog");
-		expect(name).toHaveValue("main");
-		expect(baseUrl).toHaveValue("https://provider.example");
-		expect(apiKey).toHaveValue("");
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
+		expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 	});
 
-	it("preserves a suspended draft when the same user signs in again", async () => {
+	it("starts a fresh workspace when the same user signs in again after expiry", async () => {
 		appApiState.unauthorized = undefined;
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		vi.spyOn(workbenchApi, "login").mockResolvedValue(authUser);
 		render(<App />);
-		const name = await screen.findByLabelText("名称");
-		fireEvent.change(name, { target: { value: "same-user-draft" } });
+		fireEvent.change(await screen.findByLabelText("名称"), {
+			target: { value: "same-user-draft" },
+		});
 		act(() => appApiState.unauthorized?.());
-		await screen.findByRole("dialog");
-		const dialog = screen.getByRole("dialog");
-		fireEvent.change(within(dialog).getByLabelText("用户名"), {
+		fireEvent.change(await screen.findByLabelText("用户名"), {
 			target: { value: "admin" },
 		});
-		fireEvent.change(within(dialog).getByLabelText("密码"), {
+		fireEvent.change(screen.getByLabelText("密码"), {
 			target: { value: "a password long enough" },
 		});
-		fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
-		await screen.findByLabelText("名称");
-		expect(await screen.findByLabelText("名称")).toHaveValue("same-user-draft");
+		fireEvent.click(screen.getByRole("button", { name: "登录" }));
+		expect(await screen.findByLabelText("名称")).toHaveValue("");
 	});
 
-	it("remounts and clears a suspended draft when a different user signs in", async () => {
+	it("clears the workspace when a different user signs in after expiry", async () => {
 		appApiState.unauthorized = undefined;
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
@@ -183,14 +185,13 @@ describe("authentication workflow", () => {
 			target: { value: "old-user-draft" },
 		});
 		act(() => appApiState.unauthorized?.());
-		const dialog = await screen.findByRole("dialog");
-		fireEvent.change(within(dialog).getByLabelText("用户名"), {
+		fireEvent.change(await screen.findByLabelText("用户名"), {
 			target: { value: "operator" },
 		});
-		fireEvent.change(within(dialog).getByLabelText("密码"), {
+		fireEvent.change(screen.getByLabelText("密码"), {
 			target: { value: "a password long enough" },
 		});
-		fireEvent.click(within(dialog).getByRole("button", { name: "登录" }));
+		fireEvent.click(screen.getByRole("button", { name: "登录" }));
 		await waitFor(() => expect(screen.getByLabelText("名称")).toHaveValue(""));
 	});
 
@@ -240,7 +241,7 @@ describe("authentication workflow", () => {
 		expect(discover).toHaveBeenCalledTimes(2);
 	});
 
-	it("clears a model API key when the session is suspended", async () => {
+	it("drops the in-memory model API key when the session expires", async () => {
 		appApiState.unauthorized = undefined;
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
@@ -249,8 +250,8 @@ describe("authentication workflow", () => {
 		const apiKey = await screen.findByLabelText("API Key");
 		fireEvent.change(apiKey, { target: { value: "provider-secret" } });
 		act(() => appApiState.unauthorized?.());
-		await screen.findByRole("dialog");
-		expect(apiKey).toHaveValue("");
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
 	});
 
 	it("keeps the source module and connection draft mounted behind evidence", async () => {
@@ -276,8 +277,10 @@ describe("authentication workflow", () => {
 		expect(screen.getByLabelText("API Key")).toBeInTheDocument();
 	});
 
-	it("opens the expired-session dialog when a focus reconciliation returns 401", async () => {
+	it("returns to the full login screen when a focus reconciliation returns 401", async () => {
+		// Bootstrap and the mount reconciliation succeed; the focus-triggered check hits the 401.
 		vi.spyOn(workbenchApi, "currentUser")
+			.mockResolvedValueOnce(authUser)
 			.mockResolvedValueOnce(authUser)
 			.mockRejectedValueOnce(new WorkbenchApiError(401, "expired"));
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
@@ -285,7 +288,9 @@ describe("authentication workflow", () => {
 		render(<App />);
 		await screen.findByLabelText("名称");
 		window.dispatchEvent(new Event("focus"));
-		expect(await screen.findByRole("dialog")).toHaveTextContent("会话已失效");
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+		expect(screen.queryByLabelText("名称")).not.toBeInTheDocument();
 	});
 
 	it("enables a model provider using only the newest matching passed probe result", async () => {

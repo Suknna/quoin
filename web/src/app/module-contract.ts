@@ -5,10 +5,8 @@ export interface WorkspaceModuleProps {
 	user: UserSummary;
 	route: string;
 	navigate: (route: string) => void;
-	/** True while the authenticated workspace must not issue mutations, including maintenance. */
+	/** True while platform maintenance blocks mutations; session expiry unmounts the workspace instead. */
 	suspended: boolean;
-	/** Maintenance repair commands remain available only with a valid authenticated session. */
-	authenticationSuspended?: boolean;
 	maintenanceActive?: boolean;
 	openEvidence: (id: string) => void;
 }

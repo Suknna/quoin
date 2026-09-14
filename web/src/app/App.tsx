@@ -304,12 +304,10 @@ function EvidenceOverlay({
 function Workspace({
 	user,
 	onLogout,
-	authenticationSuspended,
 	maintenanceActive,
 }: {
 	user: UserSummary;
 	onLogout: () => Promise<void>;
-	authenticationSuspended: boolean;
 	maintenanceActive: boolean;
 }) {
 	const [route, setRoute] = useState(() => {
@@ -340,8 +338,7 @@ function Workspace({
 		user,
 		route: activeRoute,
 		navigate,
-		suspended: authenticationSuspended || maintenanceActive,
-		authenticationSuspended,
+		suspended: maintenanceActive,
 		maintenanceActive,
 		openEvidence: (id) => {
 			returnFocus.current =
@@ -396,26 +393,19 @@ function Workspace({
 export function App() {
 	const [screen, setScreen] = useState<AuthScreen>("loading");
 	const [user, setUser] = useState<UserSummary>();
-	const [expired, setExpired] = useState(false);
 	const [maintenance, setMaintenance] = useState(false);
 	const [bootstrapError, setBootstrapError] = useState("");
 	const [retrying, setRetrying] = useState(false);
-	const userId = useRef<string | undefined>(undefined);
-	const [workspaceKey, setWorkspaceKey] = useState(0);
 	function authenticated(next: UserSummary) {
-		const changedUser =
-			userId.current !== undefined && userId.current !== next.id;
-		userId.current = next.id;
-		if (changedUser) setWorkspaceKey((key) => key + 1);
 		setUser(next);
-		setExpired(false);
 		setBootstrapError("");
 		setScreen(next.passwordChangeRequired ? "password-change" : "workbench");
 	}
+	// Session expiry and logout share this single path: the workspace unmounts
+	// immediately, so every draft and in-memory secret is dropped and any later
+	// login (same user or not) starts from a fresh workspace.
 	function clear() {
-		userId.current = undefined;
 		setUser(undefined);
-		setExpired(false);
 		setScreen("login");
 	}
 	async function logout() {
@@ -444,9 +434,7 @@ export function App() {
 		}
 	}
 	useEffect(() => {
-		setUnauthorizedHandler(() => {
-			if (userId.current) setExpired(true);
-		});
+		setUnauthorizedHandler(clear);
 		let cancelled = false;
 		workbenchApi
 			.currentUser()
@@ -465,7 +453,7 @@ export function App() {
 		};
 	}, []);
 	useEffect(() => {
-		if (screen !== "workbench" || !user || expired) return;
+		if (screen !== "workbench" || !user) return;
 		let running = false;
 		async function reconcile() {
 			if (running) return;
@@ -478,7 +466,7 @@ export function App() {
 				setMaintenance(state?.active === true);
 			} catch (reason) {
 				if (reason instanceof WorkbenchApiError && reason.status === 401)
-					setExpired(true);
+					clear();
 			} finally {
 				running = false;
 			}
@@ -491,7 +479,7 @@ export function App() {
 			window.clearInterval(interval);
 			window.removeEventListener("focus", onFocus);
 		};
-	}, [screen, user?.id, expired]);
+	}, [screen, user?.id]);
 	return (
 		<>
 			{screen === "loading" &&
@@ -520,31 +508,12 @@ export function App() {
 				</AuthLayout>
 			)}
 			{screen === "workbench" && user && (
-				<div inert={expired || undefined}>
-					<Workspace
-						key={workspaceKey}
-						user={user}
-						onLogout={logout}
-						authenticationSuspended={expired}
-						maintenanceActive={maintenance}
-					/>
-				</div>
+				<Workspace
+					user={user}
+					onLogout={logout}
+					maintenanceActive={maintenance}
+				/>
 			)}
-			<Dialog open={expired}>
-				<DialogContent
-					showCloseButton={false}
-					onPointerDownOutside={(event) => event.preventDefault()}
-					onEscapeKeyDown={(event) => event.preventDefault()}
-				>
-					<DialogHeader>
-						<DialogTitle>会话已失效</DialogTitle>
-						<DialogDescription>
-							请重新登录后继续。工作区仍保留在后台；不同用户登录时会清除其状态和草稿。
-						</DialogDescription>
-					</DialogHeader>
-					<LoginForm onAuthenticated={authenticated} />
-				</DialogContent>
-			</Dialog>
 		</>
 	);
 }
