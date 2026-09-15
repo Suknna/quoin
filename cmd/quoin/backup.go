@@ -32,12 +32,20 @@ func runBackup(arguments []string) {
 	if err != nil {
 		fail(err.Error())
 	}
+	// The service owns a mode=ro reader pool over the live database. It must
+	// be closed before the write pool below so the last SQLite connection can
+	// checkpoint and remove the WAL sidecar: a leaked reader would leave a
+	// sidecar that blocks a later offline restore. fail() exits the process,
+	// so the error paths below close it explicitly.
+	defer service.Close()
 	// OpenDatabase holds the same data lock as Quoin. Reconcile only after it
 	// succeeds, so abandoned active rows are closed by the exclusive owner.
 	if err = service.Reconcile(context.Background()); err != nil {
+		_ = service.Close()
 		fail(err.Error())
 	}
 	if _, err = service.RunOffline(context.Background()); err != nil {
+		_ = service.Close()
 		fail(err.Error())
 	}
 }

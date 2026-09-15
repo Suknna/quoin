@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 var ErrArchiveNotReady = errors.New("backup archive is not ready")
@@ -101,9 +105,11 @@ func (s *Service) WriteArchive(ctx context.Context, id int64, writer io.Writer) 
 }
 
 // RecordDownloadStart durably records a verified, authorized transfer before
-// headers. It deliberately does not claim that bytes reached the client.
+// headers. It deliberately does not claim that bytes reached the client. The
+// context must carry execution metadata (correlation); the fact is refused
+// otherwise.
 func (s *Service) RecordDownloadStart(ctx context.Context, actorID, backupID int64) error {
-	return s.recordDownloadAudit(ctx, actorID, backupID, "backup.download_started", "success")
+	return s.recordDownloadAudit(ctx, actorID, backupID, s.commands.downloadStart)
 }
 
 // RecordDownloadAudit is retained for internal callers that only need to
@@ -113,47 +119,115 @@ func (s *Service) RecordDownloadAudit(ctx context.Context, actorID, backupID int
 }
 
 // RecordDownloadCompletion appends a terminal immutable result after copy.
+// Like every access fact it requires execution metadata: completion contexts
+// reattach the transfer's correlation on a fresh scope (the request context
+// may already be gone).
 func (s *Service) RecordDownloadCompletion(ctx context.Context, actorID, backupID int64, transferErr error) error {
-	action, outcome := "backup.download_completed", "success"
+	op := s.commands.downloadCompleted
 	if transferErr != nil {
-		action, outcome = "backup.download_failed", "rejected"
+		// A disrupted transfer is an expected durable non-committed outcome:
+		// the runner records the failed fact (execution.RecordedFailure) and
+		// the completion caller only logs the surfaced error.
+		op = s.commands.downloadFailed
 	}
-	return s.recordDownloadAudit(ctx, actorID, backupID, action, outcome)
-}
-func (s *Service) recordDownloadAudit(ctx context.Context, actorID, backupID int64, action, outcome string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	_, err := execution.Execute(ctx, s.commands.runner, op,
+		func(tx *execution.Tx) (int64, error) {
+			if transferErr != nil {
+				return 0, &execution.RecordedFailure{
+					Code: "download_disrupted", Detail: "the backup transfer did not complete",
+					ObjectID: backupID, Outcome: audit.OutcomeFailure,
+				}
+			}
+			return 0, nil
+		},
+		func(int64) int64 { return backupID })
+	var recorded *execution.RecordedFailure
+	if errors.As(err, &recorded) {
+		// Recording the disrupted-transfer fact succeeded; the failure
+		// outcome lives in the audit row, not in an error for the caller.
+		return nil
 	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,?,?,?,?,?)`, actorID, action, outcome, "backup", backupID, timestamp(s.now()))
-	if err != nil {
-		return err
-	}
-	auditID, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_event_targets(audit_event_id,target_type,target_id) VALUES(?,?,?)`, auditID, "backup", backupID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
+// recordDownloadAudit persists one download access fact (started, completed
+// or failed) through the family's execution runner (ADR-0006): the runner
+// owns the transaction, re-verifies the acting session inside it, and writes
+// the automatic audit row before commit. Each operation states exactly one
+// fact — a started transfer never claims completion, and neither row claims
+// a business commit. Execution metadata is required: without it the runner
+// fails closed instead of recording without correlation.
+func (s *Service) recordDownloadAudit(ctx context.Context, actorID, backupID int64, op *execution.Operation) error {
+	_, err := execution.Execute(ctx, s.commands.runner, op,
+		func(tx *execution.Tx) (int64, error) {
+			return backupID, nil
+		},
+		func(int64) int64 { return backupID })
+	return err
+}
+
+// recordRetentionAttempt projects the durable retention-health fact for one
+// GC pass through the runner. Only transitions are written and audited: the
+// first failure stands until a complete pass clears it, and a stable healthy
+// pass writes nothing at all — the bounded alternative would be an audited
+// heartbeat every scheduler tick, which the design forbids.
 func (s *Service) recordRetentionAttempt(ctx context.Context, cleanupErr error) error {
-	now := timestamp(s.now())
-	if cleanupErr == nil {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_failure_at=NULL,error_detail=NULL`, now)
+	at := timestamp(s.now())
+	recordCtx, err := s.detachedTaskContext(ctx)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_failure_at=excluded.last_failure_at,error_detail=excluded.error_detail`, now, now, truncate(cleanupErr.Error(), 4096))
-	return err
+	if _, err := execution.Execute(recordCtx, s.commands.runner, s.commands.retentionHealth, func(tx *execution.Tx) (Summary, error) {
+		var lastFailure sql.NullString
+		readErr := tx.QueryRowContext(recordCtx, `SELECT last_failure_at FROM backup_retention_health WHERE id=1`).Scan(&lastFailure)
+		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+			return Summary{}, readErr
+		}
+		knownFailure := readErr == nil && lastFailure.Valid
+		if cleanupErr == nil {
+			if readErr == nil && !knownFailure {
+				return Summary{}, errRetentionHealthStable
+			}
+			if readErr == nil {
+				if _, err := tx.ExecContext(recordCtx, `UPDATE backup_retention_health SET last_attempt_at=?,last_failure_at=NULL,error_detail=NULL WHERE id=1`, at); err != nil {
+					return Summary{}, err
+				}
+				return Summary{}, nil
+			}
+			if _, err := tx.ExecContext(recordCtx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,NULL,NULL)`, at); err != nil {
+				return Summary{}, err
+			}
+			return Summary{}, nil
+		}
+		if knownFailure {
+			// Already failed: the first failure record stands with its original
+			// diagnostics until a complete pass clears it.
+			return Summary{}, errRetentionHealthStable
+		}
+		if _, err := tx.ExecContext(recordCtx, `INSERT INTO backup_retention_health(id,last_attempt_at,last_failure_at,error_detail) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,last_failure_at=excluded.last_failure_at,error_detail=excluded.error_detail`, at, at, truncate(cleanupErr.Error(), 4096)); err != nil {
+			return Summary{}, err
+		}
+		return Summary{}, nil
+	}, func(Summary) int64 { return 1 }); err != nil {
+		if errors.Is(err, errRetentionHealthStable) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) GC(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.gcLocked(ctx)
+	// Retention cleanup is a system operation; its health projection carries
+	// this internal scope's correlation (inherited when the caller provides
+	// one, otherwise established here at the entry).
+	gcCtx, err := s.executionContext(ctx, execution.SourceInternal)
+	if err != nil {
+		return err
+	}
+	return s.gcLocked(gcCtx)
 }
 
 // gcLocked removes every succeeded Run outside the durable retention window.
@@ -164,8 +238,10 @@ func (s *Service) gcLocked(ctx context.Context) (result error) {
 	defer func() {
 		// Retention health is its own durable outcome. Never clear a known
 		// failure merely because this pass was cancelled or could not inspect
-		// settings; only a complete, synced cleanup clears it.
-		if recordErr := s.recordRetentionAttempt(context.Background(), result); recordErr != nil && result == nil {
+		// settings; only a complete, synced cleanup clears it. The record
+		// commits on a detached scope so a cancelled pass still records a
+		// surviving failure.
+		if recordErr := s.recordRetentionAttempt(ctx, result); recordErr != nil && result == nil {
 			result = fmt.Errorf("record retention cleanup outcome: %w", recordErr)
 		}
 		s.refreshMetrics(context.Background())
@@ -175,7 +251,7 @@ func (s *Service) gcLocked(ctx context.Context) (result error) {
 	if err != nil {
 		return err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status='succeeded'`)
+	rows, err := s.reader.QueryContext(ctx, `SELECT id FROM backups WHERE status='succeeded'`)
 	if err != nil {
 		return err
 	}

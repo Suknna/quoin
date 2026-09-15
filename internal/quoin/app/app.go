@@ -36,6 +36,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/businessview"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/feedback"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
@@ -59,37 +60,39 @@ type servers struct {
 }
 
 type apiServer struct {
-	auth                          *auth.Service
-	db                            *sql.DB
-	alerts                        *alerts.Service
-	platformFaults                *alerts.PlatformFaultReporter
-	stelePublicURL                string
-	reveals                       *secrets.Store
-	commands                      *commandReplay
-	runtime                       *qruntime.Service
-	connections                   *connections.Service
-	analyses                      *analysis.Service
-	investigations                *investigation.Service
-	systems                       *businesssystem.Service
-	inspections                   *inspection.Service
-	views                         *businessview.Service
-	observations                  *observation.Service
-	feedbackService               *feedback.Service
-	knowledgeService              *knowledge.Service
-	browsers                      *browser.Service
-	investigationUpload           *appinvestigation.Handler
-	configHandler                 *appconfig.Handler
-	artifacts                     *artifact.Store
-	backups                       *backup.Service
-	maintenance                   *maintenance.Service
-	rootKey                       func() ([]byte, error)
-	backupCopy                    func(io.Writer, io.Reader) (int64, error)
-	backupAuthorize               func(context.Context, string, string) (auth.Session, error)
-	probeDispatchFunc             func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
-	cancelDispatchFunc            func(ctx context.Context, attemptID int64) error
-	analysisDispatchFunc          func(ctx context.Context, attemptID int64) error
-	knowledgeDispatchFunc         func(ctx context.Context, attemptID int64) error
-	investigationDispatchFunc     func(ctx context.Context, attemptID int64) error
+	reader                       execution.Reader
+	readerWired                  bool
+	auth                         *auth.Service
+	db                           *sql.DB
+	alerts                       *alerts.Service
+	platformFaults               *alerts.PlatformFaultReporter
+	stelePublicURL               string
+	reveals                      *secrets.Store
+	commands                     *commandReplay
+	runtime                      *qruntime.Service
+	connections                  *connections.Service
+	analyses                     *analysis.Service
+	investigations               *investigation.Service
+	systems                      *businesssystem.Service
+	inspections                  *inspection.Service
+	views                        *businessview.Service
+	observations                 *observation.Service
+	feedbackService              *feedback.Service
+	knowledgeService             *knowledge.Service
+	browsers                     *browser.Service
+	investigationUpload          *appinvestigation.Handler
+	configHandler                *appconfig.Handler
+	artifacts                    *artifact.Store
+	backups                      *backup.Service
+	maintenance                  *maintenance.Service
+	rootKey                      func() ([]byte, error)
+	backupCopy                   func(io.Writer, io.Reader) (int64, error)
+	backupAuthorize              func(context.Context, string, string) (auth.Session, error)
+	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
+	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
+	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
+	knowledgeDispatchFunc        func(ctx context.Context, attemptID int64) error
+	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
 	inspectionDispatchFunc       func(ctx context.Context)
 	verificationDispatchFunc     func(ctx context.Context)
 	resourceRefreshDispatchFunc  func(ctx context.Context)
@@ -105,8 +108,12 @@ type apiServer struct {
 	enabledPlugins             []string
 	// Upgrade maintenance authorities (T36): the prepare command, the drain
 	// reconciler, and the live HTTP surface swap hooks.
-	upgradeService              *upgrade.Service
-	upgradeReconciler           *upgrade.Reconciler
+	upgradeService    *upgrade.Service
+	upgradeReconciler *upgrade.Reconciler
+	// upgradeBackups is the maintenance boot's backup authority, kept for the
+	// lifecycle owner (tests) to observe that it serves from the shared
+	// read-only pool; it is deliberately not the HTTP-facing application.backups.
+	upgradeBackups              *backup.Service
 	upgradeGate                 *upgradeGate
 	setReadiness                func(sharedops.Readiness)
 	setMaintenanceReason        func(string, bool)
@@ -192,8 +199,9 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 	application.connections = connections.NewService(db, application.rootKey)
 	// ADR-0004：接入启用即用。默认基础巡检计划在启用事务内幂等创建（仅人工
 	// 运行，不产生定时模型费用）；失败回滚整个启用，确保不会出现"已启用却
-	// 无即用计划"的中间态。
-	application.connections.SetPostEnableInTx(func(ctx context.Context, conn *sql.Conn, name string) error {
+	// 无即用计划"的中间态。hook 收到连接执行器 runner 的受守卫事务句柄，
+	// 不能逃逸或提交该事务。
+	application.connections.SetPostEnableInTx(func(ctx context.Context, conn execution.Executor, name string) error {
 		var connectionID int64
 		if err := conn.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, name).Scan(&connectionID); err != nil {
 			return err
@@ -216,21 +224,6 @@ type userOutput struct {
 	Body         auth.User `json:"body"`
 }
 
-type loginInput struct {
-	UserAgent string `header:"User-Agent"`
-	Body      struct {
-		Username string `json:"username" maxLength:"200"`
-		Password string `json:"password" minLength:"15" maxLength:"128"`
-	}
-}
-
-type loginOutput struct {
-	SetCookie    string    `header:"Set-Cookie"`
-	CacheControl string    `header:"Cache-Control"`
-	Pragma       string    `header:"Pragma"`
-	Body         auth.User `json:"body"`
-}
-
 type passwordInput struct {
 	// Flattened rather than embedded: huma v2.39.1 does not bind cookie
 	// parameters from embedded structs when the input also has a Body.
@@ -242,10 +235,10 @@ type passwordInput struct {
 }
 
 type noContentOutput struct {
-	SetCookie     string `header:"Set-Cookie,omitempty"`
-	ClearSiteData string `header:"Clear-Site-Data,omitempty"`
-	CacheControl  string `header:"Cache-Control,omitempty"`
-	Pragma        string `header:"Pragma,omitempty"`
+	SetCookie     string `header:"Set-Cookie"`
+	ClearSiteData string `header:"Clear-Site-Data"`
+	CacheControl  string `header:"Cache-Control"`
+	Pragma        string `header:"Pragma"`
 }
 
 type runtimeSlot struct {
@@ -298,12 +291,12 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err != nil {
 		return err
 	}
-	hasUsers, err := authService.HasUsers(ctx)
-	if err != nil {
-		return err
+	retentionMonths := 6
+	if config.Audit != nil {
+		retentionMonths = config.Audit.RetentionMonths
 	}
-	if !hasUsers {
-		return fmt.Errorf("no administrator exists; run attached Admin bootstrap first")
+	if err := prepareAuthenticationBootstrap(ctx, authService, database.SQL, config.DataDirectory, retentionMonths); err != nil {
+		return fmt.Errorf("initialize authentication: %w", err)
 	}
 	var maintenanceActive int
 	var maintenanceReason sql.NullString
@@ -312,6 +305,15 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	if maintenanceActive == 1 {
 		application := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+		if err := application.configureReadOnly(database.Reader); err != nil {
+			return err
+		}
+		if err := application.configureAuthenticationDeployment(ctx, config); err != nil {
+			return fmt.Errorf("configure authentication deployment: %w", err)
+		}
+		if err := application.configureAuthentication(); err != nil {
+			return fmt.Errorf("configure authentication: %w", err)
+		}
 		serverSet, err := newMaintenanceServers(application, config, maintenanceReason.String)
 		if err != nil {
 			return err
@@ -334,6 +336,16 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return serverSet.runMaintenance(ctx, nil)
 	}
 	application := NewAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := application.configureReadOnly(database.Reader); err != nil {
+		return err
+	}
+	if err := application.configureAuthenticationDeployment(ctx, config); err != nil {
+		return fmt.Errorf("configure authentication deployment: %w", err)
+	}
+	if err := application.configureAuthentication(); err != nil {
+		return fmt.Errorf("configure authentication: %w", err)
+	}
+	StartAuditCleanup(ctx, database.SQL)
 	application.ConfigureSourceObservation(config.EnabledPlugins)
 	application.SetStelePublicURL(config.StelePublicURL)
 	serverSet, err := application.newServers(config)
@@ -361,6 +373,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 	application.artifacts = artifactStore
+	if err := artifactStore.SetReader(database.Reader); err != nil {
+		return fmt.Errorf("wire artifact store reader: %w", err)
+	}
 	gcProjector, err := serverSet.ops.ArtifactGCSuccessProjector()
 	if err != nil {
 		return err
@@ -377,13 +392,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 			state := serverSet.ops.Readiness()
 			return state.Mode == "normal" && state.AcceptingWork && state.Reason == sharedops.Ready
 		},
-		AuthorizeActor: func(commandContext context.Context, conn *sql.Conn, actorID int64) error {
-			var enabled, maintenanceActive int
-			var role string
-			if err := conn.QueryRowContext(commandContext, `SELECT enabled, role FROM users WHERE id=?`, actorID).Scan(&enabled, &role); err != nil {
-				return backup.ErrActorUnauthorized
-			}
-			if enabled != 1 || role != "admin" {
+		AuthorizeActor: func(commandContext context.Context, conn execution.Executor, actorID int64) error {
+			var maintenanceActive int
+			if err := auth.VerifyExecutionSession(commandContext, conn, "admin"); err != nil {
 				return backup.ErrActorUnauthorized
 			}
 			if err := conn.QueryRowContext(commandContext, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil {
@@ -406,7 +417,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err := backupService.Reconcile(ctx); err != nil {
 		return fmt.Errorf("reconcile backups: %w", err)
 	}
-	application.SetBackupService(backupService)
+	if err := application.SetBackupService(backupService); err != nil {
+		return fmt.Errorf("attach backup service: %w", err)
+	}
 	go backupService.RunScheduler(ctx)
 	// T36: the upgrade reconciler owns the drain checklist projection, the
 	// verified pre-upgrade backup and the quoin_upgrade_prepared gauge.
@@ -428,13 +441,15 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// the grant write into CompleteToolCall's transaction.
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
-	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections)
+	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections, application.db)
 	controlService.PlatformFaults = application.platformFaults
 	// The initial-analysis terminal transaction is the only current reachable
-	// worker-launch failure authority. Project its fault before COMMIT so a
-	// successful ResultAck never outlives a missing platform-fault mutation.
-	application.analyses.ProjectTerminalOutcome = func(ctx context.Context, conn *sql.Conn, sequence int64, succeeded bool, termination string) error {
-		return application.platformFaults.ObserveExecutionOutcomeOn(ctx, conn, sequence, succeeded, termination)
+	// worker-launch failure authority. Project its fault inside the runner's
+	// guarded transaction (before COMMIT) so a successful ResultAck never
+	// outlives a missing platform-fault mutation. The structural interfaces
+	// (analysis.TxWriter -> alerts.Transaction) keep both packages decoupled.
+	application.analyses.ProjectTerminalOutcome = func(ctx context.Context, tx analysis.TxWriter, sequence int64, succeeded bool, termination string) error {
+		return application.platformFaults.ObserveExecutionOutcomeOn(ctx, tx, sequence, succeeded, termination)
 	}
 	// Scheduling admission stops inside any maintenance revision: missed
 	// boundaries record their durable runtime_unavailable tombstone instead
@@ -548,26 +563,71 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	apiConfig.Transformers = []huma.Transformer{}
 	apiConfig.CreateHooks = nil
 	api := humago.New(mux, apiConfig)
+	accessRegistry, err := NormalAccessRegistry()
+	if err != nil {
+		return nil, err
+	}
+	admission, err := NewAccessAdmission(application, accessRegistry, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	api.UseMiddleware(admission.HumaMiddleware())
 	application.register(api)
-	application.registerAlertStream(mux)
-	application.registerTaskStream(mux)
+	if err := accessRegistry.ValidateSurface(api); err != nil {
+		return nil, err
+	}
+	alertStream, err := admission.Wrap("streamAlertEvents", http.HandlerFunc(newAlertEventStream(application).serve))
+	if err != nil {
+		return nil, err
+	}
+	taskStream, err := admission.Wrap("streamTaskEvents", http.HandlerFunc(newTaskEventStream(application).serve))
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /api/v1/alerts/events", alertStream)
+	mux.Handle("GET /api/v1/tasks/events", taskStream)
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
-	mux.HandleFunc("GET /api/v1/artifacts/{artifactId}/content", application.downloadArtifactContent)
-	mux.HandleFunc("GET /api/v1/backups/{backupId}/download", application.downloadBackup)
+	artifactDownload, err := admission.Wrap("downloadArtifactContent", http.HandlerFunc(application.downloadArtifactContent))
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /api/v1/artifacts/{artifactId}/content", artifactDownload)
+	backupDownload, err := admission.Wrap("downloadBackup", http.HandlerFunc(application.downloadBackup))
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /api/v1/backups/{backupId}/download", backupDownload)
 	// The attachment upload streams multipart parts into staging without
 	// whole-body buffering (HTTP-FILE-001); it also owns its response head.
-	mux.HandleFunc("POST /api/v1/investigation-attachments", application.investigationUpload.ServeUpload)
+	attachmentUpload, err := admission.Wrap("uploadInvestigationAttachment", http.HandlerFunc(application.investigationUpload.ServeUpload))
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("POST /api/v1/investigation-attachments", attachmentUpload)
+	// Every declared raw route must actually be wrapped: the Huma surface
+	// check cannot see raw mux routes, so the admission proof ends here.
+	if err := admission.AssertRawSurface(); err != nil {
+		return nil, err
+	}
 
 	csrf := http.NewCrossOriginProtection()
 	if err := csrf.AddTrustedOrigin(publicOrigin); err != nil {
 		return nil, fmt.Errorf("configure public Origin: %w", err)
 	}
-	return securityHeaders(requireBrowserOrigin(csrf.Handler(mux))), nil
+	// Security headers also cover responses rejected by the bootstrap gate.
+	gated, err := newBootstrapGate(application, accessRegistry, requireBrowserOrigin(csrf.Handler(mux)))
+	if err != nil {
+		return nil, err
+	}
+	return securityHeaders(gated), nil
 }
 
 func (application *apiServer) register(api huma.API) *appconfig.Handler {
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/login", OperationID: "login"}, application.login)
+	application.registerAuthenticationFlows(api)
+	application.registerAuthDeliveryRoutes(api)
+	application.registerAuthContactRoutes(api)
+	application.registerContactChangeRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword", DefaultStatus: http.StatusNoContent}, application.changePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout", DefaultStatus: http.StatusNoContent}, application.logout)
@@ -694,23 +754,6 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	return configHandler
 }
 
-func (application *apiServer) login(ctx context.Context, input *loginInput) (*loginOutput, error) {
-	result, retryAfter, err := application.auth.Login(ctx, input.Body.Username, input.Body.Password, input.UserAgent)
-	if err != nil {
-		if errors.Is(err, auth.ErrRateLimited) {
-			// HTTP-ERROR-006: 429 responses carry a Retry-After header with the
-			// predictable recovery window (cooldown remainder in seconds).
-			limited := huma.NewError(http.StatusTooManyRequests, "Too Many Requests")
-			return nil, huma.ErrorWithHeaders(limited, http.Header{"Retry-After": {strconv.Itoa(int(retryAfter.Round(time.Second).Seconds()))}})
-		}
-		if errors.Is(err, auth.ErrUnauthenticated) {
-			return nil, huma.Error401Unauthorized("用户名或密码错误")
-		}
-		return nil, huma.Error500InternalServerError("登录暂时不可用", err)
-	}
-	return &loginOutput{SetCookie: sessionCookie(result.Bearer, 7*24*time.Hour), CacheControl: "no-store", Pragma: "no-cache", Body: result.User}, nil
-}
-
 func (application *apiServer) me(ctx context.Context, input *authInput) (*userOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
@@ -741,7 +784,14 @@ func (application *apiServer) changePassword(ctx context.Context, input *passwor
 	return &noContentOutput{CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
-func (application *apiServer) logout(ctx context.Context, input *authInput) (*noContentOutput, error) {
+type logoutOutput struct {
+	SetCookie     []string `header:"Set-Cookie"`
+	ClearSiteData string   `header:"Clear-Site-Data"`
+	CacheControl  string   `header:"Cache-Control"`
+	Pragma        string   `header:"Pragma"`
+}
+
+func (application *apiServer) logout(ctx context.Context, input *authInput) (*logoutOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, authFailure(err, "完成登出")
@@ -762,7 +812,7 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*no
 			}
 		}
 	}
-	return &noContentOutput{SetCookie: sessionCookie("", -time.Hour), ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
+	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour), flowCookie("", time.Unix(1, 0))}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
 func dereferenceString(value *string) string {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/buildinfo"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 type manifest struct {
@@ -32,6 +33,16 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	if _, err := fmt.Sscan(id, &backupID); err != nil || backupID < 1 {
 		return Summary{}, ErrNotFound
 	}
+	// The Run task executor reattaches the queued run's persisted correlation
+	// when the caller arrives without one (a restart), so every lifecycle fact
+	// lands on the original operation. A correlation-less row is a legacy
+	// no-correlation fact: the run executes as a deliberate recovery operation
+	// under its own fresh task scope — no fake link is fabricated.
+	commandCtx, err := s.restoreOrEstablishTaskContext(ctx, backupID)
+	if err != nil {
+		return Summary{}, err
+	}
+	ctx = commandCtx
 	value, err := s.Get(ctx, backupID)
 	if err != nil {
 		return Summary{}, err
@@ -39,12 +50,12 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	if value.Status != "queued" {
 		return value, nil
 	}
-	started, err := s.nextRunTimestamp(ctx, backupID)
+	startedAt, started, err := s.startRun(ctx, backupID)
 	if err != nil {
 		return Summary{}, err
 	}
-	if _, err = s.db.ExecContext(ctx, `UPDATE backups SET status='running',stage='preflight',started_at=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status='queued'`, started, started, backupID); err != nil {
-		return Summary{}, err
+	if !started {
+		return s.Get(ctx, backupID)
 	}
 	s.refreshMetrics(ctx)
 	runErr := s.preflight(ctx)
@@ -71,24 +82,20 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 		if errors.As(runErr, &storageFailure) {
 			errorCode = "storage_unavailable"
 		}
-		// Persist failure on an uncancelled context. A caller cancellation must
+		// markRunFailed commits on a detached scope: a caller cancellation must
 		// never leave the exclusive active row behind.
-		_, err = s.db.ExecContext(context.Background(), `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code=?,retryable=1,error_detail=?,row_version=row_version+1 WHERE id=? AND status='running'`, completed, completed, errorCode, truncate(runErr.Error(), 4096), backupID)
+		failed, err := s.markRunFailed(ctx, backupID, errorCode, truncate(runErr.Error(), 4096), completed)
 		if err != nil {
 			return Summary{}, err
 		}
 		if s.metrics != nil {
 			s.metrics.Failures.Inc()
-			s.metrics.Duration.Observe(s.now().Sub(parseTimestamp(started)).Seconds())
+			s.metrics.Duration.Observe(s.now().Sub(parseTimestamp(startedAt)).Seconds())
 		}
 		s.refreshMetrics(ctx)
-		failed, getErr := s.Get(ctx, backupID)
-		if getErr != nil {
-			return Summary{}, getErr
-		}
 		return failed, runErr
 	}
-	if _, err = s.db.ExecContext(ctx, `UPDATE backups SET status='succeeded',stage='completed',completed_at=?,updated_at=?,db_sha256=?,manifest_sha256=?,artifact_count=?,size_bytes=?,manifest_path=?,row_version=row_version+1 WHERE id=? AND status='running'`, completed, completed, dbHash, manifestHash, count, sizeBytes, filepath.Join(finalDir, "manifest.json"), backupID); err != nil {
+	if err = s.markRunSucceeded(ctx, backupID, finalDir, dbHash, manifestHash, count, sizeBytes, completed); err != nil {
 		// The filesystem set was published but has no committed authority. Remove
 		// it durably before returning; otherwise Reconcile retries it next boot.
 		cleanupErr := s.cleanupRunFiles(backupID)
@@ -99,7 +106,7 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 		if failedAtErr != nil {
 			return Summary{}, fmt.Errorf("commit backup run: %w (prepare failed state: %v)", err, failedAtErr)
 		}
-		if _, failedErr := s.db.ExecContext(context.Background(), `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code='backup_failed',retryable=1,error_detail=?,row_version=row_version+1 WHERE id=? AND status='running'`, failedAt, failedAt, truncate(err.Error(), 4096), backupID); failedErr != nil {
+		if _, failedErr := s.markRunFailed(ctx, backupID, "backup_failed", truncate(err.Error(), 4096), failedAt); failedErr != nil {
 			return Summary{}, fmt.Errorf("commit backup run: %w (persist failed state: %v)", err, failedErr)
 		}
 		failed, getErr := s.Get(context.Background(), backupID)
@@ -110,7 +117,7 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	}
 	value, err = s.Get(ctx, backupID)
 	if s.metrics != nil {
-		s.metrics.Duration.Observe(s.now().Sub(parseTimestamp(started)).Seconds())
+		s.metrics.Duration.Observe(s.now().Sub(parseTimestamp(startedAt)).Seconds())
 	}
 	s.refreshMetrics(ctx)
 	if err == nil {
@@ -122,12 +129,162 @@ func (s *Service) Run(ctx context.Context, id string) (Summary, error) {
 	return value, err
 }
 
+// restoreOrEstablishTaskContext resolves the Run task scope: inherited when
+// the caller already carries metadata, restored from the queued row's
+// persisted correlation when restarting without one, or established fresh for
+// a legacy correlation-less row (a deliberate recovery operation).
+func (s *Service) restoreOrEstablishTaskContext(ctx context.Context, id int64) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	if identity, err := s.runIdentityOn(ctx, s.reader, id); err == nil && identity.restorable() {
+		return s.restoreTaskContext(ctx, identity)
+	}
+	return s.executionContext(ctx, execution.SourceTask)
+}
+
+// startRun records the queued→running lifecycle fact through the runner: the
+// transition and its automatic audit row commit atomically, and a run that
+// lost the queue race stays unaudited silence (the winner's fact stands).
+func (s *Service) startRun(ctx context.Context, id int64) (startedAt string, started bool, err error) {
+	if _, err := execution.Execute(ctx, s.commands.runner, s.commands.runStart, func(tx *execution.Tx) (Summary, error) {
+		at, err := s.nextRunTimestampOn(tx, id)
+		if err != nil {
+			return Summary{}, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE backups SET status='running',stage='preflight',started_at=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status='queued'`, at, at, id)
+		if err != nil {
+			return Summary{}, err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return Summary{}, err
+		} else if rows != 1 {
+			return Summary{}, errRunNotQueued
+		}
+		startedAt = at
+		return Summary{}, nil
+	}, func(Summary) int64 { return id }); err != nil {
+		if errors.Is(err, errRunNotQueued) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return startedAt, true, nil
+}
+
+// markRunSucceeded records the running→succeeded terminal fact with the
+// published set's verifiable identity in one runner transaction.
+func (s *Service) markRunSucceeded(ctx context.Context, id int64, finalDir, dbHash, manifestHash string, count int, sizeBytes int64, completed string) error {
+	_, err := execution.Execute(ctx, s.commands.runner, s.commands.runSucceed, func(tx *execution.Tx) (Summary, error) {
+		result, err := tx.ExecContext(ctx, `UPDATE backups SET status='succeeded',stage='completed',completed_at=?,updated_at=?,db_sha256=?,manifest_sha256=?,artifact_count=?,size_bytes=?,manifest_path=?,row_version=row_version+1 WHERE id=? AND status='running'`, completed, completed, dbHash, manifestHash, count, sizeBytes, filepath.Join(finalDir, "manifest.json"), id)
+		if err != nil {
+			return Summary{}, err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return Summary{}, err
+		} else if rows != 1 {
+			return Summary{}, errRunNotRunning
+		}
+		return Summary{}, nil
+	}, func(Summary) int64 { return id })
+	return err
+}
+
+// markRunFailed records the running→failed terminal fact on a detached scope
+// so a cancelled caller can never leave the exclusive active row behind. A
+// losing race against an already-terminal row returns the durable state
+// without a duplicate fact.
+func (s *Service) markRunFailed(ctx context.Context, id int64, errorCode, detail, completed string) (Summary, error) {
+	markCtx, err := s.detachedTaskContext(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	if _, err := execution.Execute(markCtx, s.commands.runner, s.commands.runFail, func(tx *execution.Tx) (Summary, error) {
+		result, err := tx.ExecContext(markCtx, `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code=?,retryable=1,error_detail=?,row_version=row_version+1 WHERE id=? AND status='running'`, completed, completed, errorCode, detail, id)
+		if err != nil {
+			return Summary{}, err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return Summary{}, err
+		} else if rows != 1 {
+			return Summary{}, errRunNotRunning
+		}
+		return Summary{}, nil
+	}, func(Summary) int64 { return id }); err != nil {
+		if errors.Is(err, errRunNotRunning) {
+			return s.Get(markCtx, id)
+		}
+		return Summary{}, err
+	}
+	return s.Get(markCtx, id)
+}
+
+// markRunInterrupted records one restart-recovery fact for a run the previous
+// process left active. It reports whether this call performed the transition.
+// The fact lands on the interrupted run's own persisted correlation when the
+// row carries one; a legacy NULL-correlation row keeps the fact on the
+// reconcile pass scope — no fabricated link is written.
+func (s *Service) markRunInterrupted(ctx context.Context, id int64, at string) (bool, error) {
+	markCtx := ctx
+	if identity, err := s.runIdentityOn(ctx, s.reader, id); err == nil && identity.restorable() {
+		if restored, restoreErr := s.restoreTaskContext(ctx, identity); restoreErr == nil {
+			markCtx = restored
+		}
+	}
+	marked := true
+	if _, err := execution.Execute(markCtx, s.commands.runner, s.commands.runInterrupted, func(tx *execution.Tx) (Summary, error) {
+		result, err := tx.ExecContext(markCtx, `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code='interrupted',retryable=1,error_detail='backup interrupted by process restart',row_version=row_version+1 WHERE id=? AND status IN ('queued','running')`, at, at, id)
+		if err != nil {
+			return Summary{}, err
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return Summary{}, err
+		} else if rows != 1 {
+			return Summary{}, errRunNotRunning
+		}
+		return Summary{}, nil
+	}, func(Summary) int64 { return id }); err != nil {
+		if errors.Is(err, errRunNotRunning) {
+			return false, nil
+		}
+		return false, err
+	}
+	return marked, nil
+}
+
+// detachedTaskContext re-roots an operation's correlation onto a fresh
+// background scope with the system task executor, so lifecycle facts can
+// commit after the originating context was cancelled. The original initiator
+// and request identity are preserved; without metadata a fresh task scope is
+// established. This is a deliberate re-rooting for terminal and health facts,
+// never a child-side correlation swap of a live caller scope.
+func (s *Service) detachedTaskContext(ctx context.Context) (context.Context, error) {
+	base := context.Background()
+	meta, ok := execution.FromContext(ctx)
+	if !ok {
+		return s.executionContext(base, execution.SourceTask)
+	}
+	return execution.ReplaceMetadata(base, execution.Metadata{
+		CorrelationID: meta.CorrelationID,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+		Initiator:     meta.Initiator,
+		Source:        execution.Source{Kind: execution.SourceTask, RequestID: meta.Source.RequestID},
+	})
+}
+
 // nextRunTimestamp derives a timestamp strictly newer than the persisted Run
 // timestamp. SQLite rejects equal updated_at values, and wall clocks need not
 // advance between adjacent durable transitions.
 func (s *Service) nextRunTimestamp(ctx context.Context, id int64) (string, error) {
+	return s.nextRunTimestampOn(s.reader, id)
+}
+
+// nextRunTimestampOn is the transaction-scoped form: lifecycle operations
+// read the persisted timestamp through the runner's guarded transaction so
+// the derived value can never trail a committed change.
+func (s *Service) nextRunTimestampOn(reader summaryReader, id int64) (string, error) {
 	var previous string
-	if err := s.db.QueryRowContext(ctx, `SELECT updated_at FROM backups WHERE id=?`, id).Scan(&previous); err != nil {
+	if err := reader.QueryRowContext(context.Background(), `SELECT updated_at FROM backups WHERE id=?`, id).Scan(&previous); err != nil {
 		return "", err
 	}
 	next := s.now()
@@ -137,12 +294,18 @@ func (s *Service) nextRunTimestamp(ctx context.Context, id int64) (string, error
 	return timestamp(next), nil
 }
 
+// advanceRunStage records one bounded stage transition (preflight,
+// database_snapshot, artifact_copy, manifest_publish) as an audited system
+// fact while the Run stays running.
 func (s *Service) advanceRunStage(ctx context.Context, id int64, stage string) error {
-	next, err := s.nextRunTimestamp(ctx, id)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `UPDATE backups SET stage=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status='running'`, stage, next, id)
+	_, err := execution.Execute(ctx, s.commands.runner, s.commands.runStage, func(tx *execution.Tx) (Summary, error) {
+		next, err := s.nextRunTimestampOn(tx, id)
+		if err != nil {
+			return Summary{}, err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE backups SET stage=?,updated_at=?,row_version=row_version+1 WHERE id=? AND status='running'`, stage, next, id)
+		return Summary{}, err
+	}, func(Summary) int64 { return id })
 	return err
 }
 

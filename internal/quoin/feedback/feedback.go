@@ -10,11 +10,17 @@ package feedback
 // source's still-operable candidates become SourceInvalid and every
 // KnowledgeVersion produced from that source exits retrieval (with the
 // FTS5 projection row deleted by the schema trigger).
+//
+// 追加命令通过共享执行器 execution 执行（ADR-0006）：会话复核（任意已认证
+// 角色）、幂等重放、业务修改、命令台账与审计事件由执行器在同一事务统一
+// 提交。模块不再自管事务、不写 audit INSERT、不持有拒绝记录路径；缺失合法
+// 执行上下文或会话证明时命令失败关闭。读路径走 execution.OpenReadOnly 产生
+// 的可信只读面（audit.Reader 查询形状）；组合层未接线时读全部失败关闭，
+// 可写连接从不充当读源。
 
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -22,7 +28,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/knowledge/invalidation"
 )
 
@@ -39,6 +47,18 @@ const (
 	ValueExecuted          = "executed"
 	ValueVerifiedEffective = "verified_effective"
 	ValueRejected          = "rejected"
+)
+
+const (
+	CommandAppend = "diagnosis_feedback.append"
+
+	// ObjectFeedbackEvent 是审计与命令结果的领域对象类型：追加命令自己的
+	// 产物（反馈事件行），与命令台账 result_object 引用一致。
+	ObjectFeedbackEvent = "diagnosis_feedback"
+
+	// 确定性拒绝 code（持久化于台账拒绝载荷，重放时映射回对外哨兵错误）。
+	rejectionTargetMissing = "feedback_target_missing"
+	rejectionTargetInvalid = "feedback_target_invalid"
 )
 
 const noteLimit = 4096
@@ -91,17 +111,83 @@ type Timeline struct {
 
 // Service owns the diagnosis feedback ledger.
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	// reader 是执行器验证后的可信只读面（execution.Reader）：组合层未接线时
+	// 保持零值，全部读取失败关闭——可写连接从不充当读源。
+	reader execution.Reader
+	// runner 是组合层共享的执行器；操作注册进共享注册表。
+	runner *execution.Runner
+	append *execution.Operation
+	now    func() time.Time
 }
 
-// NewService builds the ledger over the shared database handle.
+// NewService 是组合层初始装配（应用构造在 configureReadOnly 之前）：操作
+// 注册进私有执行器，读路径保持零值可信只读面——所有读取失败关闭，直到
+// 组合层通过 NewServiceWithReader 或 SetReader 注入真实只读能力。db 绝不
+// 充当读源。
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	service, err := newService(runner.Reader(), runner)
+	if err != nil {
+		// 新注册表上的首次声明不会失败；此分支只为编程错误兜底。
+		panic("feedback: compose default service: " + err.Error())
+	}
+	return service
+}
+
+// NewServiceWithReader 装配模块：reader 经共享执行器的 SetReader 原地验证
+// ——仅接受 execution.OpenReadOnly 产生的可信类型，随后采纳执行器的
+// runner.Reader()；任意 audit.Reader 适配器（包括裸可写 db）连同 nil 一起
+// 被拒绝。runner 是组合层共享的执行器（操作注册进其注册表，同名重复注册
+// 即失败）。
+func NewServiceWithReader(reader audit.Reader, runner *execution.Runner) (*Service, error) {
+	if runner == nil {
+		return nil, errors.New("feedback: command runner is required")
+	}
+	if err := runner.SetReader(reader); err != nil {
+		return nil, fmt.Errorf("feedback: %w", err)
+	}
+	return newService(runner.Reader(), runner)
+}
+
+// SetReader 把真实只读能力转发给共享执行器验证，并采纳验证后的读面：默认
+// 构造的服务由此从失败关闭转为可读。仅接受 execution.OpenReadOnly 产生的
+// 可信类型，不存在可写兼容适配器。
+func (service *Service) SetReader(reader audit.Reader) error {
+	if err := service.runner.SetReader(reader); err != nil {
+		return fmt.Errorf("feedback: %w", err)
+	}
+	service.reader = service.runner.Reader()
+	return nil
+}
+
+// newService 是两个公开构造共享的私有装配：把模块自有操作注册进 runner 的
+// 共享注册表并完成字段装配，reader 由调用方先行验证为可信只读面。
+func newService(reader execution.Reader, runner *execution.Runner) (*Service, error) {
+	if runner == nil {
+		return nil, errors.New("feedback: command runner is required")
+	}
+	appendOp, err := runner.Register(execution.Operation{
+		Name:       CommandAppend,
+		Class:      execution.ClassWrite,
+		ObjectType: ObjectFeedbackEvent,
+		Authorize:  authorizeFeedbackWriter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("feedback: register %s: %w", CommandAppend, err)
+	}
+	return &Service{reader: reader, runner: runner, append: appendOp, now: time.Now}, nil
 }
 
 func (service *Service) nowText() string {
 	return service.now().UTC().Format(time.RFC3339Nano)
+}
+
+// authorizeFeedbackWriter 在执行器事务内复核会话证明引用（auth.
+// VerifyExecutionSession，任意已认证角色）：会话未撤销、未过期、仍处签发时
+// 的 auth_revision 且主体启用。证明缺失或已失效返回 ErrActorChanged——
+// 干净回滚、不持久化任何记录。
+func authorizeFeedbackWriter(ctx context.Context, tx *execution.Tx) error {
+	return auth.VerifyExecutionSession(ctx, tx, "")
 }
 
 func validTargetType(targetType string) bool {
@@ -122,16 +208,16 @@ func validValue(value string) bool {
 
 // targetExists resolves the closed target shape: "missing" (404) for an
 // absent row and "invalid" (422) for a user message (DATA-KNOWLEDGE-008).
-func targetExists(ctx context.Context, conn *sql.Conn, target Target) (string, error) {
+func targetExists(ctx context.Context, q audit.Reader, target Target) (string, error) {
 	switch target.Type {
 	case TargetAnalysisOutput:
-		found, err := exists(ctx, conn, `SELECT 1 FROM initial_analysis_outputs WHERE id=?`, target.ID)
+		found, err := exists(ctx, q, `SELECT 1 FROM initial_analysis_outputs WHERE id=?`, target.ID)
 		return presence(found), err
 	case TargetReport:
-		found, err := exists(ctx, conn, `SELECT 1 FROM inspection_reports WHERE id=?`, target.ID)
+		found, err := exists(ctx, q, `SELECT 1 FROM inspection_reports WHERE id=?`, target.ID)
 		return presence(found), err
 	case TargetMessage:
-		row := conn.QueryRowContext(ctx, `SELECT role FROM investigation_messages WHERE id=?`, target.ID)
+		row := q.QueryRowContext(ctx, `SELECT role FROM investigation_messages WHERE id=?`, target.ID)
 		var role string
 		if err := row.Scan(&role); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -154,8 +240,8 @@ func presence(found bool) string {
 	return "missing"
 }
 
-func exists(ctx context.Context, conn *sql.Conn, query string, id int64) (bool, error) {
-	row := conn.QueryRowContext(ctx, query, id)
+func exists(ctx context.Context, q audit.Reader, query string, id int64) (bool, error) {
+	row := q.QueryRowContext(ctx, query, id)
 	var one int
 	if err := row.Scan(&one); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -167,7 +253,7 @@ func exists(ctx context.Context, conn *sql.Conn, query string, id int64) (bool, 
 }
 
 // Append adds one event to the immutable timeline (HTTP-COMMAND-003
-// replay through the durable command ledger). A rejected event applies
+// replay through the shared command runner). A rejected event applies
 // the DATA-TX-011 source invalidation inside the same transaction.
 func (service *Service) Append(ctx context.Context, principalID int64, commandID string, target Target, value, note string) (Event, error) {
 	if !validTargetType(target.Type) {
@@ -179,147 +265,78 @@ func (service *Service) Append(ctx context.Context, principalID int64, commandID
 	if utf8.RuneCountInString(note) > noteLimit {
 		return Event{}, ErrNoteTooLong
 	}
-	digest := auth.DigestCommand("diagnosis_feedback.append", map[string]any{
+	digest := auth.DigestCommand(CommandAppend, map[string]any{
 		"targetType": target.Type,
 		"targetId":   target.ID,
 		"value":      value,
 		"note":       note,
 	})
-	if record, ok, err := auth.LookupCommand(ctx, service.db, principalID, commandID); err != nil {
-		return Event{}, err
-	} else if ok {
-		return service.replay(ctx, record, digest)
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return Event{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Event{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	outcome, err := execution.Run(ctx, service.runner, service.append, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: commandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (Event, execution.Change, error) {
+		state, err := targetExists(ctx, tx, target)
+		if err != nil {
+			return Event{}, execution.Changed, err
 		}
-	}()
-	// The serialized-writer recheck makes a concurrent same-key replay
-	// deterministic (HTTP-COMMAND-007). The lookup must stay on this
-	// connection: the pool has other waiters during the open transaction.
-	if record, ok, err := auth.LookupCommandOn(ctx, conn, principalID, commandID); err != nil {
-		return Event{}, err
-	} else if ok {
-		event, replayErr := replayRecord(ctx, conn, record, digest)
-		if replayErr == nil {
-			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-				return Event{}, err
+		if state != "present" {
+			if state == "invalid" {
+				return Event{}, execution.Changed, &execution.Rejection{Code: rejectionTargetInvalid, Detail: "反馈目标必须是不可变的诊断输出或助手消息", ObjectID: target.ID}
 			}
-			committed = true
+			return Event{}, execution.Changed, &execution.Rejection{Code: rejectionTargetMissing, Detail: "反馈目标不存在", ObjectID: target.ID}
 		}
-		return event, replayErr
-	}
-	state, err := targetExists(ctx, conn, target)
+		now := service.nowText()
+		result, err := tx.ExecContext(ctx, `INSERT INTO diagnosis_feedback(target_type,target_id,value,note,created_by,created_at) VALUES(?,?,?,?,?,?)`,
+			target.Type, target.ID, value, nullableNote(note), principalID, now)
+		if err != nil {
+			return Event{}, execution.Changed, err
+		}
+		eventID, err := result.LastInsertId()
+		if err != nil {
+			return Event{}, execution.Changed, err
+		}
+		if value == ValueRejected {
+			// DATA-TX-011 in the same runner transaction: operable
+			// candidates of the source become SourceInvalid and every
+			// version the source produced exits retrieval permanently.
+			if _, err := invalidation.Apply(ctx, tx, target.Type, []int64{target.ID}, now); err != nil {
+				return Event{}, execution.Changed, err
+			}
+		}
+		// The durable ledger carries the original result payload so a replay
+		// returns the committed outcome even after later appends (HTTP-COMMAND-003).
+		row := tx.QueryRowContext(ctx, `
+			SELECT id,target_type,target_id,value,COALESCE(note,''),COALESCE(created_by,0),created_at
+			FROM diagnosis_feedback WHERE id=?`, eventID)
+		event, err := scanEvent(row.Scan)
+		if err != nil {
+			return Event{}, execution.Changed, err
+		}
+		return event, execution.Changed, nil
+	}, func(event Event) int64 { return parseID(event.ID) })
 	if err != nil {
-		return Event{}, err
+		return Event{}, translateRunnerError(err)
 	}
-	if state != "present" {
-		if err := rejectCommand(ctx, conn, principalID, commandID, digest, target, value); err != nil {
-			return Event{}, err
-		}
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return Event{}, err
-		}
-		committed = true
-		if state == "invalid" {
-			return Event{}, ErrInvalidTarget
-		}
-		return Event{}, ErrNotFound
-	}
-	now := service.nowText()
-	result, err := conn.ExecContext(ctx, `INSERT INTO diagnosis_feedback(target_type,target_id,value,note,created_by,created_at) VALUES(?,?,?,?,?,?)`,
-		target.Type, target.ID, value, nullableNote(note), principalID, now)
-	if err != nil {
-		return Event{}, err
-	}
-	eventID, err := result.LastInsertId()
-	if err != nil {
-		return Event{}, err
-	}
-	if value == ValueRejected {
-		if err := service.invalidateSource(ctx, conn, target, now); err != nil {
-			return Event{}, err
-		}
-	}
-	if err := recordAudit(ctx, conn, principalID, "diagnosis_feedback.append", target.Type, target.ID, now); err != nil {
-		return Event{}, err
-	}
-	// The durable ledger carries the original result payload so a replay
-	// returns the committed outcome even after later appends (HTTP-COMMAND-003).
-	var event Event
-	row := conn.QueryRowContext(ctx, `
-		SELECT id,target_type,target_id,value,COALESCE(note,''),COALESCE(created_by,0),created_at
-		FROM diagnosis_feedback WHERE id=?`, eventID)
-	if event, err = scanEvent(row.Scan); err != nil {
-		return Event{}, err
-	}
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return Event{}, err
-	}
-	if err := auth.RecordCommand(ctx, conn, principalID, commandID, "diagnosis_feedback.append", digest, auth.OutcomeCommitted, "diagnosis_feedback", eventID, string(payload)); err != nil {
-		return Event{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Event{}, err
-	}
-	committed = true
-	return event, nil
+	return outcome.Result, nil
 }
 
-// replay reconstructs the deterministic outcome for an already-recorded
-// command key: the committed payload replays verbatim, a rejected_known
-// outcome replays its recorded rejection (HTTP-COMMAND-003/004).
-func (service *Service) replay(ctx context.Context, record auth.CommandRecord, digest string) (Event, error) {
-	if record.RequestDigest != digest {
-		return Event{}, ErrCommandReused
-	}
-	if record.ResultObjectType != "diagnosis_feedback" {
-		return Event{}, ErrCommandReused
-	}
-	switch record.Outcome {
-	case auth.OutcomeCommitted:
-		var event Event
-		if err := json.Unmarshal([]byte(record.ResultPayload), &event); err != nil {
-			return Event{}, err
+// translateRunnerError 把执行器的确定性结果映射回模块对外哨兵错误，保持
+// knowledge/http.go 的既有 errors.Is 问题映射不变。旧台账的拒绝载荷只记录
+// 404 事实（无 code），统一按 ErrNotFound 重放。
+func translateRunnerError(err error) error {
+	var rejection *execution.Rejection
+	if errors.As(err, &rejection) {
+		if rejection.Code == rejectionTargetInvalid {
+			return ErrInvalidTarget
 		}
-		return event, nil
-	default:
-		return Event{}, ErrNotFound
+		return ErrNotFound
 	}
-}
-
-// replayRecord resolves a ledger hit through an open transaction
-// connection (the pool may be fully occupied by that handle).
-func replayRecord(ctx context.Context, conn *sql.Conn, record auth.CommandRecord, digest string) (Event, error) {
-	if record.RequestDigest != digest {
-		return Event{}, ErrCommandReused
+	if errors.Is(err, execution.ErrCommandReused) {
+		return ErrCommandReused
 	}
-	if record.Outcome != auth.OutcomeCommitted || record.ResultObjectType != "diagnosis_feedback" {
-		return Event{}, ErrCommandReused
-	}
-	var event Event
-	if err := json.Unmarshal([]byte(record.ResultPayload), &event); err != nil {
-		return Event{}, err
-	}
-	return event, nil
-}
-
-func rejectCommand(ctx context.Context, conn *sql.Conn, principalID int64, commandID, digest string, target Target, value string) error {
-	if err := auth.RecordCommand(ctx, conn, principalID, commandID, "diagnosis_feedback.append", digest, auth.OutcomeRejectedKnown, "", 0, `{"status":404}`); err != nil {
-		return err
-	}
-	return recordAudit(ctx, conn, principalID, "diagnosis_feedback.append_rejected", target.Type, target.ID, "")
+	return err
 }
 
 func nullableNote(note string) any {
@@ -327,23 +344,6 @@ func nullableNote(note string) any {
 		return nil
 	}
 	return note
-}
-
-// invalidateSource applies DATA-TX-011 for a rejected event through the
-// single shared invalidation authority (the same writer the investigation
-// undo path uses): operable candidates of the source become SourceInvalid
-// and every version the source produced exits retrieval permanently, with
-// the FTS projection following through the schema triggers.
-func (service *Service) invalidateSource(ctx context.Context, conn *sql.Conn, target Target, now string) error {
-	_, err := invalidation.Apply(ctx, conn, target.Type, []int64{target.ID}, now)
-	return err
-}
-
-func (service *Service) eventByID(ctx context.Context, eventID int64) (Event, error) {
-	row := service.db.QueryRowContext(ctx, `
-		SELECT id,target_type,target_id,value,COALESCE(note,''),COALESCE(created_by,0),created_at
-		FROM diagnosis_feedback WHERE id=?`, eventID)
-	return scanEvent(row.Scan)
 }
 
 func scanEvent(scan func(dest ...any) error) (Event, error) {
@@ -375,12 +375,12 @@ func (service *Service) List(ctx context.Context, target Target, after *Cursor, 
 	)
 	nextLimit := limit + 1
 	if after == nil {
-		rows, err = service.db.QueryContext(ctx, `
+		rows, err = service.reader.QueryContext(ctx, `
 			SELECT id,target_type,target_id,value,COALESCE(note,''),COALESCE(created_by,0),created_at
 			FROM diagnosis_feedback WHERE target_type=? AND target_id=?
 			ORDER BY created_at DESC, id DESC LIMIT ?`, target.Type, target.ID, nextLimit)
 	} else {
-		rows, err = service.db.QueryContext(ctx, `
+		rows, err = service.reader.QueryContext(ctx, `
 			SELECT id,target_type,target_id,value,COALESCE(note,''),COALESCE(created_by,0),created_at
 			FROM diagnosis_feedback WHERE target_type=? AND target_id=?
 			AND (created_at < ? OR (created_at = ? AND id < ?))
@@ -423,23 +423,6 @@ func parseID(value string) int64 {
 		return 0
 	}
 	return id
-}
-
-func recordAudit(ctx context.Context, conn *sql.Conn, actorID int64, action, targetType string, targetID int64, timestamp string) error {
-	result, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,?, 'success',?,?,?)`,
-		actorID, action, targetType, targetID, timestamp)
-	if err != nil {
-		return err
-	}
-	auditID, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, `INSERT INTO audit_event_targets(audit_event_id,target_type,target_id) VALUES(?,?,?)`, auditID, targetType, targetID)
-	if err != nil {
-		return fmt.Errorf("write audit target: %w", err)
-	}
-	return nil
 }
 
 // TrimNote is a defensive bound used by the HTTP layer before Append

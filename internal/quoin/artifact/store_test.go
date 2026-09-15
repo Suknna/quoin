@@ -17,12 +17,15 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	_ "modernc.org/sqlite"
 )
 
-func newTestDB(t *testing.T) *sql.DB {
+func newTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	path := t.TempDir() + "/test.db"
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +36,29 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`INSERT INTO artifact_retention_settings(id,generated_retention_days,row_version,updated_at) VALUES(1,90,1,?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	return db, path
+}
+
+// newTestStore builds the fixture store and wires its pure reads to a real
+// independent read-only pool — execution.OpenReadOnly on the same database
+// file, closed with the test. Production reads fail closed until the
+// composition layer installs the reader, exactly as the app must.
+func newTestStore(t *testing.T) (*sql.DB, *Store) {
+	t.Helper()
+	db, path := newTestDB(t)
+	store, err := NewStore(db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := execution.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := store.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return db, store
 }
 
 // seedToolOwner builds a Running connection_probe attempt carrying one
@@ -163,7 +188,10 @@ func uploadText(t *testing.T, store *Store, ctx context.Context, attemptID, tool
 
 // sealToolResult completes the schema-honest tool ladder after an upload:
 // pending -> running -> succeeded with the result artifact, then the read
-// grant (the frozen closure demands succeeded before the grant).
+// grant (the frozen closure demands succeeded before the grant). The grant
+// write is composed the way production composes it: one fresh runner
+// transaction whose guarded *execution.Tx is the only write surface —
+// a raw *sql.Conn can no longer satisfy the store's Executor parameter.
 func sealToolResult(t *testing.T, db *sql.DB, store *Store, attemptID, toolCallID, artifactID int64) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -173,28 +201,24 @@ func sealToolResult(t *testing.T, db *sql.DB, store *Store, attemptID, toolCallI
 	if _, err := db.Exec(`UPDATE tool_calls SET status='succeeded',result_json='{"preview":"ok"}',result_artifact_id=?,ended_at=?,row_version=row_version+1 WHERE id=? AND status='running'`, artifactID, now, toolCallID); err != nil {
 		t.Fatal(err)
 	}
-	conn, err := db.Conn(context.Background())
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	op, err := runner.Register(execution.Operation{
+		Name: "test.artifact.read-grant", Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.InsertToolResultGrant(context.Background(), conn, attemptID, artifactID, toolCallID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+	ctx := testfixture.SystemContext(t, "artifact-test-grant")
+	if _, err := execution.Execute(ctx, runner, op, func(tx *execution.Tx) (struct{}, error) {
+		return struct{}{}, store.InsertToolResultGrant(ctx, tx, attemptID, artifactID, toolCallID)
+	}, func(struct{}) int64 { return artifactID }); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestUploadReadGrepFences(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	body := "line one: alpha\nline two: beta\nline three: alpha again\n"
@@ -271,11 +295,7 @@ func TestUploadReadGrepFences(t *testing.T) {
 // uses the real table CHECK constraints; unrelated parent/model provenance is
 // outside Artifact ownership and therefore omitted with foreign keys disabled.
 func TestLintelBrowserArtifactOwnerClosure(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TRIGGER trg_browser_operations_insert_closure; DROP TRIGGER trg_browser_exploration_actions_closure; DROP TRIGGER trg_browser_exploration_parent_tool; DROP TRIGGER trg_execution_attempts_insert_queued; DROP TRIGGER trg_execution_attempts_slot_registered`); err != nil {
 		t.Fatal(err)
@@ -459,38 +479,39 @@ func TestInterruptedLintelUploadAcceptsOnlySuccessorTransportEpoch(t *testing.T)
 }
 
 func TestMaterializeEvidenceTransactionIsIdempotent(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	evidence, err := db.Exec(`INSERT INTO evidence(target_type,target_id,params_json,observed_at,result_json,integrity,created_at) VALUES('inspection_run',1,'{}',?,?,'complete',?)`, now, `{"value":1}`, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	evidenceID, _ := evidence.LastInsertId()
-	conn, err := db.Conn(context.Background())
+	// Both materializations join ONE runner transaction, preserving the
+	// caller-transaction idempotency contract: the second call observes the
+	// first call's rows inside the same transaction and answers the same id.
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	op, err := runner.Register(execution.Operation{
+		Name: "test.artifact.materialize", Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	first, err := store.MaterializeEvidenceTransaction(context.Background(), conn, evidenceID, []byte(`{"value":1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := store.MaterializeEvidenceTransaction(context.Background(), conn, evidenceID, []byte(`{"value":1}`))
-	if err != nil {
+	ctx := testfixture.SystemContext(t, "artifact-test-materialize")
+	var first, second int64
+	if _, err := execution.Execute(ctx, runner, op, func(tx *execution.Tx) (struct{}, error) {
+		var err error
+		first, err = store.MaterializeEvidenceTransaction(ctx, tx, evidenceID, []byte(`{"value":1}`))
+		if err != nil {
+			return struct{}{}, err
+		}
+		second, err = store.MaterializeEvidenceTransaction(ctx, tx, evidenceID, []byte(`{"value":1}`))
+		return struct{}{}, err
+	}, func(struct{}) int64 { return first }); err != nil {
 		t.Fatal(err)
 	}
 	if first != second {
 		t.Fatalf("materialization ids differ: %d %d", first, second)
-	}
-	if _, err = conn.ExecContext(context.Background(), "COMMIT"); err != nil {
-		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(`{"value":1}`))
 	if err = verifyBlob(store.blobPath(hex.EncodeToString(sum[:])), int64(len(`{"value":1}`)), sum[:]); err != nil {

@@ -39,7 +39,7 @@ func setState(t *testing.T, db *sql.DB, attemptID int64, state string) {
 
 func TestInterruptConvergesActiveAndRespectsCancelFence(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 
 	// Assigned and Running attempts interrupt with the loss reason.
@@ -82,7 +82,7 @@ func TestInterruptConvergesActiveAndRespectsCancelFence(t *testing.T) {
 
 func TestActiveOfSlotListsBoundAttempts(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	boundID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, boundID, "boot-a", 3)
@@ -104,7 +104,7 @@ func TestActiveOfSlotListsBoundAttempts(t *testing.T) {
 
 func TestRenewLeaseForBootExtendsOnlyLiveLeases(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	liveID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, liveID, "boot-a", 1)
@@ -155,7 +155,7 @@ func TestRenewLeaseForBootExtendsOnlyLiveLeases(t *testing.T) {
 
 func TestAcceptAcrossSameBootEpochs(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	// Dispatched on epoch 1; the stream dropped before the accept.
@@ -185,7 +185,7 @@ func TestAcceptAcrossSameBootEpochs(t *testing.T) {
 
 func TestSweepExpiredInterruptsAndConvergesCancelling(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	expiredID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, expiredID, "boot-a", 1)
@@ -234,7 +234,7 @@ func TestSweepExpiredInterruptsAndConvergesCancelling(t *testing.T) {
 
 func TestBeginModelCallReplayReturnsOriginalRow(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
@@ -286,7 +286,7 @@ func TestBeginModelCallReplayReturnsOriginalRow(t *testing.T) {
 
 func TestCompleteModelCallReplayRebuildsOriginalAck(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
@@ -372,7 +372,7 @@ var _ *sql.DB
 
 func TestPartialFailurePersistsIncompleteOutputRow(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
@@ -419,7 +419,7 @@ func TestPartialFailurePersistsIncompleteOutputRow(t *testing.T) {
 
 func TestBeginModelCallLostAckRetryAliasesRunningPredecessor(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)

@@ -13,7 +13,6 @@ import (
 	"strconv"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
-	"github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
 
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/danielgtaylor/huma/v2"
@@ -702,7 +701,9 @@ func (application *apiServer) listCredentialGenerations(ctx context.Context, inp
 
 // discoverProviderModels probes the upstream /v1/models endpoint with the
 // form's Base URL and API key (input helper only, never a qualification):
-// credentials exist only in request memory (HTTP-COMMAND model discovery).
+// the external network call runs outside any transaction and the durable
+// audited discovery fact is recorded by the connections runner; credentials
+// exist only in request memory (HTTP-COMMAND model discovery).
 func (application *apiServer) discoverProviderModels(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
@@ -732,19 +733,13 @@ func (application *apiServer) discoverProviderModels(ctx context.Context, input 
 			Detail string `json:"detail,omitempty"`
 		}
 	}{}
-	models, err := modelprovider.DiscoverUpstream(ctx, input.Body.BaseURL, input.Body.APIKey)
+	discovery, err := application.connections.DiscoverProviderModels(ctx, input.Body.BaseURL, input.Body.APIKey)
 	if err != nil {
-		output.Body.Available = false
-		output.Body.Detail = "暂时无法从该地址读取模型列表；可以直接手工填写模型 ID。"
-		return output, nil
+		return nil, connectionError(err)
 	}
-	if len(models) == 0 {
-		output.Body.Available = false
-		output.Body.Detail = "上游未返回任何模型；可以直接手工填写模型 ID。"
-		return output, nil
-	}
-	output.Body.Available = true
-	for _, model := range models {
+	output.Body.Available = discovery.Available
+	output.Body.Detail = discovery.Detail
+	for _, model := range discovery.Models {
 		output.Body.Items = append(output.Body.Items, struct {
 			ID       string         `json:"id"`
 			Metadata map[string]any `json:"metadata,omitempty"`

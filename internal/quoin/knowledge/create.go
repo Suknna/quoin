@@ -5,15 +5,18 @@ package knowledge
 // of the same immutable source and returns it (200); only when none
 // exists does it validate the source state (a rejected source can no
 // longer create) and insert the new AwaitingConfirmation row with the
-// frozen original suggestion projection.
+// frozen original suggestion projection. The whole decision runs inside
+// the shared runner transaction: replay, rejections, ledger and audit are
+// the runner's.
 
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // CreateResult reports the candidate plus whether this command created it
@@ -26,273 +29,172 @@ type CreateResult struct {
 // CreateFromAnalysisOutput resolves the analysis' sealed first success
 // output and creates or returns its candidate.
 func (service *Service) CreateFromAnalysisOutput(ctx context.Context, principalID int64, commandID string, occurrenceID, analysisID int64) (CreateResult, error) {
-	return service.CreateFromAnalysisOutputAs(ctx, MutationActor{ID: principalID}, commandID, occurrenceID, analysisID)
-}
-
-func (service *Service) CreateFromAnalysisOutputAs(ctx context.Context, actor MutationActor, commandID string, occurrenceID, analysisID int64) (CreateResult, error) {
-	principalID := actor.ID
-	// The digest covers the semantic request fields; the resolved source is
-	// deterministic from them (HTTP-COMMAND-002).
-	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceAnalysisOutput, "occurrenceId": occurrenceID, "analysisId": analysisID})
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	defer conn.Close()
-	var outputOccurrence int64
-	var outputID int64
-	var modelID, content, createdAt string
-	err = conn.QueryRowContext(ctx, `
-		SELECT a.occurrence_id, o.id, o.model_id, o.content, o.created_at
-		FROM initial_analysis_outputs o JOIN initial_analyses a ON a.id=o.analysis_id
-		WHERE o.analysis_id=?`, analysisID).Scan(&outputOccurrence, &outputID, &modelID, &content, &createdAt)
-	if err == nil && outputOccurrence != occurrenceID {
-		// The output exists but belongs to another occurrence: the path is
-		// not this object's home.
-		err = sql.ErrNoRows
-	}
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return CreateResult{}, rejectCreateNotFound(ctx, conn, principalID, commandID, digest)
+	digest := commandDigest(opCreate, map[string]any{"sourceType": SourceAnalysisOutput, "occurrenceId": occurrenceID, "analysisId": analysisID})
+	return service.runCreate(ctx, principalID, commandID, digest, SourceAnalysisOutput, func(tx *execution.Tx) (int64, Suggestion, *execution.Rejection, error) {
+		var outputOccurrence, outputID int64
+		var modelID, content, createdAt string
+		err := tx.QueryRowContext(ctx, `
+			SELECT a.occurrence_id, o.id, o.model_id, o.content, o.created_at
+			FROM initial_analysis_outputs o JOIN initial_analyses a ON a.id=o.analysis_id
+			WHERE o.analysis_id=?`, analysisID).Scan(&outputOccurrence, &outputID, &modelID, &content, &createdAt)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && outputOccurrence != occurrenceID) {
+			// The output is missing or belongs to another occurrence: the
+			// path is not this object's home.
+			return 0, Suggestion{}, &execution.Rejection{Code: codeNotFound, Detail: ErrNotFound.Error()}, nil
 		}
-		return CreateResult{}, err
-	}
-	suggestion := Suggestion{
-		V: suggestionVersion,
-		Source: suggestionSource{
-			Type:      SourceAnalysisOutput,
-			ID:        fmt.Sprintf("%d", outputID),
-			ModelID:   modelID,
-			CreatedAt: createdAt,
-			Locator:   map[string]any{"occurrenceId": occurrenceID, "analysisId": analysisID},
-		},
-		Title: deriveTitle(content),
-		Body:  content,
-	}
-	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceAnalysisOutput, outputID, suggestion)
+		if err != nil {
+			return 0, Suggestion{}, nil, err
+		}
+		suggestion := Suggestion{
+			V: suggestionVersion,
+			Source: suggestionSource{
+				Type:      SourceAnalysisOutput,
+				ID:        fmt.Sprintf("%d", outputID),
+				ModelID:   modelID,
+				CreatedAt: createdAt,
+				Locator:   map[string]any{"occurrenceId": occurrenceID, "analysisId": analysisID},
+			},
+			Title: deriveTitle(content),
+			Body:  content,
+		}
+		return outputID, suggestion, nil, nil
+	})
 }
 
 // CreateFromInvestigationMessage validates the active assistant message
 // belongs to the investigation and creates or returns its candidate.
 func (service *Service) CreateFromInvestigationMessage(ctx context.Context, principalID int64, commandID string, investigationID, messageID int64) (CreateResult, error) {
-	return service.CreateFromInvestigationMessageAs(ctx, MutationActor{ID: principalID}, commandID, investigationID, messageID)
-}
-
-func (service *Service) CreateFromInvestigationMessageAs(ctx context.Context, actor MutationActor, commandID string, investigationID, messageID int64) (CreateResult, error) {
-	principalID := actor.ID
-	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceMessage, "investigationId": investigationID, "sourceId": messageID})
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	defer conn.Close()
-	var messageInvestigation int64
-	var role, status, content, createdAt string
-	err = conn.QueryRowContext(ctx, `
-		SELECT m.investigation_id, m.role, m.status, m.content, m.created_at
-		FROM investigation_messages m WHERE m.id=?`, messageID).Scan(&messageInvestigation, &role, &status, &content, &createdAt)
-	if err != nil {
+	digest := commandDigest(opCreate, map[string]any{"sourceType": SourceMessage, "investigationId": investigationID, "sourceId": messageID})
+	return service.runCreate(ctx, principalID, commandID, digest, SourceMessage, func(tx *execution.Tx) (int64, Suggestion, *execution.Rejection, error) {
+		var messageInvestigation int64
+		var role, status, content, createdAt string
+		err := tx.QueryRowContext(ctx, `
+			SELECT m.investigation_id, m.role, m.status, m.content, m.created_at
+			FROM investigation_messages m WHERE m.id=?`, messageID).Scan(&messageInvestigation, &role, &status, &content, &createdAt)
 		if errors.Is(err, sql.ErrNoRows) {
-			return CreateResult{}, rejectCreateNotFound(ctx, conn, principalID, commandID, digest)
+			return 0, Suggestion{}, &execution.Rejection{Code: codeNotFound, Detail: ErrNotFound.Error()}, nil
 		}
-		return CreateResult{}, err
-	}
-	if messageInvestigation != investigationID {
-		return CreateResult{}, rejectCreateNotFound(ctx, conn, principalID, commandID, digest)
-	}
-	if role != "assistant" || status != "active" {
-		return CreateResult{}, rejectCreateShape(ctx, conn, principalID, commandID, digest)
-	}
-	suggestion := Suggestion{
-		V: suggestionVersion,
-		Source: suggestionSource{
-			Type:    SourceMessage,
-			ID:      fmt.Sprintf("%d", messageID),
-			Locator: map[string]any{"investigationId": investigationID},
-		},
-		Title: deriveTitle(content),
-		Body:  content,
-	}
-	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceMessage, messageID, suggestion)
+		if err != nil {
+			return 0, Suggestion{}, nil, err
+		}
+		if messageInvestigation != investigationID {
+			return 0, Suggestion{}, &execution.Rejection{Code: codeNotFound, Detail: ErrNotFound.Error()}, nil
+		}
+		if role != "assistant" || status != "active" {
+			return 0, Suggestion{}, &execution.Rejection{Code: codeSourceShape, Detail: ErrSourceShape.Error()}, nil
+		}
+		suggestion := Suggestion{
+			V: suggestionVersion,
+			Source: suggestionSource{
+				Type:    SourceMessage,
+				ID:      fmt.Sprintf("%d", messageID),
+				Locator: map[string]any{"investigationId": investigationID},
+			},
+			Title: deriveTitle(content),
+			Body:  content,
+		}
+		return messageID, suggestion, nil, nil
+	})
 }
 
 // CreateFromReport resolves the run's immutable report version and
 // creates or returns its candidate.
 func (service *Service) CreateFromReport(ctx context.Context, principalID int64, commandID string, runID, reportVersion int64) (CreateResult, error) {
-	return service.CreateFromReportAs(ctx, MutationActor{ID: principalID}, commandID, runID, reportVersion)
-}
-
-func (service *Service) CreateFromReportAs(ctx context.Context, actor MutationActor, commandID string, runID, reportVersion int64) (CreateResult, error) {
-	principalID := actor.ID
-	digest := commandDigest(ledgerCreate, map[string]any{"sourceType": SourceReport, "runId": runID, "reportVersion": reportVersion})
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	defer conn.Close()
-	var reportID int64
-	var modelID, content, createdAt string
-	err = conn.QueryRowContext(ctx, `
-		SELECT r.id, r.model_id, r.content, r.created_at
-		FROM inspection_reports r WHERE r.run_id=? AND r.version=?`, runID, reportVersion).Scan(&reportID, &modelID, &content, &createdAt)
-	if err != nil {
+	digest := commandDigest(opCreate, map[string]any{"sourceType": SourceReport, "runId": runID, "reportVersion": reportVersion})
+	return service.runCreate(ctx, principalID, commandID, digest, SourceReport, func(tx *execution.Tx) (int64, Suggestion, *execution.Rejection, error) {
+		var reportID int64
+		var modelID, content, createdAt string
+		err := tx.QueryRowContext(ctx, `
+			SELECT r.id, r.model_id, r.content, r.created_at
+			FROM inspection_reports r WHERE r.run_id=? AND r.version=?`, runID, reportVersion).Scan(&reportID, &modelID, &content, &createdAt)
 		if errors.Is(err, sql.ErrNoRows) {
-			return CreateResult{}, rejectCreateNotFound(ctx, conn, principalID, commandID, digest)
+			return 0, Suggestion{}, &execution.Rejection{Code: codeNotFound, Detail: ErrNotFound.Error()}, nil
 		}
-		return CreateResult{}, err
-	}
-	suggestion := Suggestion{
-		V: suggestionVersion,
-		Source: suggestionSource{
-			Type:      SourceReport,
-			ID:        fmt.Sprintf("%d", reportID),
-			ModelID:   modelID,
-			CreatedAt: createdAt,
-			Locator:   map[string]any{"runId": runID, "reportVersion": reportVersion},
-		},
-		Title: deriveTitle(content),
-		Body:  content,
-	}
-	return service.createOrReturn(ctx, conn, actor, commandID, digest, SourceReport, reportID, suggestion)
+		if err != nil {
+			return 0, Suggestion{}, nil, err
+		}
+		suggestion := Suggestion{
+			V: suggestionVersion,
+			Source: suggestionSource{
+				Type:      SourceReport,
+				ID:        fmt.Sprintf("%d", reportID),
+				ModelID:   modelID,
+				CreatedAt: createdAt,
+				Locator:   map[string]any{"runId": runID, "reportVersion": reportVersion},
+			},
+			Title: deriveTitle(content),
+			Body:  content,
+		}
+		return reportID, suggestion, nil, nil
+	})
 }
 
-// createOrReturn is the shared create-or-return core: dedupe first (the
-// partial unique index is the authority), reject-check the source only
-// for a genuinely new candidate, then insert with the frozen suggestion.
-func (service *Service) createOrReturn(ctx context.Context, conn *sql.Conn, actor MutationActor, commandID, digest, sourceType string, sourceID int64, suggestion Suggestion) (CreateResult, error) {
-	principalID := actor.ID
-	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
-		return CreateResult{}, err
-	} else if ok {
-		return replayCreateOutcome(record, digest)
-	}
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return CreateResult{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+// runCreate is the shared runner assembly of the create-or-return command:
+// dedupe first (the partial unique index is the authority), reject-check the
+// source only for a genuinely new candidate, then insert with the frozen
+// suggestion. The replay payload keeps the frozen {summary, created} shape
+// so pre-migration ledger rows still replay exactly.
+func (service *Service) runCreate(ctx context.Context, principalID int64, commandID, digest, sourceType string, resolve func(tx *execution.Tx) (int64, Suggestion, *execution.Rejection, error)) (CreateResult, error) {
+	outcome, err := execution.Run(ctx, service.runner, service.create, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: commandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (createReplayPayload, execution.Change, error) {
+		sourceID, suggestion, rejection, err := resolve(tx)
+		if err != nil {
+			return createReplayPayload{}, execution.Changed, err
 		}
-	}()
-	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
-		return CreateResult{}, err
-	}
-	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
-		return CreateResult{}, err
-	} else if ok {
-		result, replayErr := replayCreateOutcome(record, digest)
-		if replayErr == nil {
-			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-				return CreateResult{}, err
-			}
-			committed = true
+		if rejection != nil {
+			return createReplayPayload{}, execution.Changed, rejection
 		}
-		return result, replayErr
-	}
-	// Dedupe first: any-state existing candidate of this source returns
-	// (the deterministic create-or-return outcome is ledger-recorded).
-	if existing, found, err := service.candidateBySource(ctx, conn, sourceType, sourceID); err != nil {
-		return CreateResult{}, err
-	} else if found {
-		existingID, parseErr := strconv.ParseInt(existing.ID, 10, 64)
-		if parseErr != nil {
-			return CreateResult{}, parseErr
+		// Dedupe first: any-state existing candidate of this source returns
+		// (the deterministic create-or-return outcome is ledger-recorded).
+		if existing, found, err := service.candidateBySource(ctx, tx, sourceType, sourceID); err != nil {
+			return createReplayPayload{}, execution.Changed, err
+		} else if found {
+			return createReplayPayload{Summary: existing, Created: false}, execution.Changed, nil
 		}
-		if err := service.finishCreate(ctx, conn, principalID, commandID, digest, existingID, existing, false); err != nil {
-			return CreateResult{}, err
+		// Only a new candidate validates the source state.
+		var rejected int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM diagnosis_feedback
+			WHERE target_type=? AND target_id=? AND value='rejected'`, sourceType, sourceID).Scan(&rejected); err != nil {
+			return createReplayPayload{}, execution.Changed, err
 		}
-		return CreateResult{Candidate: existing, Created: false}, nil
-	}
-	// Only a new candidate validates the source state.
-	var rejected int
-	if err := conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM diagnosis_feedback
-		WHERE target_type=? AND target_id=? AND value='rejected'`, sourceType, sourceID).Scan(&rejected); err != nil {
-		return CreateResult{}, err
-	}
-	if rejected > 0 {
-		return CreateResult{}, rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerCreate, digest, 0, ErrSourceRejected)
-	}
-	projection, err := suggestionJSON(suggestion)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	now := service.nowText()
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO knowledge_candidates(source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at)
-		VALUES(?,?,1,?,?,?,?,0,?,?)`,
-		sourceType, sourceID, StateAwaiting, projection, suggestion.Title, suggestion.Body, principalID, now)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	candidateID, err := insert.LastInsertId()
-	if err != nil {
-		return CreateResult{}, err
-	}
-	if err := recordAudit(ctx, conn, principalID, commandID, ledgerCreate, sourceType, sourceID, nil, now); err != nil {
-		return CreateResult{}, err
-	}
-	summary, err := scanCandidateOn(ctx, conn, candidateID)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	if err := service.finishCreate(ctx, conn, principalID, commandID, digest, candidateID, summary, true); err != nil {
-		return CreateResult{}, err
-	}
-	return CreateResult{Candidate: summary, Created: true}, nil
-}
-
-// finishCreate records the ledger row (carrying the original outcome
-// payload) and commits the transaction.
-func (service *Service) finishCreate(ctx context.Context, conn *sql.Conn, principalID int64, commandID, digest string, candidateID int64, summary CandidateSummary, created bool) error {
-	payload, err := json.Marshal(createReplayPayload{Summary: summary, Created: created})
-	if err != nil {
-		return err
-	}
-	if err := recordCommand(ctx, conn, principalID, commandID, ledgerCreate, digest, authOutcomeCommitted, "knowledge_candidate", candidateID, string(payload)); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	return nil
-}
-
-// replayCreateOutcome replays a create command's recorded outcome: the
-// committed create-or-return result verbatim, or the recorded rejection.
-func replayCreateOutcome(record authRecord, digest string) (CreateResult, error) {
-	if record.RequestDigest != digest || record.ResultObjectType != "knowledge_candidate" {
-		return CreateResult{}, ErrCommandReused
-	}
-	switch record.Outcome {
-	case authOutcomeCommitted:
-		var payload createReplayPayload
-		if err := json.Unmarshal([]byte(record.ResultPayload), &payload); err != nil {
-			return CreateResult{}, err
+		if rejected > 0 {
+			return createReplayPayload{}, execution.Changed, &execution.Rejection{Code: codeSourceRejected, Detail: ErrSourceRejected.Error()}
 		}
-		return CreateResult{Candidate: payload.Summary, Created: payload.Created}, nil
-	case authOutcomeRejected:
-		return CreateResult{}, replayRejection(record.ResultPayload)
-	default:
-		return CreateResult{}, ErrCommandReused
+		projection, err := suggestionJSON(suggestion)
+		if err != nil {
+			return createReplayPayload{}, execution.Changed, err
+		}
+		now := service.nowText()
+		insert, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_candidates(source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_revision,created_by,created_at)
+			VALUES(?,?,1,?,?,?,?,0,?,?)`,
+			sourceType, sourceID, StateAwaiting, projection, suggestion.Title, suggestion.Body, principalID, now)
+		if err != nil {
+			return createReplayPayload{}, execution.Changed, err
+		}
+		candidateID, err := insert.LastInsertId()
+		if err != nil {
+			return createReplayPayload{}, execution.Changed, err
+		}
+		summary, err := scanCandidateOn(ctx, tx, candidateID)
+		if err != nil {
+			return createReplayPayload{}, execution.Changed, err
+		}
+		return createReplayPayload{Summary: summary, Created: true}, execution.Changed, nil
+	}, func(payload createReplayPayload) int64 {
+		if payload.Summary.ID == "" {
+			return 0
+		}
+		id, _ := strconv.ParseInt(payload.Summary.ID, 10, 64)
+		return id
+	})
+	if err != nil {
+		return CreateResult{}, service.translateCommandError(ctx, err)
 	}
-}
-
-// rejectCreateNotFound records the deterministic 404 in a short
-// transaction and returns the mapped error.
-func rejectCreateNotFound(ctx context.Context, conn *sql.Conn, principalID int64, commandID, digest string) error {
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	return rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerCreate, digest, 0, ErrNotFound)
-}
-
-// rejectCreateShape records the deterministic 422 in a short transaction
-// and returns the mapped error.
-func rejectCreateShape(ctx context.Context, conn *sql.Conn, principalID int64, commandID, digest string) error {
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	return rejectCandidateCommand(ctx, conn, principalID, commandID, ledgerCreate, digest, 0, ErrSourceShape)
+	return CreateResult{Candidate: outcome.Result.Summary, Created: outcome.Result.Created}, nil
 }

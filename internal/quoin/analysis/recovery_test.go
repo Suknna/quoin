@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+
 	"time"
 )
 
@@ -18,29 +19,29 @@ import (
 // live binding.
 func runAccepted(t *testing.T, service *Service, db *sql.DB) (analysisID, attemptID int64) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := commandContext(t)
 	seedProviderChain(t, db)
 	occurrenceID := seedOccurrence(t, db)
-	created, err := service.Create(ctx, occurrenceID, 1, "cmd-recovery-create")
+	created, err := service.Create(ctx, occurrenceID, testOperatorID, "cmd-recovery-create")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Attempts().BindToStream(ctx, created.AttemptID, "boot-a", 1, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AcceptAttempt(ctx, created.AttemptID, "boot-a", 1); err != nil {
+	if err := service.AcceptAttempt(context.Background(), created.AttemptID, "boot-a", 1); err != nil {
 		t.Fatal(err)
 	}
 	return created.AnalysisID, created.AttemptID
 }
 
 func TestCommitInterruptionClosesAttemptAndAnalysis(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	ctx := commandContext(t)
 	analysisID, attemptID := runAccepted(t, service, db)
 
-	if err := service.CommitInterruption(ctx, attemptID, "lease_expired"); err != nil {
+	if err := service.CommitInterruption(context.Background(), attemptID, "lease_expired"); err != nil {
 		t.Fatal(err)
 	}
 	detail, err := service.Get(ctx, analysisID)
@@ -58,7 +59,7 @@ func TestCommitInterruptionClosesAttemptAndAnalysis(t *testing.T) {
 		t.Fatalf("attempt=%+v", attempt)
 	}
 	// Interruption is idempotent and never rewrites the terminal result.
-	if err := service.CommitInterruption(ctx, attemptID, "replaced"); err != nil {
+	if err := service.CommitInterruption(context.Background(), attemptID, "replaced"); err != nil {
 		t.Fatal(err)
 	}
 	attempt, _ = service.Attempts().Get(ctx, attemptID)
@@ -67,7 +68,7 @@ func TestCommitInterruptionClosesAttemptAndAnalysis(t *testing.T) {
 	}
 	// The interrupted occurrence accepts a fresh analysis (operator retry).
 	occurrenceID := seedLookupOccurrence(t, db, analysisID)
-	fresh, err := service.Create(ctx, occurrenceID, 1, "cmd-recovery-retry")
+	fresh, err := service.Create(ctx, occurrenceID, testOperatorID, "cmd-recovery-retry")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,17 +88,17 @@ func seedLookupOccurrence(t *testing.T, db *sql.DB, analysisID int64) int64 {
 }
 
 func TestCommitInterruptionConvergesCancellingToCancelled(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	ctx := commandContext(t)
 	analysisID, attemptID := runAccepted(t, service, db)
 
 	// The operator fence committed first; the loss event arrives while the
 	// runtime stop is in flight (RUNTIME-TASK-006 fence exception).
-	if _, err := service.Cancel(ctx, analysisID, 1, 2, "cmd-recovery-cancel"); err != nil {
+	if _, err := service.Cancel(ctx, analysisID, testOperatorID, 2, "cmd-recovery-cancel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitInterruption(ctx, attemptID, "lease_expired"); err != nil {
+	if err := service.CommitInterruption(context.Background(), attemptID, "lease_expired"); err != nil {
 		t.Fatal(err)
 	}
 	detail, err := service.Get(ctx, analysisID)
@@ -112,7 +113,7 @@ func TestCommitInterruptionConvergesCancellingToCancelled(t *testing.T) {
 		t.Fatalf("attempt state=%q, want Cancelled", attempt.State)
 	}
 	// The late CancelAck is idempotent and does not strand the analysis.
-	if err := service.CancelAck(ctx, attemptID); err != nil {
+	if err := service.CancelAck(context.Background(), attemptID); err != nil {
 		t.Fatal(err)
 	}
 	detail, _ = service.Get(ctx, analysisID)
@@ -122,12 +123,12 @@ func TestCommitInterruptionConvergesCancellingToCancelled(t *testing.T) {
 }
 
 func TestFailureReplayIsIdempotent(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	ctx := commandContext(t)
 	analysisID, attemptID := runAccepted(t, service, db)
 
-	first := service.CommitResult(ctx, Result{
+	first := service.CommitResult(context.Background(), Result{
 		AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false,
 		Termination: "provider_unavailable",
 	})
@@ -136,10 +137,10 @@ func TestFailureReplayIsIdempotent(t *testing.T) {
 	}
 	// The identical failure retry (lost ResultAck) replays as the original
 	// verdict; a divergent one stays a late result.
-	if err := service.CommitResult(ctx, Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "provider_unavailable"}); err != nil {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "provider_unavailable"}); err != nil {
 		t.Fatalf("identical failure replay: %v", err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "invalid_response"}); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "invalid_response"}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("divergent failure replay: %v", err)
 	}
 	detail, _ := service.Get(ctx, analysisID)
@@ -151,9 +152,9 @@ func TestFailureReplayIsIdempotent(t *testing.T) {
 var _ *sql.DB
 
 func TestExpiredLeaseRejectsResult(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	ctx := commandContext(t)
 	analysisID, attemptID := runAccepted(t, service, db)
 	sealAgentCall(t, db, attemptID, "fixture-chat-1")
 	// Burn the lease without converging the row (the sweeper window).
@@ -162,10 +163,10 @@ func TestExpiredLeaseRejectsResult(t *testing.T) {
 	}
 	content := []byte(`"过期租约下的结果"`)
 	digest := sha256.Sum256(content)
-	if err := service.CommitResult(ctx, Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("expired-lease result accepted: %v", err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "provider_unavailable"}); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: attemptID, BootID: "boot-a", Epoch: 1, Succeeded: false, Termination: "provider_unavailable"}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("expired-lease failure accepted: %v", err)
 	}
 	detail, _ := service.Get(ctx, analysisID)
@@ -175,15 +176,15 @@ func TestExpiredLeaseRejectsResult(t *testing.T) {
 }
 
 func TestSealRepairsQueuedAnalysisCrashWindow(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	// Simulate the accept crash window with the real sequence: create a
 	// fresh analysis, accept the attempt row and skip the analysis UPDATE
 	// (the two transactions of AcceptAttempt dying between them — the
 	// analysis never left Queued).
-	ctx := context.Background()
-	created, err := service.Create(ctx, seedOccurrence(t, db), 1, "cmd-crash-window-1")
+	ctx := commandContext(t)
+	created, err := service.Create(ctx, seedOccurrence(t, db), testOperatorID, "cmd-crash-window-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,7 @@ func TestSealRepairsQueuedAnalysisCrashWindow(t *testing.T) {
 	sealAgentCall(t, db, created.AttemptID, "fixture-chat-1")
 	content := []byte(`"崩溃窗口下的封存"`)
 	digest := sha256.Sum256(content)
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-b", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); err != nil {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "boot-b", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: content, Digest: digest[:]}); err != nil {
 		t.Fatal(err)
 	}
 	detail, _ := service.Get(ctx, created.AnalysisID)
@@ -204,7 +205,7 @@ func TestSealRepairsQueuedAnalysisCrashWindow(t *testing.T) {
 		t.Fatalf("crash-window seal stranded the analysis: %+v", detail)
 	}
 	// The same repair applies to the interruption closure.
-	second, err := service.Create(ctx, seedOccurrence(t, db), 1, "cmd-crash-window-2")
+	second, err := service.Create(ctx, seedOccurrence(t, db), testOperatorID, "cmd-crash-window-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestSealRepairsQueuedAnalysisCrashWindow(t *testing.T) {
 	if err := service.Attempts().Accept(ctx, second.AttemptID, "boot-b", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitInterruption(ctx, second.AttemptID, "lease_expired"); err != nil {
+	if err := service.CommitInterruption(context.Background(), second.AttemptID, "lease_expired"); err != nil {
 		t.Fatal(err)
 	}
 	detail2, _ := service.Get(ctx, second.AnalysisID)

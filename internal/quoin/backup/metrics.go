@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 func (s *Service) refreshMetrics(ctx context.Context) {
@@ -18,7 +20,7 @@ func (s *Service) refreshMetrics(ctx context.Context) {
 	}
 	var active int
 	var running, oldest, success, manual, failure sql.NullString
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(CASE WHEN status IN ('queued','running') THEN 1 END),MAX(CASE WHEN status='running' THEN started_at END),MIN(CASE WHEN status IN ('queued','running') THEN created_at END),MAX(CASE WHEN status='succeeded' THEN completed_at END),MAX(CASE WHEN status='succeeded' AND trigger_kind='manual' AND execution_mode='online' THEN completed_at END),MAX(CASE WHEN status='failed' THEN completed_at END) FROM backups`).Scan(&active, &running, &oldest, &success, &manual, &failure)
+	_ = s.reader.QueryRowContext(ctx, `SELECT COUNT(CASE WHEN status IN ('queued','running') THEN 1 END),MAX(CASE WHEN status='running' THEN started_at END),MIN(CASE WHEN status IN ('queued','running') THEN created_at END),MAX(CASE WHEN status='succeeded' THEN completed_at END),MAX(CASE WHEN status='succeeded' AND trigger_kind='manual' AND execution_mode='online' THEN completed_at END),MAX(CASE WHEN status='failed' THEN completed_at END) FROM backups`).Scan(&active, &running, &oldest, &success, &manual, &failure)
 	if active > 0 {
 		s.metrics.Active.Set(1)
 	} else {
@@ -68,13 +70,20 @@ func unixTime(value sql.NullString) float64 {
 }
 
 func (s *Service) Reconcile(ctx context.Context) error {
+	// Restart recovery is its own system operation: the interrupted-run facts
+	// below are audited through the runner under this internal scope.
+	reconcileCtx, err := s.executionContext(ctx, execution.SourceInternal)
+	if err != nil {
+		return err
+	}
+	ctx = reconcileCtx
 	// A directory becomes visible before the terminal SQL commit. Keep all
 	// non-succeeded Runs unreachable by deleting only their numeric run root;
 	// a later startup retries a failed removal instead of accepting the set.
 	// A published directory is valid only once its Run committed succeeded.
 	// Reconciliation must therefore retry cleanup for every non-succeeded row,
 	// including failures caused after the final rename.
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM backups WHERE status <> 'succeeded'`)
+	rows, err := s.reader.QueryContext(ctx, `SELECT id FROM backups WHERE status <> 'succeeded'`)
 	if err != nil {
 		return err
 	}
@@ -99,9 +108,32 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		}
 	}
 	now := timestamp(s.now())
-	result, err := s.db.ExecContext(ctx, `UPDATE backups SET status='failed',completed_at=?,updated_at=?,error_code='interrupted',retryable=1,error_detail='backup interrupted by process restart',row_version=row_version+1 WHERE status IN ('queued','running')`, now, now)
+	activeRows, err := s.reader.QueryContext(ctx, `SELECT id FROM backups WHERE status IN ('queued','running')`)
 	if err != nil {
 		return err
+	}
+	var active []int64
+	for activeRows.Next() {
+		var id int64
+		if err := activeRows.Scan(&id); err != nil {
+			activeRows.Close()
+			return err
+		}
+		active = append(active, id)
+	}
+	if err := activeRows.Close(); err != nil {
+		return err
+	}
+	// One audited interrupted fact per run the previous process left active.
+	interrupted := 0
+	for _, id := range active {
+		marked, err := s.markRunInterrupted(ctx, id, now)
+		if err != nil {
+			return err
+		}
+		if marked {
+			interrupted++
+		}
 	}
 	archives, err := filepath.Glob(filepath.Join(s.config.BackupDirectory, ".archive-*.tar"))
 	if err != nil {
@@ -118,10 +150,8 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		}
 	}
 	if s.metrics != nil {
-		if count, _ := result.RowsAffected(); count > 0 {
-			for i := int64(0); i < count; i++ {
-				s.metrics.Failures.Inc()
-			}
+		for i := 0; i < interrupted; i++ {
+			s.metrics.Failures.Inc()
 		}
 		s.refreshMetrics(ctx)
 	}
@@ -149,6 +179,6 @@ func (s *Service) scheduleOverdue(ctx context.Context) int {
 		return 0
 	}
 	var status string
-	err = s.db.QueryRowContext(ctx, `SELECT status FROM backups WHERE trigger_kind='scheduled' AND scheduled_for=?`, timestamp(due.UTC())).Scan(&status)
+	err = s.reader.QueryRowContext(ctx, `SELECT status FROM backups WHERE trigger_kind='scheduled' AND scheduled_for=?`, timestamp(due.UTC())).Scan(&status)
 	return boolInt(err != nil || status != "succeeded")
 }

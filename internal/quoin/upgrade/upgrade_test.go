@@ -16,10 +16,86 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
 )
 
 func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func zeroDigest() string { return hex.EncodeToString(make([]byte, 32)) }
+
+// seedVerifiedSession completes the fixture administrator's initialization
+// (the bootstrap admin starts pending-init) and issues one real session row,
+// then returns a request context carrying the execution metadata — user actor
+// plus the session proof reference — that the shared command runner demands.
+// auth.VerifyExecutionSession re-checks exactly this state inside the
+// command transaction.
+func seedVerifiedSession(t *testing.T, db *sql.DB, userID int64) context.Context {
+	t.Helper()
+	now := time.Now().UTC()
+	// password_change_required is a user security column: clearing it requires
+	// the paired auth_revision advance in the same UPDATE. A row already
+	// session-eligible (fixture operators) must not be rewritten at all — the
+	// released trigger forbids a revision advance without a security change.
+	var pending, initialized int
+	if err := db.QueryRow(`SELECT password_change_required,initialized FROM users WHERE id=?`, userID).Scan(&pending, &initialized); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 || initialized != 1 {
+		if _, err := db.Exec(`UPDATE users SET initialized=1,password_change_required=0,password_change_required_at=NULL,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id=?`, now.Format(time.RFC3339Nano), userID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var revision int64
+	if err := db.QueryRow(`SELECT auth_revision FROM users WHERE id=?`, userID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("fixture-session/%d/%d", userID, now.UnixNano())))
+	result, err := db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)`,
+		userID, digest[:], revision, "fixture", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(time.Hour).Format(time.RFC3339Nano), now.Add(24*time.Hour).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: userID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: requestID},
+		Session:       execution.SessionRef{ID: sessionID, AuthRevision: revision},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
+
+// auditEvents counts committed audit rows for one action, optionally filtered
+// by outcome.
+func auditEvents(t *testing.T, db *sql.DB, action string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action=?`, action).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func ledgerRows(t *testing.T, db *sql.DB, commandType string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM client_commands WHERE command_type=?`, commandType).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
 
 func newFixture(t *testing.T) (*bootstrap.Database, int64) {
 	t.Helper()
@@ -34,6 +110,11 @@ func newFixture(t *testing.T) (*bootstrap.Database, int64) {
 	}
 	service, err := auth.NewService(database.SQL)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Production installs the read-only pool before serving; tests wire
+	// their only handle so pure reads run through the same seam.
+	if err := service.SetReader(database.Reader); err != nil {
 		database.Close()
 		t.Fatal(err)
 	}
@@ -162,12 +243,30 @@ func (fake *fakeBackups) RunUpgrade(ctx context.Context, id int64) error {
 	fake.ran = append(fake.ran, id)
 	runErr := fake.runErr
 	fake.mu.Unlock()
-	// Emulate the real terminal transition so the admission window moves on.
-	status := "succeeded"
-	if runErr != nil {
-		status = "failed"
+	// Emulate the real terminal transitions through the frozen state machine
+	// (queued→running→terminal with its stage and publish-field triggers), so
+	// the admission window moves on; a partial update would leave the run
+	// queued forever.
+	if runErr == nil {
+		for _, update := range []struct {
+			query string
+			args  []any
+		}{
+			{`UPDATE backups SET status='running',stage='preflight',started_at=?,updated_at=?,row_version=row_version+1 WHERE id=?`, []any{testNow(), testNow(), id}},
+			{`UPDATE backups SET stage='database_snapshot',updated_at=?,row_version=row_version+1 WHERE id=?`, []any{testNow(), id}},
+			{`UPDATE backups SET stage='artifact_copy',updated_at=?,row_version=row_version+1 WHERE id=?`, []any{testNow(), id}},
+			{`UPDATE backups SET stage='manifest_publish',updated_at=?,row_version=row_version+1 WHERE id=?`, []any{testNow(), id}},
+			{`UPDATE backups SET status='succeeded',stage='completed',db_sha256=?,manifest_sha256=?,artifact_count=0,size_bytes=1234,manifest_path='/backup/manifest.json',completed_at=?,updated_at=?,row_version=row_version+1 WHERE id=?`, []any{zeroDigest(), zeroDigest(), testNow(), testNow(), id}},
+		} {
+			if _, err := fake.db.ExecContext(ctx, update.query, update.args...); err != nil {
+				// A fixture transition that violates the frozen state machine
+				// must fail loudly, never strand the run queued forever.
+				return err
+			}
+		}
+		return nil
 	}
-	_, _ = fake.db.ExecContext(ctx, `UPDATE backups SET status=?,stage=CASE WHEN ?='succeeded' THEN 'completed' ELSE stage END,error_code=CASE WHEN ?='succeeded' THEN error_code ELSE 'storage_failure' END,retryable=0,error_detail=CASE WHEN ?='succeeded' THEN error_detail ELSE 'fixture failure' END,completed_at=?,updated_at=?,row_version=row_version+1 WHERE id=?`, status, status, status, status, testNow(), testNow(), id)
+	_, _ = fake.db.ExecContext(ctx, `UPDATE backups SET status='failed',error_code='storage_failure',retryable=0,error_detail='fixture failure',completed_at=?,updated_at=?,row_version=row_version+1 WHERE id=?`, testNow(), testNow(), id)
 	return runErr
 }
 
@@ -198,9 +297,9 @@ func seedSucceededUpgradeBackup(t *testing.T, db *sql.DB, actor int64, enteredAf
 }
 
 func TestPrepareEntersUpgradeMaintenanceWithDeterministicChecklist(t *testing.T) {
-	ctx := context.Background()
 	database, adminID := newFixture(t)
 	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
 	connectionID := seedConnection(t, database.SQL, "prod-thanos")
 	probeID := seedAttempt(t, database.SQL, "connection_probe", "connection", connectionID, "Queued")
 	service := upgrade.NewService(database.SQL)
@@ -224,7 +323,20 @@ func TestPrepareEntersUpgradeMaintenanceWithDeterministicChecklist(t *testing.T)
 		t.Fatalf("queued probe attempt detail=%q want queued|converge", detail)
 	}
 	_ = probeID
-	// Idempotent replay returns the same frozen revision.
+	// The shared runner recorded exactly one audited command: the user actor
+	// with the session-backed correlation from the request metadata.
+	if count := auditEvents(t, database.SQL, "upgrade.prepare"); count != 1 {
+		t.Fatalf("prepare audit rows=%d", count)
+	}
+	var actorType string
+	var actorID, correlationID int64
+	if err := database.SQL.QueryRow(`SELECT actor_type,actor_id,COALESCE(correlation_id IS NOT NULL,0) FROM audit_events WHERE action='upgrade.prepare'`).Scan(&actorType, &actorID, &correlationID); err != nil {
+		t.Fatal(err)
+	}
+	if actorType != "user" || actorID != adminID || correlationID != 1 {
+		t.Fatalf("prepare audit actor=%s/%d correlated=%d", actorType, actorID, correlationID)
+	}
+	// Idempotent replay returns the same frozen revision and records nothing new.
 	replayed, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_0001", ExpectedRowVersion: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -232,13 +344,40 @@ func TestPrepareEntersUpgradeMaintenanceWithDeterministicChecklist(t *testing.T)
 	if replayed.RowVersion != 2 || len(replayed.Items) != len(state.Items) {
 		t.Fatalf("replayed=%+v", replayed)
 	}
+	if count := auditEvents(t, database.SQL, "upgrade.prepare"); count != 1 {
+		t.Fatalf("replay produced new audit rows=%d", count)
+	}
+	if count := ledgerRows(t, database.SQL, "upgrade.prepare"); count != 1 {
+		t.Fatalf("ledger rows=%d", count)
+	}
 }
 
-func TestPrepareRejectsOperatorsAndForeignMaintenance(t *testing.T) {
-	ctx := context.Background()
+func TestPrepareFailsClosedWithoutExecutionContext(t *testing.T) {
 	database, adminID := newFixture(t)
 	defer database.Close()
-	if _, err := database.SQL.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,'x',1,?,?)`, testNow(), testNow()); err != nil {
+	service := upgrade.NewService(database.SQL)
+	// Missing execution metadata must fail closed before any state changes:
+	// no synthetic context and no anonymous actor may mask the gap.
+	if _, err := service.Prepare(context.Background(), upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_bare", ExpectedRowVersion: 1}); !errors.Is(err, execution.ErrMissingContext) {
+		t.Fatalf("missing context error=%v", err)
+	}
+	var active int
+	if err := database.SQL.QueryRow(`SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil || active != 0 {
+		t.Fatalf("maintenance after bare prepare=%d err=%v", active, err)
+	}
+	if count := auditEvents(t, database.SQL, "upgrade.prepare"); count != 0 {
+		t.Fatalf("bare prepare recorded audit rows=%d", count)
+	}
+	if count := ledgerRows(t, database.SQL, "upgrade.prepare"); count != 0 {
+		t.Fatalf("bare prepare recorded ledger rows=%d", count)
+	}
+}
+
+func TestPrepareRejectsForeignPrincipalAndUnqualifiedSessions(t *testing.T) {
+	database, adminID := newFixture(t)
+	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
+	if _, err := database.SQL.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,auth_revision,password_phc,created_at,updated_at) VALUES('op','Op','operator',1,1,1,'x',?,?)`, testNow(), testNow()); err != nil {
 		t.Fatal(err)
 	}
 	var operatorID int64
@@ -246,21 +385,98 @@ func TestPrepareRejectsOperatorsAndForeignMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := upgrade.NewService(database.SQL)
-	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: operatorID, ClientCommandID: "t36_prepare_0002", ExpectedRowVersion: 1}); !errors.Is(err, upgrade.ErrConflict) {
+	// The request names an actor the verified session does not carry: the
+	// runner rejects the mismatch before anything is recorded.
+	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: operatorID, ClientCommandID: "t36_prepare_foreign", ExpectedRowVersion: 1}); err == nil || errors.Is(err, upgrade.ErrConflict) {
+		t.Fatalf("foreign principal error=%v", err)
+	}
+	// An operator session fails the in-transaction admin re-verification.
+	operatorCtx := seedVerifiedSession(t, database.SQL, operatorID)
+	if _, err := service.Prepare(operatorCtx, upgrade.PrepareRequest{ActorID: operatorID, ClientCommandID: "t36_prepare_operator", ExpectedRowVersion: 1}); !errors.Is(err, auth.ErrActorChanged) {
 		t.Fatalf("operator error=%v", err)
 	}
+	var active int
+	if err := database.SQL.QueryRow(`SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil || active != 0 {
+		t.Fatalf("maintenance after rejected prepares=%d err=%v", active, err)
+	}
+	if count := auditEvents(t, database.SQL, "upgrade.prepare"); count != 0 {
+		t.Fatalf("rejected prepares recorded audit rows=%d", count)
+	}
+	// A foreign active maintenance window stays a deterministic business
+	// conflict for the verified admin: the runner records the rejection
+	// durably while the service maps the public ErrConflict back.
 	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='Restore',entered_at=?,entered_by_type='system',row_version=row_version+1 WHERE id=1`, testNow()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_0003", ExpectedRowVersion: 2}); !errors.Is(err, upgrade.ErrConflict) {
+	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_restore", ExpectedRowVersion: 2}); !errors.Is(err, upgrade.ErrConflict) {
 		t.Fatalf("foreign maintenance error=%v", err)
+	}
+	if count := rejectedAudits(t, database.SQL, "upgrade.prepare"); count != 1 {
+		t.Fatalf("conflicted prepare rejected audits=%d", count)
+	}
+	if count := rejectedLedgerRows(t, database.SQL, "upgrade.prepare"); count != 1 {
+		t.Fatalf("conflicted prepare rejected ledger rows=%d", count)
+	}
+}
+
+func rejectedAudits(t *testing.T, db *sql.DB, action string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action=? AND outcome='rejected'`, action).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func rejectedLedgerRows(t *testing.T, db *sql.DB, commandType string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM client_commands WHERE command_type=? AND outcome='rejected_known'`, commandType).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// Ledger rows written by the pre-runner releases carry only their compact
+// legacy JSON payload. Replaying such a row must keep the old contract —
+// return the live projection, record nothing new.
+func TestPrepareReplaysLegacyJSONLedgerRowsWithoutNewRecords(t *testing.T) {
+	database, adminID := newFixture(t)
+	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
+	service := upgrade.NewService(database.SQL)
+	if err := service.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_live", ExpectedRowVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	digest := auth.DigestCommand("upgrade.prepare", map[string]any{"expectedReason": "Upgrade", "expectedRowVersion": 1})
+	if _, err := database.SQL.Exec(`INSERT INTO client_commands(principal_type,principal_id,client_command_id,command_type,request_digest,outcome,result_object_type,result_object_id,result_payload_json,created_at) VALUES('user',?,'t36_prepare_legacy','upgrade.prepare',?,'committed','maintenance',1,'{"reason":"Upgrade"}',?)`, adminID, digest, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	before := auditEvents(t, database.SQL, "upgrade.prepare")
+	replayed, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_legacy", ExpectedRowVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The legacy payload cannot reconstruct the frozen checklist; the replay
+	// falls back to the live projection exactly like the pre-runner contract.
+	if !replayed.Active || replayed.RowVersion != 2 || len(replayed.Items) == 0 {
+		t.Fatalf("legacy replay=%+v", replayed)
+	}
+	if after := auditEvents(t, database.SQL, "upgrade.prepare"); after != before {
+		t.Fatalf("legacy replay recorded audit rows %d -> %d", before, after)
+	}
+	if count := ledgerRows(t, database.SQL, "upgrade.prepare"); count != 2 {
+		t.Fatalf("legacy replay created ledger rows=%d", count)
 	}
 }
 
 func TestReconcilerDrainsMarksBackupSafeAndProjectsPrepared(t *testing.T) {
-	ctx := context.Background()
 	database, adminID := newFixture(t)
 	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
 	investigation, err := database.SQL.Exec(`INSERT INTO investigations(created_at) VALUES(?)`, testNow())
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +492,7 @@ func TestReconcilerDrainsMarksBackupSafeAndProjectsPrepared(t *testing.T) {
 	reconciler := upgrade.NewReconciler(database.SQL, backups)
 	reconciler.SetPrepared(func(prepared bool) { preparedSeen = append(preparedSeen, prepared) })
 	// Work still blocking: no backup may be created.
-	if prepared, err := reconciler.Reconcile(ctx); err != nil || prepared {
+	if prepared, err := reconciler.Reconcile(context.Background()); err != nil || prepared {
 		t.Fatalf("prepared=%v err=%v", prepared, err)
 	}
 	if runs := backups.runs(); len(runs) != 0 {
@@ -287,7 +503,7 @@ func TestReconcilerDrainsMarksBackupSafeAndProjectsPrepared(t *testing.T) {
 		t.Fatal(err)
 	}
 	backupID := seedSucceededUpgradeBackup(t, database.SQL, adminID, "")
-	prepared, err := reconciler.Reconcile(ctx)
+	prepared, err := reconciler.Reconcile(context.Background())
 	if err != nil || !prepared {
 		t.Fatalf("prepared=%v err=%v", prepared, err)
 	}
@@ -306,9 +522,9 @@ func TestReconcilerDrainsMarksBackupSafeAndProjectsPrepared(t *testing.T) {
 }
 
 func TestReconcilerSkipsTombstonedRunCheckAttempts(t *testing.T) {
-	ctx := context.Background()
 	database, adminID := newFixture(t)
 	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
 	// A missed-schedule tombstone is a terminal (Failed) run_check attempt
 	// with its runtime_unavailable gap already recorded; it is durable
 	// history, not drainable work.
@@ -329,16 +545,16 @@ func TestReconcilerSkipsTombstonedRunCheckAttempts(t *testing.T) {
 }
 
 func TestReconcilerCreatesBackupOnlyAfterWorkClearsAndReArmsAfterFailure(t *testing.T) {
-	ctx := context.Background()
 	database, adminID := newFixture(t)
 	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
 	service := upgrade.NewService(database.SQL)
 	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_0006", ExpectedRowVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
 	backups := &fakeBackups{db: database.SQL, runErr: errors.New("storage full")}
 	reconciler := upgrade.NewReconciler(database.SQL, backups)
-	if _, err := reconciler.Reconcile(ctx); err != nil {
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	runs := backups.runs()
@@ -346,7 +562,7 @@ func TestReconcilerCreatesBackupOnlyAfterWorkClearsAndReArmsAfterFailure(t *test
 		t.Fatalf("expected one backup run, got %v", runs)
 	}
 	// The failed run is durable; no automatic retry until a newer prepare.
-	if _, err := reconciler.Reconcile(ctx); err != nil {
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if runs = backups.runs(); len(runs) != 1 {
@@ -356,7 +572,7 @@ func TestReconcilerCreatesBackupOnlyAfterWorkClearsAndReArmsAfterFailure(t *test
 	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_0007", ExpectedRowVersion: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reconciler.Reconcile(ctx); err != nil {
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if runs = backups.runs(); len(runs) != 2 {
@@ -433,5 +649,82 @@ func TestSchemaGateRejectsUnsupportedVersions(t *testing.T) {
 	}
 	if revision == 0 {
 		t.Fatal("revision")
+	}
+}
+
+// The background reconcile is itself an audited system execution: a pass that
+// can mutate the projection runs through the shared runner as the system
+// principal with a scheduler source, while a quiet pass on a fully prepared
+// window records nothing.
+func TestReconcilerRecordsAuditedSystemPassesOnlyWhenWorkPending(t *testing.T) {
+	database, adminID := newFixture(t)
+	defer database.Close()
+	ctx := seedVerifiedSession(t, database.SQL, adminID)
+	investigation, err := database.SQL.Exec(`INSERT INTO investigations(created_at) VALUES(?)`, testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	investigationID, _ := investigation.LastInsertId()
+	seedAttempt(t, database.SQL, "investigation", "investigation", investigationID, "Queued")
+	service := upgrade.NewService(database.SQL)
+	if _, err := service.Prepare(ctx, upgrade.PrepareRequest{ActorID: adminID, ClientCommandID: "t36_prepare_0008", ExpectedRowVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	backups := &fakeBackups{db: database.SQL}
+	reconciler := upgrade.NewReconciler(database.SQL, backups)
+	// Blocking work: the pass can mutate and is audited as the system actor.
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var actorType string
+	var actorID int64
+	var correlation string
+	var initiatorType string
+	var initiatorID int64
+	if err := database.SQL.QueryRow(`SELECT actor_type,actor_id,correlation_id,initiator_type,initiator_id FROM audit_events WHERE action='upgrade.reconcile' ORDER BY id DESC LIMIT 1`).Scan(&actorType, &actorID, &correlation, &initiatorType, &initiatorID); err != nil {
+		t.Fatalf("reconcile audit row missing: %v", err)
+	}
+	if actorType != "system" || actorID != 0 {
+		t.Fatalf("reconcile audit actor=%s/%d", actorType, actorID)
+	}
+	// The pass inherits the originating upgrade.prepare operation: its user
+	// correlation and initiator, with the system principal as the acting
+	// executor — never a fresh per-pass identity.
+	var prepareCorrelation string
+	if err := database.SQL.QueryRow(`SELECT correlation_id FROM audit_events WHERE action='upgrade.prepare' AND outcome='success'`).Scan(&prepareCorrelation); err != nil {
+		t.Fatal(err)
+	}
+	if correlation != prepareCorrelation || prepareCorrelation == "" {
+		t.Fatalf("reconcile correlation=%q want originating prepare %q", correlation, prepareCorrelation)
+	}
+	if initiatorType != "user" || initiatorID != adminID {
+		t.Fatalf("reconcile initiator=%s/%d want user/%d", initiatorType, initiatorID, adminID)
+	}
+	// Settle the window completely: drained work plus a succeeded backup.
+	if _, err := database.SQL.Exec(`UPDATE execution_attempts SET state='Cancelled',ended_at=?,termination_reason='cancelled',row_version=row_version+1 WHERE attempt_type='investigation'`, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fully prepared window can no longer mutate: quiet passes are not
+	// audited, no matter how often the loop ticks.
+	for i := 0; i < 3; i++ {
+		prepared, err := reconciler.Reconcile(context.Background())
+		if err != nil || !prepared {
+			t.Fatalf("quiet pass prepared=%v err=%v", prepared, err)
+		}
+	}
+	var reconcileRows, userRows int
+	if err := database.SQL.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN actor_type='user' THEN 1 ELSE 0 END),0) FROM audit_events WHERE action='upgrade.reconcile'`).Scan(&reconcileRows, &userRows); err != nil {
+		t.Fatal(err)
+	}
+
+	if reconcileRows != 3 || userRows != 0 {
+		t.Fatalf("reconcile audit rows=%d user-attributed=%d", reconcileRows, userRows)
 	}
 }

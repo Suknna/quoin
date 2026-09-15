@@ -30,10 +30,10 @@ func commitSuccessFor(t *testing.T, service *Service, attemptID int64, text stri
 }
 
 func TestSimultaneousSendsConflictDeterministically(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	created, err := service.Create(ctx, principalID, "cmd-race-create", "第一条", nil, nil)
@@ -97,10 +97,10 @@ func TestSimultaneousSendsConflictDeterministically(t *testing.T) {
 }
 
 func TestSendReplayIdempotentAcrossTargetAndHead(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	first, err := service.Create(ctx, principalID, "cmd-replay-create", "起点", nil, nil)
@@ -166,10 +166,10 @@ func TestSendReplayIdempotentAcrossTargetAndHead(t *testing.T) {
 }
 
 func TestUndoWithdrawsLatestTurnAndCancelsQueuedAttempt(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	created, err := service.Create(ctx, principalID, "cmd-undo-create", "要撤回的消息", nil, nil)
@@ -226,21 +226,24 @@ func TestUndoWithdrawsLatestTurnAndCancelsQueuedAttempt(t *testing.T) {
 	if items != 0 {
 		t.Fatalf("withdrawn message entered the new snapshot %d times", items)
 	}
-	// Undo replay reports the same committed state without re-fencing.
+	// Undo replay returns the durable ledger's stored outcome (the original
+	// committed withdrawal facts) without re-fencing or re-dispatching the
+	// runtime cancel.
 	replayed, err := service.Undo(ctx, principalID, "cmd-undo-1", created.InvestigationID, created.MessageID)
 	if err != nil {
 		t.Fatalf("undo replay: %v", err)
 	}
-	if replayed.Withdrawn != 0 || replayed.AttemptID != 0 {
-		t.Fatalf("replay must be a pure state report: %+v", replayed)
+	if replayed.Withdrawn != outcome.Withdrawn || replayed.AttemptID != outcome.AttemptID ||
+		replayed.AttemptState != outcome.AttemptState || replayed.DispatchRequired {
+		t.Fatalf("replay must return the stored outcome without dispatch: %+v vs %+v", replayed, outcome)
 	}
 }
 
 func TestUndoVersusResultCommitOrder(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	// (a) The undo fence commits first: the running attempt closes to
@@ -274,7 +277,7 @@ func TestUndoVersusResultCommitOrder(t *testing.T) {
 		t.Fatalf("late result must not commit an assistant message")
 	}
 	// The runtime's cancel ack finishes the fence (RUNTIME-CANCEL-003).
-	if err := service.CancelAck(ctx, created.AttemptID); err != nil {
+	if err := service.CancelAck(context.Background(), created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
 	var state string
@@ -322,10 +325,10 @@ func TestUndoVersusResultCommitOrder(t *testing.T) {
 }
 
 func TestUndoAfterSuccessWithdrawsWholeTurn(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	created, err := service.Create(ctx, principalID, "cmd-undo-success", "完整回合", nil, nil)
@@ -372,10 +375,10 @@ func TestUndoAfterSuccessWithdrawsWholeTurn(t *testing.T) {
 }
 
 func TestStopFenceCommitOrderings(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	// Success first: the stop answers the completed object, never a
@@ -433,7 +436,7 @@ func TestStopFenceCommitOrderings(t *testing.T) {
 	if replay.State != "Cancelling" || replay.DispatchRequired {
 		t.Fatalf("replay must report without dispatch: %+v", replay)
 	}
-	if err := service.CancelAck(ctx, running.AttemptID); err != nil {
+	if err := service.CancelAck(context.Background(), running.AttemptID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -484,10 +487,10 @@ func TestStopFenceCommitOrderings(t *testing.T) {
 }
 
 func TestRetryGuardsAndReanswer(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	created, err := service.Create(ctx, principalID, "cmd-retry-create", "要重试的问题", nil, nil)
@@ -498,7 +501,7 @@ func TestRetryGuardsAndReanswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A failed attempt (no assistant message, head stays on the user turn).
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false,
 		Termination: "provider_unavailable",
 	}); err != nil {
@@ -580,7 +583,7 @@ func TestRetryGuardsAndReanswer(t *testing.T) {
 	if err := bindRunning(t, db, fresh.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: fresh.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false,
 		Termination: "provider_unavailable",
 	}); err != nil {
@@ -599,10 +602,10 @@ func TestRetryGuardsAndReanswer(t *testing.T) {
 }
 
 func TestMessageAttemptPrefersActiveRetryAttempt(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	created, err := service.Create(ctx, principalID, "cmd-attach-create", "流附着", nil, nil)
@@ -612,7 +615,7 @@ func TestMessageAttemptPrefersActiveRetryAttempt(t *testing.T) {
 	if err := bindRunning(t, db, created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false,
 		Termination: "provider_unavailable",
 	}); err != nil {

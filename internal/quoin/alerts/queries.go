@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Queries owns the unified alert read projections. Upstream occurrences and
@@ -94,17 +98,23 @@ func platformFaultSummary(id int64, component, reason, state string, version int
 // AlertSnapshot returns occurrences and independently durable platform faults.
 // Platform rows intentionally ignore businessSystemKey: no business was declared
 // and filtering them would imply fabricated attribution.
+//
+// The watermark query and both unions run inside ONE read-only snapshot
+// transaction opened on the trusted execution.Reader (BeginSnapshot), so the
+// returned SnapshotSeq and items always describe the same committed state and
+// every statement degrades together: any failure rolls the whole snapshot
+// back, and only a clean read reaches the single Commit.
 func (service *Service) AlertSnapshot(ctx context.Context, state string, businessSystemKey string) (AlertSnapshot, error) {
 	if state != "Firing" && state != "Resolved" {
 		state = "Firing"
 	}
-	tx, err := service.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	snapshot, err := service.runner.Reader().BeginSnapshot(ctx)
 	if err != nil {
 		return AlertSnapshot{}, err
 	}
-	defer tx.Rollback()
+	defer snapshot.Rollback()
 	var seq int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_change_log`).Scan(&seq); err != nil {
+	if err := snapshot.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_change_log`).Scan(&seq); err != nil {
 		return AlertSnapshot{}, err
 	}
 	conditions, args := `o.state=?`, []any{state}
@@ -112,7 +122,7 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		conditions += ` AND o.business_system_id=(SELECT id FROM business_systems WHERE key=?)`
 		args = append(args, businessSystemKey)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
 			(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
 
 			 FROM alert_observations observation
@@ -148,7 +158,7 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		return AlertSnapshot{}, err
 	}
 	if businessSystemKey == "" {
-		faultRows, err := tx.QueryContext(ctx, `SELECT id,component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE state=?`, state)
+		faultRows, err := snapshot.QueryContext(ctx, `SELECT id,component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE state=?`, state)
 		if err != nil {
 			return AlertSnapshot{}, err
 		}
@@ -174,7 +184,7 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		}
 		return items[i].LastStateChange > items[j].LastStateChange
 	})
-	if err := tx.Commit(); err != nil {
+	if err := snapshot.Commit(); err != nil {
 		return AlertSnapshot{}, err
 	}
 	return AlertSnapshot{SnapshotSeq: seq, Items: items}, nil
@@ -190,7 +200,7 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 		var component, reason, state, first, last string
 		var version int64
 		var resolved sql.NullString
-		err = service.db.QueryRowContext(ctx, `SELECT component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE id=?`, id).Scan(&component, &reason, &state, &version, &first, &last, &resolved)
+		err = service.runner.Reader().QueryRowContext(ctx, `SELECT component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE id=?`, id).Scan(&component, &reason, &state, &version, &first, &last, &resolved)
 		if err != nil {
 			return OccurrenceSummary{}, err
 		}
@@ -203,7 +213,7 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 	var summaryState, first, changed, labels string
 	var version int64
 	var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
-	err = service.db.QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+	err = service.runner.Reader().QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
 		(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
 		 FROM alert_observations observation
 		 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
@@ -246,7 +256,7 @@ func (service *Service) ListObservations(ctx context.Context, alertID string) ([
 	if err != nil || occurrenceID <= 0 {
 		return nil, sql.ErrNoRows
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT id, observed_state, starts_at_source, ends_at_source, received_at, committed_at, effect FROM alert_observations WHERE occurrence_id=? ORDER BY committed_at DESC,id DESC`, occurrenceID)
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT id, observed_state, starts_at_source, ends_at_source, received_at, committed_at, effect FROM alert_observations WHERE occurrence_id=? ORDER BY committed_at DESC,id DESC`, occurrenceID)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +295,7 @@ func (service *Service) ListIntakeIssues(ctx context.Context, acknowledged bool)
 	if acknowledged {
 		filter = "acknowledged_at IS NOT NULL"
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT id,kind,issue_key,detail_json,first_seen_at,last_seen_at,occurrence_count,row_version FROM alert_intake_issues WHERE `+filter+` ORDER BY last_seen_at DESC`)
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT id,kind,issue_key,detail_json,first_seen_at,last_seen_at,occurrence_count,row_version FROM alert_intake_issues WHERE `+filter+` ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -303,28 +313,47 @@ func (service *Service) ListIntakeIssues(ctx context.Context, acknowledged bool)
 	return items, rows.Err()
 }
 
+// AcknowledgeIntakeIssue is the Admin-only, one-way sticky acknowledgment of
+// one intake issue, executed through the shared runner: one runner-owned
+// IMMEDIATE transaction carrying the administrator session re-check, the
+// fenced UPDATE and the automatic audit event (ADR-0006). The acknowledged
+// actor is the verified execution-metadata principal — the caller-supplied
+// actorID must match it exactly, so a caller can never acknowledge under
+// someone else's identity. A stale expectedRowVersion or an already
+// acknowledged issue is a recorded deterministic rejection that changes
+// nothing; the caller-visible outcome stays (false, nil), the historical
+// conflict shape.
 func (service *Service) AcknowledgeIntakeIssue(ctx context.Context, issueID int64, actorID int64, expectedRowVersion int64, timestamp string) (bool, error) {
-	conn, err := service.db.Conn(ctx)
+	meta, err := execution.Require(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return false, err
+	if meta.Actor.Kind != execution.PrincipalUser || meta.Actor.ID != actorID {
+		return false, fmt.Errorf("alerts: acknowledgment actor %d does not match the execution metadata principal", actorID)
 	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
-	result, err := conn.ExecContext(ctx, `UPDATE alert_intake_issues SET acknowledged_at=?,acknowledged_by=?,row_version=row_version+1 WHERE id=? AND row_version=? AND acknowledged_at IS NULL`, timestamp, actorID, issueID, expectedRowVersion)
+	_, err = execution.Execute(ctx, service.runner, service.ops.ackIntake,
+		func(tx *execution.Tx) (bool, error) {
+			result, err := tx.ExecContext(ctx, `UPDATE alert_intake_issues SET acknowledged_at=?,acknowledged_by=?,row_version=row_version+1 WHERE id=? AND row_version=? AND acknowledged_at IS NULL`, timestamp, meta.Actor.ID, issueID, expectedRowVersion)
+			if err != nil {
+				return false, err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return false, err
+			}
+			if affected == 0 {
+				return false, &execution.Rejection{Code: CodeRowVersionConflict, Detail: "接入问题版本已变化或已确认", ObjectID: issueID}
+			}
+			return true, nil
+		},
+		func(bool) int64 { return issueID })
 	if err != nil {
-		return false, err
-	}
-	affected, _ := result.RowsAffected()
-	if affected == 0 {
-		return false, nil
-	}
-	if err = service.recordAudit(ctx, conn, "user", actorID, "alert_intake_issue.acknowledge", "success", "alert_intake_issue", issueID, timestamp); err != nil {
-		return false, err
-	}
-	if _, err = conn.ExecContext(ctx, `COMMIT`); err != nil {
+		var rejection *execution.Rejection
+		if errors.As(err, &rejection) && rejection.Code == CodeRowVersionConflict {
+			// The rejection was recorded; the caller sees the same
+			// not-applied outcome it always has.
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil

@@ -52,6 +52,9 @@ func TestSourceObservationAdmissionReportsUnreadableMaintenanceFence(t *testing.
 		t.Fatal(err)
 	}
 	service := observation.NewService(db, registry, enabled)
+	if err := service.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
+		t.Fatal(err)
+	}
 	// The missing singleton makes the fence unreadable: the scheduler error
 	// handler must see it instead of silently skipping a pass.
 	if err := service.AdmitDue(context.Background(), time.Now()); err == nil || !strings.Contains(err.Error(), "maintenance fence") {

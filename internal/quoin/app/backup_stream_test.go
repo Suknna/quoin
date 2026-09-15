@@ -47,32 +47,31 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	defer database.Close()
-	authService, err := auth.NewService(database.SQL)
+	// The administrator is initialized through the real flow and the session
+	// comes from the real two-step login: audited handler calls need the
+	// guard-shaped execution metadata of a genuine session.
+	scenarioInitializeAdmin(t, authService, sender, "Correct horse battery staple 2026!")
+	bearer := scenarioTwoStepLogin(t, authService, sender, "admin", "Correct horse battery staple 2026!")
+	session, err := authService.Authenticate(ctx, bearer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authService.CreateFirstAdmin(ctx, "admin", "Admin", "Correct horse battery staple 2026!"); err != nil {
-		t.Fatal(err)
-	}
-	var adminID int64
-	if err := database.SQL.QueryRow(`SELECT id FROM users WHERE username='admin'`).Scan(&adminID); err != nil {
-		t.Fatal(err)
-	}
+	adminID := session.User.ID
 	service, err := backup.NewService(database.SQL, backup.Config{DataDirectory: config.DataDirectory, BackupDirectory: config.BackupDirectory, ArtifactDirectory: filepath.Join(config.DataDirectory, "artifacts")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Registered after the database defer, so the owned reader pool closes
+	// before the write pool and the WAL sidecar is checkpointed away.
+	defer service.Close()
 	created, err := service.RunOffline(ctx)
 	if err != nil || created.Status != "succeeded" {
 		t.Fatalf("create archive=%+v err=%v", created, err)
 	}
 	checks := 0
-	application := &apiServer{backups: service, backupAuthorize: func(context.Context, string, string) (auth.Session, error) {
+	application := &apiServer{backups: service, db: database.SQL, backupAuthorize: func(context.Context, string, string) (auth.Session, error) {
 		checks++
 		if checks >= 3 {
 			return auth.Session{}, errors.New("session revoked")
@@ -82,6 +81,10 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/backups/"+created.ID+"/download", nil)
 	request.SetPathValue("backupId", created.ID)
 	request.AddCookie(&http.Cookie{Name: "__Host-quoin-session", Value: "test-session"})
+	// Direct handler invocation bypasses the admission guard, so the request
+	// must carry the same execution metadata the guard builds from the real
+	// session; audited operations refuse a context without it.
+	request = request.WithContext(scenarioRequestContext(t, session))
 	response := httptest.NewRecorder()
 	application.downloadBackup(response, request)
 	if response.Code != http.StatusOK || response.Body.Len() == 0 {
@@ -106,7 +109,6 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='Upgrade',entered_at='2026-01-01T00:00:00Z',entered_by_type='system',row_version=row_version+1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	application.db = database.SQL
 	application.backupAuthorize = func(context.Context, string, string) (auth.Session, error) {
 		return auth.Session{User: auth.User{ID: adminID, Role: "admin"}}, nil
 	}
@@ -131,21 +133,27 @@ func TestDownloadBackupContentLengthMakesTruncatedTransportObservable(t *testing
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
+	defer database.Close()
+	scenarioInitializeAdmin(t, authService, sender, "Correct horse battery staple 2026!")
+	bearer := scenarioTwoStepLogin(t, authService, sender, "admin", "Correct horse battery staple 2026!")
+	session, err := authService.Authenticate(ctx, bearer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
 	service, err := backup.NewService(database.SQL, backup.Config{DataDirectory: config.DataDirectory, BackupDirectory: config.BackupDirectory, ArtifactDirectory: filepath.Join(config.DataDirectory, "artifacts")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Same ownership order as the other download fixture: the owned reader
+	// pool closes before the write pool.
+	defer service.Close()
 	created, err := service.RunOffline(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	application := &apiServer{backups: service, backupAuthorize: func(context.Context, string, string) (auth.Session, error) {
-		return auth.Session{User: auth.User{ID: 1, Role: "admin"}}, nil
+		return auth.Session{User: auth.User{ID: session.User.ID, Role: "admin"}}, nil
 	}}
 	application.backupCopy = func(writer io.Writer, reader io.Reader) (int64, error) {
 		buffer := make([]byte, 1)
@@ -155,8 +163,14 @@ func TestDownloadBackupContentLengthMakesTruncatedTransportObservable(t *testing
 		}
 		return int64(count), errors.New("transport disconnected")
 	}
+	// The audited handler refuses a bare request context, so the server-side
+	// handler injects the guard-shaped metadata of the real session before
+	// dispatching (the transport round trip itself stays unchanged).
+	downloadContext := scenarioRequestContext(t, session)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/backups/{backupId}/download", application.downloadBackup)
+	mux.HandleFunc("GET /api/v1/backups/{backupId}/download", func(writer http.ResponseWriter, request *http.Request) {
+		application.downloadBackup(writer, request.WithContext(downloadContext))
+	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/backups/"+created.ID+"/download", nil)

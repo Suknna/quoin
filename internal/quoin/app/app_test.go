@@ -1,6 +1,8 @@
 package app_test
 
 import (
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/app"
@@ -47,8 +48,13 @@ func TestPublicHandlerOnlyServesBackendRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Production installs the read-only pool before serving; tests wire
+	// their only handle so pure reads run through the same seam.
+	if err := service.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
 
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, database.Reader, config.PublicOrigin, config.RootKeyFile))
 	defer server.Close()
 	for _, endpoint := range []string{"/", "/investigations/example", "/api/v1/not-a-route"} {
 		response, err := server.Client().Get(server.URL + endpoint)
@@ -56,8 +62,8 @@ func TestPublicHandlerOnlyServesBackendRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		response.Body.Close()
-		if response.StatusCode != http.StatusNotFound {
-			t.Errorf("GET %s: status=%d, want %d", endpoint, response.StatusCode, http.StatusNotFound)
+		if response.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("uninitialized GET %s: status=%d, want %d", endpoint, response.StatusCode, http.StatusServiceUnavailable)
 		}
 		if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("GET %s: backend security headers missing: %v", endpoint, response.Header)
@@ -90,34 +96,45 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const temporary = "Correct horse battery staple 2026!"
-	if _, err := service.CreateFirstAdmin(ctx, "admin", "Quoin Admin", temporary); err != nil {
+	// Production installs the read-only pool before serving; tests wire
+	// their only handle so pure reads run through the same seam.
+	if err := service.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordingSender{}
+	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{0x7E}, 32), Sender: sender}); err != nil {
+		t.Fatal(err)
+	}
+	// The deployment seeds only a pending bootstrap administrator whose initial
+	// password is the public default; the unified initialization wizard opens
+	// directly with it (the deployment network owns the access boundary).
+	if _, err := service.EnsureBootstrapAdmin(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
+	server := httptest.NewServer(mustHandler(t, service, database.SQL, database.Reader, config.PublicOrigin, config.RootKeyFile))
 	defer server.Close()
 
 	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
 
-	login := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"Correct horse battery staple 2026!"}`, http.StatusOK)
+	login := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"admin"}`, http.StatusOK)
 	if strings.Contains(login.body, "$schema") {
 		t.Fatalf("response body must match the frozen OpenAPI schema, got %s", login.body)
 	}
-	cookie := login.headers.Get("Set-Cookie")
-	if !strings.HasPrefix(cookie, "__Host-quoin-session=") {
-		t.Fatalf("expected session cookie, got %q", cookie)
+	if cookie := login.headers.Get("Set-Cookie"); !strings.HasPrefix(cookie, "__Host-quoin-flow=") {
+		t.Fatalf("expected flow cookie, got %q", cookie)
 	}
-	var session struct {
-		PasswordChangeRequired bool `json:"passwordChangeRequired"`
-		AuthRevision           int  `json:"authRevision"`
+	var flow struct {
+		Type string `json:"type"`
 	}
-	if err := json.Unmarshal([]byte(login.body), &session); err != nil {
+	if err := json.Unmarshal([]byte(login.body), &flow); err != nil {
 		t.Fatal(err)
 	}
-	if !session.PasswordChangeRequired {
-		t.Fatal("first login must report passwordChangeRequired")
+	if flow.Type != "admin_initialize" {
+		t.Fatalf("expected the admin initialization flow, got %s", login.body)
 	}
+	flowCookie := scenarioCookie(login.headers, "__Host-quoin-flow")
+	flowOrigin := merge(origin, map[string]string{"Cookie": flowCookie})
 
 	// Huma validates request structure before a handler executes. It must still
 	// serialize the project-wide frozen ErrorModel and must not echo submitted
@@ -134,14 +151,64 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	unsupportedMedia := mustPost(t, server, merge(origin, map[string]string{"Content-Type": "text/plain"}), `/api/v1/auth/login`, `{"username":"admin","password":"irrelevant"}`, http.StatusUnsupportedMediaType)
 	assertFrozenProblem(t, unsupportedMedia, "unsupported_media")
 
-	me := mustRequest(t, server, map[string]string{"Cookie": splitCookie(cookie)}, `/api/v1/auth/me`, http.StatusOK)
+	// The wizard: formal password, then a verified OTP contact. The forced
+	// first-password change of the old direct login now lives in this flow's
+	// password step.
+	password := "Correct horse battery staple 2026!"
+	mustDo(t, server, http.MethodPut, flowOrigin, `/api/v1/auth/flow/password`, `{"newPassword":"`+password+`"}`, http.StatusNoContent)
+	contact := mustPost(t, server, flowOrigin, `/api/v1/auth/flow/contacts`, `{"channel":"email","target":"admin@example.test"}`, http.StatusOK)
+	var masked struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(contact.body), &masked); err != nil {
+		t.Fatal(err)
+	}
+	mustPost(t, server, flowOrigin, `/api/v1/auth/flow/challenge`, `{"contactId":"`+masked.ID+`"}`, http.StatusOK)
+	initialVerify := mustPost(t, server, flowOrigin, `/api/v1/auth/flow/verify`, `{"code":"`+sender.lastCode()+`"}`, http.StatusOK)
+	var verification struct {
+		Completed bool `json:"completed"`
+	}
+	if err := json.Unmarshal([]byte(initialVerify.body), &verification); err != nil {
+		t.Fatal(err)
+	}
+	if verification.Completed {
+		t.Fatalf("initialization verification must not create a session: %s", initialVerify.body)
+	}
+	mustPost(t, server, flowOrigin, `/api/v1/auth/flow/complete`, `{}`, http.StatusNoContent)
+	// A flow bearer can never authenticate: the flow cookie answers 401 on me.
+	mustRequest(t, server, map[string]string{"Cookie": flowCookie}, `/api/v1/auth/me`, http.StatusUnauthorized)
+
+	// Second-factor login: the password starts a login flow, the consumed OTP
+	// code issues the session cookie.
+	flowLogin := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"`+password+`"}`, http.StatusOK)
+	var secondFactor struct {
+		Type     string `json:"type"`
+		Contacts []struct {
+			ID string `json:"id"`
+		} `json:"contacts"`
+	}
+	if err := json.Unmarshal([]byte(flowLogin.body), &secondFactor); err != nil {
+		t.Fatal(err)
+	}
+	if secondFactor.Type != "login" || len(secondFactor.Contacts) == 0 {
+		t.Fatalf("expected the second-factor login flow, got %s", flowLogin.body)
+	}
+	loginOrigin := merge(origin, map[string]string{"Cookie": scenarioCookie(flowLogin.headers, "__Host-quoin-flow")})
+	mustPost(t, server, loginOrigin, `/api/v1/auth/flow/challenge`, `{"contactId":"`+secondFactor.Contacts[0].ID+`"}`, http.StatusOK)
+	verified := mustPost(t, server, loginOrigin, `/api/v1/auth/flow/verify`, `{"code":"`+sender.lastCode()+`"}`, http.StatusOK)
+	cookie := scenarioCookie(verified.headers, "__Host-quoin-session")
+	if !strings.HasPrefix(cookie, "__Host-quoin-session=") {
+		t.Fatalf("expected session cookie, got %q", verified.headers.Values("Set-Cookie"))
+	}
+
+	me := mustRequest(t, server, map[string]string{"Cookie": cookie}, `/api/v1/auth/me`, http.StatusOK)
 	t.Logf("me: %s", me)
 
-	change := mustDo(t, server, http.MethodPut, merge(origin, map[string]string{"Cookie": splitCookie(cookie)}),
-		`/api/v1/auth/password`, `{"currentPassword":"Correct horse battery staple 2026!","newPassword":"A better personal passphrase 2027!"}`, http.StatusNoContent)
+	change := mustDo(t, server, http.MethodPut, merge(origin, map[string]string{"Cookie": cookie}),
+		`/api/v1/auth/password`, `{"currentPassword":"`+password+`","newPassword":"A better personal passphrase 2027!"}`, http.StatusNoContent)
 	t.Logf("change headers: %v", change.headers)
 
-	after := mustRequest(t, server, map[string]string{"Cookie": splitCookie(cookie)}, `/api/v1/auth/me`, http.StatusOK)
+	after := mustRequest(t, server, map[string]string{"Cookie": cookie}, `/api/v1/auth/me`, http.StatusOK)
 	var updated struct {
 		PasswordChangeRequired bool `json:"passwordChangeRequired"`
 		AuthRevision           int  `json:"authRevision"`
@@ -149,7 +216,8 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	if err := json.Unmarshal([]byte(after), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.PasswordChangeRequired || updated.AuthRevision != 2 {
+	if updated.PasswordChangeRequired || updated.AuthRevision != 3 {
+		// Revision chain: seed 1, initialization password step 2, own change 3.
 		t.Fatalf("password change did not take effect: %s", after)
 	}
 }
@@ -177,9 +245,12 @@ func splitCookie(setCookie string) string {
 	return strings.Split(setCookie, ";")[0]
 }
 
-func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, origin string, rootKeyFile string) http.Handler {
+func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, reader execution.Reader, origin string, rootKeyFile string) http.Handler {
 	t.Helper()
 	application := app.NewAPIServer(service, db, rootKeyFile)
+	if err := application.SetReadOnlyReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	// Tests use a fixed deployment value rather than httptest's Host so receiver
 	// configuration cannot accidentally begin trusting request-controlled hosts.
 	application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
@@ -262,54 +333,20 @@ func merge(base, extra map[string]string) map[string]string {
 // reveal once → second reveal 410 → replay after consume reports
 // revealAvailable=false; Operator role is forbidden from both commands.
 func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	secrets := filepath.Join(root, "secrets")
-	config := contract.QuoinConfig{
-		Component: "quoin", PublicOrigin: "https://quoin.example.com",
-		DataDirectory:             filepath.Join(root, "data"),
-		BackupDirectory:           filepath.Join(root, "backup"),
-		RootKeyFile:               filepath.Join(secrets, "root-key"),
-		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
-		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
-	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
-		t.Fatal(err)
-	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	service, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const temporary = "Correct horse battery staple 2026!"
-	if _, err := service.CreateFirstAdmin(ctx, "admin", "Quoin Admin", temporary); err != nil {
-		t.Fatal(err)
-	}
-	// A second non-admin user (Operator) exercises the 403 paths; user
-	// management lands in a later ticket, so the operator row is inserted
-	// directly with the real Argon2id hash.
-	operatorPHC, err := auth.HashPassword("Operator passphrase 2026!")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.SQL.ExecContext(ctx, `INSERT INTO users(username,display_name,role,enabled,password_phc,password_change_required,created_at,updated_at) VALUES(?,'Ops Operator','operator',1,?,0,?,?)`,
-		"operator", operatorPHC, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
+	scenario := newAuthScenario(t)
+	server := scenario.server
 
-	server := httptest.NewServer(mustHandler(t, service, database.SQL, config.PublicOrigin, config.RootKeyFile))
-	defer server.Close()
-	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
+	adminSession := scenario.login(t, "admin", scenario.adminPassword)
+	admin := scenario.sessionHeaders(adminSession)
+	// A second non-admin user (Operator) exercises the 403 paths: created with
+	// an assigned OTP contact through the real admin surface, initialized via
+	// the real operator flow, then logged in with the two-step login.
+	const operatorTemp = "Operator initial passphrase 2026!"
+	const operatorFormal = "Operator passphrase 2027!"
+	scenario.createOperator(t, adminSession, "reveal-create-0001", "operator", "Ops Operator", operatorTemp, "operator@example.test")
+	operator := scenario.sessionHeaders(scenario.initializeOperatorSession(t, "operator", operatorTemp, operatorFormal))
 
-	adminCookie := loginCookie(t, server, origin, "admin", temporary, true)
-	operatorCookie := loginCookie(t, server, origin, "operator", "Operator passphrase 2026!", false)
-
-	create := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	create := mustPost(t, server, admin,
 		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
 	var created struct {
 		SourceKey       string `json:"sourceKey"`
@@ -326,7 +363,7 @@ func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
 
 	// Replay with the same clientCommandId returns the original source and the
 	// same still-valid handle (HTTP-COMMAND-003 / SEC-REVEAL-003).
-	replay := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	replay := mustPost(t, server, admin,
 		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
 	var replayed struct {
 		SourceKey       string `json:"sourceKey"`
@@ -341,17 +378,17 @@ func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
 	}
 
 	// Replaying with a DIFFERENT payload under the same command id conflicts.
-	mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	mustPost(t, server, admin,
 		`/api/v1/alert-sources`, `{"key":"other-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusConflict)
 
 	// Operator is forbidden from both commands.
-	mustPost(t, server, merge(origin, map[string]string{"Cookie": operatorCookie}),
+	mustPost(t, server, operator,
 		`/api/v1/alert-sources`, `{"key":"ops-am","protocol":"alertmanager","clientCommandId":"cmd-0002"}`, http.StatusForbidden)
-	mustPost(t, server, merge(origin, map[string]string{"Cookie": operatorCookie}),
+	mustPost(t, server, operator,
 		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusForbidden)
 
 	// Reveal succeeds exactly once; the second consume of the same handle is 410.
-	reveal := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	reveal := mustPost(t, server, admin,
 		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusOK)
 	var revealed struct {
 		CredentialID string `json:"credentialId"`
@@ -363,12 +400,12 @@ func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
 	if len(revealed.BearerToken) != 43 {
 		t.Fatalf("bearer shape wrong: %q", revealed.BearerToken)
 	}
-	mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	mustPost(t, server, admin,
 		`/api/v1/alert-sources/credentials/reveal`, `{"revealHandle":"`+created.RevealHandle+`"}`, http.StatusGone)
 
 	// After consume, a replay of the same command reports revealAvailable=false
 	// and never re-creates the credential (SEC-REVEAL-*).
-	after := mustPost(t, server, merge(origin, map[string]string{"Cookie": adminCookie}),
+	after := mustPost(t, server, admin,
 		`/api/v1/alert-sources`, `{"key":"prod-am","protocol":"alertmanager","clientCommandId":"cmd-0001"}`, http.StatusCreated)
 	var afterConsume struct {
 		RevealAvailable bool `json:"revealAvailable"`
@@ -379,17 +416,4 @@ func TestAlertSourceRevealLifecycleOverRealServer(t *testing.T) {
 	if afterConsume.RevealAvailable {
 		t.Fatalf("replay after consume must not offer a handle: %s", after.body)
 	}
-}
-
-func loginCookie(t *testing.T, server *httptest.Server, origin map[string]string, username, password string, changePassword bool) string {
-	t.Helper()
-	login := mustPost(t, server, origin, `/api/v1/auth/login`,
-		`{"username":"`+username+`","password":"`+password+`"}`, http.StatusOK)
-	cookie := splitCookie(login.headers.Get("Set-Cookie"))
-	if changePassword {
-		mustDo(t, server, http.MethodPut, merge(origin, map[string]string{"Cookie": cookie}),
-			`/api/v1/auth/password`,
-			`{"currentPassword":"`+password+`","newPassword":"Fresh personal passphrase 2027!"}`, http.StatusNoContent)
-	}
-	return cookie
 }

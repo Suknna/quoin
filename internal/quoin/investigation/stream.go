@@ -173,7 +173,7 @@ func (service *Service) TerminalViewFor(ctx context.Context, attemptID int64) (*
 func (service *Service) terminalView(ctx context.Context, attemptID int64) (TerminalEvent, error) {
 	var view TerminalEvent
 	var reason sql.NullString
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT state, termination_reason FROM execution_attempts WHERE id=?`,
 		attemptID).Scan(&view.State, &reason); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -183,13 +183,13 @@ func (service *Service) terminalView(ctx context.Context, attemptID int64) (Term
 	}
 	view.TerminationReason = reason.String
 	if view.State == "Succeeded" {
-		if err := service.db.QueryRowContext(ctx, `
+		if err := service.runner.Reader().QueryRowContext(ctx, `
 			SELECT content FROM investigation_messages WHERE attempt_id=? AND role='assistant'`,
 			attemptID).Scan(&view.Content); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return TerminalEvent{}, err
 		}
 		var usageJSON sql.NullString
-		if err := service.db.QueryRowContext(ctx, `
+		if err := service.runner.Reader().QueryRowContext(ctx, `
 			SELECT usage_json FROM model_calls WHERE attempt_id=? AND status='succeeded'
 			ORDER BY id DESC LIMIT 1`, attemptID).Scan(&usageJSON); err == nil && usageJSON.Valid {
 			var usage struct {

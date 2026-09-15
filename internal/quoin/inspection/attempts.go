@@ -16,10 +16,18 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
-// Attempts exposes the generic attempt service for dispatch and fencing.
+// Attempts exposes the generic attempt service for dispatch and fencing. The
+// fresh instance inherits this family's read-only reader so its read paths
+// (chat contract lookups, dispatch projections) never fall back to the write
+// pool; the write pool stays private to its runner transactions.
 func (s *Service) Attempts() *attempt.Service {
 	attempts := attempt.NewService(s.db)
 	attempts.SnapshotRebuilder = s.rebuildAttemptInput
+	if s.reader != nil {
+		if err := attempts.SetReader(s.reader); err != nil {
+			panic("inspection: wire attempt reader: " + err.Error())
+		}
+	}
 	return attempts
 }
 
@@ -238,7 +246,10 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	if err != nil {
 		return nil, err
 	}
-	modelID, contextBudget, maxOutput, err := attempt.NewService(s.db).LookupChatContract(ctx, attemptID)
+	// The chat contract lookup is a pure read: it goes through the shared
+	// attempt machine with this family's read-only reader wired, never a
+	// fresh write-pool fallback.
+	modelID, contextBudget, maxOutput, err := s.Attempts().LookupChatContract(ctx, attemptID)
 	if err != nil {
 		return nil, err
 	}

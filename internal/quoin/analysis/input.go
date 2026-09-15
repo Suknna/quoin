@@ -64,7 +64,7 @@ func populateOccurrenceAnnotations(ctx context.Context, queries queryer, occurre
 func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	var occurrenceID, probeResultID int64
 	var rendererVersion string
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT snapshot.renderer_version, occurrence.occurrence_id, grant.qualified_probe_result_id
 		FROM attempt_input_snapshots snapshot
 		JOIN attempt_input_items occurrence ON occurrence.snapshot_id=snapshot.id AND occurrence.occurrence_id IS NOT NULL
@@ -75,24 +75,24 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	}
 	// The frozen catalog document is part of the digested input; rebuilding
 	// reads the stored column so an enablement change never drifts history.
-	catalog, err := attempt.FrozenToolCatalogDoc(ctx, service.db, attemptID)
+	catalog, err := attempt.FrozenToolCatalogDoc(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
 	// v4 makes the config lineage optional (source-level attempts); v3 and
 	// older snapshots always carry one and keep their exact historical paths.
-	configVersionID, err := frozenConfigVersion(ctx, service.db, attemptID)
+	configVersionID, err := frozenConfigVersion(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
 	if rendererVersion == RendererVersion {
-		return service.rebuildFor(ctx, service.db, attemptID, occurrenceID, probeResultID, configVersionID, true, catalog)
+		return service.rebuildFor(ctx, service.runner.Reader(), attemptID, occurrenceID, probeResultID, configVersionID, true, catalog)
 	}
 	if rendererVersion == "initial-analysis-renderer-v3" {
 		if configVersionID == 0 {
 			return nil, fmt.Errorf("attempt %d renderer v3 snapshot lost its business config lineage", attemptID)
 		}
-		return service.rebuildFor(ctx, service.db, attemptID, occurrenceID, probeResultID, configVersionID, true, catalog)
+		return service.rebuildFor(ctx, service.runner.Reader(), attemptID, occurrenceID, probeResultID, configVersionID, true, catalog)
 	}
 	if configVersionID == 0 {
 		return nil, fmt.Errorf("attempt %d historical snapshot lost its business config lineage", attemptID)
@@ -215,7 +215,7 @@ func frozenIntegrations(ctx context.Context, queries queryer, attemptID int64) (
 // retains the old Label Contract lineage, which is never consulted by new work.
 func (service *Service) rebuildLegacyInput(ctx context.Context, attemptID, occurrenceID, probeResultID, configVersionID int64, includeAnnotations bool) ([]byte, error) {
 	var contractVersionID int64
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT label_contract_version_id FROM attempt_input_items
 		WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?)
 		  AND label_contract_version_id IS NOT NULL`, attemptID).Scan(&contractVersionID); err != nil {
@@ -224,7 +224,7 @@ func (service *Service) rebuildLegacyInput(ctx context.Context, attemptID, occur
 	var input Input
 	var labelsJSON string
 	var resolvedAt sql.NullString
-	if err := service.db.QueryRowContext(ctx, `SELECT state,first_seen_at,last_state_change_at,resolved_at,labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT state,first_seen_at,last_state_change_at,resolved_at,labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).
 		Scan(&input.Occurrence.State, &input.Occurrence.FirstSeenAt, &input.Occurrence.LastStateChange, &resolvedAt, &labelsJSON); err != nil {
 		return nil, err
 	}
@@ -236,14 +236,14 @@ func (service *Service) rebuildLegacyInput(ctx context.Context, attemptID, occur
 		return nil, err
 	}
 	if includeAnnotations {
-		if err := populateOccurrenceAnnotations(ctx, service.db, occurrenceID, &input.Occurrence); err != nil {
+		if err := populateOccurrenceAnnotations(ctx, service.runner.Reader(), occurrenceID, &input.Occurrence); err != nil {
 			return nil, err
 		}
 	}
 	// Historical snapshots always carry a business context; the pointer stays
 	// nil only for the v4 source-level shape.
 	input.BusinessContext = &BusinessContext{}
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT config.system_key,json_extract(contract.contract_json,'$.label_contract.business_system_label')
 		FROM business_system_config_versions config JOIN label_contracts contract ON contract.id=config.label_contract_version_id
 		WHERE config.id=? AND contract.id=?`, configVersionID, contractVersionID).
@@ -252,7 +252,7 @@ func (service *Service) rebuildLegacyInput(ctx context.Context, attemptID, occur
 	}
 	input.BusinessContext.ConfigVersionID = strconv.FormatInt(configVersionID, 10)
 	input.BusinessContext.LabelContractVersionID = strconv.FormatInt(contractVersionID, 10)
-	if err := service.db.QueryRowContext(ctx, `SELECT chat_model_id,context_budget_tokens,max_output_tokens FROM model_provider_connection_probe_results WHERE probe_result_id=?`, probeResultID).
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT chat_model_id,context_budget_tokens,max_output_tokens FROM model_provider_connection_probe_results WHERE probe_result_id=?`, probeResultID).
 		Scan(&input.ModelContract.ModelID, &input.ModelContract.ContextBudgetTokens, &input.ModelContract.MaxOutputTokens); err != nil {
 		return nil, err
 	}

@@ -1,6 +1,8 @@
 // Run admission: the StartRun command creates one complete durable observation
 // work graph (root, one child per plugin-declared object type, frozen inputs,
-// source grants) in a single writer transaction, and the durable
+// source grants) inside the execution runner's audited transaction — a manual
+// refresh under the administrator's verified session, a scheduler tick or
+// enablement kick under the explicit system scope — and the durable
 // reconciliation commands that keep automatic observation convergent
 // (schedule ticks, connection-disable cancellation). The active-run and
 // scheduled-run partial indexes are the cross-process dedupe authority;
@@ -15,14 +17,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
-	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
+
+// runDetail read note: runDetailOn/activeRunOn compose on the audit.Reader
+// read surface — the guarded runner transaction satisfies it, so the
+// admission business stage still reads the same uncommitted snapshot.
 
 // executionInput is the frozen source_observation_execution_v1 canonical
 // snapshot. Every discovery fact (object type, query, identity labels, limit)
@@ -43,10 +51,19 @@ type executionInput struct {
 
 // StartRun admits one complete bounded observation for one connection.
 // triggerKind is "manual", "schedule" or "enablement"; only "schedule" may
-// carry scheduledFor (the deterministic dedup tick). The scheduler uses actor
-// 0, which is intentionally not a users row. Replaying a committed
-// clientCommandID returns the stored result; an already-active Run is returned
-// unchanged instead of forking a second root.
+// carry scheduledFor (the deterministic dedup tick).
+//
+// Origins and their identities:
+//   - manual: the caller's context must carry the administrator's execution
+//     metadata (user actor with its verified session); the operation
+//     authorization re-verifies the session inside the transaction via
+//     auth.VerifyExecutionSession. There is no fallback without it.
+//   - schedule/enablement: the explicit system scope is attached here
+//     (scheduler or internal source), so the durable tick is audited under
+//     the system principal and its children inherit the correlation.
+//
+// Replaying a committed clientCommandID returns the stored result; an
+// already-active Run is returned unchanged instead of forking a second root.
 func (service *Service) StartRun(ctx context.Context, principalID int64, clientCommandID, connectionName, triggerKind string, scheduledFor *string) (SourceObservationRun, error) {
 	switch triggerKind {
 	case "manual", "enablement":
@@ -61,114 +78,102 @@ func (service *Service) StartRun(ctx context.Context, principalID int64, clientC
 		return SourceObservationRun{}, fmt.Errorf("invalid source observation trigger kind %q", triggerKind)
 	}
 	digest := commandDigest(connectionName, triggerKind, scheduledFor)
-	// The descriptor is resolved before the writer transaction: descriptor
-	// data is an immutable process fact, and holding the write lock while
-	// scanning the registry buys nothing.
-	var connectionID int64
-	var connectionType string
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return SourceObservationRun{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	command := execution.Command{ClientCommandID: clientCommandID, Digest: digest}
+	switch triggerKind {
+	case "manual":
+		if principalID < 1 {
+			return SourceObservationRun{}, errors.New("manual source observation requires an administrator principal")
 		}
-	}()
-	if err := admissionFence(ctx, conn); err != nil {
-		return SourceObservationRun{}, err
+		command.PrincipalType, command.PrincipalID = string(execution.PrincipalUser), principalID
+	default:
+		source := execution.SourceScheduler
+		if triggerKind == "enablement" {
+			source = execution.SourceInternal
+		}
+		scoped, err := ensureSystemScope(ctx, source)
+		if err != nil {
+			return SourceObservationRun{}, err
+		}
+		ctx = scoped
+		command.PrincipalType, command.PrincipalID = string(execution.PrincipalSystem), 0
 	}
-	// The command ledger owns (principal, clientCommandID) replay. The
-	// scheduler's derived command key makes tick admission idempotent across
-	// process restarts without a second dedupe store.
-	if record, found, err := auth.LookupCommandOn(ctx, conn, principalID, clientCommandID); err != nil {
-		return SourceObservationRun{}, err
-	} else if found {
-		if record.RequestDigest != digest {
+	outcome, err := execution.Run(ctx, service.runner, service.startOp, command,
+		func(tx *execution.Tx) (SourceObservationRun, execution.Change, error) {
+			if err := admissionFence(ctx, tx); err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			var connectionID int64
+			var connectionType string
+			err := tx.QueryRowContext(ctx, `SELECT id,type FROM connections WHERE name=? AND enabled=1 AND revalidation_required=0`, connectionName).Scan(&connectionID, &connectionType)
+			if errors.Is(err, sql.ErrNoRows) {
+				return SourceObservationRun{}, execution.Unchanged, fmt.Errorf("%w: %s", ErrNotObservable, connectionName)
+			}
+			if err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			// The descriptor is resolved inside the business stage against the
+			// frozen process catalog; holding no descriptor decision outside
+			// the authorization keeps one fence for the whole admission.
+			descriptor, err := service.discoverableDescriptor(connectionType)
+			if err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			// At most one active Run per connection (frozen partial index): a
+			// manual or enablement kick piggybacks on the active root instead
+			// of forking.
+			if existing, found, err := service.activeRunOn(ctx, tx, connectionID, connectionName); err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			} else if found {
+				return existing, execution.Unchanged, nil
+			}
+			// The scheduler uses actor 0, which is intentionally not a users
+			// row; the nullable creator records that distinction without
+			// fabricating a principal.
+			var createdBy any = command.PrincipalID
+			if command.PrincipalID == 0 {
+				createdBy = nil
+			}
+			now := service.nowText()
+			result, err := tx.ExecContext(ctx, `INSERT INTO observation_runs(connection_id,plugin_id,trigger_kind,scheduled_for,state,row_version,created_by,created_at) VALUES(?,?,?,?, 'Queued',1,?,?)`,
+				connectionID, descriptor.ID, triggerKind, scheduledFor, createdBy, now)
+			if err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			runID, err := result.LastInsertId()
+			if err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			// Evidence time is generated when observation truly starts;
+			// children are created after the root turns Running so the scope
+			// trigger always sees an active root and the dispatcher never
+			// meets an orphaned root.
+			if _, err := tx.ExecContext(ctx, `UPDATE observation_runs SET state='Running',evidence_at=?,row_version=2 WHERE id=?`, now, runID); err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			if err := createObservationAttempts(ctx, tx, runID, connectionID, descriptor, now); err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			detail, err := service.runDetailOn(ctx, tx, connectionName, runID)
+			if err != nil {
+				return SourceObservationRun{}, execution.Unchanged, err
+			}
+			return detail, execution.Changed, nil
+		},
+		func(detail SourceObservationRun) int64 {
+			id, _ := strconv.ParseInt(detail.ID, 10, 64)
+			return id
+		})
+	if err != nil {
+		if errors.Is(err, execution.ErrCommandReused) {
 			return SourceObservationRun{}, ErrCommandReused
 		}
-		var detail SourceObservationRun
-		if err := json.Unmarshal([]byte(record.ResultPayload), &detail); err != nil {
-			return SourceObservationRun{}, err
-		}
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return SourceObservationRun{}, err
-		}
-		committed = true
-		return detail, nil
-	}
-	err = conn.QueryRowContext(ctx, `SELECT id,type FROM connections WHERE name=? AND enabled=1 AND revalidation_required=0`, connectionName).Scan(&connectionID, &connectionType)
-	if errors.Is(err, sql.ErrNoRows) {
-		return SourceObservationRun{}, fmt.Errorf("%w: %s", ErrNotObservable, connectionName)
-	}
-	if err != nil {
 		return SourceObservationRun{}, err
 	}
-	descriptor, err := service.discoverableDescriptor(connectionType)
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	// At most one active Run per connection (frozen partial index): a manual
-	// or enablement kick piggybacks on the active root instead of forking.
-	if existing, found, err := service.activeRunOn(ctx, conn, connectionID, connectionName); err != nil {
-		return SourceObservationRun{}, err
-	} else if found {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return SourceObservationRun{}, err
-		}
-		committed = true
-		return existing, nil
-	}
-	// The scheduler uses actor 0, which is intentionally not a users row; the
-	// nullable creator records that distinction without fabricating a principal.
-	var createdBy any = principalID
-	if principalID == 0 {
-		createdBy = nil
-	}
-	now := service.nowText()
-	result, err := conn.ExecContext(ctx, `INSERT INTO observation_runs(connection_id,plugin_id,trigger_kind,scheduled_for,state,row_version,created_by,created_at) VALUES(?,?,?,?, 'Queued',1,?,?)`,
-		connectionID, descriptor.ID, triggerKind, scheduledFor, createdBy, now)
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	runID, err := result.LastInsertId()
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	// Evidence time is generated when observation truly starts; children are
-	// created after the root turns Running so the scope trigger always sees an
-	// active root and the dispatcher never meets an orphaned root.
-	if _, err := conn.ExecContext(ctx, `UPDATE observation_runs SET state='Running',evidence_at=?,row_version=2 WHERE id=?`, now, runID); err != nil {
-		return SourceObservationRun{}, err
-	}
-	if err := createObservationAttempts(ctx, conn, runID, connectionID, descriptor, now); err != nil {
-		return SourceObservationRun{}, err
-	}
-	detail, err := service.runDetailOn(ctx, conn, connectionName, runID)
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	encoded, err := json.Marshal(detail)
-	if err != nil {
-		return SourceObservationRun{}, err
-	}
-	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, "observation.source.start", digest, "committed", "observation_run", runID, string(encoded)); err != nil {
-		return SourceObservationRun{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return SourceObservationRun{}, err
-	}
-	committed = true
-	return detail, nil
+	return outcome.Result, nil
 }
 
 // activeRunOn returns the currently active Run of one connection, if any.
-func (service *Service) activeRunOn(ctx context.Context, conn *sql.Conn, connectionID int64, connectionName string) (SourceObservationRun, bool, error) {
+func (service *Service) activeRunOn(ctx context.Context, conn audit.Reader, connectionID int64, connectionName string) (SourceObservationRun, bool, error) {
 	var runID int64
 	err := conn.QueryRowContext(ctx, `SELECT id FROM observation_runs WHERE connection_id=? AND state IN ('Queued','Running') ORDER BY id DESC LIMIT 1`, connectionID).Scan(&runID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -187,8 +192,11 @@ func (service *Service) activeRunOn(ctx context.Context, conn *sql.Conn, connect
 // createObservationAttempts freezes one supervisor-only discovery child per
 // plugin-declared object type. The descriptor owns the object vocabulary;
 // this loop only projects it durably, so a plugin that declares more object
-// types extends observation without touching the admission core.
-func createObservationAttempts(ctx context.Context, conn *sql.Conn, runID, connectionID int64, descriptor plugins.Descriptor, now string) error {
+// types extends observation without touching the admission core. Children are
+// created through attempt.CreateOn so each inherits the admission's
+// correlation (the administrator's session scope or the scheduler's system
+// scope) — an attempt can never exist without its association.
+func createObservationAttempts(ctx context.Context, conn execution.Executor, runID, connectionID int64, descriptor plugins.Descriptor, now string) error {
 	for _, object := range descriptor.DiscoverObjects {
 		input := executionInput{
 			SchemaKind:       ExecutionSchemaKind,
@@ -206,15 +214,12 @@ func createObservationAttempts(ctx context.Context, conn *sql.Conn, runID, conne
 			runID, input.ObjectType, now); err != nil {
 			return err
 		}
-		insert, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,discovery_key,state,quoin_release_version,created_at) VALUES('inspection_collection','observation_run',?,?,'Queued',?,?)`,
+		attemptID, err := attempt.CreateOn(ctx, conn, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,discovery_key,state,quoin_release_version,created_at) VALUES('inspection_collection','observation_run',?,?,'Queued',?,?)`,
 			runID, input.ObjectType, attempt.ReleaseVersion(), now)
 		if err != nil {
 			return err
 		}
-		input.AttemptID, err = insert.LastInsertId()
-		if err != nil {
-			return err
-		}
+		input.AttemptID = attemptID
 		// The grant binds the attempt to the connection's exact current
 		// (revision, generation) pair — a real source grant, not a business
 		// config projection. Resolution refuses disabled or rotated connections.
@@ -258,10 +263,16 @@ func createObservationAttempts(ctx context.Context, conn *sql.Conn, runID, conne
 }
 
 // Attempts configures the generic attempt transitions with this package's
-// deterministic input rebuild, mirroring the resource refresh slice.
+// deterministic input rebuild, mirroring the resource refresh slice. The
+// ephemeral machine shares the parent's validated read-only reader so its
+// standalone reads use the same fail-closed seam; before composition wires
+// it the forwarded fail-closed reader is refused by the child's own probe
+// and the child simply stays unwired — its reads fail closed identically.
+// Callers that only compose *On transaction mutations need no reader at all.
 func (service *Service) Attempts() *attempt.Service {
 	attempts := attempt.NewService(service.db)
 	attempts.SnapshotRebuilder = service.rebuildObservationAttempt
+	_ = attempts.SetReader(service.runner.Reader())
 	return attempts
 }
 
@@ -270,55 +281,42 @@ func (service *Service) Attempts() *attempt.Service {
 // again (plugin metadata drift, missing grant), so the child records an
 // honest plugin_unavailable gap and the Run converges instead of retrying
 // the same failure every scheduler pass. Transient runtime unavailability
-// never reaches this path — those children stay Queued by design.
+// never reaches this path — those children stay Queued by design. The
+// convergence runs as an audited system operation.
 func (service *Service) ConvergeTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
-	conn, err := service.db.Conn(ctx)
+	ctx, err := ensureSystemScope(ctx, execution.SourceInternal)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
 	var runID int64
-	err = conn.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND scope_type='observation_run' AND state='Queued'`, attemptID).Scan(&runID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Already dispatched or terminal: nothing to converge.
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
+	_, err = execution.Execute(ctx, service.runner, service.convergeOp, func(tx *execution.Tx) (struct{}, error) {
+		err := tx.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND scope_type='observation_run' AND state='Queued'`, attemptID).Scan(&runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Already dispatched or terminal: nothing to converge.
+			runID = 0
+			return struct{}{}, nil
 		}
-		committed = true
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed',ended_at=? WHERE id=? AND state='Queued'`, service.nowText(), attemptID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason='plugin_unavailable' WHERE attempt_id=? AND result_digest IS NULL`, attemptID); err != nil {
-		return err
-	}
-	if err := service.convergeRunOn(ctx, conn, runID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		if err != nil {
+			return struct{}{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed',ended_at=? WHERE id=? AND state='Queued'`, service.nowText(), attemptID); err != nil {
+			return struct{}{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason='plugin_unavailable' WHERE attempt_id=? AND result_digest IS NULL`, attemptID); err != nil {
+			return struct{}{}, err
+		}
+		if err := service.convergeRunOn(ctx, tx, runID); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	}, func(struct{}) int64 { return runID })
+	return err
 }
 
 // QueuedObservationAttempts lists dispatchable children whose root is still
 // Running; the dispatcher picks them up after admission and on reconnect.
 func (service *Service) QueuedObservationAttempts(ctx context.Context) ([]int64, error) {
-	rows, err := service.db.QueryContext(ctx, `SELECT a.id FROM execution_attempts a JOIN observation_runs r ON r.id=a.scope_id WHERE a.attempt_type='inspection_collection' AND a.scope_type='observation_run' AND a.state='Queued' AND r.state='Running' ORDER BY a.id`)
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT a.id FROM execution_attempts a JOIN observation_runs r ON r.id=a.scope_id WHERE a.attempt_type='inspection_collection' AND a.scope_type='observation_run' AND a.state='Queued' AND r.state='Running' ORDER BY a.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +342,7 @@ func (service *Service) rebuildObservationAttempt(ctx context.Context, attemptID
 	var input executionInput
 	var pluginID string
 	var grant sql.NullInt64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT a.scope_id,a.discovery_key,r.plugin_id,
 		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id AND purpose='config_thanos_query')
 		FROM execution_attempts a
@@ -373,7 +371,7 @@ func (service *Service) rebuildObservationAttempt(ctx context.Context, attemptID
 	}
 	digest := sha256.Sum256(canonical)
 	var expected string
-	if err := service.db.QueryRowContext(ctx, `SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&expected); err != nil {
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&expected); err != nil {
 		return nil, err
 	}
 	if expected != hex.EncodeToString(digest[:]) {
@@ -386,7 +384,7 @@ func (service *Service) rebuildObservationAttempt(ctx context.Context, attemptID
 // row means normal operation; an unreadable source is a scheduler fault.
 func (service *Service) maintenanceFence(ctx context.Context) error {
 	var maintenanceActive int
-	if err := service.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT active FROM maintenance_state WHERE id=1),0)`).Scan(&maintenanceActive); err != nil {
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE((SELECT active FROM maintenance_state WHERE id=1),0)`).Scan(&maintenanceActive); err != nil {
 		return fmt.Errorf("read observation maintenance fence: %w", err)
 	}
 	if maintenanceActive != 0 {
@@ -397,7 +395,10 @@ func (service *Service) maintenanceFence(ctx context.Context) error {
 
 // AdmitDue cancels observation for connections that lost observability, then
 // admits due schedule ticks. It is the whole durable scheduling brain; the app
-// coordinator only supplies the clock and the dispatch kick.
+// coordinator only supplies the clock and the dispatch kick. The whole pass
+// runs under one explicit system scope (scheduler source, one shared
+// correlation) so every admitted tick and every audit record of the pass is
+// attributable to the scheduler as one operation.
 func (service *Service) AdmitDue(ctx context.Context, now time.Time) error {
 	// The maintenance fence leads every pass: an unreadable fence is a
 	// scheduler-visible fault, and active maintenance is a normal admission
@@ -407,6 +408,10 @@ func (service *Service) AdmitDue(ctx context.Context, now time.Time) error {
 		if errors.Is(err, ErrMaintenanceActive) {
 			return nil
 		}
+		return err
+	}
+	ctx, err := ensureSystemScope(ctx, execution.SourceScheduler)
+	if err != nil {
 		return err
 	}
 	if _, err := service.CancelUnobservable(ctx); err != nil {
@@ -469,7 +474,7 @@ func (service *Service) dueCandidates(ctx context.Context) ([]dueCandidate, erro
 		  AND NOT EXISTS (SELECT 1 FROM observation_runs active
 		                  WHERE active.connection_id=c.id AND active.state IN ('Queued','Running'))
 		ORDER BY c.id`, placeholders)
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.runner.Reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list source observation candidates: %w", err)
 	}
@@ -485,103 +490,108 @@ func (service *Service) dueCandidates(ctx context.Context) ([]dueCandidate, erro
 	return candidates, rows.Err()
 }
 
-// CancelUnobservable cancels active Runs whose connection was disabled or
-// whose plugin lost deployment enablement. It returns the child attempt ids
-// that need a runtime CancelAttempt dispatch kick; Queued children are fenced
-// here, Running ones keep their terminal adjudication to the runtime path.
-func (service *Service) CancelUnobservable(ctx context.Context) ([]int64, error) {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	// Materialize before the writes (single-connection pool discipline).
-	// Observability is judged against the deployment enablement set and the
-	// discover-capable kinds of the current catalog — never a hardcoded type
-	// list.
+type cancellationCandidate struct {
+	runID     int64
+	reason    string
+	attemptID int64
+}
+
+func (service *Service) cancellationCandidates(ctx context.Context, reader audit.Reader) ([]cancellationCandidate, error) {
 	enabledKinds := map[string]bool{}
 	for _, kind := range service.enabledDiscoverKinds() {
 		enabledKinds[kind] = true
 	}
-	type victim struct {
-		runID     int64
-		reason    string
-		attemptID int64
-	}
-	rows, err := conn.QueryContext(ctx, `
-		SELECT r.id,c.name,c.type,c.enabled,c.revalidation_required,a.id
+	rows, err := reader.QueryContext(ctx, `
+		SELECT r.id,c.type,c.enabled,c.revalidation_required,a.id
 		FROM observation_runs r
 		JOIN connections c ON c.id=r.connection_id
 		JOIN execution_attempts a ON a.scope_type='observation_run' AND a.scope_id=r.id AND a.state IN ('Queued','Assigned','Running','Cancelling')
 		WHERE r.state IN ('Queued','Running')
-		ORDER BY r.id, a.id`)
+		ORDER BY r.id,a.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list active source observation runs: %w", err)
 	}
-	var victims []victim
-	seenRun := map[int64]string{}
+	defer rows.Close()
+	var candidates []cancellationCandidate
 	for rows.Next() {
-		var runID, attemptID int64
-		var name, connectionType string
+		var item cancellationCandidate
+		var connectionType string
 		var enabled, revalidation int
-		if err := rows.Scan(&runID, &name, &connectionType, &enabled, &revalidation, &attemptID); err != nil {
-			rows.Close()
+		if err := rows.Scan(&item.runID, &connectionType, &enabled, &revalidation, &item.attemptID); err != nil {
 			return nil, err
 		}
-		reason := ""
 		switch {
 		case enabled != 1 || revalidation != 0:
-			reason = "connection is disabled"
+			item.reason = "connection is disabled"
 		case !enabledKinds[connectionType]:
-			reason = "no enabled discover-capable plugin for this connection kind"
-		}
-		if reason == "" {
+			item.reason = "no enabled discover-capable plugin for this connection kind"
+		default:
 			continue
 		}
-		victims = append(victims, victim{runID: runID, reason: reason, attemptID: attemptID})
-		seenRun[runID] = reason
+		candidates = append(candidates, item)
 	}
-	if err := rows.Err(); err != nil {
+	return candidates, rows.Err()
+}
+
+// CancelUnobservable cancels active Runs whose connection was disabled or
+// whose plugin lost deployment enablement. It returns the child attempt ids
+// that need a runtime CancelAttempt dispatch kick; Queued children are fenced
+// here, Running ones keep their terminal adjudication to the runtime path.
+// The reconciliation is an audited system operation: called from the
+// scheduler pass it reuses the pass's correlation, a direct caller gets a
+// fresh explicit system scope.
+func (service *Service) CancelUnobservable(ctx context.Context) ([]int64, error) {
+	ctx, err := ensureSystemScope(ctx, execution.SourceScheduler)
+	if err != nil {
 		return nil, err
 	}
-	rows.Close()
-	if len(victims) == 0 {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+	if err := requireObservationSystem(ctx, nil); err != nil {
+		return nil, err
+	}
+	candidates, err := service.cancellationCandidates(ctx, service.runner.Reader())
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+	// The scheduler's idle scan is not a business operation. A candidate only
+	// opens the audited write window; its current eligibility is rechecked there.
+	var cancelled []int64
+	_, err = execution.Execute(ctx, service.runner, service.cancelOp, func(tx *execution.Tx) ([]int64, error) {
+		victims, err := service.cancellationCandidates(ctx, tx)
+		if err != nil {
 			return nil, err
 		}
-		committed = true
+		if len(victims) == 0 {
+			return nil, execution.ErrNoTransition
+		}
+		seenRun := map[int64]string{}
+		for _, item := range victims {
+			seenRun[item.runID] = item.reason
+		}
+		cancelled = make([]int64, 0, len(victims))
+		attempts := attempt.NewService(service.db)
+		for _, item := range victims {
+			if _, err := attempts.CancelFenceOn(ctx, tx, item.attemptID); err != nil {
+				return nil, err
+			}
+			cancelled = append(cancelled, item.attemptID)
+		}
+		for runID, reason := range seenRun {
+			if _, err := tx.ExecContext(ctx, `UPDATE observation_runs SET state='Cancelled',result_detail=?,row_version=row_version+1 WHERE id=? AND state IN ('Queued','Running')`, reason, runID); err != nil {
+				return nil, err
+			}
+			// An object child that never received its result keeps an honest
+			// gap reason; its attempt row carries the precise cancel state.
+			if _, err := tx.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason='cancelled' WHERE observation_run_id=? AND status='gap' AND gap_reason='runtime_unavailable'`, runID); err != nil {
+				return nil, err
+			}
+		}
+		return cancelled, nil
+	}, func([]int64) int64 { return 0 })
+	if errors.Is(err, execution.ErrNoTransition) {
 		return nil, nil
 	}
-	attempts := attempt.NewService(service.db)
-	cancelled := make([]int64, 0, len(victims))
-	for _, item := range victims {
-		if _, err := attempts.CancelFenceOn(ctx, conn, item.attemptID); err != nil {
-			return nil, err
-		}
-		cancelled = append(cancelled, item.attemptID)
-	}
-	for runID, reason := range seenRun {
-		if _, err := conn.ExecContext(ctx, `UPDATE observation_runs SET state='Cancelled',result_detail=?,row_version=row_version+1 WHERE id=? AND state IN ('Queued','Running')`, reason, runID); err != nil {
-			return nil, err
-		}
-		// An object child that never received its result keeps an honest gap
-		// reason; its attempt row carries the precise cancel state.
-		if _, err := conn.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason='cancelled' WHERE observation_run_id=? AND status='gap' AND gap_reason='runtime_unavailable'`, runID); err != nil {
-			return nil, err
-		}
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	committed = true
 	return cancelled, nil
 }

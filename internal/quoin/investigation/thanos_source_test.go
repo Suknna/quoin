@@ -13,15 +13,33 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
+
+// investigationAdminContext is the trusted-entry execution metadata the
+// connection commands re-verify in-transaction (admin user 1, session 1).
+func investigationAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-investigation-source-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-investigation-source-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 // seedThanosIntegration drives the production metrics lifecycle through the
 // connections service (create -> probe -> passed -> qualified enable), the
@@ -50,20 +68,23 @@ func seedThanosIntegration(t *testing.T, db *sql.DB, name string) (connectionID,
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'investigation-source-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
 		t.Fatal(err)
 	}
 	connections.ProbeContractSource = func() string { return "investigation-source-test-probe-v1" }
-	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
-	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "investigation-metrics-create-"+name)
+	service := newTestConnectionsService(t, db)
+	summary, err := service.Create(investigationAdminContext(t), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "investigation-metrics-create-"+name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	probeEpoch := uint64(time.Now().UnixNano())
-	probeAttemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
+	probeAttemptID, err := service.StartProbe(investigationAdminContext(t), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +101,7 @@ func seedThanosIntegration(t *testing.T, db *sql.DB, name string) (connectionID,
 	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, probeAttemptID).Scan(&probeID); err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1)
+	enabled, err := service.Enable(investigationAdminContext(t), summary.Name, summary.RowVersion, probeID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,12 +198,28 @@ func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attempt
 	if !ok {
 		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
-	conn, err := db.Conn(context.Background())
+	return resolveToolGrantOnRunner(t, service, "test.tool_grant.thanos."+strconv.FormatInt(toolCallID, 10),
+		func(ctx context.Context, tx *execution.Tx) (attempt.ToolResolution, error) {
+			return service.Attempts().ToolGrantResolver(ctx, tx, attemptID, toolCallID, tool)
+		})
+}
+
+// newTestConnectionsService builds the connections fixture service with its
+// read-only reader opened from the same fixture file (t.TempDir() is stable
+// per test), so the probe lifecycle's pure reads share the fail-closed
+// composition instead of the removed writer-pool fallback.
+func newTestConnectionsService(t *testing.T, db *sql.DB) *connections.Service {
+	t.Helper()
+	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	reader, err := execution.OpenReadOnly(fixtureDBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	return service.Attempts().ToolGrantResolver(context.Background(), conn, attemptID, toolCallID, tool)
+	t.Cleanup(func() { reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 // TestSourceInvestigationFreezesIntegrations proves the blank-key mainline:
@@ -190,10 +227,10 @@ func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attempt
 // canonical input, later enablement churn cannot re-interpret the snapshot,
 // and the rebuild reproduces the frozen digest exactly.
 func TestSourceInvestigationFreezesIntegrations(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	seedThanosIntegration(t, db, "thanos-source-a")
 	created, err := service.Create(ctx, principalID, "cmd-source-investigation", "查一下流量错误率", nil, nil)
@@ -243,10 +280,10 @@ func TestSourceInvestigationFreezesIntegrations(t *testing.T) {
 // TestSourceInvestigationThanosGrantResolvesBySourceRef proves the explicit
 // source path end to end through the investigation resolver wiring.
 func TestSourceInvestigationThanosGrantResolvesBySourceRef(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	connectionID, _, _ := seedThanosIntegration(t, db, "thanos-source-a")
 	created, err := service.Create(ctx, principalID, "cmd-source-grant", "查一下流量错误率", nil, nil)
@@ -287,10 +324,10 @@ func TestSourceInvestigationThanosGrantResolvesBySourceRef(t *testing.T) {
 // TestSourceInvestigationAmbiguousSourcesPreflight proves the frozen two-
 // source list without an explicit name stays a recoverable Tool Result.
 func TestSourceInvestigationAmbiguousSourcesPreflight(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	seedThanosIntegration(t, db, "thanos-source-a")
 	seedThanosIntegration(t, db, "thanos-source-b")
@@ -331,11 +368,14 @@ func seedKubernetesIntegration(t *testing.T, db *sql.DB, name string) int64 {
 	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
-	summary, err := service.Create(context.Background(), connections.CreateInput{
+	if _, err := db.Exec(`INSERT OR IGNORE INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'investigation-source-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	service := newTestConnectionsService(t, db)
+	summary, err := service.Create(investigationAdminContext(t), connections.CreateInput{
 		Name: name, Type: connections.TypeKubernetes,
 		NonSecretJSON: []byte(`{"type":"kubernetes"}`),
 		Secret:        []byte(`{"type":"kubernetes","kubernetes":{"kubeconfig":"apiVersion: v1\nkind: Config"}}`), SecretPresent: true,
@@ -343,7 +383,7 @@ func seedKubernetesIntegration(t *testing.T, db *sql.DB, name string) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, 0, 1)
+	enabled, err := service.Enable(investigationAdminContext(t), summary.Name, summary.RowVersion, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,10 +395,10 @@ func seedKubernetesIntegration(t *testing.T, db *sql.DB, name string) int64 {
 // authority, the grant carries no business system, and the exact frozen
 // revision is reused.
 func TestKubernetesSourceGrantResolvesBySourceRef(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	seedKubernetesIntegration(t, db, "k8s-source-a")
 	created, err := service.Create(ctx, principalID, "cmd-k8s-source", "看下集群状态", nil, nil)
@@ -396,7 +436,7 @@ func TestKubernetesSourceGrantResolvesBySourceRef(t *testing.T) {
 	// kubernetes_read in b084's versioned schema bump, while this slice owns
 	// the authorization resolution underneath it. The single connection is
 	// released before the pool-bound verification reads below.
-	resolution := resolveKubernetesSourceCall(t, db, created.AttemptID, toolCallID)
+	resolution := resolveKubernetesSourceCall(t, service, db, created.AttemptID, toolCallID)
 	if resolution.PreflightCode != "" || len(resolution.Grants) != 1 {
 		t.Fatalf("resolution=%+v, want one grant", resolution)
 	}
@@ -415,17 +455,12 @@ func TestKubernetesSourceGrantResolvesBySourceRef(t *testing.T) {
 // resolveKubernetesSourceCall drives the production kubernetes_read resolver
 // on its own connection and releases that connection before returning, so the
 // single-writer pool stays available to the verification reads.
-func resolveKubernetesSourceCall(t *testing.T, db *sql.DB, attemptID, toolCallID int64) attempt.ToolResolution {
+func resolveKubernetesSourceCall(t *testing.T, service *Service, db *sql.DB, attemptID, toolCallID int64) attempt.ToolResolution {
 	t.Helper()
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolution, err := kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
-	if closeErr := conn.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
+	resolution, err := resolveToolGrantOnRunner(t, service, "test.tool_grant.kubernetes."+strconv.FormatInt(toolCallID, 10),
+		func(ctx context.Context, tx *execution.Tx) (attempt.ToolResolution, error) {
+			return kubernetes.ResolveRead(ctx, tx, attemptID, toolCallID)
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,10 +479,10 @@ func connectionIDFixture(t *testing.T, db *sql.DB, name string) int64 {
 // TestKubernetesSourceAmbiguityPreflight proves multiple frozen kubernetes
 // sources without an explicit name stay a recoverable preflight result.
 func TestKubernetesSourceAmbiguityPreflight(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	seedKubernetesIntegration(t, db, "k8s-source-a")
 	seedKubernetesIntegration(t, db, "k8s-source-b")
@@ -482,7 +517,7 @@ func TestKubernetesSourceAmbiguityPreflight(t *testing.T) {
 	}
 	toolCallID, _ := insert.LastInsertId()
 
-	resolution := resolveKubernetesSourceCall(t, db, created.AttemptID, toolCallID)
+	resolution := resolveKubernetesSourceCall(t, service, db, created.AttemptID, toolCallID)
 	if resolution.PreflightCode != "target_ambiguous" || !strings.Contains(resolution.PreflightDetail, "k8s-source-a") || !strings.Contains(resolution.PreflightDetail, "k8s-source-b") {
 		t.Fatalf("preflight=%+v, want target_ambiguous listing both sources", resolution)
 	}

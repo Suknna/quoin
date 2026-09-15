@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
@@ -51,7 +52,7 @@ type promQLVerificationCheck struct {
 // createPromQLVerificationAttempts appends all PromQL child Attempts to the
 // Run creation transaction. A missing usable Thanos connection aborts that
 // transaction: a run cannot claim execution when it has no authorized path.
-func createPromQLVerificationAttempts(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID int64, now string) (int, error) {
+func createPromQLVerificationAttempts(ctx context.Context, conn execution.Executor, runID, configVersionID, contractID int64, now string) (int, error) {
 	var metricsConnectionID int64
 	if err := conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
 		return 0, err
@@ -81,7 +82,7 @@ func createPromQLVerificationAttempts(ctx context.Context, conn *sql.Conn, runID
 	return count, rows.Err()
 }
 
-func createPromQLVerificationAttempt(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID, metricsConnectionID int64, check promQLVerificationCheck, now string) error {
+func createPromQLVerificationAttempt(ctx context.Context, conn execution.Executor, runID, configVersionID, contractID, metricsConnectionID int64, check promQLVerificationCheck, now string) error {
 	var rangeSeconds, stepSeconds *int64
 	if check.RangeSeconds.Valid {
 		rangeSeconds = &check.RangeSeconds.Int64

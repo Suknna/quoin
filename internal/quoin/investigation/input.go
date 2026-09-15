@@ -181,7 +181,7 @@ type provider struct {
 func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	var investigationID, probeResultID int64
 	var rendererVersion string
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT a.scope_id, g.qualified_probe_result_id, s.renderer_version
 		FROM execution_attempts a
 		JOIN attempt_connection_grants g ON g.attempt_id=a.id AND g.purpose='chat_model'
@@ -190,15 +190,15 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("attempt %d investigation binding missing: %w", attemptID, err)
 	}
-	_, cutoffSeq, err := attemptUserMessage(ctx, service.db, attemptID)
+	_, cutoffSeq, err := attemptUserMessage(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
-	businessContext, err := businessContextForAttempt(ctx, service.db, attemptID)
+	businessContext, err := businessContextForAttempt(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
-	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.db, attemptID)
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -207,12 +207,12 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	// exact historical bytes; old attempts are never re-interpreted.
 	var integrations []RenderedIntegration
 	if rendererVersion != "investigation-renderer-v1" {
-		integrations, err = frozenIntegrations(ctx, service.db, attemptID)
+		integrations, err = frozenIntegrations(ctx, service.runner.Reader(), attemptID)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return service.rebuildFor(ctx, service.db, investigationID, cutoffSeq, businessContext, integrations, probeResultID, toolCatalog)
+	return service.rebuildFor(ctx, service.runner.Reader(), investigationID, cutoffSeq, businessContext, integrations, probeResultID, toolCatalog)
 }
 
 // frozenIntegrations reconstructs the frozen source-level authority from the

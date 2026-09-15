@@ -18,7 +18,9 @@ import (
 	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // VerificationRunSummary is the ConfigVerificationRunSummary projection.
@@ -79,42 +81,75 @@ type VerificationRunDetail struct {
 // dispatch through the Plinth supervisor, and drafts carrying browser checks
 // are deterministically rejected until the Lintel executor lands
 // (CFG-VERIFYRUN-001/002).
+// RunVerification runs through the shared execution runner as a durable,
+// replayable admin ledger command (ADR-0006): the runner owns the transaction,
+// the replay check, the command ledger row and the automatic audit row. A
+// deterministic rejection rolls the business stage back to a savepoint before
+// the rejection is recorded; the surfaced *execution.Rejection is mapped back
+// to this family's stable domain errors.
 func (service *Service) RunVerification(ctx context.Context, principalID int64, clientCommandID, systemKey string, versionID int64) (VerificationRunDetail, error) {
-	commandDigest := commandDigestOf("config_verification.run", map[string]any{
-		"systemKey": systemKey, "versionId": versionID,
-	})
-	if detail, replayed, err := service.replayVerification(ctx, principalID, clientCommandID, commandDigest); replayed || err != nil {
-		return detail, err
+	command := execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: clientCommandID,
+		Digest:          commandDigestOf(opVerificationRunName, map[string]any{"systemKey": systemKey, "versionId": versionID}),
 	}
-	conn, err := service.db.Conn(ctx)
+	outcome, err := execution.Run(ctx, service.runner, service.opVerificationRun, command,
+		func(tx *execution.Tx) (VerificationRunDetail, execution.Change, error) {
+			detail, runErr := service.runVerificationOn(ctx, tx, principalID, systemKey, versionID)
+			if runErr != nil {
+				return VerificationRunDetail{}, execution.Unchanged, runErr
+			}
+			return detail, execution.Changed, nil
+		},
+		func(detail VerificationRunDetail) int64 { return detail.numericID() })
 	if err != nil {
-		return VerificationRunDetail{}, err
+		return VerificationRunDetail{}, service.verificationOutcomeError(err, systemKey)
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return VerificationRunDetail{}, err
+	return outcome.Result, nil
+}
+
+// numericID parses the detail's string id for the audit domain reference.
+func (detail VerificationRunDetail) numericID() int64 {
+	id, _ := strconv.ParseInt(detail.ID, 10, 64)
+	return id
+}
+
+// verificationOutcomeError maps the shared runner's outcomes back to this
+// family's stable exported errors: recorded rejections replay as their
+// original domain error (legacy ledger payloads carry the full typed form),
+// and ledger key conflicts keep the historic ErrCommandReused.
+func (service *Service) verificationOutcomeError(err error, systemKey string) error {
+	if errors.Is(err, execution.ErrCommandReused) {
+		return ErrCommandReused
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var rejection *execution.Rejection
+	if errors.As(err, &rejection) {
+		var legacy verificationRejection
+		if rejection.Raw != "" {
+			if decodeErr := decodeStored(rejection.Raw, &legacy); decodeErr == nil && legacy.Code != "" {
+				if legacy.SystemKey == "" {
+					legacy.SystemKey = systemKey
+				}
+				return legacy.asError()
+			}
 		}
-	}()
-	// The outer replay check can race a request which commits while this one
-	// waits for BEGIN IMMEDIATE. Do not create a second run for the same key.
-	if replayed, alreadyCommitted, replayErr := service.replayVerificationOn(ctx, conn, principalID, clientCommandID, commandDigest); replayErr != nil {
-		return VerificationRunDetail{}, replayErr
-	} else if alreadyCommitted {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return VerificationRunDetail{}, err
+		if rejection.Code == "not_found" {
+			return ErrNotFound
 		}
-		committed = true
-		return replayed, nil
+		return &ConflictError{Code: rejection.Code, Detail: rejection.Detail, SystemKey: systemKey, ObjectID: rejection.ObjectID}
 	}
+	return err
+}
+
+// runVerificationOn is RunVerification's business stage on the runner-owned
+// transaction. Deterministic denials return *execution.Rejection so the
+// runner records them in the clean transaction.
+func (service *Service) runVerificationOn(ctx context.Context, conn execution.Executor, principalID int64, systemKey string, versionID int64) (VerificationRunDetail, error) {
 	systemID, contractID, err := draftBinding(ctx, conn, systemKey, versionID)
 	if err != nil {
 		if rejection, known := verificationRejectionFor(err, systemKey, versionID); known {
-			return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.run", commandDigest, rejection, &committed)
+			return VerificationRunDetail{}, rejection.asRejection()
 		}
 		return VerificationRunDetail{}, err
 	}
@@ -146,7 +181,7 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 				SystemKey: systemKey,
 				ObjectID:  activeID,
 			}
-			return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.run", commandDigest, rejection, &committed)
+			return VerificationRunDetail{}, rejection.asRejection()
 		}
 		return VerificationRunDetail{}, mapVerificationAbort(err)
 	}
@@ -208,21 +243,7 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 			return VerificationRunDetail{}, mapVerificationAbort(err)
 		}
 	}
-	if err := service.audit(ctx, conn, principalID, "config_verification.run", runID, now); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	detail, err := verificationDetailOn(ctx, conn, systemID, versionID, runID)
-	if err != nil {
-		return VerificationRunDetail{}, err
-	}
-	if err := recordCommandResult(ctx, conn, principalID, clientCommandID, "config_verification.run", commandDigest, "config_verification_run", runID, detail); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	committed = true
-	return detail, nil
+	return verificationDetailOn(ctx, conn, systemID, versionID, runID)
 }
 
 // CancelVerification applies the one-shot cancel fence: the command must
@@ -230,47 +251,43 @@ func (service *Service) RunVerification(ctx context.Context, principalID int64, 
 // (DATA-CONFIG-007). T17 has no dispatched child attempts yet, so the frozen
 // child-fence trigger is trivially satisfied.
 func (service *Service) CancelVerification(ctx context.Context, principalID int64, clientCommandID, systemKey string, versionID, runID, expectedRowVersion int64) (VerificationRunDetail, error) {
-	commandDigest := commandDigestOf("config_verification.cancel", map[string]any{
-		"systemKey": systemKey, "versionId": versionID, "runId": runID, "expectedRowVersion": expectedRowVersion,
-	})
-	if detail, replayed, err := service.replayVerification(ctx, principalID, clientCommandID, commandDigest); replayed || err != nil {
-		return detail, err
+	command := execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: clientCommandID,
+		Digest: commandDigestOf(opVerificationCancelName, map[string]any{
+			"systemKey": systemKey, "versionId": versionID, "runId": runID, "expectedRowVersion": expectedRowVersion,
+		}),
 	}
-	conn, err := service.db.Conn(ctx)
+	outcome, err := execution.Run(ctx, service.runner, service.opVerificationCancel, command,
+		func(tx *execution.Tx) (VerificationRunDetail, execution.Change, error) {
+			detail, cancelErr := service.cancelVerificationOn(ctx, tx, principalID, systemKey, versionID, runID, expectedRowVersion)
+			if cancelErr != nil {
+				return VerificationRunDetail{}, execution.Unchanged, cancelErr
+			}
+			return detail, execution.Changed, nil
+		},
+		func(detail VerificationRunDetail) int64 { return detail.numericID() })
 	if err != nil {
-		return VerificationRunDetail{}, err
+		return VerificationRunDetail{}, service.verificationOutcomeError(err, systemKey)
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	// Recheck after writer acquisition so one command key cannot cancel twice
-	// or turn a replay into a stale row-version conflict.
-	if replayed, alreadyCommitted, replayErr := service.replayVerificationOn(ctx, conn, principalID, clientCommandID, commandDigest); replayErr != nil {
-		return VerificationRunDetail{}, replayErr
-	} else if alreadyCommitted {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return VerificationRunDetail{}, err
-		}
-		committed = true
-		return replayed, nil
-	}
+	return outcome.Result, nil
+}
+
+// cancelVerificationOn is CancelVerification's business stage on the
+// runner-owned transaction. Deterministic denials return *execution.Rejection
+// so the runner records them in the clean transaction.
+func (service *Service) cancelVerificationOn(ctx context.Context, conn execution.Executor, principalID int64, systemKey string, versionID, runID, expectedRowVersion int64) (VerificationRunDetail, error) {
 	systemID, _, err := ownedVersion(ctx, conn, systemKey, versionID)
 	if err != nil {
 		if rejection, known := verificationRejectionFor(err, systemKey, versionID); known {
-			return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.cancel", commandDigest, rejection, &committed)
+			return VerificationRunDetail{}, rejection.asRejection()
 		}
 		return VerificationRunDetail{}, err
 	}
 	if _, err := verificationRow(ctx, conn, systemID, versionID, runID); err != nil {
 		if rejection, known := verificationRejectionFor(err, systemKey, runID); known {
-			return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.cancel", commandDigest, rejection, &committed)
+			return VerificationRunDetail{}, rejection.asRejection()
 		}
 		return VerificationRunDetail{}, err
 	}
@@ -311,50 +328,50 @@ func (service *Service) CancelVerification(ctx context.Context, principalID int6
 	if err != nil {
 		mapped := mapVerificationAbort(err)
 		if rejection, known := verificationRejectionFor(mapped, systemKey, runID); known {
-			return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.cancel", commandDigest, rejection, &committed)
+			return VerificationRunDetail{}, rejection.asRejection()
 		}
 		return VerificationRunDetail{}, mapped
 	}
 	affected, _ := update.RowsAffected()
 	if affected == 0 {
-		rejection := verificationRejection{
+		return VerificationRunDetail{}, (&verificationRejection{
 			Code:      "row_version_conflict",
 			Detail:    "验证 Run 已变化或已进入终态，请刷新后重试",
 			SystemKey: systemKey,
 			ObjectID:  runID,
-		}
-		return VerificationRunDetail{}, service.rejectVerification(ctx, conn, principalID, clientCommandID, "config_verification.cancel", commandDigest, rejection, &committed)
-	}
-	if err := service.audit(ctx, conn, principalID, "config_verification.cancel", runID, service.nowText()); err != nil {
-		return VerificationRunDetail{}, err
+		}).asRejection()
 	}
 	detail, err := verificationDetailOn(ctx, conn, systemID, versionID, runID)
 	if err != nil {
 		return VerificationRunDetail{}, err
 	}
-	if err := recordCommandResult(ctx, conn, principalID, clientCommandID, "config_verification.cancel", commandDigest, "config_verification_run", runID, detail); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return VerificationRunDetail{}, err
-	}
-	committed = true
 	detail.CancellingAttemptIDs = dispatchIDs
 	return detail, nil
 }
 
-// GetVerification returns one run detail bound to (system, version).
+// GetVerification returns one run detail bound to (system, version). It is a
+// pure read: it runs on the injected read-only reader seam, never the write
+// pool.
 func (service *Service) GetVerification(ctx context.Context, systemKey string, versionID, runID int64) (VerificationRunDetail, error) {
-	conn, err := service.db.Conn(ctx)
+	reader, err := service.readReader()
 	if err != nil {
 		return VerificationRunDetail{}, err
 	}
-	defer conn.Close()
-	systemID, _, err := ownedVersion(ctx, conn, systemKey, versionID)
+	systemID, _, err := ownedVersion(ctx, reader, systemKey, versionID)
 	if err != nil {
 		return VerificationRunDetail{}, err
 	}
-	return verificationDetailOn(ctx, conn, systemID, versionID, runID)
+	return verificationDetailOn(ctx, reader, systemID, versionID, runID)
+}
+
+// readReader returns the configured read-only reader. The injected reader is
+// authoritative; falling back to the write pool is a composition gap, not a
+// license for reads to keep write capability.
+func (service *Service) readReader() (audit.Reader, error) {
+	if service.reader != nil {
+		return service.reader, nil
+	}
+	return nil, errors.New("businesssystem: read-only reader is not configured")
 }
 
 // ListVerifications returns the run history for one config version, newest
@@ -363,12 +380,11 @@ func (service *Service) ListVerifications(ctx context.Context, systemKey string,
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	conn, err := service.db.Conn(ctx)
+	reader, err := service.readReader()
 	if err != nil {
 		return nil, false, err
 	}
-	defer conn.Close()
-	systemID, _, err := ownedVersion(ctx, conn, systemKey, versionID)
+	systemID, _, err := ownedVersion(ctx, reader, systemKey, versionID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -388,7 +404,7 @@ func (service *Service) ListVerifications(ctx context.Context, systemKey string,
 	// that exact composite order so timestamps shared by multiple rows are safe.
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := conn.QueryContext(ctx, query, args...)
+	rows, err := reader.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -431,50 +447,6 @@ func commandDigestOf(commandType string, fields map[string]any) string {
 	return auth.DigestCommand(commandType, fields)
 }
 
-// replayVerification returns the stored outcome when the same command key
-// was already committed (HTTP-COMMAND-003).
-func (service *Service) replayVerification(ctx context.Context, principalID int64, clientCommandID, digest string) (VerificationRunDetail, bool, error) {
-	record, found, err := auth.LookupCommand(ctx, service.db, principalID, clientCommandID)
-	if err != nil {
-		return VerificationRunDetail{}, false, err
-	}
-	return replayVerificationRecord(record, found, digest)
-}
-
-// replayVerificationOn performs the required second ledger check from the
-// connection that already owns SQLite's writer serialization.
-func (service *Service) replayVerificationOn(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, digest string) (VerificationRunDetail, bool, error) {
-	record, found, err := auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
-	if err != nil {
-		return VerificationRunDetail{}, false, err
-	}
-	return replayVerificationRecord(record, found, digest)
-}
-
-func replayVerificationRecord(record auth.CommandRecord, found bool, digest string) (VerificationRunDetail, bool, error) {
-	if !found {
-		return VerificationRunDetail{}, false, nil
-	}
-	if record.RequestDigest != digest {
-		return VerificationRunDetail{}, true, ErrCommandReused
-	}
-	if record.Outcome == auth.OutcomeRejectedKnown {
-		var rejection verificationRejection
-		if err := decodeStored(record.ResultPayload, &rejection); err != nil {
-			return VerificationRunDetail{}, true, errors.New("rejected config verification command has an unreadable result")
-		}
-		return VerificationRunDetail{}, true, rejection.asError()
-	}
-	var replayed VerificationRunDetail
-	if err := decodeStored(record.ResultPayload, &replayed); err != nil {
-		return VerificationRunDetail{}, true, errors.New("committed config verification command has an unreadable result")
-	}
-	if replayed.ID == "" {
-		return VerificationRunDetail{}, true, errors.New("committed config verification command has no result")
-	}
-	return replayed, true, nil
-}
-
 // verificationRejection is the non-secret durable form of a deterministic
 // validation/fence rejection. Replaying it must rebuild the original domain
 // error rather than executing a command after its precondition has changed.
@@ -484,6 +456,12 @@ type verificationRejection struct {
 	SystemKey  string `json:"systemKey"`
 	ObjectID   int64  `json:"objectId"`
 	ObjectType string `json:"objectType"`
+}
+
+// asRejection converts the typed rejection into the shared runner's durable
+// rejection so the runner records it in the clean transaction.
+func (rejection verificationRejection) asRejection() *execution.Rejection {
+	return &execution.Rejection{Code: rejection.Code, Detail: rejection.Detail, ObjectID: rejection.ObjectID}
 }
 
 func (rejection verificationRejection) asError() error {
@@ -515,35 +493,10 @@ func verificationRejectionFor(err error, systemKey string, objectID int64) (veri
 	return verificationRejection{}, false
 }
 
-// rejectVerification commits the command ledger and its rejected audit event
-// in the same otherwise-empty IMMEDIATE transaction (DATA-COMMAND-004).
-func (service *Service) rejectVerification(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, commandType, digest string, rejection verificationRejection, committed *bool) error {
-	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, commandType, digest, auth.OutcomeRejectedKnown, rejection.ObjectType, rejection.ObjectID, encode(rejection)); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at)
-		VALUES('user',?,?,?,'rejected',?,?,?)`,
-		principalID, commandType, clientCommandID, rejection.ObjectType, rejection.ObjectID, service.nowText()); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	*committed = true
-	return rejection.asError()
-}
-
-// recordCommandResult persists the command outcome inside the open
-// transaction (DATA-AUDIT-004/005).
-func recordCommandResult(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, commandType, digest, objectType string, objectID int64, result any) error {
-	return auth.RecordCommand(ctx, conn, principalID, clientCommandID, commandType, digest, "committed", objectType, objectID, encode(result))
-}
-
 // draftBinding resolves (business_system_id, label_contract_version_id) for a
 // version that must be an unpublished draft of the named system; the frozen
 // INSERT closure trigger re-verifies the same facts inside the transaction.
-func draftBinding(ctx context.Context, conn *sql.Conn, systemKey string, versionID int64) (int64, int64, error) {
+func draftBinding(ctx context.Context, conn execution.Executor, systemKey string, versionID int64) (int64, int64, error) {
 	var systemID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -577,7 +530,7 @@ func draftBinding(ctx context.Context, conn *sql.Conn, systemKey string, version
 // ownedVersion resolves the system row for a version that belongs to it,
 // without requiring the draft state (reads and cancels apply to any run of
 // the bound version).
-func ownedVersion(ctx context.Context, conn *sql.Conn, systemKey string, versionID int64) (int64, int64, error) {
+func ownedVersion(ctx context.Context, conn audit.Reader, systemKey string, versionID int64) (int64, int64, error) {
 	var systemID int64
 	if err := conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, systemKey).Scan(&systemID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -596,7 +549,7 @@ func ownedVersion(ctx context.Context, conn *sql.Conn, systemKey string, version
 	return systemID, 0, nil
 }
 
-func verificationRow(ctx context.Context, conn *sql.Conn, systemID, versionID, runID int64) (int64, error) {
+func verificationRow(ctx context.Context, conn audit.Reader, systemID, versionID, runID int64) (int64, error) {
 	var id int64
 	err := conn.QueryRowContext(ctx, `SELECT id FROM config_verification_runs WHERE id=? AND business_system_id=? AND config_version_id=?`, runID, systemID, versionID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -628,7 +581,7 @@ func scanVerificationSummary(rows *sql.Rows) (VerificationRunSummary, error) {
 	return summary, nil
 }
 
-func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, versionID, runID int64) (VerificationRunDetail, error) {
+func verificationDetailOn(ctx context.Context, conn audit.Reader, systemID, versionID, runID int64) (VerificationRunDetail, error) {
 	var (
 		detail       VerificationRunDetail
 		id           int64
@@ -727,7 +680,7 @@ func verificationDetailOn(ctx context.Context, conn *sql.Conn, systemID, version
 	return detail, nil
 }
 
-func verificationDiscoverySamples(ctx context.Context, conn *sql.Conn, runID int64) ([]VerificationIdentitySample, error) {
+func verificationDiscoverySamples(ctx context.Context, conn audit.Reader, runID int64) ([]VerificationIdentitySample, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT r.discovery_key,e.result_json
 		FROM config_verification_discovery_results r JOIN evidence e ON e.id=r.evidence_id

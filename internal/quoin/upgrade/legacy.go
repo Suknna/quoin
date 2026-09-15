@@ -53,12 +53,18 @@ type LegacyMigrationReport struct {
 	MappedMetricsConnection *int64  `json:"mappedMetricsConnectionId,omitempty"`
 	LegacyConfigVersions    int64   `json:"legacyConfigVersions"`
 	RetiredRefreshAttempts  []int64 `json:"retiredRefreshAttemptIds,omitempty"`
+	// Administrator consolidation observed by the shared pre-rebuild
+	// normalization. Every released conversion records it because every
+	// conversion rebuilds into the single-admin canonical schema.
+	RetainedAdminID     int64   `json:"retainedAdminId"`
+	DemotedAdminIDs     []int64 `json:"demotedAdminIds,omitempty"`
+	RevokedSessionCount int64   `json:"revokedSessionCount,omitempty"`
 }
 
 // migrateReleasedSchemaTransaction owns one all-or-nothing release conversion.
 // The completion callback belongs inside this transaction: a canonical rebuild
 // must never commit separately from the maintenance exit that accepts writes.
-func migrateReleasedSchemaTransaction(ctx context.Context, db *sql.DB, migrate func(context.Context, *sql.Conn) (LegacyMigrationReport, error), complete func(context.Context, *sql.Conn, LegacyMigrationReport) error) (LegacyMigrationReport, error) {
+func migrateReleasedSchemaTransaction(ctx context.Context, db *sql.DB, options Options, migrate func(context.Context, *sql.Conn) (LegacyMigrationReport, error), complete func(context.Context, *sql.Conn, LegacyMigrationReport) error) (LegacyMigrationReport, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return LegacyMigrationReport{}, err
@@ -81,10 +87,34 @@ func migrateReleasedSchemaTransaction(ctx context.Context, db *sql.DB, migrate f
 	if _, err := preflightOperationalOn(ctx, conn); err != nil {
 		return LegacyMigrationReport{}, err
 	}
+	// Every conversion rebuilds into the current canonical schema, whose
+	// single-admin unique index and admin-protecting triggers make an
+	// un-normalized predecessor copy fail mid-rebuild or silently violate the
+	// invariant. Normalization therefore runs for every released predecessor
+	// before any rebuild, with the explicit selection errors — never a silent
+	// choice and never an opaque constraint failure.
+	var sourceDigest string
+	if err := conn.QueryRowContext(ctx, `SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&sourceDigest); err != nil {
+		return LegacyMigrationReport{}, err
+	}
+	var normalization adminNormalization
+	if sourceDigest == authSimplificationPredecessorDigest {
+		// This schema already enforces unique-admin and MFA invariants. Removing
+		// obsolete flow types must not reset initialized users or revoke sessions.
+		normalization, err = planAdminNormalization(ctx, conn, options)
+	} else {
+		normalization, err = normalizeAdminTopologyOn(ctx, conn, options)
+	}
+	if err != nil {
+		return LegacyMigrationReport{}, err
+	}
 	report, err := migrate(ctx, conn)
 	if err != nil {
 		return LegacyMigrationReport{}, err
 	}
+	report.RetainedAdminID = normalization.retainedID
+	report.DemotedAdminIDs = normalization.demotedIDs
+	report.RevokedSessionCount = normalization.revokedSessions
 	if err := verifyForeignKeys(ctx, conn); err != nil {
 		return LegacyMigrationReport{}, err
 	}

@@ -35,11 +35,7 @@ func interruptedUploadHeader(attemptID, toolCallID int64, body string) UploadHea
 // keeps uploading, and the retry with the same upload_id and digest
 // commits the same body.
 func TestTicket11UploadInterruptionRetry(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	body := strings.Repeat("thanos-matrix-line\n", 900)
@@ -113,11 +109,7 @@ func TestTicket11UploadInterruptionRetry(t *testing.T) {
 // with different content is a deterministic conflict, never a second
 // authority (RUNTIME-UPLOAD-002, DATA-ARTIFACT-006).
 func TestTicket11UploadInterruptionMetadataConflict(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	header := interruptedUploadHeader(attemptID, toolCallID, "first-body")
@@ -143,11 +135,7 @@ func TestTicket11UploadInterruptionMetadataConflict(t *testing.T) {
 // physical collection), and every read/grep path answers the structured
 // ErrBodyExpired instead of serving or deleting the bytes.
 func TestGeneratedArtifactRetentionExpiresBodyAndCollectsUnreferencedBlob(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	store.now = func() time.Time { return time.Now().UTC().Add(-91 * 24 * time.Hour) }
 	attemptID, toolCallID := seedToolOwner(t, db)
 	artifactID, shaHex := uploadText(t, store, context.Background(), attemptID, toolCallID, "expired generated body")
@@ -164,11 +152,7 @@ func TestGeneratedArtifactRetentionExpiresBodyAndCollectsUnreferencedBlob(t *tes
 }
 
 func TestTicket11ExpiredBodyReadFence(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	body := "series-line-1\nseries-line-2\n"
@@ -207,11 +191,7 @@ func TestTicket11ExpiredBodyReadFence(t *testing.T) {
 // attempt (or a wrong boot/epoch) can never read the tool result
 // (RUNTIME-ARTIFACT-002).
 func TestTicket11ReadGrepDeniedOutsideGrant(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	body := "granted-line\n"
@@ -234,11 +214,7 @@ func TestTicket11ReadGrepDeniedOutsideGrant(t *testing.T) {
 // a generated artifact carries from creation: expires_at is set once and
 // the logical row never rewrites it (DATA-ARTIFACT-003).
 func TestTicket11MetadataAfterExpiryStable(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	ctx := context.Background()
 	attemptID, toolCallID := seedToolOwner(t, db)
 	artifactID, _ := uploadText(t, store, ctx, attemptID, toolCallID, "stable-line\n")
@@ -260,12 +236,8 @@ func TestTicket11MetadataAfterExpiryStable(t *testing.T) {
 // single-connection deployment: receiving a slow body must not starve every
 // unrelated read until the client finishes uploading.
 func TestBeginUploadDoesNotHoldPoolConnectionWhileStreaming(t *testing.T) {
-	db := newTestDB(t)
+	db, store := newTestStore(t)
 	db.SetMaxOpenConns(1)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	attemptID, toolCallID := seedToolOwner(t, db)
 	header := interruptedUploadHeader(attemptID, toolCallID, "slow body")
 	file, replayID, err := store.BeginUpload(context.Background(), header)
@@ -291,11 +263,7 @@ func TestBeginUploadDoesNotHoldPoolConnectionWhileStreaming(t *testing.T) {
 // committed. The failed upload may remove only its staging name, never the
 // already-shared content-addressed blob.
 func TestCommitFailureNeverDeletesSharedBlob(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	firstAttempt, firstTool := seedToolOwner(t, db)
 	body := "shared blob body"
 	_, digest := uploadText(t, store, context.Background(), firstAttempt, firstTool, body)
@@ -325,11 +293,7 @@ func TestCommitFailureNeverDeletesSharedBlob(t *testing.T) {
 }
 
 func TestConcurrentSameUploadIDLinearizesToOneArtifact(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	attemptID, toolCallID := seedToolOwner(t, db)
 	header := interruptedUploadHeader(attemptID, toolCallID, "linearized body")
 	first, replayID, err := store.BeginUpload(context.Background(), header)
@@ -376,11 +340,7 @@ func TestConcurrentSameUploadIDLinearizesToOneArtifact(t *testing.T) {
 }
 
 func TestExistingDigestBlobMustVerifyBeforeReferenceCommit(t *testing.T) {
-	db := newTestDB(t)
-	store, err := NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	db, store := newTestStore(t)
 	attemptID, toolCallID := seedToolOwner(t, db)
 	header := interruptedUploadHeader(attemptID, toolCallID, "expected body")
 	if err := os.WriteFile(store.blobPath(hex.EncodeToString(header.SHA256)), []byte("corrupt body"), 0o600); err != nil {

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // discoveredObject is one observed object of a successful discovery pass.
@@ -51,7 +53,12 @@ var validGapReasons = map[string]bool{
 }
 
 // CommitProposal atomically persists one supervisor result. A duplicate
-// proposal replays only when it sealed the same immutable digest.
+// proposal replays only when it sealed the same immutable digest. The
+// adjudication is an audited system operation (the runtime result callback is
+// a trusted task-side fact): the explicit system scope is attached here, and
+// the per-resource telemetry upserts inside the transaction are the domain's
+// central audit exception — they are covered by the run lifecycle audit
+// records, never audited row by row.
 func (service *Service) CommitProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
 	var proposal resultProposal
 	if err := json.Unmarshal(raw, &proposal); err != nil {
@@ -90,124 +97,110 @@ func (service *Service) CommitProposal(ctx context.Context, attemptID int64, boo
 		return fmt.Errorf("source observation result has invalid outcome %q", proposal.Outcome)
 	}
 
-	conn, err := service.db.Conn(ctx)
+	ctx, err := ensureSystemScope(ctx, execution.SourceTask)
 	if err != nil {
 		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	var runID int64
-	var objectType string
-	err = conn.QueryRowContext(ctx, `
-		SELECT a.scope_id, o.object_type
-		FROM execution_attempts a
-		JOIN observation_run_objects o ON o.attempt_id=a.id
-		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='observation_run'`, attemptID).Scan(&runID, &objectType)
-	if err != nil {
-		return fmt.Errorf("source observation result does not close onto a frozen object child: %w", err)
-	}
-	if proposal.ObservationRunID != runID || proposal.ObjectType != objectType {
-		return errors.New("source observation result identity does not match frozen attempt")
 	}
 	digest := sha256.Sum256(raw)
-	var existing []byte
-	// Only a sealed digest counts as committed: the child row exists from
-	// admission with a NULL digest, so an unsealed row is simply not a replay.
-	replayErr := conn.QueryRowContext(ctx, `SELECT result_digest FROM observation_run_objects WHERE observation_run_id=? AND object_type=? AND result_digest IS NOT NULL`, runID, objectType).Scan(&existing)
-	if replayErr == nil {
-		// Idempotent replay adjudicates before any liveness fence: a committed
-		// result can never be overwritten, only acknowledged.
-		if string(existing) == string(digest[:]) {
-			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-				return err
+	_, err = execution.Execute(ctx, service.runner, service.resultOp, func(tx *execution.Tx) (struct{}, error) {
+		var runID int64
+		var objectType string
+		err := tx.QueryRowContext(ctx, `
+			SELECT a.scope_id, o.object_type
+			FROM execution_attempts a
+			JOIN observation_run_objects o ON o.attempt_id=a.id
+			WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='observation_run'`, attemptID).Scan(&runID, &objectType)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("source observation result does not close onto a frozen object child: %w", err)
+		}
+		if proposal.ObservationRunID != runID || proposal.ObjectType != objectType {
+			return struct{}{}, errors.New("source observation result identity does not match frozen attempt")
+		}
+		var existing []byte
+		// Only a sealed digest counts as committed: the child row exists from
+		// admission with a NULL digest, so an unsealed row is simply not a
+		// replay.
+		replayErr := tx.QueryRowContext(ctx, `SELECT result_digest FROM observation_run_objects WHERE observation_run_id=? AND object_type=? AND result_digest IS NOT NULL`, runID, objectType).Scan(&existing)
+		if replayErr == nil {
+			// Idempotent replay adjudicates before any liveness fence: a
+			// committed result can never be overwritten, only acknowledged.
+			if string(existing) == string(digest[:]) {
+				return struct{}{}, nil
 			}
-			committed = true
-			return nil
+			return struct{}{}, errors.New("source observation result replay digest conflicts")
 		}
-		return errors.New("source observation result replay digest conflicts")
-	}
-	if !errors.Is(replayErr, sql.ErrNoRows) {
-		return replayErr
-	}
-	// Boot/epoch/cancel fence: the frozen commit trigger performs the terminal
-	// transition, so enforce the dispatch binding here as the guard.
-	var bound int
-	if err := conn.QueryRowContext(ctx, `SELECT 1 FROM execution_attempts WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ErrLateResult
+		if !errors.Is(replayErr, sql.ErrNoRows) {
+			return struct{}{}, replayErr
 		}
-		return err
-	}
-	var connectionID int64
-	if err := conn.QueryRowContext(ctx, `SELECT connection_id FROM observation_runs WHERE id=?`, runID).Scan(&connectionID); err != nil {
-		return err
-	}
-	var evidenceID any
-	if proposal.Outcome == "success" {
-		// The complete, bounded observation pass is sealed as Evidence: the
-		// frozen proposal is the fact, warnings travel alongside it.
-		params, _ := json.Marshal(map[string]any{"objectType": objectType, "objectCount": len(proposal.Objects)})
-		warnings, _ := json.Marshal(proposal.Warnings)
-		payload, _ := json.Marshal(map[string]any{"schemaKind": ResultSchemaKind, "objectType": objectType, "observedAt": proposal.ObservedAt, "objects": proposal.Objects})
-		insert, err := conn.ExecContext(ctx, `
-			INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,warnings_json,integrity,created_at)
-			VALUES(?,'observation_run',?,?,?,?,?,'complete',?)`,
-			attemptID, runID, string(params), proposal.ObservedAt, string(payload), string(warnings), service.nowText())
-		if err != nil {
-			return err
+		// Boot/epoch/cancel fence: the frozen commit trigger performs the
+		// terminal transition, so enforce the dispatch binding here as the
+		// guard.
+		var bound int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM execution_attempts WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return struct{}{}, attempt.ErrLateResult
+			}
+			return struct{}{}, err
 		}
-		id, err := insert.LastInsertId()
-		if err != nil {
-			return err
+		var connectionID int64
+		if err := tx.QueryRowContext(ctx, `SELECT connection_id FROM observation_runs WHERE id=?`, runID).Scan(&connectionID); err != nil {
+			return struct{}{}, err
 		}
-		evidenceID = id
-	}
-	status := "ok"
-	if proposal.Outcome == "error" {
-		status = "error"
-	} else if proposal.Outcome == "gap" {
-		status = "gap"
-	}
-	var nullableGap any
-	if proposal.GapReason != nil {
-		nullableGap = *proposal.GapReason
-	}
-	warningsJSON, _ := json.Marshal(proposal.Warnings)
-	if _, err := conn.ExecContext(ctx, `
-		UPDATE observation_run_objects
-		SET status=?,gap_reason=?,evidence_id=?,result_digest=?,warnings_json=?
-		WHERE observation_run_id=? AND object_type=?`,
-		status, nullableGap, evidenceID, digest[:], string(warningsJSON), runID, objectType); err != nil {
-		return err
-	}
-	if proposal.Outcome == "success" {
-		if err := projectObservedObjects(ctx, conn, service.nowText(), connectionID, objectType, proposal); err != nil {
-			return err
+		var evidenceID any
+		if proposal.Outcome == "success" {
+			// The complete, bounded observation pass is sealed as Evidence:
+			// the frozen proposal is the fact, warnings travel alongside it.
+			params, _ := json.Marshal(map[string]any{"objectType": objectType, "objectCount": len(proposal.Objects)})
+			warnings, _ := json.Marshal(proposal.Warnings)
+			payload, _ := json.Marshal(map[string]any{"schemaKind": ResultSchemaKind, "objectType": objectType, "observedAt": proposal.ObservedAt, "objects": proposal.Objects})
+			insert, err := tx.ExecContext(ctx, `
+				INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,warnings_json,integrity,created_at)
+				VALUES(?,'observation_run',?,?,?,?,?,'complete',?)`,
+				attemptID, runID, string(params), proposal.ObservedAt, string(payload), string(warnings), service.nowText())
+			if err != nil {
+				return struct{}{}, err
+			}
+			id, err := insert.LastInsertId()
+			if err != nil {
+				return struct{}{}, err
+			}
+			evidenceID = id
 		}
-	}
-	// The attempt terminal transition commits first: run convergence counts
-	// active children, so it must observe this child already terminal or the
-	// Run would wait on itself forever.
-	if err := attempt.NewService(service.db).CommitResultOn(ctx, conn, attemptID, bootID, epoch, proposal.Outcome != "error", "tool_error"); err != nil {
-		return err
-	}
-	if err := service.convergeRunOn(ctx, conn, runID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		status := "ok"
+		if proposal.Outcome == "error" {
+			status = "error"
+		} else if proposal.Outcome == "gap" {
+			status = "gap"
+		}
+		var nullableGap any
+		if proposal.GapReason != nil {
+			nullableGap = *proposal.GapReason
+		}
+		warningsJSON, _ := json.Marshal(proposal.Warnings)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE observation_run_objects
+			SET status=?,gap_reason=?,evidence_id=?,result_digest=?,warnings_json=?
+			WHERE observation_run_id=? AND object_type=?`,
+			status, nullableGap, evidenceID, digest[:], string(warningsJSON), runID, objectType); err != nil {
+			return struct{}{}, err
+		}
+		if proposal.Outcome == "success" {
+			if err := projectObservedObjects(ctx, tx, service.nowText(), connectionID, objectType, proposal); err != nil {
+				return struct{}{}, err
+			}
+		}
+		// The attempt terminal transition commits first: run convergence
+		// counts active children, so it must observe this child already
+		// terminal or the Run would wait on itself forever.
+		if err := attempt.NewService(service.db).CommitResultOn(ctx, tx, attemptID, bootID, epoch, proposal.Outcome != "error", "tool_error"); err != nil {
+			return struct{}{}, err
+		}
+		if err := service.convergeRunOn(ctx, tx, runID); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	}, func(struct{}) int64 { return attemptID })
+	return err
 }
 
 // projectObservedObjects re-projects one complete object-type pass. The pass
@@ -215,7 +208,7 @@ func (service *Service) CommitProposal(ctx context.Context, attemptID int64, boo
 // previously observed identities absent (current=0) is the only place
 // "not observed anymore" may ever be expressed; a missed identity keeps its
 // history, is never deleted, and never becomes stale by inference.
-func projectObservedObjects(ctx context.Context, conn *sql.Conn, now string, connectionID int64, objectType string, proposal resultProposal) error {
+func projectObservedObjects(ctx context.Context, conn execution.Executor, now string, connectionID int64, objectType string, proposal resultProposal) error {
 	if _, err := conn.ExecContext(ctx, `UPDATE observed_source_objects SET current=0 WHERE connection_id=? AND object_type=? AND current=1`, connectionID, objectType); err != nil {
 		return err
 	}
@@ -250,8 +243,10 @@ func projectObservedObjects(ctx context.Context, conn *sql.Conn, now string, con
 
 // convergeRunOn completes the Run when no child is active anymore: any failed
 // execution fails the Run, any incomplete pass yields CompletedWithWarnings,
-// and only then is the Run terminal with an honest result detail.
-func (service *Service) convergeRunOn(ctx context.Context, conn *sql.Conn, runID int64) error {
+// and only then is the Run terminal with an honest result detail. The actual
+// terminal transition writes the run's completed/failed audit record in the
+// same transaction — once per transition, never per telemetry row.
+func (service *Service) convergeRunOn(ctx context.Context, conn execution.Executor, runID int64) error {
 	var active int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM execution_attempts WHERE scope_type='observation_run' AND scope_id=? AND state IN ('Queued','Assigned','Running','Cancelling')`, runID).Scan(&active); err != nil {
 		return err
@@ -273,8 +268,50 @@ func (service *Service) convergeRunOn(ctx context.Context, conn *sql.Conn, runID
 		// Run header never duplicates or drifts from the frozen facts.
 		state = "CompletedWithWarnings"
 	}
-	if _, err := conn.ExecContext(ctx, `UPDATE observation_runs SET state=?,result_detail=?,row_version=row_version+1 WHERE id=? AND state='Running'`, state, detail, runID); err != nil {
+	result, err := conn.ExecContext(ctx, `UPDATE observation_runs SET state=?,result_detail=?,row_version=row_version+1 WHERE id=? AND state='Running'`, state, detail, runID)
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return nil
+	}
+	return service.writeRunTerminalAudit(ctx, conn, runID, state)
+}
+
+// writeRunTerminalAudit records the run's completed or failed transition as
+// the system lifecycle fact it is, attributed to the operation's execution
+// metadata. This is the domain's central high-volume exception boundary: the
+// telemetry upserts that produced the terminal state are covered by this one
+// record and are never audited row by row.
+func (service *Service) writeRunTerminalAudit(ctx context.Context, conn audit.DB, runID int64, state string) error {
+	meta, ok := execution.FromContext(ctx)
+	if !ok {
+		return errors.New("observation: run terminal audit requires the execution metadata")
+	}
+	action := actionRunComplete
+	if state == "Failed" {
+		action = actionRunFail
+	}
+	record := audit.Record{
+		ActorType:     string(meta.Actor.Kind),
+		ActorID:       meta.Actor.ID,
+		Action:        action,
+		Outcome:       audit.OutcomeSuccess,
+		Phase:         audit.PhaseExecute,
+		DomainRefType: objectTypeObservationRun,
+		DomainRefID:   runID,
+		CorrelationID: meta.CorrelationID,
+		RequestID:     meta.Source.RequestID,
+		InitiatorType: string(meta.Initiator.Kind),
+		InitiatorID:   meta.Initiator.ID,
+		Targets:       []audit.RecordTarget{{Type: objectTypeObservationRun, ID: runID}},
+	}
+	if _, err := service.audit.Write(ctx, conn, record); err != nil {
+		return fmt.Errorf("observation: persist run terminal audit: %w", err)
 	}
 	return nil
 }

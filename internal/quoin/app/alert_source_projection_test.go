@@ -3,48 +3,27 @@ package app_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/alerts"
-	"github.com/Suknna/quoin/internal/quoin/auth"
 )
+
+// createOperatorSession provisions a real operator through the shared
+// fixture: created by the admin with an assigned OTP contact (mandatory for
+// second-factor delivery), initialized via the real operator flow, session
+// from the two-step login.
+func createOperatorSession(t *testing.T, stack *sseStack) string {
+	t.Helper()
+	stack.scenario.createOperator(t, stack.loginAdmin(t), "alert-operator-create-1", "alert-operator", "Alert Operator", "Alert operator passphrase 2026!", "alert-operator@example.test")
+	return stack.scenario.initializeOperatorSession(t, "alert-operator", "Alert operator passphrase 2026!", "Alert operator formal passphrase 2027!")
+}
 
 // TestAlertSourceManagementProjection uses the public HTTP seams: only Admin
 // may view source/intake management; receiver configuration is deployment
 // authority rather than the request host; waiting is represented by no event
 // timestamp and valid observations alone advance that timestamp.
-func createOperatorSession(t *testing.T, stack *sseStack) string {
-	t.Helper()
-	password := "Alert operator passphrase 2026!"
-	phc, err := auth.HashPassword(password)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := stack.db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,password_change_required,created_at,updated_at) VALUES('alert-operator','Alert Operator','operator',1,?,0,?,?)`, phc, now, now); err != nil {
-		t.Fatal(err)
-	}
-	request, err := http.NewRequest(http.MethodPost, stack.server.URL+"/api/v1/auth/login", strings.NewReader(fmt.Sprintf(`{"username":"alert-operator","password":%q}`, password)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Origin", "https://quoin.example.com")
-	request.Header.Set("Content-Type", "application/json")
-	response, err := stack.server.Client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("operator login status=%d", response.StatusCode)
-	}
-	return strings.Split(strings.Split(response.Header.Get("Set-Cookie"), ";")[0], "=")[1]
-}
-
 func TestAlertSourceManagementProjection(t *testing.T) {
 	stack := newSSEStack(t)
 	operatorCookie := createOperatorSession(t, stack)

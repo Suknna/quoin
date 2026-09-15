@@ -8,15 +8,33 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/danielgtaylor/huma/v2/humatest"
 )
+
+// requestContext 注入写命令所需的执行元数据与会话证明引用（fixture 会话 1，
+// 签发 revision 1）：HTTP 入口的统一准入接线完成前，由测试充当可信入口，
+// 主体与 Handler.Authenticate 返回的会话一致。
+func requestContext(t *testing.T, principalID int64, correlation string) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: principalID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: correlation + "-request"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 func TestViewHTTPUsesDeclaredNestedScope(t *testing.T) {
 	service, db := newViewHarness(t)
 	defer db.Close()
 	_, api := humatest.New(t)
 	(&Handler{Views: service, Authenticate: func(context.Context, string) (int64, error) { return 1, nil }}).Register(api)
-	created := api.Post("/api/v1/business-views", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"http-create-view","viewKey":"lab-services","displayName":"实验服务","description":"","scope":{"labelConditions":{"job":"mysql"}}}`))
+	created := api.PostCtx(requestContext(t, 1, "corr-http-create"), "/api/v1/business-views", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"http-create-view","viewKey":"lab-services","displayName":"实验服务","description":"","scope":{"labelConditions":{"job":"mysql"}}}`))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -39,7 +57,7 @@ func TestViewHTTPUpdateAcceptsEditorPayloadAndAdvancesRowVersion(t *testing.T) {
 	(&Handler{Views: service, Authenticate: func(context.Context, string) (int64, error) { return 1, nil }}).Register(api)
 
 	// 真实 UI 创建动作：key=mall-mysql-view，scope 指向 mall-prometheus 与 job=mall-mysql-exporter。
-	created := api.Post("/api/v1/business-views", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"ui-create-mall-mysql","viewKey":"mall-mysql-view","displayName":"商城MySQL监控","description":"","scope":{"connectionName":"fixture-metrics","labelConditions":{"job":"mall-mysql-exporter"}}}`))
+	created := api.PostCtx(requestContext(t, 1, "corr-http-mall-create"), "/api/v1/business-views", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"ui-create-mall-mysql","viewKey":"mall-mysql-view","displayName":"商城MySQL监控","description":"","scope":{"connectionName":"fixture-metrics","labelConditions":{"job":"mall-mysql-exporter"}}}`))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -63,7 +81,7 @@ func TestViewHTTPUpdateAcceptsEditorPayloadAndAdvancesRowVersion(t *testing.T) {
 
 	// 编辑表单保存：只把 job 改为 mall-redis-exporter，载荷与 web 端
 	// updateBusinessView 产出的 wire 完全一致（不含 viewKey）。
-	updated := api.Put("/api/v1/business-views/mall-mysql-view", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"ui-update-mall-mysql","displayName":"商城MySQL监控","description":"","scope":{"connectionName":"fixture-metrics","labelConditions":{"job":"mall-redis-exporter"}},"expectedRowVersion":1}`))
+	updated := api.PutCtx(requestContext(t, 1, "corr-http-mall-update"), "/api/v1/business-views/mall-mysql-view", "Content-Type: application/json", strings.NewReader(`{"clientCommandId":"ui-update-mall-mysql","displayName":"商城MySQL监控","description":"","scope":{"connectionName":"fixture-metrics","labelConditions":{"job":"mall-redis-exporter"}},"expectedRowVersion":1}`))
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
 	}

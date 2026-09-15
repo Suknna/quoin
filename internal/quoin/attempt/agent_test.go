@@ -15,7 +15,7 @@ import (
 
 func TestAgentModelCallWithToolClosure(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, analysisID := seedAttempt(t, db)
 	_ = analysisID
@@ -152,7 +152,7 @@ func TestAgentModelCallWithToolClosure(t *testing.T) {
 
 func TestToolCallPreflightOutcomeIsSingleAssignmentAndImmutable(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -234,7 +234,7 @@ func TestFrozenSchemaRejectsLegacyKubernetesToolNames(t *testing.T) {
 // directly instead of relying on the Go-side catalog to reject legacy input.
 func sealedRawToolProposal(t *testing.T, db *sql.DB, toolName string) (int64, int64) {
 	t.Helper()
-	service := NewService(db)
+	service := newTestService(t, db)
 	attemptID, _ := seedAttempt(t, db)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='tool-name-proof',connection_epoch=1,lease_until=?,runtime_release_version='test',row_version=row_version+1 WHERE id=?`, now, attemptID); err != nil {

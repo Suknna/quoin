@@ -39,7 +39,7 @@ func (service *RuntimeService) dispatchBrowserOperation(ctx context.Context, ope
 	// replayed to Lintel if either control frame crosses in flight.
 	if input.Kind == "journey" {
 		var attemptID int64
-		if err := service.Connections.DB().QueryRowContext(ctx, `SELECT owner_attempt_id FROM browser_operations WHERE id=? AND kind='journey'`, operationID).Scan(&attemptID); err != nil {
+		if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT owner_attempt_id FROM browser_operations WHERE id=? AND kind='journey'`, operationID).Scan(&attemptID); err != nil {
 			return err
 		}
 		attemptView, err := service.attemptsService().Get(ctx, attemptID)
@@ -97,7 +97,7 @@ func (service *RuntimeService) reconcileLintelPhysicalOperations(ctx context.Con
 		var state string
 		var storedBoot string
 		var storedEpoch uint64
-		err := service.Browsers.DB().QueryRowContext(ctx, `SELECT state,COALESCE(lintel_boot_id,''),COALESCE(lintel_connection_epoch,0) FROM browser_operations WHERE id=?`, id).Scan(&state, &storedBoot, &storedEpoch)
+		err := service.Browsers.Reader().QueryRowContext(ctx, `SELECT state,COALESCE(lintel_boot_id,''),COALESCE(lintel_connection_epoch,0) FROM browser_operations WHERE id=?`, id).Scan(&state, &storedBoot, &storedEpoch)
 		if err != nil || storedBoot != bootID || storedEpoch > epoch {
 			// A runtime-only process has no durable owner. The typed Stop tombstone
 			// is idempotent and is the only safe reconciliation action.
@@ -200,7 +200,7 @@ func (service *RuntimeService) handleBrowserStopAck(ctx context.Context, envelop
 		// close. Re-read the parent state in this StopAck transaction boundary.
 		var parentID int64
 		var parentState string
-		if service.Browsers.DB().QueryRowContext(ctx, `SELECT parent.id,parent.state
+		if service.Browsers.Reader().QueryRowContext(ctx, `SELECT parent.id,parent.state
 			FROM browser_operations operation
 			JOIN execution_attempts parent ON parent.id=operation.owner_attempt_id
 			WHERE operation.id=? AND operation.kind='exploration'`, ack.GetOperationId()).Scan(&parentID, &parentState) == nil && parentID > 0 && parentState == "Cancelling" {
@@ -371,7 +371,7 @@ func (service *RuntimeService) dispatchPendingExplorationAction(ctx context.Cont
 		return
 	}
 	var childID int64
-	err := service.Analyses.DB().QueryRowContext(ctx, `SELECT b.child_attempt_id FROM browser_exploration_child_bindings b
+	err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT b.child_attempt_id FROM browser_exploration_child_bindings b
 		JOIN execution_attempts c ON c.id=b.child_attempt_id
 		JOIN browser_operations o ON o.id=b.operation_id
 		WHERE b.operation_id=? AND o.kind='exploration' AND o.state='Running' AND c.state='Queued' ORDER BY c.id LIMIT 1`, operationID).Scan(&childID)
@@ -385,7 +385,7 @@ func (service *RuntimeService) dispatchPendingBrowserStops(ctx context.Context) 
 		return
 	}
 	var id int64
-	if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Succeeded','Failed','Cancelled','Interrupted') AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL ORDER BY id LIMIT 1`).Scan(&id); err != nil {
+	if err := service.Browsers.Reader().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Succeeded','Failed','Cancelled','Interrupted') AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL ORDER BY id LIMIT 1`).Scan(&id); err != nil {
 		return
 	}
 	// Acknowledgement is asynchronous; do not spin duplicate Stop frames.
@@ -402,12 +402,12 @@ func (service *RuntimeService) dispatchQueuedBrowserOperations(ctx context.Conte
 	// transaction counts each newly Starting row, so this fills capacity without
 	// an unbounded stale-projection burst.
 	var starting int64
-	if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state='Starting' ORDER BY id LIMIT 1`).Scan(&starting); err == nil {
+	if err := service.Browsers.Reader().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state='Starting' ORDER BY id LIMIT 1`).Scan(&starting); err == nil {
 		_ = service.dispatchBrowserOperation(ctx, starting)
 	}
 	for {
 		var id int64
-		if err := service.Browsers.DB().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Queued','WaitingForCapacity') ORDER BY id LIMIT 1`).Scan(&id); err != nil {
+		if err := service.Browsers.Reader().QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE state IN ('Queued','WaitingForCapacity') ORDER BY id LIMIT 1`).Scan(&id); err != nil {
 			return
 		}
 		if err := service.dispatchBrowserOperation(ctx, id); err != nil {

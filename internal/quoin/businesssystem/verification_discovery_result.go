@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 type verificationDiscoveryProposal struct {
@@ -30,7 +32,7 @@ type verificationDiscoveryProposal struct {
 	GapReason *string  `json:"gapReason"`
 }
 
-func validateDiscoverySeriesScope(ctx context.Context, conn *sql.Conn, configVersionID int64, discoveryKey string, series []struct {
+func validateDiscoverySeriesScope(ctx context.Context, conn execution.Executor, configVersionID int64, discoveryKey string, series []struct {
 	Labels    map[string]string `json:"labels"`
 	Value     string            `json:"value"`
 	Timestamp float64           `json:"timestamp"`
@@ -89,46 +91,50 @@ func (service *Service) CommitVerificationDiscoveryProposal(ctx context.Context,
 	default:
 		return fmt.Errorf("invalid verification discovery outcome")
 	}
-	conn, err := service.db.Conn(ctx)
+	scope, err := service.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	if _, err := execution.Execute(scope, service.runner, service.opDiscoveryResult,
+		func(conn *execution.Tx) (struct{}, error) {
+			return service.commitDiscoveryResultOn(scope, conn, attemptID, bootID, epoch, raw, p)
+		},
+		func(struct{}) int64 { return 0 }); err != nil {
+		if errors.Is(err, execution.ErrNoTransition) {
+			// The identical proposal already sealed the same immutable digest:
+			// an idempotent replay records nothing.
+			return nil
+		}
 		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
+	return nil
+}
+
+// commitDiscoveryResultOn is CommitVerificationDiscoveryProposal's business
+// stage on the runner-owned transaction.
+func (service *Service) commitDiscoveryResultOn(ctx context.Context, conn execution.Executor, attemptID int64, bootID string, epoch uint64, raw []byte, p verificationDiscoveryProposal) (struct{}, error) {
 	var runID, versionID int64
 	var key string
-	if err = conn.QueryRowContext(ctx, `SELECT a.scope_id,r.config_version_id,a.discovery_key FROM execution_attempts a JOIN config_verification_runs r ON r.id=a.scope_id WHERE a.id=? AND a.scope_type='config_verification_run' AND a.discovery_key IS NOT NULL`, attemptID).Scan(&runID, &versionID, &key); err != nil {
-		return err
+	if err := conn.QueryRowContext(ctx, `SELECT a.scope_id,r.config_version_id,a.discovery_key FROM execution_attempts a JOIN config_verification_runs r ON r.id=a.scope_id WHERE a.id=? AND a.scope_type='config_verification_run' AND a.discovery_key IS NOT NULL`, attemptID).Scan(&runID, &versionID, &key); err != nil {
+		return struct{}{}, err
 	}
 	if runID != p.VerificationRunID || key != p.DiscoveryKey {
-		return fmt.Errorf("verification discovery identity does not match attempt")
+		return struct{}{}, fmt.Errorf("verification discovery identity does not match attempt")
 	}
 	if p.Outcome == "success" {
 		if err := validateDiscoverySeriesScope(ctx, conn, versionID, key, p.Series); err != nil {
-			return err
+			return struct{}{}, err
 		}
 	}
 	digest := sha256.Sum256(raw)
 	var existing []byte
-	if err = conn.QueryRowContext(ctx, `SELECT result_digest FROM config_verification_discovery_results WHERE attempt_id=?`, attemptID).Scan(&existing); err == nil {
+	if err := conn.QueryRowContext(ctx, `SELECT result_digest FROM config_verification_discovery_results WHERE attempt_id=?`, attemptID).Scan(&existing); err == nil {
 		if string(existing) == string(digest[:]) {
-			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return err
-			}
-			committed = true
-			return nil
+			return struct{}{}, fmt.Errorf("%w: identical discovery proposal already sealed", execution.ErrNoTransition)
 		}
-		return fmt.Errorf("verification discovery proposal conflicts")
-	} else if err != sql.ErrNoRows {
-		return err
+		return struct{}{}, fmt.Errorf("verification discovery proposal conflicts")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return struct{}{}, err
 	}
 	status, gap := "ok", any(nil)
 	var evidenceID any
@@ -137,26 +143,22 @@ func (service *Service) CommitVerificationDiscoveryProposal(ctx context.Context,
 		result, _ := json.Marshal(map[string]any{"series": p.Series})
 		insert, err := conn.ExecContext(ctx, `INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,integrity,created_at) VALUES(?,'config_verification_run',?,?,?,?,?,?)`, attemptID, runID, string(params), p.ObservedAt, string(result), "complete", service.nowText())
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		evidenceID, _ = insert.LastInsertId()
 	} else {
 		status = "gap"
 		gap = *p.GapReason
 	}
-	if _, err = conn.ExecContext(ctx, `INSERT INTO config_verification_discovery_results(verification_run_id,discovery_key,attempt_id,evidence_id,status,gap_reason,result_digest,created_at) VALUES(?,?,?,?,?,?,?,?)`, runID, key, attemptID, evidenceID, status, gap, digest[:], service.nowText()); err != nil {
-		return err
+	if _, err := conn.ExecContext(ctx, `INSERT INTO config_verification_discovery_results(verification_run_id,discovery_key,attempt_id,evidence_id,status,gap_reason,result_digest,created_at) VALUES(?,?,?,?,?,?,?,?)`, runID, key, attemptID, evidenceID, status, gap, digest[:], service.nowText()); err != nil {
+		return struct{}{}, err
 	}
-	if err = attempt.NewService(service.db).CommitResultOn(ctx, conn, attemptID, bootID, epoch, p.Outcome == "success", "tool_error"); err != nil {
-		return err
+	if err := attempt.NewService(service.db).CommitResultOn(ctx, conn, attemptID, bootID, epoch, p.Outcome == "success", "tool_error"); err != nil {
+		return struct{}{}, err
 	}
-	if err = convergeVerificationRunOn(ctx, conn, runID); err != nil {
-		return err
+	if err := convergeVerificationRunOn(ctx, conn, runID); err != nil {
+		return struct{}{}, err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
 	_ = versionID
-	return nil
+	return struct{}{}, nil
 }

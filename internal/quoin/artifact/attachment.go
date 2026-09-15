@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // ErrAttachmentTooLarge reports a body over the message-level attachment
@@ -170,14 +172,18 @@ func (store *Store) StageText(reader io.Reader, limitBytes int64) (*StagedText, 
 }
 
 // CommitAttachmentTransaction registers one staged body as a durable
-// text attachment on the CALLER's already-open BEGIN IMMEDIATE transaction
-// (DATA-ARTIFACT-003 ownership order: the source material exists first,
-// the artifact closes onto it, then text_attachments completes the
-// association — never a circular owner). The caller owns COMMIT/ROLLBACK
-// so the staging replay re-check and this write serialize atomically.
-func (store *Store) CommitAttachmentTransaction(ctx context.Context, conn *sql.Conn, principalID int64, filename, shaHex string, sizeBytes int64) (AttachmentRecord, error) {
+// text attachment on the caller's runner-owned transaction (DATA-ARTIFACT-003
+// ownership order: the source material exists first, the artifact closes onto
+// it, then text_attachments completes the association — never a circular
+// owner). The only live caller is the investigation staging command's
+// execution.Execute stage, so the parameter is execution.Executor — the
+// concrete runner-owned *execution.Tx alias. A raw *sql.Conn or any wrapped
+// handle can neither satisfy nor embed it, so this registration can never run
+// outside an audited runner transaction. The runner owns COMMIT/ROLLBACK so
+// the staging re-check and this write serialize atomically.
+func (store *Store) CommitAttachmentTransaction(ctx context.Context, tx execution.Executor, principalID int64, filename, shaHex string, sizeBytes int64) (AttachmentRecord, error) {
 	now := store.now().Format(time.RFC3339Nano)
-	materialInsert, err := conn.ExecContext(ctx, `
+	materialInsert, err := tx.ExecContext(ctx, `
 		INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at)
 		VALUES('text_attachment',?,?,NULL,?,?)`, shaHex, sizeBytes, principalID, now)
 	if err != nil {
@@ -188,9 +194,9 @@ func (store *Store) CommitAttachmentTransaction(ctx context.Context, conn *sql.C
 		return AttachmentRecord{}, err
 	}
 	var blobID int64
-	err = conn.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
 	if errors.Is(err, sql.ErrNoRows) {
-		insert, err := conn.ExecContext(ctx, `
+		insert, err := tx.ExecContext(ctx, `
 			INSERT INTO artifact_blobs(sha256,size_bytes,storage_key,created_at)
 			VALUES(?,?,?,?)`, shaHex, sizeBytes, "blobs/"+shaHex+".blob", now)
 		if err != nil {
@@ -203,7 +209,7 @@ func (store *Store) CommitAttachmentTransaction(ctx context.Context, conn *sql.C
 	} else if err != nil {
 		return AttachmentRecord{}, err
 	}
-	artifactInsert, err := conn.ExecContext(ctx, `
+	artifactInsert, err := tx.ExecContext(ctx, `
 		INSERT INTO artifacts(blob_id,kind,media_type,sensitive,retention_kind,owner_type,owner_id,expires_at,created_by,created_at)
 		VALUES(?,'attachment','text/plain',0,'long_term','source_material',?,NULL,?,?)`,
 		blobID, materialID, principalID, now)
@@ -214,7 +220,7 @@ func (store *Store) CommitAttachmentTransaction(ctx context.Context, conn *sql.C
 	if err != nil {
 		return AttachmentRecord{}, err
 	}
-	attachmentInsert, err := conn.ExecContext(ctx, `
+	attachmentInsert, err := tx.ExecContext(ctx, `
 		INSERT INTO text_attachments(source_material_id,artifact_id,original_filename,size_bytes,digest,uploaded_by,uploaded_at)
 		VALUES(?,?,?,?,?,?,?)`, materialID, artifactID, filename, sizeBytes, shaHex, principalID, now)
 	if err != nil {
@@ -231,12 +237,13 @@ func (store *Store) CommitAttachmentTransaction(ctx context.Context, conn *sql.C
 	}, nil
 }
 
-// AttachmentByID loads one attachment with its artifact metadata
-// (ErrNotFound when the row does not exist).
+// AttachmentByID loads one attachment with its artifact metadata from the
+// read-only reader (ErrNotFound when the row does not exist; fails closed
+// until the composition layer wires the reader).
 func (store *Store) AttachmentByID(ctx context.Context, attachmentID int64) (AttachmentRecord, error) {
 	var record AttachmentRecord
 	var uploadedBy sql.NullInt64
-	err := store.db.QueryRowContext(ctx, `
+	err := store.reads().QueryRowContext(ctx, `
 		SELECT t.id, t.artifact_id, t.original_filename, a.media_type, t.size_bytes,
 		       t.digest, a.body_expired, t.uploaded_by, t.uploaded_at
 		FROM text_attachments t JOIN artifacts a ON a.id=t.artifact_id

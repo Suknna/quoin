@@ -11,10 +11,10 @@ import (
 )
 
 func TestFeedDeliversOrderedDeltasAndTerminalOnce(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-feed-1", "请回答", nil, nil)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestFeedDeliversOrderedDeltasAndTerminalOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := `"流式结束文本"`
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: sha256Sum([]byte(content))[:],
 	}); err != nil {
@@ -82,10 +82,10 @@ func TestFeedDeliversOrderedDeltasAndTerminalOnce(t *testing.T) {
 }
 
 func TestFeedTerminalViewAndReplay(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-view-1", "请回答", nil, nil)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestFeedTerminalViewAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := `"已提交"`
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: sha256Sum([]byte(content))[:],
 	}); err != nil {
@@ -136,8 +136,8 @@ func TestFeedTerminalViewAndReplay(t *testing.T) {
 }
 
 func TestFeedDropsWithoutObserver(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	// Unknown attempts carry no feed; delivery must never panic or create
 	// state.
 	service.DeliverDelta(999999, 1, 1, "无观察者")

@@ -62,6 +62,10 @@ func (service *RuntimeService) dispatchSourceObservationAttempt(ctx context.Cont
 	if err := service.Observations.Attempts().BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
 		return err
 	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Observations.Reader(), attemptID)
+	if err != nil {
+		return err
+	}
 	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
 		ConnectionEpoch: *view.ConnectionEpoch,
 		CorrelationId:   uint64(attemptID),
@@ -69,8 +73,9 @@ func (service *RuntimeService) dispatchSourceObservationAttempt(ctx context.Cont
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
 			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_OBSERVATION_RUN, ScopeId: prepared.scopeID,
-			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
-			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: prepared.input.SchemaKind, CanonicalJson: prepared.input.CanonicalJSON, ContentDigest: prepared.input.ContentDigest, ConnectionGrants: prepared.grants},
+			OperationCorrelationId: operationCorrelationID,
+			LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+			Input:                  &runtimev1.AttemptInputSnapshot{SchemaKind: prepared.input.SchemaKind, CanonicalJson: prepared.input.CanonicalJSON, ContentDigest: prepared.input.ContentDigest, ConnectionGrants: prepared.grants},
 		}},
 	})
 }
@@ -89,10 +94,10 @@ func (service *RuntimeService) prepareSourceObservationDispatch(ctx context.Cont
 		return sourceObservationDispatchInput{}, err
 	}
 	var scopeID int64
-	if err := service.Observations.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='inspection_collection' AND scope_type='observation_run' AND state='Queued'`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.Observations.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='inspection_collection' AND scope_type='observation_run' AND state='Queued'`, attemptID).Scan(&scopeID); err != nil {
 		return sourceObservationDispatchInput{}, err
 	}
-	rows, err := service.Observations.DB().QueryContext(ctx, `
+	rows, err := service.Observations.Reader().QueryContext(ctx, `
 		SELECT id,connection_revision_id,credential_generation_id,purpose
 		FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
 	if err != nil {

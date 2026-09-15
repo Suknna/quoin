@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -82,19 +83,34 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 }
 
 // resolveThanosCall drives the production grant resolver exactly as the
-// attempt machine does inside its persistence transaction.
+// attempt machine does: composed on the service runner's guarded Tx through
+// a dedicated registered test operation, never on a raw pool connection.
 func resolveThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	t.Helper()
 	tool, ok := attempt.DefaultCatalogs().Implementation(thanos.QueryToolName)
 	if !ok {
 		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
-	conn, err := db.Conn(context.Background())
+	op, err := service.runner.Register(execution.Operation{
+		Name:       "test.tool_grant." + strconv.FormatInt(toolCallID, 10),
+		Class:      execution.ClassWrite,
+		ObjectType: ObjectAnalysis,
+		Authorize:  func(context.Context, *execution.Tx) error { return nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	return service.Attempts().ToolGrantResolver(context.Background(), conn, attemptID, toolCallID, tool)
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "test-tool-grant-" + strconv.FormatInt(toolCallID, 10),
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execution.Execute(ctx, service.runner, op, func(tx *execution.Tx) (attempt.ToolResolution, error) {
+		return service.Attempts().ToolGrantResolver(ctx, tx, attemptID, toolCallID, tool)
+	}, func(attempt.ToolResolution) int64 { return attemptID })
 }
 
 func enabledMetricsNames(t *testing.T, db *sql.DB) []string {
@@ -142,8 +158,8 @@ func runSourceThanosAttempt(t *testing.T, db *sql.DB, service *Service, commandI
 // freezes the enabled integration list (kind+name) instead of a business
 // context, and the rebuild reproduces the frozen digest exactly.
 func TestSourceAnalysisCreatesAndRebuildsWithEnabledSource(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, _ := runSourceThanosAttempt(t, db, service, "cmd-source-create")
@@ -195,8 +211,8 @@ func TestSourceAnalysisCreatesAndRebuildsWithEnabledSource(t *testing.T) {
 // sourceRef names the connection, the grant freezes on it with no business
 // system, and the canonical execution request carries query+sourceRef.
 func TestThanosSourceGrantResolvesByExplicitName(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	connectionID, _, _ := seedThanosChain(t, db)
 	names := enabledMetricsNames(t, db)
@@ -239,8 +255,8 @@ func TestThanosSourceGrantResolvesByExplicitName(t *testing.T) {
 // candidate rule: with exactly one enabled metrics connection an omitted
 // sourceRef is deterministic, not a first-pick.
 func TestThanosSourceSingleCandidateResolvesWithoutName(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runSourceThanosAttempt(t, db, service, "cmd-source-unique")
@@ -259,8 +275,8 @@ func TestThanosSourceSingleCandidateResolvesWithoutName(t *testing.T) {
 // enabled sources without an explicit name stay a recoverable model-visible
 // result: no grant, no silent selection.
 func TestThanosSourceAmbiguityReturnsRecoverablePreflight(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	seedAdditionalThanosChain(t, db)
@@ -292,8 +308,8 @@ func TestThanosSourceAmbiguityReturnsRecoverablePreflight(t *testing.T) {
 // TestThanosSourceUnknownNameReturnsRecoverablePreflight proves a misspelled
 // sourceRef stays recoverable and names the available sources.
 func TestThanosSourceUnknownNameReturnsRecoverablePreflight(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	names := enabledMetricsNames(t, db)
@@ -312,8 +328,8 @@ func TestThanosSourceUnknownNameReturnsRecoverablePreflight(t *testing.T) {
 // TestThanosSourceWithoutEnabledConnectionReturnsPreflight proves a disabled
 // integration is a model-visible routing miss, not a crash or silent skip.
 func TestThanosSourceWithoutEnabledConnectionReturnsPreflight(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	connectionID, _, _ := seedThanosChain(t, db)
 	attemptID, callID := runSourceThanosAttempt(t, db, service, "cmd-source-disabled")
@@ -334,8 +350,8 @@ func TestThanosSourceWithoutEnabledConnectionReturnsPreflight(t *testing.T) {
 // TestThanosSourceModeRejectsBusinessResourceRef proves the declaration
 // vocabulary does not leak into source-level attempts.
 func TestThanosSourceModeRejectsBusinessResourceRef(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runSourceThanosAttempt(t, db, service, "cmd-source-resourceref")
@@ -354,8 +370,8 @@ func TestThanosSourceModeRejectsBusinessResourceRef(t *testing.T) {
 // declaration grants nothing: an attributed attempt resolves exactly like a
 // source-level one — frozen-list names only.
 func TestThanosDeclaredAttemptForeignSourceRefStaysNarrow(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	occurrenceID := seedOccurrence(t, db)

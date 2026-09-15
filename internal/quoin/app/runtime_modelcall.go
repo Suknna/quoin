@@ -51,11 +51,11 @@ func (service *RuntimeService) handleBeginModelCall(ctx context.Context, envelop
 		purpose = "model_probe_embedding"
 	}
 	var attemptType string
-	if lookupErr := service.Connections.DB().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, begin.GetAttemptId()).Scan(&attemptType); lookupErr == nil && attemptType == "embedding" {
+	if lookupErr := service.Connections.Reader().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, begin.GetAttemptId()).Scan(&attemptType); lookupErr == nil && attemptType == "embedding" {
 		purpose = "embedding"
 	}
 	var grantID int64
-	err := service.Connections.DB().QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose=? ORDER BY id LIMIT 1`, begin.GetAttemptId(), purpose).Scan(&grantID)
+	err := service.Connections.Reader().QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose=? ORDER BY id LIMIT 1`, begin.GetAttemptId(), purpose).Scan(&grantID)
 	if err != nil {
 		reject(fmt.Sprintf("model grant missing for %s: %v", purpose, err))
 		return
@@ -75,8 +75,8 @@ func (service *RuntimeService) handleBeginModelCall(ctx context.Context, envelop
 		promptDigest = ""
 		toolDigest = ""
 	}
-	db := service.Connections.DB()
-	callID, err := modelprovider.Begin(ctx, db, begin.GetAttemptId(), grantID, int(begin.GetCallSeq()), int(begin.GetRetrySeq()), operation, begin.GetModelId(), promptDigest, toolDigest, inputDigest, renderedDigest, int64(begin.GetContextBudgetTokens()), int64(begin.GetMaxOutputTokens()), 0, int(begin.GetEvictedTurnCount()))
+	db := service.writer
+	callID, err := modelprovider.Begin(ctx, db, service.Connections.Reader(), begin.GetAttemptId(), grantID, int(begin.GetCallSeq()), int(begin.GetRetrySeq()), operation, begin.GetModelId(), promptDigest, toolDigest, inputDigest, renderedDigest, int64(begin.GetContextBudgetTokens()), int64(begin.GetMaxOutputTokens()), 0, int(begin.GetEvictedTurnCount()))
 	if err != nil {
 		reject(err.Error())
 		return
@@ -84,13 +84,13 @@ func (service *RuntimeService) handleBeginModelCall(ctx context.Context, envelop
 	// Input lineage (trg_model_call_success_input): every succeeded call
 	// needs persisted items — chat carries the frozen system contract and
 	// tool schema synthetics, embedding carries the attempt snapshot.
-	if err := modelprovider.WriteInputLineage(ctx, db, callID, operation, promptDigest, toolDigest, begin.GetAttemptId()); err != nil {
+	if err := modelprovider.WriteInputLineage(ctx, db, service.Connections.Reader(), callID, operation, promptDigest, toolDigest, begin.GetAttemptId()); err != nil {
 		reject(err.Error())
 		return
 	}
 	var revisionID, generationID int64
 	var connectionID int64
-	if err := service.Connections.DB().QueryRowContext(ctx, `SELECT connection_id,connection_revision_id,credential_generation_id FROM attempt_connection_grants WHERE id=?`, grantID).Scan(&connectionID, &revisionID, &generationID); err != nil {
+	if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT connection_id,connection_revision_id,credential_generation_id FROM attempt_connection_grants WHERE id=?`, grantID).Scan(&connectionID, &revisionID, &generationID); err != nil {
 		reject(err.Error())
 		return
 	}
@@ -161,7 +161,7 @@ func (service *RuntimeService) handleCompleteModelCall(ctx context.Context, enve
 		ResponseJSON:      responseJSON, ResponseDigest: responseDigest,
 		ResponseComplete: complete.GetResponseComplete(),
 	}
-	if err := modelprovider.Complete(ctx, service.Connections.DB(), complete.GetAttemptId(), complete.GetModelCallId(), completion); err != nil {
+	if err := modelprovider.Complete(ctx, service.writer, service.Connections.Reader(), complete.GetAttemptId(), complete.GetModelCallId(), completion); err != nil {
 		reject(err.Error())
 		return
 	}
@@ -190,5 +190,7 @@ func mapFailureReason(reason runtimev1.ModelCallFailureReason) string {
 	}
 }
 
-var _ = sql.ErrNoRows
-var _ = connections.TypeModelProvider
+var (
+	_ = sql.ErrNoRows
+	_ = connections.TypeModelProvider
+)

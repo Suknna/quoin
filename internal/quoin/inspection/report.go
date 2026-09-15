@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const reportInputKind = "inspection_analysis_v1"
@@ -41,10 +42,10 @@ type reportInput struct {
 	ModelContract      reportModelContract `json:"modelContract"`
 	// 独立计划 Run（ADR-0004）的冻结绑定上下文；历史声明 Run 不携带这些字段
 	//（omitempty 保持其重建摘要逐字节不变）。
-	Plan             *planReportContext `json:"plan,omitempty"`
-	ConnectionName   string             `json:"connectionName,omitempty"`
-	TemplateID       string             `json:"templateId,omitempty"`
-	TemplateVersion  string             `json:"templateVersion,omitempty"`
+	Plan            *planReportContext `json:"plan,omitempty"`
+	ConnectionName  string             `json:"connectionName,omitempty"`
+	TemplateID      string             `json:"templateId,omitempty"`
+	TemplateVersion string             `json:"templateVersion,omitempty"`
 }
 
 // planReportContext 是模型可见的计划事实摘要（非秘密、非正文）。
@@ -69,11 +70,11 @@ type modelProviderSelection struct {
 
 var ErrModelProviderMissing = errors.New("no enabled qualified model provider")
 
-func selectReportModelProvider(ctx context.Context, conn *sql.Conn) (modelProviderSelection, error) {
+func selectReportModelProvider(ctx context.Context, tx execution.Executor) (modelProviderSelection, error) {
 	var selected modelProviderSelection
 	var qualificationRowVersion, connectionRowVersion int64
 	var probeOutcome string
-	err := conn.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
 		       q.probe_result_id, q.enabled_row_version, c.row_version, p.outcome
 		FROM connections c
@@ -93,7 +94,7 @@ func selectReportModelProvider(ctx context.Context, conn *sql.Conn) (modelProvid
 		return selected, ErrModelProviderMissing
 	}
 	var streaming, nativeToolCalling bool
-	if err = conn.QueryRowContext(ctx, `
+	if err = tx.QueryRowContext(ctx, `
 		SELECT chat_model_id, context_budget_tokens, max_output_tokens, streaming_supported, native_tool_calling_supported
 		FROM model_provider_connection_probe_results WHERE probe_result_id=?`, selected.ProbeResultID).
 		Scan(&selected.ChatModelID, &selected.ContextBudget, &selected.MaxOutput, &streaming, &nativeToolCalling); err != nil {
@@ -108,8 +109,8 @@ func selectReportModelProvider(ctx context.Context, conn *sql.Conn) (modelProvid
 // startReportAnalysisOn creates the first analysis attempt after collection
 // closes. A missing model provider is recoverable here: the reconciler retries
 // later instead of creating a placeholder report.
-func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, runID int64, now string) error {
-	_, err := s.createReportAnalysisOn(ctx, conn, runID, now, false)
+func (s *Service) startReportAnalysisOn(ctx context.Context, tx execution.Executor, runID int64, now string) error {
+	_, err := s.createReportAnalysisOn(ctx, tx, runID, now, false)
 	if errors.Is(err, ErrModelProviderMissing) {
 		return nil
 	}
@@ -120,9 +121,9 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, conn *sql.Conn, run
 // by the explicit re-analysis command: it permits prior terminal attempts but
 // never an additional concurrent attempt, so every report version has exactly
 // one live producer.
-func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, runID int64, now string, allowPrior bool) (int64, error) {
+func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Executor, runID int64, now string, allowPrior bool) (int64, error) {
 	var runState string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM inspection_runs WHERE id=?`, runID).Scan(&runState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM inspection_runs WHERE id=?`, runID).Scan(&runState); err != nil {
 		return 0, err
 	}
 	if runState != "Completed" && runState != "CompletedWithGaps" {
@@ -130,7 +131,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	}
 	if !allowPrior {
 		var existing int
-		if err := conn.QueryRowContext(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM execution_attempts WHERE attempt_type='inspection_analysis' AND scope_type='run' AND scope_id=?`, runID).
 			Scan(&existing); err != nil {
 			return 0, err
@@ -139,13 +140,13 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 			return 0, nil
 		}
 	}
-	provider, err := selectReportModelProvider(ctx, conn)
+	provider, err := selectReportModelProvider(ctx, tx)
 	if err != nil {
 		return 0, err
 	}
 	var configVersionID, planID, connectionID sql.NullInt64
 	var planKey string
-	if err = conn.QueryRowContext(ctx, `
+	if err = tx.QueryRowContext(ctx, `
 		SELECT config_version_id, plan_key, plan_id, connection_id FROM inspection_runs WHERE id=?`, runID).
 		Scan(&configVersionID, &planKey, &planID, &connectionID); err != nil {
 		return 0, err
@@ -156,12 +157,12 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	var planConnectionName, planTemplateID, planTemplateVersion string
 	if planID.Valid {
 		if connectionID.Valid {
-			if err = conn.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&planConnectionName); err != nil {
+			if err = tx.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&planConnectionName); err != nil {
 				return 0, err
 			}
 		}
 		var paramsRaw, scopeRaw string
-		if err = conn.QueryRowContext(ctx, `
+		if err = tx.QueryRowContext(ctx, `
 			SELECT frozen_params_json, frozen_scope_json, template_id, template_version FROM inspection_runs WHERE id=?`, runID).
 			Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion); err != nil {
 			return 0, err
@@ -173,10 +174,10 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 		planContext = &planReportContext{Key: planKey, Params: params, Scope: scope}
 	}
 	var reportVersion int
-	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
 		return 0, err
 	}
-	rows, err := conn.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT x.id, x.evidence_id, e.result_json, e.artifact_id
 		FROM inspection_check_results x LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
@@ -220,19 +221,18 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 		if s.artifactWriter == nil {
 			continue
 		}
-		artifactID, materializeErr := s.artifactWriter(ctx, conn, check.evidence.Int64, []byte(check.resultJSON.String))
+		artifactID, materializeErr := s.artifactWriter(ctx, tx, check.evidence.Int64, []byte(check.resultJSON.String))
 		if materializeErr != nil {
 			return 0, materializeErr
 		}
 		artifactIDs = append(artifactIDs, artifactID)
 	}
-	insert, err := conn.ExecContext(ctx, `
+	// CreateOn centrally persists the operation correlation onto the new
+	// analysis attempt in this same transaction (ADR-0006); a context without
+	// execution metadata fails closed.
+	analysisID, err := attempt.CreateOn(ctx, tx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
 		VALUES('inspection_analysis','run',?,'Queued',?,?,?)`, runID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
-	if err != nil {
-		return 0, err
-	}
-	analysisID, err := insert.LastInsertId()
 	if err != nil {
 		return 0, err
 	}
@@ -241,14 +241,14 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 		ReportVersion: int64(reportVersion + 1), ConfigVersionID: configVersionID.Int64, PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
-		Plan: planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
+		Plan:          planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
 		return 0, err
 	}
 	digest := sha256.Sum256(body)
-	snapshot, err := conn.ExecContext(ctx, `
+	snapshot, err := tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,inspection_report_version,created_at)
 		VALUES(?,?,?,?,?,?)`, analysisID, reportInputKind, "v1", hex.EncodeToString(digest[:]), input.ReportVersion, now)
 	if err != nil {
@@ -259,7 +259,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 		return 0, err
 	}
 	runDigest := sha256.Sum256([]byte(fmt.Sprintf("inspection-run:%d", runID)))
-	if _, err = conn.ExecContext(ctx, `
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_run_id)
 		VALUES(?,1,'inspection_run',?,?)`, snapshotID, hex.EncodeToString(runDigest[:]), runID); err != nil {
 		return 0, err
@@ -268,7 +268,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	for _, check := range checks {
 		itemSeq++
 		checkDigest := sha256.Sum256([]byte(fmt.Sprintf("inspection-check-result:%d", check.resultID)))
-		if _, err = conn.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_check_result_id)
 			VALUES(?,?,'inspection_check_result',?,?)`, snapshotID, itemSeq, hex.EncodeToString(checkDigest[:]), check.resultID); err != nil {
 			return 0, err
@@ -277,7 +277,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	for _, evidenceID := range evidenceIDs {
 		itemSeq++
 		evidenceDigest := sha256.Sum256([]byte(fmt.Sprintf("evidence:%d", evidenceID)))
-		if _, err = conn.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,evidence_id)
 			VALUES(?,?,'inspection_evidence',?,?)`, snapshotID, itemSeq, hex.EncodeToString(evidenceDigest[:]), evidenceID); err != nil {
 			return 0, err
@@ -286,17 +286,17 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	for _, artifactID := range artifactIDs {
 		itemSeq++
 		artifactDigest := sha256.Sum256([]byte(fmt.Sprintf("artifact:%d", artifactID)))
-		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id) VALUES(?,?,'inspection_artifact',?,?)`, snapshotID, itemSeq, hex.EncodeToString(artifactDigest[:]), artifactID); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,artifact_id) VALUES(?,?,'inspection_artifact',?,?)`, snapshotID, itemSeq, hex.EncodeToString(artifactDigest[:]), artifactID); err != nil {
 			return 0, err
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at) VALUES(?,?,'input_snapshot',?,?)`, analysisID, artifactID, snapshotID, now); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at) VALUES(?,?,'input_snapshot',?,?)`, analysisID, artifactID, snapshotID, now); err != nil {
 			return 0, err
 		}
 	}
 	if !planID.Valid {
 		versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", configVersionID.Int64)))
 		itemSeq++
-		if _, err = conn.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
 			VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID.Int64); err != nil {
 			return 0, err
@@ -304,7 +304,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, conn *sql.Conn, ru
 	}
 	// New report analyses retain only config-version lineage. The nullable run
 	// Label Contract locator is historical read metadata, never new authority.
-	_, err = conn.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?, 'chat_model', ?,?,?,?,?)`,
 		analysisID, provider.ConnectionID, provider.RevisionID, provider.CredentialGen, provider.ProbeResultID, now)
@@ -332,7 +332,11 @@ type reportProposal struct {
 // CommitReportProposal re-adjudicates the model's typed ResultProposal against
 // the frozen input and commits the single ledger row; the frozen SQL closure
 // creates the immutable Report, its ordered references, and the Attempt's
-// Succeeded terminal state in the same statement.
+// Succeeded terminal state in the same statement. The commit runs on the
+// shared execution runner (ADR-0006): the system task scope is restored from
+// the attempt's persisted correlation, the boot/epoch fence is preserved, and
+// the automatic audit row commits atomically with the ledger INSERT. An
+// identical redelivery replays silently — the first commit's audit stands.
 func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
 	var proposal reportProposal
 	if err := json.Unmarshal(raw, &proposal); err != nil {
@@ -368,90 +372,80 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 		return fmt.Errorf("inspection report result digest does not match its canonical payload")
 	}
 
-	conn, err := s.db.Conn(ctx)
+	commandCtx, err := s.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, err = execution.Execute(commandCtx, s.runner, s.reportResult, func(tx *execution.Tx) (struct{}, error) {
+		var runID int64
+		var state string
+		if err := tx.QueryRowContext(commandCtx, `
+			SELECT scope_id, state FROM execution_attempts
+			WHERE id=? AND attempt_type='inspection_analysis' AND scope_type='run'`, attemptID).
+			Scan(&runID, &state); err != nil {
+			return struct{}{}, err
 		}
-	}()
-
-	var runID int64
-	var state string
-	if err = conn.QueryRowContext(ctx, `
-		SELECT scope_id, state FROM execution_attempts
-		WHERE id=? AND attempt_type='inspection_analysis' AND scope_type='run'`, attemptID).
-		Scan(&runID, &state); err != nil {
-		return err
-	}
-	if runID != proposal.InspectionRunID {
-		return fmt.Errorf("inspection report result identity does not match attempt")
-	}
-	// Idempotent replay: an already-committed ledger row accepts only the
-	// identical payload (its digest was derived from this exact body).
-	var existingDigest []byte
-	replayErr := conn.QueryRowContext(ctx, `SELECT result_digest FROM inspection_report_result_ledgers WHERE attempt_id=?`, attemptID).Scan(&existingDigest)
-	if replayErr == nil {
-		if hex.EncodeToString(existingDigest) == proposal.ResultDigest {
-			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return err
+		if runID != proposal.InspectionRunID {
+			return struct{}{}, fmt.Errorf("inspection report result identity does not match attempt")
+		}
+		// Idempotent replay: an already-committed ledger row accepts only the
+		// identical payload (its digest was derived from this exact body).
+		var existingDigest []byte
+		replayErr := tx.QueryRowContext(commandCtx, `SELECT result_digest FROM inspection_report_result_ledgers WHERE attempt_id=?`, attemptID).Scan(&existingDigest)
+		if replayErr == nil {
+			if hex.EncodeToString(existingDigest) == proposal.ResultDigest {
+				return struct{}{}, errResultReplayed
 			}
-			committed = true
+			return struct{}{}, fmt.Errorf("inspection report replay digest conflicts")
+		}
+		if replayErr != sql.ErrNoRows {
+			return struct{}{}, replayErr
+		}
+		// The model call must be the attempt's own succeeded call with the exact
+		// prompt provenance.
+		var callState string
+		var callPrompt string
+		err := tx.QueryRowContext(commandCtx, `
+			SELECT status, prompt_digest FROM model_calls WHERE id=? AND attempt_id=?`, proposal.ModelCallID, attemptID).
+			Scan(&callState, &callPrompt)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("inspection report model call does not belong to the attempt: %w", err)
+		}
+		if callState != "succeeded" || callPrompt != proposal.PromptDigest {
+			return struct{}{}, fmt.Errorf("inspection report model call is not the succeeded prompt provenance")
+		}
+		// Boot/epoch fence: the ledger closure performs the terminal transition.
+		var bound int
+		if err := tx.QueryRowContext(commandCtx, `
+			SELECT 1 FROM execution_attempts
+			WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return struct{}{}, attempt.ErrLateResult
+			}
+			return struct{}{}, err
+		}
+		var reportVersion int64
+		if err := tx.QueryRowContext(commandCtx, `
+			SELECT inspection_report_version FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&reportVersion); err != nil {
+			return struct{}{}, err
+		}
+		if _, err := tx.ExecContext(commandCtx, `
+			INSERT INTO inspection_report_result_ledgers(
+				attempt_id, inspection_run_id, report_version, model_call_id, result_digest, evidence_digest,
+				content, prompt_digest, evidence_ids_json, artifact_ids_json, knowledge_version_ids_json, created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			attemptID, runID, reportVersion, proposal.ModelCallID, resultSum[:], evidenceDigest,
+			proposal.Content, proposal.PromptDigest, evidenceJSON, artifactJSON, knowledgeJSON, s.nowText()); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	}, func(struct{}) int64 { return proposal.InspectionRunID })
+	if err != nil {
+		if errors.Is(err, errResultReplayed) {
 			return nil
 		}
-		return fmt.Errorf("inspection report replay digest conflicts")
-	}
-	if replayErr != sql.ErrNoRows {
-		return replayErr
-	}
-	// The model call must be the attempt's own succeeded call with the exact
-	// prompt provenance.
-	var callState string
-	var callPrompt string
-	err = conn.QueryRowContext(ctx, `
-		SELECT status, prompt_digest FROM model_calls WHERE id=? AND attempt_id=?`, proposal.ModelCallID, attemptID).
-		Scan(&callState, &callPrompt)
-	if err != nil {
-		return fmt.Errorf("inspection report model call does not belong to the attempt: %w", err)
-	}
-	if callState != "succeeded" || callPrompt != proposal.PromptDigest {
-		return fmt.Errorf("inspection report model call is not the succeeded prompt provenance")
-	}
-	// Boot/epoch fence: the ledger closure performs the terminal transition.
-	var bound int
-	if err = conn.QueryRowContext(ctx, `
-		SELECT 1 FROM execution_attempts
-		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ErrLateResult
-		}
 		return err
 	}
-	var reportVersion int64
-	if err = conn.QueryRowContext(ctx, `
-		SELECT inspection_report_version FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&reportVersion); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO inspection_report_result_ledgers(
-			attempt_id, inspection_run_id, report_version, model_call_id, result_digest, evidence_digest,
-			content, prompt_digest, evidence_ids_json, artifact_ids_json, knowledge_version_ids_json, created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		attemptID, runID, reportVersion, proposal.ModelCallID, resultSum[:], evidenceDigest,
-		proposal.Content, proposal.PromptDigest, evidenceJSON, artifactJSON, knowledgeJSON, s.nowText()); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
 	return nil
 }
 

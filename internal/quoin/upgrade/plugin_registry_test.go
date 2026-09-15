@@ -160,8 +160,12 @@ func TestPluginRegistryMigrationPreservesHistoryAndAddsCapacity(t *testing.T) {
 	if stored != hex.EncodeToString(digest[:]) {
 		t.Fatalf("schema digest=%s want current release digest", stored)
 	}
-	// 迁移后的库对当前引导程序可见：verifySchemaGate 现在必须拒绝（非前置）。
-	if err := verifySchemaGate(context.Background(), conn, &PreflightResult{}); err == nil {
-		t.Fatal("migrated database must not be treated as a predecessor any more")
+	// A canonical database keeps authentic migration history and remains
+	// eligible for future maintenance; it is no longer a predecessor.
+	if isReleasedPredecessorDigest(stored) {
+		t.Fatal("migrated database is still classified as a predecessor")
+	}
+	if err := verifySchemaGate(context.Background(), conn, &PreflightResult{}); err != nil {
+		t.Fatalf("authentic migrated canonical rejected: %v", err)
 	}
 }

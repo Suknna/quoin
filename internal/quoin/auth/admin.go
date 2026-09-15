@@ -34,6 +34,10 @@ var (
 	ErrUsernameTaken = errors.New("username already exists")
 	// ErrValidation maps deterministic field rejections to 422.
 	ErrValidation = errors.New("request fields do not satisfy the domain rules")
+	// ErrActorChanged marks a write whose acting principal lost authorization
+	// mid-command (disabled concurrently or session revoked); the HTTP layer
+	// maps it to 401 because the caller's session is already gone.
+	ErrActorChanged = errors.New("acting session authorization changed")
 )
 
 // RowVersionError decorates ErrRowVersion with the authoritative row version
@@ -64,6 +68,7 @@ type userPayload struct {
 	DisplayName            string  `json:"displayName"`
 	Role                   string  `json:"role"`
 	Enabled                bool    `json:"enabled"`
+	Initialized            bool    `json:"initialized"`
 	AuthRevision           int64   `json:"authRevision"`
 	RowVersion             int64   `json:"rowVersion"`
 	PasswordChangeRequired bool    `json:"passwordChangeRequired"`
@@ -73,7 +78,7 @@ type userPayload struct {
 func userToPayload(user *User) userPayload {
 	return userPayload{
 		ID: user.ID, Username: user.Username, DisplayName: user.DisplayName, Role: user.Role,
-		Enabled: user.Enabled, AuthRevision: user.AuthRevision, RowVersion: user.RowVersion,
+		Enabled: user.Enabled, Initialized: user.Initialized, AuthRevision: user.AuthRevision, RowVersion: user.RowVersion,
 		PasswordChangeRequired: user.PasswordChangeRequired, LastLoginAt: user.LastLoginAt,
 	}
 }
@@ -82,7 +87,7 @@ func (payload userPayload) toUser() User {
 	return User{
 		ID: payload.ID, Locator: strconv.FormatInt(payload.ID, 10), Username: payload.Username,
 		DisplayName: payload.DisplayName, Role: payload.Role, Enabled: payload.Enabled,
-		AuthRevision: payload.AuthRevision, RowVersion: payload.RowVersion,
+		Initialized: payload.Initialized, AuthRevision: payload.AuthRevision, RowVersion: payload.RowVersion,
 		PasswordChangeRequired: payload.PasswordChangeRequired, LastLoginAt: payload.LastLoginAt,
 	}
 }
@@ -135,42 +140,6 @@ type SessionView struct {
 	Current           bool   `json:"current"`
 }
 
-// commandContext bundles the command key identity every write shares.
-type commandContext struct {
-	session   Session
-	commandID string
-	digest    string
-	typeName  string
-	action    string
-}
-
-// replayOrExecute centralizes the command-key lookup: a stored record with
-// the same digest replays (committed results re-materialize, deterministic
-// rejections rebuild the same 4xx), a different digest conflicts, and a new
-// command falls through to execute (HTTP-COMMAND-003/007).
-func (service *Service) replayOrExecute(ctx context.Context, command commandContext) (UserCommandResult, bool, error) {
-	stored, found, err := LookupCommand(ctx, service.db, command.session.User.ID, command.commandID)
-	if err != nil || !found {
-		return UserCommandResult{}, false, err
-	}
-	if stored.RequestDigest != command.digest {
-		return UserCommandResult{}, false, ErrCommandReused
-	}
-	if stored.Outcome == OutcomeRejectedKnown {
-		var detail ConflictDetail
-		_ = json.Unmarshal([]byte(stored.ResultPayload), &detail)
-		return UserCommandResult{}, true, detail.asError()
-	}
-	var result UserCommandResult
-	if err := json.Unmarshal([]byte(stored.ResultPayload), &result); err != nil {
-		return UserCommandResult{}, false, fmt.Errorf("replay %s: %w", command.typeName, err)
-	}
-	if result.User != nil {
-		result.User.Locator = strconv.FormatInt(result.User.ID, 10)
-	}
-	return result, true, nil
-}
-
 // ConflictDetail is the non-secret rejection payload persisted with
 // rejected_known commands so a replay rebuilds the identical 4xx response.
 type ConflictDetail struct {
@@ -179,30 +148,6 @@ type ConflictDetail struct {
 	ObjectID          string `json:"objectId,omitempty"`
 	CurrentRowVersion int64  `json:"currentRowVersion,omitempty"`
 	Detail            string `json:"detail,omitempty"`
-}
-
-func (detail ConflictDetail) asError() error {
-	switch detail.Code {
-	case "row_version_conflict":
-		return &RowVersionError{Current: detail.CurrentRowVersion, ObjectID: parseLocator(detail.ObjectID)}
-	case "active_conflict":
-		if detail.Detail == lastAdminDetail {
-			return ErrLastAdmin
-		}
-		if detail.Detail == usernameTakenDetail {
-			return ErrUsernameTaken
-		}
-		return ErrLastAdmin
-	case "command_id_reused":
-		return ErrCommandReused
-	case "not_found":
-		return ErrNotFound
-	default:
-		if strings.Contains(detail.Detail, passwordMarker) {
-			return fmt.Errorf("%w: %s", ErrPasswordPolicy, detail.Detail)
-		}
-		return fmt.Errorf("%w: %s", ErrValidation, detail.Detail)
-	}
 }
 
 const (
@@ -216,94 +161,34 @@ func parseLocator(text string) int64 {
 	return value
 }
 
-// recordOutcome writes the ledger row plus audit event on an OPEN
-// transaction (either the domain-write transaction for a commit, or a short
-// rejection transaction — DATA-AUDIT-004/005).
-func (service *Service) recordOutcome(ctx context.Context, conn *sql.Conn, command commandContext, outcome, objectType string, objectID int64, payload string, auditOutcome string) error {
-	if err := RecordCommand(ctx, conn, command.session.User.ID, command.commandID, command.typeName, command.digest, outcome, objectType, objectID, payload); err != nil {
-		return err
-	}
-	return insertAudit(ctx, conn, "user", command.session.User.ID, command.action, auditOutcome, objectType, objectID, service.timestamp())
-}
-
-// rejectOutsideTransaction persists a deterministic rejection that was
-// detected before any transaction opened (field validation): ledger + audit
-// in one short transaction, zero domain change.
-func (service *Service) rejectOutsideTransaction(ctx context.Context, command commandContext, detail ConflictDetail, wrapped error, targetID int64) error {
-	payload, err := json.Marshal(detail)
-	if err != nil {
-		payload = []byte(`{}`)
-	}
-	conn, err := service.beginImmediate(ctx)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer finishImmediate(conn, &committed)
-	if err := service.recordOutcome(ctx, conn, command, OutcomeRejectedKnown, "user", targetID, string(payload), "rejected"); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return wrapped
-}
-
-// rejectInTransaction persists a deterministic rejection discovered inside an
-// open (empty) domain transaction: ledger + audit, commit, return the
-// business error (DATA-AUDIT-004). committed is flipped so the deferred
-// finishImmediate does not try to roll back the committed rejection.
-func (service *Service) rejectInTransaction(ctx context.Context, conn *sql.Conn, command commandContext, detail ConflictDetail, wrapped error, targetID int64, committed *bool) error {
-	payload, err := json.Marshal(detail)
-	if err != nil {
-		payload = []byte(`{}`)
-	}
-	if err := service.recordOutcome(ctx, conn, command, OutcomeRejectedKnown, detail.ObjectType, targetID, string(payload), "rejected"); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	*committed = true
-	return wrapped
-}
-
-func (service *Service) rejectMissing(ctx context.Context, conn *sql.Conn, command commandContext, committed *bool) error {
-	detail := ConflictDetail{Code: "not_found", Detail: "目标对象不存在"}
-	return service.rejectInTransaction(ctx, conn, command, detail, ErrNotFound, 0, committed)
-}
-
-func (service *Service) rejectRowVersion(ctx context.Context, conn *sql.Conn, command commandContext, target User, committed *bool) error {
-	detail := ConflictDetail{Code: "row_version_conflict", ObjectType: "user", ObjectID: target.Locator, CurrentRowVersion: target.RowVersion, Detail: "目标用户已被其他操作修改，请刷新后重试"}
-	return service.rejectInTransaction(ctx, conn, command, detail, &RowVersionError{Current: target.RowVersion, ObjectID: target.ID}, target.ID, committed)
-}
-
-func (service *Service) rejectLastAdmin(ctx context.Context, conn *sql.Conn, command commandContext, target User, committed *bool) error {
-	detail := ConflictDetail{Code: "active_conflict", ObjectType: "user", ObjectID: target.Locator, CurrentRowVersion: target.RowVersion, Detail: lastAdminDetail}
-	return service.rejectInTransaction(ctx, conn, command, detail, ErrLastAdmin, target.ID, committed)
-}
-
-// ErrActorChanged marks a write whose acting principal lost authorization
-// mid-command (disabled/demoted concurrently); the HTTP layer maps it to 401
-// because the caller's session is already revoked.
-var ErrActorChanged = errors.New("acting session authorization changed")
-
-// verifyActorAdmin re-reads the acting user inside the open transaction and
-// confirms the session identity is still an enabled administrator at the
-// same auth revision (DATA-TX-002).
-func verifyActorAdmin(ctx context.Context, conn *sql.Conn, session Session) error {
-	actor, err := findUserByID(ctx, conn, session.User.ID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrActorChanged
+// asError rebuilds the typed package errors from a persisted rejection,
+// including the replay-parity mappings for password-policy details and the
+// current-session revocation conflict.
+func (detail ConflictDetail) asError() error {
+	switch detail.Code {
+	case "row_version_conflict":
+		return &RowVersionError{Current: detail.CurrentRowVersion, ObjectID: parseLocator(detail.ObjectID)}
+	case "active_conflict":
+		if detail.Detail == lastAdminDetail {
+			return ErrLastAdmin
 		}
-		return err
+		if detail.Detail == usernameTakenDetail {
+			return ErrUsernameTaken
+		}
+		if strings.Contains(detail.Detail, "当前请求使用的 Session") {
+			return fmt.Errorf("%w: %s", ErrValidation, detail.Detail)
+		}
+		return ErrLastAdmin
+	case "command_id_reused":
+		return ErrCommandReused
+	case "not_found":
+		return ErrNotFound
+	default:
+		if strings.Contains(detail.Detail, passwordMarker) || strings.Contains(strings.ToLower(detail.Detail), "password") {
+			return fmt.Errorf("%w: %s", ErrPasswordPolicy, detail.Detail)
+		}
+		return fmt.Errorf("%w: %s", ErrValidation, detail.Detail)
 	}
-	if !actor.Enabled || actor.Role != "admin" || actor.AuthRevision != session.User.AuthRevision {
-		return ErrActorChanged
-	}
-	return nil
 }
 
 func marshalUserResult(user User) (string, error) {
@@ -320,7 +205,7 @@ func (service *Service) ListUsers(ctx context.Context, afterID int64, limit int)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `SELECT id,username,display_name,role,enabled,auth_revision,row_version,password_change_required,password_phc,(SELECT MAX(created_at) FROM sessions WHERE user_id=users.id) FROM users WHERE id>? ORDER BY id LIMIT ?`, afterID, limit+1)
+	rows, err := service.read().QueryContext(ctx, `SELECT id,username,display_name,role,enabled,auth_revision,initialized,row_version,password_change_required,password_phc,(SELECT MAX(created_at) FROM sessions WHERE user_id=users.id) FROM users WHERE id>? ORDER BY id LIMIT ?`, afterID, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -347,13 +232,14 @@ func (service *Service) ListUsers(ctx context.Context, afterID int64, limit int)
 // scanUserRow shares the users projection between list and detail queries.
 func scanUserRow(rows *sql.Rows) (User, error) {
 	var user User
-	var enabled, required int
+	var enabled, initialized, required int
 	var lastLogin sql.NullString
-	if err := rows.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &user.RowVersion, &required, &user.passwordPHC, &lastLogin); err != nil {
+	if err := rows.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &initialized, &user.RowVersion, &required, &user.passwordPHC, &lastLogin); err != nil {
 		return User{}, err
 	}
 	user.Locator = strconv.FormatInt(user.ID, 10)
 	user.Enabled = enabled == 1
+	user.Initialized = initialized == 1
 	user.PasswordChangeRequired = required == 1
 	if lastLogin.Valid {
 		user.LastLoginAt = &lastLogin.String
@@ -368,7 +254,7 @@ func (service *Service) ListUserSessions(ctx context.Context, session Session, a
 		limit = 50
 	}
 	now := service.timestamp()
-	rows, err := service.db.QueryContext(ctx, `SELECT id,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at FROM sessions WHERE user_id=? AND revoked_at IS NULL AND absolute_expires_at>? AND id>? ORDER BY id LIMIT ?`, session.User.ID, now, afterID, limit+1)
+	rows, err := service.read().QueryContext(ctx, `SELECT id,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at FROM sessions WHERE user_id=? AND revoked_at IS NULL AND absolute_expires_at>? AND id>? ORDER BY id LIMIT ?`, session.User.ID, now, afterID, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -443,7 +329,7 @@ func (service *Service) ListAuditEvents(ctx context.Context, filters AuditEventF
 	}
 	query += " ORDER BY created_at DESC, id DESC LIMIT ?"
 	args = append(args, limit+1)
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.read().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, err
 	}

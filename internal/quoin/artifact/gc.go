@@ -2,10 +2,13 @@ package artifact
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const (
@@ -13,59 +16,53 @@ const (
 	artifactGCInterval  = 15 * time.Minute
 )
 
-// RunGC drains an overdue backlog through bounded passes. Each pass releases
-// blobMu before yielding, so a newly arriving backup can acquire the shared
-// artifact-storage coordinator between batches. Once no work remains it sleeps
-// until the normal internal wake-up interval.
+// RunGC drains an overdue backlog through bounded passes, releasing storage
+// coordination between batches so uploads and backups can make progress.
 func (store *Store) RunGC(ctx context.Context) {
 	for {
 		more, err := store.runGarbageCollection(ctx)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(artifactGCInterval):
-			}
-			continue
-		}
-		if more {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Millisecond):
-			}
-			continue
+		delay := artifactGCInterval
+		if err == nil && more {
+			delay = time.Millisecond
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(artifactGCInterval):
+		case <-time.After(delay):
 		}
 	}
 }
 
-// RunGarbageCollection expires one bounded metadata batch then retries every
-// orphaned blob deletion. The success gauge advances only when both phases
-// completed, so a permissions failure cannot look like GC success.
 func (store *Store) RunGarbageCollection(ctx context.Context) error {
 	_, err := store.runGarbageCollection(ctx)
 	return err
 }
 
-// runGarbageCollection returns whether another expiry batch is immediately
-// available. Its caller deliberately yields before acquiring blobMu again.
 func (store *Store) runGarbageCollection(ctx context.Context) (bool, error) {
-	// All blob lifecycle paths reserve a database connection before blobMu.
-	// CommitUpload follows the same order, avoiding the conn→blob / blob→conn
-	// inversion while making install+first-reference indivisible from GC.
-	conn, err := store.db.Conn(ctx)
+	store.gcMu.Lock()
+	defer store.gcMu.Unlock()
+	ctx, err := store.systemTaskContext(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
-	store.blobMu.Lock()
-	defer store.blobMu.Unlock()
-	rows, err := conn.QueryContext(ctx, `SELECT id FROM artifacts WHERE body_expired=0 AND expires_at IS NOT NULL AND expires_at<=? ORDER BY id LIMIT ?`, store.now().Format(time.RFC3339Nano), artifactGCBatchSize+1)
+	expiredMore, err := execution.Execute(ctx, store.runner, store.opGCCollect, func(tx *execution.Tx) (bool, error) {
+		return store.expireOverdueBodiesOn(ctx, tx)
+	}, func(bool) int64 { return 0 })
+	if err != nil && !errors.Is(err, execution.ErrNoTransition) {
+		return false, err
+	}
+	orphanMore, err := store.collectOrphanBlobs(ctx)
+	if err != nil {
+		return false, err
+	}
+	if store.gcSuccess != nil {
+		store.gcSuccess(float64(store.now().UTC().Unix()))
+	}
+	return expiredMore || orphanMore, nil
+}
+
+func (store *Store) expireOverdueBodiesOn(ctx context.Context, tx execution.Executor) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM artifacts WHERE body_expired=0 AND expires_at IS NOT NULL AND expires_at<=? ORDER BY id LIMIT ?`, store.now().Format(time.RFC3339Nano), artifactGCBatchSize+1)
 	if err != nil {
 		return false, err
 	}
@@ -78,61 +75,151 @@ func (store *Store) runGarbageCollection(ctx context.Context) (bool, error) {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
 	if err = rows.Close(); err != nil {
 		return false, err
+	}
+	if len(ids) == 0 {
+		return false, execution.ErrNoTransition
 	}
 	more := len(ids) > artifactGCBatchSize
 	if more {
 		ids = ids[:artifactGCBatchSize]
 	}
 	for _, id := range ids {
-		if _, err = conn.ExecContext(ctx, `UPDATE artifacts SET body_expired=1 WHERE id=? AND body_expired=0`, id); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE artifacts SET body_expired=1 WHERE id=? AND body_expired=0`, id); err != nil {
 			return false, err
 		}
-	}
-	orphanMore, err := store.removeOrphanBlobsOn(ctx, conn)
-	if err != nil {
-		return false, err
-	}
-	if store.gcSuccess != nil {
-		store.gcSuccess(float64(store.now().UTC().Unix()))
-	}
-	return more || orphanMore, nil
-}
-
-// removeOrphanBlobs intentionally searches body_expired rows too. A previous
-// successful state update followed by an unlink error is therefore retried,
-// instead of becoming a durable-but-never-collected orphan.
-func (store *Store) removeOrphanBlobsOn(ctx context.Context, conn *sql.Conn) (bool, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT b.sha256 FROM artifact_blobs b WHERE b.sha256 > ? AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.blob_id=b.id AND a.body_expired=0) ORDER BY b.sha256 LIMIT ?`, store.gcOrphanCursor, artifactGCBatchSize+1)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	var hashes []string
-	for rows.Next() {
-		var sha string
-		if err = rows.Scan(&sha); err != nil {
-			return false, err
-		}
-		hashes = append(hashes, sha)
-	}
-	if err = rows.Err(); err != nil {
-		return false, err
-	}
-	more := len(hashes) > artifactGCBatchSize
-	if more {
-		hashes = hashes[:artifactGCBatchSize]
-	}
-	for _, sha := range hashes {
-		if err = os.Remove(filepath.Join(store.dir, "blobs", sha+".blob")); err != nil && !os.IsNotExist(err) {
-			return false, err
-		}
-	}
-	if len(hashes) == 0 || !more {
-		store.gcOrphanCursor = ""
-	} else {
-		store.gcOrphanCursor = hashes[len(hashes)-1]
 	}
 	return more, nil
+}
+
+type orphanBlob struct {
+	ID     int64
+	SHA256 string
+}
+
+// Blob rows outlive their files. Remaining files are retried after a failed
+// pass or restart; an unmatched begin event means removal was not confirmed,
+// never that a missing file was proven to have been removed by this process.
+func (store *Store) collectOrphanBlobs(ctx context.Context) (bool, error) {
+	rows, err := store.reads().QueryContext(ctx, `SELECT b.id,b.sha256 FROM artifact_blobs b WHERE b.sha256 > ? AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.blob_id=b.id AND a.body_expired=0) ORDER BY b.sha256 LIMIT ?`, store.gcOrphanCursor, artifactGCBatchSize+1)
+	if err != nil {
+		return false, err
+	}
+	var blobs []orphanBlob
+	for rows.Next() {
+		var blob orphanBlob
+		if err := rows.Scan(&blob.ID, &blob.SHA256); err != nil {
+			rows.Close()
+			return false, err
+		}
+		blobs = append(blobs, blob)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	more := len(blobs) > artifactGCBatchSize
+	if more {
+		blobs = blobs[:artifactGCBatchSize]
+	}
+	for _, blob := range blobs {
+		if _, err := os.Stat(store.blobPath(blob.SHA256)); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		if err := store.collectBlob(ctx, blob); err != nil {
+			return false, err
+		}
+	}
+	store.gcOrphanCursor = ""
+	if more {
+		store.gcOrphanCursor = blobs[len(blobs)-1].SHA256
+	}
+	return more, nil
+}
+
+func (store *Store) collectBlob(ctx context.Context, blob orphanBlob) error {
+	// A fresh pair identifies this physical attempt, including a later
+	// re-upload of the same digest; old successful intent is never replayed.
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		return err
+	}
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	meta.CorrelationID = correlation
+	ctx, err = execution.ReplaceMetadata(ctx, meta)
+	if err != nil {
+		return err
+	}
+	_, err = execution.Execute(ctx, store.runner, store.opGCIntent, func(tx *execution.Tx) (int64, error) {
+		store.blobMu.Lock()
+		defer store.blobMu.Unlock()
+		eligible, err := orphanEligible(ctx, tx, blob)
+		if err != nil {
+			return 0, err
+		}
+		if !eligible {
+			return 0, execution.ErrNoTransition
+		}
+		if _, err := os.Stat(store.blobPath(blob.SHA256)); os.IsNotExist(err) {
+			return 0, execution.ErrNoTransition
+		} else if err != nil {
+			return 0, err
+		}
+		return blob.ID, nil
+	}, func(id int64) int64 { return id })
+	if errors.Is(err, execution.ErrNoTransition) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// The committed begin audit precedes irreversible unlink. Acquire the
+	// writer before blobMu, as upload materialization releases blobMu before
+	// committing its references. A read-only recheck alone would race that gap.
+	_, err = execution.Execute(ctx, store.runner, store.opGCComplete, func(tx *execution.Tx) (int64, error) {
+		store.blobMu.Lock()
+		defer store.blobMu.Unlock()
+		eligible, err := orphanEligible(ctx, tx, blob)
+		if err != nil {
+			return 0, err
+		}
+		if !eligible {
+			return 0, &execution.RecordedFailure{Code: "collection_superseded", ObjectID: blob.ID}
+		}
+		directory, err := os.Open(filepath.Join(store.dir, "blobs"))
+		if err != nil {
+			return 0, &execution.RecordedFailure{Code: "collection_directory_unavailable", ObjectID: blob.ID}
+		}
+		defer directory.Close()
+		if err := os.Remove(store.blobPath(blob.SHA256)); os.IsNotExist(err) {
+			return 0, &execution.RecordedFailure{Code: "collection_already_absent", ObjectID: blob.ID, Outcome: audit.OutcomeUnknown}
+		} else if err != nil {
+			return 0, &execution.RecordedFailure{Code: "collection_unlink_failed", ObjectID: blob.ID}
+		}
+		if err := directory.Sync(); err != nil {
+			return 0, &execution.RecordedFailure{Code: "collection_sync_unknown", ObjectID: blob.ID, Outcome: audit.OutcomeUnknown}
+		}
+		return blob.ID, nil
+	}, func(id int64) int64 { return id })
+	return err
+}
+
+func orphanEligible(ctx context.Context, reader audit.Reader, blob orphanBlob) (bool, error) {
+	var count int
+	err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM artifact_blobs b WHERE b.id=? AND b.sha256=? AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.blob_id=b.id AND a.body_expired=0)`, blob.ID, blob.SHA256).Scan(&count)
+	return count == 1, err
 }

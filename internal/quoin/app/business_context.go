@@ -34,7 +34,7 @@ func (application *apiServer) listBusinessContext(ctx context.Context, input *au
 	// A current configuration pointer exists only after explicit publication.
 	// Do not filter enabled: disabling stops new work but must not erase the
 	// selector needed to find historical alerts and investigations.
-	rows, err := application.db.QueryContext(ctx, `
+	rows, err := application.readAuthority().QueryContext(ctx, `
 		SELECT key, display_name
 		FROM business_systems
 		WHERE current_config_version_id IS NOT NULL

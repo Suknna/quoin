@@ -3,7 +3,10 @@ package connections_test
 // Deterministic coverage for the T07 connection domain: AEAD tamper and
 // binding-mismatch fail-closed, enable fences (single-enabled, model
 // provider qualification closure), and the probe attempt/grant closure with
-// commit-order discipline.
+// commit-order discipline. Every user-origin operation runs through the
+// shared execution runner, so tests act as the trusted entry point and build
+// real execution metadata over a real initialized admin session (ADR-0006:
+// no synthetic or anonymous identity).
 
 import (
 	"context"
@@ -20,6 +23,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	providerledger "github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 )
 
@@ -47,14 +51,47 @@ func newService(t *testing.T) (*connections.Service, *sql.DB, string) {
 	service := connections.NewService(database.SQL, func() ([]byte, error) {
 		return readKey(t, config.RootKeyFile)
 	})
+	service.SetReader(database.Reader)
 	connections.SetReleaseVersion("v0.1.0-dev")
 	connections.ProbeContractSource = func() string { return "contract_version: 1" }
 	// The qualification/audit FKs reference real users; create the fixture
-	// administrator every service test uses as principal 1.
-	if _, err := database.SQL.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'$argon2id$phc',1,?,?)`, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+	// administrator every service test uses as principal 1, fully initialized
+	// at auth revision 1, plus the valid admin session the in-transaction
+	// recheck (auth.VerifyExecutionSession) verifies.
+	if _, err := database.SQL.Exec(`INSERT INTO users(id,username,display_name,role,enabled,initialized,auth_revision,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,1,'$argon2id$phc',1,?,?)`, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
+	seedAdminSession(t, database.SQL, 1, 1)
 	return service, database.SQL, config.RootKeyFile
+}
+
+// seedAdminSession issues fixture session id sessionID for userID at the
+// given auth revision with far-future idle and absolute expiry.
+func seedAdminSession(t *testing.T, db *sql.DB, userID, sessionID int64) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,randomblob(32),1,'fixture',?,?,?,?)`,
+		sessionID, userID, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// adminContext builds the trusted-entry execution metadata the production
+// admission middleware wires for authenticated admin requests: user actor 1
+// with its real session proof. Missing metadata fails closed in the service,
+// so tests must always carry it.
+func adminContext(t *testing.T, correlation string) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-connections"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 func readKey(t *testing.T, path string) ([]byte, error) {
@@ -79,6 +116,10 @@ var seq cmdSeq
 
 func (seq *cmdSeq) Next() int { seq.n++; return seq.n }
 
+func nextCorrelation() string {
+	return fmt.Sprintf("corr-connections-%d", seq.Next())
+}
+
 func thanosInput(password string) connections.CreateInput {
 	projection, _ := json.Marshal(map[string]any{"type": "thanos", "baseUrl": "https://thanos.example.com", "username": "probe"})
 	var secret json.RawMessage
@@ -90,7 +131,7 @@ func thanosInput(password string) connections.CreateInput {
 
 func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 	service, db, keyFile := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	created, err := service.Create(ctx, thanosInput("secret-password-1"), 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
 		t.Fatal(err)
@@ -100,13 +141,26 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 		// the INSERT (row_version must increase exactly by 1 per UPDATE).
 		t.Fatalf("created projection wrong: %+v", created)
 	}
-	// Decrypt through the supervisor grant path.
-	secret, err := service.OpenGeneration(ctx, created.CurrentGenerationID)
+	// Decrypt through the actual supervisor grant path: bind the probe to a
+	// live stream, then fulfill the frozen grant — the only audited operation
+	// by which a sealed secret leaves storage.
+	if err := registerPlinthSlot(db); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if secret.Thanos == nil || secret.Thanos.Password != "secret-password-1" {
-		t.Fatalf("decrypted secret wrong: %+v", secret)
+	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-envelope", 1, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("bind envelope probe: %v ok=%v", err, ok)
+	}
+	payload, err := service.FulfillGrant(context.Background(), grantID, attemptID, "boot-envelope", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Thanos == nil || payload.Thanos.Password != "secret-password-1" {
+		t.Fatalf("decrypted secret wrong: %+v", payload)
 	}
 	// Tamper with the ciphertext: must fail closed.
 	key, _ := readFile(keyFile)
@@ -132,7 +186,7 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 // and chat-cancellation facts were persisted.
 func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	projection, _ := json.Marshal(map[string]any{
 		"type": "model_provider", "baseUrl": "https://api.example.com", "chatModelId": "chat-only",
 		"contextBudgetTokens": 1024, "maxOutputTokens": 256,
@@ -152,11 +206,11 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, chatGrantID, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "chat-only-boot", 1, time.Minute)
+	_, chatGrantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "chat-only-boot", 1, time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("bind probe: %v ok=%v", err, ok)
 	}
-	if err := service.AcceptProbe(ctx, attemptID, "chat-only-boot", 1); err != nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, "chat-only-boot", 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -170,14 +224,14 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 		// prevent the chat-only child from closing with no embedding claim.
 		{Outcome: "failed", FailureReason: "invalid_response", ProviderRequestID: "req-failed-tool"},
 	} {
-		callID, err := providerledger.Begin(ctx, database, attemptID, chatGrantID, callSeq+1, 0, "chat", "chat-only", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), fmt.Sprintf("%064x", 4), fmt.Sprintf("%064x", 5), 1024, 256, 0, 0)
+		callID, err := providerledger.Begin(context.Background(), database, service.Reader(), attemptID, chatGrantID, callSeq+1, 0, "chat", "chat-only", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), fmt.Sprintf("%064x", 4), fmt.Sprintf("%064x", 5), 1024, 256, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := providerledger.WriteInputLineage(ctx, database, callID, "chat", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), attemptID); err != nil {
+		if err := providerledger.WriteInputLineage(context.Background(), database, service.Reader(), callID, "chat", fmt.Sprintf("%064x", 2), fmt.Sprintf("%064x", 3), attemptID); err != nil {
 			t.Fatal(err)
 		}
-		if err := providerledger.Complete(ctx, database, attemptID, callID, completion); err != nil {
+		if err := providerledger.Complete(context.Background(), database, service.Reader(), attemptID, callID, completion); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -188,7 +242,7 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 		EmbeddingSupported: false, DetailJSON: `{"kind":"model_provider","embeddingSupported":false}`,
 	}}
 	result := connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", 6), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
-	if err := service.CommitProbeResult(ctx, attemptID, "chat-only-boot", 1, result, child); err != nil {
+	if err := service.CommitProbeResult(context.Background(), attemptID, "chat-only-boot", 1, result, child); err != nil {
 		t.Fatalf("chat-only probe must close with persisted chat and cancellation facts: %v", err)
 	}
 	var state, embeddingModelID string
@@ -220,7 +274,7 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 
 func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	first, err := service.Create(ctx, thanosInput(""), 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +324,7 @@ func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 // connection revision and credential generation.
 func passedMetricsProbe(t *testing.T, service *connections.Service, database *sql.DB, summary connections.Summary, boot string, epoch uint64) int64 {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	// The shared fixture registers Plinth once; repeated qualifying probes use
 	// the same slot and only advance their independent attempt bindings.
 	var registered int
@@ -286,10 +340,10 @@ func passedMetricsProbe(t *testing.T, service *connections.Service, database *sq
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, boot, epoch, 5*time.Minute); err != nil || !ok {
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, boot, epoch, 5*time.Minute); err != nil || !ok {
 		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
 	}
-	if err := service.AcceptProbe(ctx, attemptID, boot, epoch); err != nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, boot, epoch); err != nil {
 		t.Fatal(err)
 	}
 	result := connections.TypedProbeResult{
@@ -299,7 +353,7 @@ func passedMetricsProbe(t *testing.T, service *connections.Service, database *sq
 	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{
 		Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`,
 	}}
-	if err := service.CommitProbeResult(ctx, attemptID, boot, epoch, result, child); err != nil {
+	if err := service.CommitProbeResult(context.Background(), attemptID, boot, epoch, result, child); err != nil {
 		t.Fatal(err)
 	}
 	var probeID int64
@@ -311,7 +365,7 @@ func passedMetricsProbe(t *testing.T, service *connections.Service, database *sq
 
 func TestRotationRequiresAndAcceptsFreshExactProbe(t *testing.T) {
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	created, err := service.Create(ctx, thanosInput("first-secret"), 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
 		t.Fatal(err)
@@ -343,8 +397,8 @@ func TestRotationRequiresAndAcceptsFreshExactProbe(t *testing.T) {
 }
 
 func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {
-	service, _, _ := newService(t)
-	ctx := context.Background()
+	service, database, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
 	projection, _ := json.Marshal(map[string]any{"type": "kubernetes", "defaultNamespace": "ops"})
 	// Missing kubeconfig: deterministic rejection.
 	if _, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: projection}, 1, "cmd-"+fmt.Sprint(seq.Next())); !errors.Is(err, connections.ErrValidation) {
@@ -355,24 +409,36 @@ func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {
 	if _, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: dirty}, 1, "cmd-"+fmt.Sprint(seq.Next())); !errors.Is(err, connections.ErrValidation) {
 		t.Fatalf("secret in projection must be rejected, got %v", err)
 	}
-	// Valid creation decrypts the kubeconfig.
+	// Valid creation decrypts the kubeconfig through the actual audited grant
+	// fulfillment path.
 	secret, _ := json.Marshal(map[string]string{"type": "kubernetes", "kubeconfig": "apiVersion: v1\nkind: Config\n"})
 	created, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: projection, Secret: secret, SecretPresent: true}, 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened, err := service.OpenGeneration(ctx, created.CurrentGenerationID)
+	if err := registerPlinthSlot(database); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.Kubernetes == nil || opened.Kubernetes.Kubeconfig == "" {
-		t.Fatalf("kubeconfig not decrypted: %+v", opened)
+	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-k8s", 1, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("bind kubernetes probe: %v ok=%v", err, ok)
+	}
+	payload, err := service.FulfillGrant(context.Background(), grantID, attemptID, "boot-k8s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Kubernetes == nil || payload.Kubernetes.Kubeconfig == "" {
+		t.Fatalf("kubeconfig not decrypted: %+v", payload)
 	}
 }
 
 func TestProbeClosureCommitOrder(t *testing.T) {
 	service, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	created, err := service.Create(ctx, thanosInput(""), 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
 		t.Fatal(err)
@@ -383,7 +449,7 @@ func TestProbeClosureCommitOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Accept out of a fake Running state: simulate the supervisor accept.
-	if err := service.AcceptProbe(ctx, attemptID, "boot-p", 1); err == nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-p", 1); err == nil {
 		t.Fatal("accept against Queued must fail")
 	}
 	// One active probe per connection.
@@ -397,7 +463,7 @@ func TestProbeClosureCommitOrder(t *testing.T) {
 // commits atomically with the enable, and a hook failure rolls both back.
 func TestEnableInTxHookCreatesDefaultPlan(t *testing.T) {
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	hookInput := thanosInput("")
 	hookInput.Name = "hook-thanos"
 	created, err := service.Create(ctx, hookInput, 1, "cmd-"+fmt.Sprint(seq.Next()))
@@ -406,7 +472,7 @@ func TestEnableInTxHookCreatesDefaultPlan(t *testing.T) {
 	}
 	createdPlans := 0
 	seen := map[string]bool{}
-	service.SetPostEnableInTx(func(ctx context.Context, conn *sql.Conn, name string) error {
+	service.SetPostEnableInTx(func(ctx context.Context, conn execution.Executor, name string) error {
 		var connectionID int64
 		if err := conn.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, name).Scan(&connectionID); err != nil {
 			return err
@@ -453,7 +519,7 @@ func TestEnableInTxHookCreatesDefaultPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	failingProbe := passedMetricsProbe(t, service, database, failing, "boot-hook-fail", 3)
-	service.SetPostEnableInTx(func(context.Context, *sql.Conn, string) error { return errors.New("hook refused") })
+	service.SetPostEnableInTx(func(context.Context, execution.Executor, string) error { return errors.New("hook refused") })
 	if _, err := service.Enable(ctx, failing.Name, failing.RowVersion, failingProbe, 1); err == nil {
 		t.Fatal("hook failure must fail the enable")
 	}

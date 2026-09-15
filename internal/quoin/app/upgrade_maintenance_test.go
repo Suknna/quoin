@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,26 +21,26 @@ import (
 )
 
 // upgradeHTTPFixture builds the real normal-mode surface with the live gate.
-func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.QuoinConfig, string) {
+// The administrator is initialized through the real flow with the formal
+// password, so the fixture login is the real two-step login.
+
+func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.QuoinConfig, string, *stubSender) {
 	t.Helper()
 	root := t.TempDir()
 	config := &contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), SteleServiceTokenFile: filepath.Join(root, "secrets", "stele")}
 	if _, err := bootstrap.BootstrapSecrets(*config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	t.Cleanup(func() { database.Close() })
-	authService, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := authService.CreateFirstAdmin(context.Background(), "admin", "Upgrade Admin", "original-password-123"); err != nil {
-		t.Fatal(err)
-	}
+	// The initialization flow's password step sets the formal password
+	// directly; the old temporary-password forced-change detour is gone.
+	const formal = "formal-password-456"
+	scenarioInitializeAdmin(t, authService, sender, formal)
 	application := NewAPIServer(authService, database.SQL, "")
+	if err := application.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
 	handler, err := NewHandler(application, config.PublicOrigin)
 	if err != nil {
 		t.Fatal(err)
@@ -50,31 +52,16 @@ func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.Quoin
 	application.setReadiness = func(sharedops.Readiness) {}
 	reconciler := upgrade.NewReconciler(database.SQL, upgradeTestingBackups{})
 	application.upgradeReconciler = reconciler
-	// The first login carries a mandatory password change; complete it so
-	// the fixture admin acts as a fully-initialized operator.
-	firstCookie := upgradeLogin(t, handler, config, "original-password-123")
-	formal := upgradeRequest(t, handler, config, firstCookie, http.MethodPut, "/api/v1/auth/password", `{"currentPassword":"original-password-123","newPassword":"formal-password-456"}`)
-	if formal.Code != http.StatusNoContent {
-		t.Fatalf("password change status=%d body=%s", formal.Code, formal.Body.String())
-	}
-	return application, gate, config, "formal-password-456"
+	return application, gate, config, formal, sender
 }
 
 type upgradeTestingBackups struct{}
 
 func (upgradeTestingBackups) RunUpgrade(ctx context.Context, id int64) error { return nil }
 
-func upgradeLogin(t *testing.T, handler http.Handler, config *contract.QuoinConfig, password string) *http.Cookie {
+func upgradeLogin(t *testing.T, handler http.Handler, config *contract.QuoinConfig, password string, sender *stubSender) *http.Cookie {
 	t.Helper()
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(fmt.Sprintf(`{"username":"admin","password":%q}`, password)))
-	login.Header.Set("Content-Type", "application/json")
-	login.Header.Set("Origin", config.PublicOrigin)
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, login)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	return recorder.Result().Cookies()[0]
+	return scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", password, sender)
 }
 
 func upgradeRequest(t *testing.T, handler http.Handler, config *contract.QuoinConfig, cookie *http.Cookie, method, path, body string) *httptest.ResponseRecorder {
@@ -95,8 +82,8 @@ func upgradeRequest(t *testing.T, handler http.Handler, config *contract.QuoinCo
 // operations answer 503 while the deterministic drain cancels stay open, and
 // exitMaintenance restores the normal surface.
 func TestUpgradeGateSwapsLiveSurfaceAndDrainsThroughAllowlist(t *testing.T) {
-	application, handler, config, password := upgradeHTTPFixture(t)
-	cookie := upgradeLogin(t, handler, config, password)
+	application, handler, config, password, sender := upgradeHTTPFixture(t)
+	cookie := upgradeLogin(t, handler, config, password, sender)
 	// One active investigation attempt is drainable work.
 	investigation, err := application.db.Exec(`INSERT INTO investigations(created_at) VALUES(?)`, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -163,4 +150,102 @@ func TestUpgradeGateSwapsLiveSurfaceAndDrainsThroughAllowlist(t *testing.T) {
 	if restored.Code == http.StatusServiceUnavailable {
 		t.Fatalf("normal surface not restored: %s", restored.Body.String())
 	}
+}
+
+// upgradeMaintenanceFixture boots the real restart-inside-Upgrade shape the
+// production app.Run checks before startUpgradeMaintenanceRuntime: canonical
+// secrets, the WAL database with its shared read-only pool, configureReadOnly
+// and an active Upgrade maintenance row.
+func upgradeMaintenanceFixture(t *testing.T) (context.Context, context.CancelFunc, *apiServer, *bootstrap.Database, contract.QuoinConfig) {
+	t.Helper()
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	root := t.TempDir()
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), SteleServiceTokenFile: filepath.Join(root, "secrets", "stele")}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService, err := auth.NewService(database.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='Upgrade',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1`, now); err != nil {
+		t.Fatal(err)
+	}
+	application := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := application.configureReadOnly(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, stop, application, database, config
+}
+
+// assertNoWALSidecar closes the write pool and proves the data directory
+// carries no live WAL sidecar: the boot must leave the write pool as the
+// last SQLite connection so the clean close checkpoints the WAL away.
+func assertNoWALSidecar(t *testing.T, database *bootstrap.Database, dataDirectory string) {
+	t.Helper()
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDirectory, "quoin.db-wal")); !os.IsNotExist(err) {
+		t.Fatalf("backup-owned reader leaked past database.Close: WAL stat err=%v", err)
+	}
+}
+
+// TestUpgradeMaintenanceRuntimeBackupJoinsSharedReader pins the maintenance
+// boot ownership: the backup service's public reads move onto the process
+// shared read-only pool, the durable reconciler is equipped, and the write
+// pool stays the last SQLite connection of the boot. Closing the shared pool
+// must take the backup service's reads down with it — a still-attached
+// self-opened pool would keep answering.
+func TestUpgradeMaintenanceRuntimeBackupJoinsSharedReader(t *testing.T) {
+	ctx, stop, application, database, config := upgradeMaintenanceFixture(t)
+	opsServer, err := sharedops.New("quoin", ":0", sharedops.Maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.startUpgradeMaintenanceRuntime(ctx, config, &servers{ops: opsServer}); err != nil {
+		t.Fatal(err)
+	}
+	if application.upgradeReconciler == nil || application.upgradeBackups == nil {
+		t.Fatal("upgrade reconciler or backup authority was not equipped")
+	}
+	stop()
+	if err := application.reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.upgradeBackups.Settings(context.Background()); err == nil || !strings.Contains(err.Error(), "database is closed") {
+		t.Fatalf("backup read after shared-pool close err=%v, want the closed shared pool (an owned pool is still attached)", err)
+	}
+	assertNoWALSidecar(t, database, config.DataDirectory)
+}
+
+// TestUpgradeMaintenanceRuntimeProjectorFailureFailsBootWithoutLeak pins the
+// failure path: a projector error fails the boot loudly instead of running
+// the reconciler unprojected, and the boot still leaves no backup-owned
+// reader pool behind (the shared-pool wiring holds even on this path).
+func TestUpgradeMaintenanceRuntimeProjectorFailureFailsBootWithoutLeak(t *testing.T) {
+	ctx, stop, application, database, config := upgradeMaintenanceFixture(t)
+	// A non-quoin ops catalog has no quoin_upgrade_prepared gauge, so the
+	// projector wiring fails after the backup service already exists.
+	opsServer, err := sharedops.New("plinth", ":0", sharedops.Maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.startUpgradeMaintenanceRuntime(ctx, config, &servers{ops: opsServer}); err == nil {
+		t.Fatal("projector failure must fail the maintenance boot")
+	}
+	if application.upgradeBackups == nil {
+		t.Fatal("backup authority was not equipped before the projector failure")
+	}
+	if _, err := application.upgradeBackups.Settings(context.Background()); err != nil {
+		t.Fatalf("backup service must serve from the shared pool after the failed boot: %v", err)
+	}
+	stop()
+	assertNoWALSidecar(t, database, config.DataDirectory)
 }

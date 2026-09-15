@@ -7,12 +7,12 @@ package businesssystem
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -28,7 +28,7 @@ type configVerificationDiscoveryInput struct {
 	GrantID           int64    `json:"grantId"`
 }
 
-func createDiscoveryVerificationAttempts(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID int64, now string) error {
+func createDiscoveryVerificationAttempts(ctx context.Context, conn execution.Executor, runID, configVersionID, contractID int64, now string) error {
 	var metricsConnectionID int64
 	if err := conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, configVersionID).Scan(&metricsConnectionID); err != nil {
 		return err

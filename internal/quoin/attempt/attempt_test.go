@@ -10,13 +10,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"fmt"
-
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,6 +36,25 @@ func newTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func newTestService(t *testing.T, db *sql.DB) *Service {
+	t.Helper()
+	var seq int
+	var name, path string
+	if err := db.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := execution.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	service := NewService(db)
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 // seedAttempt inserts one minimal Queued initial-analysis attempt with an
@@ -256,7 +275,7 @@ func seedProviderChain(t *testing.T, db *sql.DB) (connectionID, revisionID, gene
 
 func TestBindAcceptResultLifecycle(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	attemptID, analysisID := seedAttempt(t, db)
 	ctx := context.Background()
 
@@ -300,7 +319,7 @@ func TestBindAcceptResultLifecycle(t *testing.T) {
 
 func TestCancelFenceCommitOrder(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 
 	// Cancel-before-result: the fence closes to Cancelling; the late
@@ -359,7 +378,7 @@ func TestCancelFenceCommitOrder(t *testing.T) {
 
 func TestQueuedAgentAttemptsAndDispatchInput(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
+	service := newTestService(t, db)
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	ids, err := service.QueuedAgentAttempts(ctx, "initial_analysis")

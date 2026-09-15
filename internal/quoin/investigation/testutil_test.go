@@ -5,14 +5,18 @@ package investigation
 // — the same closure ladder the acceptance stack drives.
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
+
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 )
 
 func sha256Sum(body []byte) []byte {
@@ -22,9 +26,26 @@ func sha256Sum(body []byte) []byte {
 
 var testSeedCounter int
 
-func newTestDB(t *testing.T) *sql.DB {
+// testAdminID/testOperatorID are the fixed fixture principals: the single
+// admin (id 1) and the initialized operator (id 2) the shared setup creates
+// with one real session each. The acting principal of command tests is the
+// operator — investigations belong to any authenticated user, not only the
+// admin; VerifyExecutionSession re-checks the session proof inside the
+// runner transaction.
+const (
+	testAdminID    = int64(1)
+	testOperatorID = int64(2)
+)
+
+// fixtureDBPath records the newest fixture database file so seed helpers deep
+// in a call chain can open the read-only factory over the same file. Tests in
+// this package run sequentially (no t.Parallel), so one variable is safe.
+var fixtureDBPath string
+
+func newTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	dbPath := t.TempDir() + "/test.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,23 +53,114 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	seedPrincipals(t, db)
+	fixtureDBPath = dbPath
+	return db, dbPath
 }
 
-func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
-
-func seedUser(t *testing.T, db *sql.DB) int64 {
+// newTestService composes the production read seam onto NewService: a real
+// query_only reader over the same fixture file, opened through the
+// execution.OpenReadOnly factory and validated by runner.SetReader's probe.
+// A second writable handle is never an acceptable reader.
+func newTestService(t *testing.T, db *sql.DB, dbPath string) *Service {
 	t.Helper()
-	testSeedCounter++
-	now := testNow()
-	insert, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(?,'Test Admin','admin',1,'x',1,?,?)`,
-		"test-admin-"+strings.Repeat("u", 8)+strings.TrimLeft(string(rune('a'+testSeedCounter%26)), " ")+now, now, now)
+	service := NewService(db)
+	reader, err := execution.OpenReadOnly(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, _ := insert.LastInsertId()
-	return id
+	t.Cleanup(func() { reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
+
+// resolveToolGrantOnRunner drives one tool grant resolver exactly as the
+// attempt machine does: composed on the service runner's guarded Tx through
+// a dedicated registered test operation, never on a raw pool connection.
+func resolveToolGrantOnRunner[T any](t *testing.T, service *Service, opName string, resolve func(ctx context.Context, tx *execution.Tx) (T, error)) (T, error) {
+	t.Helper()
+	op, err := service.runner.Register(execution.Operation{
+		Name:       opName,
+		Class:      execution.ClassWrite,
+		ObjectType: ObjectInvestigation,
+		Authorize:  func(context.Context, *execution.Tx) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "test-tool-grant-" + opName,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execution.Execute(ctx, service.runner, op, func(tx *execution.Tx) (T, error) {
+		return resolve(ctx, tx)
+	}, func(T) int64 { return 0 })
+}
+
+// seedPrincipals creates the initialized admin/operator pair with one real,
+// unexpired session each (auth revision 1), so execution metadata can carry
+// a session proof reference that survives the runner's in-transaction
+// session re-check (auth.VerifyExecutionSession).
+func seedPrincipals(t *testing.T, db *sql.DB) {
+	t.Helper()
+	now := testNow()
+	// Far-future session expiry: the fixture sessions stay valid for the
+	// whole test window; revocation/expiry cases adjust the rows themselves.
+	idle, absolute := "2036-09-13T00:00:00Z", "2036-09-20T00:00:00Z"
+	for _, statement := range []string{
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,row_version,created_at,updated_at) VALUES(1,'fixture-admin','Fixture Admin','admin',1,1,'fixture',1,1,'` + now + `','` + now + `')`,
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,row_version,created_at,updated_at) VALUES(2,'fixture-operator','Fixture Operator','operator',1,1,'fixture',1,1,'` + now + `','` + now + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'fixture','` + now + `','` + now + `','` + idle + `','` + absolute + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(2,2,randomblob(32),1,'fixture','` + now + `','` + now + `','` + idle + `','` + absolute + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// userContext injects execution metadata with the acting user's session
+// proof reference, exactly like the HTTP admission middleware builds it.
+// Commands fail closed without it — the services never synthesize identity.
+func userContext(t *testing.T, principalID int64) context.Context {
+	t.Helper()
+	return sessionContext(t, principalID, fmt.Sprintf("corr-%s-%d", t.Name(), time.Now().UnixNano()))
+}
+
+func sessionContext(t *testing.T, principalID int64, correlation string) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: principalID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-" + correlation},
+		Session:       execution.SessionRef{ID: principalID, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
+
+// seedUser returns the shared operator principal (user 2).
+func seedUser(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	return testOperatorID
+}
+
+// seedOtherUser returns the other fixture principal (the admin, user 1) for
+// ownership boundaries that need a distinct second principal.
+func seedOtherUser(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	return testAdminID
+}
+
+func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // seedProviderChain inserts one enabled qualified model provider through
 // the frozen probe ladder (connection -> revision/generation -> probe

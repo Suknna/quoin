@@ -16,6 +16,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
@@ -53,10 +54,25 @@ func recoveryService(t *testing.T) (*qruntime.Service, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	service := qruntime.NewService(database.SQL)
+	seedAdminSession(t, database.SQL)
+	service, err := qruntime.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The prepare command verifies a real administrator session proof inside
+	// the runner transaction; supply the metadata admission would provide.
+	adminCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "runtime-recovery-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-recovery-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	var session [32]byte
-	_, handle, _, err := service.PrepareRegistration(ctx, "lintel", 1, session)
+	_, handle, _, err := service.PrepareRegistration(adminCtx, "lintel", 1, session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +136,15 @@ func TestTicket35RecoveryRegistrationRotatesAndResumes(t *testing.T) {
 	other.FenceReportDigest = digestOf("different-fence")
 	if _, err := service.BeginLintelRecoveryRegistration(ctx, other); !errors.Is(err, qruntime.ErrLintelRecoveryFrozenFence) {
 		t.Fatalf("re-fence error=%v, want frozen fence conflict", err)
+	}
+	// The deterministic conflict is recorded as a rejected audit fact while
+	// the successful begin keeps exactly its one success fact.
+	var outcomes int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='maintenance.lintel_recovery_begin' AND outcome='rejected'`).Scan(&outcomes); err != nil {
+		t.Fatal(err)
+	}
+	if outcomes != 1 {
+		t.Fatalf("rejected begins=%d, want 1", outcomes)
 	}
 
 	longTerm, generation, err := service.Register(ctx, "lintel", resume.RegistrationToken, begin.ReplacementGeneration, "boot-new", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)

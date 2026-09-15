@@ -19,21 +19,21 @@ import (
 
 func newAttachmentService(t *testing.T) (*Service, *sql.DB, int64, *artifact.Store) {
 	t.Helper()
-	db := newTestDB(t)
+	db, dbPath := newTestDB(t)
 	principal := seedUser(t, db)
 	seedProviderChain(t, db)
 	store, err := artifact.NewStore(db, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(db)
+	service := newTestService(t, db, dbPath)
 	service.SetAttachmentStore(store, 0)
 	return service, db, principal, store
 }
 
 func mustStage(t *testing.T, service *Service, principal int64, command, filename, body string) AttachmentView {
 	t.Helper()
-	view, err := service.StageAttachment(context.Background(), principal, command, filename, strings.NewReader(body))
+	view, err := service.StageAttachment(userContext(t, principal), principal, command, filename, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("stage %s: %v", command, err)
 	}
@@ -42,7 +42,7 @@ func mustStage(t *testing.T, service *Service, principal int64, command, filenam
 
 func TestAttachmentStagingValidatesBody(t *testing.T) {
 	service, _, principal, _ := newAttachmentService(t)
-	ctx := context.Background()
+	ctx := userContext(t, principal)
 	if _, err := service.StageAttachment(ctx, principal, "stage-nul-0001", "nul.txt", strings.NewReader("a\x00b")); !errors.Is(err, ErrAttachmentText) {
 		t.Fatalf("NUL body must reject with ErrAttachmentText: %v", err)
 	}
@@ -73,10 +73,13 @@ func TestAttachmentStagingValidatesBody(t *testing.T) {
 }
 
 func TestAttachmentStagingReplayAndReuse(t *testing.T) {
-	service, _, principal, _ := newAttachmentService(t)
-	ctx := context.Background()
-	first := mustStage(t, service, principal, "stage-replay-0001", "logs.txt", "same body")
-	replayed := mustStage(t, service, principal, "stage-replay-0001", "logs.txt", "same body")
+	service, db, principal, _ := newAttachmentService(t)
+	// One explicit correlation for the whole command: the guard converges
+	// concurrent same-command uploads on the winner, so exactly ONE audited
+	// registration exists under this correlation.
+	ctx := sessionContext(t, principal, "corr-stage-replay")
+	first := mustStageCtx(t, service, ctx, principal, "stage-replay-0001", "logs.txt", "same body")
+	replayed := mustStageCtx(t, service, ctx, principal, "stage-replay-0001", "logs.txt", "same body")
 	if first.ID != replayed.ID || first.ArtifactID != replayed.ArtifactID {
 		t.Fatalf("replay diverged: %+v vs %+v", first, replayed)
 	}
@@ -84,14 +87,41 @@ func TestAttachmentStagingReplayAndReuse(t *testing.T) {
 	if _, err := service.StageAttachment(ctx, principal, "stage-replay-0001", "logs.txt", strings.NewReader("different")); !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("divergent replay must conflict: %v", err)
 	}
+	// Automatic transient audit: exactly one staging event under the
+	// command's correlation, and no durable client-command ledger row — the
+	// staged body never enters any persisted command payload.
+	var audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action=? AND actor_type='user' AND actor_id=? AND correlation_id=? AND outcome='success'`,
+		CommandAttachment, principal, "corr-stage-replay").Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("staging audit events=%d, want exactly the winner's registration", audits)
+	}
+	var ledgerRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM client_commands`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("staging must not write durable command ledger rows, found %d", ledgerRows)
+	}
 	// Foreign principals never see another user's staging object.
-	other := seedUser(t, service.db)
+	other := seedOtherUser(t, service.db)
 	if _, err := service.AttachmentFor(ctx, other, parseOrFatal(t, first.ID)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign read must be not found: %v", err)
 	}
 	if _, err := service.AttachmentFor(ctx, principal, parseOrFatal(t, first.ID)); err != nil {
 		t.Fatalf("own read: %v", err)
 	}
+}
+
+func mustStageCtx(t *testing.T, service *Service, ctx context.Context, principal int64, command, filename, body string) AttachmentView {
+	t.Helper()
+	view, err := service.StageAttachment(ctx, principal, command, filename, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("stage %s: %v", command, err)
+	}
+	return view
 }
 
 func parseOrFatal(t *testing.T, value string) int64 {
@@ -105,7 +135,7 @@ func parseOrFatal(t *testing.T, value string) int64 {
 
 func TestAttachmentMessageCombinations(t *testing.T) {
 	service, db, principal, _ := newAttachmentService(t)
-	ctx := context.Background()
+	ctx := userContext(t, principal)
 	first := mustStage(t, service, principal, "combo-stage-0001", "a.txt", "内容 A")
 	second := mustStage(t, service, principal, "combo-stage-0002", "b.txt", "内容 B")
 
@@ -125,7 +155,7 @@ func TestAttachmentMessageCombinations(t *testing.T) {
 	}
 	content := `"已阅读附件"`
 	digest := sha256Sum([]byte(content))
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:],
 	}); err != nil {
@@ -187,7 +217,7 @@ func TestAttachmentAggregateBoundary(t *testing.T) {
 	// boundary (both services share one content-addressed store).
 	small := NewService(service.db)
 	small.SetAttachmentStore(store, 12)
-	ctx := context.Background()
+	ctx := userContext(t, principal)
 	first := mustStage(t, small, principal, "agg-stage-000001", "one.txt", "12345678")
 	second := mustStage(t, small, principal, "agg-stage-000002", "two.txt", "abcdefgh")
 	if _, err := small.Create(ctx, principal, "agg-create-000001", "", []int64{parseOrFatal(t, first.ID), parseOrFatal(t, second.ID)}, nil); !errors.Is(err, ErrAttachmentTooLarge) {
@@ -200,7 +230,7 @@ func TestAttachmentAggregateBoundary(t *testing.T) {
 
 func TestAttachmentInputSnapshotAndGrants(t *testing.T) {
 	service, db, principal, _ := newAttachmentService(t)
-	ctx := context.Background()
+	ctx := userContext(t, principal)
 	view := mustStage(t, service, principal, "snap-stage-000001", "logs.txt", "T14-ATTACHMENT-BODY")
 	created, err := service.Create(ctx, principal, "snap-create-000001", "请阅读附件", []int64{parseOrFatal(t, view.ID)}, nil)
 	if err != nil {

@@ -37,7 +37,7 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 		return qruntime.ErrNotConnected
 	}
 	var scopeType string
-	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType); err != nil {
+	if err := service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType); err != nil {
 		return err
 	}
 	attempts := service.BusinessSystems.VerificationAttempts()
@@ -64,7 +64,11 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 	}
 	var scopeID int64
 	var planKey, checkKey string
-	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_id,COALESCE(plan_key,''),check_key FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &planKey, &checkKey); err != nil {
+	if err := service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT scope_id,COALESCE(plan_key,''),check_key FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &planKey, &checkKey); err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.BusinessSystems.Reader(), attemptID)
+	if err != nil {
 		return err
 	}
 	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{
@@ -74,7 +78,8 @@ func (service *RuntimeService) dispatchJourneyAttempt(ctx context.Context, attem
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
 			ScopeType: map[bool]runtimev1.ScopeType{true: runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK, false: runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN}[scopeType == "run_check"], ScopeId: scopeID,
-			PlanKey: planKey, CheckKey: checkKey,
+			OperationCorrelationId: operationCorrelationID,
+			PlanKey:                planKey, CheckKey: checkKey,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest},
 		}},
@@ -88,7 +93,7 @@ func (service *RuntimeService) dispatchReadyJourneyAttempts(ctx context.Context)
 	if service.BusinessSystems == nil {
 		return false
 	}
-	rows, err := service.BusinessSystems.DB().QueryContext(ctx, `
+	rows, err := service.BusinessSystems.Reader().QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
 		WHERE a.attempt_type='inspection_collection' AND a.scope_type IN ('config_verification_run','run_check')
@@ -133,7 +138,7 @@ func (service *RuntimeService) dispatchCancellingJourneyChecks(ctx context.Conte
 	if service.BusinessSystems == nil {
 		return false
 	}
-	rows, err := service.BusinessSystems.DB().QueryContext(ctx, `
+	rows, err := service.BusinessSystems.Reader().QueryContext(ctx, `
 		SELECT a.id, COALESCE(o.lintel_boot_id,''), COALESCE(o.lintel_connection_epoch,0), o.state, a.scope_type
 		FROM execution_attempts a
 		JOIN browser_operations o ON o.owner_attempt_id=a.id AND o.kind='journey'
@@ -242,7 +247,7 @@ func (service *RuntimeService) reconcileJourneyVerificationChildren(ctx context.
 			}
 		}
 	}
-	db := service.BusinessSystems.DB()
+	db := service.writer
 	// 1) Terminal operation with an active child: interrupt the child first.
 	rows, err := db.QueryContext(ctx, `
 		SELECT a.id, o.id, o.state, COALESCE(o.terminal_reason,''), a.scope_type
@@ -380,7 +385,7 @@ func (service *RuntimeService) recordJourneyTechnicalGap(ctx context.Context, at
 		reason = "interrupted"
 	}
 	var scope string
-	_ = service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scope)
+	_ = service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scope)
 	if scope == "run_check" {
 		if service.Inspections != nil {
 			if err := service.Inspections.RecordJourneyTechnicalGap(ctx, attemptID, reason); err != nil {
@@ -401,7 +406,7 @@ func (service *RuntimeService) convergeCancelledJourneyChild(ctx context.Context
 	if service.BusinessSystems == nil {
 		return
 	}
-	db := service.BusinessSystems.DB()
+	db := service.writer
 	var operationID int64
 	var operationState string
 	err := db.QueryRowContext(ctx, `SELECT o.id,o.state FROM execution_attempts a
@@ -475,7 +480,7 @@ func (service *RuntimeService) handleJourneyResultProposal(ctx context.Context, 
 		return
 	}
 	var childScope string
-	_ = service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, proposal.GetAttemptId()).Scan(&childScope)
+	_ = service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, proposal.GetAttemptId()).Scan(&childScope)
 	var commitErr error
 	if childScope == "run_check" {
 		if service.Inspections == nil {
@@ -500,7 +505,7 @@ func (service *RuntimeService) handleJourneyResultProposal(ctx context.Context, 
 	// The ledger transaction committed the domain terminal states; the
 	// physical Stop fence now releases identity and slot.
 	var operationID int64
-	if service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT operation_id FROM browser_journey_results WHERE attempt_id=?`, proposal.GetAttemptId()).Scan(&operationID) == nil && operationID > 0 {
+	if service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT operation_id FROM browser_journey_results WHERE attempt_id=?`, proposal.GetAttemptId()).Scan(&operationID) == nil && operationID > 0 {
 		go func() { _ = service.dispatchBrowserStop(context.Background(), operationID) }()
 	}
 	go service.reconcileJourneyVerificationChildren(context.Background())

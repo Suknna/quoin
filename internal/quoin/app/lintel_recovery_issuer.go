@@ -48,7 +48,7 @@ func recoveryEvent(stderr io.Writer, level, code, message string) {
 // Serve — grpc fatal-errors on late RegisterService.
 func recoveryServe(config contract.QuoinConfig, slots *qruntime.Service) (*grpc.Server, net.Listener, chan error, error) {
 	server := grpc.NewServer()
-	RegisterRuntimeControl(server, NewRuntimeControl(slots, buildinfo.Release, catalog.Digest(), nil))
+	RegisterRuntimeControl(server, NewRuntimeControl(slots, buildinfo.Release, catalog.Digest(), nil, nil))
 	listener, err := net.Listen("tcp", ":8443")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("listen recovery Runtime gRPC: %w", err)

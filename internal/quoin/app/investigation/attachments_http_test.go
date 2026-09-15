@@ -20,7 +20,9 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	_ "modernc.org/sqlite"
 )
 
@@ -43,7 +45,10 @@ func TestUploadAttachmentHandler(t *testing.T) {
 			return 0, investigation.ErrNotFound
 		},
 	}
-	_ = db
+	if _, err := db.Exec(`UPDATE users SET initialized=1,row_version=row_version+1 WHERE id=?`, principal); err != nil {
+		t.Fatal(err)
+	}
+	session := testfixture.SeedActiveSession(t, db, principal)
 
 	post := func(body string, contentType string, cookie string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/investigation-attachments", strings.NewReader(body))
@@ -51,6 +56,9 @@ func TestUploadAttachmentHandler(t *testing.T) {
 			request.Header.Set("Content-Type", contentType)
 		}
 		request.Header.Set("Cookie", "__Host-quoin-session="+cookie)
+		if cookie == "valid" {
+			request = request.WithContext(testfixture.UserContext(t, principal, session, "upload-handler-test"))
+		}
 		response := httptest.NewRecorder()
 		handler.ServeUpload(response, request)
 		return response
@@ -167,20 +175,35 @@ func TestUploadAttachmentHandler(t *testing.T) {
 
 func uploadService(t *testing.T) (*sql.DB, *investigation.Service, int64, *artifact.Store) {
 	t.Helper()
-	db := uploadSchema(t)
+	db, dbPath := uploadSchema(t)
 	principal := uploadSeedUser(t, db)
 	store, err := artifact.NewStore(db, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := investigation.NewService(db)
-	service.SetAttachmentStore(store, 0)
+	if err := service.SetAttachmentStore(store, 0); err != nil {
+		t.Fatal(err)
+	}
+	// 命令回放读走 artifact 只读查询面：与生产组合一致，经 execution.
+	// OpenReadOnly 在同一 fixture 文件上建立 mode=ro 池后由 service.SetReader
+	// 一并下发（runner/attempts/evidence/attachment store 共用同一已校验只读
+	// 门）。reader 由本 fixture 持有并在测试结束时关闭。
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	return db, service, principal, store
 }
 
-func uploadSchema(t *testing.T) *sql.DB {
+func uploadSchema(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	dbPath := t.TempDir() + "/test.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +211,7 @@ func uploadSchema(t *testing.T) *sql.DB {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	return db, dbPath
 }
 
 func uploadSeedUser(t *testing.T, db *sql.DB) int64 {

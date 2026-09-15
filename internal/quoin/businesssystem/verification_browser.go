@@ -16,6 +16,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const journeyVerificationSchemaKind = "inspection_collection_v1"
@@ -102,7 +103,7 @@ type browserIdentitySnapshot struct {
 // Attempt and journey operation to the Run creation transaction. Local gaps
 // (busy or profile-less identity) settle inside the same transaction so the
 // run can never hold the active fence without a converging path.
-func createBrowserVerificationAttempts(ctx context.Context, conn *sql.Conn, runID, configVersionID, contractID, systemID int64, now string) (int, error) {
+func createBrowserVerificationAttempts(ctx context.Context, conn execution.Executor, runID, configVersionID, contractID, systemID int64, now string) (int, error) {
 	document, catalogVersion, catalogDigest, err := quoinconfig.JourneyCatalog()
 	if err != nil {
 		return 0, err

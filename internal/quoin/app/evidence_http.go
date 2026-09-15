@@ -70,7 +70,8 @@ type sourceMaterialContentBody struct {
 func (application *apiServer) getSourceMaterial(ctx context.Context, input *struct {
 	Session    string `cookie:"__Host-quoin-session"`
 	MaterialID string `path:"materialId"`
-}) (*sourceMaterialBody, error) {
+},
+) (*sourceMaterialBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取来源材料"); err != nil {
 		return nil, err
 	}
@@ -79,7 +80,7 @@ func (application *apiServer) getSourceMaterial(ctx context.Context, input *stru
 		return nil, huma.Error404NotFound("来源材料不存在", nil)
 	}
 	var item sourceMaterialSummary
-	if err := application.db.QueryRowContext(ctx, `SELECT id,kind,digest,size_bytes,created_at FROM source_materials WHERE id=?`, id).Scan(&item.ID, &item.Kind, &item.Digest, &item.SizeBytes, &item.CreatedAt); err != nil {
+	if err := application.readAuthority().QueryRowContext(ctx, `SELECT id,kind,digest,size_bytes,created_at FROM source_materials WHERE id=?`, id).Scan(&item.ID, &item.Kind, &item.Digest, &item.SizeBytes, &item.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, huma.Error404NotFound("来源材料不存在", nil)
 		}
@@ -91,7 +92,8 @@ func (application *apiServer) getSourceMaterial(ctx context.Context, input *stru
 func (application *apiServer) downloadSourceMaterialContent(ctx context.Context, input *struct {
 	Session    string `cookie:"__Host-quoin-session"`
 	MaterialID string `path:"materialId"`
-}) (*sourceMaterialContentBody, error) {
+},
+) (*sourceMaterialContentBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取来源材料原文"); err != nil {
 		return nil, err
 	}
@@ -101,7 +103,7 @@ func (application *apiServer) downloadSourceMaterialContent(ctx context.Context,
 	}
 	var kind string
 	var content *string
-	if err := application.db.QueryRowContext(ctx, `SELECT kind,content FROM source_materials WHERE id=?`, id).Scan(&kind, &content); err != nil {
+	if err := application.readAuthority().QueryRowContext(ctx, `SELECT kind,content FROM source_materials WHERE id=?`, id).Scan(&kind, &content); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, huma.Error404NotFound("来源材料正文不存在", nil)
 		}
@@ -117,7 +119,8 @@ func (application *apiServer) downloadSourceMaterialContent(ctx context.Context,
 func (application *apiServer) getEvidence(ctx context.Context, input *struct {
 	Session    string `cookie:"__Host-quoin-session"`
 	EvidenceID string `path:"evidenceId"`
-}) (*evidenceDetailBody, error) {
+},
+) (*evidenceDetailBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取证据"); err != nil {
 		return nil, err
 	}
@@ -139,7 +142,8 @@ func (application *apiServer) getEvidence(ctx context.Context, input *struct {
 func (application *apiServer) getArtifactMetadata(ctx context.Context, input *struct {
 	Session    string `cookie:"__Host-quoin-session"`
 	ArtifactID string `path:"artifactId"`
-}) (*artifactMetadataBody, error) {
+},
+) (*artifactMetadataBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取产物信息"); err != nil {
 		return nil, err
 	}

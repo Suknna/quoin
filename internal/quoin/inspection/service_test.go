@@ -21,8 +21,32 @@ import (
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
+
+// commandContext returns a background context carrying execution metadata for
+// an authenticated admin command: the session proof reference points at the
+// seeded session (schemaSeed), mirroring the admission layer. The runner
+// re-verifies this session inside its transaction (VerifyExecutionSession) and
+// attempt creators centrally persist the metadata onto new rows (ADR-0006).
+func commandContext(t *testing.T) context.Context {
+	t.Helper()
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlationID,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "test-req"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 type testHarness struct {
 	db        *sql.DB
@@ -49,7 +73,27 @@ func newTestHarness(t *testing.T) *testHarness {
 	connections.ProbeContractSource = func() string { return string(gen.ConnectionProbesYAML) }
 	t.Cleanup(func() { connections.ProbeContractSource = previousProbeContractSource })
 	seedMetricsConnection(t, db)
-	return &testHarness{db: db, service: NewService(db), attempts: attempt.NewService(db), principal: 1}
+	service := NewService(db)
+	// Reads are fail-closed until the real read-only reader is wired; the
+	// harness installs a mode=ro pool over the same file so every read path
+	// exercises the split, never the write pool.
+	var file string
+	if err := db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&file); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := execution.OpenReadOnly(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	attempts := attempt.NewService(db)
+	if err := attempts.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return &testHarness{db: db, service: service, attempts: attempts, principal: 1}
 }
 
 // seedPlan 创建一个启用的独立巡检计划（fixture-metrics 接入，无业务系统）。
@@ -97,10 +141,33 @@ func (h *testHarness) seedMultiCheckPlan(t *testing.T, planKey string) string {
 
 // seedMetricsConnection creates the explicitly declared metrics authority
 // through the public connection service before config upload freezes its ID.
+// wireConnectionsReader attaches a mode=ro reader pool over the fixture
+// database to the connections service: constructors are fail-closed now, so
+// every fixture-owned service needs the read seam wired before its probe and
+// query paths run.
+func wireConnectionsReader(t *testing.T, db *sql.DB, service *connections.Service) {
+	t.Helper()
+	var file string
+	if err := db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&file); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := execution.OpenReadOnly(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedMetricsConnection creates the explicitly declared metrics authority
+// through the public connection service before config upload freezes its ID.
 func seedMetricsConnection(t *testing.T, db *sql.DB) {
 	t.Helper()
 	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
-	created, err := service.Create(context.Background(), connections.CreateInput{
+	wireConnectionsReader(t, db, service)
+	created, err := service.Create(commandContext(t), connections.CreateInput{
 		Name:          "fixture-metrics",
 		Type:          connections.TypeThanos,
 		NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"https://metrics.fixture","authType":"none"}`),
@@ -120,7 +187,8 @@ func seedMetricsConnection(t *testing.T, db *sql.DB) {
 func seedAlternateMetricsConnection(t *testing.T, db *sql.DB) {
 	t.Helper()
 	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
-	created, err := service.Create(context.Background(), connections.CreateInput{
+	wireConnectionsReader(t, db, service)
+	created, err := service.Create(commandContext(t), connections.CreateInput{
 		Name:          "alternate-metrics",
 		Type:          connections.TypePrometheus,
 		NonSecretJSON: []byte(`{"type":"prometheus","baseUrl":"https://alternate-metrics.fixture","authType":"none"}`),
@@ -136,15 +204,18 @@ func seedAlternateMetricsConnection(t *testing.T, db *sql.DB) {
 // revision and credential generation.
 func enableQualifiedMetricsConnection(t *testing.T, db *sql.DB, service *connections.Service, summary connections.Summary, bootID string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := commandContext(t)
 	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
 	if err != nil {
 		t.Fatalf("start metrics probe: %v", err)
 	}
-	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, bootID, 1, 5*time.Minute); err != nil || !ok {
+	// The supervisor-driven lifecycle steps restore the probe attempt's
+	// persisted correlation themselves; the harness hands them an unwired
+	// background scope (a wired user context is rejected as unrelated).
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, bootID, 1, 5*time.Minute); err != nil || !ok {
 		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
 	}
-	if err := service.AcceptProbe(ctx, attemptID, bootID, 1); err != nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, bootID, 1); err != nil {
 		t.Fatalf("accept metrics probe: %v", err)
 	}
 	result := connections.TypedProbeResult{
@@ -154,7 +225,7 @@ func enableQualifiedMetricsConnection(t *testing.T, db *sql.DB, service *connect
 	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{
 		Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"metrics"}`,
 	}}
-	if err := service.CommitProbeResult(ctx, attemptID, bootID, 1, result, child); err != nil {
+	if err := service.CommitProbeResult(context.Background(), attemptID, bootID, 1, result, child); err != nil {
 		t.Fatalf("commit metrics probe: %v", err)
 	}
 	var probeID int64
@@ -168,10 +239,16 @@ func enableQualifiedMetricsConnection(t *testing.T, db *sql.DB, service *connect
 
 func schemaSeed() string {
 	now := "2026-08-28T00:00:00Z"
+	// The seeded admin session backs the command contexts' session proof
+	// references: enabled initialized admin, current auth revision, unexpired
+	// idle/absolute windows (VerifyExecutionSession re-checks all of these
+	// inside the runner transaction).
 	return strings.Join([]string{
 		`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,'` + now + `')`,
-		`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at)
-		 VALUES (1,'admin','Admin','admin',1,'$argon2id$fixture',1,'` + now + `','` + now + `')`,
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at)
+		 VALUES (1,'admin','Admin','admin',1,1,'$argon2id$fixture',1,'` + now + `','` + now + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at)
+		 VALUES (1,1,zeroblob(32),1,'test harness','` + now + `','` + now + `','2099-01-01T00:00:00Z','2099-01-01T00:00:00Z')`,
 		`INSERT INTO root_key_state(id, binding_revision, verifier_nonce, verifier_ciphertext, bound_at) VALUES (1, 1, zeroblob(12), zeroblob(16), '` + now + `')`,
 		`INSERT INTO runtime_slots(slot, state, row_version, created_at) VALUES ('plinth','unregistered',1,'` + now + `'),('lintel','unregistered',1,'` + now + `')`,
 		`INSERT INTO runtime_credentials(slot, generation, token_digest, created_at, confirmed_at, first_authenticated_at, row_version) VALUES ('plinth', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1),('lintel', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1)`,
@@ -228,7 +305,7 @@ func pluginSuccessProposal(t *testing.T, h *testHarness, attemptID, runID int64,
 func TestCreatePlanRunAndPluginClosure(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	ctx := context.Background()
+	ctx := commandContext(t)
 	detail, err := h.service.CreatePlanRun(ctx, h.principal, "cmd-1", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +329,7 @@ func TestCreatePlanRunAndPluginClosure(t *testing.T) {
 		t.Fatalf("plugin child grant count = %d", grantCount)
 	}
 	h.dispatchPromQL(t, attemptID)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	var state, checkStatus string
@@ -263,7 +340,13 @@ func TestCreatePlanRunAndPluginClosure(t *testing.T) {
 	if state != "Succeeded" || checkStatus != "ok" || evidenceID < 1 {
 		t.Fatalf("plugin closure = %s/%s/evidence %d", state, checkStatus, evidenceID)
 	}
-	evidenceDetail, err := evidence.NewService(h.db).Get(ctx, evidenceID)
+	// Evidence reads run on the same fail-closed read-only seam; wire the
+	// harness reader instead of a bare write-pool constructor.
+	evidenceService := evidence.NewService(h.db)
+	if err := evidenceService.SetReader(h.service.Reader()); err != nil {
+		t.Fatal(err)
+	}
+	evidenceDetail, err := evidenceService.Get(ctx, evidenceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,12 +360,12 @@ func TestCreatePlanRunAndPluginClosure(t *testing.T) {
 	if final.State != "Completed" || final.ReportCount != 0 {
 		t.Fatalf("run should converge Completed without a report yet, got %s reports=%d", final.State, final.ReportCount)
 	}
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
 		t.Fatalf("identical replay must be idempotent: %v", err)
 	}
 	mutated := pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")
 	mutated[10] = 'x'
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, mutated); err == nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, mutated); err == nil {
 		t.Fatal("mutated replay must be rejected")
 	}
 }
@@ -290,14 +373,14 @@ func TestCreatePlanRunAndPluginClosure(t *testing.T) {
 func TestCommitPluginProposalFences(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	ctx := context.Background()
+	ctx := commandContext(t)
 	detail, err := h.service.CreatePlanRun(ctx, h.principal, "cmd-1", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
 	}
 	attemptID := h.promqlAttemptID(t, detail.RunID)
 	h.dispatchPromQL(t, attemptID)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "other-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); !errors.Is(err, attempt.ErrLateResult) {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "other-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("wrong boot must be a late result, got %v", err)
 	}
 	var parsed map[string]any
@@ -306,7 +389,7 @@ func TestCommitPluginProposalFences(t *testing.T) {
 	}
 	parsed["executionWindow"] = map[string]any{"startAt": "2026-08-27T23:00:00Z", "endAt": "2026-08-28T00:00:00Z", "stepSeconds": 60}
 	windowed, _ := json.Marshal(parsed)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, windowed); err == nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, windowed); err == nil {
 		t.Fatal("instant result with executionWindow must be rejected")
 	}
 	// A truncated collection must not fabricate Evidence or clear resources.
@@ -315,7 +398,7 @@ func TestCommitPluginProposalFences(t *testing.T) {
 	parsed["gapReason"] = "partial_response"
 	parsed["result"] = nil
 	truncated, _ := json.Marshal(parsed)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, truncated); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, truncated); err != nil {
 		t.Fatalf("typed partial_response gap must commit: %v", err)
 	}
 	var status, gap string
@@ -331,7 +414,7 @@ func TestCommitPluginProposalFences(t *testing.T) {
 func TestCreatePlanRunRejectionsAndReplay(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	ctx := context.Background()
+	ctx := commandContext(t)
 	_, err := h.service.CreatePlanRun(ctx, h.principal, "cmd-1", "missing-plan")
 	var rejection *RejectionError
 	if !errors.As(err, &rejection) || rejection.Code != "not_found" {
@@ -365,7 +448,7 @@ func TestCreatePlanRunHonorsItsOwnConnection(t *testing.T) {
 	if _, err := h.db.Exec(`UPDATE connections SET enabled=0, row_version=row_version+1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	_, err := h.service.CreatePlanRun(context.Background(), h.principal, "cmd-1", "mixed-plan")
+	_, err := h.service.CreatePlanRun(commandContext(t), h.principal, "cmd-1", "mixed-plan")
 	var rejection *RejectionError
 	if !errors.As(err, &rejection) || rejection.Code != "plan_disabled" {
 		t.Fatalf("disabled bound connection must reject plan_disabled, got %v", err)
@@ -473,7 +556,7 @@ func TestCreateScheduledPlanRunIsDeterministicAndRecordsUnavailableSlots(t *test
 func TestCreateScheduledPlanRunRecordsOverlapWithoutBackfill(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	manual, err := h.service.CreatePlanRun(context.Background(), h.principal, "manual-active", "mixed-plan")
+	manual, err := h.service.CreatePlanRun(commandContext(t), h.principal, "manual-active", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
 	}

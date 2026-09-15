@@ -3,7 +3,6 @@ package artifact
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // SnapshotFile is one immutable body copied into a backup manifest.
@@ -25,11 +24,14 @@ type SnapshotFile struct {
 // storage coordinator excludes GC. A later upload cannot appear only in the
 // archive, and GC cannot remove a body after the snapshot selected it.
 func (store *Store) SnapshotAndCopy(ctx context.Context, databaseDestination, artifactDestination string, afterSnapshot func() error, beforeCopy func(databaseSize int64, files []SnapshotFile) error) ([]SnapshotFile, error) {
-	// The SQLite snapshot must be established before taking blobMu. Uploads can
-	// hold SQLite's writer while waiting for blobMu; taking the mutex first
-	// would invert that order and deadlock a one-connection store. A GC that
-	// expires a selected body in the small gap can only make this backup fail
-	// during the verified copy below—never publish an incomplete backup set.
+	// The SQLite snapshot must be established before taking blobMu. Upload
+	// commits hold SQLite's writer and then blobMu inside the runner
+	// transaction; every blobMu acquisition therefore happens either with no
+	// store connection held (here and in the install-only stages) or after the
+	// connection is already owned (GC, upload commits), so a one-connection
+	// store can never deadlock. A GC that expires a selected body in the small
+	// gap can only make this backup fail during the verified copy below—never
+	// publish an incomplete backup set.
 	quoted := strings.ReplaceAll(databaseDestination, "'", "''")
 	if _, err := store.db.ExecContext(ctx, "VACUUM INTO '"+quoted+"'"); err != nil {
 		return nil, fmt.Errorf("snapshot database: %w", err)
@@ -44,7 +46,10 @@ func (store *Store) SnapshotAndCopy(ctx context.Context, databaseDestination, ar
 	}
 	store.blobMu.Lock()
 	defer store.blobMu.Unlock()
-	snapshot, err := sql.Open("sqlite", "file:"+databaseDestination+"?mode=ro")
+	// The snapshot database is opened through SQLite's real read-only mode:
+	// execution.OpenReadOnly is the sanctioned constructor (mode=ro), so the
+	// copy selection can never mutate state even by accident.
+	snapshot, err := execution.OpenReadOnly(databaseDestination)
 	if err != nil {
 		return nil, err
 	}

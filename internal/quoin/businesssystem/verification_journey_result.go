@@ -13,7 +13,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"regexp"
 	"strings"
 	"sync"
@@ -126,7 +128,7 @@ type JourneyScope struct {
 	// EvidenceParams renders the Evidence params_json for (planKey, checkKey).
 	EvidenceParams func(planKey, checkKey string) string
 	// Converge closes the parent run inside the same commit transaction.
-	Converge func(ctx context.Context, conn *sql.Conn, runID int64) error
+	Converge func(ctx context.Context, conn execution.Executor, runID int64) error
 }
 
 // CommitJourneyProposal commits a Config Verification browser child result.
@@ -139,7 +141,7 @@ func (service *Service) CommitJourneyProposal(ctx context.Context, attemptID int
 			params, _ := json.Marshal(map[string]string{"plan_key": planKey, "check_key": checkKey})
 			return string(params)
 		},
-		Converge: func(ctx context.Context, conn *sql.Conn, runID int64) error {
+		Converge: func(ctx context.Context, conn execution.Executor, runID int64) error {
 			return convergeVerificationRunOn(ctx, conn, runID)
 		},
 	})
@@ -171,32 +173,39 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 	if err := json.Unmarshal(frozenInput, &frozen); err != nil || frozen.OperationID == nil || *frozen.OperationID != *result.OperationID {
 		return fmt.Errorf("journey result does not match the frozen operation input")
 	}
-	conn, err := service.db.Conn(ctx)
+	stageScope, err := service.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if _, err := execution.Execute(stageScope, service.runner, service.opJourneyResult,
+		func(conn *execution.Tx) (struct{}, error) {
+			return service.commitJourneyProposalOn(stageScope, conn, attemptID, bootID, epoch, raw, result, scope)
+		},
+		func(struct{}) int64 { return 0 }); err != nil {
+		if errors.Is(err, execution.ErrNoTransition) {
+			// The identical journey result already sealed the same immutable
+			// digest: an idempotent replay records nothing.
+			return nil
+		}
 		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+	return nil
+}
 
+// commitJourneyProposalOn is CommitJourneyProposalScoped's business stage on
+// the runner-owned transaction.
+func (service *Service) commitJourneyProposalOn(ctx context.Context, conn execution.Executor, attemptID int64, bootID string, epoch uint64, raw []byte, result journeyResult, scope JourneyScope) (struct{}, error) {
 	var runID int64
 	var planKey, checkKey, attemptState string
 	var attemptBoot string
 	var attemptEpoch uint64
-	err = conn.QueryRowContext(ctx, `
+	err := conn.QueryRowContext(ctx, `
 		SELECT a.scope_id,COALESCE(a.plan_key,(SELECT r.plan_key FROM inspection_runs r WHERE r.id=a.scope_id AND a.scope_type='run_check')),a.check_key,a.state,COALESCE(a.boot_id,''),COALESCE(a.connection_epoch,0)
 		FROM execution_attempts a
 		WHERE a.id=? AND a.scope_type=? AND a.attempt_type='inspection_collection' AND a.runtime_slot='lintel'`, attemptID, scope.ScopeType).
 		Scan(&runID, &planKey, &checkKey, &attemptState, &attemptBoot, &attemptEpoch)
 	if err != nil {
-		return err
+		return struct{}{}, err
 	}
 	var operationState string
 	var operationJourneyID string
@@ -210,7 +219,7 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 		FROM browser_operations o WHERE o.id=? AND o.owner_attempt_id=? AND o.kind='journey'`,
 		*result.OperationID, attemptID).Scan(&operationState, &operationJourneyID, &operationJourneyVersion, &operationDigest, &operationVersion, &probeRevision)
 	if err != nil {
-		return fmt.Errorf("journey result does not bind a journey operation of this attempt: %w", err)
+		return struct{}{}, fmt.Errorf("journey result does not bind a journey operation of this attempt: %w", err)
 	}
 	// Idempotent replay: the same immutable digest rebuilds the same ack; a
 	// different digest loses to the operation's unique ledger key.
@@ -220,54 +229,50 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 	lookupErr := conn.QueryRowContext(ctx, `SELECT result_digest,attempt_id FROM browser_journey_results WHERE operation_id=?`, *result.OperationID).Scan(&existingDigest, &existingRun)
 	if lookupErr == nil {
 		if string(existingDigest) == string(digest) && existingRun == attemptID && attemptState == "Succeeded" {
-			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-				return err
-			}
-			committed = true
-			return nil
+			return struct{}{}, fmt.Errorf("%w: identical journey result already sealed", execution.ErrNoTransition)
 		}
-		return fmt.Errorf("journey result replay digest conflicts")
+		return struct{}{}, fmt.Errorf("journey result replay digest conflicts")
 	}
-	if lookupErr != sql.ErrNoRows {
-		return lookupErr
+	if !errors.Is(lookupErr, sql.ErrNoRows) {
+		return struct{}{}, lookupErr
 	}
 	if attemptState != "Running" || attemptBoot != bootID || epoch < attemptEpoch {
-		return fmt.Errorf("journey result arrived for a non-running or stale-stream attempt")
+		return struct{}{}, fmt.Errorf("journey result arrived for a non-running or stale-stream attempt")
 	}
 	if operationState != "Running" {
-		return fmt.Errorf("journey result arrived for a non-running operation")
+		return struct{}{}, fmt.Errorf("journey result arrived for a non-running operation")
 	}
 	if operationJourneyID == "" || operationJourneyVersion < 1 || operationDigest == "" || operationVersion == "" {
-		return fmt.Errorf("journey operation lost its frozen catalog binding")
+		return struct{}{}, fmt.Errorf("journey operation lost its frozen catalog binding")
 	}
 	if err := conn.QueryRowContext(ctx, `SELECT probe_journey_id,probe_journey_version FROM browser_identity_revisions WHERE id=?`, probeRevision).Scan(&expectedProbeID, &expectedProbeVersion); err != nil {
-		return fmt.Errorf("journey operation lost its frozen authentication probe binding: %w", err)
+		return struct{}{}, fmt.Errorf("journey operation lost its frozen authentication probe binding: %w", err)
 	}
 	// The probes and the primary content must close against the operation's
 	// frozen catalog facts (CFG-JOURNEY-003).
 	document, _, _, err := quoinconfig.JourneyCatalog()
 	if err != nil {
-		return err
+		return struct{}{}, err
 	}
 	entry, _ := document["journeys"].(map[string]any)[operationJourneyID].(map[string]any)
 	if entry == nil {
-		return fmt.Errorf("journey %q disappeared from the embedded catalog", operationJourneyID)
+		return struct{}{}, fmt.Errorf("journey %q disappeared from the embedded catalog", operationJourneyID)
 	}
 	if version, _ := entry["version"].(float64); int64(version) != operationJourneyVersion {
-		return fmt.Errorf("embedded catalog no longer carries the operation's frozen journey version")
+		return struct{}{}, fmt.Errorf("embedded catalog no longer carries the operation's frozen journey version")
 	}
 	for _, probe := range result.ProbeResults {
 		if probe.JourneyID != expectedProbeID || probe.JourneyVersion != expectedProbeVersion ||
 			probe.Catalog.Digest != operationDigest || probe.Catalog.Version != operationVersion {
-			return fmt.Errorf("journey probe does not match the operation's frozen authentication binding")
+			return struct{}{}, fmt.Errorf("journey probe does not match the operation's frozen authentication binding")
 		}
 	}
 	if result.Outcome == "success" {
 		if len(result.Evidence) != 1 || result.Evidence[0].Kind != "structured" || !result.Evidence[0].Primary || result.Evidence[0].ArtifactID != nil || len(result.Evidence[0].Content) == 0 {
-			return fmt.Errorf("journey success must carry exactly one primary structured Evidence proposal")
+			return struct{}{}, fmt.Errorf("journey success must carry exactly one primary structured Evidence proposal")
 		}
 		if err := validateAgainstInlineSchema(entry["output_schema"], "journey:"+operationJourneyID+":output", result.Evidence[0].Content); err != nil {
-			return fmt.Errorf("journey typed output violates the catalog output schema: %w", err)
+			return struct{}{}, fmt.Errorf("journey typed output violates the catalog output schema: %w", err)
 		}
 		hasAdmission, hasCompletion := false, false
 		for _, probe := range result.ProbeResults {
@@ -279,10 +284,10 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 			}
 		}
 		if !hasAdmission || !hasCompletion {
-			return fmt.Errorf("journey success requires authenticated admission and completion probes")
+			return struct{}{}, fmt.Errorf("journey success requires authenticated admission and completion probes")
 		}
 	} else if result.Outcome != "gap" || result.GapCode == nil || result.TerminalReason == nil || result.ErrorDetail == nil || len(result.Evidence) != 0 {
-		return fmt.Errorf("journey gap result is malformed")
+		return struct{}{}, fmt.Errorf("journey gap result is malformed")
 	}
 	now := service.nowText()
 	for index, probe := range result.ProbeResults {
@@ -290,7 +295,7 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 			INSERT INTO browser_probe_results(operation_id,probe_seq,phase,identity_revision_id,journey_id,journey_version,journey_catalog_digest,journey_catalog_version,result,reason_code,observed_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 			*result.OperationID, index+1, probe.Phase, probeRevision, probe.JourneyID, probe.JourneyVersion, probe.Catalog.Digest, probe.Catalog.Version, probe.Result, probe.ReasonCode, probe.ObservedAt); err != nil {
-			return err
+			return struct{}{}, err
 		}
 	}
 	// The operation's trace columns must precede the ledger statement: the
@@ -302,7 +307,7 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 			integrity = *result.TraceIntegrity
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE browser_operations SET trace_artifact_id=?,trace_integrity=?,row_version=row_version+1 WHERE id=? AND state='Running'`, *result.TraceArtifactID, integrity, *result.OperationID); err != nil {
-			return err
+			return struct{}{}, err
 		}
 	}
 	var primaryEvidenceID any
@@ -312,11 +317,11 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 			VALUES(?,?,?,?,?,?,?,?)`,
 			attemptID, scope.EvidenceTarget, runID, scope.EvidenceParams(planKey, checkKey), result.Evidence[0].ObservedAt, marshalContent(result.Evidence[0].Content), "complete", now)
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		id, err := insert.LastInsertId()
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		primaryEvidenceID = id
 	}
@@ -337,16 +342,12 @@ func (service *Service) CommitJourneyProposalScoped(ctx context.Context, attempt
 		INSERT INTO browser_journey_results(operation_id,attempt_id,result_digest,outcome,primary_evidence_id,gap_code,original_gap_code,terminal_reason,error_detail,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		*result.OperationID, attemptID, digest, result.Outcome, primaryEvidenceID, nullableGap, nullableOriginalGap, nullableTerminal, nullableDetail, now); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if err := scope.Converge(ctx, conn, runID); err != nil {
-		return err
+		return struct{}{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return struct{}{}, nil
 }
 
 func sha256Sum(raw []byte) []byte {

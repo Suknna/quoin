@@ -117,7 +117,7 @@ func (service *Service) Get(ctx context.Context, investigationID int64) (Investi
 	var detail InvestigationDetail
 	var headID sql.NullInt64
 	var createdBy sql.NullInt64
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT current_head_message_id, created_by, created_at FROM investigations WHERE id=?`,
 		investigationID).Scan(&headID, &createdBy, &detail.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -139,11 +139,11 @@ func (service *Service) Get(ctx context.Context, investigationID int64) (Investi
 	if activeID != 0 {
 		detail.ActiveAttemptID = strconv.FormatInt(activeID, 10)
 	}
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM investigation_messages WHERE investigation_id=?`, investigationID).Scan(&detail.MessageCount); err != nil {
 		return InvestigationDetail{}, err
 	}
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM execution_attempts WHERE scope_type='investigation' AND scope_id=?`, investigationID).Scan(&detail.AttemptCount); err != nil {
 		return InvestigationDetail{}, err
 	}
@@ -152,7 +152,7 @@ func (service *Service) Get(ctx context.Context, investigationID int64) (Investi
 		return InvestigationDetail{}, err
 	}
 	detail.Sources = sources
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT config.system_key, config.display_name
 		FROM execution_attempts attempt
 		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=attempt.id
@@ -183,9 +183,9 @@ func (service *Service) List(ctx context.Context, after *InvestigationListCursor
 	var err error
 	nextLimit := limit + 1
 	if after == nil {
-		rows, err = service.db.QueryContext(ctx, listQuery(``, `ORDER BY last_activity_at DESC, id DESC`), nextLimit)
+		rows, err = service.runner.Reader().QueryContext(ctx, listQuery(``, `ORDER BY last_activity_at DESC, id DESC`), nextLimit)
 	} else {
-		rows, err = service.db.QueryContext(ctx, listQuery(` WHERE last_activity_at < ? OR (last_activity_at = ? AND id < ?)`, `ORDER BY last_activity_at DESC, id DESC`), nextLimit, after.LastActivityAt, after.LastActivityAt, after.ID)
+		rows, err = service.runner.Reader().QueryContext(ctx, listQuery(` WHERE last_activity_at < ? OR (last_activity_at = ? AND id < ?)`, `ORDER BY last_activity_at DESC, id DESC`), nextLimit, after.LastActivityAt, after.LastActivityAt, after.ID)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -255,7 +255,7 @@ func (service *Service) attachTitles(ctx context.Context, items []InvestigationS
 	for _, id := range ids {
 		arguments = append(arguments, id)
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT m.investigation_id, m.content FROM investigation_messages m
 		WHERE m.status='active' AND m.role='user'
 		  AND m.seq=(SELECT MIN(seq) FROM investigation_messages m2
@@ -303,7 +303,7 @@ func deriveTitle(content string) string {
 func (service *Service) fallbackTitle(ctx context.Context, item InvestigationSummary) string {
 	var kind string
 	var sourceID int64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT 'occurrence', occurrence_id FROM investigation_source_links
 		WHERE investigation_id=? AND occurrence_id IS NOT NULL LIMIT 1`, item.ID).
 		Scan(&kind, &sourceID)
@@ -317,7 +317,7 @@ func (service *Service) fallbackTitle(ctx context.Context, item InvestigationSum
 
 func (service *Service) occurrenceDisplayName(ctx context.Context, occurrenceID int64) (string, bool) {
 	var labelsJSON string
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&labelsJSON); err != nil {
 		return "", false
 	}
@@ -336,7 +336,7 @@ func (service *Service) occurrenceDisplayName(ctx context.Context, occurrenceID 
 func (service *Service) deriveHead(ctx context.Context, investigationID int64) (string, string, error) {
 	var activity string
 	var created string
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT `+listDerived(`i`)+`, created_at FROM investigations i WHERE i.id=?`, investigationID).
 		Scan(&activity, &created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -345,7 +345,7 @@ func (service *Service) deriveHead(ctx context.Context, investigationID int64) (
 		return "", "", err
 	}
 	var content string
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT content FROM investigation_messages
 		WHERE investigation_id=? AND status='active' AND role='user'
 		ORDER BY seq LIMIT 1`, investigationID).Scan(&content)
@@ -378,7 +378,7 @@ func listDerived(alias string) string {
 
 // listSources projects the bounded immutable provenance list.
 func (service *Service) listSources(ctx context.Context, investigationID int64) ([]InvestigationSourceSummary, error) {
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id, occurrence_id, initial_analysis_id, evidence_id, inspection_report_id, linked_by, linked_at
 		FROM investigation_source_links WHERE investigation_id=? ORDER BY id`, investigationID)
 	if err != nil {

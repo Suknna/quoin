@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // DeliveryResult is the authoritative per-delivery outcome returned to Stele.
@@ -23,6 +25,13 @@ type DeliveryResult struct {
 	Occurrences []OccurrenceRef
 	Status      string // accepted|rejected|unavailable (metrics label)
 }
+
+// Stable deterministic rejection codes of the relay path.
+const (
+	codeCredentialDenied = "credential_not_accepted"
+	codeDuplicateRelay   = "duplicate_relay"
+	codeWebhookInvalid   = "webhook_invalid"
+)
 
 // IntakeIssueRef is a non-secret, machine-stable reference to one intake
 // issue aggregate created or extended by a delivery.
@@ -56,67 +65,86 @@ type prepared struct {
 	ok           bool
 }
 
-// Deliver processes one relayed webhook inside a single SQLite transaction:
-// Delivery row, per-item results, Occurrence/Observation updates, intake
-// issues, first-use credential marking, and audit all commit or none
-// (DATA-ALERT-001/002, RUNTIME-STELE-003/004/005).
+// Deliver processes one relayed webhook inside one runner-owned IMMEDIATE
+// transaction: Delivery row, per-item results, Occurrence/Observation updates,
+// intake issues and the automatic audit event all commit or none
+// (DATA-ALERT-001/002, RUNTIME-STELE-003/004/005, ADR-0006).
+//
+// Idempotency is the natural relay key: alert_deliveries.relay_id UNIQUE
+// adjudicates a redelivery inside the transaction, so no client-command
+// ledger row exists — the delivery is a non-replayable ingestion whose
+// dedup happens against the delivery table itself. The Stele service
+// identity is verified upstream by the relay admission; this side only
+// establishes the receiver-local machine scope (machineScope) whose system
+// actor the operation authorization re-checks. A credential revoked before
+// the commit rejects the delivery as a recorded deterministic rejection
+// (Q217: commit-order adjudication); an unparsable body records the rejected
+// delivery row plus the failure audit through the recorded-attempt path.
 func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
-	webhook, err := ParseWebhook(body)
-	if err != nil {
-		if rejectErr := service.recordRejected(ctx, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt); rejectErr != nil {
-			return DeliveryResult{}, rejectErr
-		}
-		return DeliveryResult{Rejected: true, Status: "rejected", Detail: "webhook body is not valid Alertmanager JSON"}, nil
+	webhook, parseErr := ParseWebhook(body)
+	if parseErr != nil {
+		return service.recordRejected(ctx, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
 	}
-
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.machineScope(ctx)
 	if err != nil {
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	result, err := execution.Execute(ctx, service.runner, service.ops.delivery,
+		func(tx *execution.Tx) (DeliveryResult, error) {
+			return service.deliverOn(ctx, tx, webhook, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
+		},
+		func(result DeliveryResult) int64 { return result.DeliveryID })
+	if err != nil {
+		var rejection *execution.Rejection
+		if errors.As(err, &rejection) {
+			// Deterministic rejection: recorded as a rejected audit fact in a
+			// clean transaction and surfaced as the wire-level REJECTED
+			// outcome — never as an infrastructure error.
+			return DeliveryResult{Rejected: true, Status: "rejected", Detail: rejection.Detail}, nil
+		}
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+	return result, nil
+}
 
+// deliverOn is the delivery business stage on the runner's guarded
+// transaction. All rejection paths return *execution.Rejection or
+// *execution.RecordedFailure so the runner owns the classification and the
+// audit rows.
+func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook *AlertmanagerWebhook, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
 	var enabled int
 	var credentialState string
-	err = conn.QueryRowContext(ctx, `SELECT s.enabled, c.state FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id AND c.id = ? WHERE s.id = ?`, credentialID, sourceID).Scan(&enabled, &credentialState)
+	err := tx.QueryRowContext(ctx, `SELECT s.enabled, c.state FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id AND c.id = ? WHERE s.id = ?`, credentialID, sourceID).Scan(&enabled, &credentialState)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && (enabled != 1 || (credentialState != "Active" && credentialState != "PendingRetirement"))) {
 		// Q217: the revocation race is adjudicated by SQLite commit order — a
 		// credential revoked before this delivery commits is rejected here,
 		// and no delivery row is created (RUNTIME-STELE-005).
-		return DeliveryResult{Rejected: true, Status: "rejected", Detail: "credential or source is not currently accepted"}, nil
+		return DeliveryResult{}, &execution.Rejection{Code: codeCredentialDenied, Detail: reasonCredentialDenied}
 	}
 	if err != nil {
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
+		return DeliveryResult{}, err
 	}
 
-	now := time.Now().UTC()
-	committedAt := now.Format(time.RFC3339Nano)
+	now := service.clockText()
+	committedAt := now
 	integrity := "complete"
 	if webhook.TruncatedAlerts > 0 {
 		integrity = "truncated"
 	}
-	result, err := conn.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, group_key, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, group_key, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), integrity, "processed", webhook.GroupKey, receivedAt.UTC().Format(time.RFC3339Nano), committedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			var existingID int64
-			if lookupErr := conn.QueryRowContext(ctx, `SELECT id FROM alert_deliveries WHERE relay_id = ?`, relayID).Scan(&existingID); lookupErr == nil {
+			if lookupErr := tx.QueryRowContext(ctx, `SELECT id FROM alert_deliveries WHERE relay_id = ?`, relayID).Scan(&existingID); lookupErr == nil {
 				return DeliveryResult{Accepted: true, Status: "accepted", Detail: "duplicate relay; already committed", DeliveryID: existingID}, nil
 			}
 		}
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, fmt.Errorf("persist delivery: %w", err)
+		return DeliveryResult{}, fmt.Errorf("persist delivery: %w", err)
 	}
 	deliveryID, err := result.LastInsertId()
 	if err != nil {
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
+		return DeliveryResult{}, err
 	}
 
 	preparedItems := make([]prepared, 0, len(webhook.Alerts))
@@ -131,9 +159,9 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 
 	// First observations share this delivery's writer transaction so declaration
 	// publication cannot change attribution authority midway through the batch.
-	attribution, err := loadAttribution(ctx, conn)
+	attribution, err := loadAttribution(ctx, tx)
 	if err != nil {
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
+		return DeliveryResult{}, err
 	}
 
 	processed := 0
@@ -142,32 +170,32 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 	for index := range preparedItems {
 		item := &preparedItems[index]
 		if item.status != "ok" {
-			itemID, insertErr := insertDeliveryItem(ctx, conn, deliveryID, item.index, item.status, item.fingerprint, item.startsAt, item.endsAt, item.labels, item.reason)
+			itemID, insertErr := insertDeliveryItem(ctx, tx, deliveryID, item.index, item.status, item.fingerprint, item.startsAt, item.endsAt, item.labels, item.reason)
 			if insertErr != nil {
-				return DeliveryResult{Unavailable: true, Status: "unavailable"}, insertErr
+				return DeliveryResult{}, insertErr
 			}
-			issueRef, issueErr := service.recordIssue(ctx, conn, sourceID, deliveryID, &itemID, *item, committedAt)
+			issueRef, issueErr := service.recordIssue(ctx, tx, sourceID, deliveryID, &itemID, *item, committedAt)
 			if issueErr != nil {
-				return DeliveryResult{Unavailable: true, Status: "unavailable"}, issueErr
+				return DeliveryResult{}, issueErr
 			}
 			issues = append(issues, issueRef)
 			continue
 		}
-		finalStatus, itemID, insertErr := service.classifyAndInsertItem(ctx, conn, sourceID, deliveryID, item, receivedAt, committedAt)
+		finalStatus, itemID, insertErr := service.classifyAndInsertItem(ctx, tx, sourceID, deliveryID, item, receivedAt, committedAt)
 		if insertErr != nil {
-			return DeliveryResult{Unavailable: true, Status: "unavailable"}, insertErr
+			return DeliveryResult{}, insertErr
 		}
 		if finalStatus != "ok" {
-			issueRef, issueErr := service.recordIssue(ctx, conn, sourceID, deliveryID, &itemID, *item, committedAt)
+			issueRef, issueErr := service.recordIssue(ctx, tx, sourceID, deliveryID, &itemID, *item, committedAt)
 			if issueErr != nil {
-				return DeliveryResult{Unavailable: true, Status: "unavailable"}, issueErr
+				return DeliveryResult{}, issueErr
 			}
 			issues = append(issues, issueRef)
 			continue
 		}
-		occurrence, _, err := service.applyItem(ctx, conn, sourceID, *item, itemID, deliveryID, receivedAt, committedAt, attribution)
+		occurrence, _, err := service.applyItem(ctx, tx, sourceID, *item, itemID, deliveryID, receivedAt, committedAt, attribution)
 		if err != nil {
-			return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
+			return DeliveryResult{}, err
 		}
 		processed++
 		if occurrence != nil {
@@ -180,20 +208,12 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 		// Delivery (integrity='truncated') and raise one delivery_truncated
 		// intake issue per delivery; no lifecycle inference is made for the
 		// unknown missing items.
-		issueRef, issueErr := service.recordTruncatedIssue(ctx, conn, sourceID, deliveryID, committedAt)
+		issueRef, issueErr := service.recordTruncatedIssue(ctx, tx, sourceID, deliveryID, committedAt)
 		if issueErr != nil {
-			return DeliveryResult{Unavailable: true, Status: "unavailable"}, issueErr
+			return DeliveryResult{}, issueErr
 		}
 		issues = append(issues, issueRef)
 	}
-
-	if err := service.recordAudit(ctx, conn, "service", 0, "alert.delivery", "success", "alert_delivery", deliveryID, committedAt); err != nil {
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
-	}
-	committed = true
 
 	return DeliveryResult{
 		Accepted: true, Status: "accepted", DeliveryID: deliveryID,
@@ -201,31 +221,47 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 	}, nil
 }
 
-func (service *Service) recordRejected(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) error {
-	conn, err := service.db.Conn(ctx)
+// recordRejected persists one unparsable webhook as a rejected delivery row
+// and records the failed intake attempt through the runner's recorded-attempt
+// path: the intended state change (the rejected delivery row) commits and the
+// automatic audit records the failure. A redelivered rejected relay id is a
+// deterministic duplicate rejection — nothing new is persisted.
+func (service *Service) recordRejected(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
+	ctx, err := service.machineScope(ctx)
 	if err != nil {
-		return err
+		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := conn.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), "rejected", "rejected", receivedAt.UTC().Format(time.RFC3339Nano), now)
+	_, err = execution.Execute(ctx, service.runner, service.ops.delivery,
+		func(tx *execution.Tx) (bool, error) {
+			result, insertErr := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+				relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), "rejected", "rejected", receivedAt.UTC().Format(time.RFC3339Nano), service.clockText())
+			if insertErr != nil {
+				if isUniqueViolation(insertErr) {
+					return false, &execution.Rejection{Code: codeDuplicateRelay, Detail: "duplicate relay; rejected delivery already recorded"}
+				}
+				return false, fmt.Errorf("persist rejected delivery: %w", insertErr)
+			}
+			deliveryID, _ := result.LastInsertId()
+			return false, &execution.RecordedFailure{
+				Code:     codeWebhookInvalid,
+				Detail:   "webhook body is not valid Alertmanager JSON",
+				ObjectID: deliveryID,
+			}
+		},
+		func(bool) int64 { return 0 })
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil
+		var failure *execution.RecordedFailure
+		var rejection *execution.Rejection
+		switch {
+		case errors.As(err, &failure):
+			// The recorded attempt committed: the wire outcome stays REJECTED.
+			return DeliveryResult{Rejected: true, Status: "rejected", Detail: failure.Detail}, nil
+		case errors.As(err, &rejection):
+			return DeliveryResult{Rejected: true, Status: "rejected", Detail: rejection.Detail}, nil
 		}
-		return fmt.Errorf("persist rejected delivery: %w", err)
+		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
-	deliveryID, _ := result.LastInsertId()
-	if err := service.recordAudit(ctx, conn, "service", 0, "alert.delivery_rejected", "success", "alert_delivery", deliveryID, now); err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, `COMMIT`)
-	return err
+	return DeliveryResult{Rejected: true, Status: "rejected", Detail: "webhook body is not valid Alertmanager JSON"}, nil
 }
 
 func prepareItem(index int, rawItem struct {
@@ -283,7 +319,7 @@ func prepareItem(index int, rawItem struct {
 // labels snapshot against the stored occurrence snapshot for the identity
 // triple and marks identity_conflict when they differ, then inserts the item
 // row exactly once with the final status.
-func (service *Service) classifyAndInsertItem(ctx context.Context, conn *sql.Conn, sourceID, deliveryID int64, item *prepared, receivedAt time.Time, committedAt string) (string, int64, error) {
+func (service *Service) classifyAndInsertItem(ctx context.Context, conn execution.Executor, sourceID, deliveryID int64, item *prepared, receivedAt time.Time, committedAt string) (string, int64, error) {
 	incomingCanonical, err := CanonicalLabels(item.labels)
 	if err != nil {
 		return "", 0, err
@@ -313,7 +349,7 @@ func (service *Service) classifyAndInsertItem(ctx context.Context, conn *sql.Con
 	return status, itemID, nil
 }
 
-func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID int64, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, attribution attributionIndex) (*OccurrenceRef, string, error) {
+func (service *Service) applyItem(ctx context.Context, conn execution.Executor, sourceID int64, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, attribution attributionIndex) (*OccurrenceRef, string, error) {
 	var occurrenceID int64
 	var state string
 	var rowVersion int64
@@ -415,7 +451,7 @@ func (service *Service) applyItem(ctx context.Context, conn *sql.Conn, sourceID 
 	return &OccurrenceRef{ID: occurrenceID, State: state, RowVersion: rowVersion}, effect, nil
 }
 
-func insertObservation(ctx context.Context, conn *sql.Conn, deliveryID, itemID, occurrenceID int64, observedState, startsAt, endsAt string, receivedAt time.Time, committedAt string, effect string) error {
+func insertObservation(ctx context.Context, conn execution.Executor, deliveryID, itemID, occurrenceID int64, observedState, startsAt, endsAt string, receivedAt time.Time, committedAt string, effect string) error {
 	_, err := conn.ExecContext(ctx, `INSERT INTO alert_observations(delivery_id, delivery_item_id, occurrence_id, observed_state, starts_at_source, ends_at_source, received_at, committed_at, effect) VALUES(?,?,?,?,?,?,?,?,?)`,
 		deliveryID, itemID, occurrenceID, observedState, startsAt, nullString(endsAt), receivedAt.UTC().Format(time.RFC3339Nano), committedAt, effect)
 	return err
@@ -428,7 +464,7 @@ func nullString(value string) any {
 	return value
 }
 
-func insertDeliveryItem(ctx context.Context, conn *sql.Conn, deliveryID int64, index int, status string, fingerprint []byte, startsAt, endsAt string, labels map[string]string, errorDetail string) (int64, error) {
+func insertDeliveryItem(ctx context.Context, conn execution.Executor, deliveryID int64, index int, status string, fingerprint []byte, startsAt, endsAt string, labels map[string]string, errorDetail string) (int64, error) {
 	canonical, err := CanonicalLabels(labels)
 	if err != nil {
 		return 0, err
@@ -441,7 +477,7 @@ func insertDeliveryItem(ctx context.Context, conn *sql.Conn, deliveryID int64, i
 	return result.LastInsertId()
 }
 
-func (service *Service) recordIssue(ctx context.Context, conn *sql.Conn, sourceID, deliveryID int64, itemID *int64, item prepared, committedAt string) (IntakeIssueRef, error) {
+func (service *Service) recordIssue(ctx context.Context, conn execution.Executor, sourceID, deliveryID int64, itemID *int64, item prepared, committedAt string) (IntakeIssueRef, error) {
 	kind := "fingerprint_mismatch"
 	if item.status == "identity_conflict" {
 		kind = "identity_conflict"
@@ -534,7 +570,7 @@ func (service *Service) recordIssue(ctx context.Context, conn *sql.Conn, sourceI
 // per delivery (ux_alert_intake_issue_truncated) and carries no item
 // reference: truncation marks the delivery and the source, never a specific
 // missing occurrence.
-func (service *Service) recordTruncatedIssue(ctx context.Context, conn *sql.Conn, sourceID, deliveryID int64, committedAt string) (IntakeIssueRef, error) {
+func (service *Service) recordTruncatedIssue(ctx context.Context, conn execution.Executor, sourceID, deliveryID int64, committedAt string) (IntakeIssueRef, error) {
 	issueKey, err := IssueKey("delivery_truncated", map[string]string{"kind": "delivery_truncated", "v": "1"})
 	if err != nil {
 		return IntakeIssueRef{}, err

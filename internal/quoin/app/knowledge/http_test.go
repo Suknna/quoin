@@ -23,8 +23,10 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/feedback"
 	domainknowledge "github.com/Suknna/quoin/internal/quoin/knowledge"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	_ "modernc.org/sqlite"
@@ -33,13 +35,15 @@ import (
 type httpFixture struct {
 	db      *sql.DB
 	handler http.Handler
+	session execution.SessionRef
 	userID  int64
 	cookie  string
 }
 
 func newHTTPFixture(t *testing.T) *httpFixture {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	dbPath := t.TempDir() + "/test.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,10 +51,31 @@ func newHTTPFixture(t *testing.T) *httpFixture {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
+	// 与生产组合一致（app.configureReadOnly）：读面是 execution.OpenReadOnly
+	// 在同一 fixture 文件上建立的真实只读池，知识/反馈服务以显式
+	// reader + writer + 共享 runner 装配；可写池绝不充当读源，reader 由本
+	// fixture 持有并在测试结束时关闭。
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	if err := runner.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	feedbackService, err := feedback.NewServiceWithReader(reader, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeService, err := domainknowledge.NewServiceWithReader(reader, db, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f := &httpFixture{db: db, cookie: "session-cookie"}
 	domainHandler := &Handler{
-		Feedback:  feedback.NewService(db),
-		Knowledge: domainknowledge.NewService(db),
+		Feedback:  feedbackService,
+		Knowledge: knowledgeService,
 		Authenticate: func(ctx context.Context, cookie string) (auth.Session, error) {
 			if cookie != f.cookie {
 				return auth.Session{}, errors.New("unauthenticated")
@@ -68,6 +93,10 @@ func newHTTPFixture(t *testing.T) *httpFixture {
 func (f *httpFixture) do(t *testing.T, method, path, body string) (int, map[string]any) {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	// 统一准入接线前，测试充当可信入口：注入与会话存根一致的执行元数据。
+	if f.userID > 0 {
+		request = request.WithContext(testfixture.UserContext(t, f.userID, f.session, "corr-http-knowledge"))
+	}
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -86,11 +115,12 @@ func (f *httpFixture) do(t *testing.T, method, path, body string) (int, map[stri
 func (f *httpFixture) seedUser(t *testing.T) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	user, err := f.db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,'x',1,?,?)`, now, now)
+	user, err := f.db.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,1,'x',1,?,?)`, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.userID, _ = user.LastInsertId()
+	f.session = testfixture.SeedActiveSession(t, f.db, f.userID)
 }
 
 // seedProviderChain inserts one enabled qualified model provider (the

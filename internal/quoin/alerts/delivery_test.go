@@ -25,6 +25,89 @@ func mustJSON(value any) string {
 	return string(encoded)
 }
 
+// The relay path audits automatically (ADR-0006): the runner-owned
+// transaction writes the success event with the receiver-local machine
+// actor and a fresh correlation, and no client-command ledger row exists —
+// the natural relay_id key is the dedup authority.
+func TestDeliverRecordsAutomaticAuditWithoutLedger(t *testing.T) {
+	service, database, teardown := newTestService(t)
+	defer teardown()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "audit-am")
+
+	body := webhookBody("firing", map[string]string{"alertname": "CPU"}, "2026-08-17T10:00:00Z", "")
+	result, err := service.Deliver(ctx, "relay-audit", sourceID, credentialID, 1, body, time.Now().UTC())
+	if err != nil || !result.Accepted {
+		t.Fatalf("deliver err=%v result=%+v", err, result)
+	}
+	row := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opDelivery)
+	if row.actorType != "system" || row.actorID != 0 || row.action != opDelivery || row.outcome != "success" ||
+		row.phase != "execute" || row.corrID == "" || row.refType != objectDelivery || row.refID != result.DeliveryID ||
+		row.initiator != "system" || row.initiatorID != 0 {
+		t.Fatalf("delivery audit row = %+v", row)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_event_targets WHERE target_type=? AND target_id=?`, objectDelivery, result.DeliveryID); got != 1 {
+		t.Fatalf("delivery audit target rows = %d, want 1", got)
+	}
+	// The raw webhook body is persisted on the delivery row, never in the
+	// audit trail (the audit schema carries no body column; this guards the
+	// row count instead of a column value).
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=?`, opDelivery); got != 1 {
+		t.Fatalf("delivery audit rows = %d, want exactly one per delivery", got)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM client_commands WHERE command_type=?`, opDelivery); got != 0 {
+		t.Fatalf("delivery ledger rows = %d, want 0 (relay dedup is the natural relay key)", got)
+	}
+}
+
+// A redelivered relay id is adjudicated by the delivery table itself: the
+// wire outcome stays accepted with the original delivery id, and the new
+// relay attempt records its own success fact referencing the original row.
+func TestDeliverRedeliveryAuditsAdjudicatedAttempt(t *testing.T) {
+	service, database, teardown := newTestService(t)
+	defer teardown()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "redeliver-am")
+
+	body := webhookBody("firing", map[string]string{"alertname": "CPU"}, "2026-08-17T10:00:00Z", "")
+	received := time.Now().UTC()
+	first, err := service.Deliver(ctx, "relay-redeliver", sourceID, credentialID, 1, body, received)
+	if err != nil || !first.Accepted {
+		t.Fatalf("first err=%v result=%+v", err, first)
+	}
+	second, err := service.Deliver(ctx, "relay-redeliver", sourceID, credentialID, 1, body, received)
+	if err != nil || !second.Accepted || second.DeliveryID != first.DeliveryID {
+		t.Fatalf("redelivery err=%v result=%+v", err, second)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM alert_deliveries`); got != 1 {
+		t.Fatalf("delivery rows after redelivery = %d, want 1", got)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=? AND outcome='success' AND domain_ref_id=?`, opDelivery, first.DeliveryID); got != 2 {
+		t.Fatalf("redelivery audit rows = %d, want 2 (one per relay attempt)", got)
+	}
+}
+
+// An HTTP execution scope can never drive the machine relay entry: the
+// operation authorization refuses it with a clean rollback and no trace.
+func TestDeliverRejectsHTTPScope(t *testing.T) {
+	service, database, teardown := newTestService(t)
+	defer teardown()
+	ctx := adminCommandContext(t, context.Background())
+	sourceID, credentialID := seedSource(t, service, context.Background(), "http-am")
+
+	body := webhookBody("firing", map[string]string{"alertname": "CPU"}, "2026-08-17T10:00:00Z", "")
+	result, err := service.Deliver(ctx, "relay-http", sourceID, credentialID, 1, body, time.Now().UTC())
+	if err == nil || !result.Unavailable {
+		t.Fatalf("HTTP scope must fail closed, got err=%v result=%+v", err, result)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM alert_deliveries`); got != 0 {
+		t.Fatalf("delivery rows after refused HTTP scope = %d, want 0", got)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=?`, opDelivery); got != 0 {
+		t.Fatalf("delivery audit rows after refused HTTP scope = %d, want 0", got)
+	}
+}
+
 func TestDeliverFiringCreatesOccurrenceAndObservation(t *testing.T) {
 	service, database, teardown := newTestService(t)
 	defer teardown()
@@ -142,6 +225,17 @@ func TestRejectedWebhookNeverTouchesOccurrences(t *testing.T) {
 	_ = database.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_deliveries WHERE status='rejected'`).Scan(&rejectedCount)
 	if rejectedCount != 1 {
 		t.Fatalf("rejected delivery not recorded: %d", rejectedCount)
+	}
+	// The recorded attempt commits the rejected delivery row and the failure
+	// audit together; the actor is the receiver-local machine principal.
+	var rejectedDeliveryID int64
+	if err := database.SQL.QueryRowContext(ctx, `SELECT id FROM alert_deliveries WHERE status='rejected'`).Scan(&rejectedDeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	row := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opDelivery)
+	if row.actorType != "system" || row.actorID != 0 || row.action != opDelivery || row.outcome != "failure" ||
+		row.corrID == "" || row.refType != objectDelivery || row.refID != rejectedDeliveryID {
+		t.Fatalf("rejected delivery audit row = %+v", row)
 	}
 }
 
@@ -281,6 +375,12 @@ func TestRevokedCredentialRejectsDelivery(t *testing.T) {
 	_ = database.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_deliveries`).Scan(&deliveryCount)
 	if deliveryCount != 0 {
 		t.Fatalf("revoked delivery must not create a delivery row: %d", deliveryCount)
+	}
+	// The deterministic rejection is recorded as a rejected audit fact in a
+	// clean transaction — with no object, because no delivery row exists.
+	row := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opDelivery)
+	if row.actorType != "system" || row.action != opDelivery || row.outcome != "rejected" || row.refID != 0 || row.corrID == "" {
+		t.Fatalf("revoked-credential audit row = %+v", row)
 	}
 }
 

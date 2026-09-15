@@ -7,7 +7,7 @@ package app
 // remaining public routes (e.g. the runtime slot gate).
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/contract"
-	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
@@ -33,9 +32,10 @@ type standaloneSurface struct {
 
 // newStandaloneSurface boots the real handler graph with the plugin
 // enablement resolved from the given whitelist (nil = descriptor defaults).
+// The administrator is initialized through the real flow and the session
+// comes from the real two-step login.
 func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface {
 	t.Helper()
-	ctx := context.Background()
 	root := t.TempDir()
 	secrets := filepath.Join(root, "secrets")
 	config := contract.QuoinConfig{
@@ -49,20 +49,14 @@ func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface 
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	t.Cleanup(func() { _ = database.Close() })
-	authService, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const temporary = "Correct horse battery staple 2026!"
-	if _, err := authService.CreateFirstAdmin(ctx, "admin", "Quoin Admin", temporary); err != nil {
-		t.Fatal(err)
-	}
+	const formalPassword = "A private admin passphrase 2027!"
+	scenarioInitializeAdmin(t, authService, sender, formalPassword)
 	application := newAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := application.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
 	// The same boot seam Run() uses: deployment YAML selects the whitelist and
 	// the registry resolves it once. This ordering (after handler
 	// construction, before serving) is why the capability fact is a
@@ -77,12 +71,11 @@ func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	// A real admin session: login, then clear the forced password change.
-	cookie := loginStandaloneAdmin(t, server, config.PublicOrigin, temporary)
+	cookie := loginStandaloneAdmin(t, server, config.PublicOrigin, formalPassword, sender)
 	return &standaloneSurface{server: server, cookie: cookie, origin: map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json", "Cookie": cookie}, application: application}
 }
 
-func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, temporary string) string {
+func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, password string, sender *stubSender) string {
 	t.Helper()
 	do := func(method, path, body string, headers map[string]string) (*http.Response, string) {
 		request, _ := http.NewRequest(method, server.URL+path, strings.NewReader(body))
@@ -97,21 +90,40 @@ func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, tempora
 		payload, _ := io.ReadAll(response.Body)
 		return response, string(payload)
 	}
-	response, _ := do(http.MethodPost, "/api/v1/auth/login", fmt.Sprintf(`{"username":"admin","password":%q}`, temporary), map[string]string{"Origin": origin, "Content-Type": "application/json"})
+	// Step one: the verified password opens the login flow (no session yet).
+	response, body := do(http.MethodPost, "/api/v1/auth/login", fmt.Sprintf(`{"username":"admin","password":%q}`, password), map[string]string{"Origin": origin, "Content-Type": "application/json"})
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("login: %d", response.StatusCode)
+		t.Fatalf("login: %d %s", response.StatusCode, body)
 	}
-	setCookie := response.Header.Get("Set-Cookie")
-	if !strings.HasPrefix(setCookie, "__Host-quoin-session=") {
-		t.Fatalf("no session cookie: %q", setCookie)
+	flowCookie := scenarioSetCookie(response.Cookies(), flowCookieName)
+	if flowCookie == nil {
+		t.Fatalf("no flow cookie: %v", response.Cookies())
 	}
-	cookie := strings.Split(strings.Split(setCookie, ";")[0], "=")[1]
-	newPassword := "A private admin passphrase 2027!"
-	session := map[string]string{"Cookie": "__Host-quoin-session=" + cookie, "Origin": origin, "Content-Type": "application/json"}
-	if response, _ := do(http.MethodPut, "/api/v1/auth/password", fmt.Sprintf(`{"currentPassword":%q,"newPassword":%q}`, temporary, newPassword), session); response.StatusCode != http.StatusNoContent {
-		t.Fatalf("password change: %d", response.StatusCode)
+	var flow struct {
+		Contacts []struct {
+			ID string `json:"id"`
+		} `json:"contacts"`
 	}
-	return "__Host-quoin-session=" + cookie
+	if err := json.Unmarshal([]byte(body), &flow); err != nil {
+		t.Fatal(err)
+	}
+	if len(flow.Contacts) == 0 {
+		t.Fatalf("login flow without a deliverable contact: %s", body)
+	}
+	// Step two: the consumed OTP code issues the session cookie.
+	sessionHeaders := map[string]string{"Cookie": flowCookieName + "=" + flowCookie.Value, "Origin": origin, "Content-Type": "application/json"}
+	if response, body := do(http.MethodPost, "/api/v1/auth/flow/challenge", `{"contactId":"`+flow.Contacts[0].ID+`"}`, sessionHeaders); response.StatusCode != http.StatusOK {
+		t.Fatalf("challenge: %d %s", response.StatusCode, body)
+	}
+	verifyResponse, verifyBody := do(http.MethodPost, "/api/v1/auth/flow/verify", `{"code":"`+sender.lastCode()+`"}`, sessionHeaders)
+	if verifyResponse.StatusCode != http.StatusOK {
+		t.Fatalf("verify: %d %s", verifyResponse.StatusCode, verifyBody)
+	}
+	sessionCookie := scenarioSetCookie(verifyResponse.Cookies(), scenarioSessionCookieName)
+	if sessionCookie == nil {
+		t.Fatalf("no session cookie after verification: %v", verifyResponse.Cookies())
+	}
+	return scenarioSessionCookieName + "=" + sessionCookie.Value
 }
 
 func (surface *standaloneSurface) request(t *testing.T, method, path, body string) (int, string) {

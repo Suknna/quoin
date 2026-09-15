@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
 
@@ -68,7 +71,25 @@ spec:
 type harness struct {
 	db        *sql.DB
 	systems   *Service
+	attempts  *attempt.Service
 	principal int64
+}
+
+// readOnlyFixturePool opens an independent read-only pool over the same
+// database file (execution.OpenReadOnly is the trusted factory) with the
+// fixture's cleanup lifetime.
+func readOnlyFixturePool(t *testing.T, db *sql.DB) audit.Reader {
+	t.Helper()
+	var file string
+	if err := db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&file); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := execution.OpenReadOnly(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return reader
 }
 
 func newHarness(t *testing.T) *harness {
@@ -83,13 +104,44 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'x',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'businesssystem-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	seedPlinthRuntime(t, db, now)
 	seedThanosExecutionPath(t, db, now)
 	seedLintelRuntime(t, db, now)
-	return &harness{db: db, systems: NewService(db), principal: 1}
+	systems := NewService(db)
+	// Verification history/evidence reads serve the trusted read-only pool.
+	reader := readOnlyFixturePool(t, db)
+	systems.SetReader(reader)
+	// The child attempt state machine shares the same pool: correlation and
+	// history reads go through it, writes keep the writer.
+	attempts := attempt.NewService(db)
+	if err := attempts.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return &harness{db: db, systems: systems, attempts: attempts, principal: 1}
+}
+
+// adminContext builds the authenticated admin execution context the shared
+// runner requires: the seeded enabled initialized admin session proves the
+// actor inside the runner transaction's session recheck.
+func (h *harness) adminContext(t *testing.T) context.Context {
+	t.Helper()
+	meta := execution.Metadata{
+		CorrelationID: strings.ToLower(strings.Repeat("v", 32)),
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: h.principal},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-verify"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	}
+	ctx, err := execution.WithMetadata(context.Background(), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 // seedThanosExecutionPath supplies only the non-secret frozen database facts
@@ -114,13 +166,14 @@ func seedMetricsExecutionPath(t *testing.T, db *sql.DB, now, connectionType, nam
 	}
 	rootKey := make([]byte, 32)
 	service := connections.NewService(db, func() ([]byte, error) { return rootKey, nil })
+	service.SetReader(readOnlyFixturePool(t, db))
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
 	configJSON, _ := json.Marshal(map[string]any{"type": connectionType, "baseUrl": "https://metrics.test", "authType": "none"})
-	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connectionType, NonSecretJSON: configJSON}, 1, "seed-metrics-create-"+name)
+	summary, err := service.Create(businessSystemAdminContext(t), connections.CreateInput{Name: name, Type: connectionType, NonSecretJSON: configJSON}, 1, "seed-metrics-create-"+name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(businessSystemAdminContext(t), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,9 +190,25 @@ func seedMetricsExecutionPath(t *testing.T, db *sql.DB, now, connectionType, nam
 	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1); err != nil {
+	if _, err := service.Enable(businessSystemAdminContext(t), summary.Name, summary.RowVersion, probeID, 1); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// businessSystemAdminContext is the trusted-entry execution metadata the
+// connection commands re-verify in-transaction (admin user 1, session 1).
+func businessSystemAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-businesssystem-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-businesssystem-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 func seedLintelRuntime(t *testing.T, db *sql.DB, now string) {

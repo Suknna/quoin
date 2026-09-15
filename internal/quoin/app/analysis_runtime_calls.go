@@ -104,7 +104,7 @@ func (service *RuntimeService) handleBeginModelCallRouted(ctx context.Context, e
 		return
 	}
 	var grantID, revisionID, generationID int64
-	if err := service.Analyses.DB().QueryRowContext(ctx, `
+	if err := service.Analyses.Reader().QueryRowContext(ctx, `
 		SELECT id,connection_revision_id,credential_generation_id FROM attempt_connection_grants
 		WHERE attempt_id=? AND purpose='chat_model' ORDER BY id LIMIT 1`, begin.GetAttemptId()).Scan(&grantID, &revisionID, &generationID); err != nil {
 		reject(err.Error())
@@ -401,7 +401,7 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 	var boot sql.NullString
 	var epoch sql.NullInt64
 	var runtimeSlot sql.NullString
-	row := service.Connections.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch,runtime_slot FROM execution_attempts WHERE id=?`, attemptID)
+	row := service.Connections.Reader().QueryRowContext(ctx, `SELECT boot_id,connection_epoch,runtime_slot FROM execution_attempts WHERE id=?`, attemptID)
 	if err := row.Scan(&boot, &epoch, &runtimeSlot); err != nil {
 		return err
 	}

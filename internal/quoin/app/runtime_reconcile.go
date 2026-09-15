@@ -6,9 +6,15 @@ package app
 // heartbeat lease renewal, Cancelling convergence when a stream ends, the
 // periodic lease sweeper and the idempotent re-dispatch of Assigned
 // attempts the runtime never accepted. Commit order stays with SQLite.
+// Recovery mutations (recovery-loss freeze, unstarted exploration closes)
+// run through execution.Execute: the audit commits inside the runner
+// transaction under the attempt's restored durable scope, failures roll the
+// mutation back, and outbound dispatches happen only after the commit.
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,6 +22,8 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -23,6 +31,142 @@ import (
 // reconcileTimeout bounds the wait for ReconcileReport after a same-boot
 // reconnect; a silent runtime leaves its attempts to the lease sweeper.
 const reconcileTimeout = 10 * time.Second
+
+// Reconcile recovery writes (ADR-0006): the runtime's recovery mutations are
+// declared, registered write operations executed through execution.Execute in
+// one runner-owned IMMEDIATE transaction. The audit event commits inside the
+// same transaction, so a recovery mutation can never commit without its audit
+// record and an audit failure rolls the mutation back — no silent partial
+// recovery write. Dispatches stay strictly post-commit: a frame is only sent
+// after the durable fact exists. The legacy browser drain-only paths keep
+// their existing best-effort send semantics (the durable fence is replayed on
+// reconnect); this migration changes transaction ownership, not dispatch.
+
+// reconcileObjectAttempt is the audit domain object type of every reconcile
+// mutation: the owning execution attempt.
+const reconcileObjectAttempt = "execution_attempt"
+
+// Stable audit action identities of the reconcile family.
+const (
+	opNameRecoveryLossPending        = "runtime.recovery_loss_pending"
+	opNameExplorationCancelUnstarted = "runtime.exploration_cancel_unstarted"
+	opNameExplorationCloseUnstarted  = "runtime.exploration_close_unstarted"
+)
+
+// reconcileOpSet holds the canonical registered operation pointers.
+type reconcileOpSet struct {
+	recoveryLossPending        *execution.Operation
+	explorationCancelUnstarted *execution.Operation
+	explorationCloseUnstarted  *execution.Operation
+}
+
+var (
+	reconcileOpsOnce        sync.Once
+	reconcileRegistryHandle *execution.Registry
+	reconcileOps            reconcileOpSet
+)
+
+// reconcileOperations declares the reconcile family's write operations once
+// per process. Authorization re-verifies inside the runner transaction that
+// the acting principal is the runtime's system authority on a task/internal
+// channel — an HTTP caller can never drive recovery. Registration failures
+// are declaration conflicts and panic like the compose default.
+func reconcileOperations() (*execution.Registry, *reconcileOpSet) {
+	reconcileOpsOnce.Do(func() {
+		registry := execution.NewRegistry()
+		register := func(op execution.Operation) *execution.Operation {
+			declared, err := registry.Register(op)
+			if err != nil {
+				panic("runtime: register " + op.Name + ": " + err.Error())
+			}
+			return declared
+		}
+		authorize := func(ctx context.Context, _ *execution.Tx) error {
+			meta, err := execution.Require(ctx)
+			if err != nil {
+				return err
+			}
+			if meta.Actor.Kind != execution.PrincipalSystem || meta.Actor.ID != 0 {
+				return errors.New("runtime: reconcile operation requires the system principal")
+			}
+			if meta.Source.Kind == execution.SourceHTTP {
+				return errors.New("runtime: reconcile operation cannot arrive from the http channel")
+			}
+			return nil
+		}
+		declare := func(name string) *execution.Operation {
+			return register(execution.Operation{Name: name, Class: execution.ClassWrite, ObjectType: reconcileObjectAttempt, Authorize: authorize})
+		}
+		reconcileRegistryHandle = registry
+		reconcileOps = reconcileOpSet{
+			recoveryLossPending:        declare(opNameRecoveryLossPending),
+			explorationCancelUnstarted: declare(opNameExplorationCancelUnstarted),
+			explorationCloseUnstarted:  declare(opNameExplorationCloseUnstarted),
+		}
+	})
+	return reconcileRegistryHandle, &reconcileOps
+}
+
+// reconcileRunner composes the reconcile family's runner over the product
+// database with the shared operation registry; a nil writer falls back to the
+// default audit writer. The runner is a value object: building it per call
+// keeps the helpers composable without shared mutable runner state.
+func reconcileRunner(db *sql.DB, writer *audit.Writer) *execution.Runner {
+	registry, _ := reconcileOperations()
+	return execution.NewRunner(db, registry, writer)
+}
+
+// reconcileScopeContext resolves the durable task scope for one attempt's
+// recovery mutation: inherited when the caller already carries execution
+// metadata, otherwise restored from the attempt row's persisted association
+// (attempt.LoadCorrelation, ADR-0006) with the system actor, the inherited
+// original initiator and the attempt's operation correlation. A legacy
+// correlation-less row establishes a fresh task identity — a deliberate
+// recovery operation, never a fabricated link.
+func reconcileScopeContext(ctx context.Context, db audit.Reader, attemptID int64) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	correlation, found, err := attempt.LoadCorrelation(ctx, db, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	actor := execution.Principal{Kind: execution.PrincipalSystem, ID: 0}
+	source := execution.Source{Kind: execution.SourceTask}
+	if found && restorableReconcileCorrelation(correlation) {
+		return execution.ReplaceMetadata(ctx, execution.Metadata{
+			CorrelationID: correlation.OperationCorrelationID,
+			Actor:         actor,
+			Initiator: execution.Principal{
+				Kind: execution.PrincipalKind(correlation.InitiatorType),
+				ID:   correlation.InitiatorID,
+			},
+			Source: source,
+		})
+	}
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, err
+	}
+	return execution.ReplaceMetadata(ctx, execution.Metadata{CorrelationID: correlationID, Actor: actor, Source: source})
+}
+
+// restorableReconcileCorrelation reports whether a persisted attempt
+// correlation is complete enough for recovery to reattach (a NULL legacy
+// column set is a no-correlation fact that is never guessed).
+func restorableReconcileCorrelation(correlation attempt.Correlation) bool {
+	if correlation.OperationCorrelationID == "" {
+		return false
+	}
+	switch execution.PrincipalKind(correlation.InitiatorType) {
+	case execution.PrincipalSystem:
+		return correlation.InitiatorID == 0
+	case execution.PrincipalUser, execution.PrincipalService:
+		return correlation.InitiatorID > 0
+	default:
+		return false
+	}
+}
 
 // reconcileWaiters carries one pending ReconcileReport waiter per slot.
 type reconcileState struct {
@@ -183,42 +327,52 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 }
 
 // freezeRecoveryLossPending creates the no-model persistent closure before a
-// lost Investigation is allowed to become Interrupted. SQLite serialization
-// makes duplicate reconciliation/reconnect scans harmless.
+// lost Investigation is allowed to become Interrupted. The insert is one
+// audited Execute transaction under the attempt's restored durable scope;
+// SQLite serialization makes duplicate reconciliation/reconnect scans
+// harmless. The committed pending row is immutable
+// (trg_pending_attempt_terminals_immutable), so an already-frozen attempt is
+// a proven no-op and is skipped silently — the five-second lease sweep would
+// otherwise re-audit the same fact on every tick while browser cleanup is
+// still pending.
 func (service *RuntimeService) freezeRecoveryLossPending(ctx context.Context, attemptID int64, reason string) error {
 	if service.Analyses == nil {
 		return fmt.Errorf("analysis service unavailable")
 	}
-	conn, err := service.Analyses.DB().Conn(ctx)
+	db := service.writer
+	var frozen int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_attempt_terminals WHERE attempt_id=? AND source='recovery_loss')`, attemptID).Scan(&frozen); err != nil {
+		return err
+	}
+	if frozen == 1 {
+		return nil
+	}
+	scope, err := reconcileScopeContext(ctx, db, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
+	type frozenTerminal struct {
+		AttemptID int64
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, ops := reconcileOperations()
+	_, err = execution.Execute(scope, reconcileRunner(db, nil), ops.recoveryLossPending, func(tx *execution.Tx) (frozenTerminal, error) {
+		// The state guard stays inside the writer transaction: only a Running
+		// investigation may freeze, and the check and the insert must share one
+		// serialization point with a concurrent terminal transition.
+		var state, attemptType string
+		if err := tx.QueryRowContext(scope, `SELECT state,attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &attemptType); err != nil {
+			return frozenTerminal{}, err
 		}
-	}()
-	var state, attemptType string
-	if err = conn.QueryRowContext(ctx, `SELECT state,attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &attemptType); err != nil {
-		return err
-	}
-	if state != "Running" || attemptType != "investigation" {
-		return nil
-	}
-	if _, err = conn.ExecContext(ctx, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,terminal_reason,created_at)
-		VALUES(?,'recovery_loss','Interrupted',?,?) ON CONFLICT(attempt_id) DO NOTHING`, attemptID, reason, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		if state != "Running" || attemptType != "investigation" {
+			return frozenTerminal{AttemptID: attemptID}, nil
+		}
+		if _, err := tx.ExecContext(scope, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,terminal_reason,created_at)
+			VALUES(?,'recovery_loss','Interrupted',?,?) ON CONFLICT(attempt_id) DO NOTHING`, attemptID, reason, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return frozenTerminal{}, err
+		}
+		return frozenTerminal{AttemptID: attemptID}, nil
+	}, func(value frozenTerminal) int64 { return value.AttemptID })
+	return err
 }
 
 // finalizeCancellation routes one Cancelling convergence to the owning
@@ -231,7 +385,9 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 		// explicit not-dispatched cleanup fact. A Starting operation is terminalized
 		// first and then receives Stop, which creates a Lintel tombstone even if the
 		// delayed Start reaches Lintel afterwards.
-		service.cancelUnstartedExplorations(ctx, attemptID)
+		if err := service.cancelUnstartedExplorations(ctx, attemptID); err != nil {
+			sharedops.LogEvent("quoin", "error", "reconcile.cancel_unstarted_failed", fmt.Sprintf("attempt=%d %v", attemptID, err))
+		}
 		if service.hasRunningExploration(ctx, attemptID) {
 			// The browser operation, rather than a currently active child, is the
 			// authoritative cancellation fence. This includes Starting, Running and
@@ -264,7 +420,7 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 	case "inspection_collection":
 		if service.Inspections != nil {
 			var scopeType string
-			_ = service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType)
+			_ = service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType)
 			if scopeType == "run_check" {
 				if err := service.Inspections.Attempts().CancelAck(ctx, attemptID); err != nil {
 					sharedops.LogEvent("quoin", "error", "inspection.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
@@ -316,7 +472,7 @@ func (service *RuntimeService) hasRunningExploration(ctx context.Context, parent
 		return false
 	}
 	var exists int
-	err := service.Analyses.DB().QueryRowContext(ctx, `SELECT EXISTS(
+	err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM browser_operations
 		WHERE owner_attempt_id=? AND kind='exploration'
 		  AND (state IN ('Queued','WaitingForCapacity','Starting','Running')
@@ -330,58 +486,58 @@ func (service *RuntimeService) hasRunningExploration(ctx context.Context, parent
 // cancellation protocol: Lintel may already have created Chromium, so it must
 // seal its incomplete trace before Quoin records Stop confirmation. It does not
 // write browser child attempt states: the Tool Call trigger owns their terminal
-// transition.
-func (service *RuntimeService) cancelUnstartedExplorations(ctx context.Context, parentID int64) {
+// transition. The close commits with its audit as one Execute transaction under
+// the parent attempt's restored durable scope; an error leaves both states
+// untouched and is surfaced, never swallowed.
+func (service *RuntimeService) cancelUnstartedExplorations(ctx context.Context, parentID int64) error {
 	if service.Analyses == nil || parentID < 1 {
-		return
+		return nil
 	}
-	conn, err := service.Analyses.DB().Conn(ctx)
+	db := service.writer
+	scope, err := reconcileScopeContext(ctx, db, parentID)
 	if err != nil {
-		return
+		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	// Queued has never sent Start. WaitingForCapacity is different: it may retain
-	// a sent Start fence after Lintel explicitly returned NO_CAPACITY. That Ack
-	// proves no Chromium was created, but the historical start fence must remain
-	// immutable, so it needs its own cleanup basis rather than not_dispatched.
-	if _, err = conn.ExecContext(ctx, `UPDATE browser_operations
-		SET state='Cancelled', ended_at=?, terminal_reason='cancelled',
-		    stop_confirmed_at=?, stop_confirmation_basis='not_dispatched',
-		    row_version=row_version+1
-		WHERE owner_attempt_id=? AND kind='exploration' AND state='Queued'`, now, now, parentID); err != nil {
-		return
+	type cancelled struct {
+		AttemptID int64
 	}
-	if _, err = conn.ExecContext(ctx, `UPDATE browser_operations
-		SET state='Cancelled', ended_at=?, terminal_reason='cancelled',
-		    stop_confirmed_at=?, stop_confirmation_basis='no_capacity',
-		    row_version=row_version+1
-		WHERE owner_attempt_id=? AND kind='exploration' AND state='WaitingForCapacity'`, now, now, parentID); err != nil {
-		return
+	_, ops := reconcileOperations()
+	_, err = execution.Execute(scope, reconcileRunner(db, nil), ops.explorationCancelUnstarted, func(tx *execution.Tx) (cancelled, error) {
+		// Queued has never sent Start. WaitingForCapacity is different: it may retain
+		// a sent Start fence after Lintel explicitly returned NO_CAPACITY. That Ack
+		// proves no Chromium was created, but the historical start fence must remain
+		// immutable, so it needs its own cleanup basis rather than not_dispatched.
+		if _, err := tx.ExecContext(scope, `UPDATE browser_operations
+			SET state='Cancelled', ended_at=?, terminal_reason='cancelled',
+			    stop_confirmed_at=?, stop_confirmation_basis='not_dispatched',
+			    row_version=row_version+1
+			WHERE owner_attempt_id=? AND kind='exploration' AND state='Queued'`, now, now, parentID); err != nil {
+			return cancelled{}, err
+		}
+		if _, err := tx.ExecContext(scope, `UPDATE browser_operations
+			SET state='Cancelled', ended_at=?, terminal_reason='cancelled',
+			    stop_confirmed_at=?, stop_confirmation_basis='no_capacity',
+			    row_version=row_version+1
+			WHERE owner_attempt_id=? AND kind='exploration' AND state='WaitingForCapacity'`, now, now, parentID); err != nil {
+			return cancelled{}, err
+		}
+		return cancelled{AttemptID: parentID}, nil
+	}, func(value cancelled) int64 { return value.AttemptID })
+	if err != nil {
+		return err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return
-	}
-	committed = true
-	conn.Close()
 	// Already-terminal dispatched operations still need a same-boot Stop
 	// tombstone. Starting operations are intentionally not transitioned here:
 	// dispatchCancellingBrowserExplorations sends their trace-bearing cancel
-	// first, then Stop fences a delayed Start.
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT id FROM browser_operations
+	// first, then Stop fences a delayed Start. The drain-only dispatch runs
+	// strictly after the durable cancel commit; sends stay best-effort because
+	// the stop fence replays on reconnect.
+	rows, err := db.QueryContext(ctx, `SELECT id FROM browser_operations
 		WHERE owner_attempt_id=? AND kind='exploration' AND state='Cancelled'
 		  AND start_dispatched_at IS NOT NULL AND stop_confirmed_at IS NULL`, parentID)
 	if err != nil {
-		return
+		return nil
 	}
 	var ids []int64
 	for rows.Next() {
@@ -394,6 +550,7 @@ func (service *RuntimeService) cancelUnstartedExplorations(ctx context.Context, 
 	for _, id := range ids {
 		_ = service.dispatchBrowserStop(context.Background(), id)
 	}
+	return nil
 }
 
 // dispatchCancellingBrowserExplorations asks Lintel to fence each child which
@@ -408,7 +565,7 @@ func (service *RuntimeService) dispatchCancellingBrowserExplorations(ctx context
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		return false
 	}
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT b.operation_id,b.child_attempt_id,b.tool_call_id
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT b.operation_id,b.child_attempt_id,b.tool_call_id
 		FROM browser_exploration_child_bindings b
 		JOIN execution_attempts c ON c.id=b.child_attempt_id
 		JOIN browser_operations o ON o.id=b.operation_id
@@ -436,7 +593,7 @@ func (service *RuntimeService) dispatchCancellingBrowserExplorations(ctx context
 	// Dispatch an operation-level cancellation (zero child/tool IDs) so Lintel
 	// commits its incomplete trace and sends CompleteBrowserOperation; do not
 	// acknowledge the parent until that durable operation terminal fact arrives.
-	idleRows, err := service.Analyses.DB().QueryContext(ctx, `SELECT o.id,o.state
+	idleRows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT o.id,o.state
 		FROM browser_operations o
 		WHERE o.owner_attempt_id=? AND o.kind='exploration' AND o.state IN ('Starting','Running')
 		  AND NOT EXISTS (
@@ -614,6 +771,23 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	if err != nil {
 		return err
 	}
+	// Re-dispatch echoes the stored association exactly like the first
+	// dispatch: the persisted row stays the single correlation authority
+	// (ADR-0006). The database follows the attempts-service selection above.
+	var correlationDB audit.Reader
+	if service.Analyses != nil {
+		correlationDB = service.Analyses.Reader()
+	}
+	if (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+		correlationDB = service.Inspections.Reader()
+	}
+	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
+		correlationDB = service.Knowledge.Reader()
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, correlationDB, view.ID)
+	if err != nil {
+		return err
+	}
 	var artifactRefs []*runtimev1.ArtifactRef
 	for _, ref := range input.ArtifactRefs {
 		artifactRefs = append(artifactRefs, &runtimev1.ArtifactRef{
@@ -657,11 +831,12 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 		CorrelationId:   uint64(view.ID),
 		BootId:          bindingBoot,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
-			AttemptId:     view.ID,
-			AttemptType:   attemptWire,
-			ScopeType:     scopeWire,
-			ScopeId:       view.ScopeID,
-			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+			AttemptId:              view.ID,
+			AttemptType:            attemptWire,
+			ScopeType:              scopeWire,
+			ScopeId:                view.ScopeID,
+			OperationCorrelationId: operationCorrelationID,
+			LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input: &runtimev1.AttemptInputSnapshot{
 				SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON,
 				ContentDigest: input.ContentDigest, ArtifactRefs: artifactRefs,
@@ -808,7 +983,7 @@ func (service *RuntimeService) dispatchAllCancellingInspections(ctx context.Cont
 	if service.Inspections == nil {
 		return
 	}
-	rows, err := service.Inspections.DB().QueryContext(ctx, `
+	rows, err := service.Inspections.Reader().QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
 		WHERE a.state='Cancelling' AND a.attempt_type IN ('inspection_collection','inspection_analysis')
 		AND NOT EXISTS (SELECT 1 FROM browser_operations b WHERE b.owner_attempt_id=a.id AND b.kind='journey')
@@ -850,7 +1025,7 @@ func (service *RuntimeService) dispatchAllCancellingBrowserExplorations(ctx cont
 	if service.Analyses == nil {
 		return
 	}
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT DISTINCT parent.id
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT DISTINCT parent.id
 		FROM execution_attempts parent
 		JOIN browser_operations o ON o.owner_attempt_id=parent.id AND o.kind='exploration'
 		WHERE parent.state='Cancelling'
@@ -888,7 +1063,7 @@ func (service *RuntimeService) replayRunningBrowserExplorationChildren(ctx conte
 		return
 	}
 	service.reconcileTerminalParentExplorations(ctx)
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT b.child_attempt_id
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT b.child_attempt_id
 		FROM browser_exploration_child_bindings b
 		JOIN execution_attempts c ON c.id=b.child_attempt_id
 		JOIN browser_operations o ON o.id=b.operation_id
@@ -933,8 +1108,10 @@ func (service *RuntimeService) reconcilePendingAttemptTerminals(ctx context.Cont
 	// Queued and NO_CAPACITY operations have a proven/no-dispatch physical
 	// outcome. Close them before checking terminal readiness: a natural parent
 	// result must not wait forever for a browser action that cannot exist.
-	service.closePendingUnstartedExplorations(ctx)
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT p.attempt_id
+	if err := service.closePendingUnstartedExplorations(ctx); err != nil {
+		sharedops.LogEvent("quoin", "error", "reconcile.pending_unstarted_close_failed", err.Error())
+	}
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT p.attempt_id
 		FROM pending_attempt_terminals p
 		WHERE NOT EXISTS (
 			SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id=p.attempt_id AND o.kind='exploration'
@@ -985,62 +1162,94 @@ func (service *RuntimeService) reconcilePendingAttemptTerminals(ctx context.Cont
 // closePendingUnstartedExplorations materializes the no-process branch of a
 // natural pending parent terminal. WaitingForCapacity retains its historical
 // Start fence but NO_CAPACITY has already proved that Lintel did not create a
-// process, so no Stop frame is necessary.
-func (service *RuntimeService) closePendingUnstartedExplorations(ctx context.Context) {
+// process, so no Stop frame is necessary. Each parent's close — the operation
+// and its queued Tool Call — commits with the audit as one Execute transaction
+// under that parent's restored durable scope; a failure leaves that parent's
+// rows untouched, is surfaced to the caller and converges on the next
+// reconcile pass.
+func (service *RuntimeService) closePendingUnstartedExplorations(ctx context.Context) error {
 	if service.Analyses == nil {
-		return
+		return nil
+	}
+	db := service.writer
+	// Materialize the candidate parents first: the SQLite pool is a single
+	// connection and every per-parent Execute opens its own writer transaction.
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT owner_attempt_id FROM browser_operations
+		WHERE kind='exploration' AND state IN ('Queued','WaitingForCapacity')
+		  AND EXISTS(SELECT 1 FROM pending_attempt_terminals p WHERE p.attempt_id=browser_operations.owner_attempt_id)`)
+	if err != nil {
+		return err
+	}
+	var parentIDs []int64
+	for rows.Next() {
+		var parentID int64
+		if err := rows.Scan(&parentID); err != nil {
+			rows.Close()
+			return err
+		}
+		parentIDs = append(parentIDs, parentID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	var firstErr error
+	for _, parentID := range parentIDs {
+		if err := service.closePendingUnstartedExplorationsFor(ctx, db, parentID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// closePendingUnstartedExplorationsFor closes one parent's unstarted
+// exploration operations and their queued Tool Calls in one audited
+// transaction. The Tool Call close is mandatory in the same transaction: the
+// parent is still Running while its immutable terminal proposal waits, and
+// closing only the BrowserOperation leaves its queued Tool Call and child
+// Attempt live, which then makes the parent terminal transaction permanently
+// fail its own closed-calls invariant. trg_tool_calls_close_browser_child
+// remains the sole child-state writer.
+func (service *RuntimeService) closePendingUnstartedExplorationsFor(ctx context.Context, db *sql.DB, parentID int64) error {
+	scope, err := reconcileScopeContext(ctx, db, parentID)
+	if err != nil {
+		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	conn, err := service.Analyses.DB().Conn(ctx)
-	if err != nil {
-		return
+	type closed struct {
+		AttemptID int64
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, ops := reconcileOperations()
+	_, err = execution.Execute(scope, reconcileRunner(db, nil), ops.explorationCloseUnstarted, func(tx *execution.Tx) (closed, error) {
+		if _, err := tx.ExecContext(scope, `UPDATE browser_operations
+			SET state='Cancelled',ended_at=?,terminal_reason='parent_terminal',
+			    stop_confirmed_at=?,stop_confirmation_basis=CASE state
+			      WHEN 'WaitingForCapacity' THEN 'no_capacity' ELSE 'not_dispatched' END,
+			    row_version=row_version+1
+			WHERE owner_attempt_id=? AND kind='exploration' AND state IN ('Queued','WaitingForCapacity')
+			  AND EXISTS(SELECT 1 FROM pending_attempt_terminals p WHERE p.attempt_id=browser_operations.owner_attempt_id)`, now, now, parentID); err != nil {
+			return closed{}, err
 		}
-	}()
-	if _, err = conn.ExecContext(ctx, `UPDATE browser_operations
-		SET state='Cancelled',ended_at=?,terminal_reason='parent_terminal',
-		    stop_confirmed_at=?,stop_confirmation_basis=CASE state
-		      WHEN 'WaitingForCapacity' THEN 'no_capacity' ELSE 'not_dispatched' END,
-		    row_version=row_version+1
-		WHERE kind='exploration' AND state IN ('Queued','WaitingForCapacity')
-		  AND EXISTS(SELECT 1 FROM pending_attempt_terminals p WHERE p.attempt_id=browser_operations.owner_attempt_id)`, now, now); err != nil {
-		return
-	}
-	// The parent is still Running while its immutable terminal proposal waits.
-	// Closing only BrowserOperation leaves its queued Tool Call and child Attempt
-	// live, which then makes the parent terminal transaction permanently fail its
-	// own closed-calls invariant. Cancel the Tool Call in this same transaction;
-	// trg_tool_calls_close_browser_child is the sole child-state writer.
-	if _, err = conn.ExecContext(ctx, `UPDATE tool_calls
-		SET status='cancelled',ended_at=?,error_detail='parent terminal pending browser cleanup',row_version=row_version+1
-		WHERE status='running' AND execution_mode='quoin_browser' AND id IN (
-			SELECT b.tool_call_id FROM browser_exploration_child_bindings b
-			JOIN browser_operations o ON o.id=b.operation_id
-			JOIN pending_attempt_terminals p ON p.attempt_id=b.parent_attempt_id
-			WHERE o.kind='exploration' AND o.state='Cancelled'
-			  AND o.terminal_reason='parent_terminal' AND o.ended_at=?
-		)`, now, now); err != nil {
-		return
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return
-	}
-	committed = true
+		if _, err := tx.ExecContext(scope, `UPDATE tool_calls
+			SET status='cancelled',ended_at=?,error_detail='parent terminal pending browser cleanup',row_version=row_version+1
+			WHERE status='running' AND execution_mode='quoin_browser' AND id IN (
+				SELECT b.tool_call_id FROM browser_exploration_child_bindings b
+				JOIN browser_operations o ON o.id=b.operation_id
+				JOIN pending_attempt_terminals p ON p.attempt_id=b.parent_attempt_id
+				WHERE b.parent_attempt_id=? AND o.kind='exploration' AND o.state='Cancelled'
+				  AND o.terminal_reason='parent_terminal' AND o.ended_at=?
+			)`, now, parentID, now); err != nil {
+			return closed{}, err
+		}
+		return closed{AttemptID: parentID}, nil
+	}, func(value closed) int64 { return value.AttemptID })
+	return err
 }
 
 func (service *RuntimeService) reconcileTerminalParentExplorations(ctx context.Context) {
 	if service.Analyses == nil {
 		return
 	}
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT DISTINCT o.owner_attempt_id
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT DISTINCT o.owner_attempt_id
 		FROM browser_operations o
 		JOIN execution_attempts parent ON parent.id=o.owner_attempt_id
 		WHERE o.kind='exploration' AND o.state IN ('Starting','Running')
@@ -1078,7 +1287,7 @@ func (service *RuntimeService) closeTerminalParentExplorations(ctx context.Conte
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		return
 	}
-	rows, err := service.Analyses.DB().QueryContext(ctx, `SELECT o.id,o.state,
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `SELECT o.id,o.state,
 		COALESCE((SELECT b.child_attempt_id FROM browser_exploration_child_bindings b
 			JOIN execution_attempts child ON child.id=b.child_attempt_id
 			WHERE b.operation_id=o.id AND child.state IN ('Queued','Assigned','Running','Cancelling')
@@ -1130,9 +1339,12 @@ func (service *RuntimeService) closeTerminalParentExplorations(ctx context.Conte
 		// durable child ownership first; retries cannot fabricate an ownerless
 		// terminal result. Terminal parents already own this transition.
 		if item.pending && item.toolCallID != 0 {
-			_, _ = service.Analyses.DB().ExecContext(ctx, `UPDATE tool_calls
-				SET status='cancelled',ended_at=?,error_detail='parent terminal pending browser cleanup',row_version=row_version+1
-				WHERE id=? AND status='running'`, time.Now().UTC().Format(time.RFC3339Nano), item.toolCallID)
+			// The pending row is the durable authority and this pre-dispatch
+			// materialization retries on every reconcile pass, so a failure must
+			// not withhold the typed close — but it is never silent.
+			if err := service.attemptsService().CancelPendingToolCall(ctx, parentID, item.toolCallID, "parent terminal pending browser cleanup"); err != nil {
+				sharedops.LogEvent("quoin", "error", "reconcile.pending_tool_call_close_failed", fmt.Sprintf("attempt=%d tool_call=%d %v", parentID, item.toolCallID, err))
+			}
 		}
 		_ = service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{
 			BootId: view.BootID, ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(item.operationID),
@@ -1154,7 +1366,7 @@ func (service *RuntimeService) dispatchAllCancellingKnowledgeExtractions(ctx con
 	if service.Knowledge == nil {
 		return
 	}
-	rows, err := service.Knowledge.DB().QueryContext(ctx, `SELECT id FROM execution_attempts WHERE state='Cancelling' AND attempt_type='knowledge_extraction' ORDER BY id`)
+	rows, err := service.Knowledge.Reader().QueryContext(ctx, `SELECT id FROM execution_attempts WHERE state='Cancelling' AND attempt_type='knowledge_extraction' ORDER BY id`)
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "knowledge.cancel_replay", err.Error())
 		return

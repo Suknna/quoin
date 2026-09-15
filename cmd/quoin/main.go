@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -11,14 +10,13 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/app"
-	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"golang.org/x/term"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel|migrate [preflight]")
+		fail("usage: quoin serve|secrets bootstrap|admin recover|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel|migrate [preflight]")
 	}
 	switch os.Args[1] {
 	case "serve":
@@ -29,10 +27,10 @@ func main() {
 		}
 		runSecrets(os.Args[3:])
 	case "admin":
-		if len(os.Args) < 3 || os.Args[2] != "create" {
-			fail("usage: quoin admin create --config <path>")
+		if len(os.Args) < 3 || os.Args[2] != "recover" {
+			fail("usage: quoin admin recover --config <path>; the administrator signs in with the default credential and initializes through the web flow")
 		}
-		runAdmin(os.Args[3:])
+		runAdminRecover(os.Args[3:])
 	case "backup":
 		runBackup(os.Args[2:])
 	case "restore":
@@ -54,7 +52,7 @@ func main() {
 	case "migrate":
 		runMigrate(os.Args[2:])
 	default:
-		fail("usage: quoin serve|secrets bootstrap|admin create|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel|migrate [preflight]")
+		fail("usage: quoin serve|secrets bootstrap|admin recover|backup --offline|restore --backup <backup-id>|root-key rebind|maintenance recover-lintel|migrate [preflight]")
 	}
 }
 
@@ -103,55 +101,6 @@ func kubernetesSecretArgument(arguments []string) (string, []string) {
 		filtered = append(filtered, arguments[index])
 	}
 	return "", filtered
-}
-
-func runAdmin(arguments []string) {
-	config := parseConfig(arguments, "admin create")
-	ctx := context.Background()
-	// Read-only existence probe first: when an administrator already exists
-	// (for example a Compose dependency rerun against a live Quoin), report
-	// and exit without ever touching the exclusive data-directory lock.
-	if bootstrap.PeekHasUsers(config.DataDirectory) {
-		sharedops.LogEvent("quoin", "info", "admin.bootstrap.already_exists", "administrator presence confirmed; creation skipped")
-		return
-	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		fail(err.Error())
-	}
-	defer database.Close()
-	service, err := auth.NewService(database.SQL)
-	if err != nil {
-		fail(err.Error())
-	}
-	exists, err := service.HasUsers(ctx)
-	if err != nil {
-		fail(err.Error())
-	}
-	if exists {
-		sharedops.LogEvent("quoin", "info", "admin.bootstrap.already_exists", "administrator presence confirmed; creation skipped")
-		return
-	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
-		fail("first administrator creation requires an attached TTY")
-	}
-	reader := bufio.NewReader(os.Stdin)
-	username := promptLine(reader, "Username: ")
-	displayName := promptLine(reader, "Display name: ")
-	password := promptPassword("Temporary password: ")
-	confirmation := promptPassword("Confirm temporary password: ")
-	if password != confirmation {
-		fail("passwords do not match")
-	}
-	created, err := service.CreateFirstAdmin(ctx, username, displayName, password)
-	if err != nil {
-		fail(err.Error())
-	}
-	if !created {
-		sharedops.LogEvent("quoin", "info", "admin.bootstrap.already_exists", "administrator presence confirmed; creation skipped")
-		return
-	}
-	sharedops.LogEvent("quoin", "info", "admin.bootstrap.created", "first administrator created; password change required at first login")
 }
 
 func parseConfig(arguments []string, command string) contract.QuoinConfig {

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,12 +23,15 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	_ "modernc.org/sqlite"
 )
 
-func newTestDB(t *testing.T) *sql.DB {
+func newTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +39,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	return db, dbPath
 }
 
 const analysisContent = "数据库连接池耗尽导致超时。\n建议检查最大连接数配置并重启实例。"
@@ -43,6 +47,7 @@ const analysisContent = "数据库连接池耗尽导致超时。\n建议检查�
 type fixture struct {
 	db              *sql.DB
 	service         *Service
+	session         execution.SessionRef
 	userID          int64
 	outputID        int64
 	analysisID      int64
@@ -55,15 +60,23 @@ type fixture struct {
 	probeResultID   int64
 }
 
+// ctx 注入带会话证明引用的合法执行元数据：与真实入口将携带的形状一致。
+func (f *fixture) ctx(t *testing.T) context.Context {
+	t.Helper()
+	return testfixture.UserContext(t, f.userID, f.session, "corr-knowledge")
+}
+
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	db := newTestDB(t)
+	db, dbPath := newTestDB(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,'x',1,?,?)`, now, now)
+	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,1,'x',1,?,?)`, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	userID, _ := user.LastInsertId()
+	// 会话证明：真实入口（HTTP 准入）接线前由测试充当可信入口。
+	session := testfixture.SeedActiveSession(t, db, userID)
 	connectionID, revisionID, generationID, probeResultID := seedProviderChain(t, db, userID)
 	source, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES('kn-src','alertmanager',1,?)`, now)
 	if err != nil {
@@ -112,7 +125,16 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	assistantID, _ := assistant.LastInsertId()
-	return &fixture{db: db, service: NewService(db), userID: userID, outputID: outputID, analysisID: analysisID, occurrenceID: occurrenceID, investigationID: investigationID, assistantID: assistantID, connectionID: connectionID, revisionID: revisionID, generationID: generationID, probeResultID: probeResultID}
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	service, err := NewServiceWithReader(reader, db, execution.NewRunner(db, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fixture{db: db, service: service, session: session, userID: userID, outputID: outputID, analysisID: analysisID, occurrenceID: occurrenceID, investigationID: investigationID, assistantID: assistantID, connectionID: connectionID, revisionID: revisionID, generationID: generationID, probeResultID: probeResultID}
 }
 
 // seedChatAttempt creates and walks one chat attempt to Running.
@@ -315,7 +337,7 @@ func seedProbeModelCalls(t *testing.T, db *sql.DB, attemptID, chatGrantID, embed
 
 func TestCreateFromAnalysisOutputSeedsSuggestion(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	result, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-create-1", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +376,7 @@ func TestCreateFromAnalysisOutputSeedsSuggestion(t *testing.T) {
 
 func TestCreateOrReturnAndCommandReplay(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	first, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-a", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +409,7 @@ func TestCreateOrReturnAndCommandReplay(t *testing.T) {
 
 func TestCreateFromInvestigationMessageValidation(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	result, err := f.service.CreateFromInvestigationMessage(ctx, f.userID, "cmd-kn-msg-1", f.investigationID, f.assistantID)
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +461,7 @@ func TestCreateFromInvestigationMessageValidation(t *testing.T) {
 
 func TestCreateRejectedSourceOnlyWithoutExistingCandidate(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := f.db.Exec(`INSERT INTO diagnosis_feedback(target_type,target_id,value,created_by,created_at) VALUES('initial_analysis_output',?,'rejected',?,?)`, f.outputID, f.userID, now); err != nil {
 		t.Fatal(err)
@@ -464,7 +486,7 @@ func TestCreateRejectedSourceOnlyWithoutExistingCandidate(t *testing.T) {
 
 func TestDraftEditRevisionAndConflicts(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-edit-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -512,7 +534,7 @@ func TestDraftEditRevisionAndConflicts(t *testing.T) {
 
 func TestDraftScopePersistsIntoVersion(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-scope-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -559,7 +581,7 @@ func TestDraftScopePersistsIntoVersion(t *testing.T) {
 
 func TestConfirmCreatesImmutableFirstVersion(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-cf-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -636,7 +658,7 @@ func TestConfirmCreatesImmutableFirstVersion(t *testing.T) {
 
 func TestExcludeFenceAndState(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-ex-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -667,7 +689,7 @@ func TestExcludeFenceAndState(t *testing.T) {
 
 func TestListAndBrowseProjections(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	first, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-ls-1", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -738,7 +760,7 @@ func parseID(t *testing.T, value string) int64 {
 
 func TestConcurrentConfirmCreatesExactlyOneKnowledge(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-race-create", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -796,7 +818,7 @@ func TestConcurrentConfirmCreatesExactlyOneKnowledge(t *testing.T) {
 
 func TestRevisionAppendsVersionAndStopReuseExitsFTS(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-revision-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -845,7 +867,7 @@ func TestRevisionAppendsVersionAndStopReuseExitsFTS(t *testing.T) {
 
 func TestStartImportFreezesSourceAndExtractionAttempt(t *testing.T) {
 	f := newFixture(t)
-	result, err := f.service.StartImport(context.Background(), f.userID, "cmd-import-0", "连接池告警的原始复盘。")
+	result, err := f.service.StartImport(f.ctx(t), f.userID, "cmd-import-0", "连接池告警的原始复盘。")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,7 +896,7 @@ func TestStartImportFreezesSourceAndExtractionAttempt(t *testing.T) {
 
 func TestImportCancellationFencesQueuedExtraction(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	started, err := f.service.StartImport(ctx, f.userID, "cmd-kn-import-cancel-0", "连接池运行记录：请求超时。")
 	if err != nil {
 		t.Fatal(err)
@@ -901,7 +923,7 @@ func TestImportCancellationFencesQueuedExtraction(t *testing.T) {
 
 func TestRevisionReplacesCurrentSearchDocument(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-kn-revision-search-0", f.occurrenceID, f.analysisID)
 	if err != nil {
 		t.Fatal(err)
@@ -941,7 +963,7 @@ func TestRevisionReplacesCurrentSearchDocument(t *testing.T) {
 
 func TestFailedExtractionClosesBatch(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	started, err := f.service.StartImport(ctx, f.userID, "cmd-kn-import-fail-0", "连接池运行记录：请求超时。")
 	if err != nil {
 		t.Fatal(err)
@@ -956,7 +978,7 @@ func TestFailedExtractionClosesBatch(t *testing.T) {
 	if _, err := f.db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=?`, now, now, started.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.FailExtraction(ctx, started.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+	if err := f.service.FailExtraction(context.Background(), started.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := f.service.GetImportBatch(ctx, parseID(t, started.Batch.ID))
@@ -977,7 +999,7 @@ func TestFailedExtractionClosesBatch(t *testing.T) {
 
 func TestSingleImportCandidateDecisionClosesBatch(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	seed := func(commandID string) (ImportResult, int64) {
 		t.Helper()
 		started, err := f.service.StartImport(ctx, f.userID, commandID, "单条知识导入原文。")
@@ -1027,7 +1049,7 @@ func TestSingleImportCandidateDecisionClosesBatch(t *testing.T) {
 
 func TestRejectedAndInterruptedExtractionCloseBatch(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	bindAssigned := func(commandID string) ImportResult {
 		t.Helper()
 		started, err := f.service.StartImport(ctx, f.userID, commandID, "连接池运行记录。")
@@ -1059,20 +1081,20 @@ func TestRejectedAndInterruptedExtractionCloseBatch(t *testing.T) {
 	}
 
 	rejected := bindAssigned("cmd-import-reject-0")
-	if err := f.service.RejectExtraction(ctx, rejected.AttemptID, "boot", 1, "internal"); err != nil {
+	if err := f.service.RejectExtraction(context.Background(), rejected.AttemptID, "boot", 1, "internal"); err != nil {
 		t.Fatal(err)
 	}
 	assertClosed(rejected, "Failed")
 
 	interrupted := bindAssigned("cmd-import-interrupt-0")
-	if err := f.service.InterruptExtraction(ctx, interrupted.AttemptID, "lease_expired"); err != nil {
+	if err := f.service.InterruptExtraction(context.Background(), interrupted.AttemptID, "lease_expired"); err != nil {
 		t.Fatal(err)
 	}
 	assertClosed(interrupted, "Interrupted")
 }
 func TestBatchConfirmRequiresCurrentAll(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	started, err := f.service.StartImport(ctx, f.userID, "cmd-batch-full-0", "两条知识导入原文。")
 	if err != nil {
 		t.Fatal(err)
@@ -1128,7 +1150,7 @@ func TestBatchConfirmRequiresCurrentAll(t *testing.T) {
 
 func TestRebuildSearchDocsRestoresDerivedProjection(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	started, err := f.service.StartImport(ctx, f.userID, "cmd-rebuild-0", "重建检索投影的导入原文。")
 	if err != nil {
 		t.Fatal(err)
@@ -1252,7 +1274,7 @@ func succeededChatCall(t *testing.T, f *fixture, attemptID, grantID int64, callS
 // proposal payload.
 func seedRunningExtraction(t *testing.T, f *fixture, commandID string, lease time.Duration) (ImportResult, []byte, int64) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	started, err := f.service.StartImport(ctx, f.userID, commandID, "围栏测试导入原文。")
 	if err != nil {
 		t.Fatal(err)
@@ -1283,7 +1305,7 @@ func seedRunningExtraction(t *testing.T, f *fixture, commandID string, lease tim
 
 func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 
 	// In-lease success commits; replay stays accepted after the batch is
 	// confirmed and after the lease burns down (frozen-identity replay).
@@ -1297,7 +1319,7 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherCallID := succeededChatCall(t, f, started.AttemptID, otherGrantID, 2)
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, payload); err != nil {
 		t.Fatal(err)
 	}
 	detail, err := f.service.GetImportBatch(ctx, batchID)
@@ -1314,13 +1336,13 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	if _, err := f.service.ConfirmBatch(ctx, f.userID, "cmd-fence-success-1", batchID, confirm); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, payload); err != nil {
 		t.Fatalf("replay after batch confirmation rejected: %v", err)
 	}
 	if _, err := f.db.Exec(`UPDATE execution_attempts SET lease_until=?,row_version=row_version+1 WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), started.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, payload); err != nil {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, payload); err != nil {
 		t.Fatalf("replay after lease expiry rejected: %v", err)
 	}
 	// A divergent payload under the same attempt identity is a late result,
@@ -1334,7 +1356,7 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, divergentPayload); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, divergentPayload); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("divergent replay error = %v, want ErrLateResult", err)
 	}
 	var itemCount map[string]any
@@ -1346,22 +1368,22 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, countPayload); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, countPayload); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("count-divergent replay error = %v, want ErrLateResult", err)
 	}
 	// Trailing data after the closed result object is a protocol violation,
 	// never silently ignored input — including a bare closing brace.
 	trailingTarget, trailingPayload, _ := seedRunningExtraction(t, f, "cmd-fence-trailing-0", time.Hour)
 	trailingObject := append(append([]byte{}, trailingPayload...), []byte("\n{\"ignored\":true}")...)
-	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingObject); !errors.Is(err, ErrInvalidExtraction) {
+	if err := f.service.CommitExtraction(context.Background(), trailingTarget.AttemptID, "boot", 1, trailingObject); !errors.Is(err, ErrInvalidExtraction) {
 		t.Fatalf("trailing-object payload error = %v, want ErrInvalidExtraction", err)
 	}
 	trailingBrace := append(append([]byte{}, trailingPayload...), '}')
-	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingBrace); !errors.Is(err, ErrInvalidExtraction) {
+	if err := f.service.CommitExtraction(context.Background(), trailingTarget.AttemptID, "boot", 1, trailingBrace); !errors.Is(err, ErrInvalidExtraction) {
 		t.Fatalf("trailing-brace payload error = %v, want ErrInvalidExtraction", err)
 	}
 	// The identical clean payload still commits for this attempt.
-	if err := f.service.CommitExtraction(ctx, trailingTarget.AttemptID, "boot", 1, trailingPayload); err != nil {
+	if err := f.service.CommitExtraction(context.Background(), trailingTarget.AttemptID, "boot", 1, trailingPayload); err != nil {
 		t.Fatalf("clean payload rejected after trailing rejections: %v", err)
 	}
 	// Re-binding the same content onto another succeeded model call of the
@@ -1376,7 +1398,7 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.CommitExtraction(ctx, started.AttemptID, "boot", 1, swapPayload); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.CommitExtraction(context.Background(), started.AttemptID, "boot", 1, swapPayload); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("model-call rebind replay error = %v, want ErrLateResult", err)
 	}
 
@@ -1384,10 +1406,10 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	// candidate, no failure closure, batch and attempt stay in flight.
 	late, latePayload, _ := seedRunningExtraction(t, f, "cmd-fence-late-0", -time.Minute)
 	lateBatchID := parseID(t, late.Batch.ID)
-	if err := f.service.CommitExtraction(ctx, late.AttemptID, "boot", 1, latePayload); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.CommitExtraction(context.Background(), late.AttemptID, "boot", 1, latePayload); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("expired-lease success error = %v, want ErrLateResult", err)
 	}
-	if err := f.service.FailExtraction(ctx, late.AttemptID, "boot", 1, "provider_unavailable"); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.FailExtraction(context.Background(), late.AttemptID, "boot", 1, "provider_unavailable"); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("expired-lease failure error = %v, want ErrLateResult", err)
 	}
 	detail, err = f.service.GetImportBatch(ctx, lateBatchID)
@@ -1409,13 +1431,13 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	// different payload for the same attempt.
 	failed, _, _ := seedRunningExtraction(t, f, "cmd-fence-fail-0", time.Hour)
 	failedBatchID := parseID(t, failed.Batch.ID)
-	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+	if err := f.service.FailExtraction(context.Background(), failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
+	if err := f.service.FailExtraction(context.Background(), failed.AttemptID, "boot", 1, "provider_unavailable"); err != nil {
 		t.Fatalf("failure replay rejected: %v", err)
 	}
-	if err := f.service.FailExtraction(ctx, failed.AttemptID, "boot", 1, "model_refused"); !errors.Is(err, attempt.ErrLateResult) {
+	if err := f.service.FailExtraction(context.Background(), failed.AttemptID, "boot", 1, "model_refused"); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("conflicting failure replay error = %v, want ErrLateResult", err)
 	}
 	state, err := f.service.GetImportBatch(ctx, failedBatchID)
@@ -1424,5 +1446,40 @@ func TestExtractionResultLeaseAndReplayFences(t *testing.T) {
 	}
 	if state.State != "Failed" {
 		t.Fatalf("failed batch state = %q", state.State)
+	}
+}
+
+// 统一执行器之前的旧拒绝行：重放保留原拒绝类别与记录的权威当前值，绝不
+// 误报为命令冲突，也绝不静默错判类别。
+func TestLegacyRejectionReplayPreservesKnownKind(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	created, err := f.service.CreateFromAnalysisOutput(ctx, f.userID, "cmd-legacy-create", f.outputID, f.analysisID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateID := parseID(t, created.Candidate.ID)
+	digest := commandDigest(opConfirm, map[string]any{"candidateId": candidateID, "expectedRevision": int64(0)})
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := f.db.Exec(`INSERT INTO client_commands(principal_type,principal_id,client_command_id,correlation_id,command_type,request_digest,outcome,result_object_type,result_object_id,result_payload_json,created_at)
+		VALUES('user',?,?,'legacy-corr',?,?,'rejected_known','knowledge_candidate',?,?,?)`,
+		f.userID, "cmd-legacy-confirm", opConfirm, digest, candidateID,
+		`{"kind":"revision_conflict","current":7,"status":409,"description":"candidate draft revision is stale"}`, now); err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := f.service.Confirm(ctx, f.userID, "cmd-legacy-confirm", candidateID, 0)
+	if confirmed.ConfirmedKnowledgeID != "" || err == nil {
+		t.Fatalf("legacy rejected replay must stay rejected, got %+v / %v", confirmed, err)
+	}
+	var conflict *RevisionConflict
+	if !errors.As(err, &conflict) || conflict.Current != 7 {
+		t.Fatalf("legacy rejection replay = %v, want RevisionConflict{7}", err)
+	}
+	// 重放不新增任何台账或审计行。
+	if got := testfixture.Count(t, f.db, `SELECT COUNT(*) FROM client_commands WHERE client_command_id='cmd-legacy-confirm'`); got != 1 {
+		t.Fatalf("legacy rejection rows = %d, want 1", got)
+	}
+	if got := testfixture.Count(t, f.db, `SELECT COUNT(*) FROM audit_events WHERE client_command_id='cmd-legacy-confirm'`); got != 0 {
+		t.Fatalf("rejection replay wrote audit rows = %d, want 0", got)
 	}
 }

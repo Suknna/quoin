@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
@@ -127,8 +126,7 @@ func (application *apiServer) revealRuntimeRegistrationToken(ctx context.Context
 		RegistrationToken string `json:"registrationToken"`
 	}
 }, error) {
-	session, err := application.authenticateAdmin(ctx, input.Session, "显示 Runtime 注册令牌")
-	if err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "显示 Runtime 注册令牌"); err != nil {
 		return nil, err
 	}
 	raw, slot, generation, revealErr := application.runtime.RevealToken(input.Body.RegistrationTokenHandle, secrets.SessionDigest(input.Session))
@@ -140,8 +138,10 @@ func (application *apiServer) revealRuntimeRegistrationToken(ctx context.Context
 	if slot == qruntime.SlotLintel {
 		return nil, lintelSlotRetired()
 	}
-	// Audit the reveal without the handle or raw token (SEC-REVEAL-004).
-	if auditErr := application.alerts.RecordRevealAudit(ctx, session.User.ID, generation, "success", nowTimestamp()); auditErr != nil {
+	// Audit the reveal through the runtime's own runner operation before the
+	// raw token leaves the handler; no handle or raw token is ever recorded
+	// (SEC-REVEAL-004).
+	if auditErr := application.runtime.RecordRevealAudit(ctx, slot, generation); auditErr != nil {
 		return nil, problem(http.StatusInternalServerError, "unavailable", "暂时无法记录审计，请重试。")
 	}
 	output := &struct {
@@ -181,5 +181,3 @@ func (application *apiServer) retireRuntimeCredential(ctx context.Context, input
 		Body qruntime.SlotView
 	}{Body: view}, nil
 }
-
-func nowTimestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

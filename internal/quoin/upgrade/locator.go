@@ -10,20 +10,20 @@ import (
 // (openapi x-quoin-maintenance-access: upgrade-drain). The maintenance UI is
 // the only consumer; maintenance itself never calls these routes.
 const (
-	endpointAnalysis            = "analysis"
-	endpointInvestigation       = "investigation"
-	endpointInspectionRun       = "inspection_run"
-	endpointKnowledgeBatch      = "knowledge_batch"
-	endpointConnectionProbe     = "connection_probe"
-	endpointConfigVerification  = "config_verification"
-	endpointBrowserOperation    = "browser_operation"
-	directiveConverge           = "converge"
+	endpointAnalysis           = "analysis"
+	endpointInvestigation      = "investigation"
+	endpointInspectionRun      = "inspection_run"
+	endpointKnowledgeBatch     = "knowledge_batch"
+	endpointConnectionProbe    = "connection_probe"
+	endpointConfigVerification = "config_verification"
+	endpointBrowserOperation   = "browser_operation"
+	directiveConverge          = "converge"
 )
 
 // attemptDirective resolves the deterministic drain directive for one active
 // attempt. All reads run on the caller's open projection transaction so the
 // item's row version is snapshot-consistent with the checklist itself.
-func attemptDirective(ctx context.Context, conn *sql.Conn, attemptID int64, scopeType string, scopeID int64, state string, parent sql.NullInt64) (string, error) {
+func attemptDirective(ctx context.Context, conn projectionExecutor, attemptID int64, scopeType string, scopeID int64, state string, parent sql.NullInt64) (string, error) {
 	switch scopeType {
 	case "analysis":
 		var occurrenceID, rowVersion int64
@@ -109,7 +109,7 @@ func attemptDirective(ctx context.Context, conn *sql.Conn, attemptID int64, scop
 // operation. Manual-login-family operations cancel through their own
 // endpoint; owned operations (journey, exploration, deployment verification)
 // cancel through the owning domain command.
-func operationDirective(ctx context.Context, conn *sql.Conn, operationID int64, kind, state string, owner sql.NullInt64) (string, error) {
+func operationDirective(ctx context.Context, conn projectionExecutor, operationID int64, kind, state string, owner sql.NullInt64) (string, error) {
 	switch kind {
 	case "manual_login", "authentication_probe":
 		var systemKey string

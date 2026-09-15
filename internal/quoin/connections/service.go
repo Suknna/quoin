@@ -3,6 +3,11 @@
 // and the connection-probe attempt/grant closure. Thanos/Kubernetes probes
 // are executed by the Plinth supervisor over the control stream; model
 // provider probes arrive with T08.
+//
+// Every active mutation runs through the family's execution runner
+// (runner.go) so the automatic audit — and for create/rotate the durable
+// command ledger — commits in the same transaction as the domain change
+// (ADR-0006). Queries run through the injected read-only reader seam.
 package connections
 
 import (
@@ -11,9 +16,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Suknna/quoin/internal/quoin/auth"
 	"strconv"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const (
@@ -75,17 +84,62 @@ type CreateInput struct {
 // grant path); production binds the bootstrap root key.
 type RootKeyProvider func() ([]byte, error)
 
+// PostEnableHook runs inside the enable transaction after the connection row
+// advanced but before commit. The guarded execution.Executor keeps the hook
+// from escaping or ending the runner-owned transaction; a hook error rolls
+// the whole enable back, so enablement-coupled invariants stay atomic.
+type PostEnableHook func(ctx context.Context, tx execution.Executor, name string) error
+
 type Service struct {
-	db      *sql.DB
-	now     func() time.Time
-	rootKey RootKeyProvider
+	db *sql.DB
+	// reader is the read seam for every query path; production injects the
+	// real read-only pool (SetReader). It defaults to the write pool until
+	// the deployment composition wires the dedicated reader.
+	reader   audit.Reader
+	now      func() time.Time
+	rootKey  RootKeyProvider
+	commands *commandRunner
 	// postEnableInTx 在启用事务提交前运行（ADR-0004 默认基础计划等启用耦合
 	// 副作用必须与启用原子提交）；由 app 层通过 SetPostEnableInTx 注册。
-	postEnableInTx func(ctx context.Context, conn *sql.Conn, name string) error
+	postEnableInTx PostEnableHook
 }
 
 func NewService(db *sql.DB, rootKey RootKeyProvider) *Service {
-	return &Service{db: db, rootKey: rootKey, now: time.Now}
+	service := &Service{db: db, rootKey: rootKey, now: time.Now}
+	service.commands = newCommandRunner(db, service.now)
+	return service
+}
+
+// SetReader injects the read-only query capability (bootstrap.Database.Reader,
+// opened in real SQLite read-only mode). Queries never mutate state, so they
+// must not depend on the write pool. A nil reader keeps the current seam.
+func (service *Service) SetReader(reader audit.Reader) error {
+	if reader == nil {
+		return errors.New("connections: read-only reader is required")
+	}
+	service.reader = reader
+	return nil
+}
+
+// read serves pure read paths from the injected read-only pool. Unwired it
+// returns the zero-value execution.Reader, which fails closed — the writer
+// database is never a read fallback.
+func (service *Service) read() audit.Reader {
+	if service.reader != nil {
+		return service.reader
+	}
+	return execution.Reader{}
+}
+
+// Reader serves the app layer's read-only dispatch lookups (the injected
+// bootstrap read-only pool).
+func (service *Service) Reader() audit.Reader { return service.read() }
+
+// SetPostEnableInTx registers a hook invoked inside the enable transaction
+// after the connection row advanced but before commit. A hook error rolls the
+// whole enable back, so enablement-coupled invariants stay atomic.
+func (service *Service) SetPostEnableInTx(hook PostEnableHook) {
+	service.postEnableInTx = hook
 }
 
 // validateConfig checks the typed non-secret projection against the frozen
@@ -269,116 +323,88 @@ type modelProviderSecretJSON struct {
 	APIKey string `json:"apiKey"`
 }
 
-// Create persists a new connection with revision 1 and generation 1 in one
-// IMMEDIATE transaction. The secret is sealed with the current root binding.
+// Create persists a new connection with revision 1 and generation 1 as a
+// durable, replayable command (DATA-COMMAND-002): the runner's transaction
+// holds the replay lookup, the validation rejections, the sealed credential
+// generation and the automatic audit row. The secret is sealed with the
+// current root binding and never enters the ledger — the digest covers only
+// non-secret semantic fields plus secret presence, and the replay payload is
+// the non-secret Summary.
 func (service *Service) Create(ctx context.Context, input CreateInput, createdBy int64, clientCommandID string) (Summary, error) {
-	config, err := validateConfig(input.Type, input.NonSecretJSON)
-	if err != nil {
-		return Summary{}, err
-	}
-	if err := validateSecret(input.Type, input.Secret); err != nil {
-		return Summary{}, err
-	}
-	if err := validateMetricsCredential(input.Type, config, input.Secret); err != nil {
-		return Summary{}, err
-	}
-	// Secret-input idempotency: the digest covers only non-secret semantic
-	// fields plus secret presence — a replayed command id returns the
-	// original result without comparing secret values (DATA-COMMAND-002).
-	digest := auth.DigestCommand("connection.create", map[string]any{
+	digest := auth.DigestCommand(opCreate, map[string]any{
 		"name": input.Name, "type": input.Type,
 		"nonSecret": string(input.NonSecretJSON), "secretPresent": input.SecretPresent,
 	})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, createdBy, clientCommandID); lookupErr == nil && found && record.RequestDigest == digest {
-		var replayed Summary
-		if err := json.Unmarshal([]byte(record.ResultPayload), &replayed); err == nil {
-			return replayed, nil
+	outcome, err := execution.Run(ctx, service.commands.runner, service.commands.create, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     createdBy,
+		ClientCommandID: clientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (Summary, execution.Change, error) {
+		if err := requireActor(ctx, createdBy); err != nil {
+			return Summary{}, execution.Changed, err
 		}
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return Summary{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Summary{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		config, err := validateConfig(input.Type, input.NonSecretJSON)
+		if err != nil {
+			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
-	}()
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	var bindingRevision int
-	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
-		return Summary{}, err
-	}
-	insert, err := conn.ExecContext(ctx, `INSERT INTO connections(name,type,enabled,revalidation_required,created_at) VALUES(?,?,0,0,?)`, input.Name, input.Type, now)
-	if err != nil {
-		if isUnique(err) {
-			return Summary{}, ErrNameTaken
+		if err := validateSecret(input.Type, input.Secret); err != nil {
+			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
-		return Summary{}, err
-	}
-	connectionID, err := insert.LastInsertId()
+		if err := validateMetricsCredential(input.Type, config, input.Secret); err != nil {
+			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
+		}
+		now := timestampOf(service.now)
+		var bindingRevision int
+		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		insert, err := tx.ExecContext(ctx, `INSERT INTO connections(name,type,enabled,revalidation_required,created_at) VALUES(?,?,0,0,?)`, input.Name, input.Type, now)
+		if err != nil {
+			if isUnique(err) {
+				return Summary{}, execution.Changed, rejectionOf(ErrNameTaken, codeNameTaken, "connection name already exists", 0)
+			}
+			return Summary{}, execution.Changed, err
+		}
+		connectionID, err := insert.LastInsertId()
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		revision, err := tx.ExecContext(ctx, `INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,1,?,?,?)`, connectionID, string(config), createdBy, now)
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		revisionID, err := revision.LastInsertId()
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		generationID, err := service.insertGeneration(ctx, tx, connectionID, input.Type, bindingRevision, input.Secret, createdBy, now)
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		summary, err := getSummaryOn(ctx, tx, input.Name)
+		return summary, execution.Changed, err
+	}, func(summary Summary) int64 { return summary.ID })
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, domainError(err)
 	}
-	revision, err := conn.ExecContext(ctx, `INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,1,?,?,?)`, connectionID, string(config), createdBy, now)
-	if err != nil {
-		return Summary{}, err
-	}
-	revisionID, err := revision.LastInsertId()
-	if err != nil {
-		return Summary{}, err
-	}
-	generationID, err := service.insertGeneration(ctx, conn, connectionID, input.Type, bindingRevision, input.Secret, createdBy, now)
-	if err != nil {
-		return Summary{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
-		return Summary{}, err
-	}
-	committed = true
-	summary, summaryErr := service.getOn(ctx, conn, input.Name)
-	if summaryErr != nil {
-		return Summary{}, summaryErr
-	}
-	projection, err := json.Marshal(summary)
-	if err != nil {
-		return Summary{}, err
-	}
-	if err := auth.RecordCommand(ctx, conn, createdBy, clientCommandID, "connection.create", digest, "committed", "connection", connectionID, string(projection)); err != nil {
-		return Summary{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Summary{}, err
-	}
-	conn.Close() // release the single pool connection before re-reading
-	return service.Get(ctx, input.Name)
+	return outcome.Result, nil
 }
 
 // insertGeneration seals and stores credential generation seq for the
-// connection; returns the new row id.
-func (service *Service) insertGeneration(ctx context.Context, conn *sql.Conn, connectionID int64, connectionType string, bindingRevision int, secret []byte, createdBy int64, now string) (int64, error) {
+// connection; returns the new row id. The current encryption envelopes are
+// reused unchanged; the sealed bytes never appear in any audit or ledger
+// payload.
+func (service *Service) insertGeneration(ctx context.Context, tx execution.Executor, connectionID int64, connectionType string, bindingRevision int, secret []byte, createdBy int64, now string) (int64, error) {
 	var nextSeq int64
-	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation_seq),0)+1 FROM credential_generations WHERE connection_id=?`, connectionID).Scan(&nextSeq); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation_seq),0)+1 FROM credential_generations WHERE connection_id=?`, connectionID).Scan(&nextSeq); err != nil {
 		return 0, err
 	}
 	var envelope *envelopeWire
-	if len(secret) > 0 {
-		rootKey, err := service.rootKey()
-		if err != nil {
-			return 0, err
-		}
-		typed := typedSecretFromRaw(connectionType, secret)
-		wire, sealErr := sealEnvelope(rootKey, connectionID, nextSeq, connectionType, bindingRevision, typed)
-		if sealErr != nil {
-			return 0, sealErr
-		}
-		envelope = wire
-	} else {
+	if len(secret) == 0 {
 		// Kubernetes requires a kubeconfig and a model provider requires an
 		// API key. Prometheus-compatible connections may use no auth, but
 		// still seal an explicit empty carrier to preserve independent,
@@ -386,17 +412,19 @@ func (service *Service) insertGeneration(ctx context.Context, conn *sql.Conn, co
 		if connectionType != TypePrometheus && connectionType != TypeThanos {
 			return 0, fmt.Errorf("%w: %s requires a secret", ErrValidation, connectionType)
 		}
-		rootKey, err := service.rootKey()
-		if err != nil {
-			return 0, err
-		}
-		wire, sealErr := sealEnvelope(rootKey, connectionID, nextSeq, connectionType, bindingRevision, &typedSecretJSON{Type: connectionType})
-		if sealErr != nil {
-			return 0, sealErr
-		}
-		envelope = wire
+		secret = []byte("{}")
 	}
-	insert, err := conn.ExecContext(ctx,
+	rootKey, err := service.rootKey()
+	if err != nil {
+		return 0, err
+	}
+	typed := typedSecretFromRaw(connectionType, secret)
+	wire, sealErr := sealEnvelope(rootKey, connectionID, nextSeq, connectionType, bindingRevision, typed)
+	if sealErr != nil {
+		return 0, sealErr
+	}
+	envelope = wire
+	insert, err := tx.ExecContext(ctx,
 		`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)`,
 		connectionID, nextSeq, envelopeVersion, bindingRevision, envelope.Nonce, envelope.Ciphertext, createdBy, now)
 	if err != nil {
@@ -422,9 +450,11 @@ func typedSecretFromRaw(connectionType string, secret []byte) *typedSecretJSON {
 	return payload
 }
 
-// getOn reads the summary on an open transaction connection.
-func (service *Service) getOn(ctx context.Context, conn *sql.Conn, name string) (Summary, error) {
-	row := conn.QueryRowContext(ctx, `
+// getSummaryOn reads one summary row through the given query seam (the
+// guarded runner transaction inside audited operations, the read-only reader
+// on direct query paths).
+func getSummaryOn(ctx context.Context, reader audit.Reader, name string) (Summary, error) {
+	row := reader.QueryRowContext(ctx, `
 		SELECT c.id,c.name,c.type,c.enabled,c.revalidation_required,
 		       COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0),c.row_version,c.created_at,
 		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}')
@@ -432,29 +462,9 @@ func (service *Service) getOn(ctx context.Context, conn *sql.Conn, name string) 
 	return scanSummary(row)
 }
 
-// Get returns the connection summary by stable name.
-// DB exposes the pool for read-only dispatch lookups in the app layer.
-func (service *Service) DB() *sql.DB { return service.db }
-
+// Get returns the connection summary by stable name through the read seam.
 func (service *Service) Get(ctx context.Context, name string) (Summary, error) {
-	row := service.db.QueryRowContext(ctx, `
-		SELECT c.id,c.name,c.type,c.enabled,c.revalidation_required,
-		       COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0),c.row_version,c.created_at,
-		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}')
-		FROM connections c WHERE c.name=?`, name)
-	var summary Summary
-	var enabled, revalidation int
-	var config string
-	if err := row.Scan(&summary.ID, &summary.Name, &summary.Type, &enabled, &revalidation, &summary.CurrentRevisionID, &summary.CurrentGenerationID, &summary.RowVersion, &summary.CreatedAt, &config); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Summary{}, ErrNotFound
-		}
-		return Summary{}, err
-	}
-	summary.Enabled = enabled == 1
-	summary.RevalidationRequired = revalidation == 1
-	summary.Config = json.RawMessage(config)
-	return summary, nil
+	return getSummaryOn(ctx, service.read(), name)
 }
 
 // scanSummary reads one summary row (config is TEXT in SQLite).
@@ -474,12 +484,12 @@ func scanSummary(row *sql.Row) (Summary, error) {
 	return summary, nil
 }
 
-// List returns one keyset page ordered by name.
+// List returns one keyset page ordered by name through the read seam.
 func (service *Service) List(ctx context.Context, after string, limit int) ([]Summary, bool, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.reader.QueryContext(ctx, `
 		SELECT c.id,c.name,c.type,c.enabled,c.revalidation_required,
 		       COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0),c.row_version,c.created_at,
 		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}')
@@ -511,159 +521,128 @@ func (service *Service) List(ctx context.Context, after string, limit int) ([]Su
 
 // Enable flips enabled=1 (clearing RevalidationRequired) under the row
 // version fence and the single-enabled partial index for thanos/model
-// provider (DATA-CONN-003/006).
+// provider (DATA-CONN-003/006) as one audited mutation. The qualified probe
+// result must close onto the current immutable revision/generation pair; the
+// enablement-coupled post-enable hook commits atomically or not at all.
 func (service *Service) Enable(ctx context.Context, name string, expectedRowVersion int64, qualifiedProbeResultID int64, createdBy int64) (Summary, error) {
-	conn, err := service.db.Conn(ctx)
+	summary, err := execution.Execute(ctx, service.commands.runner, service.commands.enable, func(tx *execution.Tx) (Summary, error) {
+		if err := requireActor(ctx, createdBy); err != nil {
+			return Summary{}, err
+		}
+		var id int64
+		var connectionType string
+		var enabled, revalidation int
+		var rowVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT id,type,enabled,revalidation_required,row_version FROM connections WHERE name=?`, name).Scan(&id, &connectionType, &enabled, &revalidation, &rowVersion); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Summary{}, rejectionOf(ErrNotFound, codeNotFound, "connection does not exist", 0)
+			}
+			return Summary{}, err
+		}
+		if rowVersion != expectedRowVersion {
+			return Summary{}, &versionRejection{current: rowVersion, id: id, rejection: execution.Rejection{Code: codeRowVersion, Detail: "connection was modified concurrently", ObjectID: id}}
+		}
+		if enabled == 1 && revalidation == 0 {
+			// Semantic no-op (HTTP-COMMAND-011): the row is untouched and the
+			// runner still records the command as the durable fact.
+			return getSummaryOn(ctx, tx, name)
+		}
+		if connectionType == TypeModelProvider || connectionType == TypePrometheus || connectionType == TypeThanos {
+			if qualifiedProbeResultID == 0 {
+				return Summary{}, rejectionOf(ErrValidation, codeValidation, fmt.Sprintf("%s enable requires an explicit passed probe result", connectionType), id)
+			}
+			var probeType string
+			var outcome string
+			var probeRevisionID, probeGenerationID int64
+			var currentRevisionID, currentGenerationID int64
+			if err := tx.QueryRowContext(ctx, `SELECT connection_type,outcome,connection_revision_id,credential_generation_id FROM connection_probe_results WHERE id=?`, qualifiedProbeResultID).Scan(&probeType, &outcome, &probeRevisionID, &probeGenerationID); err != nil {
+				return Summary{}, rejectionOf(ErrValidation, codeValidation, "unknown probe result", id)
+			}
+			if err := tx.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID); err != nil {
+				return Summary{}, err
+			}
+			// Rotation deliberately leaves an already enabled metrics connection in
+			// revalidation-required state. A passed real probe over its new immutable
+			// revision/generation pair is the event that clears that state; rejecting
+			// it because the flag is set would make recovery impossible. Old results
+			// cannot qualify because their frozen pair no longer matches.
+			if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID {
+				return Summary{}, rejectionOf(ErrActiveConflict, codeActiveConflict, "probe result does not close onto the current pair", id)
+			}
+			// The explicit qualification event must close onto the row version
+			// the enabling UPDATE produces (trigger checks
+			// q.enabled_row_version = NEW.row_version AFTER the update): insert
+			// it first against row_version+1, then advance the row in the same
+			// transaction. Metrics and model providers share this immutable proof;
+			// type-specific SQL closure verifies the matching real probe child.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, id, rowVersion+1, qualifiedProbeResultID, createdBy, timestampOf(service.now)); err != nil {
+				return Summary{}, err
+			}
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE connections SET enabled=1,revalidation_required=0,row_version=row_version+1 WHERE id=? AND row_version=?`, id, rowVersion)
+		if err != nil {
+			if isUnique(err) {
+				return Summary{}, rejectionOf(ErrSingleEnabled, codeSingleEnabled, "another enabled connection of this type already exists", id)
+			}
+			return Summary{}, err
+		}
+		if rows, _ := result.RowsAffected(); rows != 1 {
+			return Summary{}, &versionRejection{current: rowVersion, id: id, rejection: execution.Rejection{Code: codeRowVersion, Detail: "connection was modified concurrently", ObjectID: id}}
+		}
+		if service.postEnableInTx != nil {
+			if err := service.postEnableInTx(ctx, tx, name); err != nil {
+				return Summary{}, err
+			}
+		}
+		return getSummaryOn(ctx, tx, name)
+	}, func(summary Summary) int64 { return summary.ID })
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, domainError(err)
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Summary{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	var id int64
-	var connectionType string
-	var enabled, revalidation int
-	var rowVersion int64
-	if err := conn.QueryRowContext(ctx, `SELECT id,type,enabled,revalidation_required,row_version FROM connections WHERE name=?`, name).Scan(&id, &connectionType, &enabled, &revalidation, &rowVersion); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Summary{}, ErrNotFound
-		}
-		return Summary{}, err
-	}
-	if rowVersion != expectedRowVersion {
-		return Summary{}, &RowVersionError{Current: rowVersion, ID: id}
-	}
-	if enabled == 1 && revalidation == 0 {
-		// Semantic no-op (HTTP-COMMAND-011).
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return Summary{}, err
-		}
-		committed = true
-		conn.Close()
-		return service.Get(ctx, name)
-	}
-	if connectionType == TypeModelProvider || connectionType == TypePrometheus || connectionType == TypeThanos {
-		if qualifiedProbeResultID == 0 {
-			return Summary{}, fmt.Errorf("%w: %s enable requires an explicit passed probe result", ErrValidation, connectionType)
-		}
-		var probeType string
-		var outcome string
-		var probeRevisionID, probeGenerationID int64
-		var currentRevisionID, currentGenerationID int64
-		if err := conn.QueryRowContext(ctx, `SELECT connection_type,outcome,connection_revision_id,credential_generation_id FROM connection_probe_results WHERE id=?`, qualifiedProbeResultID).Scan(&probeType, &outcome, &probeRevisionID, &probeGenerationID); err != nil {
-			return Summary{}, fmt.Errorf("%w: unknown probe result", ErrValidation)
-		}
-		if err := conn.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID); err != nil {
-			return Summary{}, err
-		}
-		// Rotation deliberately leaves an already enabled metrics connection in
-		// revalidation-required state. A passed real probe over its new immutable
-		// revision/generation pair is the event that clears that state; rejecting
-		// it because the flag is set would make recovery impossible. Old results
-		// cannot qualify because their frozen pair no longer matches.
-		if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID {
-			return Summary{}, fmt.Errorf("%w: probe result does not close onto the current pair", ErrActiveConflict)
-		}
-		// The explicit qualification event must close onto the row version
-		// the enabling UPDATE produces (trigger checks
-		// q.enabled_row_version = NEW.row_version AFTER the update): insert
-		// it first against row_version+1, then advance the row in the same
-		// transaction. Metrics and model providers share this immutable proof;
-		// type-specific SQL closure verifies the matching real probe child.
-		if _, err := conn.ExecContext(ctx, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, id, rowVersion+1, qualifiedProbeResultID, createdBy, service.now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return Summary{}, err
-		}
-	}
-	result, err := conn.ExecContext(ctx, `UPDATE connections SET enabled=1,revalidation_required=0,row_version=row_version+1 WHERE id=? AND row_version=?`, id, rowVersion)
-	if err != nil {
-		if isUnique(err) {
-			return Summary{}, ErrSingleEnabled
-		}
-		return Summary{}, err
-	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
-		return Summary{}, &RowVersionError{Current: rowVersion, ID: id}
-	}
-	if service.postEnableInTx != nil {
-		if err := service.postEnableInTx(ctx, conn, name); err != nil {
-			return Summary{}, err
-		}
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Summary{}, err
-	}
-	committed = true
-	conn.Close()
-	return service.Get(ctx, name)
-}
-
-// SetPostEnableInTx registers a hook invoked inside the enable transaction
-// after the connection row advanced but before commit. A hook error rolls the
-// whole enable back, so enablement-coupled invariants stay atomic.
-func (service *Service) SetPostEnableInTx(hook func(ctx context.Context, conn *sql.Conn, name string) error) {
-	service.postEnableInTx = hook
+	return summary, nil
 }
 
 // Disable blocks new dispatches; already accepted attempts finish. During a
 // RootKeyRebind it is the explicit choice to retain the connection disabled.
+// The state flip is one audited mutation under the row version fence.
 func (service *Service) Disable(ctx context.Context, name string, expectedRowVersion int64) (Summary, error) {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return Summary{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Summary{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	summary, err := execution.Execute(ctx, service.commands.runner, service.commands.disable, func(tx *execution.Tx) (Summary, error) {
+		var id, rowVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT id,row_version FROM connections WHERE name=?`, name).Scan(&id, &rowVersion); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Summary{}, rejectionOf(ErrNotFound, codeNotFound, "connection does not exist", 0)
+			}
+			return Summary{}, err
 		}
-	}()
-	result, err := conn.ExecContext(ctx, `UPDATE connections SET enabled=0,row_version=row_version+1 WHERE name=? AND row_version=?`, name, expectedRowVersion)
-	if err != nil {
-		return Summary{}, err
-	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
-		var current int64
-		err := conn.QueryRowContext(ctx, `SELECT row_version FROM connections WHERE name=?`, name).Scan(&current)
-		if errors.Is(err, sql.ErrNoRows) {
-			return Summary{}, ErrNotFound
+		result, err := tx.ExecContext(ctx, `UPDATE connections SET enabled=0,row_version=row_version+1 WHERE name=? AND row_version=?`, name, expectedRowVersion)
+		if err != nil {
+			return Summary{}, err
 		}
-		return Summary{}, &RowVersionError{Current: current}
+		if rows, _ := result.RowsAffected(); rows != 1 {
+			return Summary{}, &versionRejection{current: rowVersion, id: id, rejection: execution.Rejection{Code: codeRowVersion, Detail: "connection was modified concurrently", ObjectID: id}}
+		}
+		if err := markRootKeyRebindConnectionSafe(ctx, tx, name, "disabled"); err != nil {
+			return Summary{}, err
+		}
+		return getSummaryOn(ctx, tx, name)
+	}, func(summary Summary) int64 { return summary.ID })
+	if err != nil {
+		return Summary{}, domainError(err)
 	}
-	if err := markRootKeyRebindConnectionSafe(ctx, conn, name, "disabled"); err != nil {
-		return Summary{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Summary{}, err
-	}
-	committed = true
-	if err := conn.Close(); err != nil {
-		return Summary{}, err
-	}
-	return service.Get(ctx, name)
+	return summary, nil
 }
 
-func markRootKeyRebindConnectionSafe(ctx context.Context, conn *sql.Conn, name, detailCode string) error {
+func markRootKeyRebindConnectionSafe(ctx context.Context, tx execution.Executor, name, detailCode string) error {
 	var active int
 	var reason string
 	var revision int64
-	if err := conn.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &revision); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &revision); err != nil {
 		return err
 	}
 	if active == 0 || reason != "RootKeyRebind" {
 		return nil
 	}
-	result, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET safe_state='Safe',detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='Connection' AND object_key=? AND safe_state='Blocking'`, detailCode, time.Now().UTC().Format(time.RFC3339Nano), revision, name)
+	result, err := tx.ExecContext(ctx, `UPDATE maintenance_items SET safe_state='Safe',detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='Connection' AND object_key=? AND safe_state='Blocking'`, detailCode, time.Now().UTC().Format(time.RFC3339Nano), revision, name)
 	if err != nil {
 		return err
 	}
@@ -673,18 +652,13 @@ func markRootKeyRebindConnectionSafe(ctx context.Context, conn *sql.Conn, name, 
 	return nil
 }
 
-// OpenGeneration decrypts the current credential generation for the
-// supervisor grant path (RUNTIME-GRANT-002).
-func (service *Service) OpenGeneration(ctx context.Context, generationID int64) (*typedSecretJSON, error) {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	return service.openGenerationOn(ctx, conn, generationID)
-}
-
-func (service *Service) openGenerationOn(ctx context.Context, conn *sql.Conn, generationID int64) (*typedSecretJSON, error) {
+// openGenerationOn is the sole decryption stage for a credential generation.
+// It is reachable only from the audited FulfillGrant runner transaction
+// (RUNTIME-GRANT-002): the sealed execution.Executor keeps this sensitive
+// read inside the runner-owned, guarded write window — not on the arbitrary
+// read-only seam. There is deliberately no public, unguarded reveal entry
+// point.
+func (service *Service) openGenerationOn(ctx context.Context, conn execution.Executor, generationID int64) (*typedSecretJSON, error) {
 	rootKey, err := service.rootKey()
 	if err != nil {
 		return nil, err
@@ -722,8 +696,6 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
-func locator(id int64) string { return strconv.FormatInt(id, 10) }
-
 func boolInt(value bool) int {
 	if value {
 		return 1
@@ -731,113 +703,146 @@ func boolInt(value bool) int {
 	return 0
 }
 
-// Rotate creates the next revision and credential generation in one
-// transaction and atomically switches the current pair (T09,
+// Rotate creates the next revision and credential generation as one durable,
+// replayable command that atomically switches the current pair (T09,
 // HTTP-COMMAND-013): the old secret stops being handed out immediately;
 // enabled model providers are disabled first (v1: disable-then-switch) and
 // every rotated connection requires a fresh passed probe before enabling
-// again (revalidation_required).
+// again (revalidation_required). The manual rotate audit is replaced by the
+// runner's automatic audit row in the same transaction.
 func (service *Service) Rotate(ctx context.Context, name string, expectedRowVersion int64, input CreateInput, createdBy int64, clientCommandID string) (Summary, error) {
-	config, err := validateConfig(input.Type, input.NonSecretJSON)
-	if err != nil {
-		return Summary{}, err
-	}
-	if err := validateSecret(input.Type, input.Secret); err != nil {
-		return Summary{}, err
-	}
-	digest := auth.DigestCommand("connection.rotate", map[string]any{
+	digest := auth.DigestCommand(opRotate, map[string]any{
 		"name": name, "type": input.Type,
 		"nonSecret": string(input.NonSecretJSON), "secretPresent": input.SecretPresent,
 	})
-	if record, found, lookupErr := auth.LookupCommand(ctx, service.db, createdBy, clientCommandID); lookupErr == nil && found && record.RequestDigest == digest {
-		var replayed Summary
-		if err := json.Unmarshal([]byte(record.ResultPayload), &replayed); err == nil {
-			return replayed, nil
+	outcome, err := execution.Run(ctx, service.commands.runner, service.commands.rotate, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     createdBy,
+		ClientCommandID: clientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (Summary, execution.Change, error) {
+		if err := requireActor(ctx, createdBy); err != nil {
+			return Summary{}, execution.Changed, err
 		}
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return Summary{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Summary{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		config, err := validateConfig(input.Type, input.NonSecretJSON)
+		if err != nil {
+			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
-	}()
-	var id int64
-	var connectionType string
-	var enabled, revalidation int
-	var rowVersion int64
-	if err := conn.QueryRowContext(ctx, `SELECT id,type,enabled,revalidation_required,row_version FROM connections WHERE name=?`, name).Scan(&id, &connectionType, &enabled, &revalidation, &rowVersion); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Summary{}, ErrNotFound
+		if err := validateSecret(input.Type, input.Secret); err != nil {
+			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
-		return Summary{}, err
-	}
-	if rowVersion != expectedRowVersion {
-		return Summary{}, &RowVersionError{ID: id, Current: rowVersion}
-	}
-	if connectionType != input.Type {
-		return Summary{}, ErrTypeMismatch
-	}
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	var bindingRevision int
-	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
-		return Summary{}, err
-	}
-	var nextRevisionSeq int64
-	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision_seq),0)+1 FROM connection_revisions WHERE connection_id=?`, id).Scan(&nextRevisionSeq); err != nil {
-		return Summary{}, err
-	}
-	revision, err := conn.ExecContext(ctx, `INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,?,?,?,?)`, id, nextRevisionSeq, string(config), createdBy, now)
+		var id int64
+		var connectionType string
+		var rowVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT id,type,row_version FROM connections WHERE name=?`, name).Scan(&id, &connectionType, &rowVersion); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return Summary{}, execution.Changed, rejectionOf(ErrNotFound, codeNotFound, "connection does not exist", 0)
+			}
+			return Summary{}, execution.Changed, err
+		}
+		if rowVersion != expectedRowVersion {
+			return Summary{}, execution.Changed, &versionRejection{current: rowVersion, id: id, rejection: execution.Rejection{Code: codeRowVersion, Detail: "connection was modified concurrently", ObjectID: id}}
+		}
+		if connectionType != input.Type {
+			return Summary{}, execution.Changed, rejectionOf(ErrTypeMismatch, codeTypeMismatch, "rotation must keep the connection type", id)
+		}
+		now := timestampOf(service.now)
+		var bindingRevision int
+		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		var nextRevisionSeq int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision_seq),0)+1 FROM connection_revisions WHERE connection_id=?`, id).Scan(&nextRevisionSeq); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		revision, err := tx.ExecContext(ctx, `INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_by,created_at) VALUES(?,?,?,?,?)`, id, nextRevisionSeq, string(config), createdBy, now)
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		revisionID, err := revision.LastInsertId()
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		generationID, err := service.insertGeneration(ctx, tx, id, input.Type, bindingRevision, input.Secret, createdBy, now)
+		if err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		// A new revision/generation has no qualifying probe yet. Disable every
+		// rotated typed connection before switching the pair so the immutable
+		// qualification trigger cannot let the old proof authorize new credentials.
+		// The later exact-pair passed probe is required to enable it again.
+		if _, err := tx.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,enabled=0,revalidation_required=1,row_version=row_version+1 WHERE id=?`, revisionID, generationID, id); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		// Re-entry under the current root binding closes only this frozen
+		// RootKeyRebind checklist item. The connection remains revalidation-required
+		// until the later normal-mode verification/enable path succeeds.
+		if err := markRootKeyRebindConnectionSafe(ctx, tx, name, "reentered_with_current_root_key"); err != nil {
+			return Summary{}, execution.Changed, err
+		}
+		summary, err := getSummaryOn(ctx, tx, name)
+		return summary, execution.Changed, err
+	}, func(summary Summary) int64 { return summary.ID })
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, domainError(err)
 	}
-	revisionID, err := revision.LastInsertId()
-	if err != nil {
-		return Summary{}, err
-	}
-	generationID, err := service.insertGeneration(ctx, conn, id, input.Type, bindingRevision, input.Secret, createdBy, now)
-	if err != nil {
-		return Summary{}, err
-	}
-	// A new revision/generation has no qualifying probe yet. Disable every
-	// rotated typed connection before switching the pair so the immutable
-	// qualification trigger cannot let the old proof authorize new credentials.
-	// The later exact-pair passed probe is required to enable it again.
-	nextEnabled := 0
-	if _, err := conn.ExecContext(ctx, `UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,enabled=?,revalidation_required=1,row_version=row_version+1 WHERE id=?`, revisionID, generationID, nextEnabled, id); err != nil {
-		return Summary{}, err
-	}
-	// Re-entry under the current root binding closes only this frozen
-	// RootKeyRebind checklist item. The connection remains revalidation-required
-	// until the later normal-mode verification/enable path succeeds.
-	if err := markRootKeyRebindConnectionSafe(ctx, conn, name, "reentered_with_current_root_key"); err != nil {
-		return Summary{}, err
-	}
-	summary, summaryErr := service.getOn(ctx, conn, name)
-	if summaryErr != nil {
-		return Summary{}, summaryErr
-	}
-	projection, err := json.Marshal(summary)
-	if err != nil {
-		return Summary{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,'connection.rotate',?,'success','connection',?,?)`, createdBy, clientCommandID, id, now); err != nil {
-		return Summary{}, err
-	}
-	if err := auth.RecordCommand(ctx, conn, createdBy, clientCommandID, "connection.rotate", digest, "committed", "connection", id, string(projection)); err != nil {
-		return Summary{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return Summary{}, err
-	}
-	committed = true
-	conn.Close()
-	return service.Get(ctx, name)
+	return outcome.Result, nil
 }
+
+// DiscoveryView is the non-secret model discovery outcome for the HTTP
+// adapter. Provider errors are never echoed: detail carries a stable,
+// secret-free hint.
+type DiscoveryView struct {
+	Available bool
+	Models    []modelprovider.DiscoveredModel
+	Detail    string
+}
+
+// discoveryAudit is the durable, secret-free audit payload of one discovery
+// execution. The API key exists only in request memory and never enters any
+// ledger or audit row.
+type discoveryAudit struct {
+	Available  bool `json:"available"`
+	ModelCount int  `json:"modelCount"`
+}
+
+// DiscoverProviderModels probes the upstream /v1/models endpoint with the
+// form's Base URL and API key (input helper only, never a qualification).
+// The external network call runs OUTSIDE any transaction; the audited
+// mutation records the durable, secret-free outcome afterwards
+// (connection.model_discovery). A context without execution metadata fails
+// closed.
+func (service *Service) DiscoverProviderModels(ctx context.Context, baseURL, apiKey string) (DiscoveryView, error) {
+	if _, err := execution.Require(ctx); err != nil {
+		return DiscoveryView{}, err
+	}
+	view := DiscoveryView{}
+	models, err := modelprovider.DiscoverUpstream(ctx, baseURL, apiKey)
+	switch {
+	case err != nil:
+		view.Detail = "暂时无法从该地址读取模型列表；可以直接手工填写模型 ID。"
+	case len(models) == 0:
+		view.Detail = "上游未返回任何模型；可以直接手工填写模型 ID。"
+	default:
+		view.Available = true
+		view.Models = models
+	}
+	// The upstream conversation itself is not transactional; only the durable
+	// discovery fact is recorded, classified by the runner with its automatic
+	// audit row (no state change, no ledger row — the request owns no
+	// client command id).
+	if _, err := execution.Execute(ctx, service.commands.runner, service.commands.modelDiscovery, func(tx *execution.Tx) (discoveryAudit, error) {
+		return discoveryAudit{Available: view.Available, ModelCount: len(view.Models)}, nil
+	}, func(discoveryAudit) int64 { return 0 }); err != nil {
+		return DiscoveryView{}, err
+	}
+	return view, nil
+}
+
+// timestampOf is the shared UTC RFC3339Nano formatting for domain rows.
+func timestampOf(now func() time.Time) string {
+	return now().UTC().Format(time.RFC3339Nano)
+}
+
+// locator renders a decimal domain locator (probe result ids in HTTP bodies).
+func locator(id int64) string { return strconv.FormatInt(id, 10) }

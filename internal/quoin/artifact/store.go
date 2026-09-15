@@ -20,6 +20,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Fixed service caps (RUNTIME-ARTIFACT-003): bounded reads, matches and
@@ -29,6 +32,30 @@ const (
 	maxGrepMatches   = 200
 	maxContextLines  = 5
 	maxResponseBytes = 512 * 1024
+)
+
+// Registered runner operations of the runtime upload ledger (ADR-0006): the
+// two ACTIVE upload mutations execute inside the store's own execution
+// runner, so the command audit records them by default and no business path
+// opens or ends its own SQLite transaction. The runtime data plane keeps its
+// task/attempt/epoch fences and never receives a human command id (Execute,
+// not Run).
+const (
+	operationUploadBegin  = "artifact.upload.begin"
+	operationUploadCommit = "artifact.upload.commit"
+	// operationUploadReject marks an interrupted commit's ledger row rejected.
+	// It is the failure-path lifecycle mutation: it runs through the same
+	// runner discipline as the other ledger mutations, so even a failed upload
+	// ends in an audited, transactional state — never a raw-connection write.
+	operationUploadReject = "artifact.upload.reject"
+	// Metadata expiry is atomic; physical collection has a durable intent
+	// before unlink and a distinct confirmation afterward.
+	operationGCCollect  = "artifact.gc.collect"
+	operationGCIntent   = "artifact.gc.collect.begin"
+	operationGCComplete = "artifact.gc.collect.complete"
+
+	objectTypeArtifact     = "artifact"
+	actionArtifactDownload = "artifact.download"
 )
 
 // ErrRejected reports an upload the ledger refused (a reject reason and a
@@ -87,6 +114,24 @@ type Store struct {
 	dir string
 	now func() time.Time
 
+	// runner owns every store mutation transaction (ADR-0006): the upload
+	// ledger mutations (begin, commit and the failure-path reject) and the GC
+	// pass execute through execution.Execute, so the audit event commits (or
+	// rolls back) atomically with the mutation and business code never touches
+	// BEGIN/COMMIT/ROLLBACK. Its Reader() is also the pure-read seam: fail
+	// closed until SetReader wires the composition layer's real read-only
+	// reader.
+	runner         *execution.Runner
+	opUploadBegin  *execution.Operation
+	opUploadCommit *execution.Operation
+	opUploadReject *execution.Operation
+	opGCCollect    *execution.Operation
+	opGCIntent     *execution.Operation
+	opGCComplete   *execution.Operation
+	// audit is the shared audit writer for the access facts this package
+	// records directly (download facts are reads, not runner mutations).
+	audit *audit.Writer
+
 	// uploadMu serializes one immutable upload_id from Begin through Commit or
 	// Abort. Two simultaneous streams must never truncate the same staging name
 	// or mint two logical artifacts for one idempotency capability.
@@ -103,6 +148,7 @@ type Store struct {
 	// gcOrphanCursor makes physical orphan cleanup bounded even though expired
 	// Artifact history retains the blob reference for auditability.
 	gcOrphanCursor string
+	gcMu           sync.Mutex
 }
 
 // NewStore builds the store on the product database and blob directory.
@@ -113,11 +159,149 @@ func NewStore(db *sql.DB, directory string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(directory, "staging"), 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dir: directory, now: func() time.Time { return time.Now().UTC() }, uploadLeases: make(map[string]chan struct{})}, nil
+	store := &Store{db: db, dir: directory, now: func() time.Time { return time.Now().UTC() }, audit: audit.NewWriter(), uploadLeases: make(map[string]chan struct{})}
+	store.runner = execution.NewRunner(db, execution.NewRegistry(), store.audit)
+	begin, err := store.runner.Register(execution.Operation{
+		Name: operationUploadBegin, Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	commit, err := store.runner.Register(execution.Operation{
+		Name: operationUploadCommit, Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reject, err := store.runner.Register(execution.Operation{
+		Name: operationUploadReject, Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	store.opUploadBegin = begin
+	store.opUploadCommit = commit
+	store.opUploadReject = reject
+	expire, err := store.runner.Register(execution.Operation{
+		Name: operationGCCollect, Class: execution.ClassWrite, ObjectType: objectTypeArtifact,
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	store.opGCCollect = expire
+	intent, err := store.runner.Register(execution.Operation{
+		Name: operationGCIntent, Class: execution.ClassWrite, ObjectType: "artifact_blob",
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	complete, err := store.runner.Register(execution.Operation{
+		Name: operationGCComplete, Class: execution.ClassWrite, ObjectType: "artifact_blob",
+		Authorize: authorizeSystemDataPlane,
+	})
+	if err != nil {
+		return nil, err
+	}
+	store.opGCIntent, store.opGCComplete = intent, complete
+	return store, nil
+}
+
+// authorizeSystemDataPlane confines the store's machine-driven mutations
+// (runtime upload ledger, GC body expiry) to the documented system task scope.
+// The gRPC adapter authenticates the machine bearer (Plinth/Lintel) before the
+// store is reached and background mechanisms root themselves in the system
+// task principal; here the execution metadata itself must state that system
+// principal on a non-HTTP channel. A user or service context — in particular
+// anything from the web surface — can never drive these mutations, and no
+// fallback exists that could fake the machine identity.
+func authorizeSystemDataPlane(ctx context.Context, _ *execution.Tx) error {
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	if meta.Actor.Kind != execution.PrincipalSystem || meta.Actor.ID != 0 {
+		return errors.New("artifact: store mutations require the system principal")
+	}
+	if meta.Source.Kind == execution.SourceHTTP {
+		return errors.New("artifact: store mutations cannot arrive from the http channel")
+	}
+	return nil
+}
+
+// systemTaskContext roots one runtime data-plane mutation in a documented
+// system task scope. Runtime upload streams are machine channels: their
+// contexts carry no user identity, so absent caller metadata the store
+// records the mutation under the system principal with a fresh correlation
+// and the task source — never under a guessed user or service identity. A
+// caller-provided scope is used as-is and never rewritten.
+func (store *Store) systemTaskContext(ctx context.Context) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, fmt.Errorf("artifact: create upload correlation id: %w", err)
+	}
+	system := execution.Principal{Kind: execution.PrincipalSystem, ID: 0}
+	scoped, err := execution.ReplaceMetadata(ctx, execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         system,
+		Initiator:     system,
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("artifact: restore system task metadata: %w", err)
+	}
+	return scoped, nil
+}
+
+// rejectOn converts a deterministic upload rejection into the runner's
+// classified rejection so the guarded transaction rolls the business stage
+// back to its savepoint and records the refused attempt. RejectInternal is
+// deliberately NOT converted: an infrastructure failure must surface
+// verbatim and leave no durable trace — no forged success, no forged
+// rejection.
+func rejectOn(rejection *Rejection) error {
+	if rejection == nil {
+		return nil
+	}
+	if rejection.Reason == RejectInternal {
+		return rejection
+	}
+	return &execution.Rejection{Code: string(rejection.Reason), Detail: rejection.Detail}
+}
+
+// uploadOutcomeError maps a classified runner outcome back onto the frozen
+// wire rejection shape; every other error surfaces verbatim.
+func uploadOutcomeError(err error) error {
+	var classified *execution.Rejection
+	if errors.As(err, &classified) {
+		return &Rejection{Reason: RejectReason(classified.Code), Detail: classified.Detail}
+	}
+	return err
 }
 
 // SetGCSuccessProjector supplies the process-owned metric projection.
 func (store *Store) SetGCSuccessProjector(project func(float64)) { store.gcSuccess = project }
+
+// SetReader installs the composition layer's real read-only reader for every
+// pure read of this store (metadata, grants, bounded text/grep, attachments).
+// It reuses the store's own execution runner gate — only an
+// OpenReadOnly-produced execution.Reader is accepted, arbitrary handles are
+// refused — and propagates its error. Until it is wired, every pure read
+// fails closed; the writer pool is never a read fallback.
+func (store *Store) SetReader(reader audit.Reader) error {
+	return store.runner.SetReader(reader)
+}
+
+// reads returns the runner's fail-closed read surface for pure reads. An
+// unwired reader errors on every query instead of serving the write pool.
+func (store *Store) reads() execution.Reader { return store.runner.Reader() }
 
 func (store *Store) stagingPath(uploadID string) string {
 	return filepath.Join(store.dir, "staging", uploadID+".part")
@@ -170,9 +354,11 @@ func (store *Store) AbortUpload(uploadID string) {
 }
 
 // BeginUpload validates and records the short-lived ledger phase, then opens a
-// staging file. It deliberately returns no database handle: a slow or stalled
-// gRPC upload must never monopolize Quoin's (often single-connection) SQLite
-// pool. CommitUpload opens its own short transaction after the bytes are sealed.
+// staging file. The ledger phase runs as one audited mutation through the
+// store's execution runner: no database handle is returned or retained, so a
+// slow or stalled gRPC upload must never monopolize Quoin's (often
+// single-connection) SQLite pool. CommitUpload runs its own short runner
+// transaction after the bytes are sealed.
 func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file *os.File, artifactID int64, err error) {
 	if header.UploadID == "" || len(header.SHA256) != 32 || header.SizeBytes < 0 {
 		return nil, 0, &Rejection{RejectMetadataMismatch, "header fields incomplete"}
@@ -189,26 +375,42 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file 
 			store.releaseUpload(header.UploadID)
 		}
 	}()
-	conn, err := store.db.Conn(ctx)
+	ctx, err = store.systemTaskContext(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		conn.Close()
-		return nil, 0, err
+	replayID, err := execution.Execute(ctx, store.runner, store.opUploadBegin, func(tx *execution.Tx) (int64, error) {
+		return store.beginUploadLedgerOn(ctx, tx, header)
+	}, func(storedArtifactID int64) int64 { return storedArtifactID })
+	if err != nil {
+		return nil, 0, uploadOutcomeError(err)
 	}
-	fail := func(rejection *Rejection) (*os.File, int64, error) {
-		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		conn.Close()
-		return nil, 0, rejection
+	if replayID != 0 {
+		// A committed replay answers the stored Artifact ID without opening a
+		// staging file: no new body is accepted on this path.
+		return nil, replayID, nil
 	}
+	file, err = os.OpenFile(store.stagingPath(header.UploadID), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, 0, &Rejection{RejectInternal, err.Error()}
+	}
+	keepLease = true
+	return file, 0, nil
+}
+
+// beginUploadLedgerOn is the guarded business stage of one upload begin: the
+// ledger lookup, the immutable-capability comparison and the uploading row
+// all run inside the runner's transaction. A returned *execution.Rejection is
+// classified (savepoint rollback plus a rejected audit event); an
+// infrastructure failure leaves no durable trace at all.
+func (store *Store) beginUploadLedgerOn(ctx context.Context, tx execution.Executor, header UploadHeader) (int64, error) {
 	var state string
 	var storedArtifact sql.NullInt64
 	var storedAttempt sql.NullInt64
 	var storedBoot, storedOwnerType, storedKind, storedMediaType, storedRetention, storedSHA string
 	var storedTraceIntegrity sql.NullString
 	var storedEpoch, storedOwnerID, storedSensitive, storedSize int64
-	err = conn.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT state, artifact_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id,
 			kind, media_type, retention_kind, sensitive, size_bytes, sha256, trace_integrity
 		FROM runtime_artifact_uploads WHERE upload_id=?`, header.UploadID).Scan(
@@ -217,32 +419,28 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// New upload: validate the attempt fence and the owner closure.
-		if rejection, ok := store.validateUploadOn(ctx, conn, header); !ok {
-			return fail(rejection)
+		if rejection, ok := store.validateUploadOn(ctx, tx, header); !ok {
+			return 0, rejectOn(rejection)
 		}
 		now := store.now().Format(time.RFC3339Nano)
-		if _, err := conn.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO runtime_artifact_uploads(upload_id,attempt_id,boot_id,connection_epoch,
 				owner_type,owner_id,kind,media_type,retention_kind,sensitive,size_bytes,sha256,trace_integrity,state,created_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?)`,
 			header.UploadID, nullableUploadAttempt(header.AttemptID), header.BootID, header.ConnectionEpoch,
 			header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind,
 			boolInt(header.Sensitive), header.SizeBytes, hex.EncodeToString(header.SHA256), nullableTraceIntegrity(header), now); err != nil {
-			return fail(&Rejection{RejectInternal, err.Error()})
+			return 0, &Rejection{RejectInternal, err.Error()}
 		}
 	case err != nil:
-		return fail(&Rejection{RejectInternal, err.Error()})
+		return 0, &Rejection{RejectInternal, err.Error()}
 	case state == "committed":
 		if !storedArtifact.Valid || !sameCommittedUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
-			return fail(&Rejection{RejectMetadataMismatch, "committed upload metadata differs"})
+			return 0, rejectOn(&Rejection{RejectMetadataMismatch, "committed upload metadata differs"})
 		}
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return fail(&Rejection{RejectInternal, err.Error()})
-		}
-		conn.Close()
-		return nil, storedArtifact.Int64, nil
+		return storedArtifact.Int64, nil
 	case state == "rejected":
-		return fail(&Rejection{RejectMetadataMismatch, "upload id was rejected"})
+		return 0, rejectOn(&Rejection{RejectMetadataMismatch, "upload id was rejected"})
 	default:
 		// A crashed upload retrying: the upload ID is a complete immutable
 		// capability, not merely a body digest. The browser-start fence and the
@@ -251,24 +449,13 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file 
 		// rewriting the ledger's original epoch. Reject every other metadata or
 		// epoch change before opening a new staging file.
 		if !sameRetryUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
-			return fail(&Rejection{RejectMetadataMismatch, "retry metadata differs"})
+			return 0, rejectOn(&Rejection{RejectMetadataMismatch, "retry metadata differs"})
 		}
-		if rejection, ok := store.validateUploadOn(ctx, conn, header); !ok {
-			return fail(rejection)
+		if rejection, ok := store.validateUploadOn(ctx, tx, header); !ok {
+			return 0, rejectOn(rejection)
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return fail(&Rejection{RejectInternal, err.Error()})
-	}
-	// The transaction is over before the upload body is received. Do not hold a
-	// pool connection across network I/O.
-	conn.Close()
-	file, err = os.OpenFile(store.stagingPath(header.UploadID), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, 0, &Rejection{RejectInternal, err.Error()}
-	}
-	keepLease = true
-	return file, 0, nil
+	return 0, nil
 }
 
 // sameUploadMetadata enforces the ledger's idempotency contract: retries of a
@@ -324,8 +511,10 @@ func sameRetryUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ow
 }
 
 // validateUploadOn checks the attempt fence and owner closure inside the
-// ledger transaction (RUNTIME-UPLOAD-004).
-func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header UploadHeader) (*Rejection, bool) {
+// ledger transaction (RUNTIME-UPLOAD-004). conn is the execution.Executor
+// surface so the identical check runs in the begin and the commit runner
+// transaction.
+func (store *Store) validateUploadOn(ctx context.Context, conn execution.Executor, header UploadHeader) (*Rejection, bool) {
 	// The operation and child fields record the epoch that started the physical
 	// browser and are immutable audit facts. A same-boot reconnect may transport
 	// a pending Lintel upload on a later epoch, but must never rewrite that start
@@ -414,57 +603,39 @@ func (store *Store) validateUploadOn(ctx context.Context, conn *sql.Conn, header
 
 // CommitUpload finishes one staged upload: hash/size verification, fsync,
 // non-replacing installation into the content-addressed blob directory, fsync
-// of the parent, then the SQLite reference transaction (RUNTIME-UPLOAD-003).
+// of the parent, then the audited SQLite reference transaction (the runner's;
+// RUNTIME-UPLOAD-003). The bytes are verified before the transaction opens, so
+// a slow digest never holds the SQLite writer.
 func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, staged *os.File) (int64, error) {
 	// BeginUpload owns this idempotency lease; every terminal Commit path releases
 	// it so a whole-body retry can linearize after an interrupted attempt.
 	defer store.releaseUpload(header.UploadID)
-	// The staging body is already sealed. Acquire a database connection only for
-	// the short reference transaction below, never while the stream is open.
-	conn, err := store.db.Conn(ctx)
-	if err != nil {
-		_ = staged.Close()
-		return 0, err
-	}
-	closeConn := func() {
-		if conn != nil {
-			conn.Close()
-			conn = nil
-		}
-	}
-	defer closeConn()
 	if err := staged.Close(); err != nil {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	info, err := os.Stat(store.stagingPath(header.UploadID))
 	if err != nil {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	if info.Size() != header.SizeBytes {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectSizeMismatch)
 		return 0, &Rejection{RejectSizeMismatch, fmt.Sprintf("staged %d bytes, header %d", info.Size(), header.SizeBytes)}
 	}
 	body, err := os.Open(store.stagingPath(header.UploadID))
 	if err != nil {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, io.LimitReader(body, header.SizeBytes+1)); err != nil {
 		body.Close()
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	body.Close()
 	if hex.EncodeToString(hash.Sum(nil)) != hex.EncodeToString(header.SHA256) {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectSHA256Mismatch)
 		return 0, &Rejection{RejectSHA256Mismatch, "staged content hash differs from header"}
 	}
@@ -472,46 +643,64 @@ func (store *Store) CommitUpload(ctx context.Context, header UploadHeader, stage
 	// into the blob store, fsync the parent directory.
 	file, err := os.OpenFile(store.stagingPath(header.UploadID), os.O_RDONLY, 0)
 	if err != nil {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	if err := file.Sync(); err != nil {
 		file.Close()
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
 	file.Close()
 	blobPath := store.blobPath(hex.EncodeToString(header.SHA256))
+	// blobMu covers non-replacing installation through the durable first
+	// reference. It is acquired INSIDE the runner transaction — after the
+	// runner owns its database connection — and released only after the runner
+	// has committed, so every blob lifecycle path keeps one lock order
+	// (database connection → blobMu) and a single-connection pool cannot
+	// deadlock against GC or a caller-transaction stage. Holding it across the
+	// commit means an unreferenced existing digest can never be unlinked
+	// between installation and its first durable reference.
+	//
 	// Rename would replace a concurrent writer's blob on Unix and the old
 	// failure cleanup could then delete a blob already referenced by another
 	// upload. Link provides non-replacing installation: either our sealed staging
 	// inode becomes the blob, or an equal digest blob already owns the path.
-	// Keep blobMu through the reference commit. GC takes the same lock only
-	// after reserving its DB connection, so an unreferenced existing digest
-	// cannot be unlinked between installation and its first durable reference.
-	store.blobMu.Lock()
-	installErr := store.installVerifiedBlob(header, blobPath)
-	if installErr != nil {
-		store.blobMu.Unlock()
-		closeConn()
-		store.rejectUpload(ctx, header.UploadID, RejectInternal)
-		return 0, installErr
-	}
-	// The staging name is ours even when a concurrent upload had already
-	// installed the shared blob. Never unlink blobPath on transaction failure:
-	// it might now be referenced by that concurrent transaction. Orphan content
-	// is safe and collectible; deleting shared content is not.
-	_ = os.Remove(store.stagingPath(header.UploadID))
-	artifactID, err := store.commitReferences(ctx, conn, header)
-	store.blobMu.Unlock()
+	ctx, err = store.systemTaskContext(ctx)
 	if err != nil {
-		closeConn()
 		store.rejectUpload(ctx, header.UploadID, RejectInternal)
 		return 0, err
 	}
-	return artifactID, nil
+	blobLocked := false
+	defer func() {
+		if blobLocked {
+			store.blobMu.Unlock()
+		}
+	}()
+	type commit struct{ artifactID int64 }
+	outcome, err := execution.Execute(ctx, store.runner, store.opUploadCommit, func(tx *execution.Tx) (commit, error) {
+		store.blobMu.Lock()
+		blobLocked = true
+		if installErr := store.installVerifiedBlob(header, blobPath); installErr != nil {
+			return commit{}, installErr
+		}
+		// The staging name is ours even when a concurrent upload had already
+		// installed the shared blob. Never unlink blobPath on transaction failure:
+		// it might now be referenced by that concurrent transaction. Orphan content
+		// is safe and collectible; deleting shared content is not.
+		_ = os.Remove(store.stagingPath(header.UploadID))
+		artifactID, refErr := store.commitReferencesOn(ctx, tx, header)
+		return commit{artifactID: artifactID}, refErr
+	}, func(value commit) int64 { return value.artifactID })
+	if blobLocked {
+		store.blobMu.Unlock()
+		blobLocked = false
+	}
+	if err != nil {
+		store.rejectUpload(ctx, header.UploadID, RejectInternal)
+		return 0, uploadOutcomeError(err)
+	}
+	return outcome.artifactID, nil
 }
 
 func (store *Store) installVerifiedBlob(header UploadHeader, blobPath string) error {
@@ -540,8 +729,9 @@ func (store *Store) installVerifiedBlobFrom(stagingPath string, header UploadHea
 }
 
 // MaterializeEvidenceTransaction creates the content-addressed, attempt-readable
-// report source for one immutable Evidence. The caller owns the SQLite transaction.
-func (store *Store) MaterializeEvidenceTransaction(ctx context.Context, conn *sql.Conn, evidenceID int64, body []byte) (int64, error) {
+// report source for one immutable Evidence. The caller owns the SQLite
+// transaction; conn is the concrete runner-owned execution.Executor.
+func (store *Store) MaterializeEvidenceTransaction(ctx context.Context, conn execution.Executor, evidenceID int64, body []byte) (int64, error) {
 	if evidenceID < 1 {
 		return 0, errors.New("evidence id must be positive")
 	}
@@ -599,11 +789,13 @@ func (store *Store) MaterializeEvidenceTransaction(ctx context.Context, conn *sq
 
 // CommitInlineArtifact durably stores non-runtime canonical bytes (the
 // Deployment Acceptance helper report and finalization bundle) as a
-// content-addressed artifact on the caller's open transaction connection:
-// the blob file is installed first, then the blob/artifact rows join the
-// caller's transaction. It follows the evidence materialization discipline
-// exactly; kind/owner/retention are validated by the schema triggers.
-func (store *Store) CommitInlineArtifact(ctx context.Context, conn *sql.Conn, kind, mediaType, retentionKind, ownerType string, ownerID int64, body []byte, createdAt time.Time) (int64, string, error) {
+// content-addressed artifact on the caller's open transaction: the blob file
+// is installed first, then the blob/artifact rows join the caller's
+// transaction. The concrete execution.Executor keeps both online and offline
+// callers inside the runner's write window. It follows the evidence materialization
+// discipline exactly; kind/owner/retention are validated by the schema
+// triggers.
+func (store *Store) CommitInlineArtifact(ctx context.Context, conn execution.Executor, kind, mediaType, retentionKind, ownerType string, ownerID int64, body []byte, createdAt time.Time) (int64, string, error) {
 	if createdAt.IsZero() {
 		createdAt = store.now()
 	}
@@ -687,31 +879,24 @@ func bytesEqual(left, right []byte) bool {
 	return true
 }
 
-// commitReferences writes artifact_blobs, artifacts and the ledger commit
-// in one transaction (the caller's connection).
-func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header UploadHeader) (int64, error) {
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+// commitReferencesOn writes artifact_blobs, artifacts and the ledger commit
+// inside the caller's already-open transaction — the execution runner's
+// guarded business stage. The runner owns BEGIN/COMMIT/ROLLBACK; this stage
+// performs only the frozen validation and reference writes.
+func (store *Store) commitReferencesOn(ctx context.Context, tx execution.Executor, header UploadHeader) (int64, error) {
 	// BeginUpload's validation deliberately precedes network I/O, but it cannot
 	// authorize the final reference: cancellation, boot replacement, or an
 	// operation terminal transition may commit while bytes are staged. Re-read the
 	// complete owner/action/boot fence inside this same transaction, immediately
 	// before any artifact rows can be created.
-	if rejection, ok := store.validateUploadOn(ctx, conn, header); !ok {
-		return 0, rejection
+	if rejection, ok := store.validateUploadOn(ctx, tx, header); !ok {
+		return 0, rejectOn(rejection)
 	}
 	shaHex := hex.EncodeToString(header.SHA256)
 	var blobID int64
-	err := conn.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM artifact_blobs WHERE sha256=?`, shaHex).Scan(&blobID)
 	if errors.Is(err, sql.ErrNoRows) {
-		insert, err := conn.ExecContext(ctx, `
+		insert, err := tx.ExecContext(ctx, `
 			INSERT INTO artifact_blobs(sha256,size_bytes,storage_key,created_at)
 			VALUES(?,?,?,?)`, shaHex, header.SizeBytes, "blobs/"+shaHex+".blob", store.now().Format(time.RFC3339Nano))
 		if err != nil {
@@ -729,12 +914,12 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 		// Retention is resolved once at creation and then frozen on the logical
 		// artifact row; later setting changes never rewrite historical expiry.
 		var days int
-		if err := conn.QueryRowContext(ctx, `SELECT generated_retention_days FROM artifact_retention_settings WHERE id=1`).Scan(&days); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT generated_retention_days FROM artifact_retention_settings WHERE id=1`).Scan(&days); err != nil {
 			return 0, fmt.Errorf("read generated artifact retention: %w", err)
 		}
 		expiresAt = sql.NullString{String: store.now().Add(time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano), Valid: true}
 	}
-	insert, err := conn.ExecContext(ctx, `
+	insert, err := tx.ExecContext(ctx, `
 		INSERT INTO artifacts(blob_id,kind,media_type,sensitive,retention_kind,owner_type,owner_id,expires_at,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?)`,
 		blobID, header.Kind, header.MediaType, boolInt(header.Sensitive), header.RetentionKind,
@@ -753,7 +938,7 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 	if header.RuntimeSlot == "lintel" && header.Kind == "trace" && header.AttemptID > 0 {
 		var update sql.Result
 		if header.TraceIntegrity == "complete" {
-			update, err = conn.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
+			update, err = tx.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
 				SET state='artifact_committed_complete',trace_artifact_id=?,trace_digest=?,finalized_at=?
 				WHERE child_attempt_id=? AND operation_id=? AND state='claimed_complete'
 				  AND NOT EXISTS (
@@ -769,7 +954,7 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 			// erase that claim here: the ActionResult transaction atomically moves the
 			// immutable complete binding into historical columns while attaching this
 			// distinct incomplete trace to the operation.
-			update, err = conn.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
+			update, err = tx.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
 				SET finalized_at=finalized_at
 				WHERE child_attempt_id=? AND operation_id=? AND state IN ('claimed_complete','artifact_committed_complete')`,
 				header.AttemptID, header.OwnerID)
@@ -781,10 +966,10 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 			if rowsErr != nil {
 				return 0, rowsErr
 			}
-			return 0, &Rejection{RejectAttemptNotRunning, "complete trace has no accepted terminal claim"}
+			return 0, rejectOn(&Rejection{RejectAttemptNotRunning, "complete trace has no accepted terminal claim"})
 		}
 	}
-	updated, err := conn.ExecContext(ctx, `
+	updated, err := tx.ExecContext(ctx, `
 		UPDATE runtime_artifact_uploads SET state='committed', artifact_id=?, committed_at=?, row_version=row_version+1
 		WHERE upload_id=? AND state='uploading'`, artifactID, store.now().Format(time.RFC3339Nano), header.UploadID)
 	if err != nil {
@@ -797,10 +982,6 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 	if rows != 1 {
 		return 0, fmt.Errorf("upload ledger %q lost its commit linearization", header.UploadID)
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return 0, err
-	}
-	committed = true
 	return artifactID, nil
 }
 
@@ -809,7 +990,7 @@ func (store *Store) commitReferences(ctx context.Context, conn *sql.Conn, header
 // requires the tool call to be succeeded first, so the caller must seal
 // the tool call before invoking this (CompleteToolCall order: UPDATE
 // tool_calls, then this insert, then COMMIT).
-func (store *Store) InsertToolResultGrant(ctx context.Context, conn *sql.Conn, attemptID, artifactID, toolCallID int64) error {
+func (store *Store) InsertToolResultGrant(ctx context.Context, conn execution.Executor, attemptID, artifactID, toolCallID int64) error {
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO attempt_artifact_grants(attempt_id,artifact_id,source_kind,source_id,granted_at)
 		VALUES(?,?,?,?,?)`,
@@ -819,18 +1000,83 @@ func (store *Store) InsertToolResultGrant(ctx context.Context, conn *sql.Conn, a
 	return nil
 }
 
-// rejectUpload marks the ledger row rejected (best effort; the physical
-// staging file is removed by the caller path).
+// rejectUpload marks the ledger row rejected and removes the physical staging
+// file on the caller's already-failing path. The marking is the audited
+// artifact.upload.reject runner mutation — a raw pool connection never
+// mutates state here, not even on failure paths. Its context is detached from
+// the caller's cancellation and rooted in a fresh system task scope: the
+// rejection is machine lifecycle bookkeeping, never the caller's identity,
+// and a canceled request must not leave an 'uploading' row dangling when the
+// marking could still commit. The mutation itself stays best effort: a
+// rejection that cannot commit leaves the row honestly 'uploading' (a
+// whole-body retry may take over) and never fabricates a durable fact; the
+// caller's primary error is surfaced unchanged. A row that already left the
+// uploading state is ErrNoTransition — the runner records nothing.
 func (store *Store) rejectUpload(ctx context.Context, uploadID string, reason RejectReason) {
-	conn, err := store.db.Conn(ctx)
+	detached := context.WithoutCancel(ctx)
+	// Preserve the trusted original correlation when the upload row still
+	// points at its dispatch attempt: the attempt's operation_correlation_id
+	// is frozen (schema trigger) and binds the reject audit event to the same
+	// correlation chain as the work whose upload failed. Unresolvable — no
+	// attempt binding, or the composition reader not yet wired — falls back to
+	// a fresh correlation. The lookup is a bounded pure read on the read-only
+	// reader, never the writer pool.
+	correlation, err := execution.NewCorrelationID()
 	if err != nil {
 		return
 	}
-	defer conn.Close()
-	_, _ = conn.ExecContext(ctx, `
+	if original := store.uploadAttemptCorrelation(detached, uploadID); original != "" {
+		correlation = original
+	}
+	system := execution.Principal{Kind: execution.PrincipalSystem, ID: 0}
+	scoped, err := execution.ReplaceMetadata(detached, execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         system,
+		Initiator:     system,
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+	if err != nil {
+		return
+	}
+	_, _ = execution.Execute(scoped, store.runner, store.opUploadReject, func(tx *execution.Tx) (struct{}, error) {
+		return struct{}{}, store.rejectUploadOn(scoped, tx, uploadID)
+	}, func(struct{}) int64 { return 0 })
+	_ = os.Remove(store.stagingPath(uploadID))
+}
+
+// uploadAttemptCorrelation resolves the frozen operation correlation of the
+// upload row's dispatch attempt (empty when unresolvable).
+func (store *Store) uploadAttemptCorrelation(ctx context.Context, uploadID string) string {
+	var operationCorrelation sql.NullString
+	err := store.reads().QueryRowContext(ctx, `
+		SELECT a.operation_correlation_id
+		FROM runtime_artifact_uploads u JOIN execution_attempts a ON a.id=u.attempt_id
+		WHERE u.upload_id=?`, uploadID).Scan(&operationCorrelation)
+	if err != nil || !operationCorrelation.Valid {
+		return ""
+	}
+	return operationCorrelation.String
+}
+
+// rejectUploadOn is the guarded business stage of one rejection marking: the
+// frozen uploading→rejected transition with its optimistic row version. A
+// row that is no longer uploading (already committed by a replay, already
+// rejected) is a missed transition and must record nothing.
+func (store *Store) rejectUploadOn(ctx context.Context, tx execution.Executor, uploadID string) error {
+	updated, err := tx.ExecContext(ctx, `
 		UPDATE runtime_artifact_uploads SET state='rejected', row_version=row_version+1
 		WHERE upload_id=? AND state='uploading'`, uploadID)
-	_ = os.Remove(store.stagingPath(uploadID))
+	if err != nil {
+		return err
+	}
+	rows, err := updated.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return execution.ErrNoTransition
+	}
+	return nil
 }
 
 // ReadText returns a bounded text slice of one attempt-granted artifact
@@ -871,7 +1117,7 @@ func (store *Store) ReadText(ctx context.Context, attemptID, artifactID int64, b
 	var sizeBytes int64
 	var shaHex, mediaType string
 	var expired int
-	err := store.db.QueryRowContext(ctx, `
+	err := store.reads().QueryRowContext(ctx, `
 		SELECT b.size_bytes, b.sha256, a.media_type, a.body_expired
 		FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.id=?`, artifactID).
 		Scan(&sizeBytes, &shaHex, &mediaType, &expired)
@@ -981,7 +1227,7 @@ func (store *Store) GrepText(ctx context.Context, attemptID, artifactID int64, b
 	var sizeBytes int64
 	var shaHex, mediaType string
 	var expired int
-	err = store.db.QueryRowContext(ctx, `
+	err = store.reads().QueryRowContext(ctx, `
 		SELECT b.size_bytes, b.sha256, a.media_type, a.body_expired
 		FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.id=?`, artifactID).
 		Scan(&sizeBytes, &shaHex, &mediaType, &expired)
@@ -1030,12 +1276,12 @@ func (store *Store) GrepText(ctx context.Context, attemptID, artifactID int64, b
 }
 
 // checkReadGrant enforces the supervisor-only attempt-scoped read fence
-// (RUNTIME-ARTIFACT-002).
+// (RUNTIME-ARTIFACT-002) on the read-only reader.
 func (store *Store) checkReadGrant(ctx context.Context, attemptID, artifactID int64, bootID string, epoch uint64) error {
 	var state string
 	var boot sql.NullString
 	var storedEpoch sql.NullInt64
-	if err := store.db.QueryRowContext(ctx, `SELECT state,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &boot, &storedEpoch); err != nil {
+	if err := store.reads().QueryRowContext(ctx, `SELECT state,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &boot, &storedEpoch); err != nil {
 		return err
 	}
 	if state != "Running" {
@@ -1045,7 +1291,7 @@ func (store *Store) checkReadGrant(ctx context.Context, attemptID, artifactID in
 		return fmt.Errorf("attempt binding mismatch")
 	}
 	var granted int
-	if err := store.db.QueryRowContext(ctx, `
+	if err := store.reads().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM attempt_artifact_grants WHERE attempt_id=? AND artifact_id=?`, attemptID, artifactID).Scan(&granted); err != nil {
 		return err
 	}
@@ -1068,7 +1314,7 @@ type Ref struct {
 func (store *Store) RefFor(ctx context.Context, attemptID, artifactID int64) (Ref, error) {
 	var ref Ref
 	var shaHex string
-	err := store.db.QueryRowContext(ctx, `
+	err := store.reads().QueryRowContext(ctx, `
 		SELECT a.id, a.media_type, b.size_bytes, b.sha256, a.body_expired
 		FROM artifacts a
 		JOIN artifact_blobs b ON b.id=a.blob_id
@@ -1111,7 +1357,7 @@ func (store *Store) Metadata(ctx context.Context, artifactID int64) (Metadata, e
 	var meta Metadata
 	var sensitive, bodyExpired int
 	var expiresAt sql.NullString
-	err := store.db.QueryRowContext(ctx, `
+	err := store.reads().QueryRowContext(ctx, `
 		SELECT a.id, a.kind, a.sensitive, a.retention_kind, a.owner_type, a.owner_id,
 		       b.size_bytes, b.sha256, a.body_expired, a.expires_at, a.created_at
 		FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.id=?`, artifactID).
@@ -1131,32 +1377,41 @@ func (store *Store) Metadata(ctx context.Context, artifactID int64) (Metadata, e
 	return meta, nil
 }
 
-// ErrBodyExpired reports an artifact whose body passed its retention
-// fence (DATA-ARTIFACT-003: metadata stays, the body refuses reads).
-
-// RecordDownloadAudit appends the non-secret download audit event before
+// RecordDownloadAudit appends the non-secret download access fact before
 // the body streams (DATA-ARTIFACT-003, HTTP-FILE-003/004: authorization
-// happens first, then the audit, then the bytes).
+// happens first, then the audit, then the bytes — a failed audit must fail
+// the download, never release content). The actor is the caller's verified
+// session principal; the correlation comes only from the request's execution
+// metadata. An uncorrelated context is refused instead of recorded with a
+// guessed identity, so an unattributable download can never reach the bytes.
 func (store *Store) RecordDownloadAudit(ctx context.Context, actorType string, actorID, artifactID int64) error {
-	now := store.now().Format(time.RFC3339Nano)
-	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at)
-		VALUES(?,?,?,?,?,?,?)`, actorType, actorID, "artifact.download", "success", "artifact", artifactID, now)
+	meta, err := execution.Require(ctx)
 	if err != nil {
 		return err
 	}
-	auditID, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
-	_, err = store.db.ExecContext(ctx, `
-		INSERT INTO audit_event_targets(audit_event_id,target_type,target_id) VALUES(?,?,?)`, auditID, "artifact", artifactID)
+	_, err = store.audit.Write(ctx, store.db, audit.Record{
+		ActorType:     actorType,
+		ActorID:       actorID,
+		Action:        actionArtifactDownload,
+		Outcome:       audit.OutcomeSuccess,
+		Phase:         audit.PhaseAccess,
+		DomainRefType: objectTypeArtifact,
+		DomainRefID:   artifactID,
+		CorrelationID: meta.CorrelationID,
+		RequestID:     meta.Source.RequestID,
+		InitiatorType: string(meta.Initiator.Kind),
+		InitiatorID:   meta.Initiator.ID,
+		Targets:       []audit.RecordTarget{{Type: objectTypeArtifact, ID: artifactID}},
+	})
 	return err
 }
 
 // OpenBody streams the physical blob of one live artifact body. The caller
-// owns the returned file and must close it. Expired bodies refuse reads
-// while their metadata and references remain durable (DATA-ARTIFACT-003/004).
+// owns the returned file and must close it. Sensitive callers must have
+// recorded the download access fact (RecordDownloadAudit) before calling:
+// that call refuses without execution metadata, so an uncorrelated read can
+// never reach this method's bytes. Expired bodies refuse reads while their
+// metadata and references remain durable (DATA-ARTIFACT-003/004).
 func (store *Store) OpenBody(ctx context.Context, artifactID int64) (*os.File, Metadata, error) {
 	meta, err := store.Metadata(ctx, artifactID)
 	if err != nil {

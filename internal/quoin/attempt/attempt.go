@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // DispatchLease is the finite lease window every dispatched attempt
@@ -69,21 +71,37 @@ type Service struct {
 	// tool_result artifact inside CompleteToolCall's transaction (the
 	// frozen closure requires the tool call to be succeeded first). Nil
 	// skips the grant (probes never produce artifacts).
-	ToolResultGrants func(ctx context.Context, conn *sql.Conn, attemptID, artifactID, toolCallID int64) error
+	ToolResultGrants func(ctx context.Context, conn execution.Executor, attemptID, artifactID, toolCallID int64) error
 	// ToolGrantResolver freezes connection bindings inside CompleteModelCall's
 	// transaction. A deterministic domain-routing miss is returned as a
 	// preflight result, not an infrastructure failure, so the model can ask a
 	// human clarification without any credential ever leaving Quoin.
-	ToolGrantResolver func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error)
+	ToolGrantResolver func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error)
 	// ToolGrantValidator re-checks the frozen binding before a pending
 	// observation tool may begin executing (DATA-CONN-002). Nil skips the
 	// check (tools without grants).
-	ToolGrantValidator func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) error
+	ToolGrantValidator func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool ToolDef) error
 	// EvidenceWriter commits the deterministic Evidence of one succeeded
 	// observation tool inside CompleteToolCall's transaction, while the
 	// tool call is still running (ARCH-TOOL-003, DATA-EVIDENCE-001). Nil
 	// skips evidence (non-observation tools).
-	EvidenceWriter func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID, artifactID int64, payloadJSON []byte, toolName string) ([]int64, error)
+	EvidenceWriter func(ctx context.Context, conn execution.Executor, attemptID, toolCallID, artifactID int64, payloadJSON []byte, toolName string) ([]int64, error)
+	// runner owns the transactions of the standalone lifecycle stages and
+	// persists their automatic audit rows (ADR-0006). The operation pointers
+	// are the registered declarations; registration happens at construction.
+	runner              *execution.Runner
+	opModelCallBegin    *execution.Operation
+	opModelCallComplete *execution.Operation
+	opToolCallBegin     *execution.Operation
+	opToolCallComplete  *execution.Operation
+	opCancelFence       *execution.Operation
+	opInterrupt         *execution.Operation
+	opLeaseSweep        *execution.Operation
+	opToolCallCancel    *execution.Operation
+	opDispatchBind      *execution.Operation
+	opDispatchAccept    *execution.Operation
+	opResultCommit      *execution.Operation
+	opCancelAck         *execution.Operation
 }
 
 // ReleaseVersion returns the quoin release string dispatched attempts
@@ -92,7 +110,19 @@ func ReleaseVersion() string { return releaseVersion }
 
 // NewService builds the attempt service on the product database.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: func() time.Time { return time.Now().UTC() }, Catalogs: DefaultCatalogs()}
+	now := func() time.Time { return time.Now().UTC() }
+	service := &Service{db: db, now: now, Catalogs: DefaultCatalogs()}
+	service.runner = execution.NewRunnerWithClock(db, execution.NewRegistry(), audit.NewWriterWithClock(now), now)
+	service.registerOperations()
+	return service
+}
+
+func (service *Service) SetReader(reader audit.Reader) error {
+	return service.runner.SetReader(reader)
+}
+
+func (service *Service) Reader() audit.Reader {
+	return service.runner.Reader()
 }
 
 // DefaultCatalogs is the unwired-wiring fallback: the shared builtin plugin
@@ -143,7 +173,7 @@ func (service *Service) Get(ctx context.Context, attemptID int64) (View, error) 
 	var slot, boot sql.NullString
 	var epoch sql.NullInt64
 	var started, ended, reason sql.NullString
-	err := service.db.QueryRowContext(ctx, `
+	err := service.Reader().QueryRowContext(ctx, `
 		SELECT id, attempt_type, scope_type, scope_id, state, row_version, runtime_slot,
 		       boot_id, connection_epoch, started_at, ended_at, termination_reason, created_at
 		FROM execution_attempts WHERE id=?`, attemptID).
@@ -188,19 +218,37 @@ func (service *Service) BindToSlot(ctx context.Context, attemptID int64, slot, b
 	if len(peerReleaseVersion) > 0 && peerReleaseVersion[0] != "" {
 		version = peerReleaseVersion[0]
 	}
-	result, err := service.db.ExecContext(ctx, `
+	return service.executeDispatch(ctx, service.opDispatchBind, attemptID,
+		func(tx *execution.Tx) error {
+			result, err := tx.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Assigned', runtime_slot=?, boot_id=?, connection_epoch=?,
 		    lease_until=?, runtime_release_version=?, row_version=row_version+1
 		WHERE id=? AND state='Queued'`, slot, bootID, epoch, service.now().Add(lease).Format(time.RFC3339Nano), version, attemptID)
+			if err != nil {
+				return err
+			}
+			if affected, _ := result.RowsAffected(); affected != 1 {
+				return fmt.Errorf("attempt %d is not Queued; dispatch binding refused", attemptID)
+			}
+			return nil
+		})
+}
+
+// executeDispatch runs one fenced dispatch/lifecycle UPDATE through the
+// shared execution runner under the attempt's persisted-correlation machine
+// scope; the runner records the automatic audit row atomically with it.
+func (service *Service) executeDispatch(ctx context.Context, op *execution.Operation, attemptID int64, stage func(tx *execution.Tx) error) error {
+	authority, err := service.lifecycleAuthority(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
-	if affected != 1 {
-		return fmt.Errorf("attempt %d is not Queued; dispatch binding refused", attemptID)
-	}
-	return nil
+	_, err = execution.Execute(authority, service.runner, op,
+		func(tx *execution.Tx) (struct{}, error) {
+			return struct{}{}, stage(tx)
+		},
+		func(struct{}) int64 { return attemptID })
+	return err
 }
 
 // Accept moves an Assigned attempt to Running and records accepted_at
@@ -212,19 +260,21 @@ func (service *Service) BindToSlot(ctx context.Context, attemptID int64, slot, b
 // A different boot can never accept (new-boot attempts interrupt first).
 func (service *Service) Accept(ctx context.Context, attemptID int64, bootID string, epoch uint64) error {
 	_ = epoch // transport context only; see the fence note above
-	result, err := service.db.ExecContext(ctx, `
+	return service.executeDispatch(ctx, service.opDispatchAccept, attemptID,
+		func(tx *execution.Tx) error {
+			result, err := tx.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Running', accepted_at=?, started_at=?, row_version=row_version+1
 		WHERE id=? AND state='Assigned' AND boot_id=?`,
-		service.nowText(), service.nowText(), attemptID, bootID)
-	if err != nil {
-		return err
-	}
-	affected, _ := result.RowsAffected()
-	if affected != 1 {
-		return fmt.Errorf("attempt %d acceptance refused (not Assigned or binding mismatch)", attemptID)
-	}
-	return nil
+				service.nowText(), service.nowText(), attemptID, bootID)
+			if err != nil {
+				return err
+			}
+			if affected, _ := result.RowsAffected(); affected != 1 {
+				return fmt.Errorf("attempt %d acceptance refused (not Assigned or binding mismatch)", attemptID)
+			}
+			return nil
+		})
 }
 
 // CommitResult seals one running attempt as Succeeded or Failed. The fence
@@ -232,6 +282,15 @@ func (service *Service) Accept(ctx context.Context, attemptID int64, bootID stri
 // a cancellation committed earlier wins by SQLite commit order
 // (DATA-TX-005, RUNTIME-CANCEL-002).
 func (service *Service) CommitResult(ctx context.Context, attemptID int64, bootID string, epoch uint64, succeeded bool, terminationReason string) error {
+	return service.executeDispatch(ctx, service.opResultCommit, attemptID,
+		func(tx *execution.Tx) error {
+			return service.commitResultOn(ctx, tx, attemptID, bootID, epoch, succeeded, terminationReason)
+		})
+}
+
+// commitResultOn is the fenced terminal UPDATE shared by CommitResult and
+// the transaction-composable CommitResultOn.
+func (service *Service) commitResultOn(ctx context.Context, db execution.Executor, attemptID int64, bootID string, epoch uint64, succeeded bool, terminationReason string) error {
 	if succeeded {
 		terminationReason = ""
 	}
@@ -246,7 +305,7 @@ func (service *Service) CommitResult(ctx context.Context, attemptID int64, bootI
 	if terminationReason != "" {
 		nullableTermination = terminationReason
 	}
-	result, err := service.db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state=?, ended_at=?, termination_reason=?, row_version=row_version+1
 		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`,
@@ -264,7 +323,7 @@ func (service *Service) CommitResult(ctx context.Context, attemptID int64, bootI
 // CommitResultOn is CommitResult's transaction-composable form. Scope
 // services use it when their typed result, Evidence and parent lifecycle must
 // commit atomically with the fenced Attempt terminal transition.
-func (service *Service) CommitResultOn(ctx context.Context, conn *sql.Conn, attemptID int64, bootID string, epoch uint64, succeeded bool, terminationReason string) error {
+func (service *Service) CommitResultOn(ctx context.Context, db execution.Executor, attemptID int64, bootID string, epoch uint64, succeeded bool, terminationReason string) error {
 	if succeeded {
 		terminationReason = ""
 	}
@@ -279,7 +338,7 @@ func (service *Service) CommitResultOn(ctx context.Context, conn *sql.Conn, atte
 	if terminationReason != "" {
 		nullableTermination = terminationReason
 	}
-	result, err := conn.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state=?, ended_at=?, termination_reason=?, row_version=row_version+1
 		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`,
@@ -300,46 +359,81 @@ func (service *Service) CommitResultOn(ctx context.Context, conn *sql.Conn, atte
 // CancelAck finishes it). Terminal attempts return their
 // state unchanged so the caller can answer "already completed" instead of a
 // conflict (HTTP-COMMAND-005).
+//
+// The standalone stage runs through the shared execution runner (ADR-0006):
+// the runner owns the transaction and records the automatic audit fact on it,
+// attributed to the system runtime authority on the attempt's persisted
+// association. A terminal or already-Cancelling no-op changed nothing and
+// records nothing: the in-transaction state check returns execution.ErrNoTransition,
+// which the runner commits without an audit row; the caller answers from a
+// fresh read.
 func (service *Service) CancelFence(ctx context.Context, attemptID int64) (state string, err error) {
-	conn, err := service.db.Conn(ctx)
+	authority, err := service.lifecycleAuthority(ctx, attemptID)
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return "", err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	if _, err := execution.Execute(authority, service.runner, service.opCancelFence,
+		func(tx *execution.Tx) (struct{}, error) {
+			var before string
+			if err := tx.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&before); err != nil {
+				return struct{}{}, err
+			}
+			switch before {
+			case "Succeeded", "Failed", "Cancelled", "Interrupted", "Cancelling":
+				// Terminal no-op, or the attempt is already Cancelling: the
+				// fence's UPDATE is fenced to Assigned/Running and Queued, so
+				// it changed nothing and records nothing.
+				return struct{}{}, fmt.Errorf("%w: attempt %d is %s", execution.ErrNoTransition, attemptID, before)
+			}
+			_, err := service.CancelFenceOn(authority, tx, attemptID)
+			return struct{}{}, err
+		},
+		func(struct{}) int64 { return attemptID }); err != nil {
+		if missed, state := service.noOpState(ctx, attemptID, err); missed {
+			return state, nil
 		}
-	}()
-	state, err = service.CancelFenceOn(ctx, conn, attemptID)
-	if err != nil {
 		return "", err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return "", err
+	return service.currentState(ctx, attemptID)
+}
+
+// noOpState resolves the ErrNoTransition contract of the lifecycle stages:
+// when err wraps execution.ErrNoTransition the attempt's authoritative state
+// is re-read and returned as the stage's answer. The first return value
+// reports whether err was a missed transition; the second is the re-read
+// state ("" when it was not).
+func (service *Service) noOpState(ctx context.Context, attemptID int64, err error) (bool, string) {
+	if !errors.Is(err, execution.ErrNoTransition) {
+		return false, ""
 	}
-	committed = true
-	return state, nil
+	state, readErr := service.currentState(ctx, attemptID)
+	if readErr != nil {
+		return true, ""
+	}
+	return true, state
+}
+
+// currentState reads the authoritative attempt state.
+func (service *Service) currentState(ctx context.Context, attemptID int64) (string, error) {
+	var state string
+	err := service.Reader().QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state)
+	return state, err
 }
 
 // CancelFenceOn is the conn-scoped variant of CancelFence: it runs the
 // same state machine on the caller's transaction (scope services compose
 // it with their own domain updates; SQLite single-writer forbids a nested
 // BEGIN).
-func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attemptID int64) (string, error) {
+func (service *Service) CancelFenceOn(ctx context.Context, db execution.Executor, attemptID int64) (string, error) {
 	var state string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
 		return "", err
 	}
 	switch state {
 	case "Succeeded", "Failed", "Cancelled", "Interrupted":
 		return state, nil
 	case "Queued":
-		result, err := conn.ExecContext(ctx, `
+		result, err := db.ExecContext(ctx, `
 			UPDATE execution_attempts
 			SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
 			WHERE id=? AND state=?`, service.nowText(), attemptID, state)
@@ -359,7 +453,7 @@ func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attem
 		// terminal fact: cancellation remains authoritative until the ActionResult
 		// commits in this same SQLite serialization domain. This prevents a staged
 		// complete artifact from making a prior parent cancellation inexpressible.
-		if _, err := conn.ExecContext(ctx, `
+		if _, err := db.ExecContext(ctx, `
 			UPDATE execution_attempts SET state='Cancelling', row_version=row_version+1
 			WHERE id=? AND state IN ('Assigned','Running')`, attemptID); err != nil {
 			return "", err
@@ -375,18 +469,20 @@ func (service *Service) CancelFenceOn(ctx context.Context, conn *sql.Conn, attem
 // CancelAck finishes Cancelling -> Cancelled once the runtime confirmed the
 // attempt stopped (RUNTIME-CANCEL-003).
 func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
-	result, err := service.db.ExecContext(ctx, `
+	return service.executeDispatch(ctx, service.opCancelAck, attemptID,
+		func(tx *execution.Tx) error {
+			result, err := tx.ExecContext(ctx, `
 		UPDATE execution_attempts
 		SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
 		WHERE id=? AND state='Cancelling'`, service.nowText(), attemptID)
-	if err != nil {
-		return err
-	}
-	affected, _ := result.RowsAffected()
-	if affected != 1 {
-		return fmt.Errorf("attempt %d is not Cancelling", attemptID)
-	}
-	return nil
+			if err != nil {
+				return err
+			}
+			if affected, _ := result.RowsAffected(); affected != 1 {
+				return fmt.Errorf("attempt %d is not Cancelling", attemptID)
+			}
+			return nil
+		})
 }
 
 // ActiveAttempt returns the id of the one active attempt for a scope, or 0
@@ -394,7 +490,7 @@ func (service *Service) CancelAck(ctx context.Context, attemptID int64) error {
 // one; DATA-ATTEMPT-002).
 func (service *Service) ActiveAttempt(ctx context.Context, scopeType string, scopeID int64) (int64, error) {
 	var id int64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.Reader().QueryRowContext(ctx, `
 		SELECT id FROM execution_attempts
 		WHERE scope_type=? AND scope_id=? AND state IN ('Queued','Assigned','Running','Cancelling')`,
 		scopeType, scopeID).Scan(&id)
@@ -410,7 +506,7 @@ func (service *Service) ActiveAttempt(ctx context.Context, scopeType string, sco
 // QueuedAgentAttempts lists plinth agent attempts of one type still
 // waiting for a live stream (created while the slot was disconnected).
 func (service *Service) QueuedAgentAttempts(ctx context.Context, attemptType string) ([]int64, error) {
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.Reader().QueryContext(ctx, `
 		SELECT id FROM execution_attempts
 		WHERE attempt_type=? AND state='Queued' ORDER BY id`, attemptType)
 	if err != nil {
@@ -486,7 +582,7 @@ func (service *Service) DispatchInputFor(ctx context.Context, attemptID int64) (
 	var input DispatchInput
 	var contentDigest string
 	var agentVersion sql.NullString
-	err := service.db.QueryRowContext(ctx, `
+	err := service.Reader().QueryRowContext(ctx, `
 		SELECT s.schema_kind, s.content_digest, a.agent_version
 		FROM attempt_input_snapshots s
 		JOIN execution_attempts a ON a.id=s.attempt_id
@@ -519,7 +615,7 @@ func (service *Service) DispatchInputFor(ctx context.Context, attemptID int64) (
 	// Input artifact refs are the attempt_artifact_grants rows frozen from
 	// the input snapshot (DATA-ARTIFACT-006 grants read access for the
 	// attempt; the logical metadata stays on the artifacts row).
-	artifactRows, err := service.db.QueryContext(ctx, `
+	artifactRows, err := service.Reader().QueryContext(ctx, `
 		SELECT a.id, a.media_type, b.size_bytes, b.sha256, a.body_expired
 		FROM attempt_artifact_grants g
 		JOIN artifacts a ON a.id=g.artifact_id
@@ -541,7 +637,7 @@ func (service *Service) DispatchInputFor(ctx context.Context, attemptID int64) (
 	if err := artifactRows.Err(); err != nil {
 		return DispatchInput{}, err
 	}
-	grantRows, err := service.db.QueryContext(ctx, `
+	grantRows, err := service.Reader().QueryContext(ctx, `
 		SELECT id, connection_revision_id, credential_generation_id, purpose,
 		       COALESCE(qualified_probe_result_id, 0)
 		FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
@@ -563,7 +659,7 @@ func (service *Service) DispatchInputFor(ctx context.Context, attemptID int64) (
 // chat_model grant: model id, context budget and max output tokens from the
 // qualified probe result child row (ARCH-AGENT-003).
 func (service *Service) LookupChatContract(ctx context.Context, attemptID int64) (modelID string, contextBudget, maxOutput int64, err error) {
-	return service.lookupChatContractOn(ctx, service.db, attemptID)
+	return service.lookupChatContractOn(ctx, service.Reader(), attemptID)
 }
 
 // lookupChatContractOn runs the contract lookup against one queryer (the
@@ -585,7 +681,7 @@ func (service *Service) lookupChatContractOn(ctx context.Context, queryer rowQue
 // InputSnapshotDigest returns the hex snapshot digest for dispatch fencing.
 func (service *Service) InputSnapshotDigest(ctx context.Context, attemptID int64) (string, error) {
 	var digest string
-	err := service.db.QueryRowContext(ctx, `SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&digest)
+	err := service.Reader().QueryRowContext(ctx, `SELECT content_digest FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&digest)
 	return digest, err
 }
 

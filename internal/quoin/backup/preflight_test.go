@@ -41,7 +41,7 @@ func TestTicket32BackupPreflightMarksCapacityFailureNotReadyAndRecovers(t *testi
 	}
 	service.probeDirectory = func(string) error { return nil }
 
-	queued, err := service.QueueManual(context.Background(), 1, "capacity-failure")
+	queued, err := service.QueueManual(newCommandContext(t, 1), 1, "capacity-failure")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestTicket32BackupPreflightMarksCapacityFailureNotReadyAndRecovers(t *testi
 	}
 
 	service.capacity = func(string) (uint64, uint64, error) { return ^uint64(0), 4096, nil }
-	retry, err := service.QueueManual(context.Background(), 1, "capacity-recovery")
+	retry, err := service.QueueManual(newCommandContext(t, 1), 1, "capacity-recovery")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestTicket32BackupPreflightMarksCapacityFailureNotReadyAndRecovers(t *testi
 		}
 		return nil
 	}
-	dataFailure, err := service.QueueManual(context.Background(), 1, "data-readonly")
+	dataFailure, err := service.QueueManual(newCommandContext(t, 1), 1, "data-readonly")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestTicket32ExactPostSnapshotGateFailsBeforeArtifactCopy(t *testing.T) {
 		}
 		return ^uint64(0), 4096, nil
 	}
-	queued, err := service.QueueManual(context.Background(), 1, "post-snapshot-capacity")
+	queued, err := service.QueueManual(newCommandContext(t, 1), 1, "post-snapshot-capacity")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -72,6 +72,13 @@ func (slice *RuntimeSlice) Dispatch(ctx context.Context, attemptID int64) error 
 	if err := slice.DB.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
 		return err
 	}
+	// The stored association is the single correlation authority (ADR-0006);
+	// queue dispatch and reconcile replay both echo it verbatim, and no
+	// reply ever carries it back.
+	correlation, _, corrErr := attempt.LoadCorrelation(ctx, slice.DB, attemptID)
+	if corrErr != nil {
+		return corrErr
+	}
 	var artifactRefs []*runtimev1.ArtifactRef
 	for _, ref := range input.ArtifactRefs {
 		artifactRefs = append(artifactRefs, &runtimev1.ArtifactRef{
@@ -93,11 +100,12 @@ func (slice *RuntimeSlice) Dispatch(ctx context.Context, attemptID int64) error 
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{
 			DispatchAttempt: &runtimev1.DispatchAttempt{
-				AttemptId:     attemptID,
-				AttemptType:   runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION,
-				ScopeType:     runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION,
-				ScopeId:       scopeID,
-				LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+				AttemptId:              attemptID,
+				AttemptType:            runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION,
+				ScopeType:              runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION,
+				ScopeId:                scopeID,
+				OperationCorrelationId: correlation.OperationCorrelationID,
+				LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 				Input: &runtimev1.AttemptInputSnapshot{
 					SchemaKind:       input.SchemaKind,
 					CanonicalJson:    input.CanonicalJSON,

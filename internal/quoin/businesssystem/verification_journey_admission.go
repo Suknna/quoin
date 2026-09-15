@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
 )
@@ -25,33 +26,38 @@ import (
 // frozen inspection_collection_v1 snapshot carrying that operation binding)
 // only when the identity carries no active or stop-unconfirmed operation.
 // Returns true when a child was admitted.
+// AdmitNextJourneyChild admits the next identity-free browser child through
+// the shared execution runner (ADR-0006): the runner owns the transaction and
+// records the automatic audit row for an admitted child. An empty sweep —
+// nothing ready to admit — is execution.ErrNoTransition and records nothing,
+// so an idle pass neither opens a durable write nor fabricates a fact.
 func (service *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error) {
-	conn, err := service.db.Conn(ctx)
+	scope, err := service.resultContext(ctx, 0)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return false, err
+	_, err = execution.Execute(scope, service.runner, service.opJourneyAdmit,
+		func(conn *execution.Tx) (struct{}, error) {
+			admitted, err := admitNextJourneyChildOn(ctx, conn, service.nowText())
+			if err != nil {
+				return struct{}{}, err
+			}
+			if !admitted {
+				return struct{}{}, fmt.Errorf("%w: no bare verification child is ready for admission", execution.ErrNoTransition)
+			}
+			return struct{}{}, nil
+		},
+		func(struct{}) int64 { return 0 })
+	if errors.Is(err, execution.ErrNoTransition) {
+		return false, nil
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	admitted, err := admitNextJourneyChildOn(ctx, conn, service.nowText())
 	if err != nil {
 		return false, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return false, err
-	}
-	committed = true
-	return admitted, nil
+	return true, nil
 }
 
-func admitNextJourneyChildOn(ctx context.Context, conn *sql.Conn, now string) (bool, error) {
+func admitNextJourneyChildOn(ctx context.Context, conn execution.Executor, now string) (bool, error) {
 	var attemptID int64
 	var runID, configVersionID int64
 	err := conn.QueryRowContext(ctx, `
@@ -129,7 +135,7 @@ func admitNextJourneyChildOn(ctx context.Context, conn *sql.Conn, now string) (b
 
 // rebuildJourneyAdmissionFacts rebuilds one browser child's frozen input facts
 // (without the operation binding) plus its identity snapshot for admission.
-func rebuildJourneyAdmissionFacts(ctx context.Context, conn *sql.Conn, attemptID int64) (browserIdentitySnapshot, journeyVerificationInput, error) {
+func rebuildJourneyAdmissionFacts(ctx context.Context, conn execution.Executor, attemptID int64) (browserIdentitySnapshot, journeyVerificationInput, error) {
 	var input journeyVerificationInput
 	var identity browserIdentitySnapshot
 	var planKey, checkKey, journeyID, params, probeParams, startURL string
@@ -172,7 +178,7 @@ func rebuildJourneyAdmissionFacts(ctx context.Context, conn *sql.Conn, attemptID
 // admitLocalGapIfAny settles the deterministic operation-less gaps of one
 // browser child at run creation. It returns dispatched=false for children
 // that must wait for identity-serial journey admission.
-func admitLocalGapIfAny(ctx context.Context, conn *sql.Conn, runID, attemptID int64, identity browserIdentitySnapshot, identityBusy bool, input journeyVerificationInput, now string) (journeyVerificationInput, bool, error) {
+func admitLocalGapIfAny(ctx context.Context, conn execution.Executor, runID, attemptID int64, identity browserIdentitySnapshot, identityBusy bool, input journeyVerificationInput, now string) (journeyVerificationInput, bool, error) {
 	if !identity.ProfileGenerationID.Valid || !identity.Generation.Valid {
 		// No published profile can ever exist for this frozen binding: the
 		// journey operation schema forbids a null profile generation. Settle
@@ -214,7 +220,7 @@ func identityBusyProposal(attemptID int64, planKey, checkKey string) ([]byte, er
 	})
 }
 
-func browserVerificationChecks(ctx context.Context, conn *sql.Conn, configVersionID int64) ([]browserVerificationCheck, error) {
+func browserVerificationChecks(ctx context.Context, conn execution.Executor, configVersionID int64) ([]browserVerificationCheck, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT p.plan_key,c.check_key,c.journey_id,COALESCE(c.journey_params_json,'{}')
 		FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
@@ -235,7 +241,7 @@ func browserVerificationChecks(ctx context.Context, conn *sql.Conn, configVersio
 	return checks, rows.Err()
 }
 
-func loadBrowserIdentitySnapshot(ctx context.Context, conn *sql.Conn, systemID int64) (browserIdentitySnapshot, error) {
+func loadBrowserIdentitySnapshot(ctx context.Context, conn execution.Executor, systemID int64) (browserIdentitySnapshot, error) {
 	var snapshot browserIdentitySnapshot
 	err := conn.QueryRowContext(ctx, `
 		SELECT i.id,i.current_revision_id,i.current_profile_generation_id,g.generation,i.state,r.start_url,r.probe_journey_id,r.probe_journey_version,COALESCE(r.probe_params_json,'{}')
@@ -251,7 +257,7 @@ func loadBrowserIdentitySnapshot(ctx context.Context, conn *sql.Conn, systemID i
 
 // freezeJourneyVerificationInput seals the child's immutable
 // inspection_collection_v1 snapshot and its config/contract lineage.
-func freezeJourneyVerificationInput(ctx context.Context, conn *sql.Conn, attemptID, configVersionID int64, input journeyVerificationInput, now string) error {
+func freezeJourneyVerificationInput(ctx context.Context, conn execution.Executor, attemptID, configVersionID int64, input journeyVerificationInput, now string) error {
 	canonical, err := marshalJourneyVerificationInput(input)
 	if err != nil {
 		return err

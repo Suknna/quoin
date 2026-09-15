@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // VerificationProposal is the fixed non-secret PromQL result sealed by the
@@ -57,33 +59,40 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 		return fmt.Errorf("config verification result has invalid outcome")
 	}
 
-	conn, err := service.db.Conn(ctx)
+	scope, err := service.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if _, err := execution.Execute(scope, service.runner, service.opRunResult,
+		func(conn *execution.Tx) (struct{}, error) {
+			return service.commitVerificationProposalOn(scope, conn, attemptID, bootID, epoch, raw, proposal)
+		},
+		func(struct{}) int64 { return 0 }); err != nil {
+		if errors.Is(err, execution.ErrNoTransition) {
+			// The identical result already sealed the same immutable digest:
+			// an idempotent replay records nothing.
+			return nil
+		}
 		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+	return nil
+}
 
+// commitVerificationProposalOn is CommitVerificationProposal's business stage
+// on the runner-owned transaction.
+func (service *Service) commitVerificationProposalOn(ctx context.Context, conn execution.Executor, attemptID int64, bootID string, epoch uint64, raw []byte, proposal VerificationProposal) (struct{}, error) {
 	var runID int64
 	var planKey, checkKey string
-	err = conn.QueryRowContext(ctx, `
+	err := conn.QueryRowContext(ctx, `
 		SELECT a.scope_id,a.plan_key,a.check_key
 		FROM execution_attempts a
 		WHERE a.id=? AND a.scope_type='config_verification_run' AND a.attempt_type='inspection_collection'`, attemptID).
 		Scan(&runID, &planKey, &checkKey)
 	if err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if proposal.VerificationRunID != runID || proposal.PlanKey != planKey || proposal.CheckKey != checkKey {
-		return fmt.Errorf("config verification result identity does not match attempt")
+		return struct{}{}, fmt.Errorf("config verification result identity does not match attempt")
 	}
 	// A duplicate ResultProposal is a harmless replay only when it sealed the
 	// same immutable result digest; a different payload can never overwrite it.
@@ -92,16 +101,12 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 	replayErr := conn.QueryRowContext(ctx, `SELECT result_digest FROM config_verification_run_check_results WHERE verification_run_id=? AND plan_key=? AND check_key=?`, runID, planKey, checkKey).Scan(&existing)
 	if replayErr == nil {
 		if string(existing) == string(digest[:]) {
-			if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-				return err
-			}
-			committed = true
-			return nil
+			return struct{}{}, fmt.Errorf("%w: identical verification result already sealed", execution.ErrNoTransition)
 		}
-		return fmt.Errorf("config verification result replay digest conflicts")
+		return struct{}{}, fmt.Errorf("config verification result replay digest conflicts")
 	}
-	if replayErr != sql.ErrNoRows {
-		return replayErr
+	if !errors.Is(replayErr, sql.ErrNoRows) {
+		return struct{}{}, replayErr
 	}
 
 	status := "ok"
@@ -115,7 +120,7 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 	if len(proposal.Warnings) != 0 {
 		marshalled, err := json.Marshal(proposal.Warnings)
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		warningsJSON = string(marshalled)
 	}
@@ -128,11 +133,11 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 			VALUES(?,'config_verification_run',?,?,?,?,?,?,?)`,
 			attemptID, runID, string(params), proposal.ObservedAt, string(proposal.Result), string(warnings), "complete", service.nowText())
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		id, err := insert.LastInsertId()
 		if err != nil {
-			return err
+			return struct{}{}, err
 		}
 		evidenceID = id
 	}
@@ -141,10 +146,10 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 		nullableGap = gapReason
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO config_verification_run_check_results(verification_run_id,plan_key,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,warnings_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, runID, planKey, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, warningsJSON, service.nowText()); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if err := attempt.NewService(service.db).CommitResultOn(ctx, conn, attemptID, bootID, epoch, proposal.Outcome != "error", "tool_error"); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	var pending, failed int
 	if err := conn.QueryRowContext(ctx, `
@@ -156,7 +161,7 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 		  (SELECT COUNT(*) FROM config_verification_run_check_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
 		  + (SELECT COUNT(*) FROM config_verification_discovery_results x WHERE x.verification_run_id=r.id AND x.status <> 'ok')
 		FROM config_verification_runs r WHERE r.id=?`, runID).Scan(&pending, &failed); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if pending == 0 {
 		state, detail := "Passed", any(nil)
@@ -164,20 +169,16 @@ func (service *Service) CommitVerificationProposal(ctx context.Context, attemptI
 			state, detail = "Failed", "存在未通过、部分或失败的配置验证检查"
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE config_verification_runs SET state=?,result_detail=?,row_version=row_version+1 WHERE id=? AND state='Running'`, state, detail, runID); err != nil {
-			return err
+			return struct{}{}, err
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return struct{}{}, nil
 }
 
 // convergeVerificationRunOn closes the parent Run once every configured check
 // has settled; Passed requires full ok+Evidence coverage (DATA-CONFIG-007).
 // It runs inside the caller's open transaction.
-func convergeVerificationRunOn(ctx context.Context, conn *sql.Conn, runID int64) error {
+func convergeVerificationRunOn(ctx context.Context, conn execution.Executor, runID int64) error {
 	var pending, failed int
 	if err := conn.QueryRowContext(ctx, `
 		SELECT
@@ -205,59 +206,55 @@ func convergeVerificationRunOn(ctx context.Context, conn *sql.Conn, runID int64)
 // Attempt without inventing Evidence. It is used only after the generic
 // Attempt authority has durably placed the child in a terminal state.
 func (service *Service) RecordVerificationTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
-	conn, err := service.db.Conn(ctx)
+	scope, err := service.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
+	_, err = execution.Execute(scope, service.runner, service.opRunGap,
+		func(conn *execution.Tx) (struct{}, error) {
+			return service.recordVerificationGapOn(scope, conn, attemptID, reason)
+		},
+		func(struct{}) int64 { return 0 })
+	if errors.Is(err, execution.ErrNoTransition) {
+		// The parent already closed (e.g. the cancel fence ran first); the
+		// child's terminal transition needs no further closure row.
+		return nil
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+	return err
+}
+
+// recordVerificationGapOn is RecordVerificationTechnicalGap's business stage
+// on the runner-owned transaction.
+func (service *Service) recordVerificationGapOn(ctx context.Context, conn execution.Executor, attemptID int64, reason string) (struct{}, error) {
 	var runID int64
 	var planKey, checkKey string
 	var state string
 	if err := conn.QueryRowContext(ctx, `SELECT a.scope_id,a.plan_key,a.check_key,a.state FROM execution_attempts a WHERE a.id=? AND a.scope_type='config_verification_run' AND a.attempt_type='inspection_collection'`, attemptID).Scan(&runID, &planKey, &checkKey, &state); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
-		return fmt.Errorf("attempt %d is not terminal", attemptID)
+		return struct{}{}, fmt.Errorf("attempt %d is not terminal", attemptID)
 	}
 	var parentState string
 	if err := conn.QueryRowContext(ctx, `SELECT state FROM config_verification_runs WHERE id=?`, runID).Scan(&parentState); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if parentState != "Running" {
-		// The parent already closed (e.g. the cancel fence ran first); the
-		// child's terminal transition needs no further closure row.
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
-		}
-		committed = true
-		return nil
+		return struct{}{}, fmt.Errorf("%w: verification run %d is already closed", execution.ErrNoTransition, runID)
 	}
 	gapReason := "interrupted"
 	if reason == "cancelled" {
 		gapReason = reason
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO config_verification_run_check_results(verification_run_id,plan_key,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at) VALUES(?,?,?,'gap',NULL,?,NULL,?,?)`, runID, planKey, checkKey, attemptID, gapReason, service.nowText()); err != nil {
-		return err
+		return struct{}{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `UPDATE config_verification_runs SET state='Interrupted',row_version=row_version+1,result_detail=?
 		WHERE id=? AND state='Running' AND NOT EXISTS (
 			SELECT 1 FROM execution_attempts WHERE scope_type='config_verification_run' AND scope_id=?
 			AND state IN ('Queued','Assigned','Running','Cancelling')
 		)`, "采集 Runtime 已中断", runID, runID); err != nil {
-		return err
+		return struct{}{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return struct{}{}, nil
 }

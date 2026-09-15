@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
 // seedHistoricalRefreshRun creates facts shaped like rows retained from the
@@ -66,16 +64,16 @@ func seedHistoricalRefreshRun(t *testing.T, h *harness, attemptState string) (ru
 	if _, err := h.db.Exec(`INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id) VALUES(?,1,'config_version',?,?)`, snapshotID, "0000000000000000000000000000000000000000000000000000000000000000", configVersionID); err != nil {
 		t.Fatal(err)
 	}
-	if err := attempt.NewService(h.db).BindToStream(context.Background(), attemptID, "legacy-boot", 1, time.Minute, "legacy"); err != nil {
+	if err := h.attempts.BindToStream(context.Background(), attemptID, "legacy-boot", 1, time.Minute, "legacy"); err != nil {
 		t.Fatal(err)
 	}
 	if attemptState == "Running" {
-		if err := attempt.NewService(h.db).Accept(context.Background(), attemptID, "legacy-boot", 1); err != nil {
+		if err := h.attempts.Accept(context.Background(), attemptID, "legacy-boot", 1); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if attemptState == "Cancelling" {
-		if _, err := attempt.NewService(h.db).CancelFence(context.Background(), attemptID); err != nil {
+		if _, err := h.attempts.CancelFence(context.Background(), attemptID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -156,7 +154,7 @@ func TestHistoricalRefreshRunsAndObservedResourcesRemainReadable(t *testing.T) {
 func TestHistoricalResourceRefreshCancellationStillConverges(t *testing.T) {
 	h := newHarness(t)
 	runID, attemptID, _ := seedHistoricalRefreshRun(t, h, "Cancelling")
-	if err := attempt.NewService(h.db).CancelAck(context.Background(), attemptID); err != nil {
+	if err := h.attempts.CancelAck(context.Background(), attemptID); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.systems.ConvergeResourceRefreshCancelAck(context.Background(), attemptID); err != nil {
@@ -180,7 +178,7 @@ func TestHistoricalResourceRefreshCancellationStillConverges(t *testing.T) {
 func TestSweptVerificationParentClosureSkipsClosedRun(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, h.principal, "cmd-gap4-upload-0001")
-	run, err := h.systems.RunVerification(context.Background(), h.principal, "cmd-gap4-run-0002", "payments", versionID(t, draft))
+	run, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-gap4-run-0002", "payments", versionID(t, draft))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +186,7 @@ func TestSweptVerificationParentClosureSkipsClosedRun(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT id FROM execution_attempts WHERE scope_type='config_verification_run' AND scope_id=?`, run.ID).Scan(&attemptID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.systems.CancelVerification(context.Background(), h.principal, "cmd-gap4-cancel-0003", "payments", versionID(t, draft), verificationRunID(t, run), 2); err != nil {
+	if _, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-gap4-cancel-0003", "payments", versionID(t, draft), verificationRunID(t, run), 2); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)

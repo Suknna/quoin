@@ -6,6 +6,12 @@ package connections
 // once the attempt reaches a terminal state (DATA-CONN-002). Cancellation
 // follows the commit-order fence: a result proposal landing after a
 // committed Cancelling fence is rejected (RUNTIME-CANCEL-002).
+//
+// The user-origin cancellation and the runtime-driven closure steps
+// (interrupt, cancel ack, queued bind) are audited runner mutations; grant
+// fulfillment stays a fenced read on the write pool — it performs no state
+// change but needs the IMMEDIATE serialization so a terminal commit racing
+// the read is still ordered (SQLite single writer).
 
 import (
 	"context"
@@ -17,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
@@ -62,21 +69,48 @@ var ErrGrantDenied = errors.New("credential grant denied")
 
 // FulfillGrant decrypts the sealed secret for one active attempt after
 // re-checking every binding (replay after terminal state is denied).
+//
+// The reveal runs through the family's execution runner (ADR-0006): the
+// runner owns the IMMEDIATE transaction so the fenced read stays ordered
+// against a racing terminal commit, and the automatic audit row records the
+// sensitive grant reveal BEFORE any secret leaves storage (DATA-CONN-002).
+// The returned payload carries the secrets only in memory — the runner
+// persists no result payload for Execute operations, so nothing secret can
+// enter the audit or any ledger. The execution scope is resolved through
+// probeLifecycleContext: the attempt's persisted association is authoritative.
 func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int64, bootID string, epoch uint64) (GrantPayload, error) {
-	conn, err := service.db.Conn(ctx)
+	// The grant row is the binding authority: the classic denial semantics
+	// (unknown grant, foreign attempt) resolve before any scope is built, so
+	// a denied reveal keeps its exact error and records nothing.
+	var grantAttempt int64
+	if err := service.reader.QueryRowContext(ctx, `SELECT attempt_id FROM attempt_connection_grants WHERE id=?`, grantID).Scan(&grantAttempt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GrantPayload{}, ErrGrantDenied
+		}
+		return GrantPayload{}, err
+	}
+	if grantAttempt != attemptID {
+		return GrantPayload{}, fmt.Errorf("%w: grant belongs to attempt %d", ErrGrantDenied, grantAttempt)
+	}
+	scope, err := service.probeLifecycleContext(ctx, grantAttempt)
 	if err != nil {
 		return GrantPayload{}, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	payload, err := execution.Execute(scope, service.commands.runner, service.commands.grantFulfill,
+		func(tx *execution.Tx) (GrantPayload, error) {
+			return service.fulfillGrantOn(scope, tx, grantID, attemptID, bootID, epoch)
+		},
+		func(GrantPayload) int64 { return grantID })
+	if err != nil {
 		return GrantPayload{}, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
+	return payload, nil
+}
+
+// fulfillGrantOn is FulfillGrant's fenced business stage on the runner-owned
+// transaction. Every binding check runs here, before the decryption.
+func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, grantID, attemptID int64, bootID string, epoch uint64) (GrantPayload, error) {
+	conn := tx
 	var purpose string
 	var grantAttempt, connectionID, revisionID, generationID int64
 	if err := conn.QueryRowContext(ctx, `SELECT attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id FROM attempt_connection_grants WHERE id=?`, grantID).Scan(&grantAttempt, &purpose, &connectionID, &revisionID, &generationID); err != nil {
@@ -169,10 +203,6 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 	default:
 		return GrantPayload{}, fmt.Errorf("sealed secret carries no typed variant for %q", connectionType)
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return GrantPayload{}, err
-	}
-	committed = true
 	return payload, nil
 }
 
@@ -183,168 +213,159 @@ func (service *Service) FulfillGrant(ctx context.Context, grantID, attemptID int
 // are rejected afterwards because results close only over Running).
 // Cancellation is available only once the attempt is Running; queued or
 // assigned probes dispatch first (the frozen state machine admits no other
-// cancelled closure for connection_probe).
+// cancelled closure for connection_probe). The fence is an audited admin
+// mutation under the attempt row-version fence.
 func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expectedRow int64) error {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	_, err := execution.Execute(ctx, service.commands.runner, service.commands.probeCancel, func(tx *execution.Tx) (int64, error) {
+		var scopeID int64
+		var state string
+		var rowVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT scope_id,state,row_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &state, &rowVersion); err != nil {
+			return 0, err
 		}
-	}()
-	var scopeID int64
-	var state string
-	var rowVersion int64
-	if err := conn.QueryRowContext(ctx, `SELECT scope_id,state,row_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID, &state, &rowVersion); err != nil {
-		return err
-	}
-	if rowVersion != expectedRow {
-		return &RowVersionError{ID: attemptID, Current: rowVersion}
-	}
-	if state != "Running" {
-		return ErrActiveConflict
-	}
-	// The cancelled closure binds the pair the attempt's grant froze —
-	// NOT the connection's current pointers: a rotation committed while the
-	// probe was in flight must not break the cancellation closure (T09).
-	var connectionType string
-	var revisionID, generationID int64
-	if err := conn.QueryRowContext(ctx, `
-		SELECT c.type, ag.connection_revision_id, ag.credential_generation_id
-		FROM connections c
-		JOIN attempt_connection_grants ag ON ag.attempt_id=? AND ag.connection_id=c.id
-		ORDER BY ag.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
-		return err
-	}
-	var bindingRevision int
-	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
-		return err
-	}
-	actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		if rowVersion != expectedRow {
+			return 0, &versionRejection{current: rowVersion, id: attemptID, rejection: execution.Rejection{Code: codeRowVersion, Detail: "attempt was modified concurrently", ObjectID: attemptID}}
+		}
+		if state != "Running" {
+			return 0, rejectionOf(ErrActiveConflict, codeActiveConflict, "only a running probe attempt can be cancelled", attemptID)
+		}
+		// The cancelled closure binds the pair the attempt's grant froze —
+		// NOT the connection's current pointers: a rotation committed while the
+		// probe was in flight must not break the cancellation closure (T09).
+		var connectionType string
+		var revisionID, generationID int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT c.type, ag.connection_revision_id, ag.credential_generation_id
+			FROM connections c
+			JOIN attempt_connection_grants ag ON ag.attempt_id=? AND ag.connection_id=c.id
+			ORDER BY ag.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
+			return 0, err
+		}
+		var bindingRevision int
+		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+			return 0, err
+		}
+		actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		if err != nil {
+			return 0, err
+		}
+		contractDigest, err := ProbeContractDigest()
+		if err != nil {
+			return 0, err
+		}
+		now := timestampOf(service.now)
+		headerInsert, err := tx.ExecContext(ctx, `INSERT INTO connection_probe_results(attempt_id,connection_id,connection_type,connection_revision_id,credential_generation_id,root_binding_revision,action_set_id,action_set_version,probe_contract_digest,outcome,result_digest,started_at,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			attemptID, scopeID, connectionType, revisionID, generationID, bindingRevision, actionSetID, actionSetVersion, contractDigest, "cancelled", cancelDigest(attemptID), now, now, now)
+		if err != nil {
+			return 0, err
+		}
+		headerID, err := headerInsert.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if err := writeCancelledChild(ctx, tx, headerID, connectionType, revisionID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelling',row_version=row_version+1 WHERE id=? AND state='Running'`, attemptID); err != nil {
+			return 0, err
+		}
+		return attemptID, nil
+	}, identity)
 	if err != nil {
-		return err
+		return domainError(err)
 	}
-	contractDigest, err := ProbeContractDigest()
-	if err != nil {
-		return err
-	}
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	headerInsert, err := conn.ExecContext(ctx, `INSERT INTO connection_probe_results(attempt_id,connection_id,connection_type,connection_revision_id,credential_generation_id,root_binding_revision,action_set_id,action_set_version,probe_contract_digest,outcome,result_digest,started_at,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		attemptID, scopeID, connectionType, revisionID, generationID, bindingRevision, actionSetID, actionSetVersion, contractDigest, "cancelled", cancelDigest(attemptID), now, now, now)
-	if err != nil {
-		return err
-	}
-	headerID, err := headerInsert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	if err := writeCancelledChild(ctx, conn, headerID, connectionType, revisionID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelling',row_version=row_version+1 WHERE id=? AND state='Running'`, attemptID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
 	return nil
 }
+
+// errProbeAlreadyTerminal marks an interrupt pass whose attempt already
+// closed: the winning closure is the single audited fact and the loser
+// records nothing (the caller sees a converged idempotent success).
+var errProbeAlreadyTerminal = errors.New("connection probe attempt already terminal")
 
 // InterruptProbe closes a Running probe with its immutable interrupted typed
 // result before advancing the Attempt terminal state. Generic Attempt
 // interruption cannot be used here because the SQL terminal fence requires
 // the typed result to exist first; restart/reconciliation therefore uses this
-// dedicated closure path.
+// dedicated audited closure path. An already-terminal attempt converges
+// silently (no state change, no audit row).
 func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, reason string) error {
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.probeLifecycleContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	_, err = execution.Execute(ctx, service.commands.runner, service.commands.probeInterrupt, func(tx *execution.Tx) (int64, error) {
+		var state string
+		var scopeID int64
+		if err := tx.QueryRowContext(ctx, `SELECT state,scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &scopeID); err != nil {
+			return 0, err
 		}
-	}()
-	var state string
-	var scopeID int64
-	if err := conn.QueryRowContext(ctx, `SELECT state,scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &scopeID); err != nil {
-		return err
-	}
-	if state == "Interrupted" || state == "Succeeded" || state == "Failed" || state == "Cancelled" {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
+		if state == "Interrupted" || state == "Succeeded" || state == "Failed" || state == "Cancelled" {
+			return 0, errProbeAlreadyTerminal
 		}
-		committed = true
+		if state != "Running" {
+			return 0, fmt.Errorf("connection probe %d is %s; interrupted closure requires Running", attemptID, state)
+		}
+		var connectionType string
+		var revisionID, generationID int64
+		if err := tx.QueryRowContext(ctx, `SELECT c.type,g.connection_revision_id,g.credential_generation_id FROM connections c JOIN attempt_connection_grants g ON g.connection_id=c.id WHERE g.attempt_id=? ORDER BY g.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
+			return 0, err
+		}
+		var bindingRevision int
+		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
+			return 0, err
+		}
+		actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		if err != nil {
+			return 0, err
+		}
+		contractDigest, err := ProbeContractDigest()
+		if err != nil {
+			return 0, err
+		}
+		now := timestampOf(service.now)
+		insert, err := tx.ExecContext(ctx, `INSERT INTO connection_probe_results(attempt_id,connection_id,connection_type,connection_revision_id,credential_generation_id,root_binding_revision,action_set_id,action_set_version,probe_contract_digest,outcome,result_digest,started_at,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, scopeID, connectionType, revisionID, generationID, bindingRevision, actionSetID, actionSetVersion, contractDigest, "interrupted", interruptionDigest(attemptID, reason), now, now, now)
+		if err != nil {
+			return 0, err
+		}
+		headerID, err := insert.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if err := writeInterruptedChild(ctx, tx, headerID, connectionType, revisionID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Running'`, now, reason, attemptID); err != nil {
+			return 0, err
+		}
+		return attemptID, nil
+	}, identity)
+	if errors.Is(err, errProbeAlreadyTerminal) {
 		return nil
 	}
-	if state != "Running" {
-		return fmt.Errorf("connection probe %d is %s; interrupted closure requires Running", attemptID, state)
-	}
-	var connectionType string
-	var revisionID, generationID int64
-	if err := conn.QueryRowContext(ctx, `SELECT c.type,g.connection_revision_id,g.credential_generation_id FROM connections c JOIN attempt_connection_grants g ON g.connection_id=c.id WHERE g.attempt_id=? ORDER BY g.id LIMIT 1`, attemptID).Scan(&connectionType, &revisionID, &generationID); err != nil {
-		return err
-	}
-	var bindingRevision int
-	if err := conn.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
-		return err
-	}
-	actionSetID, actionSetVersion, err := ActionSet(connectionType)
-	if err != nil {
-		return err
-	}
-	contractDigest, err := ProbeContractDigest()
-	if err != nil {
-		return err
-	}
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	insert, err := conn.ExecContext(ctx, `INSERT INTO connection_probe_results(attempt_id,connection_id,connection_type,connection_revision_id,credential_generation_id,root_binding_revision,action_set_id,action_set_version,probe_contract_digest,outcome,result_digest,started_at,finished_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, scopeID, connectionType, revisionID, generationID, bindingRevision, actionSetID, actionSetVersion, contractDigest, "interrupted", interruptionDigest(attemptID, reason), now, now, now)
-	if err != nil {
-		return err
-	}
-	headerID, err := insert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	if err := writeInterruptedChild(ctx, conn, headerID, connectionType, revisionID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Running'`, now, reason, attemptID); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	return err
 }
 
 // RecordCancelAck finalizes Cancelling -> Cancelled once the runtime
 // confirms the attempt stopped (RUNTIME-CANCEL-003); the cancelled result
-// already exists from the fence transaction.
+// already exists from the fence transaction. The finalization is an audited
+// system mutation.
 func (service *Service) RecordCancelAck(ctx context.Context, attemptID int64) error {
-	result, err := service.db.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelled',ended_at=?,termination_reason='cancelled',row_version=row_version+1 WHERE id=? AND state='Cancelling'`, service.now().UTC().Format(time.RFC3339Nano), attemptID)
+	ctx, err := service.probeLifecycleContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	rows, _ := result.RowsAffected()
-	if rows != 1 {
-		return fmt.Errorf("attempt %d is not in Cancelling state", attemptID)
-	}
-	return nil
+	_, err = execution.Execute(ctx, service.commands.runner, service.commands.probeCancelAck, func(tx *execution.Tx) (int64, error) {
+		result, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelled',ended_at=?,termination_reason='cancelled',row_version=row_version+1 WHERE id=? AND state='Cancelling'`, timestampOf(service.now), attemptID)
+		if err != nil {
+			return 0, err
+		}
+		rows, _ := result.RowsAffected()
+		if rows != 1 {
+			return 0, fmt.Errorf("attempt %d is not in Cancelling state", attemptID)
+		}
+		return attemptID, nil
+	}, identity)
+	return err
 }
 
 // cancelDigest derives the deterministic digest of a cancelled closure.
@@ -358,15 +379,15 @@ func interruptionDigest(attemptID int64, reason string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// writeCancelledChild persists the frozen action-set shaped child row for a
-// cancelled probe (values are the contract constants; outcome carries the
-// cancellation semantics).
-func writeInterruptedChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64) error {
-	return writeTerminalProbeChild(ctx, conn, headerID, connectionType, connectionID, "interrupted")
+// writeInterruptedChild persists the frozen action-set shaped child row for
+// an interrupted probe (values are the contract constants; outcome carries
+// the interruption semantics).
+func writeInterruptedChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64) error {
+	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "interrupted")
 }
 
-func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, connectionID int64) error {
-	return writeTerminalProbeChild(ctx, conn, headerID, connectionType, connectionID, "cancelled")
+func writeCancelledChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64) error {
+	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "cancelled")
 }
 
 // writeTerminalProbeChild preserves a closed typed child for a terminal probe
@@ -374,16 +395,16 @@ func writeCancelledChild(ctx context.Context, conn *sql.Conn, headerID int64, co
 // explicit in detail_json; no successful capability fact is manufactured.
 // revisionID is the header's frozen revision, which can differ from the
 // connection's current pointer after an in-flight rotation.
-func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64, connectionType string, revisionID int64, terminal string) error {
+func writeTerminalProbeChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, revisionID int64, terminal string) error {
 	switch connectionType {
 	case TypePrometheus, TypeThanos:
-		_, err := conn.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
 			headerID, "vector(1)", "vector", 1, "1", fmt.Sprintf(`{"kind":%q,%q:true}`, connectionType, terminal))
 		return err
 	case TypeKubernetes:
 		effective := "default"
 		var configJSON string
-		if err := conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON); err == nil {
+		if err := tx.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON); err == nil {
 			var config struct {
 				DefaultNamespace string `json:"defaultNamespace"`
 			}
@@ -391,12 +412,12 @@ func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64
 				effective = config.DefaultNamespace
 			}
 		}
-		_, err := conn.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			headerID, effective, 0, 0, 0, 0, 0, 0, 0, fmt.Sprintf(`{"kind":"kubernetes",%q:true}`, terminal))
 		return err
 	case TypeModelProvider:
 		var configJSON string
-		_ = conn.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON)
+		_ = tx.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON)
 		var config struct {
 			ChatModelID         string `json:"chatModelId"`
 			EmbeddingModelID    string `json:"embeddingModelId"`
@@ -404,7 +425,7 @@ func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64
 			MaxOutputTokens     int    `json:"maxOutputTokens"`
 		}
 		_ = json.Unmarshal([]byte(configJSON), &config)
-		_, err := conn.ExecContext(ctx, `INSERT INTO model_provider_connection_probe_results(probe_result_id,chat_model_id,embedding_model_id,context_budget_tokens,max_output_tokens,streaming_supported,native_tool_calling_supported,multi_tool_call_supported,cancellation_observed,usage_observed,request_id_observed,embedding_supported,embedding_vector_dim,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO model_provider_connection_probe_results(probe_result_id,chat_model_id,embedding_model_id,context_budget_tokens,max_output_tokens,streaming_supported,native_tool_calling_supported,multi_tool_call_supported,cancellation_observed,usage_observed,request_id_observed,embedding_supported,embedding_vector_dim,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			headerID, config.ChatModelID, nil, config.ContextBudgetTokens, config.MaxOutputTokens, 0, 0, 0, 0, 0, 0, 0, nil, fmt.Sprintf(`{"kind":"model_provider",%q:true}`, terminal))
 		return err
 	default:
@@ -415,7 +436,7 @@ func writeTerminalProbeChild(ctx context.Context, conn *sql.Conn, headerID int64
 // QueuedProbeAttempts lists connection_probe attempts still waiting for a
 // live Plinth stream (created while the slot was disconnected).
 func (service *Service) QueuedProbeAttempts(ctx context.Context) ([]int64, error) {
-	rows, err := service.db.QueryContext(ctx, `SELECT id FROM execution_attempts WHERE attempt_type='connection_probe' AND state='Queued' ORDER BY id`)
+	rows, err := service.reader.QueryContext(ctx, `SELECT id FROM execution_attempts WHERE attempt_type='connection_probe' AND state='Queued' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -431,13 +452,26 @@ func (service *Service) QueuedProbeAttempts(ctx context.Context) ([]int64, error
 	return ids, rows.Err()
 }
 
+// errProbeBindSuperseded marks a dispatcher that lost the conditional
+// Queued→Assigned race: the winner's transition is the single audited fact
+// and the loser records nothing.
+var errProbeBindSuperseded = errors.New("probe bind was superseded by another dispatcher")
+
+// bindResult carries the dispatch tuple out of the audited bind transaction.
+type bindResult struct {
+	summary Summary
+	grantID int64
+	input   []byte
+}
+
 // BindQueuedToStream moves one Queued probe to Assigned against the given
 // live binding and returns the dispatch tuple; it is a no-op (ok=false)
-// when another dispatcher won the race.
+// when another dispatcher won the race. The bind is an audited system
+// mutation guarded by the frozen snapshot digest.
 func (service *Service) BindQueuedToStream(ctx context.Context, attemptID int64, bootID string, epoch uint64, lease time.Duration) (Summary, int64, []byte, bool, error) {
 	var scopeName string
 	var contentDigest string
-	err := service.db.QueryRowContext(ctx, `
+	err := service.reader.QueryRowContext(ctx, `
 		SELECT c.name, s.content_digest
 		FROM execution_attempts a
 		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
@@ -463,42 +497,37 @@ func (service *Service) BindQueuedToStream(ctx context.Context, attemptID int64,
 	if hex.EncodeToString(rebuilt[:]) != contentDigest {
 		return Summary{}, 0, nil, false, fmt.Errorf("input snapshot digest mismatch for attempt %d", attemptID)
 	}
-	var grantID int64
-	conn, err := service.db.Conn(ctx)
+	ctx, err = service.probeLifecycleContext(ctx, attemptID)
 	if err != nil {
 		return Summary{}, 0, nil, false, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return Summary{}, 0, nil, false, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	result, err := execution.Execute(ctx, service.commands.runner, service.commands.probeBind, func(tx *execution.Tx) (bindResult, error) {
+		var grantID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=?`, attemptID).Scan(&grantID); err != nil {
+			return bindResult{}, err
 		}
-	}()
-	if err := conn.QueryRowContext(ctx, `SELECT id FROM attempt_connection_grants WHERE attempt_id=?`, attemptID).Scan(&grantID); err != nil {
-		return Summary{}, 0, nil, false, err
-	}
-	// A competing dispatcher can change this attempt after the initial snapshot
-	// read. Commit only if this transaction won the conditional Queued→Assigned
-	// transition; otherwise return the documented no-op instead of dispatching a
-	// grant for an attempt owned by another stream.
-	updated, err := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, bootID, epoch, service.now().UTC().Add(lease).Format(time.RFC3339Nano), releaseVersion, attemptID)
-	if err != nil {
-		return Summary{}, 0, nil, false, err
-	}
-	rows, err := updated.RowsAffected()
-	if err != nil {
-		return Summary{}, 0, nil, false, err
-	}
-	if rows != 1 {
+		// A competing dispatcher can change this attempt after the initial
+		// snapshot read. Commit only if this transaction won the conditional
+		// Queued→Assigned transition; otherwise the documented no-op wins over
+		// dispatching a grant for an attempt owned by another stream.
+		updated, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, bootID, epoch, timestampOf(func() time.Time { return service.now().UTC().Add(lease) }), releaseVersion, attemptID)
+		if err != nil {
+			return bindResult{}, err
+		}
+		rows, err := updated.RowsAffected()
+		if err != nil {
+			return bindResult{}, err
+		}
+		if rows != 1 {
+			return bindResult{}, errProbeBindSuperseded
+		}
+		return bindResult{summary: summary, grantID: grantID, input: input}, nil
+	}, func(bindResult) int64 { return attemptID })
+	if errors.Is(err, errProbeBindSuperseded) {
 		return Summary{}, 0, nil, false, nil
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+	if err != nil {
 		return Summary{}, 0, nil, false, err
 	}
-	committed = true
-	return summary, grantID, input, true, nil
+	return result.summary, result.grantID, result.input, true, nil
 }

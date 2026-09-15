@@ -148,7 +148,7 @@ func (handler *Handler) importBatch(ctx context.Context, input *struct {
 	if authProblem != nil {
 		return nil, authProblem
 	}
-	result, err := handler.Knowledge.StartImportAs(ctx, actor, input.Body.ClientCommandID, input.Body.Text)
+	result, err := handler.Knowledge.StartImport(ctx, actor.ID, input.Body.ClientCommandID, input.Body.Text)
 	if err != nil {
 		switch {
 		case errors.Is(err, knowledge.ErrModelProviderMissing):
@@ -203,7 +203,7 @@ func (handler *Handler) confirmImportBatch(ctx context.Context, input *struct {
 		}
 		items = append(items, knowledge.BatchConfirmation{CandidateID: id, ExpectedRevision: item.ExpectedRevision})
 	}
-	detail, err := handler.Knowledge.ConfirmBatchAs(ctx, actor, input.Body.ClientCommandID, batchID, items)
+	detail, err := handler.Knowledge.ConfirmBatch(ctx, actor.ID, input.Body.ClientCommandID, batchID, items)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -230,7 +230,7 @@ func (handler *Handler) cancelImportBatch(ctx context.Context, input *struct {
 	if p != nil {
 		return nil, p
 	}
-	detail, attemptID, err := handler.Knowledge.CancelBatchAs(ctx, actor, input.Body.ClientCommandID, batchID, input.Body.ExpectedRowVersion)
+	detail, attemptID, err := handler.Knowledge.CancelBatch(ctx, actor.ID, input.Body.ClientCommandID, batchID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -263,7 +263,7 @@ func (handler *Handler) createRevisionCandidate(ctx context.Context, input *stru
 	if p != nil {
 		return nil, p
 	}
-	candidate, created, err := handler.Knowledge.CreateRevisionCandidateAs(ctx, actor, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion)
+	candidate, created, err := handler.Knowledge.CreateRevisionCandidate(ctx, actor.ID, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -295,7 +295,7 @@ func (handler *Handler) stopReuse(ctx context.Context, input *struct {
 	if p != nil {
 		return nil, p
 	}
-	if err := handler.Knowledge.StopReuseAs(ctx, actor, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion); err != nil {
+	if err := handler.Knowledge.StopReuse(ctx, actor.ID, input.Body.ClientCommandID, knowledgeID, versionID, input.Body.ExpectedRowVersion); err != nil {
 		return nil, candidateCommandProblem(err)
 	}
 	return &struct{}{}, nil

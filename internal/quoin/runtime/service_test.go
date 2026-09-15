@@ -7,6 +7,7 @@ package runtime_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -17,10 +18,18 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
-func newService(t *testing.T) *qruntime.Service {
+// newService bootstraps a real database and the slot authority. The pure
+// reads are wired to the database's actual read-only pool (the
+// execution.OpenReadOnly product bootstrap opens alongside the writer) and
+// the runner is private. It also seeds the built-in administrator with one
+// live session and returns a context carrying that session's execution
+// metadata — the identity facts the HTTP admission middleware provides in
+// production; the commands fail closed without them.
+func newService(t *testing.T) (*qruntime.Service, context.Context) {
 	t.Helper()
 	root := t.TempDir()
 	config := contract.QuoinConfig{
@@ -39,15 +48,45 @@ func newService(t *testing.T) *qruntime.Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	return qruntime.NewService(database.SQL)
+	seedAdminSession(t, database.SQL)
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "runtime-" + t.Name(),
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-" + t.Name()},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := qruntime.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, ctx
+}
+
+// seedAdminSession inserts the built-in administrator (user 1, admin, live at
+// auth revision 1) and one unexpired session.
+func seedAdminSession(t *testing.T, db *sql.DB) {
+	t.Helper()
+	now := "2026-09-14T00:00:00Z"
+	idle, absolute := "2036-09-14T00:00:00Z", "2036-09-21T00:00:00Z"
+	for _, statement := range []string{
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'fixture',1,'` + now + `','` + now + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'fixture','` + now + `','` + now + `','` + idle + `','` + absolute + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 const release = "v0.1.0-dev"
 
 // prepareAndReveal runs the two-step reveal flow and returns the raw token.
-func prepareAndReveal(t *testing.T, service *qruntime.Service, slot string, expectedRow int64, session [32]byte) (raw string, generation int64) {
+func prepareAndReveal(t *testing.T, service *qruntime.Service, ctx context.Context, slot string, expectedRow int64, session [32]byte) (raw string, generation int64) {
 	t.Helper()
-	_, handle, available, err := service.PrepareRegistration(context.Background(), slot, expectedRow, session)
+	_, handle, available, err := service.PrepareRegistration(ctx, slot, expectedRow, session)
 	if err != nil || !available {
 		t.Fatalf("prepare %s: err=%v available=%v", slot, err, available)
 	}
@@ -59,8 +98,7 @@ func prepareAndReveal(t *testing.T, service *qruntime.Service, slot string, expe
 }
 
 func TestPrepareRevealRegisterSingleConsumption(t *testing.T) {
-	service := newService(t)
-	ctx := context.Background()
+	service, ctx := newService(t)
 	var session [32]byte
 	view, handle, available, err := service.PrepareRegistration(ctx, "plinth", 1, session)
 	if err != nil || !available {
@@ -105,11 +143,10 @@ func TestPrepareRevealRegisterSingleConsumption(t *testing.T) {
 }
 
 func TestHandshakeRejectionMatrix(t *testing.T) {
-	service := newService(t)
-	ctx := context.Background()
+	service, ctx := newService(t)
 	var session [32]byte
 	digest := catalog.Digest()
-	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
+	raw, generation := prepareAndReveal(t, service, ctx, "lintel", 1, session)
 	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
@@ -177,11 +214,10 @@ func TestHandshakeRejectionMatrix(t *testing.T) {
 // (DATA-CONFIG-008, RUNTIME-CTRL-010) — one computation, no re-serialization
 // on either side.
 func TestCatalogDigestAgreement(t *testing.T) {
-	service := newService(t)
-	ctx := context.Background()
+	service, ctx := newService(t)
 	var session [32]byte
 	digest := catalog.Digest()
-	raw, generation := prepareAndReveal(t, service, "lintel", 1, session)
+	raw, generation := prepareAndReveal(t, service, ctx, "lintel", 1, session)
 	longTerm, _, err := service.Register(ctx, "lintel", raw, generation, "boot-l", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
@@ -195,10 +231,9 @@ func TestCatalogDigestAgreement(t *testing.T) {
 }
 
 func TestReplacementRetiresAndFences(t *testing.T) {
-	service := newService(t)
-	ctx := context.Background()
+	service, ctx := newService(t)
 	var session [32]byte
-	raw, generation := prepareAndReveal(t, service, "plinth", 1, session)
+	raw, generation := prepareAndReveal(t, service, ctx, "plinth", 1, session)
 	longTerm, _, err := service.Register(ctx, "plinth", raw, generation, "boot-1", contract.ProtoAuthorityFingerprint, contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		t.Fatal(err)
@@ -243,10 +278,9 @@ func TestReplacementRetiresAndFences(t *testing.T) {
 }
 
 func TestConcurrentRegisterSingleWinner(t *testing.T) {
-	service := newService(t)
-	ctx := context.Background()
+	service, ctx := newService(t)
 	var session [32]byte
-	raw, generation := prepareAndReveal(t, service, "plinth", 1, session)
+	raw, generation := prepareAndReveal(t, service, ctx, "plinth", 1, session)
 	const attempts = 8
 	results := make(chan error, attempts)
 	var start sync.WaitGroup
@@ -271,7 +305,7 @@ func TestConcurrentRegisterSingleWinner(t *testing.T) {
 }
 
 func TestAcceptedPeerReleaseIsRetainedForDispatchProvenance(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	const peerRelease = "plinth-v9.4.1"
 	service.AttachStreamWithSenderVersion("plinth", "boot-peer", 1, peerRelease, func(any) error { return nil })
 	view, err := service.View(context.Background(), "plinth")
@@ -287,7 +321,7 @@ func TestAcceptedPeerReleaseIsRetainedForDispatchProvenance(t *testing.T) {
 // that both pass Adjudicate before their handlers reach attachment. The newer
 // handler wins first; the delayed lower epoch must not evict or close it.
 func TestOutOfOrderAcceptedAttachmentsPreserveNewerEpoch(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	newerDone := service.AttachStreamWithSender("lintel", "boot-a", 2, func(any) error { return nil })
 	if newerDone == nil {
 		t.Fatal("newer accepted epoch was not attached")
@@ -309,7 +343,7 @@ func TestOutOfOrderAcceptedAttachmentsPreserveNewerEpoch(t *testing.T) {
 }
 
 func TestWithCurrentRejectsSupersededStream(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	service.AttachStream("lintel", "boot-a", 1)
 	if err := service.WithCurrent("lintel", "boot-a", 1, func() error { return nil }); err != nil {
 		t.Fatalf("current stream rejected: %v", err)
@@ -322,7 +356,7 @@ func TestWithCurrentRejectsSupersededStream(t *testing.T) {
 }
 
 func TestWithCurrentClosingFencesSupersededOwner(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	oldDone := service.AttachStream("lintel", "boot-a", 1)
 	var closing <-chan struct{}
 	if err := service.WithCurrentClosing("lintel", "boot-a", 1, func(fence <-chan struct{}) error {
@@ -345,7 +379,7 @@ func TestWithCurrentClosingFencesSupersededOwner(t *testing.T) {
 }
 
 func TestDetachedStreamClosesDataPlaneOwnerFence(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	service.AttachStream("lintel", "boot-a", 1)
 	var closing <-chan struct{}
 	if err := service.WithCurrentClosing("lintel", "boot-a", 1, func(fence <-chan struct{}) error {
@@ -363,7 +397,7 @@ func TestDetachedStreamClosesDataPlaneOwnerFence(t *testing.T) {
 }
 
 func TestSupersededStreamCannotDetachSuccessor(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	oldDone := service.AttachStreamWithSender("lintel", "boot-a", 1, func(any) error { return nil })
 	called := false
 	service.AttachStreamWithSender("lintel", "boot-a", 2, func(any) error { called = true; return nil })
@@ -378,7 +412,7 @@ func TestSupersededStreamCannotDetachSuccessor(t *testing.T) {
 }
 
 func TestTicket21LintelCapacityIsBoundToTheLiveHello(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	service.AttachStreamWithSender("lintel", "boot-a", 7, func(any) error { return nil })
 	if err := service.SetBrowserCapacity("lintel", "boot-a", 7, 1); err != nil {
 		t.Fatalf("bind Hello capacity: %v", err)
@@ -394,7 +428,7 @@ func TestTicket21LintelCapacityIsBoundToTheLiveHello(t *testing.T) {
 }
 
 func TestTicket21SendToFencedRejectsSuccessorStream(t *testing.T) {
-	service := newService(t)
+	service, _ := newService(t)
 	oldSent, successorSent := false, false
 	service.AttachStreamWithSender("lintel", "boot-a", 7, func(any) error {
 		oldSent = true

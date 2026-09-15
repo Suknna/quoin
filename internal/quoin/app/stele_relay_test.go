@@ -9,13 +9,13 @@ import (
 	"net"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/app"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -47,16 +47,43 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	alertsService := alerts.NewService(database.SQL)
+	// Credential snapshot and delivery lookups are pure reads on the alerts
+	// runner; they fail closed until the bootstrap's real read-only pool is
+	// installed at assembly (alerts has no post-construction setter).
+	alertsService, err := alerts.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	serviceToken, err := os.ReadFile(config.SteleServiceTokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Seed a source with a bearer whose digest matches a known value.
+	// Seed a source with a bearer whose digest matches a known value. The
+	// create command verifies a real administrator session proof, so seed one
+	// and attach the execution metadata admission would provide.
+	now := "2026-09-14T00:00:00Z"
+	idle, absolute := "2036-09-14T00:00:00Z", "2036-09-21T00:00:00Z"
+	for _, statement := range []string{
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'fixture',1,'` + now + `','` + now + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'relay-fixture','` + now + `','` + now + `','` + idle + `','` + absolute + `')`,
+	} {
+		if _, err := database.SQL.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adminCtx, err := execution.WithMetadata(ctx, execution.Metadata{
+		CorrelationID: "stele-relay-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-stele-relay-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	bearer := "known-test-bearer-0123456789abcdef"
 	digest := sha256Sum(bearer)
-	result, err := alertsService.CreateSource(ctx, "test-source", "alertmanager", digest[:], 1, time.Now().UTC().Format(time.RFC3339Nano))
+	result, _, err := alertsService.CreateSource(adminCtx, "relay-seed-0001", "test-source", "alertmanager", digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}

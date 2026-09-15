@@ -8,6 +8,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
@@ -35,9 +36,18 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 	}
 	defer database.Close()
 
+	// Pure reads (slot View, alert snapshot and change log) fail closed until
+	// the bootstrap's real read-only pool is wired into both services; alerts
+	// has no post-construction setter, so it assembles with the pool directly.
 	slots := qruntime.NewService(database.SQL)
-	alertService := alerts.NewService(database.SQL)
-	service := NewRuntimeControl(slots, "test", "catalog", nil)
+	if err := slots.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	alertService, err := alerts.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewRuntimeControl(slots, "test", "catalog", nil, nil)
 	service.PlatformFaults = alerts.NewPlatformFaultReporter(alertService)
 	ctx := context.Background()
 

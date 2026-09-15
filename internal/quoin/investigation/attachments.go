@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // DefaultAttachmentLimitBytes is the deployment default for the message-level
@@ -44,25 +45,33 @@ type AttachmentView struct {
 	CreatedAt        string `json:"createdAt"`
 }
 
-// stagedReplay is one committed staging command's durable result
-// (the in-process ledger mirrors the create/send precedent; the frozen
-// client_commands table is persisted by a later ticket).
+// stagedReplay is the guard entry of one committed staging command: it lets
+// concurrent same-command uploads converge on the winner's attachment. It is
+// process-local best effort and never a durable command-outcome authority —
+// no result is ever replayed from it after a restart or eviction.
 type stagedReplay struct {
 	attachmentID int64
 	digest       string
 }
 
 // SetAttachmentStore wires the staging dependency and the deployment
-// message-level boundary (defaults apply when unset).
-func (service *Service) SetAttachmentStore(store *artifact.Store, limitBytes int64) {
+// message-level boundary (defaults apply when unset). If the family's
+// read-only reader is already installed it is forwarded to the store, so a
+// late-wired staging capability shares the one validated read-only gate.
+func (service *Service) SetAttachmentStore(store *artifact.Store, limitBytes int64) error {
 	service.attachmentMu.Lock()
-	defer service.attachmentMu.Unlock()
 	service.attachments = store
 	if limitBytes > 0 {
 		service.attachmentLimit = limitBytes
 	} else {
 		service.attachmentLimit = DefaultAttachmentLimitBytes
 	}
+	wired := service.wiredReader
+	service.attachmentMu.Unlock()
+	if wired != nil {
+		return store.SetReader(wired)
+	}
+	return nil
 }
 
 // StagedBody is one streamed-but-unsealed upload body (the multipart
@@ -89,14 +98,21 @@ func (service *Service) BeginAttachment(ctx context.Context, principalID int64, 
 }
 
 // CommitAttachment seals one staged body and registers the durable staging
-// object for the command. The replay ledger keys on (principal,
-// client_command_id); the digest covers the semantic fields — the
-// sanitized filename and the content digest/size (HTTP-COMMAND-002/003).
-// The whole seal+register runs inside one BEGIN IMMEDIATE transaction
-// with an in-transaction replay re-check: two concurrent uploads sharing
-// a command id serialize here, the loser replays the winner's attachment
-// and drops its own staged body instead of minting a second long-term
-// artifact (the same double-check pattern as Create/Send).
+// object through the execution runner as one audited, transient command
+// (Execute: no durable client-command ledger row, and no result payload is
+// persisted — the staged body exists only in memory until its bytes land in
+// the content-addressed store inside the guarded transaction). The command's
+// session proof is re-verified in-transaction and the automatic audit event
+// (investigation.attachment.stage) commits with the registration.
+//
+// stagedMu is a concurrency guard only, never the command-outcome authority:
+// it serializes the in-memory staged-body handoff so two concurrent uploads
+// sharing a command id converge on one registration — the loser reuses the
+// winner's attachment and drops its own staged body instead of minting a
+// second long-term artifact. It is process-local best effort (restart or
+// eviction simply registers fresh); no durable outcome is ever replayed from
+// it. A reused command id with different content stays a deterministic
+// conflict (HTTP-COMMAND-003).
 func (service *Service) CommitAttachment(ctx context.Context, principalID int64, clientCommandID, rawFilename string, staged *StagedBody) (AttachmentView, error) {
 	filename := artifact.SanitizeAttachmentFilename(rawFilename)
 	service.attachmentMu.Lock()
@@ -107,55 +123,34 @@ func (service *Service) CommitAttachment(ctx context.Context, principalID int64,
 		return AttachmentView{}, errors.New("attachment staging is not wired")
 	}
 	digest := attachmentCommandDigest(filename, staged.SHA256Hex, staged.SizeBytes)
-	if entry, ok, err := service.stagedLookup(principalID, clientCommandID, digest); err != nil {
-		staged.Abort()
-		return AttachmentView{}, err
-	} else if ok {
-		// Identical replay: the original staging object is the answer; the
-		// freshly streamed bytes are the same content, so drop them.
-		staged.Abort()
-		return service.AttachmentFor(ctx, principalID, entry.attachmentID)
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		staged.Abort()
-		return AttachmentView{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		staged.Abort()
-		return AttachmentView{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	service.stagedMu.Lock()
+	defer service.stagedMu.Unlock()
+	if entry, ok := service.staged[service.stagedKey(principalID, clientCommandID)]; ok {
+		if entry.digest != digest {
+			staged.Abort()
+			return AttachmentView{}, ErrCommandReused
 		}
-	}()
-	// In-transaction replay re-check: the serialized writer decides.
-	if entry, ok, err := service.stagedLookup(principalID, clientCommandID, digest); err != nil {
-		return AttachmentView{}, err
-	} else if ok {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return AttachmentView{}, err
-		}
-		committed = true
+		// Same-command convergence inside the guard: the freshly streamed
+		// bytes are the same content, so drop them and answer the winner.
 		staged.Abort()
 		return service.AttachmentFor(ctx, principalID, entry.attachmentID)
 	}
 	if err := staged.Seal(); err != nil {
 		return AttachmentView{}, err
 	}
-	record, err := store.CommitAttachmentTransaction(ctx, conn, principalID, filename, staged.SHA256Hex, staged.SizeBytes)
+	type registered struct {
+		Record artifact.AttachmentRecord
+	}
+	value, err := execution.Execute(ctx, service.runner, service.opStage, func(tx *execution.Tx) (registered, error) {
+		record, err := store.CommitAttachmentTransaction(ctx, tx, principalID, filename, staged.SHA256Hex, staged.SizeBytes)
+		return registered{Record: record}, err
+	}, func(value registered) int64 { return value.Record.ID })
 	if err != nil {
+		staged.Abort()
 		return AttachmentView{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return AttachmentView{}, err
-	}
-	committed = true
-	service.stagedRemember(principalID, clientCommandID, stagedReplay{attachmentID: record.ID, digest: digest})
-	return attachmentView(record), nil
+	service.staged[service.stagedKey(principalID, clientCommandID)] = stagedReplay{attachmentID: value.Record.ID, digest: digest}
+	return attachmentView(value.Record), nil
 }
 
 // StageAttachment is the one-shot staging path (begin + commit) for
@@ -265,30 +260,8 @@ func (service *Service) resolveAttachments(ctx context.Context, queries queryer,
 // attachments.go keeps the other staged-attachment helpers; the removed
 // placeholder comment about newBool is gone with the type itself.
 
-func (service *Service) stagedLookup(principalID int64, commandID, digest string) (stagedReplay, bool, error) {
-	service.replayMu.Lock()
-	defer service.replayMu.Unlock()
-	entry, ok := service.staged[service.replayKey(principalID, commandID)]
-	if !ok {
-		return stagedReplay{}, false, nil
-	}
-	if entry.digest != digest {
-		return stagedReplay{}, false, ErrCommandReused
-	}
-	return entry, true, nil
-}
-
-func (service *Service) stagedRemember(principalID int64, commandID string, entry stagedReplay) {
-	service.replayMu.Lock()
-	defer service.replayMu.Unlock()
-	key := service.replayKey(principalID, commandID)
-	if _, exists := service.staged[key]; !exists && len(service.staged) >= 1024 {
-		for victim := range service.staged {
-			delete(service.staged, victim)
-			break
-		}
-	}
-	service.staged[key] = entry
+func (service *Service) stagedKey(principalID int64, commandID string) string {
+	return strconv.FormatInt(principalID, 10) + ":" + commandID
 }
 
 func attachmentView(record artifact.AttachmentRecord) AttachmentView {

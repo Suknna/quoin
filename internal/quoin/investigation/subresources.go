@@ -18,7 +18,7 @@ func (service *Service) ListMessages(ctx context.Context, investigationID int64,
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id, seq, role, status, content, parent_message_id, attempt_id, created_at
 		FROM investigation_messages WHERE investigation_id=? AND seq>?
 		ORDER BY seq LIMIT ?`, investigationID, afterSeq, limit+1)
@@ -76,7 +76,7 @@ func (service *Service) attachAttachments(ctx context.Context, items []Investiga
 	for _, id := range ids {
 		arguments = append(arguments, id)
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT a.message_id, t.id, t.artifact_id, t.original_filename, ar.media_type,
 		       t.size_bytes, t.digest, ar.body_expired, t.uploaded_at
 		FROM investigation_message_attachments a
@@ -123,7 +123,7 @@ func (service *Service) attachEvidence(ctx context.Context, items []Investigatio
 	for _, id := range ids {
 		arguments = append(arguments, id)
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT message_id, evidence_id FROM investigation_message_evidence
 		WHERE message_id IN (`+placeholders+`) ORDER BY message_id, ordinal`, arguments...)
 	if err != nil {
@@ -152,7 +152,7 @@ func (service *Service) ListAttempts(ctx context.Context, investigationID int64,
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id, attempt_type, state, row_version, started_at, ended_at, termination_reason, created_at
 		FROM execution_attempts
 		WHERE scope_type='investigation' AND scope_id=? AND id>?
@@ -185,7 +185,7 @@ func (service *Service) ListAttempts(ctx context.Context, investigationID int64,
 func (service *Service) AttemptView(ctx context.Context, investigationID, attemptID int64) (InvestigationAttemptItem, error) {
 	var item InvestigationAttemptItem
 	var id int64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT id, attempt_type, state, row_version, started_at, ended_at, termination_reason, created_at
 		FROM execution_attempts
 		WHERE id=? AND scope_type='investigation' AND scope_id=?`, attemptID, investigationID).
@@ -206,7 +206,7 @@ func (service *Service) ListToolCalls(ctx context.Context, attemptID int64, afte
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id, attempt_id, model_call_id, call_seq, tool_index, provider_tool_call_id,
 		       tool_name, tool_version, arguments_json, execution_mode, failure_mode, status,
 		       row_version, result_json, result_artifact_id, error_detail, started_at, ended_at, created_at
@@ -256,7 +256,7 @@ func (service *Service) MessageFor(ctx context.Context, investigationID, message
 	var item InvestigationMessageItem
 	var id int64
 	var parentID, attemptID sql.NullInt64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT id, seq, role, status, content, parent_message_id, attempt_id, created_at
 		FROM investigation_messages WHERE id=? AND investigation_id=?`, messageID, investigationID).
 		Scan(&id, &item.Seq, &item.Role, &item.Status, &item.Content, &parentID, &attemptID, &item.CreatedAt)
@@ -291,7 +291,7 @@ func (service *Service) MessageFor(ctx context.Context, investigationID, message
 func (service *Service) MessageAttempt(ctx context.Context, investigationID, messageID int64) (int64, error) {
 	var bound sql.NullInt64
 	var latestActiveUser sql.NullInt64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT m.attempt_id, (
 			SELECT n.id FROM investigation_messages n
 			WHERE n.investigation_id=m.investigation_id AND n.status='active' AND n.role='user'

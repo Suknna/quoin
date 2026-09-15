@@ -309,7 +309,7 @@ func TestReleasedSchemaMigrationRollsBackWhenCompletionCannotExitMaintenance(t *
 		t.Fatal(err)
 	}
 	completionFailure := errors.New("simulated_crash_before_maintenance_exit")
-	if _, err := migrateReleasedSchemaTransaction(context.Background(), db, migrateDirectInvestigationMetricsOn, func(context.Context, *sql.Conn, LegacyMigrationReport) error { return completionFailure }); !errors.Is(err, completionFailure) {
+	if _, err := migrateReleasedSchemaTransaction(context.Background(), db, Options{}, migrateDirectInvestigationMetricsOn, func(context.Context, *sql.Conn, LegacyMigrationReport) error { return completionFailure }); !errors.Is(err, completionFailure) {
 		t.Fatalf("migration error=%v", err)
 	}
 	var digest string

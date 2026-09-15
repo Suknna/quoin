@@ -15,7 +15,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 // Ledger outcomes (client_commands.outcome CHECK).
@@ -73,22 +72,6 @@ func lookupCommand(ctx context.Context, reader commandReader, principalID int64,
 	record.ResultObjectID = objectID.Int64
 	record.ResultPayload = payload.String
 	return record, true, nil
-}
-
-// RecordCommand inserts the ledger row inside the caller's open IMMEDIATE
-// transaction so the command outcome commits atomically with the domain write
-// and its audit event (DATA-AUDIT-004/005).
-func RecordCommand(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, commandType, digest, outcome, objectType string, objectID int64, payload string) error {
-	var objectTypeArg, payloadArg any
-	if objectType != "" {
-		objectTypeArg = objectType
-	}
-	if payload != "" {
-		payloadArg = payload
-	}
-	_, err := conn.ExecContext(ctx, `INSERT INTO client_commands(principal_type,principal_id,client_command_id,command_type,request_digest,outcome,result_object_type,result_object_id,result_payload_json,created_at) VALUES('user',?,?,?,?,?,?,?,?,?)`,
-		principalID, clientCommandID, commandType, digest, outcome, objectTypeArg, objectID, payloadArg, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
 }
 
 // DigestCommand builds the non-secret canonical request digest: the command

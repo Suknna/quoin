@@ -3,6 +3,13 @@ package knowledge
 // Import batches are the only path by which pasted source material reaches an
 // agent. The model proposes drafts; it never inserts reusable knowledge. A
 // human confirmation remains the publication boundary.
+//
+// StartImport 通过共享执行器 Run 执行：会话复核、幂等重放、业务修改、台账与
+// 审计统一提交；抽取 Attempt 经 attempt.CreateOn 创建，在同事务持久化用户
+// 操作关联（ADR-0006）。抽取结果应用（CommitExtraction 等）是后台 Attempt
+// 生命周期：执行器 Execute 以系统主体运行，关联从持久化 Attempt 恢复
+// （attempt.LoadCorrelation），无关联的历史 Attempt 显式建立独立任务窗口，
+// 绝不静默伪装用户身份。
 
 import (
 	"context"
@@ -17,7 +24,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
-	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const (
@@ -26,11 +34,6 @@ const (
 	importInputKind        = "knowledge_extraction_v1"
 	importRendererVersion  = "knowledge-extraction-v1"
 	importResultKind       = "knowledge_extraction_result_v1"
-	ledgerImport           = "knowledge_import.create"
-	ledgerBatchConfirm     = "knowledge_import.confirm"
-	ledgerBatchCancel      = "knowledge_import.cancel"
-	ledgerStopReuse        = "knowledge_version.stop_reuse"
-	ledgerCreateRevision   = "knowledge_revision.create"
 )
 
 var (
@@ -111,103 +114,70 @@ type extractionProposal struct {
 // chat attempt in one transaction. Nothing is written if provider selection
 // fails, preventing stranded batches which cannot be processed.
 func (service *Service) StartImport(ctx context.Context, principalID int64, commandID, text string) (ImportResult, error) {
-	return service.StartImportAs(ctx, MutationActor{ID: principalID}, commandID, text)
-}
-
-func (service *Service) StartImportAs(ctx context.Context, actor MutationActor, commandID, text string) (ImportResult, error) {
-	principalID := actor.ID
 	empty := strings.TrimSpace(text) == ""
-	digest := commandDigest(ledgerImport, map[string]any{"text": text})
-	if record, ok, err := auth.LookupCommand(ctx, service.db, principalID, commandID); err != nil {
-		return ImportResult{}, err
-	} else if ok {
-		return replayImport(record, digest)
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return ImportResult{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return ImportResult{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	digest := commandDigest(opImport, map[string]any{"text": text})
+	outcome, err := execution.Run(ctx, service.runner, service.startImport, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: commandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (ImportResult, execution.Change, error) {
+		if empty {
+			return ImportResult{}, execution.Changed, rejectionOf(0, ErrEmptyImport)
 		}
-	}()
-	if err := verifyMutationActorOn(ctx, conn, actor); err != nil {
-		return ImportResult{}, err
-	}
-	if record, ok, err := authLookup(ctx, conn, principalID, commandID); err != nil {
-		return ImportResult{}, err
-	} else if ok {
-		result, replayErr := replayImport(record, digest)
-		if replayErr == nil {
-			_, replayErr = conn.ExecContext(ctx, "COMMIT")
-			committed = replayErr == nil
+		provider, err := selectImportProvider(ctx, tx)
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
 		}
-		return result, replayErr
-	}
-	if empty {
-		return ImportResult{}, rejectScopedCommand(ctx, conn, principalID, commandID, ledgerImport, digest, "knowledge_import_batch", 0, service.nowText(), ErrEmptyImport)
-	}
-	provider, err := selectImportProvider(ctx, conn)
+		now := service.nowText()
+		materialDigest := sha256.Sum256([]byte(text))
+		material, err := tx.ExecContext(ctx, `INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at)
+			VALUES('knowledge_import',?,?,?,?,?)`, hex.EncodeToString(materialDigest[:]), len([]byte(text)), text, principalID, now)
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		materialID, err := material.LastInsertId()
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		batch, err := tx.ExecContext(ctx, `INSERT INTO knowledge_import_batches(source_material_id,state,created_by,created_at)
+			VALUES(?, 'Processing', ?, ?)`, materialID, principalID, now)
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		batchID, err := batch.LastInsertId()
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		// attempt.CreateOn persists the caller's operation correlation onto the
+		// new attempt in this same transaction (ADR-0006); the user's import
+		// stays the correlation authority for its extraction lifecycle.
+		attemptID, err := service.insertImportAttempt(ctx, tx, batchID, materialID, text, provider, now)
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		detail, err := scanBatchDetailOn(ctx, tx, batchID)
+		if err != nil {
+			return ImportResult{}, execution.Changed, err
+		}
+		return ImportResult{Batch: detail, AttemptID: attemptID}, execution.Changed, nil
+	}, func(result ImportResult) int64 {
+		if result.Batch.ID == "" {
+			return 0
+		}
+		return parseCandidateLocator(result.Batch.ID)
+	})
 	if err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, service.translateCommandError(ctx, err)
 	}
-	now := service.nowText()
-	materialDigest := sha256.Sum256([]byte(text))
-	material, err := conn.ExecContext(ctx, `INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at)
-		VALUES('knowledge_import',?,?,?,?,?)`, hex.EncodeToString(materialDigest[:]), len([]byte(text)), text, principalID, now)
-	if err != nil {
-		return ImportResult{}, err
-	}
-	materialID, err := material.LastInsertId()
-	if err != nil {
-		return ImportResult{}, err
-	}
-	batch, err := conn.ExecContext(ctx, `INSERT INTO knowledge_import_batches(source_material_id,state,created_by,created_at)
-		VALUES(?, 'Processing', ?, ?)`, materialID, principalID, now)
-	if err != nil {
-		return ImportResult{}, err
-	}
-	batchID, err := batch.LastInsertId()
-	if err != nil {
-		return ImportResult{}, err
-	}
-	attemptID, err := service.insertImportAttempt(ctx, conn, batchID, materialID, text, provider, now)
-	if err != nil {
-		return ImportResult{}, err
-	}
-	batchRowVersion := int64(1)
-	if err := recordAudit(ctx, conn, principalID, commandID, ledgerImport, "knowledge_import_batch", batchID, &batchRowVersion, now); err != nil {
-		return ImportResult{}, err
-	}
-	detail, err := scanBatchDetailOn(ctx, conn, batchID)
-	if err != nil {
-		return ImportResult{}, err
-	}
-	payload, err := json.Marshal(ImportResult{Batch: detail, AttemptID: attemptID})
-	if err != nil {
-		return ImportResult{}, err
-	}
-	if err := recordCommand(ctx, conn, principalID, commandID, ledgerImport, digest, authOutcomeCommitted, "knowledge_import_batch", batchID, string(payload)); err != nil {
-		return ImportResult{}, err
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return ImportResult{}, err
-	}
-	committed = true
-	return ImportResult{Batch: detail, AttemptID: attemptID}, nil
+	return outcome.Result, nil
 }
 
-func selectImportProvider(ctx context.Context, conn *sql.Conn) (importProvider, error) {
+func selectImportProvider(ctx context.Context, q audit.Reader) (importProvider, error) {
 	var selected importProvider
 	var qualificationVersion, connectionVersion int64
 	var outcome string
-	err := conn.QueryRowContext(ctx, `SELECT c.id,c.current_revision_id,c.current_credential_generation_id,q.probe_result_id,q.enabled_row_version,c.row_version,p.outcome
+	err := q.QueryRowContext(ctx, `SELECT c.id,c.current_revision_id,c.current_credential_generation_id,q.probe_result_id,q.enabled_row_version,c.row_version,p.outcome
 		FROM connections c JOIN connection_enable_qualifications q ON q.connection_id=c.id
 		JOIN connection_probe_results p ON p.id=q.probe_result_id
 		WHERE c.type='model_provider' AND c.enabled=1 AND c.revalidation_required=0 ORDER BY q.id DESC LIMIT 1`).
@@ -222,7 +192,7 @@ func selectImportProvider(ctx context.Context, conn *sql.Conn) (importProvider, 
 		return selected, ErrModelProviderMissing
 	}
 	var nativeTools bool
-	err = conn.QueryRowContext(ctx, `SELECT chat_model_id,context_budget_tokens,max_output_tokens,native_tool_calling_supported
+	err = q.QueryRowContext(ctx, `SELECT chat_model_id,context_budget_tokens,max_output_tokens,native_tool_calling_supported
 		FROM model_provider_connection_probe_results WHERE probe_result_id=?`, selected.ProbeResultID).
 		Scan(&selected.ChatModelID, &selected.ContextBudget, &selected.MaxOutput, &nativeTools)
 	if err != nil {
@@ -234,13 +204,13 @@ func selectImportProvider(ctx context.Context, conn *sql.Conn) (importProvider, 
 	return selected, nil
 }
 
-func (service *Service) insertImportAttempt(ctx context.Context, conn *sql.Conn, batchID, materialID int64, text string, provider importProvider, now string) (int64, error) {
-	insert, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
-		VALUES('knowledge_extraction','knowledge_import_batch',?,'Queued',?,?,?)`, batchID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
-	if err != nil {
-		return 0, err
-	}
-	attemptID, err := insert.LastInsertId()
+func (service *Service) insertImportAttempt(ctx context.Context, w execution.Executor, batchID, materialID int64, text string, provider importProvider, now string) (int64, error) {
+	// attempt.CreateOn centrally persists the caller's correlation metadata
+	// onto the new attempt in this same transaction (ADR-0006).
+	attemptID, err := attempt.CreateOn(ctx, w, `
+		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
+		VALUES('knowledge_extraction','knowledge_import_batch',?,'Queued',?,?,?)`,
+		batchID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
 	if err != nil {
 		return 0, err
 	}
@@ -257,7 +227,7 @@ func (service *Service) insertImportAttempt(ctx context.Context, conn *sql.Conn,
 		return 0, err
 	}
 	sum := sha256.Sum256(canonical)
-	snapshot, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
+	snapshot, err := w.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
 		VALUES(?,?,?,?,?,?)`, attemptID, importInputKind, importRendererVersion, hex.EncodeToString(sum[:]), string(catalogDocument), now)
 	if err != nil {
 		return 0, err
@@ -267,16 +237,16 @@ func (service *Service) insertImportAttempt(ctx context.Context, conn *sql.Conn,
 		return 0, err
 	}
 	batchDigest := sha256.Sum256([]byte(fmt.Sprintf("knowledge-import-batch:%d", batchID)))
-	if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,knowledge_import_batch_id)
+	if _, err = w.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,knowledge_import_batch_id)
 		VALUES(?,1,'knowledge_import_batch',?,?)`, snapshotID, hex.EncodeToString(batchDigest[:]), batchID); err != nil {
 		return 0, err
 	}
 	materialDigest := sha256.Sum256([]byte(fmt.Sprintf("source-material:%d", materialID)))
-	if _, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,source_material_id)
+	if _, err = w.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,source_material_id)
 		VALUES(?,2,'source_material',?,?)`, snapshotID, hex.EncodeToString(materialDigest[:]), materialID); err != nil {
 		return 0, err
 	}
-	_, err = conn.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
+	_, err = w.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?,'chat_model',?,?,?,?,?)`, attemptID, provider.ConnectionID, provider.RevisionID, provider.CredentialGen, provider.ProbeResultID, now)
 	return attemptID, err
 }
@@ -285,7 +255,7 @@ func (service *Service) insertImportAttempt(ctx context.Context, conn *sql.Conn,
 // source/batch records; dispatch rejects any drift.
 func (service *Service) RebuildImportInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	var input importInput
-	err := service.db.QueryRowContext(ctx, `SELECT a.id,b.id,b.generation,s.id,s.content FROM execution_attempts a
+	err := service.reader.QueryRowContext(ctx, `SELECT a.id,b.id,b.generation,s.id,s.content FROM execution_attempts a
 		JOIN knowledge_import_batches b ON b.id=a.scope_id JOIN source_materials s ON s.id=b.source_material_id
 		WHERE a.id=? AND a.attempt_type='knowledge_extraction' AND a.scope_type='knowledge_import_batch'`, attemptID).
 		Scan(&input.AttemptID, &input.BatchID, &input.Generation, &input.SourceMaterialID, &input.Text)
@@ -300,7 +270,7 @@ func (service *Service) RebuildImportInput(ctx context.Context, attemptID int64)
 	input.ModelContract.ModelID, input.ModelContract.ContextBudgetTokens, input.ModelContract.MaxOutputTokens = modelID, budget, maximum
 	// The frozen catalog travels with the attempt: stored document only,
 	// never re-derived from current enablement.
-	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.db, attemptID)
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.writer, attemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -308,8 +278,52 @@ func (service *Service) RebuildImportInput(ctx context.Context, attemptID int64)
 	return json.Marshal(input)
 }
 
+// taskContext restores the persisted operation correlation of an extraction
+// attempt so the background result application stays linked to the user
+// operation that created it (ADR-0006 lifecycle correlation). A wired caller
+// context passes through untouched; a legacy attempt without a persisted
+// correlation gets an explicit fresh task window (never a fabricated user).
+func (service *Service) taskContext(ctx context.Context, attemptID int64) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	correlation, found, err := attempt.LoadCorrelation(ctx, service.writer, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	requestID := fmt.Sprintf("extraction-%d", attemptID)
+	actor := execution.Principal{Kind: execution.PrincipalSystem}
+	initiator := actor
+	source := execution.Source{Kind: execution.SourceTask, RequestID: requestID}
+	if found && correlation.OperationCorrelationID != "" {
+		source.RequestID = fmt.Sprintf("task-%s", correlation.OperationCorrelationID)
+		switch correlation.InitiatorType {
+		case string(execution.PrincipalUser), string(execution.PrincipalService):
+			initiator = execution.Principal{Kind: execution.PrincipalKind(correlation.InitiatorType), ID: correlation.InitiatorID}
+		}
+		return execution.WithMetadata(ctx, execution.Metadata{
+			CorrelationID: correlation.OperationCorrelationID,
+			Actor:         actor,
+			Initiator:     initiator,
+			Source:        source,
+		})
+	}
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, err
+	}
+	return execution.WithMetadata(ctx, execution.Metadata{
+		CorrelationID: correlationID,
+		Actor:         actor,
+		Initiator:     initiator,
+		Source:        source,
+	})
+}
+
 // CommitExtraction validates a typed worker proposal then atomically stores the
-// immutable suggestions, transitions the batch and seals the attempt.
+// immutable suggestions, transitions the batch and seals the attempt. The
+// application runs through the shared runner as an audited system operation
+// whose correlation is restored from the persisted attempt.
 func (service *Service) CommitExtraction(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
@@ -336,92 +350,77 @@ func (service *Service) CommitExtraction(ctx context.Context, attemptID int64, b
 			}
 		}
 	}
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.taskContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, err = execution.Execute(ctx, service.runner, service.extractionDone, func(tx *execution.Tx) (int64, error) {
+		var batchID, materialID, generation int64
+		var state, attemptState, callState string
+		var leaseUntil sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT a.scope_id,a.state,a.lease_until,b.source_material_id,b.generation,b.state,m.status
+			FROM execution_attempts a JOIN knowledge_import_batches b ON b.id=a.scope_id JOIN model_calls m ON m.id=? AND m.attempt_id=a.id
+			WHERE a.id=? AND a.attempt_type='knowledge_extraction' AND a.boot_id=? AND a.connection_epoch=?`, proposal.ModelCallID, attemptID, bootID, epoch).
+			Scan(&batchID, &attemptState, &leaseUntil, &materialID, &generation, &state, &callState)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, attempt.ErrLateResult
 		}
-	}()
-	var batchID, materialID, generation int64
-	var state, attemptState, callState string
-	var leaseUntil sql.NullString
-	err = conn.QueryRowContext(ctx, `SELECT a.scope_id,a.state,a.lease_until,b.source_material_id,b.generation,b.state,m.status
-		FROM execution_attempts a JOIN knowledge_import_batches b ON b.id=a.scope_id JOIN model_calls m ON m.id=? AND m.attempt_id=a.id
-		WHERE a.id=? AND a.attempt_type='knowledge_extraction' AND a.boot_id=? AND a.connection_epoch=?`, proposal.ModelCallID, attemptID, bootID, epoch).
-		Scan(&batchID, &attemptState, &leaseUntil, &materialID, &generation, &state, &callState)
-	if errors.Is(err, sql.ErrNoRows) {
-		return attempt.ErrLateResult
-	}
-	if err != nil {
-		return err
-	}
-	if batchID != proposal.BatchID || callState != "succeeded" {
-		return attempt.ErrLateResult
-	}
-	// ResultAck delivery is retried on the Runtime control stream. A retry of
-	// the attempt's sealed adjudication is accepted by frozen identity alone —
-	// never on the batch's later lifecycle or the remaining lease. The sealed
-	// digest covers the complete raw proposal (items and the binding model
-	// call), so any divergent payload — edited content, item-count change or a
-	// re-bind onto another succeeded model call — is a late result
-	// (RUNTIME-TASK-008, DATA-ATTEMPT-004).
-	if attemptState == "Succeeded" {
-		if sealedErr := service.matchesSealedSuggestion(ctx, conn, batchID, generation, proposal.ModelCallID, proposal.Items); sealedErr != nil {
-			return sealedErr
+		if err != nil {
+			return 0, err
 		}
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return err
+		if batchID != proposal.BatchID || callState != "succeeded" {
+			return 0, attempt.ErrLateResult
 		}
-		committed = true
-		return nil
-	}
-	if attemptState != "Running" || state != "Processing" {
-		return attempt.ErrLateResult
-	}
-	// RFC3339Nano has variable fractional digits, so TEXT order is not time
-	// order: the deadline is parsed and compared as a Go time. An expired
-	// lease is a late result even before the sweeper converges the row.
-	if !leaseUntil.Valid {
-		return attempt.ErrLateResult
-	}
-	deadline, deadlineErr := time.Parse(time.RFC3339Nano, leaseUntil.String)
-	now, nowErr := time.Parse(time.RFC3339Nano, service.nowText())
-	if deadlineErr != nil || nowErr != nil || !deadline.After(now) {
-		return attempt.ErrLateResult
-	}
-	for _, item := range proposal.Items {
-		suggestion, scope, buildErr := buildSuggestion(materialID, proposal.ModelCallID, item.Title, item.Body, item.Scope)
-		if buildErr != nil {
-			return buildErr
+		// ResultAck delivery is retried on the Runtime control stream. A retry of
+		// the attempt's sealed adjudication is accepted by frozen identity alone —
+		// never on the batch's later lifecycle or the remaining lease. The sealed
+		// digest covers the complete raw proposal (items and the binding model
+		// call), so any divergent payload — edited content, item-count change or a
+		// re-bind onto another succeeded model call — is a late result
+		// (RUNTIME-TASK-008, DATA-ATTEMPT-004).
+		if attemptState == "Succeeded" {
+			if sealedErr := service.matchesSealedSuggestion(ctx, tx, batchID, generation, proposal.ModelCallID, proposal.Items); sealedErr != nil {
+				return 0, sealedErr
+			}
+			return batchID, nil
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_scope_json,draft_revision,created_by,created_at)
-			VALUES(?,?,?,?,'AwaitingConfirmation',?,?,?,?,0,?,?)`, batchID, SourceMaterial, materialID, generation, suggestion, item.Title, item.Body, scope, nil, service.nowText()); err != nil {
-			return err
+		if attemptState != "Running" || state != "Processing" {
+			return 0, attempt.ErrLateResult
 		}
-	}
-	if _, err = conn.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); err != nil {
-		return err
-	}
-	result, updateErr := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Succeeded',ended_at=?,row_version=row_version+1 WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, service.nowText(), attemptID, bootID, epoch)
-	if updateErr != nil {
-		return updateErr
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return attempt.ErrLateResult
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		// RFC3339Nano has variable fractional digits, so TEXT order is not time
+		// order: the deadline is parsed and compared as a Go time. An expired
+		// lease is a late result even before the sweeper converges the row.
+		if !leaseUntil.Valid {
+			return 0, attempt.ErrLateResult
+		}
+		deadline, deadlineErr := time.Parse(time.RFC3339Nano, leaseUntil.String)
+		now, nowErr := time.Parse(time.RFC3339Nano, service.nowText())
+		if deadlineErr != nil || nowErr != nil || !deadline.After(now) {
+			return 0, attempt.ErrLateResult
+		}
+		for _, item := range proposal.Items {
+			suggestion, scope, buildErr := buildSuggestion(materialID, proposal.ModelCallID, item.Title, item.Body, item.Scope)
+			if buildErr != nil {
+				return 0, buildErr
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,generation,state,original_suggestion_json,draft_title,draft_body,draft_scope_json,draft_revision,created_by,created_at)
+				VALUES(?,?,?,?,'AwaitingConfirmation',?,?,?,?,0,?,?)`, batchID, SourceMaterial, materialID, generation, suggestion, item.Title, item.Body, scope, nil, service.nowText()); err != nil {
+				return 0, err
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); err != nil {
+			return 0, err
+		}
+		result, updateErr := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Succeeded',ended_at=?,row_version=row_version+1 WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, service.nowText(), attemptID, bootID, epoch)
+		if updateErr != nil {
+			return 0, updateErr
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return 0, attempt.ErrLateResult
+		}
+		return batchID, nil
+	}, func(batchID int64) int64 { return batchID })
+	return err
 }
 
 func scopeOrEmpty(scope any) []byte {
@@ -429,20 +428,6 @@ func scopeOrEmpty(scope any) []byte {
 		return []byte(value)
 	}
 	return []byte("{}")
-}
-
-func replayImport(record authRecord, digest string) (ImportResult, error) {
-	if record.RequestDigest != digest || record.ResultObjectType != "knowledge_import_batch" {
-		return ImportResult{}, ErrCommandReused
-	}
-	if record.Outcome != authOutcomeCommitted {
-		return ImportResult{}, replayRejection(record.ResultPayload)
-	}
-	var result ImportResult
-	if err := json.Unmarshal([]byte(record.ResultPayload), &result); err != nil {
-		return ImportResult{}, err
-	}
-	return result, nil
 }
 
 func scanBatchSummary(scan func(...any) error) (ImportBatchSummary, error) {
@@ -454,12 +439,12 @@ func scanBatchSummary(scan func(...any) error) (ImportBatchSummary, error) {
 	return ImportBatchSummary{ID: fmt.Sprintf("%d", id), State: state, RowVersion: rowVersion, Generation: generation, CreatedAt: createdAt}, nil
 }
 
-func scanBatchDetailOn(ctx context.Context, conn *sql.Conn, batchID int64) (ImportBatchDetail, error) {
-	batch, err := scanBatchSummary(conn.QueryRowContext(ctx, `SELECT id,state,row_version,generation,created_at FROM knowledge_import_batches WHERE id=?`, batchID).Scan)
+func scanBatchDetailOn(ctx context.Context, q audit.Reader, batchID int64) (ImportBatchDetail, error) {
+	batch, err := scanBatchSummary(q.QueryRowContext(ctx, `SELECT id,state,row_version,generation,created_at FROM knowledge_import_batches WHERE id=?`, batchID).Scan)
 	if err != nil {
 		return ImportBatchDetail{}, err
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.import_batch_id=? ORDER BY c.id`, batchID)
+	rows, err := q.QueryContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.import_batch_id=? ORDER BY c.id`, batchID)
 	if err != nil {
 		return ImportBatchDetail{}, err
 	}
@@ -479,12 +464,7 @@ func scanBatchDetailOn(ctx context.Context, conn *sql.Conn, batchID int64) (Impo
 }
 
 func (service *Service) GetImportBatch(ctx context.Context, batchID int64) (ImportBatchDetail, error) {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return ImportBatchDetail{}, err
-	}
-	defer conn.Close()
-	detail, err := scanBatchDetailOn(ctx, conn, batchID)
+	detail, err := scanBatchDetailOn(ctx, service.reader, batchID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ImportBatchDetail{}, ErrNotFound
 	}
@@ -517,7 +497,7 @@ func (service *Service) ListImportBatches(ctx context.Context, state string, aft
 		args = append(args, after.CreatedAt, after.CreatedAt, after.ID)
 	}
 	args = append(args, limit+1)
-	rows, err := service.db.QueryContext(ctx, `SELECT id,state,row_version,generation,created_at FROM knowledge_import_batches WHERE 1=1`+where+` ORDER BY created_at DESC,id DESC LIMIT ?`, args...)
+	rows, err := service.reader.QueryContext(ctx, `SELECT id,state,row_version,generation,created_at FROM knowledge_import_batches WHERE 1=1`+where+` ORDER BY created_at DESC,id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -575,12 +555,13 @@ func buildSuggestion(materialID, modelCallID int64, title, body string, rawScope
 // attempt's original adjudication: every item must reproduce, in order, the
 // immutable suggestion sealed with its candidate. A divergent payload for the
 // same attempt identity is a late result, never a re-acknowledged success.
-func (service *Service) matchesSealedSuggestion(ctx context.Context, conn *sql.Conn, batchID, generation, modelCallID int64, items []struct {
+func (service *Service) matchesSealedSuggestion(ctx context.Context, q audit.Reader, batchID, generation, modelCallID int64, items []struct {
 	Title string          `json:"title"`
 	Body  string          `json:"body"`
 	Scope json.RawMessage `json:"scope,omitempty"`
-}) error {
-	rows, err := conn.QueryContext(ctx, `SELECT original_suggestion_json FROM knowledge_candidates WHERE import_batch_id=? AND generation=? ORDER BY id`, batchID, generation)
+},
+) error {
+	rows, err := q.QueryContext(ctx, `SELECT original_suggestion_json FROM knowledge_candidates WHERE import_batch_id=? AND generation=? ORDER BY id`, batchID, generation)
 	if err != nil {
 		return err
 	}
@@ -653,67 +634,55 @@ func canonicalSuggestionContent(suggestion string) (string, error) {
 // owner to make progress. Replay of the already-committed failure is
 // idempotent by frozen attempt identity and termination reason; an expired
 // lease is a late result even before the sweeper converges the row
-// (RUNTIME-TASK-008).
+// (RUNTIME-TASK-008). The audited system step restores the attempt's
+// persisted correlation.
 func (service *Service) FailExtraction(ctx context.Context, attemptID int64, bootID string, epoch uint64, termination string) error {
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.taskContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, execErr := execution.Execute(ctx, service.runner, service.extractionFail, func(tx *execution.Tx) (int64, error) {
+		var batchID int64
+		var attemptState string
+		var priorTermination sql.NullString
+		var leaseUntil sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT scope_id,state,termination_reason,lease_until FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).
+			Scan(&batchID, &attemptState, &priorTermination, &leaseUntil); errors.Is(err, sql.ErrNoRows) {
+			return 0, attempt.ErrLateResult
+		} else if err != nil {
+			return 0, err
 		}
-	}()
-	var batchID int64
-	var attemptState string
-	var priorTermination sql.NullString
-	var leaseUntil sql.NullString
-	if err = conn.QueryRowContext(ctx, `SELECT scope_id,state,termination_reason,lease_until FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).
-		Scan(&batchID, &attemptState, &priorTermination, &leaseUntil); errors.Is(err, sql.ErrNoRows) {
-		return attempt.ErrLateResult
-	} else if err != nil {
-		return err
-	}
-	if attemptState == "Failed" {
-		// A redelivered failure proposal replays the original adjudication.
-		if !priorTermination.Valid || priorTermination.String != termination {
-			return attempt.ErrLateResult
+		if attemptState == "Failed" {
+			// A redelivered failure proposal replays the original adjudication.
+			if !priorTermination.Valid || priorTermination.String != termination {
+				return 0, attempt.ErrLateResult
+			}
+			return batchID, nil
 		}
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return err
+		if attemptState != "Running" {
+			return 0, attempt.ErrLateResult
 		}
-		committed = true
-		return nil
-	}
-	if attemptState != "Running" {
-		return attempt.ErrLateResult
-	}
-	if !leaseUntil.Valid {
-		return attempt.ErrLateResult
-	}
-	deadline, deadlineErr := time.Parse(time.RFC3339Nano, leaseUntil.String)
-	now, nowErr := time.Parse(time.RFC3339Nano, service.nowText())
-	if deadlineErr != nil || nowErr != nil || !deadline.After(now) {
-		return attempt.ErrLateResult
-	}
-	if err = service.Attempts().CommitResultOn(ctx, conn, attemptID, bootID, epoch, false, termination); err != nil {
-		return err
-	}
-	result, err := conn.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID)
-	if err != nil {
-		return err
-	}
-	if changed, _ := result.RowsAffected(); changed != 1 {
-		return attempt.ErrLateResult
-	}
-	_, err = conn.ExecContext(ctx, "COMMIT")
-	committed = err == nil
-	return err
+		if !leaseUntil.Valid {
+			return 0, attempt.ErrLateResult
+		}
+		deadline, deadlineErr := time.Parse(time.RFC3339Nano, leaseUntil.String)
+		now, nowErr := time.Parse(time.RFC3339Nano, service.nowText())
+		if deadlineErr != nil || nowErr != nil || !deadline.After(now) {
+			return 0, attempt.ErrLateResult
+		}
+		if err := service.attempts.CommitResultOn(ctx, tx, attemptID, bootID, epoch, false, termination); err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID)
+		if err != nil {
+			return 0, err
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return 0, attempt.ErrLateResult
+		}
+		return batchID, nil
+	}, func(batchID int64) int64 { return batchID })
+	return execErr
 }
 
 // RejectExtraction atomically closes a dispatched import after a terminal
@@ -726,81 +695,59 @@ func (service *Service) RejectExtraction(ctx context.Context, attemptID int64, b
 	if reason != "provider_unavailable" && reason != "worker_protocol_error" {
 		reason = "provider_unavailable"
 	}
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.taskContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, execErr := execution.Execute(ctx, service.runner, service.extractionDrop, func(tx *execution.Tx) (int64, error) {
+		var batchID int64
+		if err := tx.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction' AND state='Assigned' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&batchID); errors.Is(err, sql.ErrNoRows) {
+			return 0, attempt.ErrLateResult
+		} else if err != nil {
+			return 0, err
 		}
-	}()
-	var batchID int64
-	if err = conn.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction' AND state='Assigned' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&batchID); errors.Is(err, sql.ErrNoRows) {
-		return attempt.ErrLateResult
-	} else if err != nil {
-		return err
-	}
-	if result, updateErr := conn.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Assigned' AND boot_id=? AND connection_epoch=?`, service.nowText(), reason, attemptID, bootID, epoch); updateErr != nil {
-		return updateErr
-	} else if affected, _ := result.RowsAffected(); affected != 1 {
-		return attempt.ErrLateResult
-	}
-	if result, updateErr := conn.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); updateErr != nil {
-		return updateErr
-	} else if affected, _ := result.RowsAffected(); affected != 1 {
-		return attempt.ErrLateResult
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		if result, updateErr := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Failed',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Assigned' AND boot_id=? AND connection_epoch=?`, service.nowText(), reason, attemptID, bootID, epoch); updateErr != nil {
+			return 0, updateErr
+		} else if affected, _ := result.RowsAffected(); affected != 1 {
+			return 0, attempt.ErrLateResult
+		}
+		if result, updateErr := tx.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); updateErr != nil {
+			return 0, updateErr
+		} else if affected, _ := result.RowsAffected(); affected != 1 {
+			return 0, attempt.ErrLateResult
+		}
+		return batchID, nil
+	}, func(batchID int64) int64 { return batchID })
+	return execErr
 }
 
 // InterruptExtraction closes the user-visible batch in the same SQLite
 // transaction as lease/restart loss convergence, preventing an orphaned
 // Processing batch after its sole extraction Attempt has stopped.
 func (service *Service) InterruptExtraction(ctx context.Context, attemptID int64, reason string) error {
-	conn, err := service.db.Conn(ctx)
+	ctx, err := service.taskContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, execErr := execution.Execute(ctx, service.runner, service.extractionBreak, func(tx *execution.Tx) (int64, error) {
+		var batchID int64
+		if err := tx.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction'`, attemptID).Scan(&batchID); errors.Is(err, sql.ErrNoRows) {
+			return 0, attempt.ErrLateResult
+		} else if err != nil {
+			return 0, err
 		}
-	}()
-	var batchID int64
-	if err = conn.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='knowledge_extraction'`, attemptID).Scan(&batchID); errors.Is(err, sql.ErrNoRows) {
-		return attempt.ErrLateResult
-	} else if err != nil {
-		return err
-	}
-	final, err := service.Attempts().InterruptOn(ctx, conn, attemptID, reason)
-	if err != nil {
-		return err
-	}
-	if final == "Interrupted" {
-		if result, updateErr := conn.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); updateErr != nil {
-			return updateErr
-		} else if affected, _ := result.RowsAffected(); affected != 1 {
-			return attempt.ErrLateResult
+		final, err := service.attempts.InterruptOn(ctx, tx, attemptID, reason)
+		if err != nil {
+			return 0, err
 		}
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+		if final == "Interrupted" {
+			if result, updateErr := tx.ExecContext(ctx, `UPDATE knowledge_import_batches SET state='Failed',row_version=row_version+1 WHERE id=? AND state='Processing'`, batchID); updateErr != nil {
+				return 0, updateErr
+			} else if affected, _ := result.RowsAffected(); affected != 1 {
+				return 0, attempt.ErrLateResult
+			}
+		}
+		return batchID, nil
+	}, func(batchID int64) int64 { return batchID })
+	return execErr
 }

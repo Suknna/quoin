@@ -10,6 +10,8 @@ import (
 	"time"
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Stable error codes surfaced by `quoin migrate`; the deployment helper
@@ -25,7 +27,8 @@ var (
 
 // PreflightResult is the offline verification summary printed by
 // `quoin migrate preflight` and re-verified under the exclusive migration
-// transaction.
+// transaction. The administrator-consolidation fields are observed by the
+// shared pre-rebuild normalization and recorded on the migrate summary.
 type PreflightResult struct {
 	Revision         int64  `json:"maintenanceRevision"`
 	BackupID         int64  `json:"backupId"`
@@ -34,22 +37,47 @@ type PreflightResult struct {
 	ArtifactCount    int64  `json:"artifactCount"`
 	SchemaVersion    string `json:"schemaVersion"`
 	MigrationHistory int64  `json:"migrationHistory"`
+
+	RetainedAdminID     int64   `json:"retainedAdminId,omitempty"`
+	DemotedAdminIDs     []int64 `json:"demotedAdminIds,omitempty"`
+	RevokedSessionCount int64   `json:"revokedSessionCount,omitempty"`
 }
 
 // Preflight re-reads every gate read-only: the Upgrade maintenance must be
 // active with every checklist item Safe, the window's upgrade backup must
 // have succeeded with a manifest digest, and the database must be an exact
-// fresh-v1 schema or the exact declaration predecessor with its pinned ledger.
+// fresh-v1 schema or an exact released predecessor with an authentic ledger.
 // It is the authenticated offline verification
 // the deployment helper runs on the OLD image before stopping is considered
 // safe to proceed; Migrate re-verifies under BEGIN IMMEDIATE.
 func Preflight(ctx context.Context, db *sql.DB) (PreflightResult, error) {
+	return PreflightWithOptions(ctx, db, Options{})
+}
+
+// PreflightWithOptions is Preflight plus the read-only administrator-topology
+// validation for predecessor databases: a missing or non-admin retention
+// selection is reported here, on the OLD image, before the exclusive forward
+// step is attempted.
+func PreflightWithOptions(ctx context.Context, db *sql.DB, options Options) (PreflightResult, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return PreflightResult{}, err
 	}
 	defer conn.Close()
-	return preflightOn(ctx, conn)
+	result, err := preflightOn(ctx, conn)
+	if err != nil {
+		return PreflightResult{}, err
+	}
+	var digest string
+	if err := conn.QueryRowContext(ctx, `SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&digest); err != nil {
+		return PreflightResult{}, err
+	}
+	if isReleasedPredecessorDigest(digest) {
+		if _, err := planAdminNormalization(ctx, conn, options); err != nil {
+			return PreflightResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func preflightOn(ctx context.Context, conn *sql.Conn) (PreflightResult, error) {
@@ -98,10 +126,11 @@ func preflightOperationalOn(ctx context.Context, conn *sql.Conn) (PreflightResul
 	return result, nil
 }
 
-// verifySchemaGate enforces the first-release boundary: the only migratable
-// database is a zero-history exact fresh v1 schema. Any other schema version,
-// divergent digest or pre-existing migration ledger row is rejected with a
-// stable code; no N-1 migration evidence is ever fabricated.
+// verifySchemaGate is the release boundary: the only migratable databases are
+// the exact fresh v1 canonical schema and exact released predecessor digests,
+// each holding only its authentic migration history. Any other schema version,
+// divergent digest or inauthentic ledger row is rejected with a stable code; no
+// N-1 migration evidence is ever fabricated.
 func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResult) error {
 	var stored string
 	if err := conn.QueryRowContext(ctx, `SELECT schema_version,schema_digest FROM schema_state WHERE id=1`).Scan(&result.SchemaVersion, &stored); err != nil {
@@ -143,14 +172,59 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return fmt.Errorf("%w: plugin registry predecessor requires an empty ledger or exactly the declaration cutover ledger", ErrSchemaHistoryPresent)
 	}
+	// The auth-audit predecessor is reached by fresh installs of that release
+	// and by conversions of every earlier released predecessor, so only its
+	// ledger authenticity is fixed, not one exact shape.
+	if stored == authAuditPredecessorSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyAuthAuditPredecessorHistory(ctx, conn)
+	}
+	if stored == authSimplificationPredecessorDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyUnifiedAuthHistory(ctx, conn, false)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
 		return err
 	}
-	if result.MigrationHistory != 0 {
-		return fmt.Errorf("%w: %d ledger rows", ErrSchemaHistoryPresent, result.MigrationHistory)
+	return verifyUnifiedAuthHistory(ctx, conn, true)
+}
+
+// verifyAuthAuditPredecessorHistory admits only authentic migration history on
+// the auth-audit predecessor. That release is reached both by fresh installs
+// and by conversions of every earlier released predecessor, so several
+// authentic ledger shapes exist; every row must still be a known migration id
+// carrying its exact derived digest, and the auth-audit row itself must be
+// absent (its presence would mean the conversion already ran).
+func verifyAuthAuditPredecessorHistory(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT migration_id,digest FROM migration_ledger`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	known := map[string]bool{
+		legacyMetricsBusinessMigrationID:      true,
+		directInvestigationMetricsMigrationID: true,
+		declarationCutoverMigrationID:         true,
+		pluginRegistryMigrationID:             true,
+	}
+	for rows.Next() {
+		var migrationID, digest string
+		if err := rows.Scan(&migrationID, &digest); err != nil {
+			return err
+		}
+		if !known[migrationID] || migrationDigest(migrationID) != digest {
+			return fmt.Errorf("%w: auth-audit predecessor carries inauthentic ledger row %q", ErrSchemaHistoryPresent, migrationID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -163,7 +237,29 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 // system actor — the commit-order "accepts new writes" boundary — and the
 // wizard may start normal-mode components (OPS-UPGRADE-002/005).
 func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
-	// A released v1 database has one known prior digest. Route it to the
+	return MigrateWithOptions(ctx, db, Options{})
+}
+
+// MigrateWithOptions is Migrate with the operator decisions (the retained
+// administrator selection) required by predecessors holding several enabled
+// administrators. The selection is enforced again inside the exclusive
+// transaction, so a stale decision cannot commit.
+func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (PreflightResult, error) {
+	if meta, ok := execution.FromContext(ctx); ok {
+		if meta.Actor.Kind != execution.PrincipalSystem || meta.Actor.ID != 0 || meta.Source.Kind != execution.SourceCLI {
+			return PreflightResult{}, errors.New("schema migration requires an offline CLI system scope")
+		}
+	} else {
+		correlation, err := execution.NewCorrelationID()
+		if err != nil {
+			return PreflightResult{}, err
+		}
+		ctx, err = execution.WithMetadata(ctx, execution.Metadata{CorrelationID: correlation, Actor: execution.Principal{Kind: execution.PrincipalSystem}, Source: execution.Source{Kind: execution.SourceCLI}})
+		if err != nil {
+			return PreflightResult{}, err
+		}
+	}
+	// A released v1 database has known prior digests. Route each to its
 	// explicit converter instead of treating the digest mismatch as a generic
 	// compatibility error. No other historical digest is accepted.
 	var digest string
@@ -171,16 +267,22 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	if digest == legacyMetricsBusinessSchemaDigest {
-		return migrateReleasedSchemaAndFinish(ctx, db, migrateLegacyMetricsBusinessOn)
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateLegacyMetricsBusinessOn)
 	}
 	if digest == directInvestigationMetricsSchemaDigest {
-		return migrateReleasedSchemaAndFinish(ctx, db, migrateDirectInvestigationMetricsOn)
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateDirectInvestigationMetricsOn)
 	}
 	if digest == declarationCutoverSchemaDigest {
-		return migrateReleasedSchemaAndFinish(ctx, db, migrateDeclarationCutoverOn)
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateDeclarationCutoverOn)
 	}
 	if digest == pluginRegistrySchemaDigest {
-		return migrateReleasedSchemaAndFinish(ctx, db, migratePluginRegistryOn)
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migratePluginRegistryOn)
+	}
+	if digest == authAuditPredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateAuthAuditOn)
+	}
+	if digest == authSimplificationPredecessorDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateAuthSimplificationOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -203,7 +305,7 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 	if _, err := conn.ExecContext(ctx, `UPDATE maintenance_state SET active=0,reason=NULL,entered_at=NULL,entered_by_type=NULL,entered_by_id=NULL,exited_at=?,exited_by_type='system',exited_by_id=0,row_version=row_version+1 WHERE id=1 AND active=1 AND row_version=?`, timestampNow(), result.Revision); err != nil {
 		return PreflightResult{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('system',0,'maintenance.upgrade.migrate','success','maintenance',?,?)`, result.Revision, timestampNow()); err != nil {
+	if err := recordMigrationCompletion(ctx, conn, "maintenance.upgrade.migrate", result.Revision); err != nil {
 		return PreflightResult{}, err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
@@ -216,9 +318,9 @@ func Migrate(ctx context.Context, db *sql.DB) (PreflightResult, error) {
 // migrateReleasedSchemaAndFinish commits a released-schema conversion and the
 // Upgrade maintenance exit together. A crash or failure before COMMIT rolls
 // back both, leaving the known predecessor digest eligible for a safe retry.
-func migrateReleasedSchemaAndFinish(ctx context.Context, db *sql.DB, migrate func(context.Context, *sql.Conn) (LegacyMigrationReport, error)) (PreflightResult, error) {
+func migrateReleasedSchemaAndFinish(ctx context.Context, db *sql.DB, options Options, migrate func(context.Context, *sql.Conn) (LegacyMigrationReport, error)) (PreflightResult, error) {
 	var result PreflightResult
-	_, err := migrateReleasedSchemaTransaction(ctx, db, migrate, func(ctx context.Context, conn *sql.Conn, report LegacyMigrationReport) error {
+	_, err := migrateReleasedSchemaTransaction(ctx, db, options, migrate, func(ctx context.Context, conn *sql.Conn, report LegacyMigrationReport) error {
 		var completionErr error
 		result, completionErr = finishReleasedMigrationOn(ctx, conn, report)
 		return completionErr
@@ -241,17 +343,42 @@ func finishReleasedMigrationOn(ctx context.Context, conn *sql.Conn, report Legac
 		return PreflightResult{}, err
 	}
 	result.SchemaVersion = "v1"
+	if err := conn.QueryRowContext(ctx, `SELECT id,manifest_sha256,db_sha256,artifact_count FROM backups WHERE trigger_kind='upgrade' AND status='succeeded' AND created_at>=(SELECT entered_at FROM maintenance_state WHERE id=1) ORDER BY id DESC LIMIT 1`).Scan(&result.BackupID, &result.ManifestSHA256, &result.DBSHA256, &result.ArtifactCount); err != nil {
+		return PreflightResult{}, err
+	}
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
 		return PreflightResult{}, err
 	}
+	// The operator-facing summary carries the consolidation observations; the
+	// durable ledger and audit event remain the authoritative record.
+	result.RetainedAdminID = report.RetainedAdminID
+	result.DemotedAdminIDs = report.DemotedAdminIDs
+	result.RevokedSessionCount = report.RevokedSessionCount
 	if _, err := conn.ExecContext(ctx, `UPDATE maintenance_state SET active=0,reason=NULL,entered_at=NULL,entered_by_type=NULL,entered_by_id=NULL,exited_at=?,exited_by_type='system',exited_by_id=0,row_version=row_version+1 WHERE id=1 AND active=1 AND row_version=?`, timestampNow(), result.Revision); err != nil {
 		return PreflightResult{}, err
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('system',0,'maintenance.upgrade.migrate_legacy','success','maintenance',?,?)`, result.Revision, timestampNow()); err != nil {
+	if err := recordMigrationCompletion(ctx, conn, "maintenance.upgrade.migrate_legacy", result.Revision); err != nil {
 		return PreflightResult{}, err
 	}
-	_ = report // The durable ledger and audit event are the authoritative record.
+	// The durable ledger and audit event are the authoritative record; the
+	// report's consolidation fields were already copied onto the result.
 	return result, nil
+}
+
+// DDL rebuilds require the migration authority's raw connection. Completion
+// still uses the canonical sink in that same transaction, never a second audit.
+func recordMigrationCompletion(ctx context.Context, conn *sql.Conn, action string, revision int64) error {
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = audit.NewWriter().Write(ctx, conn, audit.Record{
+		ActorType: string(meta.Actor.Kind), ActorID: meta.Actor.ID,
+		InitiatorType: string(meta.Initiator.Kind), InitiatorID: meta.Initiator.ID,
+		Action: action, Outcome: audit.OutcomeSuccess, CorrelationID: meta.CorrelationID,
+		DomainRefType: "maintenance", DomainRefID: revision,
+	})
+	return err
 }
 
 func timestampNow() string {

@@ -9,14 +9,16 @@ import (
 // TestOperatorCannotCallManagementAPIs exercises the public HTTP seam. It
 // prevents a navigation-only role boundary from exposing management data via a
 // bookmarked URL while keeping the non-secret business selector available to
-// alert and AI SRE workflows.
+// alert and AI SRE workflows. The operator reaches the surface through the
+// shared real-auth fixture: real creation with an assigned contact, real
+// operator initialization, real two-step login.
 func TestOperatorCannotCallManagementAPIs(t *testing.T) {
-	server, admin := newAdminSurface(t)
-	defer server.Close()
+	scenario := newAdminSurface(t)
+	server := scenario.server
 
-	mustPost(t, server, admin, "/api/v1/admin/users", `{"clientCommandId":"create-operator-96","username":"operator96","displayName":"Operator 96","role":"operator","password":"Operator 96 passphrase 2026!"}`, http.StatusCreated)
-	login := mustPost(t, server, map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json"}, "/api/v1/auth/login", `{"username":"operator96","password":"Operator 96 passphrase 2026!"}`, http.StatusOK)
-	operator := map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json", "Cookie": splitCookie(login.headers.Get("Set-Cookie"))}
+	adminSession := scenario.login(t, "admin", scenario.adminPassword)
+	scenario.createOperator(t, adminSession, "create-operator-96", "operator96", "Operator 96", "Operator 96 passphrase 2026!", "operator96@example.test")
+	operator := scenario.sessionHeaders(scenario.initializeOperatorSession(t, "operator96", "Operator 96 passphrase 2026!", "Operator 96 formal passphrase 2027!"))
 
 	for _, path := range []string{
 		"/api/v1/admin/about",

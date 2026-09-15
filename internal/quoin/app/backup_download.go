@@ -90,7 +90,9 @@ func (application *apiServer) downloadBackup(writer http.ResponseWriter, request
 	if transferErr != nil {
 		sharedops.LogEvent("quoin", "error", "backup.download_stream_failed", "backup="+strconv.FormatInt(id, 10)+" "+transferErr.Error())
 	}
-	if auditErr := service.RecordDownloadCompletion(context.Background(), session.User.ID, id, transferErr); auditErr != nil {
+	completionCtx, cancelCompletion := context.WithTimeout(context.WithoutCancel(request.Context()), 5*time.Second)
+	defer cancelCompletion()
+	if auditErr := service.RecordDownloadCompletion(completionCtx, session.User.ID, id, transferErr); auditErr != nil {
 		sharedops.LogEvent("quoin", "error", "backup.download_completion_audit_failed", "backup="+strconv.FormatInt(id, 10)+" "+auditErr.Error())
 	}
 }

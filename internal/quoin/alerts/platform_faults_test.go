@@ -78,6 +78,57 @@ func TestExecutionFaultLifecycleUsesAttemptOrderAndTerminalRecovery(t *testing.T
 	}
 }
 
+// Platform-fault observations audit automatically (ADR-0006): each runner
+// execution records the machine actor and the touched fault; inputs that can
+// never be platform facts return before any execution and record nothing.
+func TestPlatformFaultObservationsAuditAutomatically(t *testing.T) {
+	service, database, cleanup := newTestService(t)
+	defer cleanup()
+	reporter := NewPlatformFaultReporter(service)
+	ctx := context.Background()
+
+	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", false); err != nil {
+		t.Fatal(err)
+	}
+	row := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opFaultRuntime)
+	if row.actorType != "system" || row.actorID != 0 || row.outcome != "success" || row.corrID == "" ||
+		row.refType != objectPlatformFault || row.refID <= 0 {
+		t.Fatalf("runtime fault audit row = %+v", row)
+	}
+	// A repeated observation advances only diagnostics and records its own
+	// bounded success fact.
+	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=? AND outcome='success'`, opFaultRuntime); got != 3 {
+		t.Fatalf("runtime fault audit rows = %d, want 3", got)
+	}
+
+	// Execution-outcome observations: non-fault inputs are not platform facts
+	// and must record nothing at all.
+	before := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=?`, opFaultExecution)
+	if err := reporter.ObserveExecutionOutcome(ctx, 0, false, "worker_protocol_error"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.ObserveExecutionOutcome(ctx, 5, false, "invalid_response"); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=?`, opFaultExecution); got != before {
+		t.Fatalf("non-fault inputs produced audit rows: %d -> %d", before, got)
+	}
+	if err := reporter.ObserveExecutionOutcome(ctx, 10, false, "worker_protocol_error"); err != nil {
+		t.Fatal(err)
+	}
+	faultRow := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opFaultExecution)
+	if faultRow.actorType != "system" || faultRow.outcome != "success" || faultRow.corrID == "" ||
+		faultRow.refType != objectPlatformFault || faultRow.refID <= 0 {
+		t.Fatalf("execution fault audit row = %+v", faultRow)
+	}
+}
+
 func TestPlatformFaultLifecycleDeduplicatesAndResolves(t *testing.T) {
 	service, _, cleanup := newTestService(t)
 	defer cleanup()

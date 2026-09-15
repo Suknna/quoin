@@ -33,6 +33,9 @@ type rebuildInput struct {
 // deterministic vectors through the real adjudication path.
 func driveEmbedding(t *testing.T, f *fixture, vectorFor func(item rebuildItem) []float32) {
 	t.Helper()
+	// The result commit is the runtime result path: production restores the
+	// attempt's persisted correlation with the system actor from a bare
+	// context (embedding taskContext), so the delivery step runs unwired.
 	ctx := context.Background()
 	var attemptID int64
 	if err := f.db.QueryRow(`SELECT id FROM execution_attempts WHERE attempt_type='embedding' AND state='Queued' LIMIT 1`).Scan(&attemptID); err != nil {
@@ -105,7 +108,10 @@ func wireQueryDispatcher(t *testing.T, f *fixture, vector []float32) func(contex
 		if err != nil {
 			return err
 		}
-		return f.service.Embeddings().CommitResult(ctx, attemptID, "boot", 1, payload)
+		// The dispatcher stands in for the runtime delivery: the result commit
+		// runs unwired and production restores the attempt's persisted scope
+		// (embedding taskContext) — never the searching user's session.
+		return f.service.Embeddings().CommitResult(context.Background(), attemptID, "boot", 1, payload)
 	}
 }
 
@@ -113,7 +119,7 @@ func wireQueryDispatcher(t *testing.T, f *fixture, vector []float32) func(contex
 // output or investigation assistant message and returns the knowledge id.
 func confirmFromSource(t *testing.T, f *fixture, suffix string, fromMessage bool) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	var candidateID int64
 	var confirmed CandidateSummary
 	if fromMessage {
@@ -142,7 +148,7 @@ func confirmFromSource(t *testing.T, f *fixture, suffix string, fromMessage bool
 
 func TestSearchMergesDualChannelsUnderOneCursor(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	// Two confirmed knowledges: only the first shares the FTS query's
 	// trigrams; both carry the unit semantic vector, so the semantic channel
 	// spans two pages at limit 1 while FTS exhausts on page one.
@@ -214,7 +220,7 @@ func TestSearchMergesDualChannelsUnderOneCursor(t *testing.T) {
 // and reports an honestly empty semantic channel.
 func TestSearchWithoutIndexServesOnlyFTS(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	confirmFromSource(t, f, "ftsonly", false)
 	f.service.Embeddings().SetDispatcher(func(context.Context, int64) error { return errNoPlinthForTest })
 	result, next, err := f.service.Search(ctx, "连接池", nil, 5)
@@ -248,7 +254,7 @@ func unitQuery() []float32 {
 // must not re-embed the query and must not replay semantic results.
 func TestPaginationSkipsExhaustedSemanticChannel(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	poolID := confirmFromSource(t, f, "page-a", false)
 	diskID := confirmFromSource(t, f, "page-b", true)
 	if err := f.service.Embeddings().Sweep(ctx); err != nil {

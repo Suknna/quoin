@@ -14,10 +14,10 @@ import (
 )
 
 func TestCreateAtomicFirstTurn(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	result, err := service.Create(ctx, principalID, "cmd-create-0001", "请分析这个告警", nil, nil)
@@ -77,10 +77,10 @@ func TestCreateAtomicFirstTurn(t *testing.T) {
 }
 
 func TestCreateReplayAndDigestConflict(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	first, err := service.Create(ctx, principalID, "cmd-create-replay", "第一条消息", nil, nil)
@@ -110,10 +110,10 @@ func TestCreateReplayAndDigestConflict(t *testing.T) {
 }
 
 func TestCreateSourceValidation(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	occurrenceID := seedOccurrence(t, db, "T13Probe")
 
@@ -153,10 +153,10 @@ func TestCreateSourceValidation(t *testing.T) {
 }
 
 func TestCreateWithBusinessSystemFreezesDirectChatMetricsContext(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
 	context := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
 
@@ -195,10 +195,10 @@ func TestCreateWithBusinessSystemFreezesDirectChatMetricsContext(t *testing.T) {
 // uses only the direct Investigation's frozen authoritative config and Label
 // Contract; no occurrence is fabricated to obtain metrics authority.
 func TestDirectBusinessContextAuthorizesMetricsGrant(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
 	business := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
 	created, err := service.CreateWithBusinessSystem(ctx, principalID, "cmd-direct-metrics", "检查商城延迟", nil, nil, business.key)
@@ -268,10 +268,10 @@ func TestDirectBusinessContextAuthorizesMetricsGrant(t *testing.T) {
 }
 
 func TestCreateRequiresContent(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	if _, err := service.Create(ctx, principalID, "cmd-create-blank", "   ", nil, nil); !errors.Is(err, ErrMessageInvalid) {
 		t.Fatalf("blank content err=%v want ErrMessageInvalid", err)
@@ -286,10 +286,10 @@ func TestCreateRequiresContent(t *testing.T) {
 }
 
 func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
 	first, err := service.Create(ctx, principalID, "cmd-send-1", "第一条", nil, nil)

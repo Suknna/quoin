@@ -10,109 +10,77 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/app"
 	"github.com/Suknna/quoin/internal/quoin/auth"
-	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // sseStack is a real public handler + real SQLite + real admin session over
 // httptest, with a second alerts.Service handle on the same database to
-// drive deliveries (the same writes Stele's relay path commits).
+// drive deliveries (the same writes Stele's relay path commits). The auth
+// surface comes from the shared real-auth fixture.
 type sseStack struct {
-	server  *httptest.Server
-	db      *sql.DB
-	alerts  *alerts.Service
-	auth    *auth.Service
-	cookie  string
-	source  int64
-	creds   int64
-	rootDir string
+	scenario *authScenario
+	server   *httptest.Server
+	db       *sql.DB
+	alerts   *alerts.Service
+	auth     *auth.Service
+	cookie   string
+	source   int64
+	creds    int64
+	rootDir  string
+}
+
+// loginAdmin performs a fresh real two-step login and returns the new admin
+// session cookie value.
+func (stack *sseStack) loginAdmin(t *testing.T) string {
+	t.Helper()
+	return stack.scenario.login(t, "admin", stack.scenario.adminPassword)
 }
 
 func newSSEStack(t *testing.T) *sseStack {
 	t.Helper()
-	ctx := context.Background()
-	root := t.TempDir()
-	secrets := filepath.Join(root, "secrets")
-	config := contract.QuoinConfig{
-		Component: "quoin", PublicOrigin: "https://quoin.example.com",
-		DataDirectory:             filepath.Join(root, "data"),
-		BackupDirectory:           filepath.Join(root, "backup"),
-		RootKeyFile:               filepath.Join(secrets, "root-key"),
-		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
-		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
-	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
-		t.Fatal(err)
-	}
-	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	authService, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	password := "SSE stack horse battery 2026!"
-	if _, err := authService.CreateFirstAdmin(ctx, "admin", "SSE Admin", password); err != nil {
-		t.Fatal(err)
-	}
-	application := app.NewAPIServer(authService, database.SQL, config.RootKeyFile)
-	application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
-	handler, err := app.NewHandler(application, config.PublicOrigin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
+	// Shared real-auth fixture: pending bootstrap administrator initialized
+	// through the real flow, session from the real two-step HTTP login.
+	scenario := newAuthScenarioWith(t, func(s *authScenario) http.Handler {
+		application := app.NewAPIServer(s.auth, s.db, s.rootKeyFile)
+		if err := application.SetReadOnlyReader(s.reader); err != nil {
+			t.Fatal(err)
+		}
+		application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
+		handler, err := app.NewHandler(application, s.publicOrigin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handler
+	})
+	cookie := scenario.login(t, "admin", scenario.adminPassword)
 
-	// Session: login over the real handler, then clear the forced password
-	// change through the real endpoint so the cookie is a normal session.
-	loginRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/auth/login", strings.NewReader(fmt.Sprintf(`{"username":"admin","password":%q}`, password)))
-	loginRequest.Header.Set("Origin", config.PublicOrigin)
-	loginRequest.Header.Set("Content-Type", "application/json")
-	loginResponse, err := server.Client().Do(loginRequest)
+	stack := &sseStack{scenario: scenario, server: scenario.server, db: scenario.db, alerts: alerts.NewService(scenario.db), auth: scenario.auth, cookie: cookie, rootDir: scenario.rootDir}
+	// The create command verifies a real administrator session proof inside
+	// the runner transaction: attach the execution metadata of the session
+	// the scenario just logged in (admission provides the same facts).
+	var sessionID, authRevision int64
+	if err := scenario.db.QueryRowContext(context.Background(), `SELECT id, auth_revision_at_issue FROM sessions WHERE user_id=1 ORDER BY id DESC LIMIT 1`).Scan(&sessionID, &authRevision); err != nil {
+		t.Fatal(err)
+	}
+	seedCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "sse-seed-source",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceInternal},
+		Session:       execution.SessionRef{ID: sessionID, AuthRevision: authRevision},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	loginBody, _ := io.ReadAll(loginResponse.Body)
-	loginResponse.Body.Close()
-	if loginResponse.StatusCode != http.StatusOK {
-		t.Fatalf("login: %d %s", loginResponse.StatusCode, loginBody)
-	}
-	setCookie := loginResponse.Header.Get("Set-Cookie")
-	if !strings.HasPrefix(setCookie, "__Host-quoin-session=") {
-		t.Fatalf("no session cookie: %q", setCookie)
-	}
-	cookieValue := strings.Split(strings.Split(setCookie, ";")[0], "=")[1]
-	newPassword := "SSE stack horse battery 2027!"
-	changeRequest, _ := http.NewRequest(http.MethodPut, server.URL+"/api/v1/auth/password", strings.NewReader(fmt.Sprintf(`{"currentPassword":%q,"newPassword":%q}`, password, newPassword)))
-	changeRequest.Header.Set("Cookie", "__Host-quoin-session="+cookieValue)
-	changeRequest.Header.Set("Origin", config.PublicOrigin)
-	changeRequest.Header.Set("Content-Type", "application/json")
-	changeResponse, err := server.Client().Do(changeRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changeBody, _ := io.ReadAll(changeResponse.Body)
-	changeResponse.Body.Close()
-	if changeResponse.StatusCode != http.StatusNoContent {
-		t.Fatalf("password change: %d %s", changeResponse.StatusCode, changeBody)
-	}
-
-	stack := &sseStack{server: server, db: database.SQL, alerts: alerts.NewService(database.SQL), auth: authService, cookie: cookieValue, rootDir: root}
 	digest := make([]byte, 32)
 	rand.Read(digest)
-	result, err := stack.alerts.CreateSource(ctx, "sse", "alertmanager", digest, 1, time.Now().UTC().Format(time.RFC3339Nano))
+	result, _, err := stack.alerts.CreateSource(seedCtx, "sse-seed-0001", "sse", "alertmanager", digest)
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}

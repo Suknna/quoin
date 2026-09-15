@@ -18,6 +18,7 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc/codes"
@@ -41,9 +42,24 @@ func (service *RuntimeService) sendEnvelope(slot string, envelope *runtimev1.Con
 	})
 }
 
+// dispatchOperationCorrelation reads the stored association for one dispatch
+// frame. The persisted row is the single correlation authority (ADR-0006):
+// every producer echoes it verbatim; a legacy row dispatches with an empty
+// id and a missing row fails the dispatch.
+func dispatchOperationCorrelation(ctx context.Context, db audit.Reader, attemptID int64) (string, error) {
+	correlation, _, err := attempt.LoadCorrelation(ctx, db, attemptID)
+	if err != nil {
+		return "", err
+	}
+	return correlation.OperationCorrelationID, nil
+}
+
 // dispatchAttempt sends the DispatchAttempt frame for one already-Assigned
 // probe attempt (RUNTIME-TASK-002/003).
 func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error {
+	if service.Connections == nil {
+		return errors.New("connections not wired")
+	}
 	digest := sha256.Sum256(input)
 	contractDigest, err := connections.ProbeContractDigest()
 	if err != nil {
@@ -53,7 +69,7 @@ func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID in
 	// probes dispatch with chat + embedding purposes).
 	var grants []*runtimev1.ConnectionGrant
 	if service.Connections != nil {
-		rows, grantErr := service.Connections.DB().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
+		rows, grantErr := service.Connections.Reader().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
 		if grantErr != nil {
 			return grantErr
 		}
@@ -72,17 +88,27 @@ func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID in
 	if err != nil {
 		return err
 	}
+	// The stored association is the single correlation authority (ADR-0006):
+	// dispatch echoes the persisted identity verbatim; a legacy row without
+	// correlation dispatches with an empty id. No reply ever carries it —
+	// every adjudication joins attempts by id, never a runtime-supplied
+	// correlation.
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Connections.Reader(), attemptID)
+	if err != nil {
+		return err
+	}
 	envelope := &runtimev1.ControlEnvelope{
 		ConnectionEpoch: epoch,
 		CorrelationId:   uint64(attemptID),
 		BootId:          bootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{
 			DispatchAttempt: &runtimev1.DispatchAttempt{
-				AttemptId:     attemptID,
-				AttemptType:   runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE,
-				ScopeType:     runtimev1.ScopeType_SCOPE_TYPE_CONNECTION,
-				ScopeId:       summary.ID,
-				LeaseDeadline: timestamppb.New(time.Now().UTC().Add(probeLeaseWindow())),
+				AttemptId:              attemptID,
+				AttemptType:            runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE,
+				ScopeType:              runtimev1.ScopeType_SCOPE_TYPE_CONNECTION,
+				ScopeId:                summary.ID,
+				OperationCorrelationId: operationCorrelationID,
+				LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(probeLeaseWindow())),
 				Input: &runtimev1.AttemptInputSnapshot{
 					SchemaKind:       "connection_probe_v1",
 					CanonicalJson:    input,
@@ -380,7 +406,7 @@ func (service *RuntimeService) dispatchCancel(ctx context.Context, attemptID int
 	if service.Connections == nil {
 		return errors.New("connections not wired")
 	}
-	row := service.Connections.DB().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
+	row := service.Connections.Reader().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
 	if err := row.Scan(&boot, &epoch); err != nil {
 		return err
 	}

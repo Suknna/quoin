@@ -17,13 +17,31 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/observation"
 	_ "modernc.org/sqlite"
 )
 
+// supervisorAdminContext is the trusted-entry execution metadata the
+// connection commands re-verify in-transaction (admin user 1, session 1).
+func supervisorAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-supervisor-roundtrip",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-supervisor-roundtrip"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
+
 func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string) observation.SourceObservationRun) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/roundtrip.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	directory := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+directory+"/roundtrip.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +51,10 @@ func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'roundtrip-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
@@ -72,15 +93,35 @@ func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string
 		t.Fatal(err)
 	}
 	service := observation.NewService(db, registry, enabled)
-	// The real probe→enable path so the frozen source grant resolves.
-	connService := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
-	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
-	configJSON, _ := json.Marshal(map[string]any{"type": "prometheus", "baseUrl": "https://metrics.test", "authType": "none"})
-	summary, err := connService.Create(context.Background(), connections.CreateInput{Name: "roundtrip-prometheus", Type: "prometheus", NonSecretJSON: configJSON}, 1, "roundtrip-create")
+	// The composition read seam (mirrors observation.newTestService): a real
+	// query_only reader over the same fixture file, opened through the
+	// execution.OpenReadOnly factory and validated by SetReader's probe — a
+	// second writable handle is never an acceptable reader. Without it every
+	// read fails closed (context canceled). One pool, same lifetime as the
+	// writer: the reader closes in t.Cleanup alongside db, and the runners
+	// never close an injected pool themselves.
+	reader, err := execution.OpenReadOnly(directory + "/roundtrip.db")
 	if err != nil {
 		t.Fatal(err)
 	}
-	probeID, err := connService.StartProbe(context.Background(), summary.Name, nil, nil)
+	t.Cleanup(func() { reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	// The real probe→enable path so the frozen source grant resolves. The
+	// connections service shares the same read-only pool: StartProbe resolves
+	// the connection summary through the same fail-closed read seam.
+	connService := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	if err := connService.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
+	configJSON, _ := json.Marshal(map[string]any{"type": "prometheus", "baseUrl": "https://metrics.test", "authType": "none"})
+	summary, err := connService.Create(supervisorAdminContext(t), connections.CreateInput{Name: "roundtrip-prometheus", Type: "prometheus", NonSecretJSON: configJSON}, 1, "roundtrip-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeID, err := connService.StartProbe(supervisorAdminContext(t), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +138,11 @@ func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string
 	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, probeID).Scan(&qualified); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := connService.Enable(context.Background(), summary.Name, summary.RowVersion, qualified, 1); err != nil {
+	if _, err := connService.Enable(supervisorAdminContext(t), summary.Name, summary.RowVersion, qualified, 1); err != nil {
 		t.Fatal(err)
 	}
 	return service, func(commandID string) observation.SourceObservationRun {
-		run, err := service.StartRun(context.Background(), 1, commandID, "roundtrip-prometheus", "manual", nil)
+		run, err := service.StartRun(supervisorAdminContext(t), 1, commandID, "roundtrip-prometheus", "manual", nil)
 		if err != nil {
 			t.Fatalf("start run: %v", err)
 		}

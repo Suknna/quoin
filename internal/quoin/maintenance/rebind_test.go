@@ -8,19 +8,24 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
+	"github.com/Suknna/quoin/internal/quoin/secrets"
 )
 
 func TestRootKeyRebindAtomicallyIsolatesAndRetainsOldEnvelope(t *testing.T) {
 	ctx := context.Background()
 	config, originalKey, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
+	adminCtx := rebindAdminContext(t)
 	input := rebindThanosInput("old-secret")
-	created, err := service.Create(ctx, input, 1, "create-before-rebind")
+	created, err := service.Create(adminCtx, input, 1, "create-before-rebind")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,26 +83,35 @@ func TestRootKeyRebindAtomicallyIsolatesAndRetainsOldEnvelope(t *testing.T) {
 	if string(nonce) != string(oldNonce) || string(ciphertext) != string(oldCiphertext) {
 		t.Fatal("rebind rewrote immutable historical credential envelope")
 	}
-	if _, err := connections.NewService(reopened.SQL, func() ([]byte, error) { return newKey, nil }).OpenGeneration(ctx, created.CurrentGenerationID); err == nil {
-		t.Fatal("old binding generation was still decryptable/grantable")
+	var generationSeq int64
+	if err := reopened.SQL.QueryRow(`SELECT generation_seq FROM credential_generations WHERE id=?`, created.CurrentGenerationID).Scan(&generationSeq); err != nil {
+		t.Fatal(err)
 	}
-	state, err := maintenance.NewService(reopened.SQL).State(ctx)
+	// The retained old envelope stays bound to the retired root binding: the
+	// old credential encryption cannot decrypt under the new root binding
+	// (AAD/fail-closed, verified with the shared envelope primitives).
+	if _, err := secrets.Open(newKey, created.ID, generationSeq, connections.TypeThanos, revision, &secrets.Envelope{Nonce: nonce, Ciphertext: ciphertext}); err == nil {
+		t.Fatal("old binding generation was still decryptable under the new root binding")
+	}
+	state, err := newMaintenanceService(t, reopened).State(ctx)
 	if err != nil || !state.Active || state.Reason != "RootKeyRebind" || len(state.Items) != 2 {
 		t.Fatalf("unexpected maintenance state: %+v err=%v", state, err)
 	}
 	if state.Items[0].SafeState != "Blocking" && state.Items[1].SafeState != "Blocking" {
 		t.Fatal("connection re-entry was not explicitly required")
 	}
-	if _, err := maintenance.NewService(reopened.SQL).Exit(ctx, maintenance.ExitRequest{ActorID: 1, ExpectedRowVersion: state.RowVersion, ExpectedReason: state.Reason, ClientCommandID: "cannot-exit-before-reentry"}); !errors.Is(err, maintenance.ErrConflict) {
+	exitCtx := seedVerifiedSession(t, reopened.SQL, 1)
+	if _, err := maintenance.NewService(reopened.SQL).Exit(exitCtx, maintenance.ExitRequest{ActorID: 1, ExpectedRowVersion: state.RowVersion, ExpectedReason: state.Reason, ClientCommandID: "cannot-exit-before-reentry"}); !errors.Is(err, maintenance.ErrConflict) {
 		t.Fatalf("exit without explicit connection action err=%v, want conflict", err)
 	}
 
 	newService := connections.NewService(reopened.SQL, func() ([]byte, error) { return newKey, nil })
+	newService.SetReader(reopened.Reader)
 	current, err := newService.Get(ctx, "main-thanos")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := newService.Rotate(ctx, "main-thanos", current.RowVersion, rebindThanosInput("new-secret"), 1, "reenter-after-rebind")
+	rotated, err := newService.Rotate(rebindAdminContext(t), "main-thanos", current.RowVersion, rebindThanosInput("new-secret"), 1, "reenter-after-rebind")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,11 +122,11 @@ func TestRootKeyRebindAtomicallyIsolatesAndRetainsOldEnvelope(t *testing.T) {
 	if err := reopened.SQL.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='connection.rotate' AND client_command_id='reenter-after-rebind' AND outcome='success'`).Scan(&rotationAudit); err != nil || rotationAudit != 1 {
 		t.Fatalf("re-entry audit missing: count=%d err=%v", rotationAudit, err)
 	}
-	state, err = maintenance.NewService(reopened.SQL).State(ctx)
+	state, err = newMaintenanceService(t, reopened).State(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := maintenance.NewService(reopened.SQL).Exit(ctx, maintenance.ExitRequest{ActorID: 1, ExpectedRowVersion: state.RowVersion, ExpectedReason: state.Reason, ClientCommandID: "exit-after-reentry"}); err != nil {
+	if _, err := maintenance.NewService(reopened.SQL).Exit(exitCtx, maintenance.ExitRequest{ActorID: 1, ExpectedRowVersion: state.RowVersion, ExpectedReason: state.Reason, ClientCommandID: "exit-after-reentry"}); err != nil {
 		t.Fatal(err)
 	}
 	var grants int
@@ -131,7 +145,7 @@ func TestRootKeyRebindRollsBackEveryStateChangeWhenAuditCannotCommit(t *testing.
 	ctx := context.Background()
 	config, originalKey, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
-	created, err := service.Create(ctx, rebindThanosInput("old-secret"), 1, "create-for-rollback")
+	created, err := service.Create(rebindAdminContext(t), rebindThanosInput("old-secret"), 1, "create-for-rollback")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,11 +187,76 @@ func TestRootKeyRebindRollsBackEveryStateChangeWhenAuditCannotCommit(t *testing.
 	}
 }
 
+// TestRootKeyRebindAutomaticAuditRecordsOperationOnce proves the runner-owned
+// audit: exactly one automatic row with the system actor, the execute phase
+// and a fresh per-operation correlation — and a replay (matching active
+// rebind) records no second row, preserving the pre-runner contract.
+func TestRootKeyRebindAutomaticAuditRecordsOperationOnce(t *testing.T) {
+	ctx := context.Background()
+	config, _, database := rebindFixture(t)
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.RootKeyFile, []byte("abcdef0123456789abcdef0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := maintenance.RebindRootKey(ctx, config.DataDirectory, config.RootKeyFile); err != nil {
+		t.Fatal(err)
+	}
+	open := func(visit func(db *sql.DB)) {
+		t.Helper()
+		database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		visit(database.SQL)
+		// Closing the SQL pool alone keeps the data-directory lock; only the
+		// wrapper's Close releases it for the next offline command.
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actor string
+	var actorID int64
+	var outcome, phase, correlation, domainRef string
+	open(func(first *sql.DB) {
+		if err := first.QueryRow(`SELECT actor_type,actor_id,outcome,phase,COALESCE(correlation_id,''),COALESCE(domain_ref_type,'') FROM audit_events WHERE action='root_key.rebind'`).Scan(&actor, &actorID, &outcome, &phase, &correlation, &domainRef); err != nil {
+			t.Fatal(err)
+		}
+		// A caller correlation can never drive the offline command.
+		if _, err := maintenance.RebindRootKey(rebindAdminContext(t), config.DataDirectory, config.RootKeyFile); err == nil {
+			t.Fatal("offline command accepted a caller execution context")
+		}
+	})
+	if actor != "system" || actorID != 0 || outcome != "success" || phase != "execute" {
+		t.Fatalf("unexpected audit row: actor=%s/%d outcome=%s phase=%s", actor, actorID, outcome, phase)
+	}
+	if correlation == "" {
+		t.Fatal("automatic audit row carries no per-operation correlation")
+	}
+	if domainRef != "maintenance" {
+		t.Fatalf("audit domain ref=%q, want maintenance", domainRef)
+	}
+	// The replay is a pure read: no second audit row.
+	if replay, err := maintenance.RebindRootKey(context.Background(), config.DataDirectory, config.RootKeyFile); err != nil || !replay.AlreadyRebound {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	open(func(second *sql.DB) {
+		var again int
+		if err := second.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='root_key.rebind'`).Scan(&again); err != nil {
+			t.Fatal(err)
+		}
+		if again != 1 {
+			t.Fatalf("replay produced %d audit rows, want still 1", again)
+		}
+	})
+}
+
 func TestRootKeyRebindExplicitDisableClosesChecklist(t *testing.T) {
 	ctx := context.Background()
 	config, _, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
-	created, err := service.Create(ctx, rebindThanosInput("old-secret"), 1, "create-for-disable")
+	created, err := service.Create(rebindAdminContext(t), rebindThanosInput("old-secret"), 1, "create-for-disable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,14 +276,15 @@ func TestRootKeyRebindExplicitDisableClosesChecklist(t *testing.T) {
 	}
 	defer reopened.Close()
 	service = connections.NewService(reopened.SQL, func() ([]byte, error) { return newKey, nil })
+	service.SetReader(reopened.Reader)
 	current, err := service.Get(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Disable(ctx, current.Name, current.RowVersion); err != nil {
+	if _, err := service.Disable(rebindAdminContext(t), current.Name, current.RowVersion); err != nil {
 		t.Fatal(err)
 	}
-	state, err := maintenance.NewService(reopened.SQL).State(ctx)
+	state, err := newMaintenanceService(t, reopened).State(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,10 +338,30 @@ func rebindFixture(t *testing.T) (contract.QuoinConfig, []byte, *bootstrap.Datab
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.SQL.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'$argon2id$phc',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+	if _, err := database.SQL.Exec(`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'$argon2id$phc',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.SQL.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'rebind-fixture',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	return config, key, database
+}
+
+// rebindAdminContext builds the trusted-entry execution metadata (user 1 with
+// its real session proof) the connection commands re-verify in-transaction.
+func rebindAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-rebind-fixture",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-rebind-fixture"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 func rebindThanosInput(password string) connections.CreateInput {

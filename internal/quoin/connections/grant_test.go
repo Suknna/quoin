@@ -18,7 +18,7 @@ import (
 func grantFixture(t *testing.T) (*connections.Service, *sql.DB, int64, int64, string, uint64) {
 	t.Helper()
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	input := thanosInput("grant-secret-password")
 	input.Name = "grant-thanos"
 	summary, err := service.Create(ctx, input, 1, "cmd-grant-create")
@@ -34,7 +34,7 @@ func grantFixture(t *testing.T) (*connections.Service, *sql.DB, int64, int64, st
 	if err := registerPlinthSlot(database); err != nil {
 		t.Fatal(err)
 	}
-	_, grantID, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-grant", 7, 5*time.Minute)
+	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-grant", 7, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("fixture bind failed: %v %v", err, ok)
 	}
@@ -43,7 +43,7 @@ func grantFixture(t *testing.T) (*connections.Service, *sql.DB, int64, int64, st
 
 func TestGrantFulfillmentFences(t *testing.T) {
 	service, _, attemptID, grantID, boot, epoch := grantFixture(t)
-	ctx := context.Background()
+	ctx := context.Background() // grant fulfillment is a fenced read, not a command
 
 	// Correct binding decrypts the typed secret.
 	payload, err := service.FulfillGrant(ctx, grantID, attemptID, boot, epoch)
@@ -98,13 +98,14 @@ func TestProbeCancelCommitOrder(t *testing.T) {
 	if err := service.AcceptProbe(ctx, attemptID, boot, epoch); err != nil {
 		t.Fatal(err)
 	}
+	cancelCtx := adminContext(t, nextCorrelation())
 	var rowVersion int64
 	if err := database.QueryRow(`SELECT row_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&rowVersion); err != nil {
 		t.Fatal(err)
 	}
 	_ = database
 	// Cancellation fence commits first (cancelled result + Cancelling).
-	if err := service.CancelProbe(ctx, attemptID, rowVersion); err != nil {
+	if err := service.CancelProbe(cancelCtx, attemptID, rowVersion); err != nil {
 		t.Fatal(err)
 	}
 	// A late result proposal after the fence is rejected
@@ -143,7 +144,8 @@ func TestInterruptedProbeUsesFrozenRevisionForTerminalChild(t *testing.T) {
 	if err := database.QueryRow(`SELECT row_version FROM connections WHERE name='grant-thanos'`).Scan(&currentVersion); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := service.Rotate(ctx, "grant-thanos", currentVersion, connections.CreateInput{
+	rotateCtx := adminContext(t, nextCorrelation())
+	rotated, err := service.Rotate(rotateCtx, "grant-thanos", currentVersion, connections.CreateInput{
 		Name: "grant-thanos", Type: connections.TypeThanos,
 		NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"https://thanos.example.com","username":"rotated"}`),
 	}, 1, "cmd-interrupt-rotate")
@@ -167,7 +169,7 @@ func TestInterruptedProbeUsesFrozenRevisionForTerminalChild(t *testing.T) {
 
 func TestCreateCommandReplay(t *testing.T) {
 	service, _, _, _ := grantFixtureLight(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	input := thanosInput("first-secret-value")
 	input.Name = "replay-thanos"
 	first, err := service.Create(ctx, input, 1, "cmd-replay-1")
@@ -216,7 +218,7 @@ func grantFixtureLight(t *testing.T) (*connections.Service, *sql.DB, int64, int6
 
 func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 	service, database, _, _ := grantFixtureLight(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	input := thanosInput("queued-secret")
 	input.Name = "queued-thanos"
 	summary, err := service.Create(ctx, input, 1, "cmd-queued-create")
@@ -241,7 +243,7 @@ func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The stream attach path binds and returns the dispatch tuple.
-	bound, grantID, snapshot, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-late", 3, 5*time.Minute)
+	bound, grantID, snapshot, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-late", 3, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("queued attempt must bind: %v %v", err, ok)
 	}
@@ -255,14 +257,14 @@ func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 		t.Fatalf("bound attempt must be Assigned, got %s", state)
 	}
 	// A second binder loses the race harmlessly.
-	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-late", 3, 5*time.Minute); err != nil || ok {
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-late", 3, 5*time.Minute); err != nil || ok {
 		t.Fatalf("second bind must be a no-op, got %v %v", err, ok)
 	}
 }
 
 func TestListRendersConfig(t *testing.T) {
 	service, _, _, _ := grantFixtureLight(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	input := thanosInput("")
 	input.Name = "list-thanos"
 	if _, err := service.Create(ctx, input, 1, "cmd-list-create"); err != nil {
@@ -282,7 +284,7 @@ func TestListRendersConfig(t *testing.T) {
 
 func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
 	service, database, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	input := thanosInput("original-secret-value")
 	input.Name = "rotate-thanos"
 	summary, err := service.Create(ctx, input, 1, "cmd-rotate-create")
@@ -296,11 +298,11 @@ func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, grantID, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-rotate", 1, 5*time.Minute)
+	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-rotate", 1, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("bind: %v %v", err, ok)
 	}
-	if err := service.AcceptProbe(ctx, attemptID, "boot-rotate", 1); err != nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-rotate", 1); err != nil {
 		t.Fatal(err)
 	}
 	// Rotate while the probe is in flight: the current pair switches.
@@ -327,7 +329,7 @@ func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
 	detail := []byte(`{"kind":"thanos","query":"vector(1)","responseType":"vector","sampleCount":1,"sampleValue":"1"}`)
 	result := connections.TypedProbeResult{Outcome: "passed", Detail: detail, ResultDigest: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
 	child := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"thanos"}`}}
-	if err := service.CommitProbeResult(ctx, attemptID, "boot-rotate", 1, result, child); err != nil {
+	if err := service.CommitProbeResult(context.Background(), attemptID, "boot-rotate", 1, result, child); err != nil {
 		t.Fatalf("late result must close over the frozen pair: %v", err)
 	}
 	var closedRevision, closedGeneration int64

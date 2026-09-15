@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // seedBusinessSystem satisfies the schema's fresh-declaration invariant. The
@@ -234,22 +236,33 @@ func TestAttributionDisabledBusinessCannotMatch(t *testing.T) {
 func TestPersistAttributionFailsWhenDiagnosticTableIsMissing(t *testing.T) {
 	service, _, done := newTestService(t)
 	defer done()
-	ctx := context.Background()
+	ctx := adminCommandContext(t, context.Background())
 	if _, err := service.db.Exec(`DROP TABLE alert_occurrence_attributions`); err != nil {
 		t.Fatal(err)
 	}
-	conn, err := service.db.Conn(ctx)
+	// persistAttribution runs inside the runner-owned transaction exactly as
+	// the delivery operation composes it; the dedicated test declaration
+	// keeps the runner's registry closed while exercising the helper's own
+	// failure behavior. The surfaced error must roll the transaction back
+	// with no business leftovers.
+	op, err := service.runner.Register(execution.Operation{
+		Name:       "test.persist_attribution",
+		Class:      execution.ClassWrite,
+		ObjectType: objectDelivery,
+		Authorize:  func(context.Context, *execution.Tx) error { return nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-
-	err = persistAttribution(ctx, conn, 1, 1, 1, attributionDecision{
-		Status:                 "unattributed",
-		CandidateSystemIDsJSON: "[]",
-		CandidateConfigIDsJSON: "[]",
-		ReasonJSON:             `{"code":"source_mismatch"}`,
-	}, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = execution.Execute(ctx, service.runner, op, func(tx *execution.Tx) (int64, error) {
+		const occurrenceID = int64(1)
+		return occurrenceID, persistAttribution(ctx, tx, occurrenceID, 1, 1, attributionDecision{
+			Status:                 "unattributed",
+			CandidateSystemIDsJSON: "[]",
+			CandidateConfigIDsJSON: "[]",
+			ReasonJSON:             `{"code":"source_mismatch"}`,
+		}, time.Now().UTC().Format(time.RFC3339Nano))
+	}, func(occurrenceID int64) int64 { return occurrenceID })
 	if err == nil {
 		t.Fatal("missing attribution diagnostic table must reject persistence")
 	}

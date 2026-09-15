@@ -49,7 +49,11 @@ func (service *RuntimeService) dispatchAnalysisAttempt(ctx context.Context, atte
 		return err
 	}
 	var scopeID int64
-	if err := service.Analyses.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Analyses.Reader(), attemptID)
+	if err != nil {
 		return err
 	}
 	var artifactRefs []*runtimev1.ArtifactRef
@@ -73,11 +77,12 @@ func (service *RuntimeService) dispatchAnalysisAttempt(ctx context.Context, atte
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{
 			DispatchAttempt: &runtimev1.DispatchAttempt{
-				AttemptId:     attemptID,
-				AttemptType:   runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS,
-				ScopeType:     runtimev1.ScopeType_SCOPE_TYPE_ANALYSIS,
-				ScopeId:       scopeID,
-				LeaseDeadline: timestamppb.New(time.Now().UTC().Add(analysisLeaseWindow())),
+				AttemptId:              attemptID,
+				AttemptType:            runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS,
+				ScopeType:              runtimev1.ScopeType_SCOPE_TYPE_ANALYSIS,
+				ScopeId:                scopeID,
+				OperationCorrelationId: operationCorrelationID,
+				LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(analysisLeaseWindow())),
 				Input: &runtimev1.AttemptInputSnapshot{
 					SchemaKind:       input.SchemaKind,
 					CanonicalJson:    input.CanonicalJSON,
@@ -267,7 +272,7 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 // slice (RUNTIME-CANCEL-003).
 func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot string, ack *runtimev1.CancelAck) {
 	var expectedSlot sql.NullString
-	if err := service.Connections.DB().QueryRowContext(ctx, `SELECT runtime_slot FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&expectedSlot); err != nil {
+	if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT runtime_slot FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&expectedSlot); err != nil {
 		sharedops.LogEvent("quoin", "error", "cancel_ack.lookup_failed", err.Error())
 		return
 	}
@@ -284,7 +289,7 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 	case "inspection_collection":
 		var scopeType string
 		if service.Inspections != nil {
-			_ = service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType)
+			_ = service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType)
 		}
 		if scopeType == "run_check" && service.Inspections != nil {
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
@@ -348,7 +353,7 @@ func (service *RuntimeService) attemptTypeOf(ctx context.Context, attemptID int6
 		return "", errors.New("analysis service not wired")
 	}
 	var attemptType string
-	err := service.Analyses.DB().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType)
+	err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType)
 	return attemptType, err
 }
 

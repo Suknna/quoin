@@ -24,14 +24,14 @@ func completeRunWithFirstReport(t *testing.T, h *testHarness) (RunDetail, []int6
 		t.Fatal(err)
 	}
 	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	run, err := h.service.CreatePlanRun(ctx, h.principal, "create-run-0001", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
 	}
 	promqlID := h.promqlAttemptID(t, run.RunID)
 	h.dispatchPromQL(t, promqlID)
-	if err := h.service.CommitPluginProposal(ctx, promqlID, "plinth-boot", 1, pluginSuccessProposal(t, h, promqlID, run.RunID, "success")); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), promqlID, "plinth-boot", 1, pluginSuccessProposal(t, h, promqlID, run.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	analysisID := h.analysisAttemptID(t, run.RunID)
@@ -45,7 +45,7 @@ func completeRunWithFirstReport(t *testing.T, h *testHarness) (RunDetail, []int6
 	callID := h.seedSucceededModelCall(t, analysisID, promptDigest)
 	evidenceIDs := evidenceIDsForRun(t, h, run.RunID)
 	artifactIDs := artifactIDsForAttempt(t, h, analysisID)
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, run.RunID, callID, "first report", evidenceIDs, artifactIDs, promptDigest)); err != nil {
+	if err := h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, run.RunID, callID, "first report", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
 	return run, evidenceIDs, artifactIDs
@@ -99,13 +99,13 @@ func artifactIDsForAttempt(t *testing.T, h *testHarness, attemptID int64) []int6
 func TestReanalyzeCreatesNextImmutableReportVersionFromExistingEvidence(t *testing.T) {
 	h := newTestHarness(t)
 	run, evidenceIDs, artifactIDs := completeRunWithFirstReport(t, h)
-	ctx := context.Background()
+	ctx := commandContext(t)
 
 	next, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.Type != "inspection_analysis" || next.State != "Queued" || next.ID == "" || next.RowVersion != 1 {
+	if next.Type != "inspection_analysis" || next.State != "Queued" || next.ID == "" || next.RowVersion != 2 {
 		t.Fatalf("reanalyze response = %+v", next)
 	}
 	var version int64
@@ -139,7 +139,7 @@ func TestReanalyzeCreatesNextImmutableReportVersionFromExistingEvidence(t *testi
 func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	ctx := context.Background()
+	ctx := commandContext(t)
 	original, err := h.service.CreatePlanRun(ctx, h.principal, "create-run-0001", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 // re-collection must demand a real plan instead of resurrecting a declaration.
 func TestRerunRejectsLegacyDeclarationRun(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := h.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES('legacy-bs','历史系统',0,1,?)`, now); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestRerunRejectsLegacyDeclarationRun(t *testing.T) {
 func TestCancelRunFencesRunningAnalysisWithoutRewritingTheRun(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +268,7 @@ func TestCancelRunFencesRunningAnalysisWithoutRewritingTheRun(t *testing.T) {
 func TestRerunRejectsSkippedOverlapSourceBeforeSQLiteClosure(t *testing.T) {
 	h := newTestHarness(t)
 	h.seedPlan(t, "mixed-plan")
-	ctx := context.Background()
+	ctx := commandContext(t)
 	result, err := h.db.Exec(`
 		INSERT INTO inspection_runs(
 			plan_id,plan_key,connection_id,plugin_id,template_id,template_version,
@@ -299,7 +299,7 @@ func TestRerunRejectsSkippedOverlapSourceBeforeSQLiteClosure(t *testing.T) {
 func TestCancelFirstRejectsLateReportProposal(t *testing.T) {
 	h := newTestHarness(t)
 	run, evidenceIDs, artifactIDs := completeRunWithFirstReport(t, h)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-late-result-0001", run.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +319,7 @@ func TestCancelFirstRejectsLateReportProposal(t *testing.T) {
 	if _, err := h.service.CancelRunWithDispatch(ctx, h.principal, "cancel-late-result-0001", run.RunID, current.RowVersion); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.service.CommitReportProposal(ctx, retry.AttemptID, "plinth-boot", 1, reportProposalBody(retry.AttemptID, run.RunID, callID, "late report", evidenceIDs, artifactIDs, promptDigest)); !errors.Is(err, attempt.ErrLateResult) {
+	if err := h.service.CommitReportProposal(context.Background(), retry.AttemptID, "plinth-boot", 1, reportProposalBody(retry.AttemptID, run.RunID, callID, "late report", evidenceIDs, artifactIDs, promptDigest)); !errors.Is(err, attempt.ErrLateResult) {
 		t.Fatalf("late proposal after cancellation = %v, want attempt.ErrLateResult", err)
 	}
 	var reports int
@@ -334,7 +334,7 @@ func TestCancelFirstRejectsLateReportProposal(t *testing.T) {
 func TestRunDetailProjectsLatestFailedAnalysisForRecovery(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-failed-detail-0001", run.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -360,7 +360,7 @@ func TestRunDetailProjectsLatestFailedAnalysisForRecovery(t *testing.T) {
 func TestCancelRunDispatchesAssignedAnalysisBecauseRuntimeMayAlreadyHaveIt(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-assigned-0001", run.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -391,11 +391,11 @@ func TestCancelRunDispatchesAssignedAnalysisBecauseRuntimeMayAlreadyHaveIt(t *te
 func TestCancelRunReportsCompletedWinnerWhenNoChildRemains(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
-	current, err := h.service.GetRun(context.Background(), run.RunID)
+	current, err := h.service.GetRun(context.TODO(), run.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := h.service.CancelRunWithDispatch(context.Background(), h.principal, "cancel-winner-0001", run.RunID, current.RowVersion)
+	outcome, err := h.service.CancelRunWithDispatch(commandContext(t), h.principal, "cancel-winner-0001", run.RunID, current.RowVersion)
 	if err != nil {
 		t.Fatal(err)
 	}

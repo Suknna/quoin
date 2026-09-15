@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // DiscoveryView is DiscoverySummary.
@@ -272,7 +274,7 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 	return count, nil
 }
 
-func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, systemID int64) (BusinessSystemDetail, error) {
+func (service *Service) systemDetailOn(ctx context.Context, conn execution.Executor, systemID int64) (BusinessSystemDetail, error) {
 	query := `
 		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
 		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300),
@@ -328,7 +330,7 @@ func (service *Service) systemDetailOn(ctx context.Context, conn *sql.Conn, syst
 	return detail, nil
 }
 
-func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, systemID, versionID int64) (ConfigVersionDetail, error) {
+func (service *Service) versionDetailOn(ctx context.Context, conn execution.Executor, systemID, versionID int64) (ConfigVersionDetail, error) {
 	query := `
 		SELECT id,version_seq,state,created_at,published_at,digest,parser_version,schema_version,
 			system_key,display_name,enabled,label_contract_version_id,journey_catalog_digest,journey_catalog_version,
@@ -368,7 +370,7 @@ func (service *Service) versionDetailOn(ctx context.Context, conn *sql.Conn, sys
 	return detail, nil
 }
 
-func (service *Service) projectionsOn(ctx context.Context, conn *sql.Conn, versionID int64) ([]DiscoveryView, []PlanView, error) {
+func (service *Service) projectionsOn(ctx context.Context, conn execution.Executor, versionID int64) ([]DiscoveryView, []PlanView, error) {
 	var (
 		discoveryRows *sql.Rows
 		planRows      *sql.Rows

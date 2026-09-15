@@ -24,6 +24,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 var (
@@ -33,18 +34,24 @@ var (
 	ErrContinuationFence = errors.New("restore continuation fence is invalid")
 )
 
-// Request contains only file identities and the temporary recovery credential.
-// The password must come from an attached TTY and is deliberately never logged.
+// Request contains only file identities and the recovery administrator name.
+// AdminUsername selects the deployment's single built-in administrator that
+// stays enabled through the isolation.
 type Request struct {
 	DataDirectory, BackupDirectory, BackupID, RootKeyFile, RollbackDirectory string
-	AdminUsername, TemporaryPassword                                         string
+	AdminUsername                                                            string
 }
 
-// Result is a non-secret recovery receipt for the deployment helper.
+// Result is the recovery receipt for the deployment helper. TemporaryPassword
+// is a SECRET: the temporary administrator password printed once on the
+// attached TTY. After restore, the service starts and the administrator signs
+// in with it to complete the unified initialization flow. It must never enter
+// logs, reports or any persisted state, and it carries no enforced expiry.
 type Result struct {
 	MaintenanceReason   string
 	MaintenanceRevision int64
 	RollbackDirectory   string
+	TemporaryPassword   string
 }
 
 // Preflight verifies an archived backup without opening or locking the live
@@ -180,7 +187,7 @@ func Restore(ctx context.Context, request Request) (Result, error) {
 		_ = stagedDB.Close()
 		return Result{}, err
 	}
-	revision, err := isolate(ctx, stagedDB.SQL, request.AdminUsername, request.TemporaryPassword)
+	revision, credential, err := isolate(ctx, stagedDB.SQL, request.AdminUsername)
 	closeErr := stagedDB.Close()
 	if err != nil {
 		return Result{}, err
@@ -195,11 +202,11 @@ func Restore(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{MaintenanceReason: "Restore", MaintenanceRevision: revision, RollbackDirectory: rollback}, nil
+	return Result{MaintenanceReason: "Restore", MaintenanceRevision: revision, RollbackDirectory: rollback, TemporaryPassword: credential.TemporaryPassword}, nil
 }
 
 func validateRequest(request Request) error {
-	for _, value := range []string{request.DataDirectory, request.BackupDirectory, request.BackupID, request.RootKeyFile, request.AdminUsername, request.TemporaryPassword} {
+	for _, value := range []string{request.DataDirectory, request.BackupDirectory, request.BackupID, request.RootKeyFile, request.AdminUsername} {
 		if value == "" {
 			return fmt.Errorf("%w: required field is empty", ErrInvalidRequest)
 		}
@@ -310,6 +317,13 @@ func copyVerifiedFile(root, relative, destination string) error {
 // normalizeStagedSQLite converts VACUUM INTO's rollback-journal snapshot to
 // Quoin's persisted WAL settings before bootstrap performs its current-schema
 // and root-key verification. It touches only the untrusted staging copy.
+//
+// Sanctioned low-level exception (execution architecture gate): a journal
+// mode PRAGMA cannot run through the runner's guarded transaction (its
+// statement guard rejects PRAGMA by design), the target file is not yet a
+// Quoin database the bootstrap lock can open, and the whole command only runs
+// as a stopped-service CLI over a throwaway staging copy. No business data is
+// read or written here.
 func normalizeStagedSQLite(ctx context.Context, path string) error {
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)"}).String()
 	database, err := sql.Open("sqlite", dsn)
@@ -341,102 +355,132 @@ func verifySQLite(ctx context.Context, database *sql.DB) error {
 	return rows.Err()
 }
 
-func isolate(ctx context.Context, database *sql.DB, username, password string) (int64, error) {
-	conn, err := database.Conn(ctx)
-	if err != nil {
-		return 0, err
+// authorizeRestoreIsolation admits only the offline system principal entering
+// through the CLI: restore runs on a staged database with the service stopped.
+func authorizeRestoreIsolation(ctx context.Context, _ *execution.Tx) error {
+	meta, ok := execution.FromContext(ctx)
+	if !ok || meta.Actor.Kind != execution.PrincipalSystem || meta.Actor.ID != 0 {
+		return errors.New("restore isolation is reserved for the system principal")
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, err
+	if meta.Source.Kind != execution.SourceCLI {
+		return fmt.Errorf("restore isolation source must be cli, got %q", meta.Source.Kind)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	var active int
-	if err := conn.QueryRowContext(ctx, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil {
-		return 0, err
-	}
-	if active != 0 {
-		return 0, ErrMaintenance
-	}
-	var adminID int64
-	var role, displayName string
-	if err := conn.QueryRowContext(ctx, `SELECT id,role,display_name FROM users WHERE username=?`, username).Scan(&adminID, &role, &displayName); err != nil {
-		return 0, fmt.Errorf("select recovery administrator: %w", err)
-	}
-	if role != "admin" {
-		return 0, errors.New("selected recovery user is not an administrator")
-	}
-	normalized, err := auth.ValidateNewPassword(password, username, displayName)
-	if err != nil {
-		return 0, err
-	}
-	phc, err := auth.HashPassword(normalized)
-	if err != nil {
-		return 0, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	statements := []struct {
-		query string
-		args  []any
-	}{
-		{`UPDATE sessions SET revoked_at=? WHERE revoked_at IS NULL`, []any{now}},
-		{`UPDATE users SET enabled=0,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id<>? AND enabled=1`, []any{now, adminID}},
-		{`UPDATE users SET enabled=1,password_phc=?,password_change_required=1,password_change_required_at=?,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id=?`, []any{phc, now, now, adminID}},
-		{`UPDATE runtime_slots SET state='revoked',current_credential_id=NULL,pending_credential_id=NULL,retiring_credential_id=NULL,row_version=row_version+1 WHERE state<>'revoked'`, nil},
-		{`UPDATE runtime_credentials SET retired_at=?,row_version=row_version+1 WHERE retired_at IS NULL`, []any{now}},
-		{`UPDATE alert_sources SET enabled=0,disabled_at=?,row_version=row_version+1 WHERE enabled=1`, []any{now}},
-		// A never-used replacement cannot retire its Active predecessor under the
-		// ordinary rotation rule. First move that replacement to its existing
-		// PendingRetirement state (without fabricating first_used_at), then retire
-		// both accepted generations while the source is disabled.
-		{`UPDATE alert_source_credentials SET state='PendingRetirement',pending_retirement_at=?,row_version=row_version+1 WHERE state='Active' AND supersedes_credential_id IS NOT NULL`, []any{now}},
-		{`UPDATE alert_source_credentials SET state='Retired',retired_at=?,row_version=row_version+1 WHERE state<>'Retired'`, []any{now}},
-		// A restored connection cannot be trusted until an Admin records it again.
-		// Disabled is the safe terminal state, so exitMaintenance stays reachable
-		// without exposing ordinary connection writes during maintenance.
-		{`UPDATE connections SET enabled=0,revalidation_required=1,row_version=row_version+1 WHERE enabled=1 OR revalidation_required=0`, nil},
-		{`UPDATE browser_identities SET state='AuthenticationRequired',row_version=row_version+1 WHERE state='Ready'`, nil},
-		{`UPDATE maintenance_state SET active=1,reason='Restore',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1 AND active=0`, []any{now}},
-	}
-	for _, statement := range statements {
-		if _, err := conn.ExecContext(ctx, statement.query, statement.args...); err != nil {
-			return 0, err
-		}
-	}
-	var storedPassword string
-	var passwordChangeRequired, enabled int
-	if err := conn.QueryRowContext(ctx, `SELECT password_phc,password_change_required,enabled FROM users WHERE id=?`, adminID).Scan(&storedPassword, &passwordChangeRequired, &enabled); err != nil {
-		return 0, fmt.Errorf("verify recovery administrator: %w", err)
-	}
-	if enabled != 1 || passwordChangeRequired != 1 || !auth.VerifyPassword(normalized, storedPassword) {
-		return 0, errors.New("recovery administrator isolation did not apply")
-	}
-	var revision int64
-	if err := conn.QueryRowContext(ctx, `SELECT row_version FROM maintenance_state WHERE id=1`).Scan(&revision); err != nil {
-		return 0, err
-	}
-	if err := insertChecklist(ctx, conn, revision, adminID, now); err != nil {
-		return 0, err
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('system',0,'maintenance.restore.enter','success','maintenance',?,?)`, revision, now); err != nil {
-		return 0, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return 0, err
-	}
-	committed = true
-	return revision, nil
+	return nil
 }
 
-func insertChecklist(ctx context.Context, conn *sql.Conn, revision, adminID int64, now string) error {
-	items := []checkItem{{"Integrity", "snapshot", "Safe", "verified"}, {"AdminPassword", fmt.Sprintf("%d", adminID), "Blocking", "temporary_password_change_required"}}
+// isolate applies the restored database's trust isolation in ONE all-or-nothing
+// runner transaction: the preserved unique administrator is driven into the
+// direct recovery entry (factors reset + the printed temporary password,
+// shared business stage with auth.BeginRecovery), every other identity,
+// session, flow, runtime slot, connection and alert-source credential is
+// revoked or disabled, Restore maintenance is entered, and the automatic
+// runner audit records the maintenance.restore.enter fact — the shared
+// executor owns the transaction and the audit row. It returns the maintenance
+// revision and the in-memory recovery credential.
+func isolate(ctx context.Context, database *sql.DB, username string) (int64, auth.RecoveryCredential, error) {
+	// The offline command owns an explicit correlation: the restore has no
+	// inbound request context, so the audited fact carries a fresh root id.
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		return 0, auth.RecoveryCredential{}, err
+	}
+	runCtx, err := execution.ReplaceMetadata(ctx, execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+		Source:        execution.Source{Kind: execution.SourceCLI},
+	})
+	if err != nil {
+		return 0, auth.RecoveryCredential{}, err
+	}
+	runner := execution.NewRunner(database, nil, nil)
+	op, err := runner.Register(execution.Operation{
+		Name: "maintenance.restore.enter", Class: execution.ClassWrite, ObjectType: "maintenance",
+		Authorize: authorizeRestoreIsolation,
+	})
+	if err != nil {
+		return 0, auth.RecoveryCredential{}, err
+	}
+	type isolationResult struct {
+		Revision   int64
+		Credential auth.RecoveryCredential
+	}
+	result, err := execution.Execute(runCtx, runner, op, func(tx *execution.Tx) (isolationResult, error) {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil {
+			return isolationResult{}, err
+		}
+		if active != 0 {
+			return isolationResult{}, ErrMaintenance
+		}
+		var adminID int64
+		var role string
+		if err := tx.QueryRowContext(ctx, `SELECT id,role FROM users WHERE username=?`, username).Scan(&adminID, &role); err != nil {
+			return isolationResult{}, fmt.Errorf("select recovery administrator: %w", err)
+		}
+		if role != "admin" {
+			return isolationResult{}, errors.New("selected recovery user is not an administrator")
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+
+		statements := []struct {
+			query string
+			args  []any
+		}{
+			{`UPDATE sessions SET revoked_at=? WHERE revoked_at IS NULL`, []any{now}},
+			{`UPDATE auth_flows SET status='revoked' WHERE status='pending'`, nil},
+			{`UPDATE users SET enabled=0,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id<>? AND enabled=1`, []any{now, adminID}},
+			{`UPDATE runtime_slots SET state='revoked',current_credential_id=NULL,pending_credential_id=NULL,retiring_credential_id=NULL,row_version=row_version+1 WHERE state<>'revoked'`, nil},
+			{`UPDATE runtime_credentials SET retired_at=?,row_version=row_version+1 WHERE retired_at IS NULL`, []any{now}},
+			{`UPDATE alert_sources SET enabled=0,disabled_at=?,row_version=row_version+1 WHERE enabled=1`, []any{now}},
+			// A never-used replacement cannot retire its Active predecessor under the
+			// ordinary rotation rule. First move that replacement to its existing
+			// PendingRetirement state (without fabricating first_used_at), then retire
+			// both accepted generations while the source is disabled.
+			{`UPDATE alert_source_credentials SET state='PendingRetirement',pending_retirement_at=?,row_version=row_version+1 WHERE state='Active' AND supersedes_credential_id IS NOT NULL`, []any{now}},
+			{`UPDATE alert_source_credentials SET state='Retired',retired_at=?,row_version=row_version+1 WHERE state<>'Retired'`, []any{now}},
+			// A restored connection cannot be trusted until an Admin records it again.
+			// Disabled is the safe terminal state, so exitMaintenance stays reachable
+			// without exposing ordinary connection writes during maintenance.
+			{`UPDATE connections SET enabled=0,revalidation_required=1,row_version=row_version+1 WHERE enabled=1 OR revalidation_required=0`, nil},
+			{`UPDATE browser_identities SET state='AuthenticationRequired',row_version=row_version+1 WHERE state='Ready'`, nil},
+			{`UPDATE maintenance_state SET active=1,reason='Restore',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1 AND active=0`, []any{now}},
+		}
+		for _, statement := range statements {
+			if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+				return isolationResult{}, err
+			}
+		}
+		// The preserved administrator enters the unified initialization flow:
+		// every factor is reset and the printed temporary password is the only
+		// proof (initialized=0 with the forced formal change marker).
+		credential, err := auth.BeginRecoveryFactorsOn(ctx, tx, adminID, time.Now())
+		if err != nil {
+			return isolationResult{}, fmt.Errorf("reset recovery administrator credential: %w", err)
+		}
+		var enabled, initialized, passwordChange int
+		if err := tx.QueryRowContext(ctx, `SELECT enabled,initialized,password_change_required FROM users WHERE id=?`, adminID).Scan(&enabled, &initialized, &passwordChange); err != nil {
+			return isolationResult{}, fmt.Errorf("verify recovery administrator: %w", err)
+		}
+		if enabled != 1 || initialized != 0 || passwordChange != 1 {
+			return isolationResult{}, errors.New("recovery administrator isolation did not apply")
+		}
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT row_version FROM maintenance_state WHERE id=1`).Scan(&revision); err != nil {
+			return isolationResult{}, err
+		}
+		if err := insertChecklist(ctx, tx, revision, adminID, now); err != nil {
+			return isolationResult{}, err
+		}
+		return isolationResult{Revision: revision, Credential: credential}, nil
+	}, func(result isolationResult) int64 { return result.Revision })
+	if err != nil {
+		return 0, auth.RecoveryCredential{}, err
+	}
+	return result.Revision, result.Credential, nil
+}
+
+func insertChecklist(ctx context.Context, conn execution.Executor, revision, adminID int64, now string) error {
+	items := []checkItem{{"Integrity", "snapshot", "Safe", "verified"}, {"AdminPassword", fmt.Sprintf("%d", adminID), "Blocking", "recovery_credential_required"}}
 	rows, err := conn.QueryContext(ctx, `SELECT id,enabled FROM users ORDER BY id`)
 	if err != nil {
 		return err

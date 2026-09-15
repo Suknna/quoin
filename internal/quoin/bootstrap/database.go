@@ -18,6 +18,7 @@ import (
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"modernc.org/sqlite"
 )
 
@@ -43,8 +44,9 @@ func init() {
 const verifierPlaintext = "quoin-root-key-verifier-v1"
 
 type Database struct {
-	SQL  *sql.DB
-	lock *sharedops.DirectoryLock
+	SQL    *sql.DB
+	Reader execution.Reader
+	lock   *sharedops.DirectoryLock
 }
 
 func OpenDatabase(ctx context.Context, dataDirectory, rootKeyFile string) (*Database, error) {
@@ -94,7 +96,17 @@ func OpenDatabase(ctx context.Context, dataDirectory, rootKeyFile string) (*Data
 		_ = db.Close()
 		return fail(err)
 	}
-	return &Database{SQL: db, lock: lock}, nil
+	reader, err := execution.OpenReadOnly(databasePath)
+	if err != nil {
+		db.Close()
+		return fail(err)
+	}
+	if err := reader.PingContext(ctx); err != nil {
+		reader.Close()
+		db.Close()
+		return fail(err)
+	}
+	return &Database{SQL: db, Reader: reader, lock: lock}, nil
 }
 
 // OpenMigrationDatabase takes the same exclusive data-directory lock and root
@@ -200,10 +212,14 @@ func (database *Database) Close() error {
 	if database == nil {
 		return nil
 	}
+	readerErr := database.Reader.Close()
 	dbErr := database.SQL.Close()
 	lockErr := database.lock.Close()
 	if dbErr != nil {
 		return dbErr
+	}
+	if readerErr != nil {
+		return readerErr
 	}
 	return lockErr
 }
@@ -251,6 +267,8 @@ func initializeDatabase(ctx context.Context, db *sql.DB, rootKey []byte) error {
 		{`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,?)`, []any{now}},
 		{`INSERT INTO backup_settings(id,enabled,schedule_cron,timezone,retention_count,schedule_enabled_at,row_version,updated_at) VALUES(1,1,'0 0 * * *','UTC',30,?,1,?)`, []any{now, now}},
 		{`INSERT INTO backup_retention_health(id) VALUES(1)`, nil},
+		{`INSERT INTO audit_retention(id,cleanup_enabled,updated_at) VALUES(1,1,?)`, []any{now}},
+		{`INSERT INTO audit_cleanup_permits(id) VALUES(1)`, nil},
 		{`INSERT INTO artifact_retention_settings(id,generated_retention_days,row_version,updated_at) VALUES(1,90,1,?)`, []any{now}},
 	}
 	for _, statement := range statements {

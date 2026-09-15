@@ -17,6 +17,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -27,7 +28,6 @@ type planObjectRef struct {
 	IdentityKey string `json:"identityKey,omitempty"`
 	// LabelConditions：business_view 范围冻结的视图 exact-match 标签条件。
 	LabelConditions map[string]string `json:"labelConditions,omitempty"`
-
 }
 
 // pluginCollectionInput 是 supervisor 收到的冻结派发输入正文。
@@ -49,55 +49,36 @@ type pluginCollectionInput struct {
 	Target    *planObjectRef `json:"target,omitempty"`
 }
 
-// CreatePlanRun 启动独立计划的一次人工 Run。每个展开检查在同一事务成为
-// run_check 子 Attempt：插件采集子冻结 inspection_plugin_execution_v1 与其
-// config_thanos_query grant。
+// CreatePlanRun 启动独立计划的一次人工 Run（执行器账本命令）：每个展开检查在
+// 同一事务成为 run_check 子 Attempt：插件采集子冻结
+// inspection_plugin_execution_v1 与其 config_thanos_query grant。台账与成功/
+// 拒绝审计由执行器在同一事务自动持久化。
 func (s *Service) CreatePlanRun(ctx context.Context, principalID int64, clientCommandID, planKey string) (RunDetail, error) {
-	const command = "inspection_run.create"
-	digest := auth.DigestCommand(command, map[string]any{"planKey": planKey})
-	if d, replayed, err := s.replay(ctx, principalID, clientCommandID, digest); replayed || err != nil {
-		return d, err
-	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return RunDetail{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	digest := auth.DigestCommand(CommandCreateRun, map[string]any{"planKey": planKey})
+	outcome, err := execution.Run(ctx, s.runner, s.createRun, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: clientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (RunDetail, execution.Change, error) {
+		detail, rejection, err := s.createPlanRunOn(ctx, tx, planRunRequest{planKey: planKey, triggerKind: "manual", availability: RuntimeAvailability{Plinth: true}, now: s.nowText()})
+		if err != nil {
+			return RunDetail{}, execution.Changed, err
 		}
-	}()
-	if d, replayed, err := s.replayOn(ctx, conn, principalID, clientCommandID, digest); replayed || err != nil {
-		if replayed {
-			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return RunDetail{}, err
-			}
-			committed = true
+		if rejection != nil {
+			return RunDetail{}, execution.Unchanged, rejection
 		}
-		return d, err
-	}
-	detail, rejection, err := s.createPlanRunOn(ctx, conn, planRunRequest{planKey: planKey, triggerKind: "manual", availability: RuntimeAvailability{Plinth: true}, now: s.nowText()})
+		return detail, execution.Changed, nil
+	}, func(detail RunDetail) int64 { return detail.RunID })
 	if err != nil {
-		return RunDetail{}, err
+		return RunDetail{}, translateCommandError(err)
 	}
-	if rejection != nil {
-		return s.reject(ctx, conn, principalID, clientCommandID, command, digest, rejection, &committed)
+	detail := outcome.Result
+	if outcome.Replayed {
+		// The wire shape drops the typed id; the ledger replay restores it from
+		// the human locator exactly like the pre-runner decode path.
+		detail.RunID = mustLocator(detail.ID)
 	}
-	if err = s.audit(ctx, conn, principalID, clientCommandID, command, detail.RunID, s.nowText()); err != nil {
-		return RunDetail{}, err
-	}
-	if err = s.recordCommand(ctx, conn, principalID, clientCommandID, command, digest, detail.RunID, detail); err != nil {
-		return RunDetail{}, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return RunDetail{}, err
-	}
-	committed = true
 	return detail, nil
 }
 
@@ -111,7 +92,7 @@ type ScheduledPlan struct {
 
 // ScheduledPlans 列出启用的定时计划（接入同样启用）。
 func (s *Service) ScheduledPlans(ctx context.Context) ([]ScheduledPlan, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader.QueryContext(ctx, `
 		SELECT p.id,p.plan_key,p.cron,p.timezone
 		FROM inspection_plans p JOIN connections c ON c.id=p.connection_id
 		WHERE p.enabled=1 AND c.enabled=1 AND p.cron IS NOT NULL
@@ -132,67 +113,78 @@ func (s *Service) ScheduledPlans(ctx context.Context) ([]ScheduledPlan, error) {
 	return plans, rows.Err()
 }
 
-// CreateScheduledPlanRun 提交一个到期的 UTC 计划 Run。计划不可再调度（被停
-// 用或接入停用）不是错误：调度器读到过期快照时静默跳过，绝不把旧定义变成
-// Run。重叠定时周期 SkippedOverlap 且不补跑。
+// scheduledRunReplayError carries the already-committed Run for a redelivered
+// schedule boundary. It is deliberately not a durable trace: the original
+// creation's audit stands, and the caller observes the stored projection as
+// success — a replay never records a second success event (ADR-0006).
+type scheduledRunReplayError struct{ detail RunDetail }
+
+func (e *scheduledRunReplayError) Error() string {
+	return "inspection scheduled run already committed for this boundary"
+}
+
+// errScheduledPlanUnavailable marks a scheduler pass whose plan snapshot is no
+// longer schedulable (plan or connection disabled). It is deliberately a plain
+// error, not a deterministic rejection: the pass changed nothing and must
+// leave no durable trace, so a stale snapshot cannot flood the audit log.
+var errScheduledPlanUnavailable = errors.New("inspection scheduled plan is no longer schedulable")
+
+// CreateScheduledPlanRun 提交一个到期的 UTC 计划 Run。调度入口在本层显式建立
+// 系统调度上下文（每个到期边界是一次新操作，新建关联）；随后执行器事务内的
+// 子 Attempt 创建经 attempt.CreateOn 持久化该关联，任务派生（派发/回执按 id
+// 关联）由此保留原始操作上下文。计划不可再调度（被停用或接入停用）不是错
+// 误：调度器读到过期快照时静默跳过，绝不把旧定义变成 Run。重叠定时周期
+// SkippedOverlap 且不补跑。
 func (s *Service) CreateScheduledPlanRun(ctx context.Context, plan ScheduledPlan, scheduledFor time.Time, availability RuntimeAvailability) (RunDetail, error) {
 	scheduledFor = scheduledFor.UTC()
 	if scheduledFor.Nanosecond() != 0 || scheduledFor.Second() != 0 {
 		return RunDetail{}, fmt.Errorf("scheduled_for must be a minute boundary")
 	}
-	conn, err := s.db.Conn(ctx)
+	commandCtx, err := s.schedulerContext(ctx)
 	if err != nil {
 		return RunDetail{}, err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return RunDetail{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
 	scheduledText := scheduledFor.Format(time.RFC3339Nano)
-	var existingID int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT id FROM inspection_runs WHERE plan_id=? AND scheduled_for=?`, plan.PlanID, scheduledText).Scan(&existingID)
-	if err == nil {
-		detail, detailErr := s.detailOn(ctx, conn, existingID)
-		if detailErr != nil {
-			return RunDetail{}, detailErr
+	outcome, err := execution.Execute(commandCtx, s.runner, s.scheduleRun, func(tx *execution.Tx) (RunDetail, error) {
+		var existingID int64
+		err := tx.QueryRowContext(commandCtx, `
+			SELECT id FROM inspection_runs WHERE plan_id=? AND scheduled_for=?`, plan.PlanID, scheduledText).Scan(&existingID)
+		if err == nil {
+			detail, detailErr := s.detailOn(commandCtx, tx, existingID)
+			if detailErr != nil {
+				return RunDetail{}, detailErr
+			}
+			return RunDetail{}, &scheduledRunReplayError{detail: detail}
 		}
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return RunDetail{}, err
 		}
-		committed = true
+		detail, rejection, err := s.createPlanRunOn(commandCtx, tx, planRunRequest{planKey: plan.PlanKey, triggerKind: "schedule", scheduledFor: &scheduledText, availability: availability, now: s.nowText()})
+		if err != nil {
+			return RunDetail{}, err
+		}
+		if rejection != nil {
+			// 计划被停用或存在过期的只读快照：这不是调度错误，静默跳过。
+			return RunDetail{}, errScheduledPlanUnavailable
+		}
 		return detail, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return RunDetail{}, err
-	}
-	detail, rejection, err := s.createPlanRunOn(ctx, conn, planRunRequest{planKey: plan.PlanKey, triggerKind: "schedule", scheduledFor: &scheduledText, availability: availability, now: s.nowText()})
+	}, func(detail RunDetail) int64 { return detail.RunID })
 	if err != nil {
-		return RunDetail{}, err
-	}
-	if rejection != nil {
-		// 计划被停用或存在过期的只读快照：这不是调度错误，静默跳过。
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return RunDetail{}, err
+		var replay *scheduledRunReplayError
+		if errors.As(err, &replay) {
+			return replay.detail, nil
 		}
-		committed = true
-		return RunDetail{}, nil
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if errors.Is(err, errScheduledPlanUnavailable) {
+			return RunDetail{}, nil
+		}
 		return RunDetail{}, err
 	}
-	committed = true
-	return detail, nil
+	return outcome, nil
 }
 
-// createPlanRunOn 是人工/定时共享的事务核心。rejection 非 nil 表示确定性
-// 拒绝（调用方决定是否写入命令台账）。
+// createPlanRunOn 是人工/定时共享的事务核心，运行在调用方的执行器事务内
+// （执行器受守卫事务或浏览器收口连接）。rejection 非 nil 表示确定性拒绝，
+// 由调用方决定持久化（账本命令）或静默跳过（调度）。
 // planRunRequest 携带一次计划 Run 创建的全部边界事实。
 type planRunRequest struct {
 	planKey      string
@@ -203,29 +195,29 @@ type planRunRequest struct {
 	now          string
 }
 
-func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request planRunRequest) (RunDetail, *RejectionError, error) {
+func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, request planRunRequest) (RunDetail, *execution.Rejection, error) {
 	planKey, triggerKind, scheduledFor, availability, now := request.planKey, request.triggerKind, request.scheduledFor, request.availability, request.now
 	var planID, connectionID int64
 	var planEnabled, connectionEnabled int
 	var pluginID, templateID, paramsJSON, scopeJSON, scopeKind string
 	var templateVersion sql.NullString
-	err := conn.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT p.id,p.connection_id,p.enabled,p.plugin_id,p.template_id,p.template_version,p.params_json,p.scope_json,p.scope_kind,c.enabled
 		FROM inspection_plans p JOIN connections c ON c.id=p.connection_id
 		WHERE p.plan_key=?`, planKey).
 		Scan(&planID, &connectionID, &planEnabled, &pluginID, &templateID, &templateVersion, &paramsJSON, &scopeJSON, &scopeKind, &connectionEnabled)
-	if err == sql.ErrNoRows {
-		return RunDetail{}, &RejectionError{Code: "not_found", Detail: "找不到该巡检计划"}, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunDetail{}, &execution.Rejection{Code: "not_found", Detail: "找不到该巡检计划"}, nil
 	}
 	if err != nil {
 		return RunDetail{}, nil, err
 	}
 	if planEnabled == 0 || connectionEnabled == 0 {
-		return RunDetail{}, &RejectionError{Code: "plan_disabled", Detail: "计划或其来源接入未启用，不能运行巡检"}, nil
+		return RunDetail{}, &execution.Rejection{Code: "plan_disabled", Detail: "计划或其来源接入未启用，不能运行巡检"}, nil
 	}
 	template, ok := TemplateFor(pluginID, templateID)
 	if !ok {
-		return RunDetail{}, &RejectionError{Code: "unknown_template", Detail: "计划引用的模板不再可用"}, nil
+		return RunDetail{}, &execution.Rejection{Code: "unknown_template", Detail: "计划引用的模板不再可用"}, nil
 	}
 	frozenVersion := template.Version
 	if templateVersion.Valid {
@@ -234,21 +226,21 @@ func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request p
 	// 展开发生在 INSERT 之前：业务视图的标签条件与对象已观测身份标签在 Run
 	// 创建时确定性冻结进 frozen_scope_json（origin 触发器随后使其不可变），
 	// 视图/观测的后续变化不影响已创建 Run。
-	targets, frozenScopeJSON, wireKind, expansionErr := s.expandPlanScope(ctx, conn, connectionID, scopeKind, scopeJSON)
+	targets, frozenScopeJSON, wireKind, expansionErr := s.expandPlanScope(ctx, tx, connectionID, scopeKind, scopeJSON)
 	if expansionErr != nil {
 		return RunDetail{}, nil, expansionErr
 	}
-	insert, err := conn.ExecContext(ctx, `
+	insert, err := tx.ExecContext(ctx, `
 		INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?, 'Queued',?)`,
 		planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
 	if err != nil {
 		// 活动唯一索引是提交顺序上的重叠裁决：只有真正活动的 Run 才把定时
 		// 到期转换成 SkippedOverlap，绝不把其它数据库故障伪装成调度决策。
-		if scheduledFor != nil && isActiveConflict(ctx, conn, planID) {
+		if scheduledFor != nil && isActiveConflict(ctx, tx, planID) {
 			var activeID int64
-			_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&activeID)
-			skip, err := conn.ExecContext(ctx, `
+			_ = tx.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&activeID)
+			skip, err := tx.ExecContext(ctx, `
 				INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
 				VALUES(?,?,?,?,?,?,?,?,?,?,?, 'SkippedOverlap',?)`,
 				planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
@@ -259,18 +251,18 @@ func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request p
 			if err != nil {
 				return RunDetail{}, nil, err
 			}
-			detail, err := s.detailOn(ctx, conn, skipID)
+			detail, err := s.detailOn(ctx, tx, skipID)
 			return detail, nil, err
 		}
 		var active int64
-		_ = conn.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&active)
-		return RunDetail{}, &RejectionError{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", ObjectID: active}, nil
+		_ = tx.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&active)
+		return RunDetail{}, &execution.Rejection{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", ObjectID: active}, nil
 	}
 	runID, err := insert.LastInsertId()
 	if err != nil {
 		return RunDetail{}, nil, err
 	}
-	if _, err = conn.ExecContext(ctx, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, now, runID); err != nil {
 		return RunDetail{}, nil, err
 	}
 	for i, target := range targets {
@@ -293,18 +285,18 @@ func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request p
 				displayName = fmt.Sprintf("%s（视图条件 %d 项）", template.DisplayName, len(target.LabelConditions))
 			}
 		}
-		if _, err = conn.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO inspection_run_checks(run_id,check_key,display_name,plugin_id,template_id,template_version,params_json,target_json,created_at)
 			VALUES(?,?,?,?,?,?,?,?,?)`, runID, checkKey, displayName, pluginID, templateID, frozenVersion, paramsJSON, targetJSON, now); err != nil {
 			return RunDetail{}, nil, err
 		}
 		if !availability.Plinth {
-			if err = s.runtimeUnavailableChild(ctx, conn, runID, checkKey, now); err != nil {
+			if err = s.runtimeUnavailableChild(ctx, tx, runID, checkKey, now); err != nil {
 				return RunDetail{}, nil, err
 			}
 			continue
 		}
-		if err = s.pluginChild(ctx, conn, runID, connectionID, pluginCollectionCheck{
+		if err = s.pluginChild(ctx, tx, runID, connectionID, pluginCollectionCheck{
 			checkKey: checkKey, pluginID: pluginID, templateID: templateID, templateVersion: frozenVersion,
 			paramsJSON: paramsJSON, target: target, evidenceAt: now, scopeKind: wireKind,
 		}); err != nil {
@@ -314,10 +306,10 @@ func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request p
 			return RunDetail{}, nil, err
 		}
 	}
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
+	if err = s.convergeOn(ctx, tx, runID); err != nil {
 		return RunDetail{}, nil, err
 	}
-	detail, err := s.detailOn(ctx, conn, runID)
+	detail, err := s.detailOn(ctx, tx, runID)
 	if err != nil {
 		return RunDetail{}, nil, err
 	}
@@ -331,7 +323,7 @@ func (s *Service) createPlanRunOn(ctx context.Context, conn *sql.Conn, request p
 //     fail closed 拒绝而非静默放大），快照同时写入 frozen_scope_json；
 //   - objects：显式对象集合，逐对象冻结其已观测身份标签（取
 //     observed_source_objects.labels_json，不从 canonical 字符串硬编码解析）。
-func (s *Service) expandPlanScope(ctx context.Context, conn *sql.Conn, connectionID int64, scopeKind, scopeJSON string) ([]planObjectRef, string, string, error) {
+func (s *Service) expandPlanScope(ctx context.Context, tx execution.Executor, connectionID int64, scopeKind, scopeJSON string) ([]planObjectRef, string, string, error) {
 	switch scopeKind {
 	case "integration":
 		return []planObjectRef{{}}, scopeJSON, "integration", nil
@@ -344,23 +336,23 @@ func (s *Service) expandPlanScope(ctx context.Context, conn *sql.Conn, connectio
 		}
 		var conditionsJSON string
 		var viewConnection sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT label_conditions_json, connection_id FROM business_views WHERE view_key=?`, viewScope.BusinessViewKey).Scan(&conditionsJSON, &viewConnection); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT label_conditions_json, connection_id FROM business_views WHERE view_key=?`, viewScope.BusinessViewKey).Scan(&conditionsJSON, &viewConnection); err != nil {
 			if err == sql.ErrNoRows {
-				return nil, "", "", &RejectionError{Code: "unknown_business_view", Detail: "业务视图已不存在，不能按其范围采证"}
+				return nil, "", "", &execution.Rejection{Code: "unknown_business_view", Detail: "业务视图已不存在，不能按其范围采证"}
 			}
 			return nil, "", "", err
 		}
 		// Run 创建时重验接入相交：视图保存后其来源可被改到另一接入，与计划
 		// 接入不再相交的范围定义必须拒绝，而不是沿旧接入按 labels 查询。
 		if viewConnection.Valid && viewConnection.Int64 != connectionID {
-			return nil, "", "", &RejectionError{Code: "scope_conflict", Detail: "业务视图来源接入与计划接入不一致，请调整视图或计划"}
+			return nil, "", "", &execution.Rejection{Code: "scope_conflict", Detail: "业务视图来源接入与计划接入不一致，请调整视图或计划"}
 		}
 		conditions := map[string]string{}
 		if err := json.Unmarshal([]byte(conditionsJSON), &conditions); err != nil {
 			return nil, "", "", err
 		}
 		if len(conditions) == 0 {
-			return nil, "", "", &RejectionError{Code: "scope_empty", Detail: "业务视图没有标签条件，等同全源查询被拒绝；如需全接入巡检请改用 integration 范围"}
+			return nil, "", "", &execution.Rejection{Code: "scope_empty", Detail: "业务视图没有标签条件，等同全源查询被拒绝；如需全接入巡检请改用 integration 范围"}
 		}
 		augmented, err := json.Marshal(map[string]any{
 			"kind": "businessView", "businessViewKey": viewScope.BusinessViewKey, "labelConditions": conditions,
@@ -377,17 +369,17 @@ func (s *Service) expandPlanScope(ctx context.Context, conn *sql.Conn, connectio
 			return nil, "", "", err
 		}
 		if len(scope.Objects) == 0 {
-			return nil, "", "", &RejectionError{Code: "malformed_scope", Detail: "objects 范围为空，等同无界查询被拒绝"}
+			return nil, "", "", &execution.Rejection{Code: "malformed_scope", Detail: "objects 范围为空，等同无界查询被拒绝"}
 		}
 		for i := range scope.Objects {
 			var labelsJSON string
-			err := conn.QueryRowContext(ctx, `
+			err := tx.QueryRowContext(ctx, `
 				SELECT labels_json FROM observed_source_objects
 				WHERE connection_id=? AND object_type=? AND identity_key=?`,
 				connectionID, scope.Objects[i].ObjectType, scope.Objects[i].IdentityKey).Scan(&labelsJSON)
 			if err != nil {
 				if err == sql.ErrNoRows {
-					return nil, "", "", &RejectionError{Code: "unknown_object", Detail: fmt.Sprintf("对象 %s/%s 未被观测到，不能冻结其身份约束", scope.Objects[i].ObjectType, scope.Objects[i].IdentityKey)}
+					return nil, "", "", &execution.Rejection{Code: "unknown_object", Detail: fmt.Sprintf("对象 %s/%s 未被观测到，不能冻结其身份约束", scope.Objects[i].ObjectType, scope.Objects[i].IdentityKey)}
 				}
 				return nil, "", "", err
 			}
@@ -396,7 +388,7 @@ func (s *Service) expandPlanScope(ctx context.Context, conn *sql.Conn, connectio
 				return nil, "", "", err
 			}
 			if len(labels) == 0 {
-				return nil, "", "", &RejectionError{Code: "scope_empty", Detail: fmt.Sprintf("对象 %s/%s 没有已观测身份标签，等同无界查询被拒绝", scope.Objects[i].ObjectType, scope.Objects[i].IdentityKey)}
+				return nil, "", "", &execution.Rejection{Code: "scope_empty", Detail: fmt.Sprintf("对象 %s/%s 没有已观测身份标签，等同无界查询被拒绝", scope.Objects[i].ObjectType, scope.Objects[i].IdentityKey)}
 			}
 			// 已观测身份标签直接冻结为 LabelConditions（查询约束）：不新增第二
 			// 字段，也绝不从 canonical 身份字符串解析标签（其真实格式是按名排序
@@ -405,22 +397,22 @@ func (s *Service) expandPlanScope(ctx context.Context, conn *sql.Conn, connectio
 		}
 		return scope.Objects, scopeJSON, "objects", nil
 	}
-	return nil, "", "", &RejectionError{Code: "malformed_scope", Detail: "未知的计划范围类型，拒绝展开"}
+	return nil, "", "", &execution.Rejection{Code: "malformed_scope", Detail: "未知的计划范围类型，拒绝展开"}
 }
 
-func isActiveConflict(ctx context.Context, conn *sql.Conn, planID int64) bool {
+func isActiveConflict(ctx context.Context, tx execution.Executor, planID int64) bool {
 	var active int
-	return conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&active) == nil && active > 0
+	return tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&active) == nil && active > 0
 }
 
 // pluginChildForRerun 为重采证 Run 的已复制检查目录冻结子 Attempt：检查行、
 // 冻结绑定与 wire 作用域类型全部来自源 Run 的复制（视图当前内容绝不参与），
 // 仅接入授权按当前启用修订重新解析。
-func (s *Service) pluginChildForRerun(ctx context.Context, conn *sql.Conn, runID, sourceRunID int64, checkKey, now string) error {
+func (s *Service) pluginChildForRerun(ctx context.Context, tx execution.Executor, runID, sourceRunID int64, checkKey, now string) error {
 	var connectionID int64
 	var pluginID, templateID, templateVersion, paramsJSON, frozenScopeJSON string
 	var targetJSON sql.NullString
-	if err := conn.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT r.connection_id, c.plugin_id, c.template_id, c.template_version, c.params_json, c.target_json, r.frozen_scope_json
 		FROM inspection_runs r JOIN inspection_run_checks c ON c.run_id=r.id
 		WHERE r.id=? AND c.check_key=?`, runID, checkKey).Scan(&connectionID, &pluginID, &templateID, &templateVersion, &paramsJSON, &targetJSON, &frozenScopeJSON); err != nil {
@@ -435,7 +427,7 @@ func (s *Service) pluginChildForRerun(ctx context.Context, conn *sql.Conn, runID
 	frozen := map[string]any{}
 	_ = json.Unmarshal([]byte(frozenScopeJSON), &frozen)
 	wireKind, _ := frozen["kind"].(string)
-	return s.pluginChild(ctx, conn, runID, connectionID, pluginCollectionCheck{
+	return s.pluginChild(ctx, tx, runID, connectionID, pluginCollectionCheck{
 		checkKey: checkKey, pluginID: pluginID, templateID: templateID, templateVersion: templateVersion,
 		paramsJSON: paramsJSON, target: target, evidenceAt: now, scopeKind: wireKind,
 	})
@@ -455,18 +447,17 @@ type pluginCollectionCheck struct {
 
 // pluginChild 冻结一个 run_check 插件采集子 Attempt：config_thanos_query
 // grant 与版本化输入正文（与既有 PromQL 子 Attempt 的授权边界相同）。
-func (s *Service) pluginChild(ctx context.Context, conn *sql.Conn, runID, connectionID int64, check pluginCollectionCheck) error {
-	insert, err := conn.ExecContext(ctx, `
+func (s *Service) pluginChild(ctx context.Context, tx execution.Executor, runID, connectionID int64, check pluginCollectionCheck) error {
+	// CreateOn centrally persists the command's correlation metadata onto
+	// the new child attempt in this same transaction (ADR-0006); a context
+	// without execution metadata fails the creation.
+	attemptID, err := attempt.CreateOn(ctx, tx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,created_at)
 		VALUES('inspection_collection','run_check',?,?,'Queued',?,?)`, runID, check.checkKey, attempt.ReleaseVersion(), s.nowText())
 	if err != nil {
 		return err
 	}
-	attemptID, err := insert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	grant, err := thanos.ResolveConfigGrantForConnection(ctx, conn, attemptID, connectionID)
+	grant, err := thanos.ResolveConfigGrantForConnection(ctx, tx, attemptID, connectionID)
 	if err != nil {
 		return err
 	}
@@ -489,7 +480,7 @@ func (s *Service) pluginChild(ctx context.Context, conn *sql.Conn, runID, connec
 		return err
 	}
 	inputDigest := sha256.Sum256(canonical)
-	snapshot, err := conn.ExecContext(ctx, `
+	snapshot, err := tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
 		VALUES(?,?, 'v1',?,?)`, attemptID, pluginExecutionSchemaKind, hex.EncodeToString(inputDigest[:]), s.nowText())
 	if err != nil {
@@ -500,14 +491,14 @@ func (s *Service) pluginChild(ctx context.Context, conn *sql.Conn, runID, connec
 		return err
 	}
 	runDigest := sha256.Sum256([]byte(fmt.Sprintf("inspection-run:%d", runID)))
-	if _, err = conn.ExecContext(ctx, `
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_run_id)
 		VALUES(?,1,'inspection_run',?,?)`, snapshotID, hex.EncodeToString(runDigest[:]), runID); err != nil {
 		return err
 	}
 	// 冻结实际使用的接入修订作为来源谱系；归属由 input item 闭合触发器精确校验。
 	revisionDigest := sha256.Sum256([]byte(fmt.Sprintf("connection-revision:%d", grant.ConnectionRevisionID)))
-	if _, err = conn.ExecContext(ctx, `
+	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id)
 		VALUES(?,2,'connection_revision',?,?)`, snapshotID, hex.EncodeToString(revisionDigest[:]), grant.ConnectionRevisionID); err != nil {
 		return err

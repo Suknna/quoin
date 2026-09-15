@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 // RuntimeService adapts the runtime.Service authority to the gRPC surface.
 type RuntimeService struct {
+	writer *sql.DB
 	runtimev1.UnimplementedRuntimeControlServer
 	Slots *qruntime.Service
 	// PlatformFaults projects runtime connection transitions into the independent
@@ -579,9 +581,11 @@ func (service *RuntimeService) projectRuntimeConnection(ctx context.Context, slo
 }
 
 // NewRuntimeControl builds the control-stream service; keep the value so
-// the HTTP surface can reuse its task dispatcher.
-func NewRuntimeControl(slots *qruntime.Service, releaseVersion, catalogDigest string, taskConnections *connections.Service) *RuntimeService {
-	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest, Connections: taskConnections}
+// the HTTP surface can reuse its task dispatcher. writer is the composition
+// writer the runtime families' not-yet-migrated runner compositions run on;
+// reads never go through it (they serve the injected read-only pools).
+func NewRuntimeControl(slots *qruntime.Service, releaseVersion, catalogDigest string, taskConnections *connections.Service, writer *sql.DB) *RuntimeService {
+	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest, Connections: taskConnections, writer: writer}
 }
 
 // dispatchQueuedInvestigations binds and dispatches every Queued

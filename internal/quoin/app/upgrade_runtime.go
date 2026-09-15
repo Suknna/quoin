@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 
 	"github.com/Suknna/quoin/internal/contract"
@@ -45,7 +46,10 @@ func maintenanceAdmissionChecker(ctx context.Context, db *sql.DB) func(context.C
 func (application *apiServer) startUpgradeMaintenanceRuntime(ctx context.Context, config contract.QuoinConfig, serverSet *servers) error {
 	artifactStore, err := artifact.NewStore(application.db, filepath.Join(config.DataDirectory, "artifacts"))
 	if err != nil {
-		return err
+		return fmt.Errorf("open artifact store: %w", err)
+	}
+	if err := artifactStore.SetReader(application.reader); err != nil {
+		return fmt.Errorf("wire artifact store reader: %w", err)
 	}
 	backupService, err := backup.NewService(application.db, backup.Config{
 		DataDirectory: config.DataDirectory, BackupDirectory: config.BackupDirectory,
@@ -57,9 +61,28 @@ func (application *apiServer) startUpgradeMaintenanceRuntime(ctx context.Context
 	if err != nil {
 		return err
 	}
+	// configureReadOnly has already joined this process to the shared
+	// read-only pool before the maintenance runtime starts, so the backup
+	// service moves its public reads onto it and the constructor's
+	// self-opened pool closes immediately: the runtime owns no connection of
+	// its own for the process lifetime and Run's deferred database.Close()
+	// stays the last SQLite connection, so no WAL sidecar survives the
+	// maintenance boot. There is deliberately no defer Close here — the
+	// reconciler goroutine below outlives this function; after the wiring the
+	// service holds nothing that would need closing.
+	if application.readerWired {
+		if err := backupService.SetReader(application.reader); err != nil {
+			_ = backupService.Close()
+			return fmt.Errorf("attach backup shared reader: %w", err)
+		}
+	}
+	application.upgradeBackups = backupService
 	application.upgradeReconciler = upgrade.NewReconciler(application.db, &backupUpgradeRunner{service: backupService})
 	projector, err := serverSet.ops.UpgradePreparedProjector()
 	if err != nil {
+		// No-op after the wiring above, but explicit for the reader-nil
+		// fallback so that path never leaks the self-opened pool either.
+		_ = backupService.Close()
 		return err
 	}
 	application.upgradeReconciler.SetPrepared(projector)

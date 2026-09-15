@@ -17,16 +17,18 @@ type ChangeEvent struct {
 
 // Watermarks derives the replay watermarks directly from the change log
 // itself (DATA-SSE-009): high_water = MAX(id), oldest_available = MIN(id).
-// No second watermark table exists.
+// No second watermark table exists. The read goes through the runner's
+// trusted read-only surface: fail-closed until the pool is wired.
 func (service *Service) Watermarks(ctx context.Context) (highWater int64, oldestAvailable int64, err error) {
-	err = service.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0), COALESCE(MIN(id),0) FROM alert_change_log`).Scan(&highWater, &oldestAvailable)
+	err = service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0), COALESCE(MIN(id),0) FROM alert_change_log`).Scan(&highWater, &oldestAvailable)
 	return highWater, oldestAvailable, err
 }
 
 // ChangesAfter returns up to limit change events with id greater than after,
-// in ascending id order (bounded replay window).
+// in ascending id order (bounded replay window). The read goes through the
+// runner's trusted read-only surface: fail-closed until the pool is wired.
 func (service *Service) ChangesAfter(ctx context.Context, after int64, limit int) ([]ChangeEvent, error) {
-	rows, err := service.db.QueryContext(ctx, `SELECT id, COALESCE(occurrence_id,0), COALESCE(platform_fault_id,0), change_type, row_version FROM alert_change_log WHERE id > ? ORDER BY id ASC LIMIT ?`, after, limit)
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT id, COALESCE(occurrence_id,0), COALESCE(platform_fault_id,0), change_type, row_version FROM alert_change_log WHERE id > ? ORDER BY id ASC LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
 	}

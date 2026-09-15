@@ -63,7 +63,7 @@ func (handler *Handler) createAnalysisKnowledgeCandidate(ctx context.Context, in
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	result, err := handler.Knowledge.CreateFromAnalysisOutputAs(ctx, actor, input.Body.ClientCommandID, occurrenceID, analysisID)
+	result, err := handler.Knowledge.CreateFromAnalysisOutput(ctx, actor.ID, input.Body.ClientCommandID, occurrenceID, analysisID)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -95,7 +95,7 @@ func (handler *Handler) createInvestigationKnowledgeCandidate(ctx context.Contex
 	if input.Body.SourceType != knowledge.SourceMessage {
 		return nil, problemUnprocessable("调查来源必须是 assistant 消息。")
 	}
-	result, err := handler.Knowledge.CreateFromInvestigationMessageAs(ctx, actor, input.Body.ClientCommandID, investigationID, sourceID)
+	result, err := handler.Knowledge.CreateFromInvestigationMessage(ctx, actor.ID, input.Body.ClientCommandID, investigationID, sourceID)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -123,7 +123,7 @@ func (handler *Handler) createReportKnowledgeCandidate(ctx context.Context, inpu
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	result, err := handler.Knowledge.CreateFromReportAs(ctx, actor, input.Body.ClientCommandID, runID, reportVersion)
+	result, err := handler.Knowledge.CreateFromReport(ctx, actor.ID, input.Body.ClientCommandID, runID, reportVersion)
 	status, outcomeProblem := createOutcome(err, result.Created)
 	if outcomeProblem != nil {
 		return nil, outcomeProblem
@@ -247,7 +247,7 @@ func (handler *Handler) editKnowledgeCandidateDraft(ctx context.Context, input *
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.EditDraftAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body, input.Body.Scope)
+	summary, err := handler.Knowledge.EditDraft(ctx, actor.ID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision, input.Body.Title, input.Body.Body, input.Body.Scope)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -270,7 +270,7 @@ func (handler *Handler) confirmKnowledgeCandidate(ctx context.Context, input *st
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.ConfirmAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision)
+	summary, err := handler.Knowledge.Confirm(ctx, actor.ID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRevision)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}
@@ -293,7 +293,7 @@ func (handler *Handler) excludeKnowledgeCandidate(ctx context.Context, input *st
 	if idProblem != nil {
 		return nil, idProblem
 	}
-	summary, err := handler.Knowledge.ExcludeAs(ctx, actor, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRowVersion)
+	summary, err := handler.Knowledge.Exclude(ctx, actor.ID, input.Body.ClientCommandID, candidateID, input.Body.ExpectedRowVersion)
 	if err != nil {
 		return nil, candidateCommandProblem(err)
 	}

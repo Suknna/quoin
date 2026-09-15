@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/alerts"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -59,18 +60,34 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 	if key == "receiver-config" {
 		return nil, huma.Error400BadRequest("告警源 key 为保留名称", nil)
 	}
-	// Command replay: same clientCommandId + same digest returns the original
-	// result; a different digest conflicts (HTTP-COMMAND-003). We keep a
-	// small in-process map keyed by (session, command) because the frozen
-	// client_commands table is in scope of a later ticket; the reveal path
-	// still enforces one-time semantics via the secrets store.
-	if previous, ok := application.commands.lookup(session.User.ID, input.Body.ClientCommandID); ok {
-		if previous.digest != commandDigest(key, input.Body.Protocol) {
-			return nil, huma.Error409Conflict("命令 ID 已被使用", fmt.Errorf("command_id_reused"))
+	// Command replay: the durable client_commands ledger (HTTP-COMMAND-003)
+	// decides — the same clientCommandId with the same request digest replays
+	// the stored result; a different digest conflicts. The reveal capability
+	// stays in the memory store keyed by the creating session; no raw bearer
+	// and no reveal handle ever enters the ledger (SEC-REVEAL-005).
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, huma.Error500InternalServerError("无法创建凭据", err)
+	}
+	digestSum := sha256.Sum256(raw)
+	result, replayed, err := application.alerts.CreateSource(ctx, input.Body.ClientCommandID, key, input.Body.Protocol, digestSum[:])
+	if err != nil {
+		if errors.Is(err, execution.ErrCommandReused) {
+			return nil, problem(http.StatusConflict, "command_id_reused", "命令标识已用于不同请求。")
 		}
-		output := createSourceOutput{Status: http.StatusCreated}
-		output.Body.SourceKey = previous.result.SourceKey
-		output.Body.CredentialID = strconv.FormatInt(previous.result.CredentialID, 10)
+		if isUniqueViolation(err) {
+			// A concurrent same-command request may have won the race: the
+			// ledger replay above already covers the settled case, so this is
+			// a genuine conflict.
+			return nil, huma.Error409Conflict("告警源已存在", err)
+		}
+		return nil, huma.Error500InternalServerError("无法创建告警源", err)
+	}
+	output := createSourceOutput{Status: http.StatusCreated}
+	output.Body.SourceKey = result.SourceKey
+	output.Body.CredentialID = strconv.FormatInt(result.CredentialID, 10)
+	if replayed {
+		// The original reveal handle is still the one live capability.
 		if handle, credentialID, valid := application.reveals.Lookup(secrets.SessionDigest(input.Session), input.Body.ClientCommandID); valid {
 			output.Body.RevealAvailable = true
 			output.Body.RevealHandle = handle
@@ -78,37 +95,7 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 		}
 		return &output, nil
 	}
-
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return nil, huma.Error500InternalServerError("无法创建凭据", err)
-	}
-	digest := sha256.Sum256(raw)
-	result, err := application.alerts.CreateSource(ctx, key, input.Body.Protocol, digest[:], session.User.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		if isUniqueViolation(err) {
-			// A concurrent same-command request may have won the race: replay
-			// the original result instead of reporting a conflict.
-			if previous, ok := application.commands.lookup(session.User.ID, input.Body.ClientCommandID); ok && previous.digest == commandDigest(key, input.Body.Protocol) {
-				output := createSourceOutput{Status: http.StatusCreated}
-				output.Body.SourceKey = previous.result.SourceKey
-				output.Body.CredentialID = strconv.FormatInt(previous.result.CredentialID, 10)
-				if handle, credentialID, valid := application.reveals.Lookup(secrets.SessionDigest(input.Session), input.Body.ClientCommandID); valid {
-					output.Body.RevealAvailable = true
-					output.Body.RevealHandle = handle
-					output.Body.CredentialID = strconv.FormatInt(credentialID, 10)
-				}
-				return &output, nil
-			}
-			return nil, huma.Error409Conflict("告警源已存在", err)
-		}
-		return nil, huma.Error500InternalServerError("无法创建告警源", err)
-	}
 	handle := application.reveals.Create(secrets.SessionDigest(input.Session), input.Body.ClientCommandID, result.CredentialID, base64.RawURLEncoding.EncodeToString(raw))
-	application.commands.remember(session.User.ID, input.Body.ClientCommandID, commandDigest(key, input.Body.Protocol), result)
-	output := createSourceOutput{Status: http.StatusCreated}
-	output.Body.SourceKey = result.SourceKey
-	output.Body.CredentialID = strconv.FormatInt(result.CredentialID, 10)
 	output.Body.RevealAvailable = true
 	output.Body.RevealHandle = handle
 	return &output, nil
@@ -125,7 +112,8 @@ func (application *apiServer) revealAlertSourceCredential(ctx context.Context, i
 		CredentialID string `json:"credentialId"`
 		BearerToken  string `json:"bearerToken"`
 	}
-}, error) {
+}, error,
+) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
@@ -140,10 +128,10 @@ func (application *apiServer) revealAlertSourceCredential(ctx context.Context, i
 	if !ok {
 		return nil, huma.Error410Gone("一次性句柄已失效或已消费", nil)
 	}
-	// HTTP-COMMAND-008: the non-secret reveal audit event is written before
-	// the raw bearer leaves the handler; no handle or raw value ever enters
-	// the audit trail.
-	if err := application.alerts.RecordRevealAudit(ctx, session.User.ID, credentialID, "success", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	// HTTP-COMMAND-008: the non-secret reveal audit event commits inside the
+	// runner transaction before the raw bearer leaves the handler; no handle
+	// or raw value ever enters the audit trail.
+	if err := application.alerts.RecordRevealAudit(ctx, credentialID); err != nil {
 		return nil, huma.Error500InternalServerError("无法记录审计", err)
 	}
 	return &struct {
@@ -174,7 +162,8 @@ func (application *apiServer) listAlerts(ctx context.Context, input *struct {
 	Session           string `cookie:"__Host-quoin-session"`
 	State             string `query:"state" enum:"Firing,Resolved"`
 	BusinessSystemKey string `query:"businessSystemKey"`
-}) (*alertSnapshotOutput, error) {
+},
+) (*alertSnapshotOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
@@ -196,7 +185,8 @@ func (application *apiServer) getAlertOccurrence(ctx context.Context, input *str
 	OccurrenceID string `path:"occurrenceId"`
 }) (*struct {
 	Body alerts.OccurrenceSummary `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
 	}
@@ -219,7 +209,8 @@ func (application *apiServer) listAlertObservations(ctx context.Context, input *
 	Body struct {
 		Items []alerts.Observation `json:"items"`
 	} `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.auth.Authenticate(ctx, input.Session); err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
 	}
@@ -244,7 +235,8 @@ func (application *apiServer) listIntakeIssues(ctx context.Context, input *struc
 		Items      []alerts.IntakeIssue `json:"items"`
 		NextCursor string               `json:"nextCursor,omitempty"`
 	} `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警接入问题"); err != nil {
 		return nil, err
 	}
@@ -269,7 +261,8 @@ func (application *apiServer) receiverConfig(ctx context.Context, input *authInp
 	Body struct {
 		PublicReceiverURL string `json:"publicReceiverUrl"`
 	} `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Alertmanager 接收地址"); err != nil {
 		return nil, err
 	}
@@ -290,7 +283,8 @@ func (application *apiServer) listAlertSources(ctx context.Context, input *authI
 		Items      []alerts.SourceSummary `json:"items"`
 		NextCursor string                 `json:"nextCursor,omitempty"`
 	} `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源"); err != nil {
 		return nil, err
 	}
@@ -314,7 +308,8 @@ func (application *apiServer) getAlertSource(ctx context.Context, input *struct 
 	SourceKey string `path:"sourceKey"`
 }) (*struct {
 	Body alerts.SourceDetail `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源"); err != nil {
 		return nil, err
 	}
@@ -364,7 +359,8 @@ func (application *apiServer) acknowledgeIntakeIssue(ctx context.Context, input 
 	}
 }) (*struct {
 	Status int `header:"-"`
-}, error) {
+}, error,
+) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, huma.Error401Unauthorized("请重新登录")
@@ -395,16 +391,6 @@ func isUniqueViolation(err error) bool {
 	// Only the source_key uniqueness maps to 409; CHECK/trigger failures are
 	// internal faults and must not be reported as "already exists".
 	return strings.Contains(message, "UNIQUE constraint failed") || strings.Contains(message, "UNIQUE")
-}
-
-// commandDigest is the non-secret semantic digest for a create-source command.
-func commandDigest(key, protocol string) string {
-	return alertSourceCommandDigest("create", key, protocol)
-}
-
-func alertSourceCommandDigest(operation, sourceKey, subject string) string {
-	sum := sha256.Sum256([]byte("alert_source." + operation + ":" + sourceKey + ":" + subject))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 type alertSourceCommandInput struct {
@@ -445,7 +431,8 @@ func (application *apiServer) listAlertSourceCredentials(ctx context.Context, in
 		Items      []alerts.CredentialSummary `json:"items"`
 		NextCursor string                     `json:"nextCursor,omitempty"`
 	} `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源凭据"); err != nil {
 		return nil, err
 	}
@@ -492,103 +479,87 @@ func (application *apiServer) listAlertSourceCredentials(ctx context.Context, in
 }
 
 func (application *apiServer) rotateAlertSourceCredential(ctx context.Context, input *rotateAlertSourceCredentialInput) (*createSourceOutput, error) {
-	session, err := application.authenticateAdmin(ctx, input.Session, "轮换告警源凭据")
-	if err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "轮换告警源凭据"); err != nil {
 		return nil, err
-	}
-	commandDigest := alertSourceCommandDigest("rotate", input.SourceKey, "")
-	if previous, ok := application.commands.lookup(session.User.ID, input.Body.ClientCommandID); ok {
-		if previous.digest != commandDigest {
-			return nil, huma.Error409Conflict("命令 ID 已被使用", nil)
-		}
-		out := &createSourceOutput{Status: http.StatusOK}
-		out.Body.SourceKey, out.Body.CredentialID = previous.result.SourceKey, strconv.FormatInt(previous.result.CredentialID, 10)
-		if handle, credentialID, valid := application.reveals.Lookup(secrets.SessionDigest(input.Session), input.Body.ClientCommandID); valid {
-			out.Body.RevealAvailable, out.Body.RevealHandle, out.Body.CredentialID = true, handle, strconv.FormatInt(credentialID, 10)
-		}
-		return out, nil
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, huma.Error500InternalServerError("无法创建凭据", err)
 	}
-	digest := sha256.Sum256(raw)
-	result, err := application.alerts.RotateCredential(ctx, input.SourceKey, digest[:], session.User.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, huma.Error404NotFound("告警源不存在", err)
-	}
+	digestSum := sha256.Sum256(raw)
+	result, replayed, err := application.alerts.RotateCredential(ctx, input.Body.ClientCommandID, input.SourceKey, digestSum[:])
 	if err != nil {
+		if errors.Is(err, execution.ErrCommandReused) {
+			return nil, huma.Error409Conflict("命令 ID 已被使用", nil)
+		}
+		// Deterministic rejections (unknown source, no active credential)
+		// keep the legacy 409 surface.
 		return nil, huma.Error409Conflict("无法轮换告警源凭据", err)
 	}
-	handle := application.reveals.Create(secrets.SessionDigest(input.Session), input.Body.ClientCommandID, result.CredentialID, base64.RawURLEncoding.EncodeToString(raw))
-	application.commands.remember(session.User.ID, input.Body.ClientCommandID, commandDigest, result)
 	out := &createSourceOutput{Status: http.StatusOK}
-	out.Body.SourceKey, out.Body.CredentialID, out.Body.RevealAvailable, out.Body.RevealHandle = result.SourceKey, strconv.FormatInt(result.CredentialID, 10), true, handle
+	out.Body.SourceKey, out.Body.CredentialID = result.SourceKey, strconv.FormatInt(result.CredentialID, 10)
+	if replayed {
+		// The original reveal handle is still the one live capability.
+		if handle, credentialID, valid := application.reveals.Lookup(secrets.SessionDigest(input.Session), input.Body.ClientCommandID); valid {
+			out.Body.RevealAvailable, out.Body.RevealHandle, out.Body.CredentialID = true, handle, strconv.FormatInt(credentialID, 10)
+		}
+		return out, nil
+	}
+	handle := application.reveals.Create(secrets.SessionDigest(input.Session), input.Body.ClientCommandID, result.CredentialID, base64.RawURLEncoding.EncodeToString(raw))
+	out.Body.RevealAvailable, out.Body.RevealHandle = true, handle
 	return out, nil
 }
 
 func (application *apiServer) retireAlertSourceCredential(ctx context.Context, input *retireAlertCredentialInput) (*struct {
 	Body alerts.CredentialSummary `json:"body"`
-}, error) {
-	session, err := application.authenticateAdmin(ctx, input.Session, "退休告警源凭据")
-	if err != nil {
+}, error,
+) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "退休告警源凭据"); err != nil {
 		return nil, err
 	}
 	id, err := strconv.ParseInt(input.CredentialID, 10, 64)
 	if err != nil || id < 1 {
 		return nil, problemUnprocessable("credentialId 必须是十进制 locator。")
 	}
-	commandDigest := alertSourceCommandDigest("retire", input.SourceKey, input.CredentialID)
-	if previous, ok := application.commands.lookup(session.User.ID, input.Body.ClientCommandID); ok {
-		if previous.digest != commandDigest || previous.credential == nil {
+	// The durable ledger owns the replay: a repeated command returns the
+	// stored summary; a stored rejection replays the same conflict.
+	summary, _, err := application.alerts.RetireCredential(ctx, input.Body.ClientCommandID, input.SourceKey, id, input.Body.ExpectedRowVersion)
+	if err != nil {
+		var rejection *execution.Rejection
+		switch {
+		case errors.Is(err, execution.ErrCommandReused):
 			return nil, huma.Error409Conflict("命令 ID 已被使用", nil)
-		}
-		return &struct {
-			Body alerts.CredentialSummary `json:"body"`
-		}{Body: *previous.credential}, nil
-	}
-	ok, err := application.alerts.RetireCredential(ctx, input.SourceKey, id, input.Body.ExpectedRowVersion, session.User.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return nil, huma.Error500InternalServerError("无法退休告警源凭据", err)
-	}
-	if !ok {
-		return nil, huma.Error409Conflict("告警源凭据已变化", nil)
-	}
-	credentials, err := application.alerts.ListCredentials(ctx, input.SourceKey)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("无法读取告警源凭据", err)
-	}
-	for _, credential := range credentials {
-		if credential.ID == input.CredentialID {
-			application.commands.rememberCredential(session.User.ID, input.Body.ClientCommandID, commandDigest, credential)
-			return &struct {
-				Body alerts.CredentialSummary `json:"body"`
-			}{Body: credential}, nil
+		case errors.As(err, &rejection):
+			return nil, huma.Error409Conflict("告警源凭据已变化", nil)
+		default:
+			return nil, huma.Error500InternalServerError("无法退休告警源凭据", err)
 		}
 	}
-	return nil, huma.Error404NotFound("告警源凭据不存在", nil)
+	return &struct {
+		Body alerts.CredentialSummary `json:"body"`
+	}{Body: summary}, nil
 }
 
 func (application *apiServer) disableAlertSource(ctx context.Context, input *alertSourceCommandInput) (*struct {
 	Body alerts.SourceDetail `json:"body"`
-}, error) {
-	session, err := application.authenticateAdmin(ctx, input.Session, "停用告警源")
-	if err != nil {
+}, error,
+) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "停用告警源"); err != nil {
 		return nil, err
 	}
-	ok, err := application.alerts.SetSourceEnabled(ctx, input.SourceKey, false, input.Body.ExpectedRowVersion, session.User.ID, time.Now().UTC().Format(time.RFC3339Nano))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, huma.Error404NotFound("告警源不存在", err)
-	}
+	detail, _, err := application.alerts.SetSourceEnabled(ctx, input.Body.ClientCommandID, input.SourceKey, false, input.Body.ExpectedRowVersion)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("无法停用告警源", err)
-	}
-	if !ok {
-		return nil, huma.Error409Conflict("告警源已变化", nil)
-	}
-	detail, err := application.alerts.GetSource(ctx, input.SourceKey)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("无法读取告警源", err)
+		var rejection *execution.Rejection
+		switch {
+		case errors.Is(err, execution.ErrCommandReused):
+			return nil, huma.Error409Conflict("命令 ID 已被使用", nil)
+		case errors.As(err, &rejection) && rejection.Code == alerts.CodeNotFound:
+			return nil, huma.Error404NotFound("告警源不存在", err)
+		case errors.As(err, &rejection):
+			return nil, huma.Error409Conflict("告警源已变化", nil)
+		default:
+			return nil, huma.Error500InternalServerError("无法停用告警源", err)
+		}
 	}
 	return &struct {
 		Body alerts.SourceDetail `json:"body"`

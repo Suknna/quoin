@@ -10,6 +10,11 @@ package verification
 // elapsed-side rows are materialized as genuinely aged session rows —
 // exactly what a 13-hour-old session looks like on disk — and authenticated
 // through the real Authenticate path. No wall-clock sleep.
+//
+// The session under test is minted through the real two-step login: the
+// direct one-shot login no longer exists, so the fixture initializes the
+// bootstrap administrator through the real flow and consumes an OTP code
+// delivered to a recording sender.
 
 import (
 	"context"
@@ -18,12 +23,36 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+)
+
+// boundarySender is a TEST-ONLY auth.Sender fake keeping the latest code.
+type boundarySender struct {
+	mu   sync.Mutex
+	code string
+}
+
+func (s *boundarySender) Send(_ context.Context, message auth.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.code = message.Variables["code"]
+	return nil
+}
+
+func (s *boundarySender) lastCode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.code
+}
+
+const (
+	boundaryPassword = "Correct horse battery staple 2026!"
 )
 
 func TestBoundarySessionIdleExpiry(t *testing.T) {
@@ -41,14 +70,51 @@ func TestBoundarySessionIdleExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const password = "Correct horse battery staple 2026!"
-	if _, err := service.CreateFirstAdmin(ctx, "admin", "Admin", password); err != nil {
+	if err := service.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	sender := &boundarySender{}
+	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: []byte("boundary-otp-key-boundary-otp-key!"), Sender: sender}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.EnsureBootstrapAdmin(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Real initialization: the default credential starts the unified flow,
+	// then a formal password plus a verified contact complete it — the same
+	// steps the deployment wizard drives.
+	flow, _, err := service.StartAdminInitialization(ctx, "admin", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetFlowPassword(ctx, flow.Bearer, boundaryPassword); err != nil {
+		t.Fatal(err)
+	}
+	masked, err := service.RegisterFlowContact(ctx, flow.Bearer, "email", "admin@boundary.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.SendFlowChallenge(ctx, flow.Bearer, masked.Locator); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.VerifyFlowChallenge(ctx, flow.Bearer, sender.lastCode()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CompleteAdminInitialization(ctx, flow.Bearer); err != nil {
 		t.Fatal(err)
 	}
 
 	// before-boundary: a freshly issued session (idle deadline 12h ahead)
-	// authenticates.
-	login, _, err := service.Login(ctx, "admin", password, "boundary")
+	// authenticates. The second factor is mandatory: password start, OTP
+	// challenge, code verify.
+	twoStep, _, err := service.StartAuthentication(ctx, "admin", boundaryPassword, "boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.SendFlowChallenge(ctx, twoStep.Bearer, twoStep.Contacts[0].Locator); err != nil {
+		t.Fatal(err)
+	}
+	login, err := service.CompleteLogin(ctx, twoStep.Bearer, sender.lastCode())
 	if err != nil {
 		t.Fatal(err)
 	}

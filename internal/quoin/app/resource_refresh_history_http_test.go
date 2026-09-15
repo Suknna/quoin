@@ -10,7 +10,9 @@ import (
 // redirect. With no published system fixture, the service's not-found result is
 // the expected boundary response after a syntactically valid command.
 func TestManualResourceRefreshRouteReachesTheDomain(t *testing.T) {
-	server, admin := newAdminSurface(t)
+	scenario := newAdminSurface(t)
+	server := scenario.server
+	admin := scenario.sessionHeaders(scenario.login(t, "admin", scenario.adminPassword))
 	const history = "/api/v1/business-systems/payments/resource-refresh-runs/1"
 
 	mustRequest(t, server, admin, history, http.StatusNotFound)

@@ -43,10 +43,14 @@ func (service *RuntimeService) dispatchInspectionAttempt(ctx context.Context, at
 		return err
 	}
 	var scopeID int64
-	if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
 		return err
 	}
-	rows, err := service.Inspections.DB().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Inspections.Reader(), attemptID)
+	if err != nil {
+		return err
+	}
+	rows, err := service.Inspections.Reader().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
 	if err != nil {
 		return err
 	}
@@ -68,7 +72,7 @@ func (service *RuntimeService) dispatchInspectionAttempt(ctx context.Context, at
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
-			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK, ScopeId: scopeID,
+			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK, ScopeId: scopeID, OperationCorrelationId: operationCorrelationID,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest, ConnectionGrants: grants},
 		}},
@@ -97,7 +101,11 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 		return err
 	}
 	var scopeID int64
-	if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Inspections.Reader(), attemptID)
+	if err != nil {
 		return err
 	}
 	var grants []*runtimev1.ConnectionGrant
@@ -114,7 +122,7 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS,
-			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_RUN, ScopeId: scopeID,
+			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_RUN, ScopeId: scopeID, OperationCorrelationId: operationCorrelationID,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest, ConnectionGrants: grants, AgentVersion: input.AgentVersion},
 		}},
@@ -129,7 +137,7 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 		return fmt.Errorf("inspections are not wired")
 	}
 	var attemptType, scopeType string
-	if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT attempt_type,scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType, &scopeType); err != nil {
+	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT attempt_type,scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType, &scopeType); err != nil {
 		return err
 	}
 	if attemptType == "inspection_collection" && scopeType == "resource_refresh_run" {
@@ -141,7 +149,7 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 	}
 	if attemptType == "inspection_collection" && scopeType == "run_check" {
 		var journeyCount int
-		if err := service.Inspections.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&journeyCount); err != nil {
+		if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&journeyCount); err != nil {
 			return err
 		}
 		if journeyCount != 0 {

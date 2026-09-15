@@ -56,18 +56,18 @@ const candidateColumns = `
 	COALESCE(c.target_knowledge_id,0), COALESCE(c.confirmed_knowledge_id,0)`
 
 // scanCandidateOn reads one candidate row through the given connection.
-func scanCandidateOn(ctx context.Context, conn *sql.Conn, candidateID int64) (CandidateSummary, error) {
-	row := conn.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.id=?`, candidateID)
+func scanCandidateOn(ctx context.Context, q queryer, candidateID int64) (CandidateSummary, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.id=?`, candidateID)
 	return readCandidateRow(row.Scan)
 }
 
-func (service *Service) candidateSummaryOn(ctx context.Context, conn *sql.Conn, candidateID int64) (CandidateSummary, error) {
-	return scanCandidateOn(ctx, conn, candidateID)
+func (service *Service) candidateSummaryOn(ctx context.Context, q queryer, candidateID int64) (CandidateSummary, error) {
+	return scanCandidateOn(ctx, q, candidateID)
 }
 
 // candidateBySource returns any-state candidate of one immutable source.
-func (service *Service) candidateBySource(ctx context.Context, conn *sql.Conn, sourceType string, sourceID int64) (CandidateSummary, bool, error) {
-	row := conn.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.source_type=? AND c.source_id=? ORDER BY c.id LIMIT 1`, sourceType, sourceID)
+func (service *Service) candidateBySource(ctx context.Context, q queryer, sourceType string, sourceID int64) (CandidateSummary, bool, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.source_type=? AND c.source_id=? ORDER BY c.id LIMIT 1`, sourceType, sourceID)
 	summary, err := readCandidateRow(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CandidateSummary{}, false, nil
@@ -112,7 +112,7 @@ func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 // GetCandidate returns the candidate detail with the immutable original
 // suggestion projection.
 func (service *Service) GetCandidate(ctx context.Context, candidateID int64) (CandidateDetail, error) {
-	row := service.db.QueryRowContext(ctx, `
+	row := service.reader.QueryRowContext(ctx, `
 		SELECT `+candidateColumns+`, c.original_suggestion_json
 		FROM knowledge_candidates c WHERE c.id=?`, candidateID)
 	var summary CandidateSummary
@@ -164,7 +164,7 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 	}
 	query := `SELECT ` + candidateColumns + `, c.created_at, (c.state='AwaitingConfirmation') FROM knowledge_candidates c WHERE 1=1` + where + ` ORDER BY ` + orderExpr + ` LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.reader.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -232,7 +232,7 @@ func (service *Service) Browse(ctx context.Context, after *KnowledgeCursor, limi
 		FROM reusable_knowledge k JOIN knowledge_versions v ON v.id=k.current_version_id
 		WHERE 1=1` + where + ` ORDER BY v.created_at DESC, k.id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.reader.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -271,7 +271,7 @@ func (service *Service) Browse(ctx context.Context, after *KnowledgeCursor, limi
 // GetKnowledge returns the aggregate detail (bounded version count only;
 // history pages through ListVersions).
 func (service *Service) GetKnowledge(ctx context.Context, knowledgeID int64) (KnowledgeDetail, error) {
-	row := service.db.QueryRowContext(ctx, `
+	row := service.reader.QueryRowContext(ctx, `
 		SELECT k.id, v.title, v.id, v.version_seq, k.row_version,
 		       (SELECT COUNT(*) FROM knowledge_versions x WHERE x.knowledge_id=k.id),
 		       NOT EXISTS (SELECT 1 FROM knowledge_version_retrieval_state s WHERE s.knowledge_version_id=k.current_version_id AND s.exited=1)
@@ -310,7 +310,7 @@ func (service *Service) ListVersions(ctx context.Context, knowledgeID int64, aft
 		FROM knowledge_versions v JOIN knowledge_version_retrieval_state s ON s.knowledge_version_id=v.id
 		WHERE 1=1` + where + ` ORDER BY v.id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.reader.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -377,7 +377,7 @@ func parseVersionLocator(value string) int64 {
 
 // GetVersion returns one immutable version detail within its knowledge.
 func (service *Service) GetVersion(ctx context.Context, knowledgeID, versionID int64) (VersionDetail, error) {
-	row := service.db.QueryRowContext(ctx, `
+	row := service.reader.QueryRowContext(ctx, `
 		SELECT v.id, v.version_seq, v.title, v.body, v.scope_json, v.conditions_json, v.limitations_json,
 		       v.source_candidate_id, v.created_at, EXISTS (SELECT 1 FROM knowledge_search_docs d WHERE d.knowledge_version_id=v.id), s.exited_at, s.exit_reason, s.row_version
 		FROM knowledge_versions v

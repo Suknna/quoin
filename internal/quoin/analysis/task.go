@@ -36,7 +36,7 @@ type TaskSnapshot struct {
 // Watermarks derives the replay watermarks directly from the change log
 // itself (DATA-SSE-009): high_water = MAX(id), oldest_available = MIN(id).
 func (service *Service) TaskWatermarks(ctx context.Context) (highWater, oldest int64, err error) {
-	err = service.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0), COALESCE(MIN(id),0) FROM task_change_log`).Scan(&highWater, &oldest)
+	err = service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0), COALESCE(MIN(id),0) FROM task_change_log`).Scan(&highWater, &oldest)
 	return highWater, oldest, err
 }
 
@@ -52,7 +52,7 @@ func TaskCursorExpired(cursor, highWater, oldest int64) bool {
 
 // TaskChangesAfter replays the bounded change window after the cursor.
 func (service *Service) TaskChangesAfter(ctx context.Context, cursor int64, limit int) ([]TaskChange, error) {
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id,object_type,object_id,change_type,row_version
 		FROM task_change_log WHERE id>? ORDER BY id LIMIT ?`, cursor, limit)
 	if err != nil {
@@ -74,7 +74,7 @@ func (service *Service) TaskChangesAfter(ctx context.Context, cursor int64, limi
 // non-terminal initial_analyses, execution_attempts and tool_calls.
 func (service *Service) ActiveTaskSnapshot(ctx context.Context) ([]TaskRef, error) {
 	items := []TaskRef{}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT 'initial_analysis', id, row_version FROM initial_analyses
 		WHERE state IN ('Queued','Running')
 		UNION ALL SELECT 'execution_attempt', id, row_version FROM execution_attempts

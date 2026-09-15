@@ -12,14 +12,15 @@ import (
 // wire shape rather than internal structs so credentials, maintenance items,
 // and repair links cannot accidentally become part of the public contract.
 func TestAdminAboutBoundaryAndSanitization(t *testing.T) {
-	server, admin := newAdminSurface(t)
-	defer server.Close()
+	scenario := newAdminSurface(t)
+	server := scenario.server
 
-	mustPost(t, server, admin, "/api/v1/admin/users", `{"clientCommandId":"create-about-operator-102","username":"aboutoperator","displayName":"About Operator","role":"operator","password":"About operator passphrase 2026!"}`, http.StatusCreated)
-	login := mustPost(t, server, map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json"}, "/api/v1/auth/login", `{"username":"aboutoperator","password":"About operator passphrase 2026!"}`, http.StatusOK)
-	operator := map[string]string{"Origin": "https://quoin.example.com", "Content-Type": "application/json", "Cookie": splitCookie(login.headers.Get("Set-Cookie"))}
+	adminSession := scenario.login(t, "admin", scenario.adminPassword)
+	scenario.createOperator(t, adminSession, "create-about-operator-102", "aboutoperator", "About Operator", "About operator passphrase 2026!", "aboutoperator@example.test")
+	operator := scenario.sessionHeaders(scenario.initializeOperatorSession(t, "aboutoperator", "About operator passphrase 2026!", "About operator formal passphrase 2027!"))
 	mustRequest(t, server, operator, "/api/v1/admin/about", http.StatusForbidden)
 
+	admin := scenario.sessionHeaders(adminSession)
 	body := mustRequest(t, server, admin, "/api/v1/admin/about", http.StatusOK)
 	var about struct {
 		ReleaseVersion string `json:"releaseVersion"`

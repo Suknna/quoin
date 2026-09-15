@@ -90,8 +90,6 @@ func (service *Service) HandlePublishResult(ctx context.Context, result PublishR
 	return nil
 }
 
-func timestampString(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
-
 // HandlePublishRejected commits only a matching persisted publish command;
 // malformed or unsolicited Runtime frames leave the operation Running.
 // HandlePublishUnauthenticated records the publish probe fact without ending

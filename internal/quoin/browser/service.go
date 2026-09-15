@@ -11,13 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
-
 	"time"
 
 	"github.com/Suknna/quoin/internal/lintel/catalog"
-	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 var (
@@ -132,7 +131,11 @@ type Identity struct {
 }
 
 type Service struct {
-	db      *sql.DB
+	db *sql.DB
+	// reader is the composition layer's read-only query surface
+	// (bootstrap mode=ro/query_only); until injected it falls back to the
+	// write pool (compose-time compatibility, same as the other families).
+	reader  audit.Reader
 	now     func() time.Time
 	Catalog func() (document []byte, version, digest string, err error)
 	// Dispatch is injected by app.RuntimeService after its live Lintel channel
@@ -150,151 +153,21 @@ func NewService(db *sql.DB) *Service {
 	}
 }
 
-// DB exposes the authority connection only to Quoin's colocated runtime dispatcher.
-func (service *Service) DB() *sql.DB { return service.db }
-
-func validateConfigure(input ConfigureInput) error {
-	if input.SystemKey == "" || input.Name == "" || input.ClientCommandID == "" || input.Probe.JourneyID == "" || input.Probe.Version < 1 || len(input.Probe.Params) == 0 {
-		return ErrInvalid
+// SetReader injects the composition layer's real read-only query surface.
+func (service *Service) SetReader(reader audit.Reader) {
+	if reader != nil {
+		service.reader = reader
 	}
-	parsed, err := url.ParseRequestURI(input.StartURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("%w: start URL", ErrInvalid)
-	}
-	var object map[string]any
-	if json.Unmarshal(input.Probe.Params, &object) != nil {
-		return fmt.Errorf("%w: authentication probe params", ErrInvalid)
-	}
-	if fieldErrors := quoinconfig.ValidateJourneyReferenceVersion(input.Probe.JourneyID, input.Probe.Version, "authentication_probe", object, "authenticationProbe"); len(fieldErrors) != 0 {
-		return fmt.Errorf("%w: authentication probe reference", ErrInvalid)
-	}
-	return nil
 }
 
-// Configure commits an immutable revision. A configured identity starts in
-// AuthenticationRequired until a manual login publishes a verified profile.
-func (service *Service) Configure(ctx context.Context, actorID int64, input ConfigureInput) (Identity, *Operation, error) {
-	if err := validateConfigure(input); err != nil {
-		return Identity{}, nil, err
+// Reader serves the app runtime's read-only state lookups. Unwired it
+// returns the zero-value execution.Reader, which fails closed — the writer
+// database is never a read fallback.
+func (service *Service) Reader() audit.Reader {
+	if service.reader != nil {
+		return service.reader
 	}
-	_, version, digest, err := service.Catalog()
-	if err != nil {
-		return Identity{}, nil, fmt.Errorf("read journey catalog: %w", err)
-	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return Identity{}, nil, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Identity{}, nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	var systemID int64
-	if err = conn.QueryRowContext(ctx, `SELECT id FROM business_systems WHERE key=?`, input.SystemKey).Scan(&systemID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Identity{}, nil, ErrNotFound
-		}
-		return Identity{}, nil, err
-	}
-	replayed, _, err := replayCommand(ctx, conn, actorID, input.ClientCommandID, "configure_browser_identity", commandDigest(input.SystemKey, input.Name, input.StartURL, input.Probe.JourneyID, input.Probe.Version, string(input.Probe.Params), input.ExpectedRowVersion))
-	if err != nil {
-		return Identity{}, nil, err
-	}
-	if replayed {
-		identity, lookupErr := service.identityOn(ctx, conn, input.SystemKey)
-		return identity, nil, lookupErr
-	}
-	var identityID, rowVersion, newRevisionID int64
-	var currentProfile sql.NullInt64
-	err = conn.QueryRowContext(ctx, `SELECT id,current_profile_generation_id,row_version FROM browser_identities WHERE business_system_id=?`, systemID).Scan(&identityID, &currentProfile, &rowVersion)
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	if errors.Is(err, sql.ErrNoRows) {
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO browser_identity_revisions (business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, systemID, 1, input.Name, input.StartURL, input.Probe.JourneyID, input.Probe.Version, string(input.Probe.Params), digest, version, actorID, now)
-		if insertErr != nil {
-			return Identity{}, nil, insertErr
-		}
-		newRevisionID, _ = result.LastInsertId()
-		result, insertErr = conn.ExecContext(ctx, `INSERT INTO browser_identities (business_system_id,current_revision_id,current_profile_generation_id,state,created_at) VALUES (?,?,NULL,'AuthenticationRequired',?)`, systemID, newRevisionID, now)
-		if insertErr != nil {
-			return Identity{}, nil, insertErr
-		}
-		identityID, _ = result.LastInsertId()
-	} else if err != nil {
-		return Identity{}, nil, err
-	} else {
-		if input.ExpectedRowVersion == nil || *input.ExpectedRowVersion != rowVersion {
-			return Identity{}, nil, &RowVersionError{Current: rowVersion}
-		}
-		var active int
-		if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE identity_id=? AND (state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR stop_confirmed_at IS NULL)`, identityID).Scan(&active); err != nil {
-			return Identity{}, nil, err
-		}
-		if active != 0 {
-			return Identity{}, nil, ErrConflict
-		}
-		var revision int64
-		if err = conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision),0)+1 FROM browser_identity_revisions WHERE business_system_id=?`, systemID).Scan(&revision); err != nil {
-			return Identity{}, nil, err
-		}
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO browser_identity_revisions (business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, systemID, revision, input.Name, input.StartURL, input.Probe.JourneyID, input.Probe.Version, string(input.Probe.Params), digest, version, actorID, now)
-		if insertErr != nil {
-			return Identity{}, nil, insertErr
-		}
-		newRevisionID, _ = result.LastInsertId()
-		if _, err = conn.ExecContext(ctx, `UPDATE browser_identities SET current_revision_id=?,row_version=row_version+1 WHERE id=? AND row_version=?`, newRevisionID, identityID, rowVersion); err != nil {
-			return Identity{}, nil, err
-		}
-	}
-	var probeOperationID int64
-	if currentProfile.Valid {
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO browser_operations (identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,actor_user_id,actor_session_id,verification_manifest_item_id,clone_identity,state,journey_catalog_digest,journey_catalog_version,journey_id,journey_version,probe_phase,requested_at) VALUES (?,?,?,NULL,'authentication_probe',NULL,NULL,NULL,NULL,'Queued',?,?,?,?,?,?,?)`, identityID, newRevisionID, currentProfile.Int64, digest, version, input.Probe.JourneyID, input.Probe.Version, "revision_change", now)
-		if insertErr != nil {
-			return Identity{}, nil, insertErr
-		}
-		probeOperationID, _ = result.LastInsertId()
-	}
-	if err = recordCommand(ctx, conn, actorID, input.ClientCommandID, "configure_browser_identity", commandDigest(input.SystemKey, input.Name, input.StartURL, input.Probe.JourneyID, input.Probe.Version, string(input.Probe.Params), input.ExpectedRowVersion), "browser_identity", identityID, now); err != nil {
-		return Identity{}, nil, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Identity{}, nil, err
-	}
-	committed = true
-	// Test and production DB pools may intentionally have one connection; the
-	// transaction connection must be returned before reading the committed view.
-	if err := conn.Close(); err != nil {
-		return Identity{}, nil, err
-	}
-	identity, err := service.identityOn(ctx, service.db, input.SystemKey)
-	if err != nil {
-		return Identity{}, nil, err
-	}
-	if probeOperationID == 0 {
-		return identity, nil, nil
-	}
-	operation, err := service.operationOn(ctx, service.db, probeOperationID)
-	if err != nil {
-		return Identity{}, nil, err
-	}
-	// A disconnected Lintel leaves the durable global-FIFO item queued; its
-	// attach path drains it. A best-effort immediate dispatch is only a latency
-	// optimization and cannot alter the committed authority.
-	if service.Dispatch != nil {
-		_ = service.Dispatch(ctx, probeOperationID)
-	}
-	return identity, &operation, nil
-}
-
-// StartManualLogin reserves the identity before asking Lintel to create a
-// headed browser. This makes duplicate login starts structurally impossible.
-func (service *Service) StartManualLogin(ctx context.Context, systemKey string, actorUserID, actorSessionID, expectedRowVersion int64, clientCommandID string) (Operation, error) {
-	return service.startManualLogin(ctx, businessIdentityScope(systemKey), actorUserID, actorSessionID, expectedRowVersion, clientCommandID)
+	return execution.Reader{}
 }
 
 // StartStandaloneManualLogin is the identity_key-located StartManualLogin for
@@ -499,65 +372,70 @@ func (service *Service) getOperation(ctx context.Context, scope identityScope, i
 	return service.operationOn(ctx, service.db, id)
 }
 
-func (service *Service) Cancel(ctx context.Context, systemKey string, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
-	return service.cancel(ctx, businessIdentityScope(systemKey), operationID, actorID, expectedVersion, clientCommandID)
-}
-
 // CancelStandalone is the identity_key-located Cancel for plugin-owned
-// identities (ADR-0004); the terminal state machine is shared.
+// identities (ADR-0004); the terminal state machine is shared. It is the one
+// browser write command retained on the Upgrade-drain maintenance allowlist
+// and runs through the shared command runner (browser.cancel_operation): the
+// durable client-command ledger, replay decision and automatic audit are the
+// runner's, replacing the local replay/record helper pair.
 func (service *Service) CancelStandalone(ctx context.Context, identityKey string, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
-	return service.cancel(ctx, standaloneIdentityScope(identityKey), operationID, actorID, expectedVersion, clientCommandID)
-}
-
-func (service *Service) cancel(ctx context.Context, scope identityScope, operationID, actorID, expectedVersion int64, clientCommandID string) (Operation, error) {
 	if clientCommandID == "" {
 		return Operation{}, ErrInvalid
 	}
+	scope := standaloneIdentityScope(identityKey)
 	digest := commandDigest(scope.digestSeed, operationID, expectedVersion)
-	conn, err := service.db.Conn(ctx)
+	_, _, opCancel := browserOperations()
+	outcome, err := execution.Run(ctx, service.runner(), opCancel,
+		execution.Command{
+			PrincipalType:   string(execution.PrincipalUser),
+			PrincipalID:     actorID,
+			ClientCommandID: clientCommandID,
+			Digest:          digest,
+		},
+		func(tx *execution.Tx) (Operation, execution.Change, error) {
+			return service.cancelOn(ctx, tx, scope, operationID, actorID, expectedVersion)
+		},
+		func(op Operation) int64 { return op.ID })
 	if err != nil {
 		return Operation{}, err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Operation{}, err
+	if outcome.Replayed {
+		return outcome.Result, nil
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	replayed, resultID, err := replayCommand(ctx, conn, actorID, clientCommandID, "cancel_browser_operation", digest)
+	// The command connection returns to the pool before the committed view is
+	// read: test and production pools may intentionally hold one connection.
+	return service.operationOn(ctx, service.db, outcome.Result.ID)
+}
+
+// cancelOn is the shared terminal state machine inside the runner
+// transaction. Ownership, scope and optimistic-version facts re-verify under
+// the same BEGIN IMMEDIATE lock that commits the cancellation; an already
+// terminal operation is an idempotent no-change success, and a lost
+// concurrent transition surfaces the real current row version.
+func (service *Service) cancelOn(ctx context.Context, tx *execution.Tx, scope identityScope, operationID, actorID, expectedVersion int64) (Operation, execution.Change, error) {
+	identityID, _, _, _, _, err := resolveIdentityOn(ctx, tx, scope)
 	if err != nil {
-		return Operation{}, err
+		return Operation{}, execution.Changed, err
 	}
-	if replayed {
-		return service.operationOn(ctx, conn, resultID)
-	}
-	identityID, _, _, _, _, err := resolveIdentityOn(ctx, conn, scope)
+	owned, err := operationOwnedOn(ctx, tx, identityID, operationID)
 	if err != nil {
-		return Operation{}, err
-	}
-	owned, err := operationOwnedOn(ctx, conn, identityID, operationID)
-	if err != nil {
-		return Operation{}, err
+		return Operation{}, execution.Changed, err
 	}
 	if !owned {
-		return Operation{}, ErrNotFound
+		return Operation{}, execution.Changed, ErrNotFound
 	}
-	op, err := service.operationOn(ctx, conn, operationID)
+	op, err := service.operationOn(ctx, tx, operationID)
 	if err != nil {
-		return Operation{}, err
+		return Operation{}, execution.Changed, err
 	}
 	if op.ActorUserID == nil || *op.ActorUserID != actorID {
-		return Operation{}, ErrNotFound
+		return Operation{}, execution.Changed, ErrNotFound
 	}
 	if op.RowVersion != expectedVersion {
-		return Operation{}, &RowVersionError{Current: op.RowVersion}
+		return Operation{}, execution.Changed, &RowVersionError{Current: op.RowVersion}
 	}
 	if op.State == "Succeeded" || op.State == "Failed" || op.State == "Cancelled" || op.State == "Interrupted" {
-		return op, nil
+		return op, execution.Unchanged, nil
 	}
 	now := service.now().UTC().Format(time.RFC3339Nano)
 	var update sql.Result
@@ -565,41 +443,35 @@ func (service *Service) cancel(ctx context.Context, scope identityScope, operati
 		// A zero started_at alone does not prove dispatch did not occur. The
 		// persisted Start fence is the authority for choosing cleanup semantics.
 		var startDispatched sql.NullString
-		if err = conn.QueryRowContext(ctx, `SELECT start_dispatched_at FROM browser_operations WHERE id=?`, operationID).Scan(&startDispatched); err != nil {
-			return Operation{}, err
+		if err = tx.QueryRowContext(ctx, `SELECT start_dispatched_at FROM browser_operations WHERE id=?`, operationID).Scan(&startDispatched); err != nil {
+			return Operation{}, execution.Changed, err
 		}
 		if !startDispatched.Valid {
-			update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND row_version=?`, now, now, operationID, expectedVersion)
+			update, err = tx.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND row_version=?`, now, now, operationID, expectedVersion)
 		} else {
-			update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
+			update, err = tx.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
 		}
 	} else {
-		update, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
+		update, err = tx.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='cancelled',row_version=row_version+1 WHERE id=? AND row_version=?`, now, operationID, expectedVersion)
 	}
 	if err != nil {
-		return Operation{}, err
+		return Operation{}, execution.Changed, err
 	}
 	if affected, _ := update.RowsAffected(); affected != 1 {
 		// The initial version check was only a read. A concurrent terminal/start
 		// transition can win before this UPDATE; return its real row version rather
 		// than acknowledging cancellation with the caller's stale expectation.
 		var current int64
-		if lookupErr := conn.QueryRowContext(ctx, `SELECT row_version FROM browser_operations WHERE id=?`, operationID).Scan(&current); lookupErr != nil {
-			return Operation{}, lookupErr
+		if lookupErr := tx.QueryRowContext(ctx, `SELECT row_version FROM browser_operations WHERE id=?`, operationID).Scan(&current); lookupErr != nil {
+			return Operation{}, execution.Changed, lookupErr
 		}
-		return Operation{}, &RowVersionError{Current: current}
+		return Operation{}, execution.Changed, &RowVersionError{Current: current}
 	}
-	if err = recordCommand(ctx, conn, actorID, clientCommandID, "cancel_browser_operation", digest, "browser_operation", operationID, now); err != nil {
-		return Operation{}, err
+	updated, err := service.operationOn(ctx, tx, operationID)
+	if err != nil {
+		return Operation{}, execution.Changed, err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Operation{}, err
-	}
-	committed = true
-	if err := conn.Close(); err != nil {
-		return Operation{}, err
-	}
-	return service.operationOn(ctx, service.db, operationID)
+	return updated, execution.Changed, nil
 }
 
 func commandDigest(values ...any) string {
@@ -623,10 +495,6 @@ func replayCommand(ctx context.Context, db sqlQueryer, actorID int64, commandID,
 	return true, resultID.Int64, nil
 }
 func recordCommand(ctx context.Context, db *sql.Conn, actorID int64, commandID, commandType, digest, objectType string, objectID int64, now string) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO client_commands(principal_type,principal_id,client_command_id,command_type,request_digest,outcome,result_object_type,result_object_id,created_at) VALUES('user',?,?,?,?, 'committed',?,?,?)`, actorID, commandID, commandType, digest, objectType, objectID, now)
-	return err
-}
-func recordCommandDB(ctx context.Context, db *sql.DB, actorID int64, commandID, commandType, digest, objectType string, objectID int64, now string) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO client_commands(principal_type,principal_id,client_command_id,command_type,request_digest,outcome,result_object_type,result_object_id,created_at) VALUES('user',?,?,?,?, 'committed',?,?,?)`, actorID, commandID, commandType, digest, objectType, objectID, now)
 	return err
 }

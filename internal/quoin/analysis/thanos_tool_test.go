@@ -19,7 +19,24 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
+
+// analysisAdminContext is the trusted-entry execution metadata the
+// connection commands re-verify in-transaction (admin user 1, session 1).
+func analysisAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-analysis-source-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-analysis-source-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 // seedThanosChain follows the production metrics lifecycle: a current passed
 // probe is committed first, then Enable atomically records its qualification.
@@ -36,6 +53,24 @@ func seedThanosChain(t *testing.T, db *sql.DB) (connectionID, revisionID, genera
 	}
 	summary := createQualifiedThanos(t, db, fmt.Sprintf("thanos-%d", seedCounter), uint64(seedCounter+1))
 	return summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID
+}
+
+// newTestConnectionsService builds the connections fixture service with its
+// read-only reader opened from the same fixture file (t.TempDir() is stable
+// per test), so the probe lifecycle's pure reads share the fail-closed
+// composition instead of the removed writer-pool fallback.
+func newTestConnectionsService(t *testing.T, db *sql.DB) *connections.Service {
+	t.Helper()
+	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	reader, err := execution.OpenReadOnly(fixtureDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) connections.Summary {
@@ -62,18 +97,21 @@ func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) 
 		}
 	}
 	connections.ProbeContractSource = func() string { return "analysis-test-probe-contract-v1" }
-	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'analysis-source-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
 		t.Fatal(err)
 	}
-	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
-	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "analysis-metrics-create-"+name)
+	service := newTestConnectionsService(t, db)
+	summary, err := service.Create(analysisAdminContext(t), connections.CreateInput{Name: name, Type: connections.TypeThanos, NonSecretJSON: []byte(`{"type":"thanos","baseUrl":"http://thanos.test","authType":"none"}`)}, 1, "analysis-metrics-create-"+name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(analysisAdminContext(t), summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +128,7 @@ func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) 
 	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1)
+	enabled, err := service.Enable(analysisAdminContext(t), summary.Name, summary.RowVersion, probeID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +139,7 @@ func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) 
 // drives its attempt to Running, opening the first chat call.
 func runThanosAttempt(t *testing.T, db *sql.DB, service *Service, occurrenceID int64, commandID string) (attemptID, callID int64) {
 	t.Helper()
-	created, err := service.Create(context.Background(), occurrenceID, 1, commandID)
+	created, err := service.Create(commandContext(t), occurrenceID, testOperatorID, commandID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +236,8 @@ func completeThanosProposal(t *testing.T, service *Service, attemptID, callID in
 // the grant resolves inside the pending-row transaction and travels in the
 // authorization (ARCH-INPUT-003).
 func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-grant")
@@ -233,8 +271,8 @@ func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
 // revision/generation must be reused, while each Tool Call retains its own
 // authorization link.
 func TestThanosGrantIsReusedForMultipleCallsInOneResponse(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-grant-reuse")
@@ -273,8 +311,8 @@ func TestThanosGrantIsReusedForMultipleCallsInOneResponse(t *testing.T) {
 // source never yields a grant: the routing miss is a recoverable preflight
 // result on the persisted Tool Call, and no grant row exists.
 func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-reject")
@@ -305,8 +343,8 @@ func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
 // TestThanosQueryUsesAnalysisSnapshotAfterNewPublish proves a new business
 // publish cannot redirect an already-created analysis to its newer connection.
 func TestThanosQueryUsesAnalysisSnapshotAfterNewPublish(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	originalConnection, _, _ := seedThanosChain(t, db)
 	occurrenceID := seedOccurrence(t, db)
@@ -356,8 +394,8 @@ func seedAdditionalThanosChain(t *testing.T, db *sql.DB) int64 {
 // re-reads the connection state (DATA-CONN-002): a disable committed after
 // the grant refuses BeginToolCall and the tool call stays pending.
 func TestThanosBeginToolCallExecutionFence(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-fence")
@@ -371,8 +409,8 @@ func TestThanosBeginToolCallExecutionFence(t *testing.T) {
 	if err := db.QueryRow(`SELECT name,row_version FROM connections WHERE id=?`, connectionID).Scan(&connectionName, &connectionVersion); err != nil {
 		t.Fatal(err)
 	}
-	connectionService := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
-	if _, err := connectionService.Disable(context.Background(), connectionName, connectionVersion); err != nil {
+	connectionService := newTestConnectionsService(t, db)
+	if _, err := connectionService.Disable(analysisAdminContext(t), connectionName, connectionVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Attempts().BeginToolCall(context.Background(), attemptID, authorization.ToolCallID); err == nil {
@@ -392,8 +430,8 @@ func TestThanosBeginToolCallExecutionFence(t *testing.T) {
 // grant binding commit atomically, and the Evidence detail projects the
 // producer and connection facts (ARCH-TOOL-003, DATA-EVIDENCE-001).
 func TestThanosEvidenceCommitsWithToolCallTerminalState(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-evidence")
@@ -441,8 +479,8 @@ func TestThanosEvidenceCommitsWithToolCallTerminalState(t *testing.T) {
 // closure: the evidence body is exactly the committed tool_result Artifact
 // (DATA-EVIDENCE-001: 正文位置恰好一个).
 func TestThanosSpilledResultBindsEvidenceToArtifact(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-spill")
@@ -496,8 +534,8 @@ func TestThanosSpilledResultBindsEvidenceToArtifact(t *testing.T) {
 // the tool completion and leaves the call running (the runtime then seals
 // the technical failure, never a fake observation).
 func TestThanosResultPayloadShapeRejected(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	seedThanosChain(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-thanos-shape")

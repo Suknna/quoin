@@ -74,7 +74,7 @@ func (s *Service) preflightRequirement(ctx context.Context) (preflightRequiremen
 	}
 
 	entries := make([]fileEntry, 0)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader.QueryContext(ctx, `
 		SELECT b.sha256,b.size_bytes
 		FROM artifact_blobs b
 		WHERE EXISTS (
@@ -102,10 +102,10 @@ func (s *Service) preflightRequirement(ctx context.Context) (preflightRequiremen
 	}
 
 	var pageCount, pageSize int64
-	if err := s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+	if err := s.reader.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
 		return preflightRequirement{}, err
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+	if err := s.reader.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
 		return preflightRequirement{}, err
 	}
 	if pageCount < 0 || pageSize <= 0 || uint64(pageCount) > math.MaxUint64/uint64(pageSize) {

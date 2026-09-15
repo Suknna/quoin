@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
-	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
@@ -23,38 +21,28 @@ func TestRootKeyRebindAllowsOwnPasswordChangeWithoutRestoreChecklist(t *testing.
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	defer database.Close()
-	authService, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := authService.CreateFirstAdmin(context.Background(), "admin", "Root Key Admin", "original-password-123"); err != nil {
-		t.Fatal(err)
-	}
+	// Real initialization: the formal password the maintenance login proves is
+	// set through the initialization flow's password step.
+	scenarioInitializeAdmin(t, authService, sender, "original-password-123")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='RootKeyRebind',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1`, now); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := newMaintenanceHandler(NewMaintenanceAPIServer(authService, database.SQL, ""), config.PublicOrigin, "RootKeyRebind")
+	maintenanceApplication := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := maintenanceApplication.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newMaintenanceHandler(maintenanceApplication, config.PublicOrigin, "RootKeyRebind")
 	if err != nil {
 		t.Fatal(err)
 	}
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"admin","password":"original-password-123"}`))
-	login.Header.Set("Content-Type", "application/json")
-	login.Header.Set("Origin", config.PublicOrigin)
-	loginResponse := httptest.NewRecorder()
-	handler.ServeHTTP(loginResponse, login)
-	if loginResponse.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
-	}
+	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123", sender)
 	change := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", bytes.NewBufferString(`{"currentPassword":"original-password-123","newPassword":"root-rebind-password-789"}`))
 	change.Header.Set("Content-Type", "application/json")
 	change.Header.Set("Origin", config.PublicOrigin)
-	change.AddCookie(loginResponse.Result().Cookies()[0])
+	change.AddCookie(cookie)
 	changeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(changeResponse, change)
 	if changeResponse.Code != http.StatusNoContent {
@@ -68,18 +56,9 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	defer database.Close()
-	authService, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := authService.CreateFirstAdmin(context.Background(), "admin", "Restore Admin", "original-password-123"); err != nil {
-		t.Fatal(err)
-	}
+	scenarioInitializeAdmin(t, authService, sender, "original-password-123")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.SQL.Exec(`UPDATE maintenance_state SET active=1,reason='Restore',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1`, now); err != nil {
 		t.Fatal(err)
@@ -95,20 +74,16 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	if _, err := database.SQL.Exec(`INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(?, 'AdminPassword', ?, 'Blocking', 'temporary_password_change_required', ?)`, maintenanceRevision, strconv.FormatInt(adminID, 10), now); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewMaintenanceHandler(authService, database.SQL, config.PublicOrigin)
+	stateApplication := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := stateApplication.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newMaintenanceHandler(stateApplication, config.PublicOrigin, "Restore")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"admin","password":"original-password-123"}`))
-	login.Header.Set("Content-Type", "application/json")
-	login.Header.Set("Origin", config.PublicOrigin)
-	loginResponse := httptest.NewRecorder()
-	handler.ServeHTTP(loginResponse, login)
-	if loginResponse.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
-	}
-	cookie := loginResponse.Result().Cookies()[0]
+	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123", sender)
 	state := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance", nil)
 	state.AddCookie(cookie)
 	stateResponse := httptest.NewRecorder()
@@ -135,15 +110,9 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	if changeResponse.Code != http.StatusNoContent {
 		t.Fatalf("password change status=%d body=%s", changeResponse.Code, changeResponse.Body.String())
 	}
-	relogin := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"admin","password":"replacement-password-456"}`))
-	relogin.Header.Set("Content-Type", "application/json")
-	relogin.Header.Set("Origin", config.PublicOrigin)
-	reloginResponse := httptest.NewRecorder()
-	handler.ServeHTTP(reloginResponse, relogin)
-	if reloginResponse.Code != http.StatusOK {
-		t.Fatalf("relogin status=%d body=%s", reloginResponse.Code, reloginResponse.Body.String())
-	}
-	cookie = reloginResponse.Result().Cookies()[0]
+	// The new password again only opens a flow: the second-factor login issues
+	// the session used for the remaining route checks.
+	cookie = scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "replacement-password-456", sender)
 	runtimeRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runtime", nil)
 	runtimeRequest.AddCookie(cookie)
 	runtimeResponse := httptest.NewRecorder()
@@ -200,7 +169,11 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 			t.Errorf("%s %s status=%d body=%s, want OpenAPI trust-rebuild allow", route.method, route.path, response.Code, response.Body.String())
 		}
 	}
-	rootRebindHandler, err := newMaintenanceHandler(NewMaintenanceAPIServer(authService, database.SQL, ""), config.PublicOrigin, "RootKeyRebind")
+	rootRebindApplication := NewMaintenanceAPIServer(authService, database.SQL, config.RootKeyFile)
+	if err := rootRebindApplication.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	rootRebindHandler, err := newMaintenanceHandler(rootRebindApplication, config.PublicOrigin, "RootKeyRebind")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +225,7 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	failedAuthentication.AddCookie(cookie)
 	failedAuthenticationResponse := httptest.NewRecorder()
 	handler.ServeHTTP(failedAuthenticationResponse, failedAuthentication)
-	if failedAuthenticationResponse.Code != http.StatusInternalServerError || !strings.Contains(failedAuthenticationResponse.Body.String(), `"code":"unavailable"`) {
+	if failedAuthenticationResponse.Code != http.StatusServiceUnavailable || !strings.Contains(failedAuthenticationResponse.Body.String(), `"code":"unavailable"`) {
 		t.Fatalf("failed-authentication maintenance deny status=%d body=%s", failedAuthenticationResponse.Code, failedAuthenticationResponse.Body.String())
 	}
 }

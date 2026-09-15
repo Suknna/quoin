@@ -13,7 +13,7 @@ import (
 
 func TestPrometheusAndThanosHaveIndependentCredentialsAndEnabledState(t *testing.T) {
 	service, db, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	createMetrics := func(name, typ, authType string, secret map[string]string) connections.Summary {
 		t.Helper()
 		config, err := json.Marshal(map[string]any{
@@ -47,9 +47,31 @@ func TestPrometheusAndThanosHaveIndependentCredentialsAndEnabledState(t *testing
 	if prometheus.CurrentGenerationID == thanos.CurrentGenerationID || prometheus.CurrentRevisionID == thanos.CurrentRevisionID {
 		t.Fatalf("metrics connections must own independent revision and credential generation: %+v %+v", prometheus, thanos)
 	}
-	opened, err := service.OpenGeneration(ctx, prometheus.CurrentGenerationID)
-	if err != nil || opened.Prometheus == nil || opened.Prometheus.BearerToken != "prom-token" || opened.Thanos != nil {
-		t.Fatalf("prometheus credential carrier = %+v, err=%v", opened, err)
+	// The bearer token decrypts only through the actual audited grant
+	// fulfillment path, and the Prometheus carrier stays distinct from the
+	// Thanos alias.
+	if err := registerPlinthSlot(db); err != nil {
+		t.Fatal(err)
+	}
+	revealAttempt, err := service.StartProbe(ctx, prometheus.Name, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), revealAttempt, "boot-prometheus-reveal", 1, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("bind prometheus reveal probe: %v ok=%v", err, ok)
+	}
+	payload, err := service.FulfillGrant(context.Background(), grantID, revealAttempt, "boot-prometheus-reveal", 1)
+	if err != nil || payload.Metrics == nil || payload.Metrics.BearerToken != "prom-token" || payload.Thanos != nil {
+		t.Fatalf("prometheus credential carrier = %+v, err=%v", payload, err)
+	}
+	// Close the reveal attempt so the qualification probe below can run
+	// (one active probe per connection).
+	if err := service.AcceptProbe(context.Background(), revealAttempt, "boot-prometheus-reveal", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.InterruptProbe(context.Background(), revealAttempt, "lease_expired"); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := service.Enable(ctx, prometheus.Name, prometheus.RowVersion, 0, 1); !errors.Is(err, connections.ErrValidation) {
 		t.Fatalf("Prometheus enable without probe must be rejected, got %v", err)
@@ -66,7 +88,7 @@ func TestPrometheusAndThanosHaveIndependentCredentialsAndEnabledState(t *testing
 
 func TestPrometheusProbeCreatesExactGrant(t *testing.T) {
 	service, db, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	config, _ := json.Marshal(map[string]any{
 		"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "none",
 	})
@@ -90,7 +112,7 @@ func TestPrometheusProbeCreatesExactGrant(t *testing.T) {
 
 func TestInterruptPrometheusProbeClosesTypedResult(t *testing.T) {
 	service, db, _ := newService(t)
-	ctx := context.Background()
+	ctx := adminContext(t, nextCorrelation())
 	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "none"})
 	created, err := service.Create(ctx, connections.CreateInput{Name: "prometheus-interrupted", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, "prometheus-interrupt-create")
 	if err != nil {
@@ -103,13 +125,13 @@ func TestInterruptPrometheusProbeClosesTypedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok, err := service.BindQueuedToStream(ctx, attemptID, "boot-interrupted", 1, 5*time.Minute); err != nil || !ok {
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-interrupted", 1, 5*time.Minute); err != nil || !ok {
 		t.Fatalf("bind: %v ok=%v", err, ok)
 	}
-	if err := service.AcceptProbe(ctx, attemptID, "boot-interrupted", 1); err != nil {
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-interrupted", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.InterruptProbe(ctx, attemptID, "lease_expired"); err != nil {
+	if err := service.InterruptProbe(context.Background(), attemptID, "lease_expired"); err != nil {
 		t.Fatal(err)
 	}
 	var state, outcome, connectionType string
@@ -119,12 +141,17 @@ func TestInterruptPrometheusProbeClosesTypedResult(t *testing.T) {
 	if state != "Interrupted" || outcome != "interrupted" || connectionType != connections.TypePrometheus {
 		t.Fatalf("interrupted Prometheus closure=%s/%s/%s", state, outcome, connectionType)
 	}
+	// An interrupt pass over an already-terminal attempt converges silently.
+	if err := service.InterruptProbe(context.Background(), attemptID, "lease_expired"); err != nil {
+		t.Fatalf("repeated interrupt must converge, got %v", err)
+	}
 }
 
 func TestMetricsAuthSecretValidationRejectsSmuggledCredential(t *testing.T) {
 	service, _, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
 	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "bearer", "bearerToken": "leak"})
-	if _, err := service.Create(context.Background(), connections.CreateInput{Name: "bad-prometheus", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, fmt.Sprintf("metrics-bad-%d", seq.Next())); !errors.Is(err, connections.ErrValidation) {
+	if _, err := service.Create(ctx, connections.CreateInput{Name: "bad-prometheus", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, fmt.Sprintf("metrics-bad-%d", seq.Next())); !errors.Is(err, connections.ErrValidation) {
 		t.Fatalf("secret in non-secret projection must be rejected, got %v", err)
 	}
 }

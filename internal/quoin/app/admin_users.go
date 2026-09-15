@@ -57,7 +57,7 @@ func commandUserError(err error) error {
 		problemErr.Conflict = map[string]any{"code": "row_version_conflict", "objectType": "user", "objectId": strconv.FormatInt(version.ObjectID, 10), "rowVersion": version.Current}
 		return problemErr
 	case errors.Is(err, auth.ErrLastAdmin):
-		problemErr := problem(http.StatusConflict, "active_conflict", "系统必须保留至少一个有效的管理员；请先创建或启用另一个管理员。")
+		problemErr := problem(http.StatusConflict, "active_conflict", "内置管理员不能禁用、删除或降级。")
 		problemErr.Conflict = map[string]any{"code": "active_conflict", "objectType": "user"}
 		return problemErr
 	case errors.Is(err, auth.ErrUsernameTaken):
@@ -134,14 +134,15 @@ func (application *apiServer) registerAdminUserRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/admin/users/{userId}/revoke-sessions", OperationID: "revokeUserSessions"}, application.revokeUserSessions)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/sessions", OperationID: "listOwnSessions"}, application.listOwnSessions)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/sessions/{sessionId}/revoke", OperationID: "revokeOwnSession", DefaultStatus: http.StatusNoContent}, application.revokeOwnSession)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/audit-events", OperationID: "listAuditEvents"}, application.listAuditEvents)
+	application.registerAuditRoutes(api)
 }
 
 func (application *apiServer) listUsers(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Cursor  string `query:"cursor"`
 	Limit   int    `query:"limit"`
-}) (*usersListOutput, error) {
+},
+) (*usersListOutput, error) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取用户列表"); err != nil {
 		return nil, err
 	}
@@ -161,16 +162,18 @@ func (application *apiServer) listUsers(ctx context.Context, input *struct {
 func (application *apiServer) createUser(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128"`
-		Username        string `json:"username" maxLength:"200"`
-		DisplayName     string `json:"displayName" maxLength:"200"`
-		Role            string `json:"role"`
-		Password        string `json:"password" minLength:"15" maxLength:"128"`
+		ClientCommandID string              `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		Username        string              `json:"username" maxLength:"200"`
+		DisplayName     string              `json:"displayName" maxLength:"200"`
+		Role            string              `json:"role,omitempty" enum:"operator"`
+		Password        string              `json:"password" minLength:"15" maxLength:"128"`
+		Contacts        []auth.ContactInput `json:"contacts" minItems:"1" maxItems:"2"`
 	}
 }) (*struct {
 	Status int `header:"-"`
 	Body   auth.User
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "创建用户")
 	if err != nil {
 		return nil, err
@@ -178,11 +181,11 @@ func (application *apiServer) createUser(ctx context.Context, input *struct {
 	// Digest covers the non-secret semantic fields only (DATA-COMMAND-002):
 	// the password value never enters any persisted digest (SEC-KEY-008).
 	digest := auth.DigestCommand("user.create", map[string]any{
-		"username": input.Body.Username, "displayName": input.Body.DisplayName, "role": input.Body.Role,
+		"username": input.Body.Username, "displayName": input.Body.DisplayName, "role": "operator", "contacts": input.Body.Contacts,
 	})
 	result, _, err := application.auth.CreateUser(ctx, session, auth.CreateUserInput{
 		ClientCommandID: input.Body.ClientCommandID, Digest: digest,
-		Username: input.Body.Username, DisplayName: input.Body.DisplayName, Role: input.Body.Role, Password: input.Body.Password,
+		Username: input.Body.Username, DisplayName: input.Body.DisplayName, Role: "operator", Password: input.Body.Password, Contacts: input.Body.Contacts,
 	})
 	if err != nil {
 		return nil, commandUserError(err)
@@ -213,7 +216,8 @@ func (application *apiServer) updateUser(ctx context.Context, input *struct {
 	}
 }) (*struct {
 	Body auth.User
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "更新用户")
 	if err != nil {
 		return nil, err
@@ -259,7 +263,8 @@ func (application *apiServer) resetUserPassword(ctx context.Context, input *stru
 		User                auth.User `json:"user"`
 		RevokedSessionCount int64     `json:"revokedSessionCount"`
 	}
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "重置用户密码")
 	if err != nil {
 		return nil, err
@@ -303,7 +308,8 @@ func (application *apiServer) revokeUserSessions(ctx context.Context, input *str
 	Body struct {
 		RevokedSessionCount int64 `json:"revokedSessionCount"`
 	}
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "撤销用户 Session")
 	if err != nil {
 		return nil, err
@@ -339,7 +345,8 @@ func (application *apiServer) listOwnSessions(ctx context.Context, input *struct
 		Items      []auth.SessionView `json:"items"`
 		NextCursor string             `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateFull(ctx, input.Session, "读取登录设备列表")
 	if err != nil {
 		return nil, err
@@ -369,7 +376,8 @@ func (application *apiServer) revokeOwnSession(ctx context.Context, input *struc
 	Body      struct {
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128"`
 	}
-}) (*noContentOutput, error) {
+},
+) (*noContentOutput, error) {
 	session, err := application.authenticateFull(ctx, input.Session, "撤销登录设备")
 	if err != nil {
 		return nil, err
@@ -402,7 +410,8 @@ func (application *apiServer) listAuditEvents(ctx context.Context, input *struct
 		Items      []auth.AuditEventView `json:"items"`
 		NextCursor string                `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取审计事件"); err != nil {
 		return nil, err
 	}

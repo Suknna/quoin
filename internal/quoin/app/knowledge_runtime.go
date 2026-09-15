@@ -35,7 +35,11 @@ func (service *RuntimeService) dispatchKnowledgeExtractionAttempt(ctx context.Co
 		return err
 	}
 	var scopeID int64
-	if err := service.Knowledge.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.Knowledge.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Knowledge.Reader(), attemptID)
+	if err != nil {
 		return err
 	}
 	grants := make([]*runtimev1.ConnectionGrant, 0, len(input.Grants))
@@ -43,7 +47,7 @@ func (service *RuntimeService) dispatchKnowledgeExtractionAttempt(ctx context.Co
 		grants = append(grants, &runtimev1.ConnectionGrant{GrantId: grant.GrantID, ConnectionRevisionId: grant.ConnectionRevisionID, CredentialGenerationId: grant.CredentialGenerationID, Purpose: grant.Purpose, ConnectionProbeResultId: grant.ConnectionProbeResultID})
 	}
 	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(attemptID), BootId: view.BootID, Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
-		AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION, ScopeType: runtimev1.ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH, ScopeId: scopeID, LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+		AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION, ScopeType: runtimev1.ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH, ScopeId: scopeID, OperationCorrelationId: operationCorrelationID, LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 		Input: &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest, ConnectionGrants: grants, AgentVersion: input.AgentVersion},
 	}}})
 }

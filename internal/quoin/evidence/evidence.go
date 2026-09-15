@@ -15,6 +15,9 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // ErrNotFound reports an unknown evidence locator.
@@ -44,7 +47,12 @@ type Projector func(argumentsJSON, payloadJSON []byte, artifactID int64) (Projec
 
 // Service is the evidence authority.
 type Service struct {
-	db        *sql.DB
+	db *sql.DB
+	// reader serves every pure read. It stays the zero execution.Reader —
+	// fail closed on every query — until the composition layer wires the real
+	// read-only reader via SetReader; the writer database is never a read
+	// fallback.
+	reader    execution.Reader
 	now       func() time.Time
 	projector map[string]Projector
 }
@@ -64,15 +72,26 @@ func (service *Service) RegisterProjector(toolName string, projector Projector) 
 	service.projector[toolName] = projector
 }
 
-// DB exposes the product database for read-only routing queries.
-func (service *Service) DB() *sql.DB { return service.db }
+// SetReader installs the composition layer's real read-only reader for every
+// pure read of this service. It reuses the execution runner's trusted gate —
+// only an OpenReadOnly-produced execution.Reader is accepted, arbitrary
+// handles are refused — and propagates its error. Until it is wired, every
+// pure read fails closed; there is no writer fallback.
+func (service *Service) SetReader(reader audit.Reader) error {
+	gate := execution.NewRunner(service.db, nil, nil)
+	if err := gate.SetReader(reader); err != nil {
+		return err
+	}
+	service.reader = gate.Reader()
+	return nil
+}
 
 // WriteForToolCall commits the deterministic Evidence for one succeeded
 // observation tool inside the caller's transaction, while the Tool Call is
 // still running (the frozen trg_evidence_attempt_tool_closure demands the
 // running state at the Evidence INSERT; the terminal state advances in the
 // same transaction afterwards — ARCH-TOOL-003, DATA-EVIDENCE-001).
-func (service *Service) WriteForToolCall(ctx context.Context, conn *sql.Conn, attemptID, toolCallID, artifactID int64, payloadJSON []byte, toolName string) ([]int64, error) {
+func (service *Service) WriteForToolCall(ctx context.Context, conn execution.Executor, attemptID, toolCallID, artifactID int64, payloadJSON []byte, toolName string) ([]int64, error) {
 	var attemptState, scopeType string
 	var scopeID int64
 	if err := conn.QueryRowContext(ctx, `
@@ -207,14 +226,14 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 	// 独立计划 Run（ADR-0004）：插件采集由 Plinth supervisor 执行，连接来自
 	// Run 冻结的接入授权；插件身份随 producer 事实一并冻结。
 	var pluginID string
-	pluginErr := service.db.QueryRowContext(ctx, `
+	pluginErr := service.reader.QueryRowContext(ctx, `
 		SELECT c.plugin_id
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
 		JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
 		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&pluginID)
 	if pluginErr == nil {
-		rows, grantErr := service.db.QueryContext(ctx, `
+		rows, grantErr := service.reader.QueryContext(ctx, `
 			SELECT c.name,c.type
 			FROM attempt_connection_grants ag
 			JOIN connections c ON c.id=ag.connection_id
@@ -241,7 +260,7 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 		return nil, nil, pluginErr
 	}
 	var checkKind string
-	err := service.db.QueryRowContext(ctx, `
+	err := service.reader.QueryRowContext(ctx, `
 		SELECT c.kind
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id
@@ -254,7 +273,7 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 	if err != nil {
 		return nil, nil, err
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.reader.QueryContext(ctx, `
 		SELECT c.name,c.type
 		FROM attempt_connection_grants ag
 		JOIN connections c ON c.id=ag.connection_id
@@ -286,7 +305,7 @@ func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error)
 	var attemptID, toolCallID sql.NullInt64
 	var resultJSON, warningsJSON, errorsJSON sql.NullString
 	var artifactID sql.NullInt64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.reader.QueryRowContext(ctx, `
 		SELECT id,target_type,target_id,params_json,observed_at,integrity,created_at,
 		       attempt_id,tool_call_id,result_json,artifact_id,warnings_json,errors_json
 		FROM evidence WHERE id=?`, evidenceID).
@@ -314,7 +333,7 @@ func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error)
 	switch {
 	case attemptID.Valid && toolCallID.Valid:
 		var toolName, toolVersion string
-		if err := service.db.QueryRowContext(ctx, `SELECT tool_name,tool_version FROM tool_calls WHERE id=?`, toolCallID.Int64).Scan(&toolName, &toolVersion); err != nil {
+		if err := service.reader.QueryRowContext(ctx, `SELECT tool_name,tool_version FROM tool_calls WHERE id=?`, toolCallID.Int64).Scan(&toolName, &toolVersion); err != nil {
 			return View{}, err
 		}
 		detail.Producer = map[string]any{
@@ -324,7 +343,7 @@ func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error)
 			"toolName":    toolName,
 			"toolVersion": toolVersion,
 		}
-		rows, err := service.db.QueryContext(ctx, `
+		rows, err := service.reader.QueryContext(ctx, `
 			SELECT c.name, c.type
 			FROM tool_call_connection_grants tcg
 			JOIN attempt_connection_grants ag ON ag.id = tcg.connection_grant_id
@@ -362,18 +381,19 @@ func (service *Service) Get(ctx context.Context, evidenceID int64) (View, error)
 	case resultJSON.Valid:
 		detail.Body = map[string]any{"kind": "inline_json", "value": parseJSON(resultJSON.String)}
 	case artifactID.Valid:
-		detail.Body = map[string]any{"kind": "artifact", "artifact": artifactSummary(service.db, artifactID.Int64)}
+		detail.Body = map[string]any{"kind": "artifact", "artifact": artifactSummary(ctx, service.reader, artifactID.Int64)}
 	}
 	return detail, nil
 }
 
-// artifactSummary projects the frozen ArtifactSummary of one artifact row.
-func artifactSummary(db *sql.DB, artifactID int64) map[string]any {
+// artifactSummary projects the frozen ArtifactSummary of one artifact row on
+// the read-only reader (pure read; never the writer pool).
+func artifactSummary(ctx context.Context, reader execution.Reader, artifactID int64) map[string]any {
 	var kind, mediaType, retentionKind, ownerType, sha256Hex string
 	var sensitive, bodyExpired int
 	var ownerID, sizeBytes int64
 	var expiresAt, createdAt sql.NullString
-	err := db.QueryRow(`SELECT a.kind,a.media_type,a.sensitive,a.retention_kind,a.owner_type,a.owner_id,
+	err := reader.QueryRowContext(ctx, `SELECT a.kind,a.media_type,a.sensitive,a.retention_kind,a.owner_type,a.owner_id,
 		b.size_bytes,b.sha256,a.body_expired,a.expires_at,a.created_at
 		FROM artifacts a JOIN artifact_blobs b ON b.id=a.blob_id WHERE a.id=?`, artifactID).
 		Scan(&kind, &mediaType, &sensitive, &retentionKind, &ownerType, &ownerID,

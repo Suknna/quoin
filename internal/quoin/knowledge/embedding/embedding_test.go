@@ -19,8 +19,34 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	_ "modernc.org/sqlite"
 )
+
+// queryContext returns a background context carrying execution metadata with
+// the harness user's real session proof, mirroring the HTTP search request
+// originator: the query-create operation re-verifies the session inside its
+// transaction (auth.VerifyExecutionSession), and the centralized attempt
+// creation persists this metadata onto the new row (ADR-0006) and fails
+// closed without it.
+func (harness *harness) queryContext(t *testing.T) context.Context {
+	t.Helper()
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlationID,
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: harness.userID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "test-query"},
+		Session:       harness.session,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -40,6 +66,7 @@ func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 type harness struct {
 	db              *sql.DB
 	service         *Service
+	session         execution.SessionRef
 	userID          int64
 	connectionID    int64
 	revisionID      int64
@@ -53,11 +80,14 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	db := newTestDB(t)
 	now := testNow()
-	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,'x',1,?,?)`, now, now)
+	// initialized=1 and a live session are what auth.VerifyExecutionSession
+	// re-verifies inside the query-create transaction.
+	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,1,'x',1,?,?)`, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	userID, _ := user.LastInsertId()
+	session := testfixture.SeedActiveSession(t, db, userID)
 	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, []byte(strings.Repeat("e", 12)), []byte(strings.Repeat("f", 16)), now); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +176,7 @@ func newHarness(t *testing.T) *harness {
 	if _, err := db.Exec(`UPDATE connections SET enabled=1,revalidation_required=0,row_version=row_version+1 WHERE id=? AND row_version=2`, connectionID); err != nil {
 		t.Fatal(err)
 	}
-	return &harness{db: db, service: NewService(db), userID: userID, connectionID: connectionID, revisionID: revisionID, credentialGenID: credentialGenID, probeResultID: probeResultID}
+	return &harness{db: db, service: NewService(db), session: session, userID: userID, connectionID: connectionID, revisionID: revisionID, credentialGenID: credentialGenID, probeResultID: probeResultID}
 }
 
 func seedProbeModelCalls(t *testing.T, db *sql.DB, attemptID, chatGrantID, embedGrantID, snapshotID int64, now string) {
@@ -736,7 +766,7 @@ func TestSweepKeepsLiveQueryAttempts(t *testing.T) {
 	generation := harness.queryInt(t, `SELECT id FROM embedding_generations WHERE state='current'`)
 	// The live request registers its originator before the attempt commits,
 	// so a sweep racing the request window converges nothing.
-	if _, _, err := harness.service.CreateQueryAttempt(context.Background(), "活跃请求"); err != nil {
+	if _, _, err := harness.service.CreateQueryAttempt(harness.queryContext(t), "活跃请求"); err != nil {
 		t.Fatal(err)
 	}
 	harness.sweepOK(t)
@@ -759,7 +789,7 @@ func TestSweepConvergesOrphanedQueryAttempts(t *testing.T) {
 	// orphan is created through a detached service whose registry never
 	// holds the query text (as after a process restart).
 	orphanService := NewService(harness.db)
-	if _, _, createErr := orphanService.CreateQueryAttempt(context.Background(), "重启前的问题"); createErr != nil {
+	if _, _, createErr := orphanService.CreateQueryAttempt(harness.queryContext(t), "重启前的问题"); createErr != nil {
 		t.Fatalf("create query attempt: %v", createErr)
 	}
 	harness.sweepOK(t)

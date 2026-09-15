@@ -13,27 +13,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
 
 type harness struct {
 	db        *sql.DB
+	dbPath    string
 	registry  *plugins.Registry
 	enabled   []string
 	service   *Service
 	conns     *connections.Service
 	principal int64
+	// sessionID is the administrator's verified session bound into every
+	// manual-refresh context (execution.SessionRef).
+	sessionID int64
 }
 
 func newHarness(t *testing.T, connectionType string) *harness {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	directory := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+directory+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,9 +51,19 @@ func newHarness(t *testing.T, connectionType string) *harness {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',1,?,?)`, now, now); err != nil {
+	// initialized=1 and a live session are what auth.VerifyExecutionSession
+	// re-verifies inside the admission transaction.
+	if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
+	sessionResult, err := db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,?,1,'observation-test',?,?,?,?)`,
+		make([]byte, 32), now, now,
+		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := sessionResult.LastInsertId()
 	seedPlinthSlot(t, db, now, "plinth")
 	// The maintenance singleton exists in every real database; connection
 	// commands read it inside their transactions.
@@ -56,14 +74,56 @@ func newHarness(t *testing.T, connectionType string) *harness {
 	// enablement set the app wiring would resolve at boot.
 	registry, enabled := observationTestRegistry(t)
 	rootKey := make([]byte, 32)
-	h := &harness{
-		db: db, registry: registry, enabled: enabled,
-		service:   NewService(db, registry, enabled),
-		conns:     connections.NewService(db, func() ([]byte, error) { return rootKey, nil }),
-		principal: 1,
+	// The connections fixture service gets the same validated read-only
+	// reader (OpenReadOnly over this fixture file) — its probe lifecycle's
+	// pure reads fail closed without it.
+	conns := connections.NewService(db, func() ([]byte, error) { return rootKey, nil })
+	connsReader, err := execution.OpenReadOnly(directory + "/test.db")
+	if err != nil {
+		t.Fatal(err)
 	}
-	seedEnabledMetricsConnection(t, h, connectionType, fmt.Sprintf("main-%s", connectionType), now, rootKey)
+	t.Cleanup(func() { connsReader.Close() })
+	if err := conns.SetReader(connsReader); err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{
+		db: db, dbPath: directory + "/test.db", registry: registry, enabled: enabled,
+		service:   newTestService(t, db, directory+"/test.db", registry, enabled),
+		conns:     conns,
+		principal: 1, sessionID: sessionID,
+	}
+	// The connection seeding commands are audited administrator mutations:
+	// they run under the seeded administrator's verified session context.
+	seedCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "seed-observation-bootstrap",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Initiator:     execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-seed"},
+		Session:       execution.SessionRef{ID: sessionID, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEnabledMetricsConnection(t, seedCtx, h, connectionType, fmt.Sprintf("main-%s", connectionType), now, rootKey)
 	return h
+}
+
+// newTestService composes the production read seam onto NewService: a real
+// query_only reader over the same fixture file, opened through the
+// execution.OpenReadOnly factory and validated by runner.SetReader's probe.
+// A second writable handle is never an acceptable reader.
+func newTestService(t *testing.T, db *sql.DB, dbPath string, registry *plugins.Registry, enabled []string) *Service {
+	t.Helper()
+	service := NewService(db, registry, enabled)
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 // observationTestRegistry pins an isolated descriptor catalog so these tests
@@ -115,7 +175,7 @@ func seedPlinthSlot(t *testing.T, db *sql.DB, now, slot string) {
 
 // seedEnabledMetricsConnection drives the real probe→enable path so the
 // admission's grant resolution sees a genuinely enabled, current connection.
-func seedEnabledMetricsConnection(t *testing.T, h *harness, connectionType, name, now string, rootKey []byte) {
+func seedEnabledMetricsConnection(t *testing.T, ctx context.Context, h *harness, connectionType, name, now string, rootKey []byte) {
 	t.Helper()
 	if _, err := h.db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
 		t.Fatal(err)
@@ -123,14 +183,18 @@ func seedEnabledMetricsConnection(t *testing.T, h *harness, connectionType, name
 	service := h.conns
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
 	configJSON, _ := json.Marshal(map[string]any{"type": connectionType, "baseUrl": "https://metrics.test", "authType": "none"})
-	summary, err := service.Create(context.Background(), connections.CreateInput{Name: name, Type: connectionType, NonSecretJSON: configJSON}, 1, "seed-observation-create-"+name)
+	summary, err := service.Create(ctx, connections.CreateInput{Name: name, Type: connectionType, NonSecretJSON: configJSON}, 1, "seed-observation-create-"+name)
+	if err != nil {
+		t.Fatalf("SEED create: %v", err)
+	}
+	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(context.Background(), summary.Name, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The bind/accept/result steps are runtime machinery that runs after the
+	// originating request ended: on a bare context the connections service
+	// restores the attempt's persisted correlation ("seed-observation-bootstrap")
+	// with the system task actor — an inherited scope is rejected as unrelated.
 	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "seed-boot", 1, 5*time.Minute); err != nil || !ok {
 		t.Fatalf("bind metrics probe: %v ok=%v", err, ok)
 	}
@@ -144,18 +208,45 @@ func seedEnabledMetricsConnection(t *testing.T, h *harness, connectionType, name
 	if err := h.db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Enable(context.Background(), summary.Name, summary.RowVersion, probeID, 1); err != nil {
+	if _, err := service.Enable(ctx, summary.Name, summary.RowVersion, probeID, 1); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func (h *harness) startRun(t *testing.T, commandID, trigger string, scheduledFor *string) SourceObservationRun {
 	t.Helper()
-	run, err := h.service.StartRun(context.Background(), h.principal, commandID, fmt.Sprintf("main-prometheus"), trigger, scheduledFor)
+	var ctx context.Context = context.Background()
+	if trigger == "manual" {
+		ctx = h.adminContext(t)
+	}
+	run, err := h.service.StartRun(ctx, h.principal, commandID, fmt.Sprintf("main-prometheus"), trigger, scheduledFor)
 	if err != nil {
 		t.Fatalf("start source observation run: %v", err)
 	}
 	return run
+}
+
+// adminContext builds the exact execution metadata the app HTTP layer will
+// attach for a manual refresh: the administrator actor with its verified
+// session reference. Tests exercise the real contract, never a fallback.
+func (h *harness) adminContext(t *testing.T) context.Context {
+	t.Helper()
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := execution.Principal{Kind: execution.PrincipalUser, ID: h.principal}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         admin,
+		Initiator:     admin,
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-observation-test"},
+		Session:       execution.SessionRef{ID: h.sessionID, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 func (h *harness) bindChildToRunning(t *testing.T, attemptID int64) {
@@ -297,22 +388,205 @@ func TestStartRunIsIdempotentPerConnectionAndCommand(t *testing.T) {
 	if replay.ID != first.ID {
 		t.Fatalf("command replay returned %s, want %s", replay.ID, first.ID)
 	}
-	// A reused command id with a different request is a conflict.
-	if _, err := h.service.StartRun(context.Background(), h.principal, "cmd-obs-start-0002", "main-prometheus", "enablement", nil); !errors.Is(err, ErrCommandReused) {
+	// A reused command id with a different request is a conflict. The ledger
+	// key includes the principal, so the probe stays on the manual identity;
+	// the replay pre-stage rejects before any business runs.
+	if _, err := h.service.StartRun(h.adminContext(t), h.principal, "cmd-obs-start-0002", "other-connection", "manual", nil); !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("reused command = %v, want ErrCommandReused", err)
 	}
 }
 
 func TestStartRunRefusesUnobservableConnections(t *testing.T) {
 	h := newHarness(t, "prometheus")
-	if _, err := h.service.StartRun(context.Background(), h.principal, "cmd-obs-missing-0001", "no-such-connection", "manual", nil); !errors.Is(err, ErrNotObservable) {
+	if _, err := h.service.StartRun(h.adminContext(t), h.principal, "cmd-obs-missing-0001", "no-such-connection", "manual", nil); !errors.Is(err, ErrNotObservable) {
 		t.Fatalf("missing connection = %v, want ErrNotObservable", err)
 	}
 	// Disabling the deployment's plugin set fails admission closed: without
 	// an enabled discover-capable catalog nothing may be observed.
 	disabled := NewService(h.db, h.registry, []string{"alertmanager"})
-	if _, err := disabled.StartRun(context.Background(), h.principal, "cmd-obs-disabled-0001", "main-prometheus", "manual", nil); !errors.Is(err, ErrNotObservable) {
+	if _, err := disabled.StartRun(h.adminContext(t), h.principal, "cmd-obs-disabled-0001", "main-prometheus", "manual", nil); !errors.Is(err, ErrNotObservable) {
 		t.Fatalf("disabled plugin admission = %v, want ErrNotObservable", err)
+	}
+}
+
+// TestStartRunManualRequiresVerifiedAdminContext pins the fail-closed
+// identity contract of the manual refresh: no execution metadata, an
+// unproven session, a non-admin session or a mismatched principal never
+// reaches the mutation — there is no fallback that could fake the actor.
+func TestStartRunManualRequiresVerifiedAdminContext(t *testing.T) {
+	h := newHarness(t, "prometheus")
+
+	// A context without execution metadata is a wiring bug, rejected closed.
+	if _, err := h.service.StartRun(context.Background(), h.principal, "cmd-obs-ctx-0001", "main-prometheus", "manual", nil); !errors.Is(err, execution.ErrMissingContext) {
+		t.Fatalf("missing metadata = %v, want execution.ErrMissingContext", err)
+	}
+
+	// A user actor without a session reference cannot be verified.
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := execution.Principal{Kind: execution.PrincipalUser, ID: h.principal}
+	sessionless, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation, Actor: admin, Initiator: admin,
+		Source: execution.Source{Kind: execution.SourceHTTP},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.StartRun(sessionless, h.principal, "cmd-obs-ctx-0002", "main-prometheus", "manual", nil); !errors.Is(err, auth.ErrActorChanged) {
+		t.Fatalf("sessionless actor = %v, want auth.ErrActorChanged", err)
+	}
+
+	// An operator session is not an administrator.
+	operatorID, operatorSession := seedOperatorWithSession(t, h)
+	operator := execution.Principal{Kind: execution.PrincipalUser, ID: operatorID}
+	operatorCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation + "-op", Actor: operator, Initiator: operator,
+		Source:  execution.Source{Kind: execution.SourceHTTP},
+		Session: execution.SessionRef{ID: operatorSession, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.StartRun(operatorCtx, operatorID, "cmd-obs-ctx-0003", "main-prometheus", "manual", nil); !errors.Is(err, auth.ErrActorChanged) {
+		t.Fatalf("operator admission = %v, want auth.ErrActorChanged", err)
+	}
+
+	// The command principal must be the context actor.
+	if _, err := h.service.StartRun(h.adminContext(t), 999, "cmd-obs-ctx-0004", "main-prometheus", "manual", nil); err == nil || strings.Contains(err.Error(), "not observable") {
+		t.Fatalf("mismatched principal = %v, want the principal match failure", err)
+	}
+}
+
+// seedOperatorWithSession adds one enabled operator (the single-admin index
+// is untouched) with a live session.
+func seedOperatorWithSession(t *testing.T, h *harness) (int64, int64) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := h.db.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES('operator','Operator','operator',1,1,'x',1,?,?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, _ := result.LastInsertId()
+	digest := make([]byte, 32)
+	digest[0] = byte(userID) // unique per user; the digest column is UNIQUE
+	session, err := h.db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,1,'operator-test',?,?,?,?)`,
+		userID, digest, now, now,
+		time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := session.LastInsertId()
+	return userID, sessionID
+}
+
+// TestObservationRunLifecycleAudited pins the automatic audit trail of the
+// run lifecycle: the manual acceptance is audited under the administrator,
+// the scheduled tick under the system principal with its correlation carried
+// onto the created attempts, and the terminal transition writes the run's
+// completed/failed record — while the per-resource telemetry upserts stay
+// outside the audit trail by design.
+func TestObservationRunLifecycleAudited(t *testing.T) {
+	h := newHarness(t, "prometheus")
+	run := h.startRun(t, "cmd-obs-audit-0001", "manual", nil)
+
+	var actorType string
+	var actorID int64
+	if err := h.db.QueryRow(`SELECT actor_type,actor_id FROM audit_events WHERE action='observation.source.start'`).Scan(&actorType, &actorID); err != nil {
+		t.Fatalf("manual admission audit event: %v", err)
+	}
+	if actorType != "user" || actorID != h.principal {
+		t.Fatalf("manual admission audit actor = %s/%d", actorType, actorID)
+	}
+
+	// The created attempt carries the admission correlation (attempt.CreateOn).
+	var correlated int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM execution_attempts a
+		JOIN observation_run_objects o ON o.attempt_id=a.id
+		WHERE a.scope_type='observation_run' AND a.scope_id=? AND a.operation_correlation_id IS NOT NULL`, parseID(t, run.ID)).Scan(&correlated); err != nil {
+		t.Fatal(err)
+	}
+	if correlated != 1 {
+		t.Fatalf("attempts without inherited correlation = %d, want 1", correlated)
+	}
+
+	// The terminal transition of the manual run writes its completed record.
+	queued, err := h.service.QueuedObservationAttempts(context.Background())
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("queued children = %v, %v; want the manual root's child", queued, err)
+	}
+	h.bindChildToRunning(t, queued[0])
+	h.commitProposal(t, run.ID, queued[0], "success", identityObjects(
+		map[string]string{"job": "web", "instance": "one:80"},
+	), nil)
+	var completed, failed int
+	if err := h.db.QueryRow(`SELECT
+			COUNT(*) FILTER(WHERE action='observation.run.complete'),
+			COUNT(*) FILTER(WHERE action='observation.run.fail')
+		FROM audit_events WHERE domain_ref_type='observation_run'`).Scan(&completed, &failed); err != nil {
+		t.Fatal(err)
+	}
+	if completed != 1 || failed != 0 {
+		t.Fatalf("terminal audit records complete=%d fail=%d, want 1/0", completed, failed)
+	}
+
+	// With the run terminal, the next scheduler pass admits a tick under the
+	// explicit system scope; its admission is audited for the system principal.
+	h.service.UseClock(func() time.Time { return time.Now().UTC().Add(10 * time.Minute) })
+	if err := h.service.AdmitDue(context.Background(), time.Now().UTC().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueryRow(`SELECT actor_type,actor_id FROM audit_events WHERE action='observation.source.start' AND actor_type='system'`).Scan(&actorType, &actorID); err != nil {
+		t.Fatalf("scheduled admission audit event: %v", err)
+	}
+	if actorID != 0 {
+		t.Fatalf("scheduled audit actor id = %d, want 0", actorID)
+	}
+
+	// A failed execution flips the terminal record to the fail action.
+	failedRun := h.startRun(t, "cmd-obs-audit-0002", "manual", nil)
+	queued, err = h.service.QueuedObservationAttempts(context.Background())
+	if err != nil || len(queued) == 0 {
+		t.Fatalf("queued children = %v, %v", queued, err)
+	}
+	h.bindChildToRunning(t, queued[0])
+	h.commitProposal(t, failedRun.ID, queued[0], "error", nil, gapReason("query_failed"))
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='observation.run.fail' AND domain_ref_type='observation_run'`).Scan(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed != 1 {
+		t.Fatalf("failed run terminal records = %d, want 1", failed)
+	}
+}
+
+func gapReason(reason string) *string { return &reason }
+
+// TestSetReaderServesReads pins the composition seam: after SetReader the
+// read models are served through the injected (read-only) query surface.
+func TestSetReaderServesReads(t *testing.T) {
+	h := newHarness(t, "prometheus")
+	run := h.startRun(t, "cmd-obs-reader-0001", "manual", nil)
+
+	readOnly, err := execution.OpenReadOnly(h.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { readOnly.Close() })
+	if err := h.service.SetReader(readOnly); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, run.ID)))
+	if err != nil {
+		t.Fatalf("read through the injected reader: %v", err)
+	}
+	if detail.ID != run.ID || detail.State != "Running" {
+		t.Fatalf("read through reader returned wrong run: %#v", detail)
+	}
+	if _, _, err := h.service.ListResources(context.Background(), "main-prometheus", "", "", 0, 50); err != nil {
+		t.Fatalf("resource reads through the injected reader: %v", err)
 	}
 }
 
@@ -516,7 +790,24 @@ func TestCompleteSuccessExpressesAbsenceAsNotObserved(t *testing.T) {
 // disabled connection so subsequent admission sees it observable again.
 func reEnableConnection(t *testing.T, h *harness, name string) {
 	t.Helper()
-	attemptID, err := h.conns.StartProbe(context.Background(), name, nil, nil)
+	// The administrator probe start is an audited user command with its
+	// verified session; the runtime bind/accept/result steps run unwired and
+	// restore the attempt's persisted correlation.
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: correlation + "-enable",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: h.principal},
+		Initiator:     execution.Principal{Kind: execution.PrincipalUser, ID: h.principal},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-reenable"},
+		Session:       execution.SessionRef{ID: h.sessionID, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := h.conns.StartProbe(admin, name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +828,7 @@ func reEnableConnection(t *testing.T, h *harness, name string) {
 	if err := h.db.QueryRow(`SELECT row_version FROM connections WHERE name=?`, name).Scan(&rowVersion); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.conns.Enable(context.Background(), name, rowVersion, probeID, 1); err != nil {
+	if _, err := h.conns.Enable(admin, name, rowVersion, probeID, 1); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -557,7 +848,7 @@ func TestAdmitDueScheduleTicksAndCancellationReconcile(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT row_version FROM connections WHERE name='main-prometheus'`).Scan(&enabledRowVersion); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.conns.Disable(context.Background(), "main-prometheus", enabledRowVersion); err != nil {
+	if _, err := h.conns.Disable(h.adminContext(t), "main-prometheus", enabledRowVersion); err != nil {
 		t.Fatalf("disable connection: %v", err)
 	}
 	cancelled, err := h.service.CancelUnobservable(context.Background())
@@ -615,7 +906,7 @@ func TestAdmitDueScheduleTicksAndCancellationReconcile(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT row_version FROM connections WHERE name='main-prometheus'`).Scan(&enabledRowVersion); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.conns.Disable(context.Background(), "main-prometheus", enabledRowVersion); err != nil {
+	if _, err := h.conns.Disable(h.adminContext(t), "main-prometheus", enabledRowVersion); err != nil {
 		t.Fatalf("re-disable: %v", err)
 	}
 	if _, err := h.service.CancelUnobservable(context.Background()); err != nil {

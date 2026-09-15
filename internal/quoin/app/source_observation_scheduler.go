@@ -39,6 +39,9 @@ func (application *apiServer) ConfigureSourceObservation(enabledPlugins []string
 	if err != nil {
 		return err
 	}
+	if application.readerWired {
+		service.SetReader(application.reader)
+	}
 	application.observations = service
 	return nil
 }

@@ -16,18 +16,19 @@ import (
 
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/connections"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
 
 // assembledImplementations is the assembled implementation table the browser
 // validation assertions dispatch through (same source as production).
@@ -123,6 +124,7 @@ func TestBrowserObservationAuditRejectsMissingCurrentPage(t *testing.T) {
 		t.Fatal("missing current page was accepted as an action audit")
 	}
 }
+
 func TestBrowserExplorationArtifactCommitFailed(t *testing.T) {
 	runBrowserExplorationTerminalScenario(t, "artifact")
 }
@@ -134,6 +136,7 @@ func TestBrowserExplorationFailedClosePersistsCompletionProbe(t *testing.T) {
 func TestBrowserExplorationFailedAdmissionPersistsProbe(t *testing.T) {
 	runBrowserExplorationTerminalScenario(t, "admission_failed")
 }
+
 func TestBrowserExplorationCrashFirst(t *testing.T) {
 	runBrowserExplorationTerminalScenario(t, "crash")
 }
@@ -237,8 +240,8 @@ func TestBrowserExplorationParentCancellationKeepsStartingOperationForTraceClosu
 }
 
 func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
-	ctx := context.Background()
-	db, rootKeyFile := newBrowserExplorationFixture(t, ctx)
+	ctx := browserAdminContext(t)
+	db, reader, rootKeyFile := newBrowserExplorationFixture(t, ctx)
 	defer db.Close()
 	arguments := []byte(`{"action":"open","identityKey":"ops-console"}`)
 	digest := sha256.Sum256(arguments)
@@ -249,11 +252,11 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	// The fixture intentionally executes the frozen schema, including its
 	// browser_exploration_actions and row-version triggers. Foreign-key checks
 	// are disabled only to avoid unrelated model-provider bootstrap records.
-	mustExec(t, db, `INSERT INTO users(id,username,display_name,role,enabled,password_phc,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',?,?)`, now, now)
+	mustExec(t, db, `INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'x',?,?)`, now, now)
 	mustExec(t, db, `INSERT INTO source_materials(id,kind,digest,size_bytes,content,created_at) VALUES(1,'knowledge_import',?,0,'fixture',?)`, d64, now)
-	seedQualifiedModelProvider(t, ctx, db, rootKeyFile, now)
 	mustExec(t, db, `INSERT INTO browser_identity_revisions(id,business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_at) VALUES(1,NULL,1,'readonly','https://payments.example','authentication.url-prefix.v1',1,'{}',?,'v1',?)`, d64, now)
-	mustExec(t, db, `INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,?,1,'test',?,?,?,?)`, make([]byte, 32), now, now, now, now)
+	mustExec(t, db, `INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,?,1,'test',?,?,?,?)`, make([]byte, 32), now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z")
+	seedQualifiedModelProvider(t, ctx, db, reader, rootKeyFile, now)
 	mustExec(t, db, `INSERT INTO browser_identities(id,business_system_id,identity_key,current_revision_id,state,created_at) VALUES(1,NULL,'ops-console',1,'AuthenticationRequired',?)`, now)
 	mustExec(t, db, `INSERT INTO browser_operations(id,identity_id,identity_revision_id,kind,actor_user_id,actor_session_id,state,journey_catalog_digest,journey_catalog_version,requested_at) VALUES(1,1,1,'manual_login',1,1,'Queued',?,'v1',?)`, d64, now)
 	mustExec(t, db, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id='lintel-boot',lintel_connection_epoch=7,row_version=row_version+1 WHERE id=1`, now)
@@ -294,10 +297,30 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		sentMu.Unlock()
 	}
 	slots := qruntime.NewService(db)
+	if err := slots.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	slots.AttachStream(qruntime.SlotPlinth, "plinth-boot", 1)
 	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 7)
+	analyses := analysis.NewService(db)
+	if err := analyses.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	investigations := investigation.NewService(db)
+	if err := investigations.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	browsers := browser.NewService(db)
+	browsers.SetReader(reader)
+	attempts := attempt.NewService(db)
+	if err := attempts.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	service := &RuntimeService{
-		Slots: slots, Analyses: analysis.NewService(db), Investigations: investigation.NewService(db), Browsers: browser.NewService(db), ReleaseVersion: "q",
+		Slots: slots, Analyses: analyses, Investigations: investigations, Browsers: browsers, ReleaseVersion: "q",
+		// The exploration composition's writer: same production shape, the
+		// fixture's only handle standing in for the composition writer.
+		writer: db,
 		sendEnvelopeForTest: func(_ string, envelope *runtimev1.ControlEnvelope) error {
 			sentMu.Lock()
 			sent = append(sent, envelope)
@@ -354,10 +377,10 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 			mustExec(t, db, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id='lintel-boot',lintel_connection_epoch=7,row_version=row_version+1 WHERE id=2`, now)
 			mustExec(t, db, `UPDATE browser_operations SET state='WaitingForCapacity',row_version=row_version+1 WHERE id=2`)
 		}
-		if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+		if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 			t.Fatalf("queued parent cancel state=%q err=%v", state, err)
 		}
-		service.finalizeCancellation(ctx, 2, "investigation")
+		service.finalizeCancellation(context.Background(), 2, "investigation")
 		var parent, operation, stopBasis string
 		mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=2`, &parent)
 		if err := db.QueryRow(`SELECT state,stop_confirmation_basis FROM browser_operations WHERE id=2`).Scan(&operation, &stopBasis); err != nil {
@@ -374,11 +397,11 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	}
 	mustExec(t, db, `UPDATE browser_operations SET state='Starting',start_dispatched_at=?,lintel_boot_id='lintel-boot',lintel_connection_epoch=7,row_version=row_version+1 WHERE id=2`, now)
 	if scenario == "cancel_starting" {
-		if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+		if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 			t.Fatalf("starting parent cancel state=%q err=%v", state, err)
 		}
 		resetSent()
-		service.finalizeCancellation(ctx, 2, "investigation")
+		service.finalizeCancellation(context.Background(), 2, "investigation")
 		frames = sentSnapshot()
 		if len(frames) == 0 || frames[0].GetCancelBrowserExplorationAction() == nil {
 			t.Fatalf("starting cancellation did not dispatch trace-bearing cancel: %v", frames)
@@ -519,7 +542,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		if scenario == "natural_parent" || scenario == "pending_cancel" || scenario == "pending_claim_complete" {
 			terminalBody := []byte(`"investigation complete"`)
 			terminalDigest := sha256.Sum256(terminalBody)
-			if err := service.Investigations.CommitResult(ctx, investigation.Result{AttemptID: 2, BootID: "plinth-boot", Epoch: 1, Succeeded: true, SchemaKind: investigation.OutputSchemaKind, Canonical: terminalBody, Digest: terminalDigest[:]}); err != nil {
+			if err := service.Investigations.CommitResult(context.Background(), investigation.Result{AttemptID: 2, BootID: "plinth-boot", Epoch: 1, Succeeded: true, SchemaKind: investigation.OutputSchemaKind, Canonical: terminalBody, Digest: terminalDigest[:]}); err != nil {
 				t.Fatalf("commit natural parent result: %v", err)
 			}
 			var parentState string
@@ -560,7 +583,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 				return
 			}
 			if scenario == "pending_cancel" {
-				if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+				if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 					t.Fatalf("cancel pending natural result state=%q err=%v", state, err)
 				}
 				mustQuery(t, db, `SELECT COUNT(*) FROM pending_attempt_terminals WHERE attempt_id=2`, &pending)
@@ -569,7 +592,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 				}
 				return
 			}
-		} else if state, err := attempt.NewService(db).Interrupt(ctx, 2, "lease_expired"); err != nil || state != "Interrupted" {
+		} else if state, err := attempts.Interrupt(ctx, 2, "lease_expired"); err != nil || state != "Interrupted" {
 			t.Fatalf("interrupt idle parent state=%q err=%v", state, err)
 		}
 		resetSent()
@@ -607,10 +630,10 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		db.SetMaxOpenConns(1)
 		done := make(chan struct{})
 		go func() {
-			if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+			if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 				t.Errorf("cancel idle parent state=%q err=%v", state, err)
 			}
-			service.finalizeCancellation(ctx, 2, "investigation")
+			service.finalizeCancellation(context.Background(), 2, "investigation")
 			close(done)
 		}()
 		select {
@@ -716,18 +739,18 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		// running. Offline cancellation must retain the parent fence; once Lintel
 		// returns, the operation-level cancellation (zero child/tool IDs) must
 		// commit its trace and converge the parent without inventing a child.
-		if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+		if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 			t.Fatalf("parent cancel state=%q err=%v", state, err)
 		}
 		service.Slots = nil
-		service.finalizeCancellation(ctx, 2, "investigation")
+		service.finalizeCancellation(context.Background(), 2, "investigation")
 		var parent string
 		mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=2`, &parent)
 		if parent != "Cancelling" {
 			t.Fatalf("offline cancellation acknowledged while operation runs: parent=%s", parent)
 		}
 		service.Slots = slots
-		service.finalizeCancellation(ctx, 2, "investigation")
+		service.finalizeCancellation(context.Background(), 2, "investigation")
 		frames = sentSnapshot()
 		if len(frames) == 0 || frames[len(frames)-1].GetCancelBrowserExplorationAction() == nil {
 			t.Fatalf("idle cancellation was not dispatched: %v", frames)
@@ -883,7 +906,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		}
 		// Exercise the actual parent fence. Its frozen trigger cancels the running
 		// Tool Call and moves this child to Cancelling; no test writes a child state.
-		if state, err := attempt.NewService(db).CancelFence(ctx, 2); err != nil || state != "Cancelling" {
+		if state, err := attempts.CancelFence(ctx, 2); err != nil || state != "Cancelling" {
 			t.Fatalf("parent cancel state=%q err=%v", state, err)
 		}
 		var parent, tool, child string
@@ -893,7 +916,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		if parent != "Cancelling" || tool != "cancelled" || child != "Cancelling" {
 			t.Fatalf("parent cancellation fence parent=%s tool=%s child=%s", parent, tool, child)
 		}
-		service.finalizeCancellation(ctx, 2, "investigation")
+		service.finalizeCancellation(context.Background(), 2, "investigation")
 		frames = sentSnapshot()
 		if len(frames) == 0 || frames[len(frames)-1].GetCancelBrowserExplorationAction() == nil {
 			t.Fatalf("cancelling parent did not dispatch browser action cancellation: %v", frames)
@@ -1163,12 +1186,15 @@ func browserToolResult(t *testing.T, action, outcome, sessionID string) []byte {
 	return body
 }
 
-func seedQualifiedModelProvider(t *testing.T, ctx context.Context, db *sql.DB, rootKey string, now string) {
+func seedQualifiedModelProvider(t *testing.T, ctx context.Context, db *sql.DB, reader audit.Reader, rootKey string, now string) {
 	t.Helper()
 	connections.ProbeContractSource = func() string { return "fixture-connection-probe-contract-v1" }
 	connections.SetReleaseVersion("test")
 	d64 := fmt.Sprintf("%064x", 1)
 	service := connections.NewService(db, func() ([]byte, error) { return os.ReadFile(rootKey) })
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	projection, err := json.Marshal(map[string]any{"type": "model_provider", "baseUrl": "https://model.example", "chatModelId": "chat", "embeddingModelId": "embed", "contextBudgetTokens": 1024, "maxOutputTokens": 256})
 	if err != nil {
 		t.Fatal(err)
@@ -1231,7 +1257,7 @@ func seedQualifiedModelProvider(t *testing.T, ctx context.Context, db *sql.DB, r
 	// one cancelled chat record; these rows are the deterministic provider probe observation.
 	resultDigest := fmt.Sprintf("%064x", 2)
 	child := &connections.TypedChild{ModelProvider: &connections.ModelProviderProbeChild{ChatModelID: "chat", EmbeddingModelID: ptr("embed"), ContextBudgetTokens: 1024, MaxOutputTokens: 256, StreamingSupported: true, NativeToolCallingSupported: true, MultiToolCallSupported: true, CancellationObserved: true, UsageObserved: true, RequestIDObserved: true, EmbeddingSupported: true, EmbeddingVectorDim: 3, DetailJSON: `{}`}}
-	if err := service.CommitProbeResult(ctx, probeID, "fixture-probe", 1, connections.TypedProbeResult{Outcome: "passed", Detail: json.RawMessage(`{}`), ResultDigest: resultDigest, StartedAt: now, FinishedAt: now}, child); err != nil {
+	if err := service.CommitProbeResult(context.Background(), probeID, "fixture-probe", 1, connections.TypedProbeResult{Outcome: "passed", Detail: json.RawMessage(`{}`), ResultDigest: resultDigest, StartedAt: now, FinishedAt: now}, child); err != nil {
 		t.Fatal(err)
 	}
 	mustExec(t, db, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, summary.ID, summary.RowVersion+1, 1, 1, now)
@@ -1240,7 +1266,23 @@ func seedQualifiedModelProvider(t *testing.T, ctx context.Context, db *sql.DB, r
 
 func ptr(value string) *string { return &value }
 
-func newBrowserExplorationFixture(t *testing.T, ctx context.Context) (*sql.DB, string) {
+// browserAdminContext is the trusted-entry execution metadata the seeded
+// connection lifecycle re-verifies in-transaction (admin user 1, session 1).
+func browserAdminContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-browser-exploration-fixture",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-browser-exploration-fixture"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
+
+func newBrowserExplorationFixture(t *testing.T, ctx context.Context) (*sql.DB, audit.Reader, string) {
 	t.Helper()
 	root := t.TempDir()
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: root + "/data", BackupDirectory: root + "/backup", RootKeyFile: root + "/secrets/root-key", RuntimeTLSCertificateFile: root + "/secrets/runtime.crt", RuntimeTLSPrivateKeyFile: root + "/secrets/runtime.key", SteleServiceTokenFile: root + "/secrets/stele-token"}
@@ -1252,7 +1294,7 @@ func newBrowserExplorationFixture(t *testing.T, ctx context.Context) (*sql.DB, s
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	return database.SQL, config.RootKeyFile
+	return database.SQL, database.Reader, config.RootKeyFile
 }
 
 func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
@@ -1261,6 +1303,7 @@ func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 		t.Fatalf("exec %s: %v", query, err)
 	}
 }
+
 func mustExecResult(t *testing.T, db *sql.DB, query string, args ...any) sql.Result {
 	t.Helper()
 	result, err := db.Exec(query, args...)
@@ -1269,6 +1312,7 @@ func mustExecResult(t *testing.T, db *sql.DB, query string, args ...any) sql.Res
 	}
 	return result
 }
+
 func browserToolDeliveryCount(sent []*runtimev1.ControlEnvelope) int {
 	count := 0
 	for _, envelope := range sent {

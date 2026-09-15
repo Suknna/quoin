@@ -28,7 +28,7 @@ func TestCopySnapshotFileRejectsBodyDifferentFromSnapshotDigest(t *testing.T) {
 }
 
 func TestSnapshotLifecycleUpdateNeverWaitsForSQLiteWhileHoldingBlobLock(t *testing.T) {
-	db := newTestDB(t)
+	db, _ := newTestDB(t)
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	store, err := NewStore(db, t.TempDir())

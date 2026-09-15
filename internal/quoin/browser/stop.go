@@ -13,13 +13,11 @@ type StopRequest struct {
 	Epoch       uint64
 }
 
-func (service *Service) PrepareStop(ctx context.Context, operationID int64) (StopRequest, error) {
-	return service.prepareStop(ctx, operationID, "", 0)
-}
-
 // PrepareStopForBoot targets the currently attached boot when the immutable
 // start binding belongs to a predecessor. This preserves the original binding
 // as history while requiring the current boot to prove physical cleanup.
+// Reachable only through dispatchBrowserStop after a live Lintel slot view,
+// which the retired Lintel entry can no longer admit.
 func (service *Service) PrepareStopForBoot(ctx context.Context, operationID int64, bootID string, epoch uint64) (StopRequest, error) {
 	if bootID == "" || epoch == 0 {
 		return StopRequest{}, ErrInvalid

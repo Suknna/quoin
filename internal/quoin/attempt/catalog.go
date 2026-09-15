@@ -465,7 +465,7 @@ func legacyGenerationCatalog(agentVersion string) *FrozenCatalog {
 // FrozenToolCatalog loads the attempt's frozen catalog document
 // (attempt_input_snapshots.tool_catalog_json, ADR-0004).
 func (service *Service) FrozenToolCatalog(ctx context.Context, attemptID int64) (*FrozenCatalog, error) {
-	return frozenToolCatalogOn(ctx, service.db, attemptID)
+	return frozenToolCatalogOn(ctx, service.Reader(), attemptID)
 }
 
 // frozenToolCatalogOn is the transaction-composable form: callers inside a

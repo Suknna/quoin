@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	quoinconfig "github.com/Suknna/quoin/internal/quoin/config"
 )
 
@@ -23,7 +24,7 @@ type browserIdentity struct {
 	ProbeParams         string
 }
 
-func loadBrowserIdentity(ctx context.Context, conn *sql.Conn, systemID int64) (browserIdentity, bool, error) {
+func loadBrowserIdentity(ctx context.Context, conn audit.Reader, systemID int64) (browserIdentity, bool, error) {
 	var identity browserIdentity
 	err := conn.QueryRowContext(ctx, `
 		SELECT i.id, r.id, i.current_profile_generation_id, g.generation, r.start_url,

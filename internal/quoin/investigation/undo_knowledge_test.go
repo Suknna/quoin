@@ -13,14 +13,32 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 )
+
+// newTestKnowledgeService composes the knowledge fixture on the same
+// validated read-only reader as the rest of the family: the legacy
+// NewService(db) compatibility constructor fails closed by design now.
+func newTestKnowledgeService(t *testing.T, db *sql.DB, dbPath string) *knowledge.Service {
+	t.Helper()
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	service, err := knowledge.NewServiceWithReader(reader, db, execution.NewRunner(db, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
 
 // seedSucceededTurn creates one investigation whose first user turn has a
 // committed assistant reply, returning the assistant message id and head.
-func seedSucceededTurn(t *testing.T, service *Service, db *sql.DB, principalID int64, suffix string) (investigationID, assistantID, head int64) {
+func seedSucceededTurn(t *testing.T, service *Service, db *sql.DB, ctx context.Context, principalID int64, suffix string) (investigationID, assistantID, head int64) {
 	t.Helper()
-	ctx := context.Background()
 	created, err := service.Create(ctx, principalID, "t29-create-"+suffix, "数据库连接池如何治理？", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +51,7 @@ func seedSucceededTurn(t *testing.T, service *Service, db *sql.DB, principalID i
 	}
 	content := `"先检查连接池上限，再观察超时指标。"`
 	digest := sha256Sum([]byte(content))
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:],
 	}); err != nil {
@@ -49,14 +67,18 @@ func seedSucceededTurn(t *testing.T, service *Service, db *sql.DB, principalID i
 }
 
 func TestUndoBeforeConfirmInvalidatesCandidate(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	knowledgeService := knowledge.NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	knowledgeService := newTestKnowledgeService(t, db, dbPath)
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
+	if _, err := db.Exec(`UPDATE users SET initialized=1, row_version=row_version+1 WHERE id=?`, principalID); err != nil {
+		t.Fatal(err)
+	}
+	session := testfixture.SeedActiveSession(t, db, principalID)
+	ctx := testfixture.UserContext(t, principalID, session, "t29-knowledge")
 
-	investigationID, assistantID, head := seedSucceededTurn(t, service, db, principalID, "undo-first")
+	investigationID, assistantID, head := seedSucceededTurn(t, service, db, ctx, principalID, "undo-first")
 
 	created, err := knowledgeService.CreateFromInvestigationMessage(ctx, principalID, "t29-cand-undo-first", investigationID, assistantID)
 	if err != nil {
@@ -78,7 +100,7 @@ func TestUndoBeforeConfirmInvalidatesCandidate(t *testing.T) {
 		t.Fatalf("candidate state after undo = %s, want SourceInvalid", state)
 	}
 	// A late confirmation loses the commit-order race deterministically.
-	_, confirmErr := knowledgeService.ConfirmAs(ctx, knowledge.MutationActor{ID: principalID, AuthRevision: 1}, "t29-confirm-late", parseCandidateID(t, created.Candidate.ID), 0)
+	_, confirmErr := knowledgeService.Confirm(ctx, principalID, "t29-confirm-late", parseCandidateID(t, created.Candidate.ID), 0)
 	if confirmErr == nil {
 		t.Fatal("confirmation after undo-source invalidation succeeded")
 	}
@@ -93,20 +115,24 @@ func TestUndoBeforeConfirmInvalidatesCandidate(t *testing.T) {
 }
 
 func TestConfirmBeforeUndoExitsVersionPermanently(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	knowledgeService := knowledge.NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	knowledgeService := newTestKnowledgeService(t, db, dbPath)
 	principalID := seedUser(t, db)
 	seedProviderChain(t, db)
+	if _, err := db.Exec(`UPDATE users SET initialized=1, row_version=row_version+1 WHERE id=?`, principalID); err != nil {
+		t.Fatal(err)
+	}
+	session := testfixture.SeedActiveSession(t, db, principalID)
+	ctx := testfixture.UserContext(t, principalID, session, "t29-knowledge")
 
-	investigationID, assistantID, head := seedSucceededTurn(t, service, db, principalID, "confirm-first")
+	investigationID, assistantID, head := seedSucceededTurn(t, service, db, ctx, principalID, "confirm-first")
 
 	created, err := knowledgeService.CreateFromInvestigationMessage(ctx, principalID, "t29-cand-confirm-first", investigationID, assistantID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	confirmed, err := knowledgeService.ConfirmAs(ctx, knowledge.MutationActor{ID: principalID, AuthRevision: 1}, "t29-confirm-first", parseCandidateID(t, created.Candidate.ID), 0)
+	confirmed, err := knowledgeService.Confirm(ctx, principalID, "t29-confirm-first", parseCandidateID(t, created.Candidate.ID), 0)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}

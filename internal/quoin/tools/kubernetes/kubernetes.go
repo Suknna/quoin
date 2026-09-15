@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 const (
@@ -29,7 +30,7 @@ const (
 //     kubernetes_source items are the authority; sourceRef names the
 //     connection explicitly and ambiguity stays a recoverable preflight
 //     result instead of a first-pick or a fan-out.
-func ResolveRead(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
+func ResolveRead(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	var arguments struct {
 		BusinessSystem string `json:"businessSystem"`
 		SourceRef      string `json:"sourceRef"`
@@ -156,7 +157,7 @@ type frozenSourceItem struct {
 // kubernetes_source items define the whole read-only scope, and an omitted
 // sourceRef resolves only when exactly one candidate exists (ADR-0004:
 // ambiguity is never silently resolved).
-func resolveSourceRead(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, sourceRef string) (attempt.ToolResolution, error) {
+func resolveSourceRead(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, sourceRef string) (attempt.ToolResolution, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT c.id, item.connection_revision_id, c.name
 		FROM attempt_input_snapshots snapshot
@@ -269,7 +270,7 @@ func resolveSourceRead(ctx context.Context, conn *sql.Conn, attemptID, toolCallI
 // validates only the requested grant. Business-view grants additionally
 // require their mapping to stay Active; source-level grants (no business
 // system) fence purely on the connection pair and root binding.
-func ValidateGrantForFulfillment(ctx context.Context, conn *sql.Conn, attemptID, grantID int64) error {
+func ValidateGrantForFulfillment(ctx context.Context, conn execution.Executor, attemptID, grantID int64) error {
 	var (
 		connectionID, revisionID, generationID int64
 		businessSystemID                       sql.NullInt64

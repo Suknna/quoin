@@ -5,19 +5,21 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
 	plinthagent "github.com/Suknna/quoin/internal/plinth/agent"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 )
 
 func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-investigation-provenance", "调查 Kubernetes", nil, nil)
 	if err != nil {
@@ -69,10 +71,10 @@ func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
 // attempt with no frozen kubernetes source is only a recoverable preflight —
 // no grant, no execution, no Evidence.
 func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-kubernetes-gated", "调查 Kubernetes", nil, nil)
 	if err != nil {
@@ -146,14 +148,10 @@ func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T)
 	}
 	var toolCallID int64
 	_ = db.QueryRow(`SELECT id FROM tool_calls WHERE attempt_id=?`, created.AttemptID).Scan(&toolCallID)
-	conn, connErr := db.Conn(ctx)
-	if connErr != nil {
-		t.Fatal(connErr)
-	}
-	resolution, resolveErr := kubernetes.ResolveRead(ctx, conn, created.AttemptID, toolCallID)
-	if closeErr := conn.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
+	resolution, resolveErr := resolveToolGrantOnRunner(t, service, "test.tool_grant.kubernetes."+strconv.FormatInt(toolCallID, 10),
+		func(ctx context.Context, tx *execution.Tx) (attempt.ToolResolution, error) {
+			return kubernetes.ResolveRead(ctx, tx, created.AttemptID, toolCallID)
+		})
 	if resolveErr != nil {
 		t.Fatalf("routing miss must stay a recoverable preflight: %v", resolveErr)
 	}

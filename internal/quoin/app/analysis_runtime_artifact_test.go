@@ -33,13 +33,23 @@ func TestArtifactServiceLintelUploadScope(t *testing.T) {
 	}
 	lintelToken := installArtifactTestCredential(t, db, qruntime.SlotLintel, 0x11)
 	plinthToken := installArtifactTestCredential(t, db, qruntime.SlotPlinth, 0x22)
+	// Pure reads (bearer validation, artifact read fences) fail closed until
+	// the fixture's one real OpenReadOnly pool is wired; it lives exactly as
+	// long as the fixture.
+	reader := fixtureReadOnlyPool(t, db)
 	store, err := artifact.NewStore(db, t.TempDir())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetReader(reader); err != nil {
 		t.Fatal(err)
 	}
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
 	slots := qruntime.NewService(db)
+	if err := slots.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	// Upload is a data-plane operation of the current control stream, not merely
 	// a bearer-authenticated RPC. Both principals in this scope test are attached
 	// to the header's declared boot/epoch.
@@ -157,13 +167,22 @@ func TestArtifactServiceRejectsOversizedHeaderBeforeStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := installArtifactTestCredential(t, db, qruntime.SlotLintel, 0x33)
+	// Same fail-closed wiring as the scope fixture: one real OpenReadOnly pool
+	// per fixture serves every pure read, closed with the fixture.
+	reader := fixtureReadOnlyPool(t, db)
 	store, err := artifact.NewStore(db, t.TempDir())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetReader(reader); err != nil {
 		t.Fatal(err)
 	}
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
 	slots := qruntime.NewService(db)
+	if err := slots.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
 	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 2)
 	RegisterArtifactService(server, NewArtifactService(slots, store))
 	go func() { _ = server.Serve(listener) }()

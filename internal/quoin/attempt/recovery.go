@@ -10,8 +10,11 @@ package attempt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // LossReasons are the execution_attempts.termination_reason values that may
@@ -29,41 +32,51 @@ var LossReasons = map[string]bool{
 // reason; an attempt whose cancellation fence already committed converges to
 // Cancelled instead (the fence exception); terminal attempts are returned
 // unchanged so callers can stay idempotent.
+//
+// The standalone stage runs through the shared execution runner (ADR-0006):
+// the runner owns the transaction and records the automatic audit fact on
+// it, attributed to the system runtime authority on the attempt's persisted
+// association. A terminal no-op changed nothing and records nothing: the
+// in-transaction state check returns execution.ErrNoTransition, which the
+// runner commits without an audit row; the caller answers from a fresh read.
 func (service *Service) Interrupt(ctx context.Context, attemptID int64, reason string) (string, error) {
 	if !LossReasons[reason] {
 		return "", fmt.Errorf("attempt %d loss reason %q is not a closed interruption reason", attemptID, reason)
 	}
-	conn, err := service.db.Conn(ctx)
+	authority, err := service.lifecycleAuthority(ctx, attemptID)
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return "", err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	if _, err := execution.Execute(authority, service.runner, service.opInterrupt,
+		func(tx *execution.Tx) (struct{}, error) {
+			var before string
+			if err := tx.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&before); err != nil {
+				return struct{}{}, err
+			}
+			switch before {
+			case "Succeeded", "Failed", "Cancelled", "Interrupted":
+				// Loss raced a terminal result: nothing changed and nothing
+				// records (the winner keeps the state it won).
+				return struct{}{}, fmt.Errorf("%w: attempt %d is %s", execution.ErrNoTransition, attemptID, before)
+			}
+			_, err := service.InterruptOn(authority, tx, attemptID, reason)
+			return struct{}{}, err
+		},
+		func(struct{}) int64 { return attemptID }); err != nil {
+		if missed, final := service.noOpState(ctx, attemptID, err); missed {
+			return final, nil
 		}
-	}()
-	final, err := service.InterruptOn(ctx, conn, attemptID, reason)
-	if err != nil {
 		return "", err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return "", err
-	}
-	committed = true
-	return final, nil
+	return service.currentState(ctx, attemptID)
 }
 
 // InterruptOn is the conn-scoped variant of Interrupt for callers composing
 // the loss convergence with their own scope updates in one transaction
 // (SQLite single-writer forbids nested BEGIN).
-func (service *Service) InterruptOn(ctx context.Context, conn *sql.Conn, attemptID int64, reason string) (string, error) {
+func (service *Service) InterruptOn(ctx context.Context, db execution.Executor, attemptID int64, reason string) (string, error) {
 	var state string
-	if err := conn.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
 		return "", err
 	}
 	now := service.nowText()
@@ -74,7 +87,7 @@ func (service *Service) InterruptOn(ctx context.Context, conn *sql.Conn, attempt
 	case "Cancelling":
 		// The cancellation fence already committed; loss converges it to
 		// Cancelled (RUNTIME-TASK-006 fence exception).
-		result, err := conn.ExecContext(ctx, `
+		result, err := db.ExecContext(ctx, `
 			UPDATE execution_attempts
 			SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
 			WHERE id=? AND state='Cancelling'`, now, attemptID)
@@ -86,7 +99,7 @@ func (service *Service) InterruptOn(ctx context.Context, conn *sql.Conn, attempt
 		}
 		return "Cancelled", nil
 	case "Queued", "Assigned", "Running":
-		result, err := conn.ExecContext(ctx, `
+		result, err := db.ExecContext(ctx, `
 			UPDATE execution_attempts
 			SET state='Interrupted', ended_at=?, termination_reason=?, row_version=row_version+1
 			WHERE id=? AND state=?`, now, reason, attemptID, state)
@@ -106,7 +119,7 @@ func (service *Service) InterruptOn(ctx context.Context, conn *sql.Conn, attempt
 // their dispatch binding, so the reconnect adjudication can split them by
 // boot and lease (RUNTIME-TASK-005/006).
 func (service *Service) ActiveOfSlot(ctx context.Context, slot string) ([]View, error) {
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.Reader().QueryContext(ctx, `
 		SELECT id, attempt_type, scope_type, scope_id, state, row_version, runtime_slot,
 		       boot_id, connection_epoch, started_at, ended_at, termination_reason, created_at, lease_until
 		FROM execution_attempts
@@ -187,23 +200,26 @@ type Swept struct {
 // (lease_expired), Cancelling → Cancelled. The caller routes each outcome to
 // the owning scope aggregate. Queued attempts carry no lease and are never
 // swept.
+//
+// The batch runs under an EXPLICIT scheduler scope (ADR-0006, audit design):
+// the trigger mints a fresh correlation, and each transition re-roots onto
+// the attempt's persisted association with the trigger kept as the request
+// identity (sweepAuthority). Each converged transition runs through the
+// shared execution runner as its own audited operation, so an idle tick with
+// nothing to sweep opens no transaction and records no audit row; each
+// audited transition carries the attempt's ORIGINAL persisted correlation.
+// A candidate that lost a fenced race against a concurrent terminal commit
+// is skipped for this tick (the winner owns the state); the first real
+// failure stops the batch and is returned alongside the outcomes already
+// converged, so the caller can still route them.
 func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 	now := service.nowText()
-	conn, err := service.db.Conn(ctx)
+	// Each trigger is a new scheduler operation with its own correlation.
+	trigger, err := execution.NewCorrelationID()
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return nil, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	rows, err := conn.QueryContext(ctx, `
+	rows, err := service.Reader().QueryContext(ctx, `
 		SELECT a.id, a.attempt_type, a.scope_type, a.scope_id, a.state,
 		       CASE WHEN a.attempt_type='investigation' OR EXISTS (
 		         SELECT 1 FROM browser_exploration_child_bindings b
@@ -221,8 +237,6 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 		return nil, err
 	}
 	var swept []Swept
-	var ids []int64
-	var states []string
 	for rows.Next() {
 		var item Swept
 		var state string
@@ -236,50 +250,86 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 		// through the parent closure state machine; only its trace action may
 		// eventually acknowledge the terminal attempt.
 		item.DeferredLoss = deferred != 0
-		ids = append(ids, item.AttemptID)
-		states = append(states, state)
 		swept = append(swept, item)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for index, id := range ids {
+	for index := 0; index < len(swept); index++ {
 		if swept[index].DeferredLoss {
 			// This is deliberately a typed candidate, not a terminal transition.
 			// The caller creates recovery_loss before it observes/dispatches browser
-			// cleanup, eliminating the lease-sweep trace-loss race.
+			// cleanup, eliminating the lease-sweep trace-loss race. Nothing
+			// transitioned here, so nothing records.
 			continue
 		}
-		if states[index] == "Cancelling" {
-			result, err := conn.ExecContext(ctx, `
-				UPDATE execution_attempts
-				SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
-				WHERE id=? AND state='Cancelling'`, now, id)
-			if err != nil {
-				return nil, err
-			}
-			if affected, _ := result.RowsAffected(); affected != 1 {
-				return nil, fmt.Errorf("sweep lost the cancel race on attempt %d", id)
-			}
-			swept[index].Final = "Cancelled"
-			continue
-		}
-		result, err := conn.ExecContext(ctx, `
-			UPDATE execution_attempts
-			SET state='Interrupted', ended_at=?, termination_reason='lease_expired', row_version=row_version+1
-			WHERE id=? AND state=?`, now, id, states[index])
+		final, err := service.sweepOne(ctx, swept[index].AttemptID, now, trigger)
 		if err != nil {
-			return nil, err
+			if errors.Is(err, errSweepRaceLost) {
+				// A concurrent cancel/fence/ack won the transition: the attempt
+				// is no longer this batch's to converge. Drop the candidate.
+				swept = append(swept[:index], swept[index+1:]...)
+				index--
+				continue
+			}
+			return swept, err
 		}
-		if affected, _ := result.RowsAffected(); affected != 1 {
-			return nil, fmt.Errorf("sweep lost the interrupt race on attempt %d", id)
-		}
-		swept[index].Final = "Interrupted"
+		swept[index].Final = final
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return nil, err
-	}
-	committed = true
 	return swept, nil
+}
+
+// errSweepRaceLost marks a candidate whose fenced transition lost against a
+// concurrent terminal commit. It never reaches the caller: the batch skips
+// the candidate instead of failing.
+var errSweepRaceLost = errors.New("attempt: lease sweep lost the fenced race")
+
+// sweepOne converges one expired attempt through the runner. The business
+// stage re-reads the state inside the transaction (the candidate snapshot
+// may be stale) and only the fenced winner records; a terminal state means
+// someone else committed first.
+func (service *Service) sweepOne(ctx context.Context, attemptID int64, now, trigger string) (string, error) {
+	authority, err := service.sweepAuthority(ctx, attemptID, trigger)
+	if err != nil {
+		return "", err
+	}
+	return execution.Execute(authority, service.runner, service.opLeaseSweep,
+		func(tx *execution.Tx) (string, error) {
+			var state string
+			if err := tx.QueryRowContext(ctx, `SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+				return "", err
+			}
+			switch state {
+			case "Succeeded", "Failed", "Cancelled", "Interrupted":
+				return "", errSweepRaceLost
+			case "Cancelling":
+				result, err := tx.ExecContext(ctx, `
+					UPDATE execution_attempts
+					SET state='Cancelled', ended_at=?, termination_reason='cancelled', row_version=row_version+1
+					WHERE id=? AND state='Cancelling'`, now, attemptID)
+				if err != nil {
+					return "", err
+				}
+				if affected, _ := result.RowsAffected(); affected != 1 {
+					return "", errSweepRaceLost
+				}
+				return "Cancelled", nil
+			case "Queued", "Assigned", "Running":
+				result, err := tx.ExecContext(ctx, `
+					UPDATE execution_attempts
+					SET state='Interrupted', ended_at=?, termination_reason='lease_expired', row_version=row_version+1
+					WHERE id=? AND state=?`, now, attemptID, state)
+				if err != nil {
+					return "", err
+				}
+				if affected, _ := result.RowsAffected(); affected != 1 {
+					return "", errSweepRaceLost
+				}
+				return "Interrupted", nil
+			default:
+				return "", fmt.Errorf("attempt %d has unknown state %q", attemptID, state)
+			}
+		},
+		func(string) int64 { return attemptID })
 }

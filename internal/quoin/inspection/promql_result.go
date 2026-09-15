@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 type promqlProposal struct {
@@ -33,8 +34,12 @@ type promqlProposal struct {
 	GapReason       *string         `json:"gapReason"`
 }
 
-// CommitPromQLProposal atomically persists a supervisor result. A duplicate
-// proposal replays only when it sealed the same immutable digest.
+// CommitPromQLProposal atomically persists a supervisor result on the shared
+// execution runner (ADR-0006): the system task scope is restored from the
+// attempt's persisted correlation, the boot/epoch fence is preserved, and the
+// automatic audit row commits atomically with the check result. A duplicate
+// proposal replays only when it sealed the same immutable digest (and never
+// records a second success audit).
 func (s *Service) CommitPromQLProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
 	var proposal promqlProposal
 	if err := json.Unmarshal(raw, &proposal); err != nil {
@@ -87,104 +92,94 @@ func (s *Service) CommitPromQLProposal(ctx context.Context, attemptID int64, boo
 		return fmt.Errorf("inspection PromQL result has invalid outcome")
 	}
 
-	conn, err := s.db.Conn(ctx)
+	commandCtx, err := s.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, err = execution.Execute(commandCtx, s.runner, s.promqlResult, func(tx *execution.Tx) (struct{}, error) {
+		var runID int64
+		var checkKey, mode string
+		err := tx.QueryRowContext(commandCtx, `
+			SELECT a.scope_id, a.check_key, c.query_mode
+			FROM execution_attempts a
+			JOIN inspection_runs r ON r.id=a.scope_id
+			JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
+			JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
+			WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check' AND c.kind='promql'`, attemptID).
+			Scan(&runID, &checkKey, &mode)
+		if err != nil {
+			return struct{}{}, err
 		}
-	}()
-
-	var runID int64
-	var checkKey, mode string
-	err = conn.QueryRowContext(ctx, `
-		SELECT a.scope_id, a.check_key, c.query_mode
-		FROM execution_attempts a
-		JOIN inspection_runs r ON r.id=a.scope_id
-		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
-		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check' AND c.kind='promql'`, attemptID).
-		Scan(&runID, &checkKey, &mode)
-	if err != nil {
-		return err
-	}
-	if proposal.InspectionRunID != runID || proposal.CheckKey != checkKey || proposal.QueryMode != mode {
-		return fmt.Errorf("inspection PromQL result identity does not match frozen attempt")
-	}
-	digest := sha256.Sum256(raw)
-	var existing []byte
-	replayErr := conn.QueryRowContext(ctx, `
-		SELECT result_digest FROM inspection_check_results WHERE run_id=? AND check_key=?`, runID, checkKey).Scan(&existing)
-	if replayErr == nil {
-		// Idempotent replay adjudicates before any liveness fence: a committed
-		// result can never be overwritten, only acknowledged.
-		if string(existing) == string(digest[:]) {
-			if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-				return err
+		if proposal.InspectionRunID != runID || proposal.CheckKey != checkKey || proposal.QueryMode != mode {
+			return struct{}{}, fmt.Errorf("inspection PromQL result identity does not match frozen attempt")
+		}
+		digest := sha256.Sum256(raw)
+		var existing []byte
+		replayErr := tx.QueryRowContext(commandCtx, `
+			SELECT result_digest FROM inspection_check_results WHERE run_id=? AND check_key=?`, runID, checkKey).Scan(&existing)
+		if replayErr == nil {
+			// Idempotent replay adjudicates before any liveness fence: a committed
+			// result can never be overwritten, only acknowledged.
+			if string(existing) == string(digest[:]) {
+				return struct{}{}, errResultReplayed
 			}
-			committed = true
+			return struct{}{}, fmt.Errorf("inspection PromQL result replay digest conflicts")
+		}
+		if replayErr != sql.ErrNoRows {
+			return struct{}{}, replayErr
+		}
+		// Boot/epoch/cancel fence: the frozen commit trigger performs the terminal
+		// transition, so enforce the dispatch binding here as the guard.
+		var bound int
+		if err := tx.QueryRowContext(commandCtx, `
+			SELECT 1 FROM execution_attempts
+			WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return struct{}{}, attempt.ErrLateResult
+			}
+			return struct{}{}, err
+		}
+		var evidenceID any
+		if proposal.Outcome == "success" {
+			params, _ := json.Marshal(map[string]string{"check_key": checkKey})
+			warnings, _ := json.Marshal(proposal.Warnings)
+			insert, err := tx.ExecContext(commandCtx, `
+				INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,warnings_json,integrity,created_at)
+				VALUES(?,'inspection_run',?,?,?,?,?,'complete',?)`,
+				attemptID, runID, string(params), proposal.ObservedAt, string(proposal.Result), string(warnings), s.nowText())
+			if err != nil {
+				return struct{}{}, err
+			}
+			id, err := insert.LastInsertId()
+			if err != nil {
+				return struct{}{}, err
+			}
+			evidenceID = id
+		}
+		var nullableGap any
+		if proposal.GapReason != nil {
+			nullableGap = *proposal.GapReason
+		}
+		status := "ok"
+		if proposal.Outcome != "success" {
+			status = "gap"
+		}
+		if _, err := tx.ExecContext(commandCtx, `
+			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
+			VALUES(?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, s.nowText()); err != nil {
+			return struct{}{}, err
+		}
+		if err := s.convergeOn(commandCtx, tx, runID); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	}, func(struct{}) int64 { return proposal.InspectionRunID })
+	if err != nil {
+		if errors.Is(err, errResultReplayed) {
 			return nil
 		}
-		return fmt.Errorf("inspection PromQL result replay digest conflicts")
-	}
-	if replayErr != sql.ErrNoRows {
-		return replayErr
-	}
-	// Boot/epoch/cancel fence: the frozen commit trigger performs the terminal
-	// transition, so enforce the dispatch binding here as the guard.
-	var bound int
-	if err = conn.QueryRowContext(ctx, `
-		SELECT 1 FROM execution_attempts
-		WHERE id=? AND state='Running' AND boot_id=? AND connection_epoch=?`, attemptID, bootID, epoch).Scan(&bound); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return attempt.ErrLateResult
-		}
 		return err
 	}
-	var evidenceID any
-	if proposal.Outcome == "success" {
-		params, _ := json.Marshal(map[string]string{"check_key": checkKey})
-		warnings, _ := json.Marshal(proposal.Warnings)
-		insert, err := conn.ExecContext(ctx, `
-			INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,warnings_json,integrity,created_at)
-			VALUES(?,'inspection_run',?,?,?,?,?,'complete',?)`,
-			attemptID, runID, string(params), proposal.ObservedAt, string(proposal.Result), string(warnings), s.nowText())
-		if err != nil {
-			return err
-		}
-		id, err := insert.LastInsertId()
-		if err != nil {
-			return err
-		}
-		evidenceID = id
-	}
-	var nullableGap any
-	if proposal.GapReason != nil {
-		nullableGap = *proposal.GapReason
-	}
-	status := "ok"
-	if proposal.Outcome != "success" {
-		status = "gap"
-	}
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, s.nowText()); err != nil {
-		return err
-	}
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
 	return nil
 }
 

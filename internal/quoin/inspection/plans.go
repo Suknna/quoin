@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -19,7 +20,9 @@ import (
 	"github.com/robfig/cron/v3"
 
 	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // planKeyPattern 与业务声明稳定 key 共用同一封闭词表：小写字母开头，仅小写
@@ -230,153 +233,118 @@ type PlanConflictError struct {
 
 func (e *PlanConflictError) Error() string { return e.Detail }
 
-// CreatePlan 在一个事务中校验并创建计划。计划不改变任何运行中的对象；
-// 只有随后创建的 Run 消费它。
+// planRejection adapts the module's deterministic plan validation failures to
+// the runner's recorded rejection shape; any other error passes through
+// unchanged (clean rollback, no durable trace).
+func planRejection(err error) error {
+	var conflict *PlanConflictError
+	if errors.As(err, &conflict) {
+		return &execution.Rejection{Code: conflict.Code, Detail: conflict.Detail}
+	}
+	return err
+}
+
+// translatePlanError maps the runner's recorded plan rejections back to the
+// public PlanConflictError shape — the HTTP problem mapping depends on Code —
+// and keeps the historic command_reused identity for ledger key conflicts.
+func translatePlanError(err error) error {
+	var rejection *execution.Rejection
+	if errors.As(err, &rejection) {
+		return &PlanConflictError{Code: rejection.Code, Detail: rejection.Detail}
+	}
+	if errors.Is(err, execution.ErrCommandReused) {
+		return &PlanConflictError{Code: "command_reused", Detail: "命令标识已用于其它请求，请更换后重试"}
+	}
+	return err
+}
+
+// CreatePlan 在执行器的一个事务中校验并创建计划：会话复核、幂等重放、业务
+// 修改、命令台账与审计事件同事务提交。计划不改变任何运行中的对象；只有随后
+// 创建的 Run 消费它。
 func (s *Service) CreatePlan(ctx context.Context, principalID int64, clientCommandID string, input PlanInput) (Plan, error) {
-	const command = "inspection_plan.create"
 	if err := validatePlanKey(input.PlanKey); err != nil {
 		return Plan{}, err
 	}
-	frozen, err := s.validatePlanInput(ctx, input)
-	if err != nil {
-		return Plan{}, err
-	}
-	digest := auth.DigestCommand(command, map[string]any{"planKey": input.PlanKey, "connectionName": input.ConnectionName, "displayName": input.DisplayName, "enabled": input.Enabled})
-	if record, replayed, err := replayPlan(ctx, s.db, principalID, clientCommandID, digest); replayed || err != nil {
-		return decodePlanReplay(record, replayed, err)
-	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return Plan{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Plan{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	digest := auth.DigestCommand(CommandCreatePlan, map[string]any{"planKey": input.PlanKey, "connectionName": input.ConnectionName, "displayName": input.DisplayName, "enabled": input.Enabled})
+	outcome, err := execution.Run(ctx, s.runner, s.createPlan, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: clientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (Plan, execution.Change, error) {
+		frozen, err := s.validatePlanInput(ctx, tx, input)
+		if err != nil {
+			return Plan{}, execution.Unchanged, planRejection(err)
 		}
-	}()
-	record, found, err := auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
-	if err != nil {
-		return Plan{}, err
-	}
-	if found {
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return Plan{}, err
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, input.PlanKey).Scan(&exists); err != nil {
+			return Plan{}, execution.Unchanged, err
 		}
-		committed = true
-		return decodePlanReplay(record, true, nil)
-	}
-	var exists int
-	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, input.PlanKey).Scan(&exists); err != nil {
-		return Plan{}, err
-	}
-	if exists != 0 {
-		return s.rejectPlan(ctx, conn, principalID, clientCommandID, command, digest, &PlanConflictError{Code: "plan_exists", Detail: "同名巡检计划已存在，key 退役后不可复用"}, &committed)
-	}
-	now := s.nowText()
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
-		input.PlanKey, input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
-		frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, principalID, now, now); err != nil {
-		return Plan{}, err
-	}
-	plan, err := s.planOn(ctx, conn, input.PlanKey)
+		if exists != 0 {
+			return Plan{}, execution.Unchanged, &execution.Rejection{Code: "plan_exists", Detail: "同名巡检计划已存在，key 退役后不可复用"}
+		}
+		now := s.nowText()
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
+			input.PlanKey, input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
+			frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, principalID, now, now); err != nil {
+			return Plan{}, execution.Unchanged, err
+		}
+		plan, err := s.planOn(ctx, tx, input.PlanKey)
+		if err != nil {
+			return Plan{}, execution.Unchanged, err
+		}
+		return plan, execution.Changed, nil
+	}, func(plan Plan) int64 { return plan.planID })
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, translatePlanError(err)
 	}
-	if err = s.auditPlanCommand(ctx, conn, principalID, clientCommandID, command, plan.planID, now); err != nil {
-		return Plan{}, err
-	}
-	if err = recordPlanCommand(ctx, conn, principalID, clientCommandID, command, digest, plan.planID, plan); err != nil {
-		return Plan{}, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Plan{}, err
-	}
-	committed = true
-	return plan, nil
+	return outcome.Result, nil
 }
 
-// UpdatePlan 以整体提交方式更新计划定义；expectedRowVersion 是并发前提。
-// 更新创建新的定义事实，但不改写任何已存在 Run 的冻结绑定。
+// UpdatePlan 以整体提交方式更新计划定义；expectedRowVersion 是并发前提。更新
+// 创建新的定义事实，但不改写任何已存在 Run 的冻结绑定。
 func (s *Service) UpdatePlan(ctx context.Context, principalID int64, clientCommandID string, input PlanInput, expectedRowVersion int64) (Plan, error) {
-	const command = "inspection_plan.update"
-	frozen, err := s.validatePlanInput(ctx, input)
-	if err != nil {
-		return Plan{}, err
-	}
-	digest := auth.DigestCommand(command, map[string]any{"planKey": input.PlanKey, "expectedRowVersion": expectedRowVersion, "displayName": input.DisplayName, "enabled": input.Enabled})
-	if record, replayed, err := replayPlan(ctx, s.db, principalID, clientCommandID, digest); replayed || err != nil {
-		return decodePlanReplay(record, replayed, err)
-	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return Plan{}, err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Plan{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	digest := auth.DigestCommand(CommandUpdatePlan, map[string]any{"planKey": input.PlanKey, "expectedRowVersion": expectedRowVersion, "displayName": input.DisplayName, "enabled": input.Enabled})
+	outcome, err := execution.Run(ctx, s.runner, s.updatePlan, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     principalID,
+		ClientCommandID: clientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (Plan, execution.Change, error) {
+		frozen, err := s.validatePlanInput(ctx, tx, input)
+		if err != nil {
+			return Plan{}, execution.Unchanged, planRejection(err)
 		}
-	}()
-	record, found, err := auth.LookupCommandOn(ctx, conn, principalID, clientCommandID)
-	if err != nil {
-		return Plan{}, err
-	}
-	if found {
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return Plan{}, err
+		result, err := tx.ExecContext(ctx, `
+			UPDATE inspection_plans SET display_name=?,enabled=?,connection_id=?,plugin_id=?,template_id=?,template_version=?,
+			  params_json=?,scope_json=?,scope_kind=?,cron=?,timezone=?,row_version=row_version+1,updated_at=?
+			WHERE plan_key=? AND row_version=?`,
+			input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
+			frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, s.nowText(),
+			input.PlanKey, expectedRowVersion)
+		if err != nil {
+			return Plan{}, execution.Unchanged, err
 		}
-		committed = true
-		return decodePlanReplay(record, true, nil)
-	}
-	result, err := conn.ExecContext(ctx, `
-		UPDATE inspection_plans SET display_name=?,enabled=?,connection_id=?,plugin_id=?,template_id=?,template_version=?,
-		  params_json=?,scope_json=?,scope_kind=?,cron=?,timezone=?,row_version=row_version+1,updated_at=?
-		WHERE plan_key=? AND row_version=?`,
-		input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
-		frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, s.nowText(),
-		input.PlanKey, expectedRowVersion)
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			return Plan{}, execution.Unchanged, &execution.Rejection{Code: "row_version_conflict", Detail: "巡检计划已变化，请刷新后重试"}
+		}
+		plan, err := s.planOn(ctx, tx, input.PlanKey)
+		if err != nil {
+			return Plan{}, execution.Unchanged, err
+		}
+		return plan, execution.Changed, nil
+	}, func(plan Plan) int64 { return plan.planID })
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, translatePlanError(err)
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return s.rejectPlan(ctx, conn, principalID, clientCommandID, command, digest, &PlanConflictError{Code: "row_version_conflict", Detail: "巡检计划已变化，请刷新后重试"}, &committed)
-	}
-	plan, err := s.planOn(ctx, conn, input.PlanKey)
-	if err != nil {
-		return Plan{}, err
-	}
-	if err = s.auditPlanCommand(ctx, conn, principalID, clientCommandID, command, plan.planID, s.nowText()); err != nil {
-		return Plan{}, err
-	}
-	if err = recordPlanCommand(ctx, conn, principalID, clientCommandID, command, digest, plan.planID, plan); err != nil {
-		return Plan{}, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Plan{}, err
-	}
-	committed = true
-	return plan, nil
+	return outcome.Result, nil
 }
 
-// ListPlans 返回全部计划，按 key 稳定序。
+// ListPlans 返回全部计划，按 key 稳定序（只读 reader）。
 func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	rows, err := conn.QueryContext(ctx, `SELECT plan_key FROM inspection_plans ORDER BY plan_key`)
+	rows, err := s.reader.QueryContext(ctx, `SELECT plan_key FROM inspection_plans ORDER BY plan_key`)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +362,7 @@ func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
 	}
 	plans := []Plan{}
 	for _, key := range keys {
-		plan, err := s.planOn(ctx, conn, key)
+		plan, err := s.planOn(ctx, s.reader, key)
 		if err != nil {
 			return nil, err
 		}
@@ -403,21 +371,16 @@ func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
 	return plans, nil
 }
 
-// GetPlan 返回一个计划。
+// GetPlan 返回一个计划（只读 reader）。
 func (s *Service) GetPlan(ctx context.Context, planKey string) (Plan, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return Plan{}, err
-	}
-	defer conn.Close()
-	return s.planOn(ctx, conn, planKey)
+	return s.planOn(ctx, s.reader, planKey)
 }
 
-func (s *Service) planOn(ctx context.Context, conn *sql.Conn, planKey string) (Plan, error) {
+func (s *Service) planOn(ctx context.Context, q audit.Reader, planKey string) (Plan, error) {
 	var plan Plan
 	var enabled int
 	var templateVersion, cron sql.NullString
-	err := conn.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT p.id,p.plan_key,p.display_name,p.enabled,c.name,p.plugin_id,p.template_id,p.template_version,
 		       p.params_json,p.scope_json,p.scope_kind,p.cron,p.timezone,p.row_version,p.created_at,p.updated_at
 		FROM inspection_plans p JOIN connections c ON c.id=p.connection_id
@@ -460,7 +423,7 @@ type frozenPlanBinding struct {
 // validatePlanInput 静态校验计划定义并解析接入/视图/对象引用。缺省模板版本
 // 在 Run 创建时冻结当时版本；params 按模板 Schema 校验；scope 引用必须存在
 // 且视图接入与计划接入固定相交（绝不全源查询）。
-func (s *Service) validatePlanInput(ctx context.Context, input PlanInput) (frozenPlanBinding, error) {
+func (s *Service) validatePlanInput(ctx context.Context, q execution.Executor, input PlanInput) (frozenPlanBinding, error) {
 	var frozen frozenPlanBinding
 	normalizedKind, err := dbScopeKind(input.ScopeKind)
 	if err != nil {
@@ -511,7 +474,7 @@ func (s *Service) validatePlanInput(ctx context.Context, input PlanInput) (froze
 	frozen.params = string(params)
 	frozen.scope = string(scope)
 	frozen.scopeKind = input.ScopeKind
-	if err := s.resolvePlanReferences(ctx, input, &frozen); err != nil {
+	if err := s.resolvePlanReferences(ctx, q, input, &frozen); err != nil {
 		return frozen, err
 	}
 	return frozen, nil
@@ -519,9 +482,9 @@ func (s *Service) validatePlanInput(ctx context.Context, input PlanInput) (froze
 
 // resolvePlanReferences 校验接入、业务视图与对象引用。计划接入必须固定：
 // business_view 范围只允许跨来源候选视图或与计划接入一致的视图。
-func (s *Service) resolvePlanReferences(ctx context.Context, input PlanInput, frozen *frozenPlanBinding) error {
+func (s *Service) resolvePlanReferences(ctx context.Context, q execution.Executor, input PlanInput, frozen *frozenPlanBinding) error {
 	var kind string
-	err := s.db.QueryRowContext(ctx, `SELECT type FROM connections WHERE name=?`, input.ConnectionName).Scan(&kind)
+	err := q.QueryRowContext(ctx, `SELECT type FROM connections WHERE name=?`, input.ConnectionName).Scan(&kind)
 	if err == sql.ErrNoRows {
 		return &PlanConflictError{Code: "unknown_connection", Detail: "来源接入不存在"}
 	}
@@ -535,7 +498,7 @@ func (s *Service) resolvePlanReferences(ctx context.Context, input PlanInput, fr
 	if pluginID != input.PluginID {
 		return &PlanConflictError{Code: "plugin_mismatch", Detail: "插件与接入平台类型不匹配"}
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, input.ConnectionName).Scan(&frozen.connectionID); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, input.ConnectionName).Scan(&frozen.connectionID); err != nil {
 		return err
 	}
 	switch input.ScopeKind {
@@ -545,7 +508,7 @@ func (s *Service) resolvePlanReferences(ctx context.Context, input PlanInput, fr
 			return &PlanConflictError{Code: "malformed_scope", Detail: "business_view 范围必须携带 businessViewKey"}
 		}
 		var viewConnection sql.NullInt64
-		err := s.db.QueryRowContext(ctx, `SELECT connection_id FROM business_views WHERE view_key=?`, input.BusinessViewKey).Scan(&viewConnection)
+		err := q.QueryRowContext(ctx, `SELECT connection_id FROM business_views WHERE view_key=?`, input.BusinessViewKey).Scan(&viewConnection)
 		if err == sql.ErrNoRows {
 			return &PlanConflictError{Code: "unknown_business_view", Detail: "业务视图不存在"}
 		}
@@ -564,7 +527,7 @@ func (s *Service) resolvePlanReferences(ctx context.Context, input PlanInput, fr
 				return &PlanConflictError{Code: "malformed_scope", Detail: "对象必须携带 objectType 与 identityKey"}
 			}
 			var exists int
-			if err := s.db.QueryRowContext(ctx, `
+			if err := q.QueryRowContext(ctx, `
 				SELECT COUNT(*) FROM observed_source_objects
 				WHERE connection_id=? AND object_type=? AND identity_key=?`,
 				frozen.connectionID, object.ObjectType, object.IdentityKey).Scan(&exists); err != nil {
@@ -591,10 +554,26 @@ func DefaultPlanKey(connectionName string) string {
 	return "basic-" + hex.EncodeToString(sum[:])[:32]
 }
 
+// EnsureDefaultPlan 以独立执行器命令幂等创建默认基础计划（无外部组合方的
+// 直连入口）；与接入启用同事务的组合路径仍走 EnsureDefaultPlanOn。
+func (s *Service) EnsureDefaultPlan(ctx context.Context, connectionID int64, connectionName string) error {
+	if s.opDefaultPlan == nil {
+		return errors.New("inspection: default plan operation is not registered")
+	}
+	_, err := execution.Execute(ctx, s.runner, s.opDefaultPlan,
+		func(tx *execution.Tx) (struct{}, error) {
+			return struct{}{}, s.EnsureDefaultPlanOn(ctx, tx, connectionID, connectionName)
+		},
+		func(struct{}) int64 { return int64(connectionID) })
+	return err
+}
+
 // EnsureDefaultPlanOn 在接入启用事务内幂等创建默认基础计划：用户点“立即
 // 巡检”无需先填表。计划仅人工运行（cron NULL，不产生定时模型费用）；已存在
-// 同名计划（含用户自建）时原样保留。非指标接入不创建。
-func (s *Service) EnsureDefaultPlanOn(ctx context.Context, conn *sql.Conn, connectionID int64, connectionName string) error {
+// 同名计划（含用户自建）时原样保留。非指标接入不创建。conn 是连接启用方的
+// 受守卫事务句柄（execution.Executor），使默认计划的创建与启用保持同事务
+// 原子提交；*sql.Conn 等同签名查询面同样满足该接口。
+func (s *Service) EnsureDefaultPlanOn(ctx context.Context, conn execution.Executor, connectionID int64, connectionName string) error {
 	var kind string
 	if err := conn.QueryRowContext(ctx, `SELECT type FROM connections WHERE id=?`, connectionID).Scan(&kind); err != nil {
 		if err == sql.ErrNoRows {
@@ -631,72 +610,6 @@ func validatePlanKey(key string) error {
 		return &PlanConflictError{Code: "malformed_key", Detail: "计划 key 必须匹配 ^[a-z][a-z0-9-]{0,62}$"}
 	}
 	return nil
-}
-
-func (s *Service) auditPlanCommand(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command string, planID int64, now string) error {
-	_, err := conn.ExecContext(ctx, `
-		INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at)
-		VALUES('user',?,?,?,'success','inspection_plan',?,?)`, principalID, command, clientCommandID, planID, now)
-	return err
-}
-
-func recordPlanCommand(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command, digest string, planID int64, plan Plan) error {
-	payload, err := json.Marshal(plan)
-	if err != nil {
-		return err
-	}
-	return auth.RecordCommand(ctx, conn, principalID, clientCommandID, command, digest, auth.OutcomeCommitted, "inspection_plan", planID, string(payload))
-}
-
-// replayPlan 查询命令台账；found/replayed 区分“无记录”与“digest 冲突”。
-func replayPlan(ctx context.Context, db *sql.DB, principalID int64, clientCommandID, digest string) (auth.CommandRecord, bool, error) {
-	record, found, err := auth.LookupCommand(ctx, db, principalID, clientCommandID)
-	if err != nil || !found {
-		return record, false, err
-	}
-	if record.RequestDigest != digest {
-		return record, false, &PlanConflictError{Code: "command_reused", Detail: "命令标识已用于其它请求，请更换后重试"}
-	}
-	return record, true, nil
-}
-
-// decodePlanReplay 把台账记录还原为计划投影或确定性拒绝。
-func decodePlanReplay(record auth.CommandRecord, found bool, err error) (Plan, error) {
-	if err != nil {
-		return Plan{}, err
-	}
-	if !found {
-		return Plan{}, nil
-	}
-	if record.Outcome == auth.OutcomeRejectedKnown {
-		var rejection PlanConflictError
-		if err := json.Unmarshal([]byte(record.ResultPayload), &rejection); err != nil {
-			return Plan{}, err
-		}
-		return Plan{}, &rejection
-	}
-	var plan Plan
-	if err := json.Unmarshal([]byte(record.ResultPayload), &plan); err != nil {
-		return Plan{}, err
-	}
-	return plan, nil
-}
-
-func (s *Service) rejectPlan(ctx context.Context, conn *sql.Conn, principalID int64, clientCommandID, command, digest string, rejection *PlanConflictError, committed *bool) (Plan, error) {
-	payload, _ := json.Marshal(rejection)
-	if err := auth.RecordCommand(ctx, conn, principalID, clientCommandID, command, digest, auth.OutcomeRejectedKnown, "inspection_plan", 0, string(payload)); err != nil {
-		return Plan{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,created_at)
-		VALUES('user',?,?,?,'rejected','inspection_plan',?)`, principalID, command, clientCommandID, s.nowText()); err != nil {
-		return Plan{}, err
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Plan{}, err
-	}
-	*committed = true
-	return Plan{}, rejection
 }
 
 func nullableInt64(value int64) any {

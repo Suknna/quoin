@@ -13,6 +13,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 func newStandaloneTestService(t *testing.T) (*sql.DB, *Service) {
@@ -97,7 +98,7 @@ func runStandaloneLogin(t *testing.T, service *Service, identity Identity, comma
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, err := service.PrepareDispatch(context.Background(), op.ID, "lintel-boot", 3)
+	input, err := service.PrepareDispatchWithCapacity(context.Background(), op.ID, "lintel-boot", 3, unboundedCapacity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +138,11 @@ func TestStandaloneLoginCancelAndScopeIsolation(t *testing.T) {
 	if _, err := service.GetStandaloneOperation(context.Background(), second.IdentityKey, running.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("operation must be invisible from another identity key: %v", err)
 	}
-	if _, err := service.CancelStandalone(context.Background(), "no-such-identity", running.ID, 1, running.RowVersion, "standalone-cancel-0001"); !errors.Is(err, ErrNotFound) {
+	ctx := userCommandContext(t)
+	if _, err := service.CancelStandalone(ctx, "no-such-identity", running.ID, 1, running.RowVersion, "standalone-cancel-0001"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cancel through an unknown key must be not found: %v", err)
 	}
-	cancelled, err := service.CancelStandalone(context.Background(), first.IdentityKey, running.ID, 1, running.RowVersion, "standalone-cancel-0001")
+	cancelled, err := service.CancelStandalone(ctx, first.IdentityKey, running.ID, 1, running.RowVersion, "standalone-cancel-0001")
 	if err != nil || cancelled.State != "Cancelled" || cancelled.TerminalReason == nil || *cancelled.TerminalReason != "cancelled" {
 		t.Fatalf("standalone cancel must terminate the operation: %#v %v", cancelled, err)
 	}
@@ -150,12 +152,13 @@ func TestStandaloneLoginCancelAndScopeIsolation(t *testing.T) {
 		t.Fatalf("physical stop confirmation must stay asynchronous: %#v", cancelled)
 	}
 	// A replayed cancel command returns the identical terminal operation; a
-	// replay with different arguments is rejected as a command conflict.
-	replayed, err := service.CancelStandalone(context.Background(), first.IdentityKey, running.ID, 1, running.RowVersion, "standalone-cancel-0001")
+	// replay with different arguments is rejected by the shared command
+	// ledger as a command reuse.
+	replayed, err := service.CancelStandalone(ctx, first.IdentityKey, running.ID, 1, running.RowVersion, "standalone-cancel-0001")
 	if err != nil || replayed.ID != cancelled.ID || replayed.State != "Cancelled" {
 		t.Fatalf("cancel replay must be idempotent: %#v %v", replayed, err)
 	}
-	if _, err := service.CancelStandalone(context.Background(), first.IdentityKey, running.ID, 1, running.RowVersion+9, "standalone-cancel-0001"); !errors.Is(err, ErrConflict) {
+	if _, err := service.CancelStandalone(ctx, first.IdentityKey, running.ID, 1, running.RowVersion+9, "standalone-cancel-0001"); !errors.Is(err, execution.ErrCommandReused) {
 		t.Fatalf("command reuse with a different request must conflict: %v", err)
 	}
 }

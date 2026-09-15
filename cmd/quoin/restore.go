@@ -17,8 +17,10 @@ import (
 
 // runRestore is intentionally an offline command. Recovery acquires the same
 // data lock as Quoin before reading the backup or changing live files, so it
-// cannot race a running service. The temporary password is read only from the
-// attached TTY and never reaches argv, environment, logs, or reports.
+// cannot race a running service. The recovery administrator name is read from
+// the attached TTY; no password is requested — restore generates a temporary
+// administrator password instead, which is printed to the attached TTY exactly
+// once and never reaches argv, environment, logs, or reports.
 func runRestore(arguments []string) {
 	if len(arguments) > 0 && arguments[0] == "preflight" {
 		runRestorePreflight(arguments[1:])
@@ -34,29 +36,33 @@ func runRestore(arguments []string) {
 	}
 	config := parseConfig(configArguments, "restore")
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
-		fail("restore requires an attached TTY for recovery administrator selection and temporary password")
+		fail("restore requires an attached TTY for recovery administrator selection and the one-time credential handoff")
 	}
 	reader := bufio.NewReader(os.Stdin)
 	adminUsername := promptRestoreLine(reader, "Recovery administrator username: ")
-	password := promptRestorePassword("Temporary password: ")
-	confirmation := promptRestorePassword("Confirm temporary password: ")
-	if password != confirmation {
-		fail("passwords do not match")
-	}
 	result, err := recovery.Restore(context.Background(), recovery.Request{
 		DataDirectory: config.DataDirectory, BackupDirectory: config.BackupDirectory, BackupID: backupID,
-		RootKeyFile: config.RootKeyFile, AdminUsername: adminUsername, TemporaryPassword: password,
+		RootKeyFile: config.RootKeyFile, AdminUsername: adminUsername,
 		RollbackDirectory: ".restore-rollback-" + backupID,
 	})
 	if err != nil {
 		fail(err.Error())
 	}
+	if result.TemporaryPassword == "" {
+		fail("restore did not return the temporary administrator password")
+	}
+	// The temporary password is the only path back into the restored
+	// deployment: it is printed once to the attached TTY. It carries no
+	// enforced expiry; the structured log line below stays secret-free by
+	// construction.
+	fmt.Fprintf(os.Stdout, "Temporary administrator password (shown only once):\n%s\n", result.TemporaryPassword)
+	fmt.Fprintln(os.Stdout, "Start Quoin, sign in with this password, and complete initialization (formal password plus a verified contact).")
 	sharedops.LogEvent("quoin", "info", "restore.completed", "maintenance revision="+strconv.FormatInt(result.MaintenanceRevision, 10)+" rollback="+filepath.Base(result.RollbackDirectory))
 }
 
 // Restore prompts use stdout because Kubernetes TTY attach relays the terminal
-// output stream there. Password bytes remain read from the raw terminal and are
-// never written back to either stream.
+// output stream there. Sensitive input remains read from the raw terminal and
+// is never written back to either stream.
 func promptRestoreLine(reader *bufio.Reader, label string) string {
 	fmt.Fprint(os.Stdout, label)
 	value, err := reader.ReadString('\n')
@@ -64,16 +70,6 @@ func promptRestoreLine(reader *bufio.Reader, label string) string {
 		fail("could not read attached TTY input")
 	}
 	return strings.TrimSpace(value)
-}
-
-func promptRestorePassword(label string) string {
-	fmt.Fprint(os.Stdout, label)
-	value, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stdout)
-	if err != nil {
-		fail("could not read password from attached TTY")
-	}
-	return trimTerminalPassword(value)
 }
 
 func runRestorePreflight(arguments []string) {

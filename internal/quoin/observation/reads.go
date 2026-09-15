@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/Suknna/quoin/internal/quoin/audit"
 )
 
 // ListRuns pages a connection's observation runs newest-first. next is the
@@ -20,13 +22,13 @@ func (service *Service) ListRuns(ctx context.Context, connectionName string, aft
 		limit = 50
 	}
 	var connectionID int64
-	if err := service.db.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, connectionName).Scan(&connectionID); err != nil {
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, connectionName).Scan(&connectionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, ErrNotFound
 		}
 		return nil, 0, err
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT r.id,r.trigger_kind,r.state,r.row_version,r.evidence_at,r.result_detail,r.created_at
 		FROM observation_runs r
 		WHERE r.connection_id=? AND r.id>?
@@ -68,7 +70,7 @@ func (service *Service) GetRun(ctx context.Context, connectionName string, runID
 	var detail SourceObservationRun
 	detail.ConnectionName = connectionName
 	var evidenceAt, resultDetail sql.NullString
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT r.connection_id,r.trigger_kind,r.state,r.row_version,r.evidence_at,r.result_detail,r.created_at
 		FROM observation_runs r
 		JOIN connections c ON c.id=r.connection_id
@@ -95,10 +97,10 @@ func (service *Service) GetRun(ctx context.Context, connectionName string, runID
 	return detail, nil
 }
 
-// runDetailOn reads one Run with its children over an existing transaction
-// connection; StartRun uses it to seal the command's stored replay payload
-// from the same snapshot it commits.
-func (service *Service) runDetailOn(ctx context.Context, conn *sql.Conn, connectionName string, runID int64) (SourceObservationRun, error) {
+// runDetailOn reads one Run with its children over the caller's read
+// surface; StartRun uses it on the guarded runner transaction to seal the
+// command's stored replay payload from the same snapshot it commits.
+func (service *Service) runDetailOn(ctx context.Context, conn audit.Reader, connectionName string, runID int64) (SourceObservationRun, error) {
 	var detail SourceObservationRun
 	detail.ConnectionName = connectionName
 	var evidenceAt, resultDetail sql.NullString
@@ -151,7 +153,7 @@ func (service *Service) runDetailOn(ctx context.Context, conn *sql.Conn, connect
 
 // runObjects lists the frozen per-object-type children of one Run.
 func (service *Service) runObjects(ctx context.Context, runID int64) ([]SourceObservationRunObject, error) {
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT object_type,status,gap_reason,attempt_id,evidence_id
 		FROM observation_run_objects
 		WHERE observation_run_id=?
@@ -195,7 +197,7 @@ func (service *Service) ListResources(ctx context.Context, connectionName, objec
 		limit = 50
 	}
 	var connectionID int64
-	if err := service.db.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, connectionName).Scan(&connectionID); err != nil {
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, connectionName).Scan(&connectionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, ErrNotFound
 		}
@@ -217,7 +219,7 @@ func (service *Service) ListResources(ctx context.Context, connectionName, objec
 		return nil, 0, fmt.Errorf("invalid source resource state filter %q", state)
 	}
 	query += ` ORDER BY o.id`
-	rows, err := service.db.QueryContext(ctx, query, args...)
+	rows, err := service.runner.Reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -289,7 +291,7 @@ func (service *Service) GetResource(ctx context.Context, connectionName string, 
 	var labelsJSON string
 	var displayName, observedAt, lastSuccess sql.NullString
 	var current, stale int
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT o.object_type,o.identity_key,o.display_name,o.labels_json,o.observed_at,o.current,o.stale,o.last_successful_refresh_at
 		FROM observed_source_objects o
 		JOIN connections c ON c.id=o.connection_id

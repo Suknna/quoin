@@ -108,9 +108,9 @@ func digestText(prefix string, id int64) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func insertBusinessContextLineage(ctx context.Context, conn *sql.Conn, snapshotID int64, after int, business frozenBusinessContext) error {
+func insertBusinessContextLineage(ctx context.Context, tx writer, snapshotID int64, after int, business frozenBusinessContext) error {
 	configDigest := digestText("business-system-config-version:", business.ConfigVersionID)
-	if _, err := conn.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
 		VALUES(?,?, 'business_config', ?, ?)`, snapshotID, after+1, configDigest, business.ConfigVersionID); err != nil {
 		return err
@@ -123,8 +123,8 @@ func insertBusinessContextLineage(ctx context.Context, conn *sql.Conn, snapshotI
 // The frozen revision is the grant-eligible set: later thanos_query and
 // kubernetes_read grants must match these items exactly, and rotations
 // create new revisions so the attempt's authority stays reconstructible.
-func insertSourceLineageItems(ctx context.Context, conn *sql.Conn, snapshotID, firstSeq int64) (int64, error) {
-	rows, err := conn.QueryContext(ctx, `
+func insertSourceLineageItems(ctx context.Context, tx writer, snapshotID, firstSeq int64) (int64, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT name, current_revision_id FROM connections
 		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
 		ORDER BY name, current_revision_id`)
@@ -150,7 +150,7 @@ func insertSourceLineageItems(ctx context.Context, conn *sql.Conn, snapshotID, f
 	}
 	for index, source := range sources {
 		var kind string
-		if err := conn.QueryRowContext(ctx, `SELECT type FROM connections WHERE current_revision_id=?`, source.revisionID).Scan(&kind); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT type FROM connections WHERE current_revision_id=?`, source.revisionID).Scan(&kind); err != nil {
 			return 0, err
 		}
 		role := "metrics_source"
@@ -158,7 +158,7 @@ func insertSourceLineageItems(ctx context.Context, conn *sql.Conn, snapshotID, f
 			role = "kubernetes_source"
 		}
 		digest := sha256.Sum256([]byte("connection-revision:" + strconv.FormatInt(source.revisionID, 10)))
-		if _, err := conn.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id)
 			VALUES(?,?,?,?,?)`, snapshotID, firstSeq+int64(index), role, hex.EncodeToString(digest[:]), source.revisionID); err != nil {
 			return 0, err
@@ -169,9 +169,10 @@ func insertSourceLineageItems(ctx context.Context, conn *sql.Conn, snapshotID, f
 
 // enabledIntegrations renders the model-visible projection of the enabled
 // observation integrations in the same deterministic order as the frozen
-// lineage items.
-func enabledIntegrations(ctx context.Context, conn *sql.Conn) ([]RenderedIntegration, error) {
-	rows, err := conn.QueryContext(ctx, `
+// lineage items. It composes on the runner's guarded transaction just like
+// on a plain pool handle (writer).
+func enabledIntegrations(ctx context.Context, tx writer) ([]RenderedIntegration, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT name, type FROM connections
 		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
 		ORDER BY name, type`)

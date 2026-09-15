@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/proto"
 )
@@ -23,6 +25,14 @@ import (
 // call. The child attempt and audit row are written before the Lintel dispatch;
 // consequently a control-stream retry can rediscover the same durable child
 // rather than starting a second browser action.
+//
+// The durable admission writes run through the declared browser.exploration_admission
+// operation (ADR-0006): the runner owns the BEGIN IMMEDIATE transaction and the
+// automatic audit row, so an admission decision can never commit without its
+// record. This surface is the retired browser plugin's retained reference
+// implementation (ADR-0007): it is reached only from the live Plinth slot for
+// attempts whose frozen catalog still carries quoin_browser, and its outbound
+// Lintel sends are best-effort post-commit work exactly as before.
 func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, envelope *runtimev1.ControlEnvelope, request *runtimev1.RequestBrowserSubExecution) {
 	ack := &runtimev1.BrowserSubExecutionAck{ParentAttemptId: request.GetParentAttemptId(), ToolCallId: request.GetToolCallId()}
 	reject := func(reason runtimev1.BrowserSubExecutionRejectReason) {
@@ -47,30 +57,171 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
 		return
 	}
-	db := service.Analyses.DB()
-	conn, err := db.Conn(ctx)
+	db := service.writer
+	authority, err := browserExplorationAuthority(ctx, db, request.GetParentAttemptId())
 	if err != nil {
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
 		return
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	_, opAdmission, _ := browserExplorationOperations()
+	handled, err := execution.Execute(authority, browserExplorationRunner(db), opAdmission, func(tx *execution.Tx) (browserSubExecutionHandling, error) {
+		return service.admitBrowserSubExecutionOn(ctx, tx, request, input.GetCanonicalJson(), digest)
+	}, func(handled browserSubExecutionHandling) int64 { return handled.childID })
+	if err != nil {
+		if errors.Is(err, errBrowserSubExecutionUnsupported) {
+			reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
+			return
+		}
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
 		return
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	ack.Accepted, ack.ChildAttemptId = true, handled.childID
+	_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
+	// Post-commit fan-out only: the durable admission fact exists, and the
+	// production pool's single connection has been returned by the runner.
+	if handled.delivery != nil {
+		service.deliverBrowserToolResult(request.GetToolCallId(), handled.childID, true, handled.delivery, "")
+		return
+	}
+	if handled.replay {
+		// The previous control-stream send may have been lost after the durable
+		// action row committed. Replays must redispatch that exact child instead
+		// of merely returning its ID and leaving it Running forever.
+		go func() { _ = service.replayBrowserExplorationChild(context.Background(), handled.childID) }()
+		return
+	}
+	// open needs Chromium started before its child can become Running; later
+	// calls attach to the same already-Running operation.
+	if handled.open && service.Slots != nil {
+		go func() { _ = service.dispatchBrowserOperation(context.Background(), handled.operationID) }()
+	} else {
+		go func() { _ = service.dispatchBrowserExplorationAction(context.Background(), handled.childID) }()
+	}
+}
+
+// browserExplorationOperations declares the retained browser exploration
+// write operations once per process (ADR-0006). Authorization confines both
+// to the runtime's system authority on a task/internal channel: an HTTP
+// caller can never drive browser admission or dispatch, mirroring the
+// reconcile family's rules.
+const opNameBrowserExplorationAdmission = "browser.exploration_admission"
+const opNameBrowserExplorationActionDispatch = "browser.exploration_action_dispatch"
+
+var (
+	browserExplorationOpsOnce        sync.Once
+	browserExplorationRegistryHandle *execution.Registry
+	opAdmission                      *execution.Operation
+	opDispatch                       *execution.Operation
+)
+
+func browserExplorationOperations() (*execution.Registry, *execution.Operation, *execution.Operation) {
+	browserExplorationOpsOnce.Do(func() {
+		registry := execution.NewRegistry()
+		register := func(op execution.Operation) *execution.Operation {
+			declared, err := registry.Register(op)
+			if err != nil {
+				panic("browser: register " + op.Name + ": " + err.Error())
+			}
+			return declared
 		}
-	}()
+		authorize := func(ctx context.Context, _ *execution.Tx) error {
+			meta, err := execution.Require(ctx)
+			if err != nil {
+				return err
+			}
+			if meta.Actor.Kind != execution.PrincipalSystem || meta.Actor.ID != 0 {
+				return errors.New("browser: exploration operation requires the system principal")
+			}
+			if meta.Source.Kind == execution.SourceHTTP {
+				return errors.New("browser: exploration operation cannot arrive from the http channel")
+			}
+			return nil
+		}
+		declare := func(name string) *execution.Operation {
+			return register(execution.Operation{Name: name, Class: execution.ClassWrite, ObjectType: reconcileObjectAttempt, Authorize: authorize})
+		}
+		opAdmission = declare(opNameBrowserExplorationAdmission)
+		opDispatch = declare(opNameBrowserExplorationActionDispatch)
+		browserExplorationRegistryHandle = registry
+	})
+	return browserExplorationRegistryHandle, opAdmission, opDispatch
+}
+
+// browserExplorationRunner composes the exploration family's runner over the
+// analysis database with the shared operation registry; a nil writer falls
+// back to the default audit writer.
+func browserExplorationRunner(db *sql.DB) *execution.Runner {
+	registry, _, _ := browserExplorationOperations()
+	return execution.NewRunner(db, registry, nil)
+}
+
+// browserExplorationAuthority roots one browser exploration stage on the
+// parent attempt's PERSISTED association (ADR-0006), mirroring the attempt
+// package's lifecycleAuthority: the row-scoped correlation is authoritative
+// and immutable — never the raw caller context, so a user- or service-scoped
+// caller context can never drive these machine stages, and there is no
+// session fallback to fake. A legacy attempt without a persisted association
+// still fails closed into an explicit fresh task scope: a deliberate machine
+// operation under its own identity, auditable, never anonymous.
+func browserExplorationAuthority(ctx context.Context, db *sql.DB, parentAttemptID int64) (context.Context, error) {
+	correlation, found, err := attempt.LoadCorrelation(ctx, db, parentAttemptID)
+	if err != nil {
+		return nil, err
+	}
+	if found && correlation.OperationCorrelationID != "" {
+		initiator := execution.Principal{Kind: execution.PrincipalSystem, ID: 0}
+		if correlation.InitiatorType != "" {
+			initiator = execution.Principal{Kind: execution.PrincipalKind(correlation.InitiatorType), ID: correlation.InitiatorID}
+		}
+		return execution.ReplaceMetadata(ctx, execution.Metadata{
+			CorrelationID: correlation.OperationCorrelationID,
+			Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+			Initiator:     initiator,
+			Source:        execution.Source{Kind: execution.SourceTask},
+		})
+	}
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, err
+	}
+	return execution.ReplaceMetadata(ctx, execution.Metadata{
+		CorrelationID: correlationID,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+}
+
+// browserSubExecutionHandling is the committed outcome of one admission
+// transaction. It carries only what the post-commit envelope fan-out needs.
+type browserSubExecutionHandling struct {
+	childID     int64
+	replay      bool
+	open        bool
+	operationID int64
+	// delivery is the model-visible payload of an admission that ends the
+	// call in-transaction (admission rejection, closed session); nil means
+	// the call stays open for the async action dispatch.
+	delivery []byte
+}
+
+// errBrowserSubExecutionUnsupported marks a request that is refused before
+// any durable fact: the runner rolls back nothing-to-commit and the handler
+// answers the transport rejection without an audit row, exactly like the
+// pre-migration behavior.
+var errBrowserSubExecutionUnsupported = errors.New("browser sub-execution is not admissible")
+
+// admitBrowserSubExecutionOn is the durable admission state machine inside
+// the runner transaction. Every branch decision reads the same transaction
+// the writes commit in, so concurrent terminal transitions cannot slip
+// between decision and admission; the unique requester index stays the
+// replay authority.
+func (service *RuntimeService) admitBrowserSubExecutionOn(ctx context.Context, tx *execution.Tx, request *runtimev1.RequestBrowserSubExecution, canonical []byte, digest [sha256.Size]byte) (browserSubExecutionHandling, error) {
 	var attemptType, state, arguments, argumentsDigest, toolName, toolStatus string
 	var scopeID int64
-	err = conn.QueryRowContext(ctx, `SELECT a.attempt_type,a.state,a.scope_id,t.tool_name,t.status,t.arguments_json,t.arguments_digest
+	err := tx.QueryRowContext(ctx, `SELECT a.attempt_type,a.state,a.scope_id,t.tool_name,t.status,t.arguments_json,t.arguments_digest
 		FROM execution_attempts a JOIN tool_calls t ON t.attempt_id=a.id WHERE a.id=? AND t.id=?`, request.GetParentAttemptId(), request.GetToolCallId()).Scan(&attemptType, &state, &scopeID, &toolName, &toolStatus, &arguments, &argumentsDigest)
-	if err != nil || attemptType != "investigation" || toolName != "quoin_browser" || (toolStatus != "running" && toolStatus != "succeeded") || arguments != string(input.GetCanonicalJson()) || argumentsDigest != hex.EncodeToString(digest[:]) {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-		return
+	if err != nil || attemptType != "investigation" || toolName != "quoin_browser" || (toolStatus != "running" && toolStatus != "succeeded") || arguments != string(canonical) || argumentsDigest != hex.EncodeToString(digest[:]) {
+		return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 	}
 	// The unique requester index is the durable idempotency key. Replays return
 	// the same child before attempting any session or operation lookup.
@@ -78,36 +229,22 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 	// The child is the replay key. It is intentionally created before its
 	// action row, because the frozen action trigger requires both operation and
 	// child to be Running.
-	err = conn.QueryRowContext(ctx, `SELECT id FROM execution_attempts WHERE requested_by_tool_call_id=?`, request.GetToolCallId()).Scan(&childID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM execution_attempts WHERE requested_by_tool_call_id=?`, request.GetToolCallId()).Scan(&childID)
 	if err == nil {
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-			return
-		}
-		committed = true
-		ack.Accepted, ack.ChildAttemptId = true, childID
-		_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
-		// The previous control-stream send may have been lost after the durable
-		// action row committed. Replays must redispatch that exact child instead
-		// of merely returning its ID and leaving it Running forever.
-		go func() { _ = service.replayBrowserExplorationChild(context.Background(), childID) }()
-		return
+		return browserSubExecutionHandling{childID: childID, replay: true}, nil
 	}
 	if err != sql.ErrNoRows {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
+		return browserSubExecutionHandling{}, err
 	}
 	// A pending terminal freezes further browser admission. This runs under the
-	// same BEGIN IMMEDIATE transaction as child/action creation, so no new
+	// same write transaction as child/action creation, so no new
 	// obligation can appear after a terminal drain has checked the parent.
 	var terminalPending int
-	if err = conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_attempt_terminals WHERE attempt_id=?)`, request.GetParentAttemptId()).Scan(&terminalPending); err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_attempt_terminals WHERE attempt_id=?)`, request.GetParentAttemptId()).Scan(&terminalPending); err != nil {
+		return browserSubExecutionHandling{}, err
 	}
 	if state != "Running" || toolStatus != "running" || terminalPending != 0 {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-		return
+		return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 	}
 	var action struct {
 		Action      string `json:"action"`
@@ -116,9 +253,8 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 		PageID      string `json:"pageId"`
 		URL         string `json:"url"`
 	}
-	if err = json.Unmarshal(input.GetCanonicalJson(), &action); err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-		return
+	if err = json.Unmarshal(canonical, &action); err != nil {
+		return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var identityID, revisionID, profileID int64
@@ -128,7 +264,7 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 		// identityKey. There is no business-system dependency — a published
 		// (Ready) profile is the only usability gate.
 		var identityState string
-		err = conn.QueryRowContext(ctx, `SELECT i.id,i.current_revision_id,i.current_profile_generation_id,i.state,r.journey_catalog_digest,r.journey_catalog_version
+		err = tx.QueryRowContext(ctx, `SELECT i.id,i.current_revision_id,i.current_profile_generation_id,i.state,r.journey_catalog_digest,r.journey_catalog_version
 			FROM browser_identities i JOIN browser_identity_revisions r ON r.id=i.current_revision_id
 			WHERE i.identity_key=?`, action.IdentityKey).Scan(&identityID, &revisionID, &profileID, &identityState, &catalogDigest, &catalogVersion)
 		if err != nil || identityState != "Ready" || profileID < 1 {
@@ -137,132 +273,72 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 				code = "AuthenticationRequired"
 			}
 			payload := browserAdmissionPayload(code, nil)
-			if err := service.completeBrowserAdmissionRejection(ctx, conn, request, scopeID, payload, now); err != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
+			childID, err = service.completeBrowserAdmissionRejection(ctx, tx, request, scopeID, payload, now)
+			if err != nil {
+				return browserSubExecutionHandling{}, err
 			}
-			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
-			}
-			committed = true
-			// The production pool is deliberately single-connection. Release this
-			// completed transaction before resolving the durable child for delivery.
-			conn.Close()
-			var child int64
-			if err := db.QueryRowContext(ctx, `SELECT id FROM execution_attempts WHERE requested_by_tool_call_id=?`, request.GetToolCallId()).Scan(&child); err != nil {
-				return
-			}
-			ack.Accepted, ack.ChildAttemptId = true, child
-			_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
-			service.deliverBrowserToolResult(request.GetToolCallId(), child, true, payload, "")
-			return
+			return browserSubExecutionHandling{childID: childID, delivery: payload}, nil
 		}
-		res, insertErr := conn.ExecContext(ctx, `INSERT INTO browser_operations(identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,state,journey_catalog_digest,journey_catalog_version,requested_at)
+		res, insertErr := tx.ExecContext(ctx, `INSERT INTO browser_operations(identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,state,journey_catalog_digest,journey_catalog_version,requested_at)
 			VALUES(?,?,?,?, 'exploration','Queued',?,?,?)`, identityID, revisionID, profileID, request.GetParentAttemptId(), catalogDigest, catalogVersion, now)
 		if insertErr != nil {
 			// The active-identity unique index is an expected admission outcome,
 			// not malformed Tool input. Close the Tool Call and its child with a
 			// structured operation-null result so the model can choose another
 			// system or retry after the existing session releases the Identity.
-			busy, busyErr := currentIdentityBusy(ctx, conn, identityID)
+			busy, busyErr := currentIdentityBusy(ctx, tx, identityID)
 			if busyErr != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
+				return browserSubExecutionHandling{}, busyErr
 			}
 			payload := browserAdmissionPayload("IdentityBusy", busy)
-			if err := service.completeBrowserAdmissionRejection(ctx, conn, request, scopeID, payload, now); err != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
+			childID, err = service.completeBrowserAdmissionRejection(ctx, tx, request, scopeID, payload, now)
+			if err != nil {
+				return browserSubExecutionHandling{}, err
 			}
-			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
-			}
-			committed = true
-			conn.Close()
-			var child int64
-			if err := db.QueryRowContext(ctx, `SELECT id FROM execution_attempts WHERE requested_by_tool_call_id=?`, request.GetToolCallId()).Scan(&child); err != nil {
-				return
-			}
-			ack.Accepted, ack.ChildAttemptId = true, child
-			_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
-			service.deliverBrowserToolResult(request.GetToolCallId(), child, true, payload, "")
-			return
+			return browserSubExecutionHandling{childID: childID, delivery: payload}, nil
 		}
 		operationID, _ = res.LastInsertId()
 	} else {
 		operationID, err = strconv.ParseInt(action.SessionID, 10, 64)
 		if err != nil || operationID < 1 {
-			reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-			return
+			return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 		}
 		var operationState, identityState string
-		err = conn.QueryRowContext(ctx, `SELECT o.identity_id,o.identity_revision_id,o.profile_generation_id,o.journey_catalog_digest,o.journey_catalog_version,o.state,i.state
+		err = tx.QueryRowContext(ctx, `SELECT o.identity_id,o.identity_revision_id,o.profile_generation_id,o.journey_catalog_digest,o.journey_catalog_version,o.state,i.state
 			FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id
 			WHERE o.id=? AND o.owner_attempt_id=? AND o.kind='exploration'`, operationID, request.GetParentAttemptId()).Scan(&identityID, &revisionID, &profileID, &catalogDigest, &catalogVersion, &operationState, &identityState)
 		if err != nil {
-			reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-			return
+			return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 		}
 		if operationState != "Queued" && operationState != "WaitingForCapacity" && operationState != "Starting" && operationState != "Running" {
 			payload := browserClosedSessionPayload(action.Action, action.SessionID)
-			childID, closeErr := service.completeClosedSessionCall(ctx, conn, request, scopeID, operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, input.GetCanonicalJson(), payload, now)
-			if closeErr != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
+			childID, err = service.completeClosedSessionCall(ctx, tx, request, scopeID, operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, canonical, payload, now)
+			if err != nil {
+				return browserSubExecutionHandling{}, err
 			}
-			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-				reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-				return
-			}
-			committed = true
-			// The runtime slot projection reads through the production one-connection
-			// pool; release this completed transaction before synchronous delivery.
-			conn.Close()
-			ack.Accepted, ack.ChildAttemptId = true, childID
-			_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
-			service.deliverBrowserToolResult(request.GetToolCallId(), childID, true, payload, "")
-			return
+			return browserSubExecutionHandling{childID: childID, delivery: payload}, nil
 		}
 		if identityState != "Ready" {
-			reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
-			return
+			return browserSubExecutionHandling{}, errBrowserSubExecutionUnsupported
 		}
 	}
-	res, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,agent_version,created_at)
+	res, err := tx.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,agent_version,created_at)
 		VALUES('browser_exploration','investigation',?,'Queued',?,?,?,?)`, scopeID, request.GetToolCallId(), service.ReleaseVersion, nil, now)
 	if err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
+		return browserSubExecutionHandling{}, err
 	}
 	childID, _ = res.LastInsertId()
-	if err = freezeBrowserExplorationInput(ctx, conn, childID, request.GetParentAttemptId(), request.GetToolCallId(), operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, input.GetCanonicalJson(), now); err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
+	if err = freezeBrowserExplorationInput(ctx, tx, childID, request.GetParentAttemptId(), request.GetToolCallId(), operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, canonical, now); err != nil {
+		return browserSubExecutionHandling{}, err
 	}
 	// This immutable row, rather than browser_operations.owner_attempt_id, is
 	// the operation binding for every replay, cancellation and reconnect. One
 	// parent Investigation may own several historical Exploration sessions.
-	if _, err = conn.ExecContext(ctx, `INSERT INTO browser_exploration_child_bindings(child_attempt_id,tool_call_id,operation_id,parent_attempt_id,created_at)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO browser_exploration_child_bindings(child_attempt_id,tool_call_id,operation_id,parent_attempt_id,created_at)
 		VALUES(?,?,?,?,?)`, childID, request.GetToolCallId(), operationID, request.GetParentAttemptId(), now); err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
+		return browserSubExecutionHandling{}, err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL)
-		return
-	}
-	committed = true
-	ack.Accepted, ack.ChildAttemptId = true, childID
-	_ = service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{ConnectionEpoch: envelope.GetConnectionEpoch(), BootId: envelope.GetBootId(), CorrelationId: envelope.GetCorrelationId(), Msg: &runtimev1.ControlEnvelope_BrowserSubExecutionAck{BrowserSubExecutionAck: ack}})
-	// open needs Chromium started before its child can become Running; later
-	// calls attach to the same already-Running operation.
-	if action.Action == "open" && service.Slots != nil {
-		go func() { _ = service.dispatchBrowserOperation(context.Background(), operationID) }()
-	} else {
-		go func() { _ = service.dispatchBrowserExplorationAction(context.Background(), childID) }()
-	}
+	return browserSubExecutionHandling{childID: childID, open: action.Action == "open", operationID: operationID}, nil
 }
 
 // completeBrowserAdmissionRejection records the only operation-less browser child
@@ -284,8 +360,8 @@ func attemptImplementations(service *RuntimeService) *attempt.ImplementationTabl
 	return service.Analyses.Attempts().Catalogs.Implementations
 }
 
-func (service *RuntimeService) completeClosedSessionCall(ctx context.Context, conn *sql.Conn, request *runtimev1.RequestBrowserSubExecution, scopeID, operationID, identityID, revisionID, profileID int64, catalogDigest, catalogVersion string, input, payload []byte, now string) (int64, error) {
-	result, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,created_at)
+func (service *RuntimeService) completeClosedSessionCall(ctx context.Context, tx *execution.Tx, request *runtimev1.RequestBrowserSubExecution, scopeID, operationID, identityID, revisionID, profileID int64, catalogDigest, catalogVersion string, input, payload []byte, now string) (int64, error) {
+	result, err := tx.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,created_at)
 		VALUES('browser_exploration','investigation',?,'Queued',?,?,?)`, scopeID, request.GetToolCallId(), service.ReleaseVersion, now)
 	if err != nil {
 		return 0, err
@@ -294,17 +370,17 @@ func (service *RuntimeService) completeClosedSessionCall(ctx context.Context, co
 	if err != nil {
 		return 0, err
 	}
-	if err := freezeBrowserExplorationInput(ctx, conn, childID, request.GetParentAttemptId(), request.GetToolCallId(), operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, input, now); err != nil {
+	if err := freezeBrowserExplorationInput(ctx, tx, childID, request.GetParentAttemptId(), request.GetToolCallId(), operationID, identityID, revisionID, profileID, catalogDigest, catalogVersion, input, now); err != nil {
 		return 0, err
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO browser_exploration_child_bindings(child_attempt_id,tool_call_id,operation_id,parent_attempt_id,created_at)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO browser_exploration_child_bindings(child_attempt_id,tool_call_id,operation_id,parent_attempt_id,created_at)
 		VALUES(?,?,?,?,?)`, childID, request.GetToolCallId(), operationID, request.GetParentAttemptId(), now); err != nil {
 		return 0, err
 	}
 	if err := attempt.ValidateToolResultPayload(attemptImplementations(service), "browser_tool_result_v1", payload); err != nil {
 		return 0, fmt.Errorf("invalid closed-session browser result: %w", err)
 	}
-	result, err = conn.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
+	result, err = tx.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
 		WHERE id=? AND status='running'`, now, string(payload), request.GetToolCallId())
 	if err != nil {
 		return 0, err
@@ -323,29 +399,30 @@ func browserClosedSessionPayload(action, sessionID string) []byte {
 	return payload
 }
 
-func (service *RuntimeService) completeBrowserAdmissionRejection(ctx context.Context, conn *sql.Conn, request *runtimev1.RequestBrowserSubExecution, scopeID int64, payload []byte, now string) error {
-	result, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,created_at)
+func (service *RuntimeService) completeBrowserAdmissionRejection(ctx context.Context, tx *execution.Tx, request *runtimev1.RequestBrowserSubExecution, scopeID int64, payload []byte, now string) (int64, error) {
+	result, err := tx.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,created_at)
 		VALUES('browser_exploration','investigation',?,'Queued',?,?,?)`, scopeID, request.GetToolCallId(), service.ReleaseVersion, now)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	childID, err := result.LastInsertId()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if attempt.ValidateToolResultPayload(attemptImplementations(service), "browser_tool_result_v1", payload) != nil {
-		return fmt.Errorf("invalid frozen browser admission result")
+		return 0, fmt.Errorf("invalid frozen browser admission result")
 	}
-	result, err = conn.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
+	result, err = tx.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
 		WHERE id=? AND status='running'`, now, string(payload), request.GetToolCallId())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		return fmt.Errorf("browser admission tool call is no longer running")
+		return 0, fmt.Errorf("browser admission tool call is no longer running")
 	}
-	_ = childID // child is atomically terminalized by trg_tool_calls_close_browser_child.
-	return nil
+	// The child is atomically terminalized by trg_tool_calls_close_browser_child;
+	// its row id is still the durable admission rejection's audit object.
+	return childID, nil
 }
 
 type identityBusy struct {
@@ -358,9 +435,9 @@ type identityBusy struct {
 // identity. IdentityBusy is not retryable in the current browser session: no
 // session has been admitted, and the model needs the concrete occupancy facts
 // to decide whether to wait or target another browser identity.
-func currentIdentityBusy(ctx context.Context, conn *sql.Conn, identityID int64) (*identityBusy, error) {
+func currentIdentityBusy(ctx context.Context, tx *execution.Tx, identityID int64) (*identityBusy, error) {
 	var busy identityBusy
-	err := conn.QueryRowContext(ctx, `SELECT id,kind,COALESCE(started_at,start_dispatched_at,requested_at)
+	err := tx.QueryRowContext(ctx, `SELECT id,kind,COALESCE(started_at,start_dispatched_at,requested_at)
 		FROM browser_operations WHERE identity_id=?
 		  AND (state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR stop_confirmed_at IS NULL)
 		ORDER BY id DESC LIMIT 1`, identityID).Scan(&busy.OperationID, &busy.Kind, &busy.OccupiedAt)
@@ -417,7 +494,7 @@ func (service *RuntimeService) closeRejectedExplorationStart(ctx context.Context
 		admission = false
 	}
 	payload := browserAdmissionPayload(code, nil)
-	conn, err := service.Analyses.DB().Conn(ctx)
+	conn, err := service.writer.Conn(ctx)
 	if err != nil {
 		return
 	}
@@ -551,7 +628,7 @@ func normalizeBrowserExplorationToolResult(table *attempt.ImplementationTable, r
 // parent Tool Call remains the authority for the original request; the child
 // snapshot binds that frozen request to the exact browser identity/profile and
 // catalog facts selected in the same transaction.
-func freezeBrowserExplorationInput(ctx context.Context, conn *sql.Conn, childID, parentAttemptID, toolCallID, operationID, identityID, revisionID, profileID int64, catalogDigest, catalogVersion string, request []byte, now string) error {
+func freezeBrowserExplorationInput(ctx context.Context, tx *execution.Tx, childID, parentAttemptID, toolCallID, operationID, identityID, revisionID, profileID int64, catalogDigest, catalogVersion string, request []byte, now string) error {
 	var parsed json.RawMessage
 	if !json.Valid(request) {
 		return fmt.Errorf("browser request is not JSON")
@@ -577,7 +654,7 @@ func freezeBrowserExplorationInput(ctx context.Context, conn *sql.Conn, childID,
 		return err
 	}
 	digest := sha256.Sum256(canonical)
-	result, err := conn.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
+	result, err := tx.ExecContext(ctx, `INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
 		VALUES(?,?,?,?,?)`, childID, "browser_exploration_v1", "browser_tool_v1", hex.EncodeToString(digest[:]), now)
 	if err != nil {
 		return err
@@ -590,7 +667,7 @@ func freezeBrowserExplorationInput(ctx context.Context, conn *sql.Conn, childID,
 	// immutable lineage reference from its already-dispatched parent snapshot;
 	// the child-specific canonical digest above carries the Tool Call and browser
 	// bindings that make that reference's use unambiguous.
-	result, err = conn.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,
+	result, err = tx.ExecContext(ctx, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,
 		occurrence_id,initial_analysis_id,investigation_message_id,evidence_id,artifact_id,knowledge_version_id,
 		inspection_run_id,inspection_check_result_id,source_material_id,business_system_config_version_id,
 		label_contract_version_id,knowledge_import_batch_id,embedding_generation_id,connection_revision_id)
@@ -622,7 +699,7 @@ func (service *RuntimeService) handleBrowserExplorationTerminalClaim(ctx context
 		return
 	}
 	ack := &runtimev1.BrowserExplorationTerminalClaimAck{OperationId: claim.GetOperationId(), ChildAttemptId: claim.GetChildAttemptId(), ToolCallId: claim.GetToolCallId()}
-	conn, err := service.Analyses.DB().Conn(ctx)
+	conn, err := service.writer.Conn(ctx)
 	if err == nil {
 		defer conn.Close()
 		if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err == nil {
@@ -716,7 +793,7 @@ func (service *RuntimeService) handleBrowserExplorationActionResult(ctx context.
 	if err != nil {
 		return
 	}
-	db := service.Analyses.DB()
+	db := service.writer
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return
@@ -1013,7 +1090,7 @@ func (service *RuntimeService) replayUndeliveredBrowserToolResults(ctx context.C
 	if service.Analyses == nil {
 		return
 	}
-	rows, err := service.Analyses.DB().QueryContext(ctx, `
+	rows, err := service.Analyses.Reader().QueryContext(ctx, `
 		SELECT t.id, child.id, t.status, COALESCE(t.result_json,''), COALESCE(t.error_detail,'')
 		FROM tool_calls t
 		JOIN execution_attempts child ON child.requested_by_tool_call_id=t.id
@@ -1333,7 +1410,7 @@ func (service *RuntimeService) isExplorationOperation(ctx context.Context, opera
 		return false
 	}
 	var count int
-	return service.Analyses.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE id=? AND kind='exploration'`, operationID).Scan(&count) == nil && count == 1
+	return service.Analyses.Reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE id=? AND kind='exploration'`, operationID).Scan(&count) == nil && count == 1
 }
 
 func (service *RuntimeService) explorationCompletionAlreadyCommitted(ctx context.Context, operationID int64, digest []byte) bool {
@@ -1341,7 +1418,7 @@ func (service *RuntimeService) explorationCompletionAlreadyCommitted(ctx context
 		return false
 	}
 	var count int
-	return service.Analyses.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations
+	return service.Analyses.Reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations
 		WHERE id=? AND kind='exploration' AND state IN ('Succeeded','Failed','Cancelled','Interrupted')
 		  AND completion_digest=?`, operationID, digest).Scan(&count) == nil && count == 1
 }
@@ -1394,7 +1471,7 @@ func (service *RuntimeService) handleExplorationCompletion(ctx context.Context, 
 	} else if reason != "artifact_commit_failed" && reason != "runtime_unavailable" {
 		return
 	}
-	conn, err := service.Analyses.DB().Conn(ctx)
+	conn, err := service.writer.Conn(ctx)
 	if err != nil {
 		return
 	}
@@ -1572,6 +1649,20 @@ func terminalErrorCode(reason string) string {
 	return "RuntimeUnavailable"
 }
 
+// errBrowserDispatchNotEligible marks a dispatch pass whose durable state no
+// longer allows promotion (a concurrent transition won the CAS or the child
+// left the Queued state). It is a benign no-op, not a failure: the runner
+// rolls back nothing-to-commit and records nothing, matching the pre-migration
+// silent-return behavior.
+var errBrowserDispatchNotEligible = errors.New("browser exploration dispatch is not eligible")
+
+// dispatchBrowserExplorationAction is the second durable phase. It promotes the
+// queued child under the live Lintel fence and creates the action only after
+// the frozen prerequisites are committed. The promotion runs through the
+// declared browser.exploration_action_dispatch operation (ADR-0006): the
+// runner owns the transaction and the automatic audit row, so the
+// Queued → Assigned → Running promotion and its action ledger entry can never
+// commit without their record.
 func (service *RuntimeService) dispatchBrowserExplorationAction(ctx context.Context, childID int64) error {
 	if service.Analyses == nil || (service.Slots == nil && service.browserExplorationSlotView == nil) {
 		return fmt.Errorf("browser action authority unavailable")
@@ -1586,84 +1677,105 @@ func (service *RuntimeService) dispatchBrowserExplorationAction(ctx context.Cont
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		return qruntime.ErrNotConnected
 	}
-	conn, err := service.Analyses.DB().Conn(ctx)
+	db := service.writer
+	// The dispatch inherits the parent investigation's persisted task scope
+	// (ADR-0006): the machine actor executes on the initiator's behalf under
+	// the attempt's own operation correlation.
+	var parentID int64
+	if err := db.QueryRowContext(ctx, `SELECT parent_attempt_id FROM browser_exploration_child_bindings WHERE child_attempt_id=?`, childID).Scan(&parentID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	authority, err := browserExplorationAuthority(ctx, db, parentID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	_, _, opDispatch := browserExplorationOperations()
+	dispatched, err := execution.Execute(authority, browserExplorationRunner(db), opDispatch, func(tx *execution.Tx) (browserActionDispatch, error) {
+		return service.dispatchBrowserExplorationActionOn(ctx, tx, childID, view)
+	}, func(dispatched browserActionDispatch) int64 { return dispatched.childID })
+	if err != nil {
+		if errors.Is(err, errBrowserDispatchNotEligible) {
+			return nil
+		}
 		return err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
+	digest := sha256.Sum256([]byte(dispatched.actionJSON))
+	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{
+		BootId: view.BootID, ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(childID),
+		Msg: &runtimev1.ControlEnvelope_ExecuteBrowserExplorationAction{ExecuteBrowserExplorationAction: &runtimev1.ExecuteBrowserExplorationAction{
+			OperationId: dispatched.operationID, ChildAttemptId: childID, ParentAttemptId: dispatched.parentID, ToolCallId: dispatched.toolCallID,
+			Input: &runtimev1.BrowserSubExecutionInput{SchemaKind: "browser_tool_v1", CanonicalJson: []byte(dispatched.actionJSON), ContentDigest: digest[:]}}},
+	})
+}
 
-	var operationID, parentID, toolCallID int64
-	var childState, toolState, actionJSON, operationState, parentState string
-	err = conn.QueryRowContext(ctx, `SELECT b.operation_id,b.parent_attempt_id,b.tool_call_id,c.state,t.status,t.arguments_json,o.state,p.state
+// browserActionDispatch carries the durable promotion facts the post-commit
+// control frame needs.
+type browserActionDispatch struct {
+	childID, operationID, parentID, toolCallID int64
+	actionJSON                                 string
+}
+
+// dispatchBrowserExplorationActionOn is the durable promotion inside the
+// runner transaction. Eligibility re-reads the same transaction that commits
+// the promotion; every lost race is the benign not-eligible outcome.
+func (service *RuntimeService) dispatchBrowserExplorationActionOn(ctx context.Context, tx *execution.Tx, childID int64, view qruntime.SlotView) (browserActionDispatch, error) {
+	var dispatched browserActionDispatch
+	var childState, toolState, operationState, parentState string
+	err := tx.QueryRowContext(ctx, `SELECT b.operation_id,b.parent_attempt_id,b.tool_call_id,c.state,t.status,t.arguments_json,o.state,p.state
 		FROM browser_exploration_child_bindings b
 		JOIN execution_attempts c ON c.id=b.child_attempt_id
 		JOIN tool_calls t ON t.id=b.tool_call_id
 		JOIN browser_operations o ON o.id=b.operation_id
-		JOIN execution_attempts p ON p.id=b.parent_attempt_id WHERE b.child_attempt_id=?`, childID).Scan(&operationID, &parentID, &toolCallID, &childState, &toolState, &actionJSON, &operationState, &parentState)
+		JOIN execution_attempts p ON p.id=b.parent_attempt_id WHERE b.child_attempt_id=?`, childID).Scan(&dispatched.operationID, &dispatched.parentID, &dispatched.toolCallID, &childState, &toolState, &dispatched.actionJSON, &operationState, &parentState)
 	if err != nil {
-		return err
+		return dispatched, err
 	}
 	if childState != "Queued" || toolState != "running" || operationState != "Running" || parentState != "Running" {
-		return nil
+		return dispatched, errBrowserDispatchNotEligible
 	}
 	var action struct {
 		Action string `json:"action"`
 		PageID string `json:"pageId"`
 	}
-	if err = json.Unmarshal([]byte(actionJSON), &action); err != nil {
-		return err
+	if err = json.Unmarshal([]byte(dispatched.actionJSON), &action); err != nil {
+		return dispatched, err
 	}
 	now := time.Now().UTC()
 	lease := now.Add(2 * time.Minute).Format(time.RFC3339Nano)
 	// The frozen attempt state machine requires Queued → Assigned → Running.
 	// Assign and accept within this one durable preparation transaction; the
 	// action is still not sent until its audit row has committed.
-	result, err := conn.ExecContext(ctx, `UPDATE execution_attempts
+	result, err := tx.ExecContext(ctx, `UPDATE execution_attempts
 		SET state='Assigned',runtime_slot='lintel',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1
 		WHERE id=? AND state='Queued'`, view.BootID, *view.ConnectionEpoch, lease, view.ReleaseVersion, childID)
 	if err != nil {
-		return err
+		return dispatched, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return nil
+		return dispatched, errBrowserDispatchNotEligible
 	}
-	result, err = conn.ExecContext(ctx, `UPDATE execution_attempts
+	result, err = tx.ExecContext(ctx, `UPDATE execution_attempts
 		SET state='Running',accepted_at=?,row_version=row_version+1
 		WHERE id=? AND state='Assigned'`, now.Format(time.RFC3339Nano), childID)
 	if err != nil {
-		return err
+		return dispatched, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return fmt.Errorf("browser action child %d was not promoted to Running", childID)
+		return dispatched, fmt.Errorf("browser action child %d was not promoted to Running", childID)
 	}
 	var actionSeq int64
-	if err = conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(action_seq),0)+1 FROM browser_exploration_actions WHERE operation_id=?`, operationID).Scan(&actionSeq); err != nil {
-		return err
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(action_seq),0)+1 FROM browser_exploration_actions WHERE operation_id=?`, dispatched.operationID).Scan(&actionSeq); err != nil {
+		return dispatched, err
 	}
-	if _, err = conn.ExecContext(ctx, `INSERT INTO browser_exploration_actions(operation_id,action_seq,child_attempt_id,tool_call_id,action_kind,page_id,target_description,started_at)
-		VALUES(?,?,?,?,?,?,?,?)`, operationID, actionSeq, childID, toolCallID, action.Action, nullableText(action.PageID), action.Action, now.Format(time.RFC3339Nano)); err != nil {
-		return err
+	if _, err = tx.ExecContext(ctx, `INSERT INTO browser_exploration_actions(operation_id,action_seq,child_attempt_id,tool_call_id,action_kind,page_id,target_description,started_at)
+		VALUES(?,?,?,?,?,?,?,?)`, dispatched.operationID, actionSeq, childID, dispatched.toolCallID, action.Action, nullableText(action.PageID), action.Action, now.Format(time.RFC3339Nano)); err != nil {
+		return dispatched, err
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	digest := sha256.Sum256([]byte(actionJSON))
-	return service.sendEnvelope(qruntime.SlotLintel, &runtimev1.ControlEnvelope{
-		BootId: view.BootID, ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(childID),
-		Msg: &runtimev1.ControlEnvelope_ExecuteBrowserExplorationAction{ExecuteBrowserExplorationAction: &runtimev1.ExecuteBrowserExplorationAction{
-			OperationId: operationID, ChildAttemptId: childID, ParentAttemptId: parentID, ToolCallId: toolCallID,
-			Input: &runtimev1.BrowserSubExecutionInput{SchemaKind: "browser_tool_v1", CanonicalJson: []byte(actionJSON), ContentDigest: digest[:]}}},
-	})
+	dispatched.childID = childID
+	return dispatched, nil
 }
 
 // handleBrowserToolResultDeliveryAck deliberately has no process-local cleanup.
@@ -1684,7 +1796,7 @@ func (service *RuntimeService) replayBrowserExplorationChild(ctx context.Context
 	}
 	var operationID, parentID, toolID int64
 	var actionJSON, state, operationState string
-	err = service.Analyses.DB().QueryRowContext(ctx, `SELECT b.operation_id,b.parent_attempt_id,b.tool_call_id,t.arguments_json,c.state,o.state
+	err = service.Analyses.Reader().QueryRowContext(ctx, `SELECT b.operation_id,b.parent_attempt_id,b.tool_call_id,t.arguments_json,c.state,o.state
 		FROM browser_exploration_child_bindings b
 		JOIN execution_attempts c ON c.id=b.child_attempt_id
 		JOIN tool_calls t ON t.id=b.tool_call_id
@@ -1700,7 +1812,7 @@ func (service *RuntimeService) replayBrowserExplorationChild(ctx context.Context
 		return nil
 	}
 	var exists int
-	if err := service.Analyses.DB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM browser_exploration_actions WHERE child_attempt_id=? AND outcome IS NULL)`, childID).Scan(&exists); err != nil || exists != 1 {
+	if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM browser_exploration_actions WHERE child_attempt_id=? AND outcome IS NULL)`, childID).Scan(&exists); err != nil || exists != 1 {
 		return err
 	}
 	digest := sha256.Sum256([]byte(actionJSON))

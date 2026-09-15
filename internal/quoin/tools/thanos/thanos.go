@@ -23,6 +23,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Frozen tool identity (byte-pinned with the worker-side catalog and the
@@ -71,7 +72,7 @@ type frozenSource struct {
 
 // frozenDeclarationSourceItems loads the attempt's frozen source items of
 // one role, joined to their stable connection names.
-func frozenDeclarationSourceItems(ctx context.Context, conn *sql.Conn, attemptID int64, itemRole string) ([]frozenSource, error) {
+func frozenDeclarationSourceItems(ctx context.Context, conn execution.Executor, attemptID int64, itemRole string) ([]frozenSource, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT c.id, item.connection_revision_id, c.name
 		FROM attempt_input_snapshots snapshot
@@ -112,7 +113,7 @@ func namesOf(sources []frozenSource) string {
 // currentConnectionPair re-reads the connection's current binding and root
 // state inside the caller's transaction. enabled=false reports an admin
 // disable/revalidation without an error so callers can preflight.
-func currentConnectionPair(ctx context.Context, conn *sql.Conn, connectionID int64) (revisionID, generationID int64, enabled bool, err error) {
+func currentConnectionPair(ctx context.Context, conn execution.Executor, connectionID int64) (revisionID, generationID int64, enabled bool, err error) {
 	var (
 		revalidation int
 		bindingRev   int64
@@ -144,7 +145,7 @@ func currentConnectionPair(ctx context.Context, conn *sql.Conn, connectionID int
 // per attempt and connection authorizes every identical call, while each
 // Tool Call keeps its own auditable association row. businessSystemID=0
 // marks a source-level grant (NULL in the schema).
-func freezeSourceExecution(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, executionArgs any, source frozenSource, generationID, frozenRevisionID, businessSystemID int64) (attempt.ToolGrant, error) {
+func freezeSourceExecution(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, executionArgs any, source frozenSource, generationID, frozenRevisionID, businessSystemID int64) (attempt.ToolGrant, error) {
 	canonical, err := json.Marshal(executionArgs)
 	if err != nil {
 		return attempt.ToolGrant{}, err
@@ -195,7 +196,7 @@ func freezeSourceExecution(ctx context.Context, conn *sql.Conn, attemptID, toolC
 // The model names the source explicitly (sourceRef) whenever the frozen
 // list is ambiguous; zero or several candidates without a name is a
 // recoverable preflight result, never a silent first-pick.
-func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
+func ResolveQueryGrant(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	var resourceRef, sourceRef, query sql.NullString
 	if err := conn.QueryRowContext(ctx, `
 		SELECT json_extract(arguments_json, '$.resourceRef'),
@@ -220,7 +221,7 @@ func ResolveQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallI
 // resolveSourceQueryGrant authorizes the only thanos_query path: the
 // admin-enabled integrations frozen as metrics_source items are the
 // read-only scope.
-func resolveSourceQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, sourceRef, query string) (attempt.ToolResolution, error) {
+func resolveSourceQueryGrant(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, sourceRef, query string) (attempt.ToolResolution, error) {
 	sources, err := frozenDeclarationSourceItems(ctx, conn, attemptID, "metrics_source")
 	if err != nil {
 		return attempt.ToolResolution{}, err
@@ -273,7 +274,10 @@ func resolveSourceQueryGrant(ctx context.Context, conn *sql.Conn, attemptID, too
 // connection for a deterministic Config Verification or Inspection attempt.
 // The declaration locator is mandatory: historical attempts retain their
 // already-created immutable grants rather than re-resolving a global default.
-func ResolveConfigGrantForConnection(ctx context.Context, conn *sql.Conn, attemptID, requiredConnectionID int64) (attempt.ToolGrant, error) {
+// conn is the execution.Executor surface, so grant freezing composes both
+// inside plain caller connections and inside the shared execution runner's
+// guarded transaction (ADR-0006).
+func ResolveConfigGrantForConnection(ctx context.Context, conn execution.Executor, attemptID, requiredConnectionID int64) (attempt.ToolGrant, error) {
 	var connectionID, revisionID, generationID, bindingRevision, rootBinding int64
 	if err := conn.QueryRowContext(ctx, `
 		SELECT c.id, c.current_revision_id, c.current_credential_generation_id,
@@ -308,7 +312,7 @@ func ResolveConfigGrantForConnection(ctx context.Context, conn *sql.Conn, attemp
 // ValidateConfigGrantForExecution re-checks the frozen config execution
 // grant just before the supervisor starts the query. A connection disable,
 // rotation or root-key rebind committed first wins the race.
-func ValidateConfigGrantForExecution(ctx context.Context, conn *sql.Conn, attemptID int64) error {
+func ValidateConfigGrantForExecution(ctx context.Context, conn execution.Executor, attemptID int64) error {
 	var grantRevisionID, grantGenerationID, enabled, revalidation, bindingRevision, rootBinding int64
 	var currentRevisionID, currentGenID sql.NullInt64
 	err := conn.QueryRowContext(ctx, `
@@ -338,7 +342,7 @@ func ValidateConfigGrantForExecution(ctx context.Context, conn *sql.Conn, attemp
 // thanos_query tool call may begin executing (DATA-CONN-002: the execution
 // authorization transaction re-reads the connection state; a disable,
 // rotation or root rebind committed first refuses execution).
-func ValidateGrantForExecution(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64) error {
+func ValidateGrantForExecution(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64) error {
 	var (
 		grantRevisionID, grantGenerationID int64
 		enabled, revalidation              int

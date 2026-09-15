@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
 )
 
@@ -48,19 +49,46 @@ const (
 	detailBackupDone    = "backup_verified"
 )
 
+type projectionExecutor = execution.Executor
+
 var (
 	ErrConflict      = maintenance.ErrConflict
 	ErrCommandReused = maintenance.ErrCommandReused
 )
 
-// Service owns the prepare command and checklist projection.
+// Service owns the prepare command and checklist projection. Prepare runs
+// through the shared execution runner: the verified admin session authorizes
+// in-transaction, the ledger row (with its correlation) and the audit event
+// are recorded automatically in the same transaction.
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	runner  *execution.Runner
+	prepare *execution.Operation
+	now     func() time.Time
 }
 
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	service := &Service{now: time.Now}
+	service.runner = execution.NewRunner(db, execution.NewRegistry(), nil)
+	registered, err := service.runner.Register(execution.Operation{
+		Name:       commandPrepare,
+		Class:      execution.ClassWrite,
+		ObjectType: "maintenance",
+		// Prepare is a user command: the shared in-transaction verification
+		// re-checks the session proof reference (unrevoked, unexpired, current
+		// revision, initialized, no pending password change, admin role).
+		Authorize: func(ctx context.Context, tx *execution.Tx) error {
+			return auth.VerifyExecutionSession(ctx, tx, "admin")
+		},
+	})
+	if err != nil {
+		panic(fmt.Sprintf("upgrade: register %s: %v", commandPrepare, err))
+	}
+	service.prepare = registered
+	return service
+}
+
+func (service *Service) SetReader(reader execution.Reader) error {
+	return service.runner.SetReader(reader)
 }
 
 // SetClock is the process-boundary seam for deterministic tests.
@@ -89,74 +117,67 @@ func (service *Service) Prepare(ctx context.Context, request PrepareRequest) (ma
 		return maintenance.State{}, fmt.Errorf("%w: required request field", ErrConflict)
 	}
 	digest := auth.DigestCommand(commandPrepare, map[string]any{"expectedReason": Reason, "expectedRowVersion": request.ExpectedRowVersion})
-	conn, err := service.db.Conn(ctx)
+	outcome, err := execution.Run(ctx, service.runner, service.prepare, execution.Command{
+		PrincipalType:   string(execution.PrincipalUser),
+		PrincipalID:     request.ActorID,
+		ClientCommandID: request.ClientCommandID,
+		Digest:          digest,
+	}, func(tx *execution.Tx) (maintenance.State, execution.Change, error) {
+		return service.prepareOn(ctx, tx, request)
+	}, func(state maintenance.State) int64 { return state.RowVersion })
 	if err != nil {
-		return maintenance.State{}, err
+		return maintenance.State{}, maintenance.MapRejectionConflict(err)
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return maintenance.State{}, err
+	// Legacy ledger rows (pre-runner releases) carry only their compact
+	// {"reason":"Upgrade"} payload: the state projection decodes with row
+	// version zero. The old replay contract returns the live projection —
+	// preserve it.
+	if outcome.Replayed && outcome.Result.RowVersion == 0 {
+		return maintenance.StateOn(ctx, service.runner.Reader())
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	if prior, found, err := auth.LookupCommandOn(ctx, conn, request.ActorID, request.ClientCommandID); err != nil {
-		return maintenance.State{}, err
-	} else if found {
-		if prior.CommandType != commandPrepare || prior.RequestDigest != digest {
-			return maintenance.State{}, ErrCommandReused
-		}
-		if prior.Outcome == auth.OutcomeCommitted {
-			return maintenance.StateOn(ctx, conn)
-		}
-		return maintenance.State{}, ErrConflict
-	}
-	var enabled int
-	var role string
-	if err := conn.QueryRowContext(ctx, `SELECT enabled,role FROM users WHERE id=?`, request.ActorID).Scan(&enabled, &role); err != nil || enabled != 1 || role != "admin" {
-		return maintenance.State{}, ErrConflict
-	}
+	return outcome.Result, nil
+}
+
+// prepareOn is the business stage inside the runner-owned transaction. The
+// caller's identity and admin role were already verified in-transaction by
+// the operation's Authorize callback, so the duplicate user check is gone.
+func (service *Service) prepareOn(ctx context.Context, tx *execution.Tx, request PrepareRequest) (maintenance.State, execution.Change, error) {
 	var active int
 	var reason string
 	var current int64
-	if err := conn.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &current); err != nil {
-		return maintenance.State{}, err
+	if err := tx.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &current); err != nil {
+		return maintenance.State{}, execution.Changed, err
 	}
 	if active == 1 && reason != Reason {
-		return maintenance.State{}, ErrConflict
+		return maintenance.State{}, execution.Changed, maintenance.ConflictRejection(fmt.Sprintf("maintenance %q is active", reason))
 	}
 	if current != request.ExpectedRowVersion {
-		return maintenance.State{}, ErrConflict
+		return maintenance.State{}, execution.Changed, maintenance.ConflictRejection("upgrade maintenance window moved")
 	}
-	now := service.timestamp()
-	revision := current
 	if active == 0 {
-		revision = current + 1
-		result, err := conn.ExecContext(ctx, `UPDATE maintenance_state SET active=1,reason=?,entered_at=?,entered_by_type='user',entered_by_id=?,exited_at=NULL,exited_by_type=NULL,exited_by_id=NULL,row_version=row_version+1 WHERE id=1 AND active=0 AND row_version=?`, Reason, now, request.ActorID, current)
+		now := service.timestamp()
+		revision := current + 1
+		result, err := tx.ExecContext(ctx, `UPDATE maintenance_state SET active=1,reason=?,entered_at=?,entered_by_type='user',entered_by_id=?,exited_at=NULL,exited_by_type=NULL,exited_by_id=NULL,row_version=row_version+1 WHERE id=1 AND active=0 AND row_version=?`, Reason, now, request.ActorID, current)
 		if err != nil {
-			return maintenance.State{}, err
+			return maintenance.State{}, execution.Changed, err
 		}
 		if affected, _ := result.RowsAffected(); affected != 1 {
-			return maintenance.State{}, ErrConflict
+			return maintenance.State{}, execution.Changed, maintenance.ConflictRejection("upgrade maintenance window moved during entry")
 		}
-		if err := projectChecklist(ctx, conn, revision, now); err != nil {
-			return maintenance.State{}, err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO audit_events(actor_type,actor_id,action,client_command_id,outcome,domain_ref_type,domain_ref_id,created_at) VALUES('user',?,'maintenance.upgrade.prepare',?,'success','maintenance',?,?)`, request.ActorID, request.ClientCommandID, revision, now); err != nil {
-			return maintenance.State{}, err
+		if err := projectChecklist(ctx, tx, revision, now); err != nil {
+			return maintenance.State{}, execution.Changed, err
 		}
 	}
-	if err := auth.RecordCommand(ctx, conn, request.ActorID, request.ClientCommandID, commandPrepare, digest, auth.OutcomeCommitted, "maintenance", revision, `{"reason":"Upgrade"}`); err != nil {
-		return maintenance.State{}, err
+	state, err := maintenance.StateOn(ctx, tx)
+	if err != nil {
+		return maintenance.State{}, execution.Changed, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return maintenance.State{}, err
+	if active == 0 {
+		return state, execution.Changed, nil
 	}
-	committed = true
-	return maintenance.StateOn(ctx, conn)
+	// Continuing an already-active window changes nothing; the runner still
+	// records the continuation with its unified unchanged classification.
+	return state, execution.Unchanged, nil
 }
 
 // The active-work state sets are frozen by the SQL predicates below:
@@ -170,7 +191,7 @@ func (service *Service) Prepare(ctx context.Context, request PrepareRequest) (ma
 // active attempt, one per active browser operation, plus the always-present
 // pre-upgrade backup preflight. Existing rows are never downgraded from Safe
 // (attempt and operation lifecycles are forward-only).
-func projectChecklist(ctx context.Context, conn *sql.Conn, revision int64, now string) error {
+func projectChecklist(ctx context.Context, conn projectionExecutor, revision int64, now string) error {
 	if _, err := conn.ExecContext(ctx, `INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(maintenance_revision,kind,object_key) DO NOTHING`, revision, kindBackup, backupObjectKey, "Blocking", detailBackupPending, now); err != nil {
 		return err
 	}
@@ -184,10 +205,10 @@ func projectChecklist(ctx context.Context, conn *sql.Conn, revision int64, now s
 		return err
 	}
 	type activeAttempt struct {
-		id                            int64
-		scopeType, state              string
-		scopeID                       int64
-		parent                        sql.NullInt64
+		id               int64
+		scopeType, state string
+		scopeID          int64
+		parent           sql.NullInt64
 	}
 	attempts := []activeAttempt{}
 	for rows.Next() {
@@ -218,9 +239,9 @@ func projectChecklist(ctx context.Context, conn *sql.Conn, revision int64, now s
 		return err
 	}
 	type activeOperation struct {
-		id                     int64
-		kind, state            string
-		owner                  sql.NullInt64
+		id          int64
+		kind, state string
+		owner       sql.NullInt64
 	}
 	operations := []activeOperation{}
 	for operationRows.Next() {

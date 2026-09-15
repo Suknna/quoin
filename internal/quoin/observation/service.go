@@ -41,7 +41,9 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Frozen wire identities of the source observation execution protocol. The
@@ -59,6 +61,27 @@ const (
 	// DefaultIntervalSeconds is the durable schedule cadence for automatic
 	// observation (minimum boundary owned here, not by the coordinator).
 	DefaultIntervalSeconds = 300
+
+	// operationStart is the audited admission mutation (manual administrator
+	// refresh, scheduler tick or enablement kick). The command ledger owns
+	// replay for it.
+	operationStart = "observation.source.start"
+	// operationResult commits one supervisor result proposal; the Run
+	// convergence it performs inside the same transaction may also emit the
+	// run's terminal audit record (actionRunComplete / actionRunFail).
+	operationResult = "observation.source.result"
+	// operationConverge terminates one permanently unexecutable child.
+	operationConverge = "observation.source.converge"
+	// operationCancel reconciles runs whose connection lost observability.
+	operationCancel = "observation.source.cancel"
+	// actionRunComplete / actionRunFail are the run terminal audit actions
+	// written once per actual state transition — the central high-volume
+	// exception of this domain: per-resource telemetry upserts are never
+	// audited row by row, the run lifecycle carries the audit trail.
+	actionRunComplete = "observation.run.complete"
+	actionRunFail     = "observation.run.fail"
+
+	objectTypeObservationRun = "observation_run"
 )
 
 // ErrNotFound reports a missing connection, run or observed resource.
@@ -80,6 +103,14 @@ var ErrMaintenanceActive = errors.New("source observation admission is blocked b
 // the deployment-resolved enablement set are mandatory wiring: without an
 // explicit enabled discovery catalog nothing is admitted, so a deployment can
 // never silently observe more than its YAML selected.
+//
+// Every lifecycle mutation runs through the shared execution runner: the
+// manual refresh is an administrator session mutation
+// (auth.VerifyExecutionSession), scheduled ticks and runtime result commits
+// carry explicit system metadata, and each accepted/completed/failed run
+// transition is audited automatically in the same transaction. Per-resource
+// telemetry upserts are deliberately not audited row by row — the run
+// lifecycle record is the domain's central audit exception.
 type Service struct {
 	db  *sql.DB
 	now func() time.Time
@@ -89,19 +120,134 @@ type Service struct {
 	// enabled is the deployment-resolved enablement set (registry
 	// ResolveEnabled output), frozen at process construction.
 	enabled []string
+	// runner owns every write transaction; business code never commits. Pure
+	// reads go through runner.Reader(): fail-closed until the composition
+	// layer wires a real read-only pool — never a fallback to the writer.
+	runner *execution.Runner
+	audit  *audit.Writer
+	// startOp/resultOp/convergeOp/cancelOp are the registered write
+	// operations; an undeclared mutation cannot execute.
+	startOp    *execution.Operation
+	resultOp   *execution.Operation
+	convergeOp *execution.Operation
+	cancelOp   *execution.Operation
 }
 
 // NewService constructs the production service. registry and enabled must be
 // non-nil/non-empty from the boot wiring; admission fails closed without them.
 func NewService(db *sql.DB, registry *plugins.Registry, enabled []string) *Service {
-	return &Service{db: db, now: time.Now, registry: registry, enabled: enabled}
+	service := &Service{
+		db: db, now: time.Now, registry: registry, enabled: enabled,
+		audit: audit.NewWriter(),
+	}
+	service.runner = execution.NewRunner(db, nil, service.audit)
+	service.registerOperations()
+	return service
+}
+
+// registerOperations declares every lifecycle mutation. Registration failures
+// are declaration conflicts — programming errors that surface at startup.
+func (service *Service) registerOperations() {
+	register := func(op execution.Operation) *execution.Operation {
+		declared, err := service.runner.Register(op)
+		if err != nil {
+			panic("observation: register " + op.Name + ": " + err.Error())
+		}
+		return declared
+	}
+	service.startOp = register(execution.Operation{Name: operationStart, Class: execution.ClassWrite, ObjectType: objectTypeObservationRun, Authorize: authorizeObservationStart})
+	service.resultOp = register(execution.Operation{Name: operationResult, Class: execution.ClassWrite, ObjectType: objectTypeObservationRun, Authorize: requireObservationSystem})
+	service.convergeOp = register(execution.Operation{Name: operationConverge, Class: execution.ClassWrite, ObjectType: objectTypeObservationRun, Authorize: requireObservationSystem})
+	service.cancelOp = register(execution.Operation{Name: operationCancel, Class: execution.ClassWrite, ObjectType: objectTypeObservationRun, Authorize: requireObservationSystem})
+}
+
+// SetReader installs the composition layer's real read-only query surface
+// (execution.OpenReadOnly / Database.Reader). Validation and ownership live
+// in the runner: it probes PRAGMA query_only and refuses the writable pool,
+// so a wiring gap fails closed instead of silently reading (and contending)
+// on the writer.
+func (service *Service) SetReader(reader audit.Reader) error {
+	if err := service.runner.SetReader(reader); err != nil {
+		return fmt.Errorf("observation: install read-only reader: %w", err)
+	}
+	return nil
+}
+
+// authorizeObservationStart admits the two legitimate origins of a run: the
+// administrator's verified session (manual refresh) and the system principal
+// (scheduler tick, enablement kick). Anything else — in particular a user
+// session without the admin role or an unverified context — fails closed;
+// there is no fallback that could fake either identity.
+func authorizeObservationStart(ctx context.Context, tx *execution.Tx) error {
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	switch meta.Actor.Kind {
+	case execution.PrincipalUser:
+		return auth.VerifyExecutionSession(ctx, tx, "admin")
+	case execution.PrincipalSystem:
+		return verifySystemOrigin(meta)
+	default:
+		return errors.New("observation: run admission requires an administrator session or the system scheduler")
+	}
+}
+
+// requireObservationSystem confines result adjudication and reconciliation to
+// the system principal arriving through a trusted background source.
+func requireObservationSystem(ctx context.Context, _ *execution.Tx) error {
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	if meta.Actor.Kind != execution.PrincipalSystem {
+		return errors.New("observation: lifecycle operation requires the system principal")
+	}
+	return verifySystemOrigin(meta)
+}
+
+func verifySystemOrigin(meta execution.Metadata) error {
+	if meta.Actor.ID != 0 {
+		return errors.New("observation: the system principal uses id 0")
+	}
+	if meta.Source.Kind == execution.SourceHTTP {
+		return errors.New("observation: lifecycle operations cannot arrive from the http channel")
+	}
+	return nil
+}
+
+// ensureSystemScope attaches the explicit system metadata for a scheduled or
+// runtime-originated mutation when the caller did not bring one. An existing
+// metadata scope is reused as-is: a scheduler pass shares one correlation
+// across its ticks, and a caller-provided scope is never rewritten.
+func ensureSystemScope(ctx context.Context, source execution.SourceKind) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	correlation, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, fmt.Errorf("observation: create correlation id: %w", err)
+	}
+	system := execution.Principal{Kind: execution.PrincipalSystem, ID: 0}
+	scoped, err := execution.ReplaceMetadata(ctx, execution.Metadata{
+		CorrelationID: correlation,
+		Actor:         system,
+		Initiator:     system,
+		Source:        execution.Source{Kind: source},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("observation: restore system metadata: %w", err)
+	}
+	return scoped, nil
 }
 
 // UseClock pins the clock for deterministic tests.
 func (service *Service) UseClock(now func() time.Time) { service.now = now }
 
 // DB exposes the shared database for the app runtime slice wiring.
-func (service *Service) DB() *sql.DB { return service.db }
+// Reader serves the app layer's read-only routing queries through the
+// injected bootstrap read-only pool; unwired it fails closed.
+func (service *Service) Reader() audit.Reader { return service.runner.Reader() }
 
 func (service *Service) nowText() string { return service.now().UTC().Format(time.RFC3339Nano) }
 
@@ -284,7 +430,7 @@ func DecodeIdentityKey(identityKey string) map[string]string {
 // admissionFence blocks admission inside any maintenance revision. An absent
 // singleton row means normal operation (older databases materialize their row
 // only when upgrade work begins).
-func admissionFence(ctx context.Context, conn *sql.Conn) error {
+func admissionFence(ctx context.Context, conn audit.Reader) error {
 	var maintenanceActive int
 	if err := conn.QueryRowContext(ctx, `SELECT COALESCE((SELECT active FROM maintenance_state WHERE id=1),0)`).Scan(&maintenanceActive); err != nil {
 		return fmt.Errorf("read observation maintenance fence: %w", err)

@@ -5,13 +5,14 @@ package inspection
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // TestNoBusinessRunReport walks the full plan-run slice without any business
@@ -25,33 +26,26 @@ func TestNoBusinessRunReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
-	ctx := context.Background()
+	ctx := commandContext(t)
 
 	// 接入启用事务内幂等创建默认基础计划；重复启用返回同一行。
-	conn, err := h.db.Conn(ctx)
-	if err != nil {
+	// The default-plan creation now runs through the shared execution
+	// runner: the guarded transaction replaces the fixture's manual
+	// BEGIN/COMMIT and each call records its automatic audit row (the
+	// idempotent second call records nothing new).
+	if err = h.service.EnsureDefaultPlan(ctx, 1, "fixture-metrics"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	if err = h.service.EnsureDefaultPlanOn(ctx, conn, 1, "fixture-metrics"); err != nil {
-		t.Fatal(err)
-	}
-	if err = h.service.EnsureDefaultPlanOn(ctx, conn, 1, "fixture-metrics"); err != nil {
+	if err = h.service.EnsureDefaultPlan(ctx, 1, "fixture-metrics"); err != nil {
 		t.Fatal(err)
 	}
 	var defaultCount int
-	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, "basic-fixture-metrics").Scan(&defaultCount); err != nil {
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_plans WHERE plan_key=?`, "basic-fixture-metrics").Scan(&defaultCount); err != nil {
 		t.Fatal(err)
 	}
 	if defaultCount != 1 {
 		t.Fatalf("default plan rows = %d, want exactly 1", defaultCount)
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		t.Fatal(err)
-	}
-	conn.Close()
 
 	// 人工 Run：默认计划即点即用，无需任何业务声明。
 	detail, err := h.service.CreatePlanRun(ctx, h.principal, "slice-run-0001", "basic-fixture-metrics")
@@ -81,7 +75,7 @@ func TestNoBusinessRunReport(t *testing.T) {
 		t.Fatalf("frozen source provenance items = %d, want 1", revisionCount)
 	}
 	h.dispatchPromQL(t, attemptID)
-	if err = h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
+	if err = h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	final, err := h.service.GetRun(ctx, detail.RunID)
@@ -106,7 +100,7 @@ func TestNoBusinessRunReport(t *testing.T) {
 	if len(evidenceIDs) != 1 || len(artifactIDs) != 1 {
 		t.Fatalf("slice evidence=%v artifacts=%v", evidenceIDs, artifactIDs)
 	}
-	if err = h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "无业务报告", evidenceIDs, artifactIDs, promptDigest)); err != nil {
+	if err = h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "无业务报告", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
 	report, err := h.service.GetReport(ctx, detail.RunID, 1)
@@ -131,7 +125,7 @@ func TestNoBusinessRunReport(t *testing.T) {
 // commits as a typed gap without fabricating evidence.
 func TestRangePlanRunSettlesOnFailureAndPartial(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := "2026-09-13T00:00:00Z"
 	params, _ := json.Marshal(map[string]any{"expression": "up", "rangeSeconds": 300, "stepSeconds": 60})
 	scope, _ := json.Marshal(map[string]any{"kind": "integration"})
@@ -152,10 +146,10 @@ func TestRangePlanRunSettlesOnFailureAndPartial(t *testing.T) {
 		"schemaKind": "inspection_plugin_result_v1", "attemptId": attemptID, "inspectionRunId": detail.RunID,
 		"checkKey": "promql_range", "outcome": "error", "observedAt": "2026-09-13T00:00:01Z",
 		"executionWindow": map[string]any{"startAt": "2026-09-12T23:55:00Z", "endAt": "2026-09-13T00:00:00Z", "stepSeconds": 60},
-		"result": nil, "warnings": []string{}, "errors": []string{"upstream timeout"}, "gapReason": "query_failed",
+		"result":          nil, "warnings": []string{}, "errors": []string{"upstream timeout"}, "gapReason": "query_failed",
 	}
 	body, _ := json.Marshal(failed)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, body); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, body); err != nil {
 		t.Fatalf("failed range proposal must settle: %v", err)
 	}
 	var status, gap string
@@ -191,10 +185,10 @@ func TestRangePlanRunSettlesOnFailureAndPartial(t *testing.T) {
 		"schemaKind": "inspection_plugin_result_v1", "attemptId": attemptID2, "inspectionRunId": detail2.RunID,
 		"checkKey": "promql_range", "outcome": "gap", "observedAt": "2026-09-13T00:00:01Z",
 		"executionWindow": nil,
-		"result": nil, "warnings": []string{"collection truncated"}, "errors": []string{}, "gapReason": "partial_response",
+		"result":          nil, "warnings": []string{"collection truncated"}, "errors": []string{}, "gapReason": "partial_response",
 	}
 	body2, _ := json.Marshal(partial)
-	if err := h.service.CommitPluginProposal(ctx, attemptID2, "plinth-boot", 1, body2); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID2, "plinth-boot", 1, body2); err != nil {
 		t.Fatalf("partial range proposal must settle: %v", err)
 	}
 	final2, err := h.service.GetRun(ctx, detail2.RunID)
@@ -219,23 +213,13 @@ func TestPlanRunAnalysisDispatchRealChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
-	ctx := context.Background()
+	ctx := commandContext(t)
 
-	// 真实链路从接入启用事务开始：默认基础计划由此产生。
-	conn, err := h.db.Conn(ctx)
-	if err != nil {
+	// 真实链路从接入启用事务开始：默认基础计划由此产生。独立直连入口
+	// EnsureDefaultPlan 走同一执行器，自动审计随命令原子落账。
+	if err := h.service.EnsureDefaultPlan(ctx, 1, "fixture-metrics"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	if err = h.service.EnsureDefaultPlanOn(ctx, conn, 1, "fixture-metrics"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		t.Fatal(err)
-	}
-	conn.Close()
 
 	detail, err := h.service.CreatePlanRun(ctx, h.principal, "chain-run-0001", "basic-fixture-metrics")
 	if err != nil {
@@ -248,7 +232,7 @@ func TestPlanRunAnalysisDispatchRealChain(t *testing.T) {
 		t.Fatalf("collection dispatch rebuild: %v", err)
 	}
 	h.dispatchPromQL(t, collectAttemptID)
-	if err = h.service.CommitPluginProposal(ctx, collectAttemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, collectAttemptID, detail.RunID, "success")); err != nil {
+	if err = h.service.CommitPluginProposal(context.Background(), collectAttemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, collectAttemptID, detail.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	analysisID := h.analysisAttemptID(t, detail.RunID)
@@ -300,7 +284,7 @@ func TestPlanRunAnalysisDispatchRealChain(t *testing.T) {
 	callID := h.seedSucceededModelCall(t, analysisID, promptDigest)
 	evidenceIDs := evidenceIDsForRun(t, h, detail.RunID)
 	artifactIDs := artifactIDsForAttempt(t, h, analysisID)
-	if err = h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "链路报告", evidenceIDs, artifactIDs, promptDigest)); err != nil {
+	if err = h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "链路报告", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.service.GetReport(ctx, detail.RunID, 1); err != nil {
@@ -315,7 +299,7 @@ func TestPlanRunAnalysisDispatchRealChain(t *testing.T) {
 // assertions are on the frozen inputs alone.
 func TestPlanRunScopeFreezeRoundtrip(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := "2026-09-13T00:00:00Z"
 	for _, statement := range []string{
 		"INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,row_version,created_by,created_at,updated_at) VALUES('mall-mysql-view','商城 MySQL','desc',1,'{\"env\":\"prod\",\"service\":\"mysql\"}',1,1,'" + now + "','" + now + "')",
@@ -397,7 +381,7 @@ func TestPlanRunScopeFreezeRoundtrip(t *testing.T) {
 // rejections with no Run created.
 func TestPlanRunScopeFailsClosed(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := "2026-09-13T00:00:00Z"
 	for _, statement := range []string{
 		"INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,row_version,created_by,created_at,updated_at) VALUES('empty-view','空条件','desc',1,'{}',1,1,'" + now + "','" + now + "')",
@@ -424,17 +408,24 @@ func TestPlanRunScopeFailsClosed(t *testing.T) {
 		}
 	}
 	// 未知范围类型是数据库 CHECK 之下的纵深防御：直接驱动 expander 验证
-	// fail closed，绝不当 integration 处理。
-	conn, err := h.db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
+	// fail closed，绝不当 integration 处理。探针在执行器事务内运行——与
+	// 生产调用方完全同一受守卫通道，不使用裸连接。
+	probe, regErr := h.service.runner.Register(execution.Operation{
+		Name: "inspection_plan.scope_probe_test", Class: execution.ClassWrite,
+		ObjectType: ObjectInspectionRun,
+		Authorize:  authorizeInspectionAdmin,
+	})
+	if regErr != nil {
+		t.Fatal(regErr)
 	}
-	if _, _, _, probeErr := h.service.expandPlanScope(ctx, conn, 1, "mystery", `{"kind":"mystery"}`); probeErr == nil {
-		conn.Close()
+	if _, probeErr := execution.Execute(ctx, h.service.runner, probe,
+		func(tx *execution.Tx) (struct{}, error) {
+			return struct{}{}, sProbe(h.service, ctx, tx, 1, `{"kind":"mystery"}`)
+		},
+		func(struct{}) int64 { return 0 }); probeErr == nil {
 		t.Fatal("unknown scope kind must fail closed")
 	} else {
-		conn.Close()
-		var rejection *RejectionError
+		var rejection *execution.Rejection
 		if !errors.As(probeErr, &rejection) || rejection.Code != "malformed_scope" {
 			t.Fatalf("unknown kind error = %v, want malformed_scope", probeErr)
 		}
@@ -454,7 +445,7 @@ func TestPlanRunScopeFailsClosed(t *testing.T) {
 // connection with stale labels.
 func TestPlanRunRevalidatesViewConnectionAtCreation(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := "2026-09-13T00:00:00Z"
 	seedAlternateMetricsConnection(t, h.db)
 	for _, statement := range []string{
@@ -493,7 +484,7 @@ func TestPlanRunRevalidatesViewConnectionAtCreation(t *testing.T) {
 // conditions — never re-reading the modified view.
 func TestRerunPreservesOriginalViewConditionsThroughRealDispatch(t *testing.T) {
 	h := newTestHarness(t)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	now := "2026-09-13T00:00:00Z"
 	if _, err := h.db.Exec(`INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,row_version,created_by,created_at,updated_at) VALUES('mall-mysql-view','商城 MySQL','desc',1,'{"service":"mysql"}',1,1,'` + now + "','" + now + "')"); err != nil {
 		t.Fatal(err)
@@ -551,4 +542,10 @@ func TestRerunPreservesOriginalViewConditionsThroughRealDispatch(t *testing.T) {
 		t.Fatal("rerun must never read the modified view")
 	}
 	_ = sourceParsed
+}
+
+// sProbe adapts expandPlanScope to the runner's Execute callback shape.
+func sProbe(service *Service, ctx context.Context, tx *execution.Tx, connectionID int64, scopeJSON string) error {
+	_, _, _, err := service.expandPlanScope(ctx, tx, connectionID, "mystery", scopeJSON)
+	return err
 }

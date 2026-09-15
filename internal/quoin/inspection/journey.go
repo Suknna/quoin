@@ -11,9 +11,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // JourneyCore is wired by the app package to the shared frozen journey
@@ -25,24 +28,23 @@ type JourneyCore func(ctx context.Context, attemptID int64, bootID string, epoch
 // browser child into an operation-bound Journey dispatch input. Local gaps
 // have already frozen and terminalized at Run creation; only ready/free
 // children reach this sweep.
+//
+// The sweep runs through the shared execution runner (ADR-0006): the runner
+// owns the transaction and records the automatic audit row for the admitted
+// child (inspection_run object). An empty sweep — nothing ready to admit —
+// is execution.ErrNoTransition and records nothing, so an idle pass neither
+// opens a durable write nor fabricates a success fact. The scope follows the
+// family scheduler convention: each sweep is its own scheduler operation.
 func (s *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error) {
-	conn, err := s.db.Conn(ctx)
+	scope, err := s.schedulerContext(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return false, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	var attemptID, runID, versionID, systemID int64
-	var contractID sql.NullInt64
-	err = conn.QueryRowContext(ctx, `
+	admittedRun, err := execution.Execute(scope, s.runner, s.journeyAdmit,
+		func(tx *execution.Tx) (int64, error) {
+			var attemptID, runID, versionID, systemID int64
+			var contractID sql.NullInt64
+			err := tx.QueryRowContext(ctx, `
 		SELECT a.id,a.scope_id,r.config_version_id,r.label_contract_version_id,r.business_system_id
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id AND r.state='Running'
@@ -55,51 +57,55 @@ func (s *Service) AdmitNextJourneyChild(ctx context.Context) (bool, error) {
 		  AND NOT EXISTS(SELECT 1 FROM browser_operations active WHERE active.identity_id=i.id
 		    AND (active.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR active.stop_confirmed_at IS NULL))
 		ORDER BY a.id LIMIT 1`).Scan(&attemptID, &runID, &versionID, &contractID, &systemID)
-	if err == sql.ErrNoRows {
-		_, _ = conn.ExecContext(ctx, "COMMIT")
-		committed = true
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, fmt.Errorf("%w: no bare run_check child is ready for admission", execution.ErrNoTransition)
+			}
+			if err != nil {
+				return 0, err
+			}
+			identity, hasIdentity, err := loadBrowserIdentity(ctx, tx, systemID)
+			if err != nil {
+				return 0, err
+			}
+			if !hasIdentity || !identity.ProfileGenerationID.Valid || !identity.Generation.Valid {
+				return 0, fmt.Errorf("run_check browser child lost ready identity during admission")
+			}
+			journey, err := loadJourneyFacts(ctx, tx, attemptID)
+			if err != nil {
+				return 0, err
+			}
+			now := s.nowText()
+			insert, err := tx.ExecContext(ctx, `INSERT INTO browser_operations(identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,actor_user_id,actor_session_id,verification_manifest_item_id,clone_identity,state,journey_catalog_digest,journey_catalog_version,journey_id,journey_version,probe_phase,requested_at)
+		VALUES(?,?,?,?, 'journey',NULL,NULL,NULL,NULL,'Queued',?,?,?,?,NULL,?)`,
+				identity.IdentityID, identity.RevisionID, identity.ProfileGenerationID.Int64, attemptID,
+				journey.catalogDigest, journey.catalogVersion, journey.journeyID, journey.journeyVersion, now)
+			if err != nil {
+				return 0, err
+			}
+			operationID, err := insert.LastInsertId()
+			if err != nil {
+				return 0, err
+			}
+			// The shared builder renders the exact frozen bytes for both admission
+			// and rebuild, so dispatch and result adjudication stay byte-equal.
+			body, err := renderJourneyInspectionBody(journey, identity, attemptID, operationID)
+			if err != nil {
+				return 0, err
+			}
+			if err = freezeInput(ctx, tx, attemptID, "inspection_collection_v1", body, versionID, contractID.Int64, now); err != nil {
+				return 0, err
+			}
+			return runID, nil
+		},
+		func(runID int64) int64 { return runID })
+	if errors.Is(err, execution.ErrNoTransition) {
+		// The empty sweep is the normal idle outcome, not a failure.
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	identity, hasIdentity, err := loadBrowserIdentity(ctx, conn, systemID)
-	if err != nil {
-		return false, err
-	}
-	if !hasIdentity || !identity.ProfileGenerationID.Valid || !identity.Generation.Valid {
-		return false, fmt.Errorf("run_check browser child lost ready identity during admission")
-	}
-	journey, err := loadJourneyFacts(ctx, conn, attemptID)
-	if err != nil {
-		return false, err
-	}
-	now := s.nowText()
-	insert, err := conn.ExecContext(ctx, `INSERT INTO browser_operations(identity_id,identity_revision_id,profile_generation_id,owner_attempt_id,kind,actor_user_id,actor_session_id,verification_manifest_item_id,clone_identity,state,journey_catalog_digest,journey_catalog_version,journey_id,journey_version,probe_phase,requested_at)
-		VALUES(?,?,?,?, 'journey',NULL,NULL,NULL,NULL,'Queued',?,?,?,?,NULL,?)`,
-		identity.IdentityID, identity.RevisionID, identity.ProfileGenerationID.Int64, attemptID,
-		journey.catalogDigest, journey.catalogVersion, journey.journeyID, journey.journeyVersion, now)
-	if err != nil {
-		return false, err
-	}
-	operationID, err := insert.LastInsertId()
-	if err != nil {
-		return false, err
-	}
-	// The shared builder renders the exact frozen bytes for both admission
-	// and rebuild, so dispatch and result adjudication stay byte-equal.
-	body, err := renderJourneyInspectionBody(journey, identity, attemptID, operationID)
-	if err != nil {
-		return false, err
-	}
-	if err = freezeInput(ctx, conn, attemptID, "inspection_collection_v1", body, versionID, contractID.Int64, now); err != nil {
-		return false, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return false, err
-	}
-	committed = true
-	return true, nil
+	return admittedRun != 0, nil
 }
 
 // journeyFacts are the durable facts the frozen input renders from.
@@ -122,7 +128,7 @@ type journeyFacts struct {
 	probeParams      string
 }
 
-func loadJourneyFacts(ctx context.Context, conn *sql.Conn, attemptID int64) (journeyFacts, error) {
+func loadJourneyFacts(ctx context.Context, conn audit.Reader, attemptID int64) (journeyFacts, error) {
 	var facts journeyFacts
 	err := conn.QueryRowContext(ctx, `
 		SELECT r.plan_key,a.check_key,c.journey_id,COALESCE(c.journey_params_json,'{}')
@@ -175,25 +181,24 @@ func renderJourneyInspectionBody(facts journeyFacts, identity browserIdentity, a
 // rebuildJourneyInspectionInput reconstructs the frozen operation-bound
 // inspection_collection_v1 bytes from the same durable facts admission froze.
 func (s *Service) rebuildJourneyInspectionInput(ctx context.Context, attemptID int64) ([]byte, error) {
-	conn, err := s.db.Conn(ctx)
+	reader, err := s.readReader()
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 	var operationID int64
-	if err = conn.QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&operationID); err != nil {
+	if err = reader.QueryRowContext(ctx, `SELECT id FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&operationID); err != nil {
 		return nil, err
 	}
-	facts, err := loadJourneyFacts(ctx, conn, attemptID)
+	facts, err := loadJourneyFacts(ctx, reader, attemptID)
 	if err != nil {
 		return nil, err
 	}
 	var systemID int64
-	if err = conn.QueryRowContext(ctx, `
+	if err = reader.QueryRowContext(ctx, `
 		SELECT r.business_system_id FROM execution_attempts a JOIN inspection_runs r ON r.id=a.scope_id WHERE a.id=?`, attemptID).Scan(&systemID); err != nil {
 		return nil, err
 	}
-	identity, hasIdentity, err := loadBrowserIdentity(ctx, conn, systemID)
+	identity, hasIdentity, err := loadBrowserIdentity(ctx, reader, systemID)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +212,7 @@ func (s *Service) rebuildJourneyInspectionInput(ctx context.Context, attemptID i
 // shared frozen journey closure, then converges the Run (starting its report
 // analysis when collection completes) inside the same transaction.
 func (s *Service) CommitJourneyProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
-	converge := func(ctx context.Context, conn *sql.Conn, runID int64) error {
+	converge := func(ctx context.Context, conn execution.Executor, runID int64) error {
 		if err := s.convergeOn(ctx, conn, runID); err != nil {
 			return err
 		}
@@ -230,127 +235,94 @@ func (s *Service) CommitJourneyProposal(ctx context.Context, attemptID int64, bo
 
 // RecordPromQLTechnicalGap closes a terminally lost run_check PromQL child:
 // the frozen closure admits no check result without a Running attempt, so the
-// Run itself becomes Interrupted once no active child remains.
+// Run itself becomes Interrupted once no active child remains. The stage runs
+// through the shared execution runner (ADR-0006) under the attempt's restored
+// system task scope; a no-transition miss (an active child remains) rolls
+// back and records nothing.
 func (s *Service) RecordPromQLTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
 	_ = reason
-	conn, err := s.db.Conn(ctx)
+	scope, err := s.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	var runID int64
-	var state string
-	if err = conn.QueryRowContext(ctx, `
+	_, err = execution.Execute(scope, s.runner, s.promqlGap,
+		func(tx *execution.Tx) (int64, error) {
+			var runID int64
+			var state string
+			if err := tx.QueryRowContext(ctx, `
 		SELECT a.scope_id, a.state FROM execution_attempts a
 		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).
-		Scan(&runID, &state); err != nil {
-		return err
-	}
-	if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
-		return fmt.Errorf("attempt %d is not terminal", attemptID)
-	}
-	if _, err = conn.ExecContext(ctx, `
+				Scan(&runID, &state); err != nil {
+				return 0, err
+			}
+			if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
+				return 0, fmt.Errorf("attempt %d is not terminal", attemptID)
+			}
+			result, err := tx.ExecContext(ctx, `
 		UPDATE inspection_runs SET state='Interrupted', row_version=row_version+1
 		WHERE id=? AND state='Running' AND NOT EXISTS (
 			SELECT 1 FROM execution_attempts WHERE scope_type='run_check' AND scope_id=? AND state IN ('Queued','Assigned','Running','Cancelling'))`,
-		runID, runID); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+				runID, runID)
+			if err != nil {
+				return 0, err
+			}
+			if affected, _ := result.RowsAffected(); affected == 0 {
+				return 0, fmt.Errorf("%w: run %d still has active run_check children", execution.ErrNoTransition, runID)
+			}
+			return runID, nil
+		},
+		func(runID int64) int64 { return runID })
+	return err
 }
 
 // RecordJourneyTechnicalGap settles one terminally interrupted run_check
-// browser child without inventing Evidence, then converges the Run.
+// browser child without inventing Evidence, then converges the Run. The
+// stage runs through the shared execution runner (ADR-0006) under the
+// attempt's restored system task scope; an already-settled gap is an
+// ErrNoTransition miss and records nothing.
 func (s *Service) RecordJourneyTechnicalGap(ctx context.Context, attemptID int64, reason string) error {
 	if reason != "cancelled" {
 		reason = "interrupted"
 	}
-	conn, err := s.db.Conn(ctx)
+	scope, err := s.resultContext(ctx, attemptID)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	var runID int64
-	var checkKey, state string
-	if err = conn.QueryRowContext(ctx, `
+	_, err = execution.Execute(scope, s.runner, s.journeyGap,
+		func(tx *execution.Tx) (int64, error) {
+			var runID int64
+			var checkKey, state string
+			if err := tx.QueryRowContext(ctx, `
 		SELECT a.scope_id,a.check_key,a.state FROM execution_attempts a
 		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).
-		Scan(&runID, &checkKey, &state); err != nil {
-		return err
-	}
-	if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
-		return fmt.Errorf("attempt %d is not terminal", attemptID)
-	}
-	var settled int
-	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND check_key=?`, runID, checkKey).Scan(&settled); err != nil {
-		return err
-	}
-	if settled == 0 {
-		if _, err = conn.ExecContext(ctx, `
+				Scan(&runID, &checkKey, &state); err != nil {
+				return 0, err
+			}
+			if state != "Failed" && state != "Cancelled" && state != "Interrupted" {
+				return 0, fmt.Errorf("attempt %d is not terminal", attemptID)
+			}
+			var settled int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND check_key=?`, runID, checkKey).Scan(&settled); err != nil {
+				return 0, err
+			}
+			if settled == 0 {
+				if _, err := tx.ExecContext(ctx, `
 			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
 			VALUES(?,?,'gap',NULL,?,NULL,?,?)`, runID, checkKey, attemptID, reason, s.nowText()); err != nil {
-			return err
-		}
+					return 0, err
+				}
+			}
+			if err := s.convergeOn(ctx, tx, runID); err != nil {
+				return 0, err
+			}
+			if err := s.startReportAnalysisOn(ctx, tx, runID, s.nowText()); err != nil {
+				return 0, err
+			}
+			return runID, nil
+		},
+		func(runID int64) int64 { return runID })
+	if errors.Is(err, execution.ErrNoTransition) {
+		return nil
 	}
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
-		return err
-	}
-	if err = s.startReportAnalysisOn(ctx, conn, runID, s.nowText()); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return err
-	}
-	committed = true
-	return nil
-}
-
-// ConvergeRun re-evaluates an Inspection after a browser journey ledger
-// committed (or a terminal cancellation gap settled).
-func (s *Service) ConvergeRun(ctx context.Context, runID int64) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	if err = s.convergeOn(ctx, conn, runID); err != nil {
-		return err
-	}
-	if err = s.startReportAnalysisOn(ctx, conn, runID, s.nowText()); err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, "COMMIT")
-	committed = err == nil
 	return err
 }

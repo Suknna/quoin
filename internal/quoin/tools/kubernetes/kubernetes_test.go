@@ -5,8 +5,69 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
+
+// fixtureAuditTables are the two audit tables the runner's automatic audit
+// write needs. They mirror the generated authority's relevant columns; the
+// historical sealed-helper fixtures otherwise stay deliberately minimal.
+var fixtureAuditTables = []string{
+	`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor_id INTEGER NOT NULL, action TEXT NOT NULL, correlation_id TEXT, request_id TEXT, phase TEXT NOT NULL DEFAULT 'execute', initiator_type TEXT, initiator_id INTEGER, client_command_id TEXT, outcome TEXT NOT NULL, domain_ref_type TEXT, domain_ref_id INTEGER, created_at TEXT NOT NULL)`,
+	`CREATE TABLE audit_event_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_event_id INTEGER NOT NULL, target_type TEXT NOT NULL, target_id INTEGER NOT NULL, target_version INTEGER)`,
+}
+
+// runSealedHelper drives one historical sealed kubernetes helper exactly as
+// the retired attempt machine and grant fulfillment did: composed on a
+// runner-owned guarded Tx inside a dedicated registered fixture operation
+// carrying trusted system metadata — never on a raw pool connection. Each
+// call owns a fresh runner registry, so repeated fixture runs stay
+// independent. Errors surface verbatim after the runner's rollback, keeping
+// the helpers' failure semantics with no extra business leftovers.
+func runSealedHelper[T any](t *testing.T, db *sql.DB, name string, objectID int64, run func(ctx context.Context, tx *execution.Tx) (T, error)) (T, error) {
+	t.Helper()
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	op, err := runner.Register(execution.Operation{
+		Name:       "test.kubernetes." + name,
+		Class:      execution.ClassWrite,
+		ObjectType: "attempt_connection_grant",
+		Authorize:  func(context.Context, *execution.Tx) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "test-kubernetes-" + name,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+		Source:        execution.Source{Kind: execution.SourceTask},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execution.Execute(ctx, runner, op, func(tx *execution.Tx) (T, error) {
+		return run(ctx, tx)
+	}, func(T) int64 { return objectID })
+}
+
+// resolveSealedRead routes one kubernetes_read Tool Call through the runner
+// transaction, mirroring the production grant-resolution composition.
+func resolveSealedRead(t *testing.T, db *sql.DB, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
+	t.Helper()
+	return runSealedHelper(t, db, "resolve_read", attemptID, func(ctx context.Context, tx *execution.Tx) (attempt.ToolResolution, error) {
+		return ResolveRead(ctx, tx, attemptID, toolCallID)
+	})
+}
+
+// validateSealedGrant fences one grant for fulfillment through the runner
+// transaction, mirroring the production FulfillGrant composition.
+func validateSealedGrant(t *testing.T, db *sql.DB, attemptID, grantID int64) error {
+	t.Helper()
+	_, err := runSealedHelper(t, db, "validate_grant", attemptID, func(ctx context.Context, tx *execution.Tx) (struct{}, error) {
+		return struct{}{}, ValidateGrantForFulfillment(ctx, tx, attemptID, grantID)
+	})
+	return err
+}
 
 // TestResolveReadPreflightNeverCreatesGrants uses the resolver's actual SQL
 // seam. Routing failures are accepted Tool Call outcomes, not credential or
@@ -17,6 +78,9 @@ func TestResolveReadPreflightNeverCreatesGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// One pooled connection keeps the in-memory database (and the serialized
+	// writer discipline the runner transaction relies on) deterministic.
+	db.SetMaxOpenConns(1)
 	for _, statement := range []string{
 		`CREATE TABLE tool_calls (id INTEGER PRIMARY KEY, attempt_id INTEGER NOT NULL, arguments_json TEXT NOT NULL)`,
 		`CREATE TABLE business_systems (id INTEGER PRIMARY KEY, key TEXT NOT NULL, display_name TEXT NOT NULL)`,
@@ -31,7 +95,11 @@ func TestResolveReadPreflightNeverCreatesGrants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx := context.Background()
+	for _, statement := range fixtureAuditTables {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cases := []struct {
 		name       string
 		argument   string
@@ -68,12 +136,7 @@ func TestResolveReadPreflightNeverCreatesGrants(t *testing.T) {
 			if _, err := db.Exec(`INSERT INTO tool_calls(id,attempt_id,arguments_json) VALUES(?,?,?)`, index+1, 77, `{"businessSystem":"`+test.argument+`"}`); err != nil {
 				t.Fatal(err)
 			}
-			conn, err := db.Conn(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resolution, err := ResolveRead(ctx, conn, 77, int64(index+1))
-			conn.Close()
+			resolution, err := resolveSealedRead(t, db, 77, int64(index+1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -115,13 +178,7 @@ func TestValidateGrantForFulfillmentRejectsCommittedInvalidators(t *testing.T) {
 			if err := test.apply(db); err != nil {
 				t.Fatal(err)
 			}
-			conn, err := db.Conn(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = ValidateGrantForFulfillment(context.Background(), conn, 77, 1)
-			conn.Close()
-			if err == nil {
+			if err := validateSealedGrant(t, db, 77, 1); err == nil {
 				t.Fatal("invalidated Kubernetes grant was accepted")
 			}
 		})
@@ -142,24 +199,16 @@ func TestValidateGrantForFulfillmentIsPerGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx := context.Background()
 	// Retirement of grant 1's mapping cannot be masked by still-active grant 2.
 	if _, err := db.Exec(`UPDATE business_system_kubernetes_connections SET state='Retired' WHERE connection_id=5`); err != nil {
 		t.Fatal(err)
 	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateGrantForFulfillment(ctx, conn, 77, 1); err == nil {
-		conn.Close()
+	if err := validateSealedGrant(t, db, 77, 1); err == nil {
 		t.Fatal("retired requested grant was accepted because a sibling remained active")
 	}
-	if err := ValidateGrantForFulfillment(ctx, conn, 77, 2); err != nil {
-		conn.Close()
+	if err := validateSealedGrant(t, db, 77, 2); err != nil {
 		t.Fatalf("active sibling grant rejected after another mapping retired: %v", err)
 	}
-	conn.Close()
 	// Conversely, invalid grant 2 must not deny grant 1.
 	if _, err := db.Exec(`UPDATE business_system_kubernetes_connections SET state='Active' WHERE connection_id=5`); err != nil {
 		t.Fatal(err)
@@ -167,15 +216,10 @@ func TestValidateGrantForFulfillmentIsPerGrant(t *testing.T) {
 	if _, err := db.Exec(`UPDATE connections SET enabled=0 WHERE id=6`); err != nil {
 		t.Fatal(err)
 	}
-	conn, err = db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if err := ValidateGrantForFulfillment(ctx, conn, 77, 1); err != nil {
+	if err := validateSealedGrant(t, db, 77, 1); err != nil {
 		t.Fatalf("valid requested grant rejected because sibling was invalid: %v", err)
 	}
-	if err := ValidateGrantForFulfillment(ctx, conn, 77, 2); err == nil {
+	if err := validateSealedGrant(t, db, 77, 2); err == nil {
 		t.Fatal("disabled requested grant was accepted")
 	}
 }
@@ -186,6 +230,9 @@ func newGrantValidationDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One pooled connection keeps the in-memory database (and the serialized
+	// writer discipline the runner transaction relies on) deterministic.
+	db.SetMaxOpenConns(1)
 	for _, statement := range []string{
 		`CREATE TABLE attempt_connection_grants (id INTEGER PRIMARY KEY, attempt_id INTEGER, purpose TEXT, business_system_id INTEGER, connection_id INTEGER, connection_revision_id INTEGER, credential_generation_id INTEGER, created_by_tool_call_id INTEGER)`,
 		`CREATE TABLE tool_call_connection_grants (tool_call_id INTEGER, connection_grant_id INTEGER, ordinal INTEGER)`,
@@ -194,6 +241,12 @@ func newGrantValidationDB(t *testing.T) *sql.DB {
 		`CREATE TABLE credential_generations (id INTEGER PRIMARY KEY, key_binding_revision INTEGER)`,
 		`CREATE TABLE root_key_state (binding_revision INTEGER)`,
 	} {
+		if _, err := db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range fixtureAuditTables {
 		if _, err := db.Exec(statement); err != nil {
 			db.Close()
 			t.Fatal(err)
@@ -221,6 +274,9 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// One pooled connection keeps the in-memory database (and the serialized
+	// writer discipline the runner transaction relies on) deterministic.
+	db.SetMaxOpenConns(1)
 	for _, statement := range []string{
 		`CREATE TABLE tool_calls (id INTEGER PRIMARY KEY, attempt_id INTEGER NOT NULL, arguments_json TEXT NOT NULL)`,
 		`CREATE TABLE business_systems (id INTEGER PRIMARY KEY, key TEXT NOT NULL, display_name TEXT NOT NULL)`,
@@ -234,6 +290,11 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for _, statement := range fixtureAuditTables {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, statement := range []string{
 		`INSERT INTO business_systems VALUES(1,'payments','Payments')`, `INSERT INTO business_system_kubernetes_connections VALUES(1,5,'Active')`,
 		`INSERT INTO connections VALUES(5,11,13,1,0)`, `INSERT INTO credential_generations VALUES(13,1)`, `INSERT INTO root_key_state VALUES(1)`,
@@ -243,7 +304,6 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx := context.Background()
 	var firstGrant, firstRevision, firstGeneration int64
 	for _, callID := range []int64{1, 2} {
 		if callID == 2 {
@@ -254,12 +314,7 @@ func TestResolveReadReusesCompatibleAttemptGrant(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		conn, err := db.Conn(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resolution, err := ResolveRead(ctx, conn, 77, callID)
-		conn.Close()
+		resolution, err := resolveSealedRead(t, db, 77, callID)
 		if err != nil {
 			t.Fatalf("call %d: %v", callID, err)
 		}

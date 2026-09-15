@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/knowledge/embedding"
 	"github.com/Suknna/quoin/internal/quoin/knowledge/retrieval"
 )
@@ -28,46 +29,49 @@ const SemanticWait = 20 * time.Second
 // with its single authority: a document exists exactly for every current
 // version whose retrieval state has not exited. The external-content FTS
 // index follows through its triggers, so one rebuild repairs both layers
-// after any historical drift.
-
+// after any historical drift. The rebuild runs through the shared runner as
+// an audited system operation; a context without execution metadata gets an
+// explicit fresh background window (maintenance has no user originator).
 func (service *Service) RebuildSearchDocs(ctx context.Context) error {
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	if _, ok := execution.FromContext(ctx); !ok {
+		correlationID, err := execution.NewCorrelationID()
+		if err != nil {
+			return err
 		}
-	}()
-	if _, err := conn.ExecContext(ctx, `DELETE FROM knowledge_search_docs`); err != nil {
-		return err
+		enriched, err := execution.WithMetadata(ctx, execution.Metadata{
+			CorrelationID: correlationID,
+			Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+			Source:        execution.Source{Kind: execution.SourceTask, RequestID: "search-docs-rebuild"},
+		})
+		if err != nil {
+			return err
+		}
+		ctx = enriched
 	}
-	// Full reload from the authority (current ∧ not exited), never a
-	// merge: a drifted row under the same version id is replaced, not kept.
-	if _, err := conn.ExecContext(ctx, `INSERT INTO knowledge_search_docs(knowledge_version_id,title,body)
-		SELECT v.id, v.title, v.body FROM reusable_knowledge k
-		JOIN knowledge_versions v ON v.id=k.current_version_id
-		JOIN knowledge_version_retrieval_state r ON r.knowledge_version_id=v.id AND r.exited=0
-	`); err != nil {
-		return err
-	}
-	// The external-content index is a second derived layer: reconcile the
-	// content rows, then rebuild knowledge_fts itself so FTS-only drift is
-	// repaired too (DATA-DERIVED-001).
-	if _, err := conn.ExecContext(ctx, `INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')`); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return err
-	}
-	committed = true
-	return nil
+	_, err := execution.Execute(ctx, service.runner, service.searchRebuild, func(tx *execution.Tx) (int64, error) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_search_docs`); err != nil {
+			return 0, err
+		}
+		// Full reload from the authority (current ∧ not exited), never a
+		// merge: a drifted row under the same version id is replaced, not kept.
+		result, err := tx.ExecContext(ctx, `INSERT INTO knowledge_search_docs(knowledge_version_id,title,body)
+			SELECT v.id, v.title, v.body FROM reusable_knowledge k
+			JOIN knowledge_versions v ON v.id=k.current_version_id
+			JOIN knowledge_version_retrieval_state r ON r.knowledge_version_id=v.id AND r.exited=0
+		`)
+		if err != nil {
+			return 0, err
+		}
+		reloaded, _ := result.RowsAffected()
+		// The external-content index is a second derived layer: reconcile the
+		// content rows, then rebuild knowledge_fts itself so FTS-only drift is
+		// repaired too (DATA-DERIVED-001).
+		if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')`); err != nil {
+			return 0, err
+		}
+		return reloaded, nil
+	}, func(reloaded int64) int64 { return 0 })
+	return err
 }
 
 // SearchHit is one KnowledgeSearchHit in one channel.
@@ -183,7 +187,7 @@ func (service *Service) searchFTS(ctx context.Context, query string, after *Quer
 		where += ` AND (rank > ? OR (rank = ? AND s.knowledge_version_id > ?))`
 		args = append(args, after.FTS.LastScore, after.FTS.LastScore, after.FTS.LastID)
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.reader.QueryContext(ctx, `
 		SELECT s.knowledge_version_id, rank, k.id, v.title, v.version_seq, k.row_version
 		FROM knowledge_fts f
 		JOIN knowledge_search_docs s ON s.knowledge_version_id = f.rowid

@@ -46,6 +46,10 @@ type Supervisor struct {
 // frozen row binding even after same-boot reconnects (RUNTIME-TASK-008).
 func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
+	// The dispatch's persisted business correlation rides the task context
+	// for local diagnostics only (ADR-0006): it grants nothing, and replies
+	// join attempts by id instead of echoing any runtime-supplied identity.
+	parent = dispatchContext(parent, dispatch)
 
 	// Supervisor scope: connection_probe and plinth agent attempts exist
 	// here (RUNTIME-SCOPE); every agent attempt runs through a fresh
@@ -318,7 +322,12 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		sharedops.LogEvent("plinth", "error", "probe.accept_send", err.Error())
 		return
 	}
-	sharedops.LogEvent("plinth", "info", "probe.accepted", fmt.Sprintf("attempt=%d", attemptID))
+	// The correlation rides local logs only when the dispatch carried one.
+	acceptedMessage := fmt.Sprintf("attempt=%d", attemptID)
+	if correlation := OperationCorrelation(ctx); correlation != "" {
+		acceptedMessage += " corr=" + correlation
+	}
+	sharedops.LogEvent("plinth", "info", "probe.accepted", acceptedMessage)
 
 	input := dispatch.GetInput()
 	grants := input.GetConnectionGrants()

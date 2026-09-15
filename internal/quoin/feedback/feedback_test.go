@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,12 +19,18 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
 
-func newTestDB(t *testing.T) *sql.DB {
+// newTestDB 打开 fixture 写库并在同一文件上建立真实只读池（与生产组合一致：
+// execution.OpenReadOnly 的 mode=ro + query_only，可写池绝不充当读源）。
+// 只读池由测试持有并在结束时关闭。
+func newTestDB(t *testing.T) (*sql.DB, execution.Reader) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/test.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	dbPath := t.TempDir() + "/test.db"
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +38,12 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	reader, err := execution.OpenReadOnly(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	return db, reader
 }
 
 type fixture struct {
@@ -44,13 +56,19 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	db := newTestDB(t)
+	db, reader := newTestDB(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,'x',1,?,?)`, now, now)
+	user, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES('op','Op','operator',1,1,'x',1,?,?)`, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	userID, _ := user.LastInsertId()
+	// 会话证明：fixture 用户在签发 revision 1 的有效会话（远期过期）。
+	// 会话复核用例再单独改变撤销或漂移事实。
+	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,?,randomblob(32),1,'fixture',?,?,?,?)`,
+		userID, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
 	connectionID, revisionID, generationID, probeResultID := seedProviderChain(t, db, userID)
 	// One firing occurrence plus its sealed Initial Analysis output.
 	source, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES('fb-src','alertmanager',1,?)`, now)
@@ -102,7 +120,30 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	msgID, _ := assistant.LastInsertId()
-	return &fixture{db: db, service: NewService(db), userID: userID, outputID: outputID, msgID: msgID}
+	// 与生产组合一致（app.configureReadOnly）：真实只读池经共享执行器验证后
+	// 装配服务；可写池绝不充当读源。
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	service, err := NewServiceWithReader(reader, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &fixture{db: db, service: service, userID: userID, outputID: outputID, msgID: msgID}
+}
+
+// ctx 注入带会话证明引用的合法执行元数据：真实入口（HTTP 准入）统一接线
+// 前，由测试充当可信入口，主体与会话和 fixture 数据一致。
+func (f *fixture) ctx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-fb-" + strconv.FormatInt(f.userID, 10),
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: f.userID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-fb"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
 }
 
 // seedChatAttempt walks one model-driven attempt from Queued to Running
@@ -361,7 +402,7 @@ func parseTestID(value string) int64 {
 
 func TestAppendRecordsTimelineAndLatestValue(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	first, err := f.service.Append(ctx, f.userID, "cmd-feedback-1", Target{Type: TargetAnalysisOutput, ID: f.outputID}, ValueAdopted, "看起来对症")
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +433,7 @@ func TestAppendRecordsTimelineAndLatestValue(t *testing.T) {
 
 func TestAppendRejectsInvalidTargetsAndValues(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	// A user message is not one of the three immutable diagnosis outputs.
 	var userMessageID int64
 	if err := f.db.QueryRow(`SELECT id FROM investigation_messages WHERE role='user'`).Scan(&userMessageID); err != nil {
@@ -421,7 +462,7 @@ func TestAppendRejectsInvalidTargetsAndValues(t *testing.T) {
 
 func TestAppendCommandReplayIsDeterministic(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	target := Target{Type: TargetMessage, ID: f.msgID}
 	first, err := f.service.Append(ctx, f.userID, "cmd-replay-1", target, ValueExecuted, "已执行")
 	if err != nil {
@@ -449,7 +490,7 @@ func TestAppendCommandReplayIsDeterministic(t *testing.T) {
 
 func TestRejectedInvalidatesCandidatesAndRetrieval(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	// Source A (the analysis output) carries a Confirmed candidate with a
 	// live retrieval doc; source B (the assistant message) carries an
 	// AwaitingConfirmation candidate.
@@ -522,7 +563,7 @@ func TestRejectedInvalidatesCandidatesAndRetrieval(t *testing.T) {
 
 func TestTimelinePaginationKeyset(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	target := Target{Type: TargetAnalysisOutput, ID: f.outputID}
 	for index := 0; index < 5; index++ {
 		if _, err := f.service.Append(ctx, f.userID, fmt.Sprintf("cmd-page-%d", index), target, ValueAdopted, fmt.Sprintf("note-%d", index)); err != nil {
@@ -553,7 +594,7 @@ func TestTimelinePaginationKeyset(t *testing.T) {
 
 func TestEventJSONShape(t *testing.T) {
 	f := newFixture(t)
-	ctx := context.Background()
+	ctx := f.ctx(t)
 	event, err := f.service.Append(ctx, f.userID, "cmd-json-1", Target{Type: TargetMessage, ID: f.msgID}, ValueAdopted, "备注")
 	if err != nil {
 		t.Fatal(err)
@@ -570,5 +611,196 @@ func TestEventJSONShape(t *testing.T) {
 		if _, ok := decoded[key]; !ok {
 			t.Fatalf("event json missing %q: %s", key, body)
 		}
+	}
+}
+
+// 自动审计：追加命令同事务产生一条 execute 审计与目标引用；幂等重放返回
+// 原事件且不新增审计；换载荷重用命令键确定性冲突且不留新痕迹。
+func TestAppendAutomaticAuditAndReplay(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	target := Target{Type: TargetAnalysisOutput, ID: f.outputID}
+	event, err := f.service.Append(ctx, f.userID, "cmd-audit-1", target, ValueAdopted, "看起来对症")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		action, outcome, phase, commandID, correlation string
+		refType                                        string
+		actorID, refID                                 int64
+	)
+	if err := f.db.QueryRow(`SELECT action,outcome,phase,client_command_id,correlation_id,domain_ref_type,domain_ref_id,actor_id FROM audit_events`).Scan(
+		&action, &outcome, &phase, &commandID, &correlation, &refType, &refID, &actorID); err != nil {
+		t.Fatal(err)
+	}
+	if action != CommandAppend || outcome != "success" || phase != "execute" || commandID != "cmd-audit-1" ||
+		correlation != "corr-fb-"+strconv.FormatInt(f.userID, 10) || refType != ObjectFeedbackEvent ||
+		refID != parseTestID(event.ID) || actorID != f.userID {
+		t.Fatalf("audit row = action=%s outcome=%s phase=%s cmd=%s corr=%s ref=%s/%d actor=%d",
+			action, outcome, phase, commandID, correlation, refType, refID, actorID)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM audit_event_targets WHERE target_type=? AND target_id=?`, ObjectFeedbackEvent, parseTestID(event.ID)); got != 1 {
+		t.Fatalf("audit targets = %d, want 1", got)
+	}
+
+	// 幂等重放：同一命令键返回原事件，不新增审计。
+	replayed, err := f.service.Append(ctx, f.userID, "cmd-audit-1", target, ValueAdopted, "看起来对症")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ID != event.ID {
+		t.Fatalf("replay returned a different event: %s vs %s", replayed.ID, event.ID)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM audit_events`); got != 1 {
+		t.Fatalf("audit events after replay = %d, want 1", got)
+	}
+
+	// 命令键重用（同 ID 不同请求）：确定性冲突，不新增审计。
+	if _, err := f.service.Append(ctx, f.userID, "cmd-audit-1", target, ValueExecuted, ""); err != ErrCommandReused {
+		t.Fatalf("reused command id must surface ErrCommandReused, got %v", err)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM audit_events`); got != 1 {
+		t.Fatalf("audit events after reuse conflict = %d, want 1", got)
+	}
+}
+
+// 确定性拒绝持久化：缺失目标的拒绝事实进入台账与审计，业务行不落库；
+// 重放同一拒绝命令返回同一哨兵错误且不重复审计。
+func TestAppendMissingTargetRejectionIsDurable(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	missing := Target{Type: TargetAnalysisOutput, ID: 9999}
+	if _, err := f.service.Append(ctx, f.userID, "cmd-missing-1", missing, ValueAdopted, ""); err != ErrNotFound {
+		t.Fatalf("missing target must be 404: %v", err)
+	}
+	var ledgerOutcome string
+	if err := f.db.QueryRow(`SELECT outcome FROM client_commands WHERE client_command_id='cmd-missing-1'`).Scan(&ledgerOutcome); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerOutcome != "rejected_known" {
+		t.Fatalf("rejection ledger outcome = %q", ledgerOutcome)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM audit_events WHERE outcome='rejected'`); got != 1 {
+		t.Fatalf("rejected audit events = %d, want 1", got)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM diagnosis_feedback`); got != 0 {
+		t.Fatalf("rejected append persisted an event: %d", got)
+	}
+	// 重放拒绝：同一哨兵错误，不再新增审计行。
+	if _, err := f.service.Append(ctx, f.userID, "cmd-missing-1", missing, ValueAdopted, ""); err != ErrNotFound {
+		t.Fatalf("replayed rejection must stay 404: %v", err)
+	}
+	if got := countTestRows(t, f.db, `SELECT COUNT(*) FROM audit_events`); got != 1 {
+		t.Fatalf("audit events after rejection replay = %d, want 1", got)
+	}
+}
+
+// 会话复核：会话证明引用缺失（伪造或入口未携带）不得退化为仅查 users 行；
+// 会话撤销后即使准入通过也在事务内复核失败。两类失败都干净无痕。
+func TestAppendSessionProofIsVerifiedInTransaction(t *testing.T) {
+	f := newFixture(t)
+	noSession, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "corr-fb-nosession",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: f.userID},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-fb-nosession"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := Target{Type: TargetAnalysisOutput, ID: f.outputID}
+	if _, err := f.service.Append(noSession, f.userID, "cmd-nosession-1", target, ValueAdopted, ""); !errors.Is(err, auth.ErrActorChanged) {
+		t.Fatalf("missing session proof must surface ErrActorChanged, got %v", err)
+	}
+	if _, err := f.db.Exec(`UPDATE sessions SET revoked_at=datetime('now') WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.Append(f.ctx(t), f.userID, "cmd-revoked-1", target, ValueAdopted, ""); !errors.Is(err, auth.ErrActorChanged) {
+		t.Fatalf("revoked session must surface ErrActorChanged, got %v", err)
+	}
+	for name, query := range map[string]string{
+		"diagnosis_feedback": `SELECT COUNT(*) FROM diagnosis_feedback`,
+		"client_commands":    `SELECT COUNT(*) FROM client_commands`,
+		"audit_events":       `SELECT COUNT(*) FROM audit_events`,
+	} {
+		if got := countTestRows(t, f.db, query); got != 0 {
+			t.Fatalf("%s rows after session rejection = %d, want 0", name, got)
+		}
+	}
+}
+
+func countTestRows(t *testing.T, db *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// writableAdapter 是任意实现 audit.Reader 的适配器：包着可写连接的读形状，
+// 正是注入边界必须结构性拒绝的第二条写通道。
+type writableAdapter struct{ db *sql.DB }
+
+func (a writableAdapter) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return a.db.QueryContext(ctx, query, args...)
+}
+
+func (a writableAdapter) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return a.db.QueryRowContext(ctx, query, args...)
+}
+
+// 默认构造（应用初始装配，configureReadOnly 之前）绝不把可写 db 当作读源：
+// 读路径保持零值可信只读面，所有读取失败关闭；构造本身不 panic。
+func TestDefaultServiceReadsFailClosed(t *testing.T) {
+	db, _ := newTestDB(t)
+	service := NewService(db)
+	if _, err := service.List(context.Background(), Target{Type: TargetAnalysisOutput, ID: 1}, nil, 10); err == nil {
+		t.Fatal("unwired default service must fail closed on reads")
+	} else if !strings.Contains(err.Error(), "no read-only reader") {
+		t.Fatalf("read failure must report the missing read-only reader, got %v", err)
+	}
+}
+
+// 读能力注入只接受 execution.OpenReadOnly 产生的可信类型：裸可写 db、任意
+// audit.Reader 适配器与 nil 一并被拒绝，不存在可写兼容通道；可信读源装配
+// 后读路径真实可用。
+func TestReaderInjectionAcceptsOnlyTrustedReadOnly(t *testing.T) {
+	db, reader := newTestDB(t)
+	runner := execution.NewRunner(db, execution.NewRegistry(), nil)
+	if _, err := NewServiceWithReader(db, runner); err == nil {
+		t.Fatal("raw writable database must not be accepted as a reader")
+	}
+	if _, err := NewServiceWithReader(nil, runner); err == nil {
+		t.Fatal("nil reader must be rejected")
+	}
+	if _, err := NewServiceWithReader(writableAdapter{db: db}, runner); err == nil {
+		t.Fatal("arbitrary audit.Reader adapters must not be accepted as a reader")
+	}
+	if _, err := NewServiceWithReader(reader, runner); err != nil {
+		t.Fatalf("trusted OpenReadOnly reader must be accepted: %v", err)
+	}
+}
+
+// SetReader 把真实只读能力转发给共享执行器验证并采纳其读面：默认构造的
+// 服务注入前读失败关闭，注入后读路径真实可用；可写 db 仍被拒绝。
+func TestSetReaderWiresReadOnlyCapability(t *testing.T) {
+	db, reader := newTestDB(t)
+	service := NewService(db)
+	if err := service.SetReader(db); err == nil {
+		t.Fatal("writable db must not be accepted as reader")
+	}
+	target := Target{Type: TargetAnalysisOutput, ID: 1}
+	if _, err := service.List(context.Background(), target, nil, 10); err == nil {
+		t.Fatal("service must stay fail closed before the reader is wired")
+	}
+	if err := service.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.List(context.Background(), target, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("empty timeline expected, got %+v", page.Items)
 	}
 }

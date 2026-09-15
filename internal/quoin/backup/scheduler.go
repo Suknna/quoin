@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // RunScheduler keeps scheduling in process; backups.scheduled_for, rather than
@@ -31,52 +33,68 @@ func (s *Service) runDue(ctx context.Context) {
 	// Active age is derived from wall time, so refresh on every durable
 	// scheduler pass even when no run becomes due.
 	s.refreshMetrics(ctx)
-	value, queued, err := s.catchUp(ctx)
+	value, commandCtx, queued, err := s.catchUp(ctx)
 	if err != nil || !queued {
 		return
 	}
-	go func() { _, _ = s.Run(context.Background(), value.ID) }()
+	go func() {
+		// The queued run's correlation and original initiator are restored onto
+		// a fresh background task scope: the goroutine must outlive this
+		// scheduler pass without keeping its cancellation, while the Run it
+		// executes stays the same business operation the queue recorded.
+		taskCtx, err := s.detachedTaskContext(commandCtx)
+		if err != nil {
+			return
+		}
+		_, _ = s.Run(taskCtx, value.ID)
+	}()
 }
 
 // CatchUp creates only the latest missed schedule boundary. Run calls
 // Reconcile before RunScheduler, so an old active row never prevents a new
 // catch-up from being evaluated indefinitely.
-func (s *Service) CatchUp(ctx context.Context) error { _, _, err := s.catchUp(ctx); return err }
-func (s *Service) catchUp(ctx context.Context) (Summary, bool, error) {
+func (s *Service) CatchUp(ctx context.Context) error { _, _, _, err := s.catchUp(ctx); return err }
+func (s *Service) catchUp(ctx context.Context) (Summary, context.Context, bool, error) {
 	if !s.scheduleAdmission() {
-		return Summary{}, false, nil
+		return Summary{}, nil, false, nil
 	}
 	settings, err := s.Settings(ctx)
 	if err != nil || !settings.Enabled || settings.ScheduleCron == nil || *settings.ScheduleCron == "" {
-		return Summary{}, false, err
+		return Summary{}, nil, false, err
 	}
 	location, err := time.LoadLocation(settings.Timezone)
 	if err != nil {
-		return Summary{}, false, fmt.Errorf("load backup timezone: %w", err)
+		return Summary{}, nil, false, fmt.Errorf("load backup timezone: %w", err)
 	}
 	schedule, err := cron.ParseStandard(*settings.ScheduleCron)
 	if err != nil {
-		return Summary{}, false, fmt.Errorf("parse backup schedule: %w", err)
+		return Summary{}, nil, false, fmt.Errorf("parse backup schedule: %w", err)
 	}
 	now := s.now().In(location)
 	var observed sql.NullString
-	if err = s.db.QueryRowContext(ctx, `SELECT scheduled_for FROM backups WHERE trigger_kind='scheduled' ORDER BY scheduled_for DESC LIMIT 1`).Scan(&observed); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Summary{}, false, err
+	if err = s.reader.QueryRowContext(ctx, `SELECT scheduled_for FROM backups WHERE trigger_kind='scheduled' ORDER BY scheduled_for DESC LIMIT 1`).Scan(&observed); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Summary{}, nil, false, err
 	}
 	start, err := s.scheduleStart(ctx, observed, location)
 	if err != nil {
-		return Summary{}, false, err
+		return Summary{}, nil, false, err
 	}
 	due := latestScheduleBoundary(schedule, start, now)
 	if due.IsZero() {
-		return Summary{}, false, nil
+		return Summary{}, nil, false, nil
 	}
-	value, admitted, err := s.queueScheduledAdmitted(ctx, due.UTC(), settings)
+	// A due boundary is a new scheduling operation: establish the system
+	// scheduler scope here, at the entry, for the durable queue mutation.
+	commandCtx, err := s.executionContext(ctx, execution.SourceScheduler)
+	if err != nil {
+		return Summary{}, nil, false, err
+	}
+	value, admitted, err := s.queueScheduledAdmitted(commandCtx, due.UTC(), settings)
 	if errors.Is(err, ErrActive) {
-		return Summary{}, false, nil
+		return Summary{}, nil, false, nil
 	}
 	if err != nil {
-		return Summary{}, false, err
+		return Summary{}, nil, false, err
 	}
 	// queueScheduledAdmitted holds the sole production SQLite connection until
 	// it returns. Project only after that boundary so the metrics query cannot
@@ -84,59 +102,48 @@ func (s *Service) catchUp(ctx context.Context) (Summary, bool, error) {
 	if admitted {
 		s.refreshMetrics(ctx)
 	}
-	return value, admitted, nil
+	return value, commandCtx, admitted, nil
 }
 
-// queueScheduledAdmitted is the final scheduling fence. It starts the SQLite
-// writer transaction before it rereads enabled settings and inserts the row, so
-// a concurrent disable can never leave a scheduled run behind it.
+// queueScheduledAdmitted is the final scheduling fence. The runner-owned IMMEDIATE
+// transaction rereads enabled settings and inserts the row, so a concurrent
+// disable can never leave a scheduled run behind it. A superseded fence is a
+// plain no-op; an already-active run surfaces ErrActive for the caller to
+// swallow — neither leaves a durable trace.
 func (s *Service) queueScheduledAdmitted(ctx context.Context, due time.Time, expected Settings) (Summary, bool, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return Summary{}, false, err
+	meta, metaErr := execution.Require(ctx)
+	if metaErr != nil {
+		return Summary{}, false, metaErr
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return Summary{}, false, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	outcome, err := execution.Execute(ctx, s.commands.runner, s.commands.schedule, func(tx *execution.Tx) (Summary, error) {
+		current, err := s.settingsOn(ctx, tx)
+		if err != nil {
+			return Summary{}, err
 		}
-	}()
-	current, err := s.settingsOn(ctx, conn)
-	if err != nil {
-		return Summary{}, false, err
-	}
-	if !s.scheduleAdmission() || !current.Enabled || !settingsEqual(current, expected) {
-		if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return Summary{}, false, err
+		if !s.scheduleAdmission() || !current.Enabled || !settingsEqual(current, expected) {
+			return Summary{}, errScheduleSuperseded
 		}
-		committed = true
-		return Summary{}, false, nil
-	}
-	value := timestamp(due)
-	result, err := conn.ExecContext(ctx, `INSERT INTO backups(status,stage,trigger_kind,execution_mode,scheduled_for,row_version,created_at,updated_at,triggered_by) VALUES('queued','queued','scheduled','online',?,1,?,?,NULL)`, value, timestamp(s.now()), timestamp(s.now()))
+		value := timestamp(due)
+		result, err := tx.ExecContext(ctx, `INSERT INTO backups(status,stage,trigger_kind,execution_mode,scheduled_for,row_version,created_at,updated_at,triggered_by,correlation_id,initiator_type) VALUES('queued','queued','scheduled','online',?,1,?,?,NULL,?,?)`, value, timestamp(s.now()), timestamp(s.now()), meta.CorrelationID, string(meta.Initiator.Kind))
+		if err != nil {
+			if isActiveConstraint(err) {
+				return Summary{}, ErrActive
+			}
+			return Summary{}, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return Summary{}, err
+		}
+		return scanSummary(ctx, tx, id)
+	}, func(value Summary) int64 { return mustInt(value.ID) })
 	if err != nil {
-		if isActiveConstraint(err) {
-			return Summary{}, false, ErrActive
+		if errors.Is(err, errScheduleSuperseded) {
+			return Summary{}, false, nil
 		}
 		return Summary{}, false, err
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return Summary{}, false, err
-	}
-	queued, err := s.getOn(ctx, conn, id)
-	if err != nil {
-		return Summary{}, false, err
-	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return Summary{}, false, err
-	}
-	committed = true
-	return queued, true, nil
+	return outcome, true, nil
 }
 
 func (s *Service) scheduleStart(ctx context.Context, observed sql.NullString, location *time.Location) (time.Time, error) {
@@ -148,7 +155,7 @@ func (s *Service) scheduleStart(ctx context.Context, observed sql.NullString, lo
 		return value.In(location), nil
 	}
 	var enabledAt string
-	if err := s.db.QueryRowContext(ctx, `SELECT schedule_enabled_at FROM backup_settings WHERE id=1 AND enabled=1`).Scan(&enabledAt); err != nil {
+	if err := s.reader.QueryRowContext(ctx, `SELECT schedule_enabled_at FROM backup_settings WHERE id=1 AND enabled=1`).Scan(&enabledAt); err != nil {
 		return time.Time{}, err
 	}
 	value, err := time.Parse(time.RFC3339Nano, enabledAt)

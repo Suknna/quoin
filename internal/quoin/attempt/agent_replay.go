@@ -12,12 +12,22 @@ import (
 	"fmt"
 )
 
+// replayQuerier is the read surface the replay rebuild needs: both the pool
+// (the pre-transaction fast path) and the runner's guarded transaction
+// satisfy it. It is deliberately read-only — the replay never writes.
+type replayQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // replayCompleteModelCall rebuilds the original Ack payload of one sealed
 // physical call: a succeeded replay must match the stored response digest
 // and reconstruct the durable tool authorizations from the ledger; a failed
 // replay must match its termination reason. Any divergence is a conflict,
-// never a silent re-execution (RUNTIME-AGENT-005).
-func (service *Service) replayCompleteModelCall(ctx context.Context, conn *sql.Conn, completion CompleteCall, status string) ([]ToolAuthorization, error) {
+// never a silent re-execution (RUNTIME-AGENT-005). The replayQuerier surface
+// is deliberately read-only and composes both on the pool (the fast path
+// before the runner transaction) and on the runner transaction itself.
+func (service *Service) replayCompleteModelCall(ctx context.Context, conn replayQuerier, completion CompleteCall, status string) ([]ToolAuthorization, error) {
 	if status == "cancelled" {
 		return nil, fmt.Errorf("%w: call %d was cancelled", ErrLedgerDenied, completion.CallID)
 	}

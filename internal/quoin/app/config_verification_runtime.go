@@ -35,11 +35,15 @@ func (service *RuntimeService) dispatchVerificationAttempt(ctx context.Context, 
 		return err
 	}
 	var scopeID int64
-	if err := service.BusinessSystems.DB().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+	if err := service.BusinessSystems.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.BusinessSystems.Reader(), attemptID)
+	if err != nil {
 		return err
 	}
 	var grants []*runtimev1.ConnectionGrant
-	rows, err := service.BusinessSystems.DB().QueryContext(ctx, `
+	rows, err := service.BusinessSystems.Reader().QueryContext(ctx, `
 		SELECT id,connection_revision_id,credential_generation_id,purpose
 		FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
 	if err != nil {
@@ -62,7 +66,7 @@ func (service *RuntimeService) dispatchVerificationAttempt(ctx context.Context, 
 		BootId:          view.BootID,
 		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
 			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
-			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN, ScopeId: scopeID,
+			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN, ScopeId: scopeID, OperationCorrelationId: operationCorrelationID,
 			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
 			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest, ConnectionGrants: grants},
 		}},

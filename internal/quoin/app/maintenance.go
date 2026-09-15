@@ -56,6 +56,15 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 	apiConfig.OpenAPIPath, apiConfig.DocsPath, apiConfig.SchemasPath = "", "", ""
 	apiConfig.Transformers, apiConfig.CreateHooks = []huma.Transformer{}, nil
 	api := humago.New(apiMux, apiConfig)
+	accessRegistry, err := MaintenanceAccessRegistry(maintenanceReason)
+	if err != nil {
+		return nil, err
+	}
+	admission, err := NewAccessAdmission(application, accessRegistry, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	api.UseMiddleware(admission.HumaMiddleware())
 	// Maintenance defaults every non-allowlisted product API — including HEAD
 	// and extension methods — to a retriable unavailable response rather than
 	// pretending it does not exist. Explicit Huma operation routes below win
@@ -72,12 +81,17 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 		}
 		writeBackupProblem(writer, http.StatusServiceUnavailable, "unavailable", "系统正在维护中，请完成维护后重试。", true)
 	}
-	apiMux.HandleFunc("/api/", maintenanceUnavailable)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/login", OperationID: "login"}, application.login)
+	unavailable, wrapErr := admission.Wrap("maintenanceUnavailable", http.HandlerFunc(maintenanceUnavailable))
+	if wrapErr != nil {
+		return nil, wrapErr
+	}
+	apiMux.Handle("/api/", unavailable)
+	application.registerAuthenticationFlows(api)
+	application.registerAuthDeliveryRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword"}, application.maintenanceChangePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout"}, application.maintenanceLogout)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/audit-events", OperationID: "listAuditEvents"}, application.listAuditEvents)
+	application.registerAuditRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/maintenance", OperationID: "getMaintenanceState"}, application.getMaintenanceState)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/exit", OperationID: "exitMaintenance"}, application.exitMaintenance)
 	switch maintenanceReason {
@@ -91,6 +105,13 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 		// (HTTP-MAINT-005); every other product operation stays denied.
 		huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 		application.registerUpgradeDrainRoutes(api)
+	}
+	if err := accessRegistry.ValidateSurface(api); err != nil {
+		return nil, err
+	}
+	// The catch-all is this surface's only raw route; prove it was wrapped.
+	if err := admission.AssertRawSurface(); err != nil {
+		return nil, err
 	}
 	// The frontend service owns every non-API path, including its maintenance
 	// page. Quoin deliberately keeps the maintenance allowlist API-only.
@@ -190,7 +211,7 @@ func (application *apiServer) maintenanceChangePassword(ctx context.Context, inp
 	return &noContentOutput{CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
-func (application *apiServer) maintenanceLogout(ctx context.Context, input *authInput) (*noContentOutput, error) {
+func (application *apiServer) maintenanceLogout(ctx context.Context, input *authInput) (*logoutOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
 	if err != nil {
 		return nil, authFailure(err, "完成登出")
@@ -198,7 +219,7 @@ func (application *apiServer) maintenanceLogout(ctx context.Context, input *auth
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
 	}
-	return &noContentOutput{SetCookie: sessionCookie("", -time.Hour), ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
+	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour), flowCookie("", time.Unix(1, 0))}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
 func (application *apiServer) getMaintenanceState(ctx context.Context, input *authInput) (*maintenanceOutput, error) {

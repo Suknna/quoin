@@ -16,10 +16,10 @@ import (
 )
 
 func TestCommitResultSealsAssistantMessage(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-commit-1", "请回答", nil, nil)
 	if err != nil {
@@ -33,7 +33,7 @@ func TestCommitResultSealsAssistantMessage(t *testing.T) {
 	}
 	content := `"调查结论文本"`
 	digest := sha256Sum([]byte(content))
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:],
 	}); err != nil {
@@ -64,14 +64,14 @@ func TestCommitResultSealsAssistantMessage(t *testing.T) {
 		t.Fatalf("attempt state=%s want Succeeded", attemptState)
 	}
 	// The identical proposal replays the original verdict (RUNTIME-TASK-008).
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:],
 	}); err != nil {
 		t.Fatalf("identical replay: %v", err)
 	}
 	// A divergent proposal stays a late result.
-	if err := service.CommitResult(ctx, Result{
+	if err := service.CommitResult(context.Background(), Result{
 		AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true,
 		SchemaKind: OutputSchemaKind, Canonical: []byte(`"别的文本"`), Digest: sha256Sum([]byte(`"别的文本"`))[:],
 	}); !errors.Is(err, ErrLateResult) {
@@ -80,10 +80,10 @@ func TestCommitResultSealsAssistantMessage(t *testing.T) {
 }
 
 func TestCommitResultLatePaths(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-late-1", "请回答", nil, nil)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestCommitResultLatePaths(t *testing.T) {
 	digest := sha256Sum([]byte(content))
 	result := Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:]}
 	// A wrong boot/epoch binding never commits (audit-only).
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "other-boot", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:]}); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "other-boot", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: digest[:]}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("wrong boot err=%v want ErrLateResult", err)
 	}
 	// A burned lease never commits (RUNTIME-TASK-008).
@@ -107,7 +107,7 @@ func TestCommitResultLatePaths(t *testing.T) {
 	if _, err := db.Exec(`UPDATE execution_attempts SET lease_until=?, row_version=row_version+1 WHERE id=?`, past, created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitResult(ctx, result); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), result); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("burned lease err=%v want ErrLateResult", err)
 	}
 	// A withdrawn user message never re-enters the active branch
@@ -118,7 +118,7 @@ func TestCommitResultLatePaths(t *testing.T) {
 	if _, err := db.Exec(`UPDATE investigation_messages SET status='withdrawn' WHERE id=?`, created.MessageID); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CommitResult(ctx, result); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), result); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("withdrawn branch err=%v want ErrLateResult", err)
 	}
 	// The withdrawn message stays immutable (no resurrect path).
@@ -128,10 +128,10 @@ func TestCommitResultLatePaths(t *testing.T) {
 }
 
 func TestCommitFailureAndReplay(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-fail-1", "请回答", nil, nil)
 	if err != nil {
@@ -142,7 +142,7 @@ func TestCommitFailureAndReplay(t *testing.T) {
 	}
 	reason := "provider_unavailable"
 	failure := Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false, Termination: reason}
-	if err := service.CommitResult(ctx, failure); err != nil {
+	if err := service.CommitResult(context.Background(), failure); err != nil {
 		t.Fatalf("failure commit: %v", err)
 	}
 	var attemptState, sealedReason string
@@ -170,19 +170,19 @@ func TestCommitFailureAndReplay(t *testing.T) {
 	}
 	// The identical failure replays its original verdict; a different
 	// reason stays a late result.
-	if err := service.CommitResult(ctx, failure); err != nil {
+	if err := service.CommitResult(context.Background(), failure); err != nil {
 		t.Fatalf("identical failure replay: %v", err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false, Termination: "timeout"}); !errors.Is(err, ErrLateResult) {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: false, Termination: "timeout"}); !errors.Is(err, ErrLateResult) {
 		t.Fatalf("divergent failure err=%v want ErrLateResult", err)
 	}
 }
 
 func TestCommitRejectsWrongSchemaKindAndDigest(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-guard-1", "请回答", nil, nil)
 	if err != nil {
@@ -195,13 +195,13 @@ func TestCommitRejectsWrongSchemaKindAndDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := `"文本"`
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: "initial_analysis_output_v1", Canonical: []byte(content), Digest: sha256Sum([]byte(content))[:]}); err == nil || !strings.Contains(err.Error(), "schema kind") {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: "initial_analysis_output_v1", Canonical: []byte(content), Digest: sha256Sum([]byte(content))[:]}); err == nil || !strings.Contains(err.Error(), "schema kind") {
 		t.Fatalf("wrong schema err=%v", err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: sha256Sum([]byte("other"))[:]}); err == nil || !strings.Contains(err.Error(), "digest") {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(content), Digest: sha256Sum([]byte("other"))[:]}); err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("wrong digest err=%v", err)
 	}
-	if err := service.CommitResult(ctx, Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(`{"not":"a string"}`), Digest: sha256Sum([]byte(`{"not":"a string"}`))[:]}); err == nil || !strings.Contains(err.Error(), "JSON string") {
+	if err := service.CommitResult(context.Background(), Result{AttemptID: created.AttemptID, BootID: "boot-t", Epoch: 1, Succeeded: true, SchemaKind: OutputSchemaKind, Canonical: []byte(`{"not":"a string"}`), Digest: sha256Sum([]byte(`{"not":"a string"}`))[:]}); err == nil || !strings.Contains(err.Error(), "JSON string") {
 		t.Fatalf("wrong shape err=%v", err)
 	}
 }
@@ -223,10 +223,10 @@ func TestPendingFailureProposalPreservesTerminalIdentity(t *testing.T) {
 }
 
 func TestCommitPendingRecoveryLossAcceptsNullModelColumns(t *testing.T) {
-	db := newTestDB(t)
-	service := NewService(db)
-	ctx := context.Background()
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 	created, err := service.Create(ctx, principalID, "cmd-recovery-loss", "请回答", nil, nil)
 	if err != nil {
@@ -239,7 +239,7 @@ func TestCommitPendingRecoveryLossAcceptsNullModelColumns(t *testing.T) {
 		VALUES(?,'recovery_loss','Interrupted','lease_expired',?)`, created.AttemptID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	_, committed, err := service.CommitPendingTerminal(ctx, created.AttemptID)
+	_, committed, err := service.CommitPendingTerminal(context.Background(), created.AttemptID)
 	if err != nil || !committed {
 		t.Fatalf("recovery-loss drain committed=%t err=%v", committed, err)
 	}

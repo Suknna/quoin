@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // Input is the frozen embedding_v1 wire shape. A rebuild attempt carries
@@ -62,8 +63,8 @@ func TextDigest(text string) string {
 // insertRebuildAttempt persists one Queued embedding attempt whose batch is
 // every pending row of the generation, freezing the grant over the
 // provider's qualified probe result.
-func (service *Service) insertRebuildAttempt(ctx context.Context, conn *sql.Conn, generationID int64, selected provider) (int64, error) {
-	attemptID, err := service.insertAttempt(ctx, conn, generationID, selected, "rebuild")
+func (service *Service) insertRebuildAttempt(ctx context.Context, tx *execution.Tx, generationID int64, selected provider) (int64, error) {
+	attemptID, err := service.insertAttempt(ctx, tx, generationID, selected)
 	if err != nil {
 		return 0, err
 	}
@@ -71,7 +72,7 @@ func (service *Service) insertRebuildAttempt(ctx context.Context, conn *sql.Conn
 		SchemaKind: InputSchemaKind, AttemptID: attemptID, GenerationID: generationID, Mode: "rebuild",
 		ModelContract: ModelContract{EmbeddingModelID: selected.EmbeddingModel, VectorDim: selected.VectorDim},
 	}
-	rows, err := conn.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT v.id, v.title, v.body FROM embeddings e
 		JOIN knowledge_versions v ON v.id=e.knowledge_version_id
 		WHERE e.embedding_generation_id=? AND e.state='pending'
@@ -94,7 +95,7 @@ func (service *Service) insertRebuildAttempt(ctx context.Context, conn *sql.Conn
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	if err := service.writeSnapshot(ctx, conn, attemptID, input, items); err != nil {
+	if err := service.writeSnapshot(ctx, tx, attemptID, input, items); err != nil {
 		return 0, err
 	}
 	return attemptID, nil
@@ -108,81 +109,71 @@ func (service *Service) CreateQueryAttempt(ctx context.Context, query string) (i
 	if err != nil || !ok {
 		return 0, generation, err
 	}
-	conn, err := service.db.Conn(ctx)
-	if err != nil {
-		return 0, generation, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, generation, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var createdAttempt int64
+	created, err := execution.Execute(ctx, service.runner, service.queryCreate, func(tx *execution.Tx) (int64, error) {
+		selected, ok, err := service.selectProvider(ctx, tx)
+		if err != nil || !ok {
+			if err == nil {
+				err = ErrNoProvider
+			}
+			return 0, err
 		}
-	}()
-	selected, ok, err := service.selectProvider(ctx, conn)
-	if err != nil || !ok {
-		if err == nil {
-			err = ErrNoProvider
+		// The generation must still be the serving one (a switch may commit
+		// between the read above and this transaction).
+		var serving int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM embedding_generations WHERE state='current'`).Scan(&serving); err != nil {
+			return 0, err
 		}
-		return 0, generation, err
-	}
-	// The generation must still be the serving one (a switch may commit
-	// between the read above and this transaction).
-	var serving int64
-	if err := conn.QueryRowContext(ctx, `SELECT id FROM embedding_generations WHERE state='current'`).Scan(&serving); err != nil {
-		return 0, generation, err
-	}
-	if serving != generation.ID {
-		return 0, generation, ErrBusy
-	}
-	attemptID, err := service.insertAttempt(ctx, conn, generation.ID, selected, "query")
-	if err != nil {
-		return 0, generation, err
-	}
-	text := TextInput{Text: query, Digest: TextDigest(query)}
-	input := Input{
-		SchemaKind: InputSchemaKind, AttemptID: attemptID, GenerationID: generation.ID, Mode: "query",
-		ModelContract: ModelContract{EmbeddingModelID: selected.EmbeddingModel, VectorDim: selected.VectorDim},
-		Query:         &text,
-	}
-	if err := service.writeSnapshot(ctx, conn, attemptID, input, nil); err != nil {
-		return 0, generation, err
-	}
-	// The originator registers BEFORE the commit publishes the attempt: a
-	// concurrent sweep running between the commit and the caller's own
-	// registration must never converge this live request as an orphan.
-	service.mu.Lock()
-	service.queryTexts[attemptID] = query
-	service.mu.Unlock()
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		if serving != generation.ID {
+			return 0, ErrBusy
+		}
+		attemptID, err := service.insertAttempt(ctx, tx, generation.ID, selected)
+		if err != nil {
+			return 0, err
+		}
+		text := TextInput{Text: query, Digest: TextDigest(query)}
+		input := Input{
+			SchemaKind: InputSchemaKind, AttemptID: attemptID, GenerationID: generation.ID, Mode: "query",
+			ModelContract: ModelContract{EmbeddingModelID: selected.EmbeddingModel, VectorDim: selected.VectorDim},
+			Query:         &text,
+		}
+		if err := service.writeSnapshot(ctx, tx, attemptID, input, nil); err != nil {
+			return 0, err
+		}
+		// The originator registers BEFORE the commit publishes the attempt: a
+		// concurrent sweep running between the commit and the caller's own
+		// registration must never converge this live request as an orphan.
 		service.mu.Lock()
-		delete(service.queryTexts, attemptID)
+		service.queryTexts[attemptID] = query
+		createdAttempt = attemptID
 		service.mu.Unlock()
+		return attemptID, nil
+	}, func(int64) int64 { return generation.ID })
+	if err != nil {
+		// A rolled-back creation must not leave the request-scoped registry
+		// holding a dead attempt id.
+		if createdAttempt > 0 {
+			service.forgetQuery(createdAttempt)
+		}
 		return 0, generation, err
 	}
-	committed = true
-	return attemptID, generation, nil
+	return created, generation, nil
 }
 
 // insertAttempt creates the Queued execution attempt plus the frozen
 // embedding grant (agent_version stays NULL: RUNTIME-AGENT-010).
-func (service *Service) insertAttempt(ctx context.Context, conn *sql.Conn, generationID int64, selected provider, mode string) (int64, error) {
-	_ = mode
-	insert, err := conn.ExecContext(ctx, `
+func (service *Service) insertAttempt(ctx context.Context, tx *execution.Tx, generationID int64, selected provider) (int64, error) {
+	// CreateOn centrally persists the caller's correlation metadata onto
+	// the new attempt in this same transaction (ADR-0006); the busy
+	// classification of INSERT-level scope conflicts stays here.
+	attemptID, err := attempt.CreateOn(ctx, tx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,created_at)
 		VALUES('embedding','embedding_generation',?,'Queued',?,?)`,
 		generationID, attempt.ReleaseVersion(), service.nowText())
 	if err != nil {
 		return 0, busyOrErr(err)
 	}
-	attemptID, err := insert.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	if _, err := conn.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?,'embedding',?,?,?,?,?)`,
 		attemptID, selected.ConnectionID, selected.RevisionID, selected.CredentialGen, selected.ProbeResultID, service.nowText()); err != nil {
@@ -204,13 +195,13 @@ func busyOrErr(err error) error {
 
 // writeSnapshot freezes the canonical input (digest in
 // attempt_input_snapshots) and the per-version lineage items.
-func (service *Service) writeSnapshot(ctx context.Context, conn *sql.Conn, attemptID int64, input Input, items []frozenItem) error {
+func (service *Service) writeSnapshot(ctx context.Context, w writer, attemptID int64, input Input, items []frozenItem) error {
 	canonical, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
 	sum := sha256.Sum256(canonical)
-	snapshot, err := conn.ExecContext(ctx, `
+	snapshot, err := w.ExecContext(ctx, `
 		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
 		VALUES(?,?,?,?,?)`, attemptID, InputSchemaKind, RendererVersion, hex.EncodeToString(sum[:]), service.nowText())
 	if err != nil {
@@ -223,7 +214,7 @@ func (service *Service) writeSnapshot(ctx context.Context, conn *sql.Conn, attem
 	for index, item := range items {
 		// One locator per lineage item (schema CHECK): the version id. The
 		// generation binding lives in the frozen snapshot itself.
-		if _, err := conn.ExecContext(ctx, `
+		if _, err := w.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,knowledge_version_id)
 			VALUES(?,?,'knowledge_version',?,?)`,
 			snapshotID, int64(index+1), item.digest, item.versionID); err != nil {
@@ -231,7 +222,7 @@ func (service *Service) writeSnapshot(ctx context.Context, conn *sql.Conn, attem
 		}
 	}
 	if input.Query != nil {
-		if _, err := conn.ExecContext(ctx, `
+		if _, err := w.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,embedding_generation_id)
 			VALUES(?,?,'user',?,?)`,
 			snapshotID, int64(len(items)+1), input.Query.Digest, input.GenerationID); err != nil {
@@ -247,7 +238,7 @@ func (service *Service) writeSnapshot(ctx context.Context, conn *sql.Conn, attem
 // the in-memory registry of its live HTTP originator.
 func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	var scopeID int64
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.reader.QueryRowContext(ctx, `
 		SELECT a.scope_id FROM execution_attempts a
 		WHERE a.id=? AND a.attempt_type='embedding' AND a.scope_type='embedding_generation'`, attemptID).
 		Scan(&scopeID); err != nil {
@@ -261,7 +252,7 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 		SchemaKind: InputSchemaKind, AttemptID: attemptID, GenerationID: scopeID,
 		ModelContract: ModelContract{EmbeddingModelID: modelID, VectorDim: vectorDim},
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.reader.QueryContext(ctx, `
 		SELECT i.knowledge_version_id, i.source_digest FROM attempt_input_items i
 		JOIN attempt_input_snapshots s ON s.id=i.snapshot_id
 		WHERE s.attempt_id=? AND i.knowledge_version_id IS NOT NULL
@@ -283,7 +274,7 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	}
 	if len(frozenItems) > 0 {
 		input.Mode = "rebuild"
-		versionRows, err := service.db.QueryContext(ctx, `
+		versionRows, err := service.reader.QueryContext(ctx, `
 			SELECT id, title, body FROM knowledge_versions WHERE id IN (`+placeholders(len(frozenItems))+`)`, idsOf(frozenItems)...)
 		if err != nil {
 			return nil, err
@@ -313,7 +304,7 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	}
 	// Query attempt: the frozen query digest is in the single user-role item.
 	var queryDigest string
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.reader.QueryRowContext(ctx, `
 		SELECT i.source_digest FROM attempt_input_items i
 		JOIN attempt_input_snapshots s ON s.id=i.snapshot_id
 		WHERE s.attempt_id=? AND i.item_role='user'`, attemptID).Scan(&queryDigest); err != nil {
@@ -338,7 +329,7 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 func (service *Service) lookupContract(ctx context.Context, attemptID int64) (string, int64, error) {
 	var modelID sql.NullString
 	var dim sql.NullInt64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.reader.QueryRowContext(ctx, `
 		SELECT e.embedding_model_id, e.embedding_vector_dim
 		FROM attempt_connection_grants g
 		JOIN model_provider_connection_probe_results e ON e.probe_result_id=g.qualified_probe_result_id

@@ -220,14 +220,14 @@ func TestImmutableReportClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
-	ctx := context.Background()
+	ctx := commandContext(t)
 	detail, err := h.service.CreatePlanRun(ctx, h.principal, "cmd-1", "mixed-plan")
 	if err != nil {
 		t.Fatal(err)
 	}
 	attemptID := h.promqlAttemptID(t, detail.RunID)
 	h.dispatchPromQL(t, attemptID)
-	if err := h.service.CommitPluginProposal(ctx, attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, detail.RunID, "success")); err != nil {
 		t.Fatal(err)
 	}
 	// Convergence created exactly one analysis attempt with the structured
@@ -292,7 +292,7 @@ func TestImmutableReportClosure(t *testing.T) {
 	if len(artifactIDs) != len(evidenceIDs) {
 		t.Fatalf("frozen artifact grants = %v", artifactIDs)
 	}
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
+	if err := h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatal(err)
 	}
 	final, err := h.service.GetRun(ctx, detail.RunID)
@@ -314,10 +314,10 @@ func TestImmutableReportClosure(t *testing.T) {
 		t.Fatalf("analysis attempt state = %s", analysisState)
 	}
 	// Same-bytes replay is idempotent; tampered content never lands.
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
+	if err := h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "巡检报告正文", evidenceIDs, artifactIDs, promptDigest)); err != nil {
 		t.Fatalf("identical replay must be idempotent: %v", err)
 	}
-	if err := h.service.CommitReportProposal(ctx, analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "篡改内容", evidenceIDs, artifactIDs, promptDigest)); err == nil {
+	if err := h.service.CommitReportProposal(context.Background(), analysisID, "plinth-boot", 1, reportProposalBody(analysisID, detail.RunID, callID, "篡改内容", evidenceIDs, artifactIDs, promptDigest)); err == nil {
 		t.Fatal("tampered report replay must be rejected")
 	}
 	var reports int

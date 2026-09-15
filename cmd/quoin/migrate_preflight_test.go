@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	_ "modernc.org/sqlite"
 )
@@ -64,17 +66,24 @@ func builtQuoinBinary(t *testing.T) string {
 // records the stable code from stderr and the JSON summary from stdout.
 func runQuoinMigrateCLI(t *testing.T, binary, configPath string) (int, string, string) {
 	t.Helper()
+	return runQuoinCLI(t, binary, append([]string{"migrate", "preflight"}, "--config", configPath)...)
+}
+
+// runQuoinCLI executes an arbitrary `quoin` invocation and returns the exit
+// code with both streams verbatim.
+func runQuoinCLI(t *testing.T, binary string, arguments ...string) (int, string, string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	command := exec.CommandContext(ctx, binary, "migrate", "preflight", "--config", configPath)
+	command := exec.CommandContext(ctx, binary, arguments...)
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	err := command.Run()
 	code := 0
 	exitErr, ok := err.(*exec.ExitError)
 	if err != nil && !ok {
-		t.Fatalf("run migrate preflight: %v stderr=%s", err, stderr.String())
+		t.Fatalf("run quoin %v: %v stderr=%s", arguments, err, stderr.String())
 	}
 	if ok {
 		code = exitErr.ExitCode()
@@ -89,10 +98,33 @@ func runQuoinMigrateCLI(t *testing.T, binary, configPath string) (int, string, s
 // ledger is append-only in the released schema, so its state is fixed here.
 func seedPredecessorDeployment(t *testing.T, schemaDigest, ledgerDigest string, withMaintenance bool) (configPath string) {
 	t.Helper()
+	accounts := []seedAccount{}
+	if withMaintenance {
+		accounts = append(accounts, seedAccount{id: 1, username: "upgrade-admin", role: "admin", enabled: 1})
+	}
+	configPath, _ = seedPredecessorDeploymentWithAccounts(t, "declaration-cutover-predecessor.sql", schemaDigest, ledgerDigest, accounts, withMaintenance)
+	return configPath
+}
+
+// seedAccount is one predecessor user row; enabled accounts get active
+// sessions that satisfy the released issue trigger.
+type seedAccount struct {
+	id       int64
+	username string
+	role     string
+	enabled  int
+	sessions int
+}
+
+// seedPredecessorDeploymentWithAccounts is the general form of
+// seedPredecessorDeployment for any released predecessor fixture, with an
+// explicit account population for the administrator-topology cases.
+func seedPredecessorDeploymentWithAccounts(t *testing.T, schemaFile, schemaDigest, ledgerDigest string, accounts []seedAccount, withMaintenance bool) (configPath, dataDirectory string) {
+	t.Helper()
 	const enteredAt = "2026-01-01T00:00:00Z"
 	const backupAt = "2026-01-02T00:00:00Z"
 	root := t.TempDir()
-	dataDirectory := filepath.Join(root, "data")
+	dataDirectory = filepath.Join(root, "data")
 	secrets := filepath.Join(root, "secrets")
 	for _, directory := range []string{dataDirectory, secrets} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -118,7 +150,7 @@ steleServiceTokenFile: %s
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	schema, err := os.ReadFile(filepath.Join("..", "..", "internal", "quoin", "upgrade", "testdata", "declaration-cutover-predecessor.sql"))
+	schema, err := os.ReadFile(filepath.Join("..", "..", "internal", "quoin", "upgrade", "testdata", schemaFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,23 +182,42 @@ steleServiceTokenFile: %s
 	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
 		t.Fatal(err)
 	}
+	for _, account := range accounts {
+		if _, err := db.Exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`,
+			account.id, account.username, account.username+" display", account.role, account.enabled, "phc-"+account.username, enteredAt, enteredAt); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < account.sessions; i++ {
+			token := sha256.Sum256([]byte(account.username + "/" + string(rune('a'+i))))
+			if _, err := db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)`,
+				account.id, token[:], 1, "fixture", enteredAt, enteredAt, enteredAt, enteredAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	if !withMaintenance {
-		return configPath
+		return configPath, dataDirectory
 	}
-	if _, err := db.Exec(`INSERT INTO users(username,display_name,role,enabled,password_phc,auth_revision,created_at,updated_at) VALUES('upgrade-admin','Upgrade Admin','admin',1,'x',1,?,?)`, enteredAt, enteredAt); err != nil {
-		t.Fatal(err)
+	if len(accounts) == 0 {
+		t.Fatal("a verified upgrade window requires a user to own the upgrade backup")
 	}
-	if _, err := db.Exec(`UPDATE maintenance_state SET active=1,reason='Upgrade',entered_at=?,entered_by_type='user',entered_by_id=1,row_version=row_version+1 WHERE id=1 AND active=0`, enteredAt); err != nil {
+	enteredBy := int64(0)
+	enteredByType := "deployment_helper"
+	if len(accounts) != 0 {
+		enteredBy = accounts[0].id
+		enteredByType = "user"
+	}
+	if _, err := db.Exec(`UPDATE maintenance_state SET active=1,reason='Upgrade',entered_at=?,entered_by_type=?,entered_by_id=?,row_version=row_version+1 WHERE id=1 AND active=0`, enteredAt, enteredByType, enteredBy); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(2,'BackupPreflight','pre_upgrade_backup','Safe','backup_verified',?)`, enteredAt); err != nil {
 		t.Fatal(err)
 	}
 	digest := hex.EncodeToString(make([]byte, 32))
-	if _, err := db.Exec(`INSERT INTO backups(status,stage,trigger_kind,execution_mode,scheduled_for,db_sha256,manifest_sha256,artifact_count,size_bytes,manifest_path,row_version,created_at,updated_at,started_at,completed_at,triggered_by) VALUES('succeeded','completed','upgrade','online',NULL,?,?,0,1234,'/backup/manifest.json',1,?,?,?,?,1)`, digest, digest, backupAt, backupAt, backupAt, backupAt); err != nil {
+	if _, err := db.Exec(`INSERT INTO backups(status,stage,trigger_kind,execution_mode,scheduled_for,db_sha256,manifest_sha256,artifact_count,size_bytes,manifest_path,row_version,created_at,updated_at,started_at,completed_at,triggered_by) VALUES('succeeded','completed','upgrade','online',NULL,?,?,0,1234,'/backup/manifest.json',1,?,?,?,?,?)`, digest, digest, backupAt, backupAt, backupAt, backupAt, enteredBy); err != nil {
 		t.Fatal(err)
 	}
-	return configPath
+	return configPath, dataDirectory
 }
 
 func TestMigratePreflightCLIAcceptsReleasedPredecessor(t *testing.T) {
@@ -211,5 +262,143 @@ func TestMigratePreflightCLIRequiresVerifiedUpgradeMaintenance(t *testing.T) {
 	code, _, stderr := runQuoinMigrateCLI(t, binary, config)
 	if code != 1 || !strings.Contains(stderr, "upgrade_maintenance_not_active") {
 		t.Fatalf("missing maintenance exit=%d stderr=%s", code, stderr)
+	}
+}
+
+// The pre-audit predecessor fixture is the byte-exact schema captured before
+// the auth-audit canonical change; the CLI must admit exactly these bytes.
+const pinnedAuthAuditPredecessorDigest = "d67fc107b5f8a978eae6b609393f6ec5563978234dc5167da7c1d021315b6269"
+
+func seedAuthAuditPredecessorDeployment(t *testing.T, accounts []seedAccount, withMaintenance bool) (configPath, dataDirectory string) {
+	t.Helper()
+	return seedPredecessorDeploymentWithAccounts(t, "auth-audit-predecessor.sql", pinnedAuthAuditPredecessorDigest, "", accounts, withMaintenance)
+}
+
+func TestMigratePreflightCLIAcceptsAuthAuditPredecessor(t *testing.T) {
+	binary := builtQuoinBinary(t)
+	config, _ := seedAuthAuditPredecessorDeployment(t, []seedAccount{{id: 1, username: "upgrade-admin", role: "admin", enabled: 1}}, true)
+	code, stdout, stderr := runQuoinMigrateCLI(t, binary, config)
+	if code != 0 {
+		t.Fatalf("preflight rejected the pre-audit predecessor: exit=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"stage":"preflight-verified"`) {
+		t.Fatalf("summary did not admit the pre-audit predecessor: %s", stdout)
+	}
+}
+
+func TestMigratePreflightCLIRequiresRetainedAdminSelection(t *testing.T) {
+	binary := builtQuoinBinary(t)
+	// Two enabled administrators make the retention choice ambiguous: the
+	// read-only preflight on the OLD image must reject it with the stable code
+	// before the operator retires the predecessor release.
+	config, _ := seedAuthAuditPredecessorDeployment(t, []seedAccount{
+		{id: 1, username: "alice", role: "admin", enabled: 1},
+		{id: 2, username: "bob", role: "admin", enabled: 1},
+	}, true)
+	code, _, stderr := runQuoinMigrateCLI(t, binary, config)
+	if code != 1 || !strings.Contains(stderr, "retained_admin_selection_required") {
+		t.Fatalf("ambiguous admins exit=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestMigrateCLIRejectsAmbiguousAdminSelectionAtomically(t *testing.T) {
+	binary := builtQuoinBinary(t)
+	config, dataDirectory := seedAuthAuditPredecessorDeployment(t, []seedAccount{
+		{id: 1, username: "alice", role: "admin", enabled: 1, sessions: 1},
+		{id: 2, username: "bob", role: "admin", enabled: 1},
+	}, true)
+	code, _, stderr := runQuoinCLI(t, binary, "migrate", "--config", config)
+	if code != 1 || !strings.Contains(stderr, "retained_admin_selection_required") {
+		t.Fatalf("ambiguous migrate exit=%d stderr=%s", code, stderr)
+	}
+	// The rejection must leave the predecessor exactly as it was: digest,
+	// administrators, active session, active maintenance window, no ledger.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDirectory, "quoin.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var digest string
+	if err := db.QueryRow(`SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&digest); err != nil || digest != pinnedAuthAuditPredecessorDigest {
+		t.Fatalf("digest after rejection=%q err=%v", digest, err)
+	}
+	var admins, activeSessions, ledger, active int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin'`).Scan(&admins); err != nil || admins != 2 {
+		t.Fatalf("admin rows=%d err=%v", admins, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&activeSessions); err != nil || activeSessions != 1 {
+		t.Fatalf("active sessions=%d err=%v", activeSessions, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_ledger`).Scan(&ledger); err != nil || ledger != 0 {
+		t.Fatalf("ledger rows=%d err=%v", ledger, err)
+	}
+	if err := db.QueryRow(`SELECT active FROM maintenance_state WHERE id=1`).Scan(&active); err != nil || active != 1 {
+		t.Fatalf("maintenance after rejection=%d err=%v", active, err)
+	}
+}
+
+func TestMigrateCLIRetainsExplicitSelectedAdmin(t *testing.T) {
+	binary := builtQuoinBinary(t)
+	config, dataDirectory := seedAuthAuditPredecessorDeployment(t, []seedAccount{
+		{id: 1, username: "alice", role: "admin", enabled: 1, sessions: 2},
+		{id: 2, username: "bob", role: "admin", enabled: 1},
+	}, true)
+	code, stdout, stderr := runQuoinCLI(t, binary, "migrate", "--config", config, "--retain-admin-id", "1")
+	if code != 0 {
+		t.Fatalf("explicit migrate failed: exit=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"stage":"migrated"`) {
+		t.Fatalf("summary=%s", stdout)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDirectory, "quoin.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	target := sha256.Sum256([]byte(gencontracts.SchemaSQL))
+	var digest string
+	if err := db.QueryRow(`SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if digest != hex.EncodeToString(target[:]) {
+		t.Fatalf("migrated digest=%s want %x", digest, target)
+	}
+	var retainedUsername, retainedRole string
+	var retainedEnabled, retainedInitialized int
+	if err := db.QueryRow(`SELECT username,role,enabled,initialized FROM users WHERE id=1`).Scan(&retainedUsername, &retainedRole, &retainedEnabled, &retainedInitialized); err != nil {
+		t.Fatal(err)
+	}
+	if retainedUsername != "admin" || retainedRole != "admin" || retainedEnabled != 1 || retainedInitialized != 0 {
+		t.Fatalf("retained admin=%q/%s/%d/%d", retainedUsername, retainedRole, retainedEnabled, retainedInitialized)
+	}
+	var bobRole, bobUsername string
+	var bobEnabled, bobInitialized int
+	if err := db.QueryRow(`SELECT username,role,enabled,initialized FROM users WHERE id=2`).Scan(&bobUsername, &bobRole, &bobEnabled, &bobInitialized); err != nil {
+		t.Fatal(err)
+	}
+	if bobUsername != "bob" || bobRole != "operator" || bobEnabled != 1 || bobInitialized != 0 {
+		t.Fatalf("demoted admin=%q/%s/%d/%d", bobUsername, bobRole, bobEnabled, bobInitialized)
+	}
+	var admins, activeSessions, maintenanceActive int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin'`).Scan(&admins); err != nil || admins != 1 {
+		t.Fatalf("admin rows=%d err=%v", admins, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&activeSessions); err != nil || activeSessions != 0 {
+		t.Fatalf("active sessions after migrate=%d err=%v", activeSessions, err)
+	}
+	if err := db.QueryRow(`SELECT active FROM maintenance_state WHERE id=1`).Scan(&maintenanceActive); err != nil || maintenanceActive != 0 {
+		t.Fatalf("maintenance after migrate=%d err=%v", maintenanceActive, err)
+	}
+}
+
+func TestMigrateCLIRejectsNonAdminRetainedSelection(t *testing.T) {
+	binary := builtQuoinBinary(t)
+	config, _ := seedAuthAuditPredecessorDeployment(t, []seedAccount{
+		{id: 1, username: "alice", role: "admin", enabled: 1},
+		{id: 2, username: "bob", role: "operator", enabled: 1},
+	}, true)
+	code, _, stderr := runQuoinCLI(t, binary, "migrate", "--config", config, "--retain-admin-id", "2")
+	if code != 1 || !strings.Contains(stderr, "retained_admin_unknown") {
+		t.Fatalf("non-admin selection exit=%d stderr=%s", code, stderr)
 	}
 }

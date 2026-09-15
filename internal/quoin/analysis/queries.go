@@ -15,7 +15,7 @@ import (
 // data.
 func (service *Service) VerifyOccurrence(ctx context.Context, analysisID, occurrenceID int64) error {
 	var stored int64
-	err := service.db.QueryRowContext(ctx, `SELECT occurrence_id FROM initial_analyses WHERE id=?`, analysisID).Scan(&stored)
+	err := service.runner.Reader().QueryRowContext(ctx, `SELECT occurrence_id FROM initial_analyses WHERE id=?`, analysisID).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) || stored != occurrenceID {
 		return ErrNotFound
 	}
@@ -26,7 +26,7 @@ func (service *Service) VerifyOccurrence(ctx context.Context, analysisID, occurr
 func (service *Service) Get(ctx context.Context, analysisID int64) (Detail, error) {
 	var detail Detail
 	var id int64
-	err := service.db.QueryRowContext(ctx, `
+	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT id,state,row_version,created_at FROM initial_analyses WHERE id=?`, analysisID).
 		Scan(&id, &detail.State, &detail.RowVersion, &detail.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -36,14 +36,14 @@ func (service *Service) Get(ctx context.Context, analysisID int64) (Detail, erro
 		return Detail{}, err
 	}
 	detail.ID = strconv.FormatInt(id, 10)
-	if err := service.db.QueryRowContext(ctx, `
+	if err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM execution_attempts WHERE scope_type='analysis' AND scope_id=?`, analysisID).
 		Scan(&detail.AttemptCount); err != nil {
 		return Detail{}, err
 	}
 	var outputID int64
 	var modelID, content, outputCreated string
-	err = service.db.QueryRowContext(ctx, `
+	err = service.runner.Reader().QueryRowContext(ctx, `
 		SELECT id,model_id,content,created_at FROM initial_analysis_outputs WHERE analysis_id=?`,
 		analysisID).Scan(&outputID, &modelID, &content, &outputCreated)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -56,7 +56,7 @@ func (service *Service) Get(ctx context.Context, analysisID int64) (Detail, erro
 		ID: strconv.FormatInt(outputID, 10), ModelID: modelID, Content: content, CreatedAt: outputCreated,
 		EvidenceIDs: []string{},
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT evidence_id FROM initial_analysis_output_evidence WHERE output_id=? ORDER BY ordinal`, outputID)
 	if err != nil {
 		return Detail{}, err
@@ -78,7 +78,7 @@ func (service *Service) ListByOccurrence(ctx context.Context, occurrenceID int64
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id,state,row_version,created_at FROM initial_analyses
 		WHERE occurrence_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?`,
 		occurrenceID, after, after, limit+1)
@@ -114,7 +114,7 @@ func (service *Service) ListAttempts(ctx context.Context, analysisID int64, afte
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := service.db.QueryContext(ctx, `
+	rows, err := service.runner.Reader().QueryContext(ctx, `
 		SELECT id,attempt_type,state,row_version,started_at,ended_at,termination_reason,created_at
 		FROM execution_attempts
 		WHERE scope_type='analysis' AND scope_id=? AND (?=0 OR id>?) ORDER BY id ASC LIMIT ?`,

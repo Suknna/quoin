@@ -124,8 +124,17 @@ type artifactRetentionOutput struct {
 	Body artifactRetentionSettings `json:"body"`
 }
 
-func (application *apiServer) SetBackupService(service *backup.Service) {
+// SetBackupService attaches the backup authority and joins its public query
+// path to the process-shared read-only pool when configureReadOnly has
+// already run (the production order). The returned error is the reader
+// wiring result: startup must fail loudly rather than keep the service's
+// second self-opened pool.
+func (application *apiServer) SetBackupService(service *backup.Service) error {
 	application.backups = service
+	if !application.readerWired {
+		return nil
+	}
+	return service.SetReader(application.reader)
 }
 func (application *apiServer) registerBackupRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/backups", OperationID: "listBackups"}, application.listBackups)

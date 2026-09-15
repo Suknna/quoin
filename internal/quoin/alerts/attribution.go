@@ -6,10 +6,11 @@ package alerts
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // attributionCandidate is retained in the immutable diagnostic so an operator
@@ -30,7 +31,7 @@ type attributionDecision struct {
 // loadAttribution deliberately does not load an active global contract. The
 // type remains a delivery-scoped seam so all first observations in one delivery
 // use the same authority transaction.
-func loadAttribution(context.Context, *sql.Conn) (attributionIndex, error) {
+func loadAttribution(context.Context, execution.Executor) (attributionIndex, error) {
 	return attributionIndex{}, nil
 }
 
@@ -41,7 +42,7 @@ type attributionIndex struct{}
 // source and every exact label condition is present with its declared value.
 // The compiler supplies derived public-metric matchLabels when YAML omits
 // AlertSourceLabels, so source-only declarations never become broad matches.
-func (attributionIndex) attribute(ctx context.Context, conn *sql.Conn, sourceID int64, labels map[string]string) (attributionDecision, error) {
+func (attributionIndex) attribute(ctx context.Context, conn execution.Executor, sourceID int64, labels map[string]string) (attributionDecision, error) {
 	canonical, err := CanonicalLabels(labels)
 	if err != nil {
 		return attributionDecision{}, fmt.Errorf("canonicalize labels for attribution: %w", err)
@@ -136,7 +137,7 @@ func (attributionIndex) attribute(ctx context.Context, conn *sql.Conn, sourceID 
 // persistAttribution freezes the full decision alongside the occurrence and its
 // first delivery snapshot. This makes diagnostics historical facts rather than
 // a read-time re-evaluation of subsequently changed declarations.
-func persistAttribution(ctx context.Context, conn *sql.Conn, occurrenceID, deliveryID, deliveryItemID int64, decision attributionDecision, createdAt string) error {
+func persistAttribution(ctx context.Context, conn execution.Executor, occurrenceID, deliveryID, deliveryItemID int64, decision attributionDecision, createdAt string) error {
 	_, err := conn.ExecContext(ctx, `INSERT INTO alert_occurrence_attributions(occurrence_id,status,candidate_system_ids_json,candidate_config_version_ids_json,reason_json,evaluated_from_delivery_id,evaluated_from_delivery_item_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
 		occurrenceID, decision.Status, decision.CandidateSystemIDsJSON, decision.CandidateConfigIDsJSON, decision.ReasonJSON, deliveryID, deliveryItemID, createdAt)
 	return err

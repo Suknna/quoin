@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 // RevokeSession terminates that session's active manual logins. It is invoked
@@ -39,26 +41,35 @@ func (service *Service) CloseRevokedSessions(ctx context.Context) ([]int64, erro
 	return operations, nil
 }
 
+// RevokeSession drains one revoked session through the declared
+// browser.revoke_session operation (ADR-0006): the per-session cancellation
+// commits inside the runner transaction together with its automatic audit
+// row, so a revocation can never converge browser state without its record,
+// and an audit failure rolls the whole drain back.
 func (service *Service) RevokeSession(ctx context.Context, sessionID int64) ([]int64, error) {
 	if sessionID < 1 {
 		return nil, ErrInvalid
 	}
-	conn, err := service.db.Conn(ctx)
+	authority, err := drainAuthority(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	_, opRevoke, _ := browserOperations()
+	ids, err := execution.Execute(authority, service.runner(), opRevoke, func(tx *execution.Tx) ([]int64, error) {
+		return revokeSessionOn(ctx, tx, service.now, sessionID)
+	}, func([]int64) int64 { return sessionID })
+	if err != nil {
 		return nil, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-	now := service.now().UTC().Format(time.RFC3339Nano)
-	rows, err := conn.QueryContext(ctx, `SELECT id,start_dispatched_at IS NOT NULL FROM browser_operations WHERE kind='manual_login' AND actor_session_id=? AND state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')`, sessionID)
+	return ids, nil
+}
+
+// revokeSessionOn cancels every live manual-login operation of the session
+// inside the caller's runner transaction. A dispatched operation keeps its
+// physical cleanup fence open (Stop reconciliation proves the cleanup); an
+// undispatched one is fenced closed immediately because no process exists.
+func revokeSessionOn(ctx context.Context, tx *execution.Tx, now func() time.Time, sessionID int64) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,start_dispatched_at IS NOT NULL FROM browser_operations WHERE kind='manual_login' AND actor_session_id=? AND state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +93,14 @@ func (service *Service) RevokeSession(ctx context.Context, sessionID int64) ([]i
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	stamp := now().UTC().Format(time.RFC3339Nano)
 	ids := make([]int64, 0, len(operations))
 	for _, operation := range operations {
 		var result sql.Result
 		if operation.dispatched {
-			result, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='session_revoked',row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')`, now, operation.id)
+			result, err = tx.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='session_revoked',row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')`, stamp, operation.id)
 		} else {
-			result, err = conn.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='session_revoked',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity')`, now, now, operation.id)
+			result, err = tx.ExecContext(ctx, `UPDATE browser_operations SET state='Cancelled',ended_at=?,terminal_reason='session_revoked',stop_confirmed_at=?,stop_confirmation_basis='not_dispatched',row_version=row_version+1 WHERE id=? AND state IN ('Queued','WaitingForCapacity')`, stamp, stamp, operation.id)
 		}
 		if err != nil {
 			return nil, err
@@ -98,9 +110,5 @@ func (service *Service) RevokeSession(ctx context.Context, sessionID int64) ([]i
 		}
 		ids = append(ids, operation.id)
 	}
-	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, err
-	}
-	committed = true
 	return ids, nil
 }

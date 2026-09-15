@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 func seedRunningAttemptWithFrozenCatalog(t *testing.T, db *sql.DB, service *Service) (int64, *FrozenCatalog) {
@@ -98,8 +100,8 @@ func sealModelCall(t *testing.T, service *Service, attemptID, callID int64, prop
 // call stays pending with its preflight code, and no execution inputs exist.
 func TestCompleteModelCallReturnsSourceAmbiguityPreflightToModel(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
-	service.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
+	service := newTestService(t, db)
+	service.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
 		if tool.Name != "thanos_query" {
 			return ToolResolution{}, fmt.Errorf("unexpected resolver call for %s", tool.Name)
 		}
@@ -148,8 +150,8 @@ func TestCompleteModelCallReturnsSourceAmbiguityPreflightToModel(t *testing.T) {
 // authorization carries exactly those Quoin-scoped bytes.
 func TestCompleteModelCallFreezesNormalizedExecutionInputs(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
-	service.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
+	service := newTestService(t, db)
+	service.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
 		scoped, _ := json.Marshal(map[string]string{"resourceRef": "prom-main", "query": "up"})
 		sum := sha256.Sum256(scoped)
 		if _, err := conn.ExecContext(ctx, `INSERT INTO tool_call_execution_inputs(tool_call_id,arguments_json,arguments_digest,created_at) VALUES(?,?,?,datetime('now'))`,
@@ -178,8 +180,8 @@ func TestCompleteModelCallFreezesNormalizedExecutionInputs(t *testing.T) {
 // fails instead of executing unscoped arguments (RUNTIME-AGENT-005).
 func TestCompleteModelCallFailsClosedWithoutNormalizedInputs(t *testing.T) {
 	db := newTestDB(t)
-	service := NewService(db)
-	service.ToolGrantResolver = func(ctx context.Context, conn *sql.Conn, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
+	service := newTestService(t, db)
+	service.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool ToolDef) (ToolResolution, error) {
 		return ToolResolution{Grants: []ToolGrant{{GrantID: 71, ConnectionRevisionID: 7, CredentialGenerationID: 7, Purpose: "thanos_query"}}}, nil
 	}
 	attemptID, catalog := seedRunningAttemptWithFrozenCatalog(t, db, service)

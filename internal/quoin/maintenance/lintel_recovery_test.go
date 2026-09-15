@@ -18,11 +18,39 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/lintel/catalog"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
 const t35Release = "v0.1.0-dev"
+
+// t35AdminContext seeds the built-in administrator with one live session and
+// returns the execution metadata context the prepare command requires (the
+// production admission middleware provides the same facts).
+func t35AdminContext(t *testing.T, db *sql.DB) context.Context {
+	t.Helper()
+	now := "2026-09-14T00:00:00Z"
+	idle, absolute := "2036-09-14T00:00:00Z", "2036-09-21T00:00:00Z"
+	for _, statement := range []string{
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'fixture',1,'` + now + `','` + now + `')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'fixture','` + now + `','` + now + `','` + idle + `','` + absolute + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "runtime-t35-seed",
+		Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-t35-seed"},
+		Session:       execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
 
 func t35Digest(parts ...string) string {
 	sum := sha256.Sum256([]byte(t35Join(parts)))
@@ -74,6 +102,18 @@ func t35FirstHello(t *testing.T, fixture *t35Fixture) {
 	}
 }
 
+// t35RuntimeService composes the runtime authority on a private runner with
+// the database's actual read-only pool — the same NewServiceWithReader wiring
+// the composed application uses, so the pure handshake reads stay real.
+func t35RuntimeService(t *testing.T, database *bootstrap.Database) *qruntime.Service {
+	t.Helper()
+	service, err := qruntime.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
 func newT35Fixture(t *testing.T, disposition string) *t35Fixture {
 	t.Helper()
 	root := t.TempDir()
@@ -94,7 +134,7 @@ func newT35Fixture(t *testing.T, disposition string) *t35Fixture {
 	}
 	fixture := &t35Fixture{
 		database: database,
-		service:  qruntime.NewService(database.SQL),
+		service:  t35RuntimeService(t, database),
 		request: maintenance.LintelRecoveryFinalizeRequest{
 			DataDirectory: config.DataDirectory, RootKeyFile: config.RootKeyFile, Disposition: disposition,
 			DispositionDigest:    t35Digest("disposition", disposition),
@@ -103,8 +143,10 @@ func newT35Fixture(t *testing.T, disposition string) *t35Fixture {
 			PostVerifyDigest:     t35Digest("post-verify"),
 		},
 	}
-	// Old lintel credential: real registration + first Hello.
-	ctx := context.Background()
+	// Old lintel credential: real registration + first Hello. The prepare
+	// command verifies a real admin session proof inside the runner
+	// transaction.
+	ctx := t35AdminContext(t, database.SQL)
 	var session [32]byte
 	_, handle, _, err := fixture.service.PrepareRegistration(ctx, "lintel", 1, session)
 	if err != nil {
@@ -146,8 +188,7 @@ func (fixture *t35Fixture) seedBrowserOperations(t *testing.T) {
 			t.Fatalf("%s: %v", query, err)
 		}
 	}
-	exec(`INSERT INTO users(id,username,display_name,role,enabled,password_phc,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,'x',?,?)`, now, now)
-	exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,?,1,'t35',?,?,?,?)`, make([]byte, 32), now, now, now, now)
+	// The admin identity (users/sessions) already exists from t35AdminContext.
 	for id := 1; id <= 5; id++ {
 		exec(`INSERT INTO business_systems(id,key,display_name,enabled,created_at) VALUES(?,?,'Payments',0,?)`, id, fmt.Sprintf("payments-%d", id), now)
 		exec(`INSERT INTO browser_identity_revisions(id,business_system_id,revision,name,start_url,probe_journey_id,probe_journey_version,probe_params_json,journey_catalog_digest,journey_catalog_version,created_at) VALUES(?,?,?,'readonly','https://payments.example','authentication.url-prefix.v1',1,'{}',?,'v1',?)`, id, id, id, d64, now)
@@ -205,12 +246,12 @@ func TestTicket35FinalizeSequentialRecoveriesOnSameDatabase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return database, qruntime.NewService(database.SQL)
+		return database, t35RuntimeService(t, database)
 	}
 	// Seed the first credential once.
 	{
 		database, service := open()
-		ctx := context.Background()
+		ctx := t35AdminContext(t, database.SQL)
 		var session [32]byte
 		_, handle, _, err := service.PrepareRegistration(ctx, "lintel", 1, session)
 		if err != nil {
@@ -294,6 +335,108 @@ func TestTicket35FinalizeExclusiveReattachAndReplay(t *testing.T) {
 	conflicting.PostVerifyDigest = t35Digest("other-post-verify")
 	if _, err := maintenance.FinalizeLintelRecovery(context.Background(), conflicting); !errors.Is(err, maintenance.ErrLintelRecoveryReceiptConflict) {
 		t.Fatalf("conflict error=%v", err)
+	}
+}
+
+// TestTicket35FinalizeAutomaticAuditRecordsOperationOnce proves the
+// runner-owned audit for the finalizer: exactly one automatic row with the
+// system actor, the execute phase and a fresh per-operation correlation, and
+// a receipt replay records no second row.
+func TestTicket35FinalizeAutomaticAuditRecordsOperationOnce(t *testing.T) {
+	fixture := newT35Fixture(t, "exclusively_reattached")
+	t35Begin(t, fixture)
+	t35FirstHello(t, fixture)
+	fixture.close(t)
+	if _, err := maintenance.FinalizeLintelRecovery(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	visit := func(visit func(db *sql.DB)) {
+		t.Helper()
+		database, err := bootstrap.OpenDatabase(context.Background(), fixture.request.DataDirectory, fixture.request.RootKeyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		visit(database.SQL)
+		// Only the wrapper's Close releases the data-directory lock.
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actor string
+	var actorID int64
+	var outcome, phase, correlation string
+	visit(func(first *sql.DB) {
+		if err := first.QueryRow(`SELECT actor_type,actor_id,outcome,phase,COALESCE(correlation_id,'') FROM audit_events WHERE action='lintel_recovery.finalize'`).Scan(&actor, &actorID, &outcome, &phase, &correlation); err != nil {
+			t.Fatal(err)
+		}
+		// A caller correlation can never drive the offline command.
+		callerCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+			CorrelationID: "caller-correlation",
+			Actor:         execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+			Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-caller"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := maintenance.FinalizeLintelRecovery(callerCtx, fixture.request); err == nil {
+			t.Fatal("offline finalizer accepted a caller execution context")
+		}
+	})
+	if actor != "system" || actorID != 0 || outcome != "success" || phase != "execute" || correlation == "" {
+		t.Fatalf("unexpected audit row: actor=%s/%d outcome=%s phase=%s correlation=%q", actor, actorID, outcome, phase, correlation)
+	}
+	if replay, err := maintenance.FinalizeLintelRecovery(context.Background(), fixture.request); err != nil || !replay.AlreadyFinalized {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	visit(func(second *sql.DB) {
+		var again int
+		if err := second.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action='lintel_recovery.finalize'`).Scan(&again); err != nil {
+			t.Fatal(err)
+		}
+		if again != 1 {
+			t.Fatalf("replay produced %d audit rows, want still 1", again)
+		}
+	})
+}
+
+// TestTicket35FinalizeRollsBackWhenAuditCannotCommit proves the automatic
+// audit is authoritative: an audit write failure aborts the whole finalization
+// — no receipt, no domain closure, no maintenance exit — because the runner
+// writes the audit inside the same transaction.
+func TestTicket35FinalizeRollsBackWhenAuditCannotCommit(t *testing.T) {
+	fixture := newT35Fixture(t, "exclusively_reattached")
+	t35Begin(t, fixture)
+	t35FirstHello(t, fixture)
+	if _, err := fixture.database.SQL.Exec(`CREATE TRIGGER fail_lintel_recovery_finalize_audit BEFORE INSERT ON audit_events WHEN NEW.action='lintel_recovery.finalize' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	fixture.close(t)
+	if _, err := maintenance.FinalizeLintelRecovery(context.Background(), fixture.request); err == nil {
+		t.Fatal("finalizer unexpectedly committed when its mandatory audit failed")
+	}
+	db := reopenReadonly(t, fixture)
+	defer db.Close()
+	var active int
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT active,reason FROM maintenance_state WHERE id=1`).Scan(&active, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || !reason.Valid || reason.String != "LintelRecovery" {
+		t.Fatalf("maintenance state moved past the audit failure: active=%d reason=%v", active, reason)
+	}
+	var receipts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM lintel_recovery_receipts`).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 0 {
+		t.Fatalf("receipt survived the rolled-back finalization: count=%d", receipts)
+	}
+	var retiring sql.NullInt64
+	if err := db.QueryRow(`SELECT retiring_credential_id FROM runtime_slots WHERE slot='lintel'`).Scan(&retiring); err != nil {
+		t.Fatal(err)
+	}
+	if !retiring.Valid {
+		t.Fatal("retiring pointer was cleared by a rolled-back finalization")
 	}
 }
 
