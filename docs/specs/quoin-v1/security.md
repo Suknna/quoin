@@ -2,6 +2,8 @@
 
 **状态：Draft**
 
+> **认证与审计整改（2026-09，进行中）：** [ADR-0005](../../adr/0005-unified-authentication-foundation.md)/[ADR-0006](../../adr/0006-automatic-audit-and-operation-correlation.md) 与 [统一认证设计](../../authentication-design.md)、[审计设计](../../audit-design.md) 已被接受并进入实施：唯一内置管理员、密码后二级验证（邮件/短信 OTP）、独立认证流程 Cookie（`__Host-quoin-flow`，Cookie 属性同 SEC-SESSION-001、流程级短时效、绝不被 Session 认证接受）与自动审计/关联/保留清理的机器契约（`contracts/openapi.yaml`、`contracts/sql/schema.sql`）已同步更新；一次性安装凭据机制已移除（2026-09-15，见 ADR-0005「决定更新」及其更正），认证 wire 不存在独立 recovery 流程类别，管理员恢复由 `quoin admin recover` 的 CLI 临时密码承载；认证流程与审计查询/保留的 HTTP 处理器已落地，全项目准入迁移与逐操作覆盖仍在进行——进度以 [`docs/auth-audit-implementation-plan.md`](../../auth-audit-implementation-plan.md) 与 [`docs/auth-audit-operation-coverage.md`](../../auth-audit-operation-coverage.md)（main 维护）为准，本文不据此宣称整改完成。被替代的旧条款保留原 ID 与历史含义并逐条标注 superseded；设计细节一律引用上述设计文档，不在本文复制。
+
 **CATEGORY 前缀：`SEC`**（SPEC-TRACE-002）
 
 领域语言权威：[CONTEXT.md](../../../CONTEXT.md)
@@ -29,7 +31,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-PASSWORD-004 —** 密码 PHC **MUST** 使用 Argon2id，最低参数为 `m=19 MiB,t=2,p=1`；只有在真实部署硬件上按目标并发完成基准后才 **MAY** 提高参数。验证器 **MUST** 接受现有合规 PHC 并可在成功登录后升级参数，**MUST NOT** 降低已有参数。（来源：CONTEXT「本地账号认证」、OWASP Password Storage）
 - **SEC-PASSWORD-005 —** 用户不存在、密码错误和账号禁用 **MUST** 返回同一 401 响应；不存在用户 **MUST** 执行等价 dummy Argon2id 工作。密码、PHC、候选 blocklist 命中值与 dummy hash **MUST NOT** 进入日志、审计、指标标签或错误详情。（来源：CONTEXT「本地账号认证」）
 - **SEC-PASSWORD-006 —** 单 Quoin 进程 **MUST** 以有界内存表按规范化用户名执行“15 分钟内失败 5 次后冷却 15 分钟”，不存在用户走同一路径；表满时 **MUST** 淘汰最旧状态并继续受全局登录速率与 Argon2 并发门保护，**MUST NOT** 把匿名用户名持续写入 SQLite。进程重启清零是 v1 接受的边界。（来源：Issue #16 Q16.5、CONTEXT「本地账号认证」）
-- **SEC-PASSWORD-007 —** 离线创建/重置 Admin 的临时密码只可经 TTY 读取或一次显示；Web Admin 为其他用户重置时，临时密码只可作为受同源与 Session 保护的请求秘密接收，API **MUST NOT** 回显或保存明文。两条路径都 **MUST NOT** 把临时密码放入参数、环境变量、命令历史、审计或日志；首次登录后的 Session 保持受限，直到同一事务成功保存正式密码、清除强制改密状态并更新 Session revision。（来源：CONTEXT「管理员离线恢复」「本地账号认证」）
+- **SEC-PASSWORD-007 —（部分 superseded by ADR-0005）** 历史的“离线创建/重置 Admin”生命周期已被唯一管理员模型替代：空库引导自动创建唯一待初始化 admin（初始密码为公共默认值 `admin`，只在未完成初始化的初始化流程内可被接受，永不满足正式密码策略；产品内不提供部署所有权证明——一次性安装凭据机制已移除〔2026-09-15〕，首次部署访问边界由部署环境负责）；离线 `quoin admin create` 退役；全部因子丢失走 `quoin admin recover`（`--mode password|factors`，attached TTY）。仍现行的部分：Web Admin 为 Operator 重置的临时密码只可作为受同源与 Session 保护的请求秘密接收，管理员恢复的临时密码只经 attached TTY 设置或打印一次，不设单独有效期；任何路径 **MUST NOT** 把临时密码/流程凭据放入参数、环境变量、命令历史、审计或日志、API 回显或持久明文；首次登录后的 Session 保持受限，直到同一事务成功保存正式密码、清除强制改密状态并更新 Session revision。（来源：CONTEXT「管理员离线恢复」「本地账号认证」、[统一认证设计 §2/§6](../../authentication-design.md)）
 
 ## 3. Session、同源请求与浏览器响应
 
@@ -37,7 +39,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-SESSION-002 —** SQLite **MUST** 只保存 Session bearer 的 32-byte SHA-256 digest；比较 **MUST** 使用固定长度、无早退的实现。登录成功必须签发新 bearer；登出、撤销、过期、账号禁用或 auth revision 不匹配后，该 bearer **MUST** 在全部 HTTP、SSE 与 WebSocket 入口立即失效。`revoked_at` 只允许由 NULL 前进到时间戳且不可清除；绝对期限创建后不可延长，活动时间与空闲期限只能同步前进且不得越过绝对期限，已撤销 Session 不得再刷新活动窗口。（来源：CONTEXT「同源 Web 会话」、DATA-AUTH-003/005）
 - **SEC-SESSION-003 —** 受保护请求 **MUST** 每次读取当前 User 的 enabled、role 与 auth revision；前端隐藏入口、Session 创建时角色快照和已经建立的长连接 **MUST NOT** 替代当前授权检查。写事务 **MUST** 在提交前与业务写同事务复核。（来源：CONTEXT「本地账号认证」「权限」、HTTP-AUTH-003、DATA-TX-002）
 - **SEC-CSRF-001 —** 全部浏览器写请求 **MUST** 先经过 Go `CrossOriginProtection`。携带 Session Cookie 的非安全方法若 `Sec-Fetch-Site` 与 `Origin` 同时缺失，或 `Origin` 存在但不精确等于规范公共 Origin，**MUST** 在读取业务正文前返回 403；v1 **MUST NOT** 提供 Cookie CLI 例外或同步 CSRF token。（来源：Issue #16 Q16.8、CONTEXT「同源 Web 会话」）
-- **SEC-CSRF-002 —** `login` **MUST** 另执行认证前同源门：`Origin` 存在时只接受精确公共 Origin；没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`；两者都缺失以及 `same-site|cross-site|none` **MUST** 返回 403，且 **MUST NOT** 执行 Argon2id 或建立 Session。（来源：Issue #16 Q16.14）
+- **SEC-CSRF-002 —** 认证入口（现行 `startAuthentication`，即原 `login` 路由）**MUST** 另执行认证前同源门：`Origin` 存在时只接受精确公共 Origin；没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`；两者都缺失以及 `same-site|cross-site|none` **MUST** 返回 403，且 **MUST NOT** 执行 Argon2id 或建立 Session/流程。该门 **MUST** 同样覆盖后续可能新增的认证入口（管理员恢复为离线 CLI，不提供恢复 HTTP 入口）。（来源：Issue #16 Q16.14）
 - **SEC-CSRF-003 —** noVNC WebSocket 升级 **MUST** 校验规范公共 Origin、当前 Session、当前 User 与 operation 发起者；带凭据跨域 CORS 与跨域 SSE **MUST NOT** 启用。公共 Origin **MUST** 来自单一部署配置，**MUST NOT** 由不可信 Host/Forwarded 头临时推导。（来源：CONTEXT「同源 Web 会话」、HTTP-NOVNC-002）
 - **SEC-HEADER-001 —** Quoin 受保护响应与前端静态页面响应 **MUST** 设置应用拥有的 CSP、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`；CSP **MUST** 以 `default-src 'self'` 和 `frame-ancestors 'none'` 为基线，只按锁定前端/noVNC 的真实资源需要显式放行，**MUST NOT** 使用 wildcard、`unsafe-eval` 或内联 script。（来源：Issue #16 Q16.9、OWASP HTTP Headers）
 - **SEC-HEADER-002 —** Session、秘密、敏感 Artifact、raw trace、备份及其错误响应 **MUST** 设置 `Cache-Control: no-store`；登出成功响应 **MUST** 清除 Session Cookie 并发送 `Clear-Site-Data`，实际 TLS 终止层 **MUST** 独占 HSTS 配置。（来源：Issue #16 Q16.9）
@@ -45,7 +47,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 ## 4. 权限与服务身份
 
 - **SEC-AUTHZ-001 —** 权限矩阵 **MUST** 以 CONTEXT「权限」和 HTTP-PERM-* 为唯一人类/HTTP 语义；所有 HTTP 与 gRPC 入口都 **MUST** 服务端检查主体类型、当前状态、操作权限和对象归属，**MUST NOT** 依赖前端、模型、worker 或调用方隐藏字段。（来源：CONTEXT「权限」、Issue #16）
-- **SEC-AUTHZ-002 —** Quoin **MUST** 拒绝禁用或降级最后一个有效 Admin；`quoin admin create` **MUST** 只接受无 `users` 行的空白库，全部 Admin 无法登录时的 `quoin admin reset-password` **MUST** 只修改已存在 Admin；两者都要求长期 Quoin 停止且独占 SQLite。部署包 **MAY** 仅按 OPS-PACKAGE-003 用 attached TTY 包装空白库创建，**MUST NOT** 提供网络 bootstrap、邮件找回或安全问题。（来源：CONTEXT「管理员离线恢复」）
+- **SEC-AUTHZ-002 —（superseded by ADR-0005 唯一管理员模型）** 历史的“多个 Admin + 最后有效 Admin 保护 + 离线 `quoin admin create`/`reset-password`”叙述不再适用：一个部署固定一个内置 `admin`（schema 唯一索引与触发器强制：不可禁用、降级或删除，Operator **MUST NOT** 经创建或更新路径提升为 Admin）；其凭据生命周期只经引导初始化、恢复命令（`quoin admin recover`，CLI-only，`--mode password|factors`）与备份恢复的 TTY 恢复通道，**MUST NOT** 提供网络 bootstrap、邮件找回、安全问题或第二个管理员。（来源：CONTEXT「权限」「管理员离线恢复」、[统一认证设计 §1/§6](../../authentication-design.md)、`contracts/sql/schema.sql#idx_users_single_admin`）
 - **SEC-SERVICE-001 —** Plinth、Lintel 与 Stele token **MUST** 使用封闭主体类型和最小 RPC scope；Plinth/Lintel 长期 token 只保存 32-byte digest，Stele token 只由部署 Secret 文件提供。服务 token **MUST NOT** 被 Web Admin Session、worker 或模型复用。（来源：CONTEXT「服务身份」、RUNTIME-AUTH-*）
 - **SEC-SERVICE-002 —** 每个 gRPC 请求和 stream 建立 MUST 复核 token、slot/service 类型、统一 Proto 契约指纹与当前吊销状态；发布版本仅保留为非准入溯源信息；吊销、slot 替换或凭据退休 **MUST** 立即关闭对应控制流、浏览器流与上传流并禁止旧 token 重连。（来源：CONTEXT「服务身份」、RUNTIME-REVOKE-001）
 - **SEC-SERVICE-002a —** Lintel Runtime token 的 Artifact scope 仅为 `Upload(trace|screenshot)`，且仅限其当前 fence 下 `browser_operation` owner 的生成物；它没有 `ReadText`、`GrepText`、通用 Artifact owner 或其他 Artifact kind 权限。敏感 trace 的保密与下载授权仍由 Artifact 的 `sensitive` 事实及 SEC-DOWNLOAD-* 裁决，不因 Lintel 上传而降级。（来源：Issue #45）
@@ -74,10 +76,10 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 
 ## 7. 审计、错误与日志
 
-- **SEC-AUDIT-001 —** 持久 Audit Event **MUST** 覆盖：登录成功；登出、Session 创建/撤销；全部已认证领域写成功和确定性拒绝；用户/角色/密码；秘密 reveal/轮换/退休；Runtime；维护、恢复、根密钥 rebind 与离线命令；敏感下载授权和已认证权限拒绝。事件 **MUST** 只保存非秘密 actor/action/target/result/locator。（来源：Issue #16 Q16.15、CONTEXT「审计与执行溯源」）
+- **SEC-AUDIT-001 —** 持久 Audit Event **MUST** 覆盖：登录成功；登出、Session 创建/撤销；全部已认证领域写成功和确定性拒绝；用户/角色/密码；秘密 reveal/轮换/退休；Runtime；维护、恢复、根密钥 rebind 与离线命令；敏感下载授权和已认证权限拒绝。事件 **MUST** 只保存非秘密 actor/action/target/result/locator。**ADR-0006 目标（实施中）：** 覆盖 **MUST** 由统一入口（访问事实）与共享执行器（权威业务结果）自动产生并携带 correlation_id/phase，不再依赖各业务手工 INSERT；认证流程各阶段、审计查询自身与保留清理批次同样纳入。逐操作覆盖进度以 [`docs/auth-audit-operation-coverage.md`](../../auth-audit-operation-coverage.md) 为准，未完成前不得宣称默认审计已全覆盖。（来源：Issue #16 Q16.15、CONTEXT「审计与执行溯源」、[审计设计 §1–§4](../../audit-design.md)）
 - **SEC-AUDIT-002 —** 匿名登录失败、CSRF/畸形匿名请求、无效 Runtime/Stele token、未认证 403/401 与 429 **MUST NOT** 逐条写入 SQLite；它们 **MUST** 只进入有界计数器和速率受限的非秘密运维日志，且不得保存密码、完整用户名、token/digest 或请求 body。（来源：Issue #16 Q16.5/Q16.15）
 - **SEC-AUDIT-003 —** 强制 Audit Event 与领域状态变化 **MUST** 在同一 SQLite 事务提交；Audit INSERT 失败时领域写 **MUST** 回滚。确定性拒绝可在零领域变化的短事务写入；基础设施提交结果未知 **MUST NOT** 被另行写成权威 success/failure。（来源：Issue #16 Q16.15、DATA-AUDIT-004）
-- **SEC-AUDIT-004 —** `audit_events` 与 targets **MUST** 由 SQL 禁止 UPDATE/DELETE；Web API **MUST NOT** 提供删除或改写入口。v1 **MUST NOT** 用同一 SQLite 内的 hash chain 产生无法兑现的防部署操作者篡改承诺。（来源：Issue #16 Q16.18）
+- **SEC-AUDIT-004 —（DELETE 语义 superseded by 审计保留机制）** `audit_events` 与 targets **MUST** 由 SQL 禁止 UPDATE；Web API **MUST NOT** 提供单条删除、任意批量删除、改写或清空入口；v1 **MUST NOT** 用同一 SQLite 内的 hash chain 产生无法兑现的防部署操作者篡改承诺。历史的“审计无限保留、一切 DELETE 一律禁止”叙述已被受控保留清理替代（ADR-0006/审计设计 §7）：过期事件及 targets **MAY** 仅在单例 cleanup permit 被 armed 时删除，permit 的 cutoff 由 schema 触发器对照 `audit_retention`（默认且最短 6 个自然月）与受信时钟机械裁决，批次与结果持久留痕；保留期内的记录 **MUST NOT** 被删除。清理控制器/保留设置的运营验收仍在进行。（来源：Issue #16 Q16.18、[审计设计 §7](../../audit-design.md)、`contracts/sql/schema.sql#trg_audit_events_no_delete`）
 - **SEC-LOG-001 —** Quoin、Plinth、Lintel 与 Stele 的普通日志、指标标签、持久诊断、Audit Event 和 UI 技术详情 **MUST** 使用字段白名单；默认 **MUST NOT** 记录请求/响应 body、HTTP headers、gRPC metadata、完整 URL query、protobuf/raw JSON dump、Provider 原始错误或任意对象格式化结果。（来源：Issue #16 Q16.17、CONTEXT「秘密与日志」）
 - **SEC-LOG-002 —** 秘密值 **MUST** 使用不能被普通字符串化的封装类型；其格式化、JSON/Proto debug 或 error wrapping 结果只能是固定 `[REDACTED]`。外部适配器 **MUST** 先把上游失败映射为稳定错误码和允许字段，再写日志、数据库或 HTTP problem。（来源：Issue #16 Q16.17）
 - **SEC-LOG-003 —** 用户主动上传的日志/文本和明确标为敏感的 raw trace **MAY** 包含用户提供的秘密且不做通用猜测式扫描；普通 logger、审计、搜索索引和模型输入 **MUST NOT** 自动复制 raw trace，用户上传正文只按其显式业务路径保留。（来源：CONTEXT「模型调用边界」「在线保留」、Issue #16 Q16.17）

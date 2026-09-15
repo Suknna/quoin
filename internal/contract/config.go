@@ -49,6 +49,68 @@ type QuoinConfig struct {
 	// startup. The same field drives Quoin's catalog and the frozen model
 	// tool directory.
 	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
+	// Authentication is the optional deployment-side bootstrap for
+	// verification-code delivery (authentication design section 8). It
+	// exists only when this YAML supplies it: an absent section means the
+	// deployment ships no delivery preset and administrators configure
+	// delivery at runtime. SecretsFile names the read-only secret
+	// reference mapping file; runtime-configured secrets stay root-key
+	// encrypted in the database and never live in this file.
+	Authentication *QuoinAuthenticationConfig `json:"authentication,omitempty" yaml:"authentication,omitempty"`
+	// Audit is the optional audit retention override (ADR-0006). Absent
+	// selects the six-calendar-month default; RetentionMonths can only
+	// extend it.
+	Audit *QuoinAuditConfig `json:"audit,omitempty" yaml:"audit,omitempty"`
+}
+
+// QuoinAuthenticationConfig wraps the deploy-sourced verification delivery
+// preset and its secret reference file.
+type QuoinAuthenticationConfig struct {
+	// Configuration is the initial delivery channel mapping. It shares the
+	// exact JSON shape of auth_delivery_settings.configuration_json so the
+	// deploy preset and runtime-administered settings decode identically.
+	Configuration *AuthDeliveryDeployment `json:"configuration,omitempty" yaml:"configuration,omitempty"`
+	// SecretsFile is the read-only path to a JSON or YAML document mapping
+	// secret reference names to values. Values are resolved at send time
+	// only and never logged.
+	SecretsFile string `json:"secretsFile,omitempty" yaml:"secretsFile,omitempty"`
+}
+
+// AuthDeliveryDeployment is the per-channel delivery preset.
+type AuthDeliveryDeployment struct {
+	// Email delivers verification mail over SMTP.
+	Email *AuthDeliveryChannel `json:"email,omitempty" yaml:"email,omitempty"`
+	// SMS delivers verification SMS over the deployment's webhook gateway.
+	SMS *AuthDeliveryChannel `json:"sms,omitempty" yaml:"sms,omitempty"`
+}
+
+// AuthDeliveryChannel is one delivery channel configuration. Its JSON field
+// names are the machine contract shared with the stored delivery settings;
+// at most one kind's fields are meaningful per entry.
+type AuthDeliveryChannel struct {
+	Kind              string            `json:"kind" yaml:"kind"`
+	Host              string            `json:"host,omitempty" yaml:"host,omitempty"`
+	Port              int               `json:"port,omitempty" yaml:"port,omitempty"`
+	From              string            `json:"from,omitempty" yaml:"from,omitempty"`
+	Username          string            `json:"username,omitempty" yaml:"username,omitempty"`
+	PasswordRef       string            `json:"passwordRef,omitempty" yaml:"passwordRef,omitempty"`
+	TLSMode           string            `json:"tlsMode,omitempty" yaml:"tlsMode,omitempty"`
+	URL               string            `json:"url,omitempty" yaml:"url,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	SecretHeaders     map[string]string `json:"secretHeaders,omitempty" yaml:"secretHeaders,omitempty"`
+	Encoding          string            `json:"encoding,omitempty" yaml:"encoding,omitempty"`
+	Fields            map[string]string `json:"fields,omitempty" yaml:"fields,omitempty"`
+	SuccessField      string            `json:"successField,omitempty" yaml:"successField,omitempty"`
+	SuccessValue      string            `json:"successValue,omitempty" yaml:"successValue,omitempty"`
+	AllowPrivateCIDRs []string          `json:"allowPrivateCIDRs,omitempty" yaml:"allowPrivateCIDRs,omitempty"`
+	RootCAPEM         string            `json:"rootCaPem,omitempty" yaml:"rootCaPem,omitempty"`
+}
+
+// QuoinAuditConfig is the deployment audit retention override.
+type QuoinAuditConfig struct {
+	// RetentionMonths is the audit retention in calendar months; the
+	// default and schema minimum is six (ADR-0006).
+	RetentionMonths int `json:"retentionMonths" yaml:"retentionMonths"`
 }
 
 // DeploymentBinding is the immutable runtime authority for what this process

@@ -2,6 +2,8 @@
 
 **状态：Draft**
 
+> **认证重设计（2026-09-14，已确认、未实施）：** 新认证目标见 [ADR-0005](../../adr/0005-unified-authentication-foundation.md) 与[统一认证设计](../../authentication-design.md)。它替代旧规格中多管理员、离线首建管理员和第一版无 MFA 等目标约束；当前 SQL、OpenAPI、配置及运行实现尚未同步，不能把设计确认视为实现或验收完成。审计自动记录、操作关联与至少六个月保留目标已由 [ADR-0006](../../adr/0006-automatic-audit-and-operation-correlation.md) 确认，详细见[审计设计](../../audit-design.md)，尚未同步实现及机器契约。
+
 **Non-normative：** 本目录承载 Quoin v1 的规范性技术契约。目标是把 [`CONTEXT.md`](../../../CONTEXT.md) 中已经冻结的领域语言与业务边界，落实为可供后续实施规划和验证直接使用的数据、API、组件协议、配置、前端、安全、运维与验收规格；本目录不包含生产实现或实施任务拆分。
 
 > **状态提示（2026-09-13，受控浏览器退役）：** 受控浏览器业务已整体下线：`browser` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），Lintel slot 不再接受 Register/Connect（长期凭据一律被拒），全部浏览器 HTTP/WebSocket 路由、journey-catalog 视图与 OpenAPI 操作已拆除（旧 URL 一律 404），Runtime 状态与 About 只投影 plinth 槽位。Lintel 相关实现代码与历史部署工件保留作恢复参考（部署工件见 `deploy/retired/browser`）；各主题文件与历史验收中涉及浏览器的条款仅作历史解读，其活动路由以当前 OpenAPI 为准。

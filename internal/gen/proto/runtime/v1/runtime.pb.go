@@ -3333,20 +3333,25 @@ func (x *Capacity) GetMax() uint32 {
 // （RUNTIME-TASK-001/002）。重复投递按 attempt_id + boot/epoch 幂等。
 // 任务执行输入由 input（AttemptInputSnapshot）完整携带；连接秘密不在本消息，
 // 经 FetchCredentialGrant 由 supervisor 按 grant_id 获取（RUNTIME-GRANT-001）。
+// operation_correlation_id 是跨进程/重启的业务操作关联标识（ADR-0006）：协议只承载
+// 关联身份，权威归属（含原始发起者）由 Quoin 在派发事务内独立持久化；它与
+// ControlEnvelope.correlation_id（流内请求-响应配对编号，uint64）语义不同且互不替代，
+// 也不是权限凭据、不替代 attempt_id；无关联时为空。
 type DispatchAttempt struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	AttemptId             int64                  `protobuf:"varint,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"` // execution_attempts.id
-	AttemptType           AttemptType            `protobuf:"varint,2,opt,name=attempt_type,json=attemptType,proto3,enum=quoin.runtime.v1.AttemptType" json:"attempt_type,omitempty"`
-	ScopeType             ScopeType              `protobuf:"varint,3,opt,name=scope_type,json=scopeType,proto3,enum=quoin.runtime.v1.ScopeType" json:"scope_type,omitempty"`
-	ScopeId               int64                  `protobuf:"varint,4,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
-	CheckKey              string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                               // run_check/config_verification_run 子 Attempt 时非空；否则空
-	LeaseDeadline         *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=lease_deadline,json=leaseDeadline,proto3" json:"lease_deadline,omitempty"`                                // 有限 lease 截止；时长数值为部署配置
-	Input                 *AttemptInputSnapshot  `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`                                                                     // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
-	RequestedByToolCallId int64                  `protobuf:"varint,8,opt,name=requested_by_tool_call_id,json=requestedByToolCallId,proto3" json:"requested_by_tool_call_id,omitempty"` // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
-	PlanKey               string                 `protobuf:"bytes,9,opt,name=plan_key,json=planKey,proto3" json:"plan_key,omitempty"`                                                  // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
-	DiscoveryKey          string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                  // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	AttemptId              int64                  `protobuf:"varint,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"` // execution_attempts.id
+	AttemptType            AttemptType            `protobuf:"varint,2,opt,name=attempt_type,json=attemptType,proto3,enum=quoin.runtime.v1.AttemptType" json:"attempt_type,omitempty"`
+	ScopeType              ScopeType              `protobuf:"varint,3,opt,name=scope_type,json=scopeType,proto3,enum=quoin.runtime.v1.ScopeType" json:"scope_type,omitempty"`
+	ScopeId                int64                  `protobuf:"varint,4,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
+	CheckKey               string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                               // run_check/config_verification_run 子 Attempt 时非空；否则空
+	LeaseDeadline          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=lease_deadline,json=leaseDeadline,proto3" json:"lease_deadline,omitempty"`                                // 有限 lease 截止；时长数值为部署配置
+	Input                  *AttemptInputSnapshot  `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`                                                                     // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
+	RequestedByToolCallId  int64                  `protobuf:"varint,8,opt,name=requested_by_tool_call_id,json=requestedByToolCallId,proto3" json:"requested_by_tool_call_id,omitempty"` // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
+	PlanKey                string                 `protobuf:"bytes,9,opt,name=plan_key,json=planKey,proto3" json:"plan_key,omitempty"`                                                  // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
+	DiscoveryKey           string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                  // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
+	OperationCorrelationId string                 `protobuf:"bytes,11,opt,name=operation_correlation_id,json=operationCorrelationId,proto3" json:"operation_correlation_id,omitempty"`  // 业务操作关联标识（ADR-0006）；不透明文本，无关联为空
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *DispatchAttempt) Reset() {
@@ -3445,6 +3450,13 @@ func (x *DispatchAttempt) GetPlanKey() string {
 func (x *DispatchAttempt) GetDiscoveryKey() string {
 	if x != nil {
 		return x.DiscoveryKey
+	}
+	return ""
+}
+
+func (x *DispatchAttempt) GetOperationCorrelationId() string {
+	if x != nil {
+		return x.OperationCorrelationId
 	}
 	return ""
 }
@@ -10062,7 +10074,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\x19active_browser_operations\x18\x04 \x03(\x03R\x17activeBrowserOperations\"6\n" +
 	"\bCapacity\x12\x18\n" +
 	"\arunning\x18\x01 \x01(\rR\arunning\x12\x10\n" +
-	"\x03max\x18\x02 \x01(\rR\x03max\"\xe1\x03\n" +
+	"\x03max\x18\x02 \x01(\rR\x03max\"\x9b\x04\n" +
 	"\x0fDispatchAttempt\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\x03R\tattemptId\x12@\n" +
@@ -10076,7 +10088,8 @@ const file_runtime_proto_rawDesc = "" +
 	"\x19requested_by_tool_call_id\x18\b \x01(\x03R\x15requestedByToolCallId\x12\x19\n" +
 	"\bplan_key\x18\t \x01(\tR\aplanKey\x12#\n" +
 	"\rdiscovery_key\x18\n" +
-	" \x01(\tR\fdiscoveryKey\"\xc4\x02\n" +
+	" \x01(\tR\fdiscoveryKey\x128\n" +
+	"\x18operation_correlation_id\x18\v \x01(\tR\x16operationCorrelationId\"\xc4\x02\n" +
 	"\x14AttemptInputSnapshot\x12\x1f\n" +
 	"\vschema_kind\x18\x01 \x01(\tR\n" +
 	"schemaKind\x12%\n" +

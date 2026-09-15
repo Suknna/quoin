@@ -39,6 +39,7 @@ CREATE TABLE users (
   role                       TEXT NOT NULL CHECK (role IN ('admin','operator')),
   enabled                    INTEGER NOT NULL CHECK (enabled IN (0,1)),
   auth_revision              INTEGER NOT NULL DEFAULT 1 CHECK (auth_revision > 0),
+  initialized                INTEGER NOT NULL DEFAULT 0 CHECK (initialized IN (0,1)),
   password_phc               TEXT NOT NULL CHECK (length(password_phc) > 0), -- Argon2id PHC，格式见 security.md
   password_change_required   INTEGER NOT NULL DEFAULT 0 CHECK (password_change_required IN (0,1)), -- 首次/强制改密（离线创建、Admin 重置、备份恢复置位）
   password_change_required_at TEXT,                        -- 置位时间；成功改密在同一事务清除标志（DATA-AUTH-001）
@@ -49,6 +50,77 @@ CREATE TABLE users (
     (password_change_required = 1 AND password_change_required_at IS NOT NULL)
     OR (password_change_required = 0 AND password_change_required_at IS NULL)
   )
+) STRICT;
+
+CREATE UNIQUE INDEX idx_users_single_admin ON users(role) WHERE role = 'admin';
+CREATE TRIGGER trg_users_admin_identity BEFORE UPDATE OF role, enabled ON users
+WHEN OLD.role = 'admin' AND (NEW.role <> 'admin' OR NEW.enabled <> 1)
+BEGIN SELECT RAISE(ABORT, 'the built-in administrator cannot be demoted or disabled'); END;
+CREATE TRIGGER trg_users_admin_no_delete BEFORE DELETE ON users
+WHEN OLD.role = 'admin'
+BEGIN SELECT RAISE(ABORT, 'the built-in administrator cannot be deleted'); END;
+
+CREATE TABLE user_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  user_id INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  channel TEXT NOT NULL CHECK (channel IN ('email','sms')),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  target TEXT NOT NULL CHECK (length(target) BETWEEN 3 AND 320),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  verified_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (user_id, channel)
+) STRICT;
+CREATE INDEX idx_user_contacts_user ON user_contacts(user_id);
+
+CREATE TABLE auth_flows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  flow_type TEXT NOT NULL CHECK (flow_type IN ('admin_initialize','operator_initialize','login','contact_change')),
+  user_id INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  flow_token_digest BLOB NOT NULL UNIQUE CHECK (length(flow_token_digest) = 32),
+  correlation_id TEXT NOT NULL DEFAULT '',
+  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
+  password_set INTEGER NOT NULL DEFAULT 0 CHECK (password_set IN (0,1)),
+  verified_contact_id INTEGER REFERENCES user_contacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  candidate_channel TEXT CHECK (candidate_channel IS NULL OR candidate_channel IN ('email','sms')),
+  candidate_target TEXT CHECK (candidate_target IS NULL OR length(candidate_target) BETWEEN 3 AND 320),
+  client_label TEXT NOT NULL DEFAULT 'Browser',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','completed','failed','revoked')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  completed_at TEXT,
+  failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0)
+) STRICT;
+CREATE INDEX idx_auth_flows_user ON auth_flows(user_id,status);
+
+CREATE TABLE auth_challenges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  flow_id INTEGER NOT NULL REFERENCES auth_flows(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  purpose TEXT NOT NULL CHECK (purpose IN ('second_factor','contact_verification')),
+  contact_id INTEGER NOT NULL REFERENCES user_contacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  contact_version INTEGER NOT NULL CHECK (contact_version > 0),
+  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
+  code_digest BLOB NOT NULL CHECK (length(code_digest) = 32),
+  delivery_id TEXT NOT NULL UNIQUE,
+  delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (delivery_status IN ('pending','accepted','failed','unknown')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT
+) STRICT;
+CREATE INDEX idx_auth_challenges_flow ON auth_challenges(flow_id);
+
+CREATE TABLE auth_delivery_settings (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  source TEXT NOT NULL CHECK (source IN ('deployment','administrator')),
+  configuration_json TEXT NOT NULL CHECK (json_valid(configuration_json)),
+  secret_nonce BLOB CHECK (secret_nonce IS NULL OR length(secret_nonce)=12),
+  secret_ciphertext BLOB,
+  root_binding_revision INTEGER NOT NULL CHECK (root_binding_revision > 0),
+  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version > 0),
+  updated_at TEXT NOT NULL,
+  CHECK ((secret_nonce IS NULL AND secret_ciphertext IS NULL) OR (secret_nonce IS NOT NULL AND length(secret_ciphertext)>=16))
 ) STRICT;
 
 CREATE TABLE sessions (
@@ -174,9 +246,10 @@ CREATE INDEX idx_runtime_credentials_confirmed ON runtime_credentials (slot, con
 
 CREATE TABLE client_commands (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  principal_type     TEXT NOT NULL CHECK (principal_type IN ('user','service')),
+  principal_type     TEXT NOT NULL CHECK (principal_type IN ('user','service','system')),
   principal_id       INTEGER NOT NULL,           -- users.id 或 service principal id（service 无 users 行，不设 FK）
   client_command_id  TEXT NOT NULL,
+  correlation_id     TEXT,
   command_type       TEXT NOT NULL,
   request_digest     TEXT NOT NULL CHECK (length(request_digest) = 64), -- 非秘密语义字段（含 expected_*；秘密只记存在性）规范化后 SHA-256（DATA-COMMAND-002）
   outcome            TEXT NOT NULL CHECK (outcome IN ('committed','rejected_known')),
@@ -206,14 +279,71 @@ CREATE TABLE audit_events (
   actor_type        TEXT NOT NULL CHECK (actor_type IN ('user','service','system')),
   actor_id          INTEGER NOT NULL,
   action            TEXT NOT NULL,
+  correlation_id    TEXT,
+  request_id        TEXT,
+  phase             TEXT NOT NULL DEFAULT 'execute',
+  initiator_type    TEXT CHECK (initiator_type IS NULL OR initiator_type IN ('user','service','system')),
+  initiator_id      INTEGER,
   client_command_id TEXT,
   outcome           TEXT NOT NULL CHECK (outcome IN ('success','failure','rejected','unknown')),
   domain_ref_type   TEXT,
   domain_ref_id     INTEGER,
   created_at        TEXT NOT NULL
 ) STRICT;
+CREATE INDEX idx_audit_events_correlation ON audit_events(correlation_id,id);
 CREATE INDEX idx_audit_events_created ON audit_events (created_at);
 CREATE INDEX idx_audit_events_actor ON audit_events (actor_type, actor_id);
+
+CREATE TABLE audit_retention (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  retention_months INTEGER NOT NULL DEFAULT 6 CHECK (retention_months>=6),
+  cleanup_enabled INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_enabled IN (0,1)),
+  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version>0),
+  last_run_at TEXT,
+  last_success_cutoff_at TEXT,
+  last_success_deleted_events INTEGER CHECK (last_success_deleted_events IS NULL OR last_success_deleted_events>=0),
+  last_failure_at TEXT,
+  last_error_code TEXT,
+  updated_by_type TEXT CHECK (updated_by_type IS NULL OR updated_by_type IN ('user','service','system')),
+  updated_by_id INTEGER,
+  updated_at TEXT
+) STRICT;
+CREATE TABLE audit_cleanup_permits (
+  id INTEGER PRIMARY KEY CHECK (id=1),
+  active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0,1)),
+  cutoff_at TEXT NOT NULL DEFAULT '',
+  upper_event_id INTEGER NOT NULL DEFAULT 0 CHECK (upper_event_id>=0),
+  acquired_at TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE TRIGGER trg_audit_cleanup_permit_cutoff BEFORE UPDATE ON audit_cleanup_permits
+WHEN NEW.active=1 AND NOT EXISTS (
+ SELECT 1 FROM audit_retention r WHERE r.id=1 AND r.cleanup_enabled=1
+ AND julianday(NEW.cutoff_at) IS NOT NULL
+ AND julianday(NEW.cutoff_at) <= (julianday(date('now','start of month',printf('-%d months',r.retention_months))) + min(CAST(strftime('%d','now') AS INTEGER),CAST(strftime('%d',date('now','start of month',printf('-%d months',r.retention_months),'+1 month','-1 day')) AS INTEGER))-1 + (julianday('now')-julianday(date('now'))))
+ AND NEW.upper_event_id <= COALESCE((SELECT MAX(id) FROM audit_events),0)
+)
+BEGIN SELECT RAISE(ABORT, 'audit cleanup cutoff exceeds the retention policy'); END;
+CREATE TRIGGER trg_audit_cleanup_permit_inactive_insert BEFORE INSERT ON audit_cleanup_permits
+WHEN NEW.active<>0
+BEGIN SELECT RAISE(ABORT, 'audit cleanup permits must start inactive'); END;
+CREATE TRIGGER trg_audit_cleanup_permit_no_delete BEFORE DELETE ON audit_cleanup_permits
+BEGIN SELECT RAISE(ABORT, 'audit cleanup permit singleton cannot be deleted'); END;
+CREATE TRIGGER trg_audit_retention_no_delete BEFORE DELETE ON audit_retention
+BEGIN SELECT RAISE(ABORT, 'audit retention singleton cannot be deleted'); END;
+
+CREATE TABLE audit_cleanup_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id>0),
+  cutoff_at TEXT NOT NULL,
+  upper_event_id INTEGER NOT NULL CHECK (upper_event_id>=0),
+  deleted_events INTEGER NOT NULL CHECK (deleted_events>=0),
+  deleted_targets INTEGER NOT NULL CHECK (deleted_targets>=0),
+  final INTEGER NOT NULL CHECK (final IN (0,1)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER trg_audit_cleanup_batches_no_update BEFORE UPDATE ON audit_cleanup_batches
+BEGIN SELECT RAISE(ABORT, 'audit cleanup batches are immutable'); END;
+CREATE TRIGGER trg_audit_cleanup_batches_no_delete BEFORE DELETE ON audit_cleanup_batches
+BEGIN SELECT RAISE(ABORT, 'audit cleanup batches are immutable'); END;
 
 CREATE TABLE audit_event_targets (
   id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -1782,6 +1912,9 @@ CREATE TABLE verification_finalization_receipts (
 
 CREATE TABLE execution_attempts (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  operation_correlation_id  TEXT,
+  initiator_type            TEXT CHECK (initiator_type IS NULL OR initiator_type IN ('user','service','system')),
+  initiator_id              INTEGER,
   attempt_type              TEXT NOT NULL CHECK (attempt_type IN
                               ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding',
                                'inspection_collection','browser_exploration','connection_probe')),
@@ -1853,6 +1986,12 @@ CREATE TABLE execution_attempts (
     OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_verification_run','resource_refresh_run','observation_run'))
   )
 ) STRICT;
+CREATE TRIGGER execution_attempts_correlation_immutable BEFORE UPDATE ON execution_attempts
+WHEN OLD.operation_correlation_id IS NOT NULL AND (
+ NEW.operation_correlation_id IS NOT OLD.operation_correlation_id
+ OR NEW.initiator_type IS NOT OLD.initiator_type OR NEW.initiator_id IS NOT OLD.initiator_id)
+BEGIN SELECT RAISE(ABORT, 'attempt operation association is immutable'); END;
+
 CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (scope_type, scope_id)
   WHERE state IN ('Queued','Assigned','Running','Cancelling') AND check_key IS NULL
     AND scope_type NOT IN ('resource_refresh_run','observation_run') AND attempt_type <> 'browser_exploration';
@@ -2517,6 +2656,8 @@ CREATE TABLE backup_retention_health (
 ) STRICT;
 
 CREATE TABLE backups (
+  correlation_id TEXT,
+  initiator_type TEXT CHECK (initiator_type IS NULL OR initiator_type IN ('user','service','system')),
   id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   status          TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed')),
   stage           TEXT NOT NULL CHECK (stage IN ('queued','preflight','database_snapshot','artifact_copy','manifest_publish','completed')),
@@ -2637,11 +2778,22 @@ CREATE TABLE lintel_recovery_receipts (
 CREATE TRIGGER trg_audit_events_no_update BEFORE UPDATE ON audit_events
 BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 CREATE TRIGGER trg_audit_events_no_delete BEFORE DELETE ON audit_events
-BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
+WHEN NOT EXISTS (
+  SELECT 1 FROM audit_cleanup_permits p JOIN audit_retention r ON r.id=1
+  WHERE p.id=1 AND p.active=1 AND r.cleanup_enabled=1
+    AND julianday(OLD.created_at)<julianday(p.cutoff_at) AND OLD.id<=p.upper_event_id
+)
+BEGIN SELECT RAISE(ABORT, 'audit deletion requires an active retention permit'); END;
 CREATE TRIGGER trg_audit_event_targets_no_update BEFORE UPDATE ON audit_event_targets
 BEGIN SELECT RAISE(ABORT, 'audit_event_targets is append-only'); END;
 CREATE TRIGGER trg_audit_event_targets_no_delete BEFORE DELETE ON audit_event_targets
-BEGIN SELECT RAISE(ABORT, 'audit_event_targets is append-only'); END;
+WHEN NOT EXISTS (
+ SELECT 1 FROM audit_cleanup_permits p JOIN audit_retention r ON r.id=1
+ JOIN audit_events e ON e.id=OLD.audit_event_id
+ WHERE p.id=1 AND p.active=1 AND r.cleanup_enabled=1
+   AND julianday(e.created_at)<julianday(p.cutoff_at) AND e.id<=p.upper_event_id
+)
+BEGIN SELECT RAISE(ABORT, 'audit target deletion requires an active retention permit'); END;
 CREATE TRIGGER trg_client_commands_no_update BEFORE UPDATE ON client_commands
 BEGIN SELECT RAISE(ABORT, 'client_commands is append-only'); END;
 CREATE TRIGGER trg_client_commands_no_delete BEFORE DELETE ON client_commands

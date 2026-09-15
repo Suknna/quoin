@@ -244,6 +244,298 @@
         "enabledPlugins": {
           "$ref": "#/$defs/enabledPlugins",
           "description": "显式插件启用白名单（ADR-0004）。字段省略=启用全部 DefaultEnabled 插件（prometheus/thanos/alertmanager）；显式空数组=全部停用——省略与空数组是不同的部署事实。未知插件 ID 使组件启动失败。browser 与 kubernetes 插件已退役，显式列出同样启动失败。"
+        },
+        "authentication": {
+          "$ref": "#/$defs/quoinAuthentication"
+        },
+        "audit": {
+          "$ref": "#/$defs/quoinAudit"
+        }
+      }
+    },
+    "quoinAuthentication": {
+      "description": "部署侧认证投递引导（统一认证设计第 8 节）。configuration 是管理员运行时投递设置的部署预设，仅当本 YAML 提供时才存在部署来源预设；secretsFile 指向只读的秘密引用映射文件（引用名→值，JSON 或 YAML）。整节可省略；省略时部署不预置投递设置，管理员运行时配置的秘密仍经根密钥加密保存，绝不写入本文件。",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/authDeliveryDeployment"
+        },
+        "secretsFile": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "authDeliveryDeployment": {
+      "description": "认证投递渠道映射，与 auth_delivery_settings.configuration_json 的机器形状一致：email 渠道为 SMTP 投递，sms 渠道必须是 webhook。",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "email": {
+          "$ref": "#/$defs/authDeliveryChannel"
+        },
+        "sms": {
+          "$ref": "#/$defs/authDeliveryChannel"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "sms"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sms": {
+                "properties": {
+                  "kind": {
+                    "const": "webhook"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "authDeliveryChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "smtp",
+            "webhook"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "$ref": "#/$defs/hostPort"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 320,
+          "description": "SMTP 信封发件人与 From 头地址。"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "passwordRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "SMTP 密码的秘密引用名；值只能来自 authentication.secretsFile 映射，不得内联。"
+        },
+        "tlsMode": {
+          "enum": [
+            "starttls",
+            "implicit"
+          ],
+          "default": "starttls",
+          "description": "TLS 必选；starttls 表示服务器必须提供 STARTTLS，implicit 表示从首字节即 TLS。无明文投递选项。"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://",
+          "minLength": 8,
+          "maxLength": 2048,
+          "description": "webhook 的唯一固定目标；必须 HTTPS，不得包含占位符或 userinfo。"
+        },
+        "headers": {
+          "$ref": "#/$defs/authDeliveryHeaders"
+        },
+        "secretHeaders": {
+          "$ref": "#/$defs/authDeliverySecretHeaders"
+        },
+        "encoding": {
+          "enum": [
+            "json",
+            "form"
+          ],
+          "default": "json"
+        },
+        "fields": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "受限字段映射：值只能是字面量与固定占位符（{delivery_id} {channel} {recipient} {template} {code} {expires_in_seconds} {metadata.KEY}），不是可执行模板。"
+          }
+        },
+        "successField": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "可选的 2xx 业务成功判定 JSON 字段路径（最多 4 层）。"
+        },
+        "successValue": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "successField 的期望 JSON 字面量（字符串、数字或布尔）。"
+        },
+        "allowPrivateCIDRs": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"
+          },
+          "description": "显式允许的私网网段；link-local/元数据地址即使被列出也永远拒绝。"
+        },
+        "rootCaPem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "PEM 编码的附加 CA，只追加到系统信任池，不替代公共校验。"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "smtp"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "host",
+              "port",
+              "from"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "webhook"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "url"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "successField"
+            ]
+          },
+          "then": {
+            "required": [
+              "successValue"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "successValue"
+            ]
+          },
+          "then": {
+            "required": [
+              "successField"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "username"
+            ]
+          },
+          "then": {
+            "required": [
+              "passwordRef"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "passwordRef"
+            ]
+          },
+          "then": {
+            "required": [
+              "username"
+            ]
+          }
+        }
+      ]
+    },
+    "authDeliveryHeaders": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    },
+    "authDeliverySecretHeaders": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "请求头名→秘密引用名；值来自 authentication.secretsFile 映射，不得内联。"
+      }
+    },
+    "quoinAudit": {
+      "description": "审计保留期（ADR-0006）：默认且最低六个自然月，部署只能延长；省略整节保持默认。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retentionMonths"
+      ],
+      "properties": {
+        "retentionMonths": {
+          "type": "integer",
+          "minimum": 6,
+          "maximum": 240
         }
       }
     },
