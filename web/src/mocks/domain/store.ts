@@ -8,6 +8,7 @@ import type { BusinessSystemDetail, ConfigVersionDetail, LabelContractSummary, R
 import type { InspectionReportDetail, InspectionRunDetail } from '../../features/inspection/api'
 import type { CandidateDetail, ImportBatchDetail, KnowledgeDetail, KnowledgeVersionDetail } from '../../features/knowledge/api'
 import type { InvestigationAttempt, InvestigationDetail, InvestigationMessage } from '../../features/investigation/api'
+import type { AuthDeliveryConfiguration, AuthFlowContact, AuthFlowKind } from '../../features/authentication/api'
 
 /** Public scenario vocabulary consumed by the future mock bootstrap and scenario panel. */
 export type MockScenario = 'administrator' | 'operator' | 'unauthenticated' | 'password-change' | 'session-expired' | 'unavailable' | 'maintenance' | 'platform-one' | 'platform-boundary' | 'metrics-one' | 'metrics-boundary' | 'business-boundary' | 'empty' | 'slow' | 'conflict'
@@ -15,16 +16,36 @@ export type MockScenario = 'administrator' | 'operator' | 'unauthenticated' | 'p
 export const DEMO_CREDENTIALS = {
   admin: { username: 'admin', password: 'demo-admin-password' },
   operator: { username: 'operator', password: 'demo-operator-password' },
+  // Fixed second-factor code the auth flow preview "delivers".
+  otp: '654321',
 } as const
 
+/** Server-side flow state the HttpOnly cookie points at; one per browser preview. */
+export interface MockAuthFlow {
+  type: AuthFlowKind
+  userId: string
+  expiresAt: string
+  contacts: AuthFlowContact[]
+  passwordSet?: boolean
+  /** Per-flow verified factor (mirrors auth_flows.verified_contact_id), set by a successful challenge verify. */
+  factorVerified: boolean
+  /** Applied to the stored password only when the flow completes. */
+  pendingPassword?: string
+}
+
 const now = '2026-09-09T09:30:00.000Z'
-export const adminUser: UserSummary = { id: 'user-admin', username: 'admin', displayName: '演示管理员', role: 'admin', enabled: true, passwordChangeRequired: false, authRevision: 1, rowVersion: 1, lastLoginAt: now }
-export const operatorUser: UserSummary = { id: 'user-operator', username: 'operator', displayName: '演示操作员', role: 'operator', enabled: true, passwordChangeRequired: false, authRevision: 1, rowVersion: 1, lastLoginAt: now }
+export const adminUser: UserSummary = { id: 'user-admin', username: 'admin', displayName: '演示管理员', role: 'admin', enabled: true, initialized: true, passwordChangeRequired: false, authRevision: 1, rowVersion: 1, lastLoginAt: now }
+export const operatorUser: UserSummary = { id: 'user-operator', username: 'operator', displayName: '演示操作员', role: 'operator', enabled: true, initialized: true, passwordChangeRequired: false, authRevision: 1, rowVersion: 1, lastLoginAt: now }
 const passwordChangeUser: UserSummary = { ...operatorUser, passwordChangeRequired: true }
 
 export interface MockState {
   scenario: MockScenario
   currentUser: UserSummary | null
+  /** False only for a fresh deployment awaiting first-run admin initialization. */
+  adminInitialized: boolean
+  authFlow: MockAuthFlow | null
+  authChallenge: { contactId: string; code: string } | null
+  authDelivery: { configuration: AuthDeliveryConfiguration; rowVersion: number; source: string }
   users: AdminUser[]
   sessions: SessionInfo[]
   auditEvents: AuditEventInfo[]
@@ -97,6 +118,7 @@ function baseState(scenario: MockScenario): MockState {
   const evidence: EvidenceDetail = { id: 'evidence-latency', targetType: 'thanos_query', targetId: webAlert.id, params: { query: 'histogram_quantile(0.95, checkout_latency)' }, observedAt: now, integrity: 'complete', producer: { kind: 'quoin_local' }, connections: [{ key: thanos.name, type: 'thanos' }], body: { kind: 'inline_json', value: { p95Ms: 1420, thresholdMs: 800 } }, createdAt: now }
   const state: MockState = {
     scenario, currentUser: scenario === 'operator' ? operatorUser : scenario === 'password-change' ? passwordChangeUser : scenario === 'unauthenticated' || scenario === 'session-expired' ? null : adminUser,
+    adminInitialized: scenario !== 'empty', authFlow: null, authChallenge: null, authDelivery: { configuration: {}, rowVersion: 0, source: '' },
     users: [adminUser, operatorUser].map(user => ({ ...user })), passwords: { [adminUser.id]: DEMO_CREDENTIALS.admin.password, [operatorUser.id]: DEMO_CREDENTIALS.operator.password }, sessions: [{ id: 'session-current', clientLabel: '本地演示浏览器', createdAt: now, lastActiveAt: now, idleExpiresAt: '2026-09-09T17:30:00Z', absoluteExpiresAt: '2026-09-10T09:30:00Z', current: true }], auditEvents: [{ id: 'audit-1', actorType: 'user', actorId: adminUser.id, action: 'mock_session_started', outcome: 'success', createdAt: now }],
     alerts: [webAlert, resolvedAlert], observations: { [webAlert.id]: [{ id: 'observation-1', observedState: 'firing', startsAt: webAlert.firstSeenAt, receivedAt: now, committedAt: now, effect: 'repeat_firing' }], [resolvedAlert.id]: [{ id: 'observation-2', observedState: 'resolved', startsAt: resolvedAlert.firstSeenAt, endsAt: resolvedAlert.resolvedAt, receivedAt: resolvedAlert.resolvedAt!, committedAt: resolvedAlert.resolvedAt!, effect: 'resolved' }] }, intakeIssues: [{ id: 'intake-1', kind: 'delivery_truncated', issueKey: 'alertmanager/demo', detailJson: '{"source":"demo"}', firstSeenAt: now, lastSeenAt: now, occurrenceCount: 2, rowVersion: 1 }], alertSources: [{ key: 'demo-alertmanager', protocol: 'alertmanager', enabled: true, rowVersion: 1, createdAt: now, credentialCount: 1 }], alertCredentials: { 'demo-alertmanager': [{ id: 'alert-credential-1', rowVersion: 1, state: 'Active', createdAt: now }] }, mappings: { checkout: [{ id: 'mapping-k8s-1', connectionId: kubernetes.id, connectionName: kubernetes.name, state: 'Active', rowVersion: 1, createdBy: adminUser.id, createdAt: now, retiredBy: null }] }, feedback: [{ id: 'feedback-1', targetType: 'initial_analysis_output', targetId: 'analysis-output-1', value: 'adopted', createdBy: adminUser.id, createdAt: now }], backupSettings: { enabled: true, scheduleCron: '0 2 * * *', timezone: 'Asia/Shanghai', backupTarget: 'local', retentionCount: 7, rowVersion: 3 }, artifactRetention: { generatedRetentionDays: 14, rowVersion: 5 }, backups: [{ id: 'backup-1', status: 'Succeeded', stage: 'Completed', createdAt: now, completedAt: now }], analyses: { [webAlert.id]: [analysis] }, analysisAttempts: { [analysis.id]: [{ id: 'analysis-attempt-1', type: 'initial_analysis', state: 'Succeeded', rowVersion: 1, startedAt: now, endedAt: now, createdAt: now }] },
     investigations: [investigation], messages: { [investigation.id]: [firstMessage, assistantMessage] }, investigationAttempts: { [investigation.id]: [{ id: 'attempt-1', type: 'investigation', state: 'Succeeded', rowVersion: 1, createdAt: now, startedAt: now, endedAt: now }] }, attachments: new Map(), connections: [thanos, kubernetes, model], probes: {}, probeResults: { [thanos.name]: [{ id: 'probe-result-1', attemptId: 'probe-attempt-1', connectionType: 'thanos', outcome: 'passed', actionSetId: 'thanos', actionSetVersion: 1, resultDigest: 'sha256:probe', startedAt: now, finishedAt: now, details: { endpoint: 'reachable' } }] }, systems: [checkout], configVersions: { checkout: [config] }, refreshRuns: { checkout: [] }, verifications: { 'checkout/config-checkout-1': [{ id: 'verification-1', purpose: 'prepublish', configVersionId: config.id, labelContractVersionId: 'label-1', state: 'Passed', rowVersion: 1, evidenceAt: now, createdAt: now, checkResults: [{ planKey: 'checkout-health', checkKey: 'latency', status: 'ok', evidenceId: evidence.id }] }] }, labels: [{ id: 'label-1', version: 1, state: 'active', rowVersion: 1, parserVersion: '1', schemaVersion: '1', createdAt: now, activatedAt: now }], businessViews: [checkoutView, catalogView], inspectionPlans: [latencyPlan, clusterPlan], inspectionRuns: [activeRun, run], reports: { [run.id]: [{ id: 'report-1', runId: run.id, version: 1, evidenceDigest: 'sha256:evidence', evidenceIds: [evidence.id], modelId: 'gpt-demo', content: '巡检完成，结算服务延迟需要关注。', createdAt: now }] }, candidates: [candidate, importCandidate], knowledge: [knowledge], versions: { [knowledge.id]: [version] }, imports: [importBatch], evidence: { [evidence.id]: evidence }, commands: new Map(), sequence: 10,
@@ -110,7 +132,7 @@ function baseState(scenario: MockScenario): MockState {
     state.systems = Array.from({ length: 50 }, (_, index) => ({ ...checkout, key: `business-system-${String(index + 1).padStart(2, '0')}`, displayName: index === 49 ? '业务系统名称非常长用于验证左侧列表项目截断、悬停和箭头布局的边界预览二零二六零九一零' : `业务系统 ${String(index + 1).padStart(2, '0')}` }))
   }
   // Empty mode keeps a signed-in identity but removes every domain projection and its linked history.
-  if (scenario === 'empty') { state.users = []; state.sessions = []; state.auditEvents = []; state.alerts = []; state.observations = {}; state.intakeIssues = []; state.alertSources = []; state.alertCredentials = {}; state.analyses = {}; state.analysisAttempts = {}; state.investigations = []; state.messages = {}; state.investigationAttempts = {}; state.attachments = new Map(); state.connections = []; state.probes = {}; state.probeResults = {}; state.systems = []; state.configVersions = {}; state.refreshRuns = {}; state.verifications = {}; state.labels = []; state.businessViews = []; state.inspectionPlans = []; state.inspectionRuns = []; state.reports = {}; state.candidates = []; state.knowledge = []; state.versions = {}; state.imports = []; state.evidence = {}; state.mappings = {}; state.feedback = []; state.backups = [] }
+  if (scenario === 'empty') { state.adminInitialized = false; state.users = []; state.sessions = []; state.auditEvents = []; state.alerts = []; state.observations = {}; state.intakeIssues = []; state.alertSources = []; state.alertCredentials = {}; state.analyses = {}; state.analysisAttempts = {}; state.investigations = []; state.messages = {}; state.investigationAttempts = {}; state.attachments = new Map(); state.connections = []; state.probes = {}; state.probeResults = {}; state.systems = []; state.configVersions = {}; state.refreshRuns = {}; state.verifications = {}; state.labels = []; state.businessViews = []; state.inspectionPlans = []; state.inspectionRuns = []; state.reports = {}; state.candidates = []; state.knowledge = []; state.versions = {}; state.imports = []; state.evidence = {}; state.mappings = {}; state.feedback = []; state.backups = [] }
   return state
 }
 

@@ -158,6 +158,16 @@ export const workbenchApi = {
 			body: JSON.stringify(body),
 		}, false),
 	logout: () => request<void>("/api/v1/auth/logout", { method: "POST" }, false),
+	/**
+	 * Idle-clock refresh for an authenticated session. Fired only by real user
+	 * interaction from the shell (never by timers or other API calls); failures
+	 * stay silent because the reconcile loop owns session-expiry recovery.
+	 */
+	activity: () =>
+		request<void>("/api/v1/auth/activity", {
+			method: "POST",
+			body: JSON.stringify({}),
+		}, false),
 	maintenance: async (): Promise<MaintenanceState | null> => {
 		try {
 			return await request<MaintenanceState>("/api/v1/maintenance");

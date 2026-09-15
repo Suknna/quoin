@@ -13,9 +13,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const appApiState = vi.hoisted(() => ({
 	unauthorized: undefined as (() => void) | undefined,
 }));
+const authFlowApiState = vi.hoisted(() => ({
+	start: vi.fn(),
+	resume: vi.fn(),
+	setPassword: vi.fn(),
+	addContact: vi.fn(),
+	sendChallenge: vi.fn(),
+	verify: vi.fn(),
+	complete: vi.fn(),
+	readDelivery: vi.fn(),
+	saveDelivery: vi.fn(),
+}));
 vi.mock("@/features/evidence/ui", () => ({
 	EvidenceReader: () => <p>证据正文</p>,
 }));
+
+vi.mock("@/features/authentication/api", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("@/features/authentication/api")>();
+	return { ...actual, authFlowApi: authFlowApiState };
+});
 
 vi.mock("@/api/workbench", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/api/workbench")>();
@@ -28,6 +45,7 @@ vi.mock("@/api/workbench", async (importOriginal) => {
 });
 
 import { authUser, modelProviderDetail, otherUser } from "@/api/fixtures";
+import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError, workbenchApi } from "@/api/workbench";
 import { App } from "./App";
 
@@ -51,7 +69,48 @@ beforeEach(() => {
 	vi.stubGlobal("scrollTo", vi.fn());
 	window.history.replaceState(null, "", "/admin/model_provider/new");
 	window.location.hash = "";
+	authFlowApiState.resume.mockRejectedValue(
+		new WorkbenchApiError(404, "没有进行中的认证流程"),
+	);
 });
+
+/** Walks the real feature UI from credentials through the second factor. */
+async function signInThroughFlow(user: UserSummary) {
+	authFlowApiState.start.mockResolvedValue({
+		type: "login",
+		user: {
+			id: user.id,
+			username: user.username,
+			displayName: user.displayName,
+		},
+		expiresAt: "2026-09-15T10:00:00Z",
+		contacts: [
+			{
+				id: "c1",
+				channel: "email",
+				maskedTarget: "a***@quoin.dev",
+				verified: true,
+			},
+		],
+		passwordSet: true,
+	});
+	authFlowApiState.verify.mockResolvedValue({ completed: true, user });
+	fireEvent.change(await screen.findByLabelText("用户名"), {
+		target: { value: user.username },
+	});
+	fireEvent.change(screen.getByLabelText("密码"), {
+		target: { value: "a password long enough" },
+	});
+	fireEvent.click(screen.getByRole("button", { name: "登录" }));
+	await screen.findByText(/a\*\*\*@quoin\.dev/);
+	fireEvent.change(screen.getByLabelText("验证码"), {
+		target: { value: "012345" },
+	});
+	fireEvent.click(screen.getByRole("button", { name: "验证并继续" }));
+	await waitFor(() =>
+		expect(authFlowApiState.verify).toHaveBeenCalledWith("012345"),
+	);
+}
 afterEach(() => {
 	cleanup();
 	vi.restoreAllMocks();
@@ -118,35 +177,22 @@ describe("authentication workflow", () => {
 		).toBeGreaterThanOrEqual(6);
 	});
 
-	it("uses the password-change stage before requesting protected connections", async () => {
+	it("leaves the forced password stage to the authentication feature flow", async () => {
+		// The shell no longer renders its own password-change stage: a temp
+		// credential is resolved inside the flow, and /auth/me sessions go
+		// straight to the workbench.
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue({
 			...authUser,
 			passwordChangeRequired: true,
 		});
-		const list = vi.spyOn(workbenchApi, "listConnections");
+		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
+		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		expect(await screen.findByLabelText("当前临时密码")).toBeInTheDocument();
+		expect(await screen.findByRole("button", { name: "创建模型提供方" }))
+			.toBeInTheDocument();
 		expect(
-			screen.getByRole("complementary", { name: "关于 Quoin" }),
-		).toHaveTextContent("让每次一判断，都有据可寻。");
-		expect(list).not.toHaveBeenCalled();
-		fireEvent.change(screen.getByLabelText("当前临时密码"), {
-			target: { value: "current password long enough" },
-		});
-		fireEvent.change(screen.getByLabelText("新密码"), {
-			target: { value: "new password long enough" },
-		});
-		fireEvent.change(screen.getByLabelText("再次输入新密码"), {
-			target: { value: "different password long enough" },
-		});
-		const change = vi.spyOn(workbenchApi, "changePassword");
-		fireEvent.submit(
-			screen.getByRole("button", { name: "保存并进入工作台" }).closest("form")!,
-		);
-		expect(await screen.findByRole("alert")).toHaveTextContent(
-			"两次输入的新密码不一致",
-		);
-		expect(change).not.toHaveBeenCalled();
+			screen.queryByLabelText("当前临时密码"),
+		).not.toBeInTheDocument();
 	});
 
 	it("keeps an operator read-only and does not make mutation requests", async () => {
@@ -213,19 +259,12 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
-		vi.spyOn(workbenchApi, "login").mockResolvedValue(authUser);
 		render(<App />);
 		fireEvent.change(await screen.findByLabelText("名称"), {
 			target: { value: "same-user-draft" },
 		});
 		act(() => appApiState.unauthorized?.());
-		fireEvent.change(await screen.findByLabelText("用户名"), {
-			target: { value: "admin" },
-		});
-		fireEvent.change(screen.getByLabelText("密码"), {
-			target: { value: "a password long enough" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "登录" }));
+		await signInThroughFlow(authUser);
 		expect(await screen.findByLabelText("名称")).toHaveValue("");
 	});
 
@@ -234,19 +273,12 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
-		vi.spyOn(workbenchApi, "login").mockResolvedValue(otherUser);
 		render(<App />);
 		fireEvent.change(await screen.findByLabelText("名称"), {
 			target: { value: "old-user-draft" },
 		});
 		act(() => appApiState.unauthorized?.());
-		fireEvent.change(await screen.findByLabelText("用户名"), {
-			target: { value: "operator" },
-		});
-		fireEvent.change(screen.getByLabelText("密码"), {
-			target: { value: "a password long enough" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "登录" }));
+		await signInThroughFlow(otherUser);
 		await waitFor(() => expect(screen.getByLabelText("名称")).toHaveValue(""));
 	});
 
@@ -459,5 +491,78 @@ describe("authentication workflow", () => {
 			"退出服务不可用",
 		);
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
+	});
+
+	it("pings activity only on real interaction, throttled to five minutes", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-09-15T08:00:00Z"));
+			vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
+			vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
+			vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
+			const activity = vi
+				.spyOn(workbenchApi, "activity")
+				.mockResolvedValue(undefined);
+			render(<App />);
+			await vi.waitFor(() =>
+				expect(
+					screen.getByRole("button", { name: "创建模型提供方" }),
+				).toBeInTheDocument(),
+			);
+			// Time alone never renews a session: no interval may ping by itself.
+			await vi.advanceTimersByTimeAsync(10 * 60_000);
+			expect(activity).not.toHaveBeenCalled();
+			// The first interaction pings once...
+			fireEvent.pointerDown(document.body);
+			expect(activity).toHaveBeenCalledTimes(1);
+			// ...and a burst inside the throttle window stays silent.
+			fireEvent.keyDown(document.body, { key: "Tab" });
+			fireEvent(document, new Event("visibilitychange"));
+			await vi.advanceTimersByTimeAsync(4 * 60_000);
+			fireEvent.pointerDown(document.body);
+			expect(activity).toHaveBeenCalledTimes(1);
+			// A new interaction after the window renews the throttle.
+			await vi.advanceTimersByTimeAsync(60_000);
+			fireEvent.pointerDown(document.body);
+			expect(activity).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("pings only when a hidden tab becomes visible again", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-09-15T08:00:00Z"));
+			vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
+			vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
+			vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
+			const activity = vi
+				.spyOn(workbenchApi, "activity")
+				.mockResolvedValue(undefined);
+			render(<App />);
+			await vi.waitFor(() =>
+				expect(
+					screen.getByRole("button", { name: "创建模型提供方" }),
+				).toBeInTheDocument(),
+			);
+			Object.defineProperty(document, "visibilityState", {
+				value: "hidden",
+				configurable: true,
+			});
+			fireEvent(document, new Event("visibilitychange"));
+			await vi.advanceTimersByTimeAsync(6 * 60_000);
+			fireEvent(document, new Event("visibilitychange"));
+			expect(activity).not.toHaveBeenCalled();
+			Object.defineProperty(document, "visibilityState", {
+				value: "visible",
+				configurable: true,
+			});
+			fireEvent(document, new Event("visibilitychange"));
+			expect(activity).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+			delete (document as { visibilityState?: string }).visibilityState;
+		}
 	});
 });

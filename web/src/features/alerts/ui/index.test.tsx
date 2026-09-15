@@ -7,7 +7,7 @@ import { useAlertsModule } from "./index";
 
 function View({ route, navigate = vi.fn(), openEvidence = vi.fn() }: { route: string; navigate?: (route: string) => void; openEvidence?: (id: string) => void }) {
   const view = useAlertsModule({
-    user: { id: "1", username: "admin", displayName: "Admin", role: "admin", passwordChangeRequired: false, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 },
+    user: { id: "1", username: "admin", displayName: "Admin", role: "admin", passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 },
     route,
     navigate,
     suspended: false,

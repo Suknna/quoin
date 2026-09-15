@@ -183,4 +183,17 @@ describe("workbench API boundary", () => {
 		);
 		expect(fetchMock.mock.calls[1][1]).not.toHaveProperty("method");
 	});
+
+	it("posts the session activity ping as an empty same-origin body", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValue(new Response(null, { status: 204 }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(workbenchApi.activity()).resolves.toBeUndefined();
+		expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/auth/activity");
+		expect(fetchMock.mock.calls[0][1]).toMatchObject({
+			method: "POST",
+			credentials: "include",
+		});
+	});
 });

@@ -16,7 +16,7 @@ import { WorkspaceShell } from "@/app/WorkspaceShell";
 import { ReportBody, RunDetail, useInspectionsModule } from "./index";
 
 function baseProps(route: string) {
-  return { user: { id: "u", username: "u", displayName: "U", role: "admin" as const, passwordChangeRequired: false, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 }, route, navigate: vi.fn(), suspended: false, openEvidence: vi.fn() };
+  return { user: { id: "u", username: "u", displayName: "U", role: "admin" as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }, route, navigate: vi.fn(), suspended: false, openEvidence: vi.fn() };
 }
 const props = baseProps("/inspections");
 

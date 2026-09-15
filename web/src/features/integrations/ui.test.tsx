@@ -20,6 +20,7 @@ const props: WorkspaceModuleProps = {
 		passwordChangeRequired: false,
 		authRevision: 1,
 		enabled: true,
+		initialized: true,
 		lastLoginAt: null,
 		rowVersion: 1,
 	},

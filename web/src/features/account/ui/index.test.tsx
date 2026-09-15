@@ -10,7 +10,7 @@ vi.mock("@/api/workbench", () => ({
 	workbenchApi: { changePassword: vi.fn(), currentUser: vi.fn() },
 }));
 
-const user = { id: "1", username: "alice", displayName: "Alice", role: "operator" as const, passwordChangeRequired: true, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 };
+const user = { id: "1", username: "alice", displayName: "Alice", role: "operator" as const, passwordChangeRequired: true, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 };
 function View({ route = "/account" }: { route?: string }) { const view = useAccountModule({ user, route, navigate: vi.fn(), suspended: false, openEvidence: vi.fn() }); return <>{view.list}{view.content}</>; }
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -59,5 +59,20 @@ describe("account module", () => {
 		expect(await screen.findByText("撤销此会话？")).toBeInTheDocument();
 		expect(screen.getByText("这是当前设备。确认后将清除本设备认证并重新加载登录页面。")).toBeInTheDocument();
 		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps audit out of the personal account: legacy /account/audit falls back to the profile", () => {
+		render(<View route="/account/audit" />);
+		expect(screen.getByRole("button", { name: "个人资料" })).toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "个人资料" })).toBeInTheDocument();
+		expect(screen.queryByText("审计事件")).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "审计事件" })).not.toBeInTheDocument();
+	});
+
+	it("adds the contact-channel section: operator sees the read-only notice", () => {
+		render(<View route="/account/contacts" />);
+		expect(screen.getByRole("button", { name: "收码渠道" })).toBeInTheDocument();
+		expect(screen.getByText(/收码渠道由管理员指定/)).toBeInTheDocument();
+		expect(screen.queryByLabelText("当前密码")).not.toBeInTheDocument();
 	});
 });

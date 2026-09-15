@@ -2,20 +2,282 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchRuntimeStatus, formatRuntimeTime, isRuntimeSlotView, prepareRegistration, revealRegistrationToken, retireRuntimeCredential, type RuntimeSlotView } from "@/features/admin/runtimes/api";
+import {
+	Field,
+	FieldDescription,
+	FieldGroup,
+	FieldLabel,
+} from "@/components/ui/field";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import {
+	fetchRuntimeStatus,
+	formatRuntimeTime,
+	isRuntimeSlotView,
+	prepareRegistration,
+	type RuntimeSlotView,
+	retireRuntimeCredential,
+	revealRegistrationToken,
+} from "@/features/admin/runtimes/api";
 import { ConfirmAction } from "./controls";
 
 /** In-memory secrets are epoch-fenced and removed when this surface closes, suspends, or replaces one. */
-export function Runtimes({ suspended, refreshRevision = 0, onChanged }: { suspended: boolean; refreshRevision?: number; onChanged?: () => Promise<void> }) {
- const [items, setItems] = useState<RuntimeSlotView[]>([]); const [secret, setSecret] = useState(""); const [error, setError] = useState(""); const [loading, setLoading] = useState(false); const [pending, setPending] = useState<string>(); const epoch = useRef(0);
- const clearSecret = useCallback(() => { epoch.current += 1; setSecret(""); }, []);
- const load = useCallback(async () => { if (suspended) return; try { setLoading(true); setError(""); const status = await fetchRuntimeStatus(); // 受控浏览器退役：只有 Plinth 槽位可注册；任何残留的 lintel 投影都不再渲染。
-setItems([status.plinth].filter(isRuntimeSlotView)); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法读取运行时状态。"); } finally { setLoading(false); } }, [suspended]);
- useEffect(() => { void load(); }, [load, refreshRevision]);
- useEffect(() => { if (suspended) clearSecret(); return clearSecret; }, [clearSecret, suspended]);
- async function refresh() { await load(); await onChanged?.(); }
- async function prepare(slot: RuntimeSlotView) { if (suspended || pending) return; try { setPending(`prepare:${slot.slot}`); setError(""); clearSecret(); const prepared = await prepareRegistration(slot.slot, slot.rowVersion); if (!prepared.registrationTokenAvailable || !prepared.registrationTokenHandle) throw new Error("注册令牌不可用。"); const requestEpoch = epoch.current; const revealed = await revealRegistrationToken(prepared.registrationTokenHandle); if (!suspended && requestEpoch === epoch.current) setSecret(revealed.registrationToken); await load(); await onChanged?.(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法准备注册。"); } finally { setPending(undefined); } }
- async function retire(slot: RuntimeSlotView) { if (suspended || pending) return; try { setPending(`retire:${slot.slot}`); setError(""); await retireRuntimeCredential(slot.slot, slot.rowVersion); await load(); await onChanged?.(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法退休凭据。"); } finally { setPending(undefined); } }
- return <section className="flex flex-col gap-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-medium">运行时注册与轮换</h3><p className="mt-1 text-sm text-muted-foreground">首次注册与替代注册均只显示一次令牌。</p></div><Button size="sm" variant="outline" disabled={suspended || loading || !!pending} onClick={() => void refresh()}>{loading ? "正在刷新…" : "刷新"}</Button></div>{error && <Alert variant="destructive"><AlertDescription>{error} <Button variant="link" className="h-auto p-0 align-baseline" disabled={suspended || loading || !!pending} onClick={() => void load()}>重试</Button></AlertDescription></Alert>}{secret && <Alert><AlertDescription><div className="flex flex-wrap items-center justify-between gap-2"><span>一次性注册令牌：<code>{secret}</code>。关闭、页面挂起或准备另一枚令牌后立即清除，系统不会再次显示。</span><Button size="sm" variant="outline" onClick={clearSecret}>关闭并清除</Button></div></AlertDescription></Alert>}{!loading && !error && items.length === 0 && <p className="text-sm text-muted-foreground">暂无运行时事实。</p>}<Table><TableHeader><TableRow><TableHead>槽位</TableHead><TableHead>状态</TableHead><TableHead>凭据代</TableHead><TableHead>连接</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.map(item => { const registrationLabel = item.state === "registered" ? "准备替代注册" : "准备首次注册"; const isPending = !!pending; return <TableRow key={item.slot}><TableCell>{item.slot}</TableCell><TableCell><Badge variant={item.state === "registered" ? "default" : "secondary"}>{item.state}</Badge></TableCell><TableCell>当前 {item.currentGeneration}{item.pendingGeneration !== undefined && <span> · 待注册 {item.pendingGeneration}</span>}{item.retiringGeneration !== undefined && <span> · 待退休 {item.retiringGeneration}</span>}<small className="block text-muted-foreground">{item.retirementState ?? "未知"}</small></TableCell><TableCell>{item.connected ? `已连接 ${formatRuntimeTime(item.lastSeenAt)}` : "未连接"}</TableCell><TableCell className="space-x-2"><ConfirmAction title={item.state === "registered" ? `替代 ${item.slot} 的注册凭据？` : `首次注册 ${item.slot}？`} description={item.state === "registered" ? "将准备新的注册令牌。新凭据首次认证前，当前凭据保持有效。" : "将准备该组件的首次注册令牌。令牌只会显示一次。"} disabled={suspended || isPending} onConfirm={() => void prepare(item)}>{pending === `prepare:${item.slot}` ? "正在准备…" : registrationLabel}</ConfirmAction><ConfirmAction title={`退休 ${item.slot} 的待退休凭据？`} description="只会退休服务端已经标记为待退休的凭据代；当前凭据不会被此命令退休。" disabled={suspended || isPending || item.retirementState !== "PendingRetirement" || item.retiringGeneration === undefined} onConfirm={() => void retire(item)}>{pending === `retire:${item.slot}` ? "正在退休…" : "退休凭据"}</ConfirmAction></TableCell></TableRow>; })}</TableBody></Table></section>;
+export function Runtimes({
+	suspended,
+	refreshRevision = 0,
+	onChanged,
+}: {
+	suspended: boolean;
+	refreshRevision?: number;
+	onChanged?: () => Promise<void>;
+}) {
+	const [items, setItems] = useState<RuntimeSlotView[]>([]);
+	const [secret, setSecret] = useState("");
+	const [error, setError] = useState("");
+	const [loading, setLoading] = useState(false);
+	const [pending, setPending] = useState<string>();
+	const epoch = useRef(0);
+	const clearSecret = useCallback(() => {
+		epoch.current += 1;
+		setSecret("");
+	}, []);
+	const load = useCallback(async () => {
+		if (suspended) return;
+		try {
+			setLoading(true);
+			setError("");
+			const status = await fetchRuntimeStatus();
+			// Retired browser runtimes must not regain a registration entry from a stale server projection.
+			setItems([status.plinth].filter(isRuntimeSlotView));
+		} catch (reason) {
+			setError(
+				reason instanceof Error ? reason.message : "暂时无法读取运行时状态。",
+			);
+		} finally {
+			setLoading(false);
+		}
+	}, [suspended]);
+	useEffect(() => {
+		void load();
+	}, [load, refreshRevision]);
+	useEffect(() => {
+		if (suspended) clearSecret();
+		return clearSecret;
+	}, [clearSecret, suspended]);
+
+	async function refresh() {
+		await load();
+		await onChanged?.();
+	}
+	async function prepare(slot: RuntimeSlotView) {
+		if (suspended || pending) return;
+		try {
+			setPending(`prepare:${slot.slot}`);
+			setError("");
+			clearSecret();
+			const prepared = await prepareRegistration(slot.slot, slot.rowVersion);
+			if (
+				!prepared.registrationTokenAvailable ||
+				!prepared.registrationTokenHandle
+			)
+				throw new Error("注册令牌不可用。");
+			const requestEpoch = epoch.current;
+			const revealed = await revealRegistrationToken(
+				prepared.registrationTokenHandle,
+			);
+			if (!suspended && requestEpoch === epoch.current) {
+				setSecret(
+					JSON.stringify({
+						slot: revealed.slot,
+						generation: revealed.generation,
+						token: revealed.registrationToken,
+					}),
+				);
+			}
+			await load();
+			await onChanged?.();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : "暂时无法准备注册。");
+		} finally {
+			setPending(undefined);
+		}
+	}
+	async function retire(slot: RuntimeSlotView) {
+		if (suspended || pending) return;
+		try {
+			setPending(`retire:${slot.slot}`);
+			setError("");
+			await retireRuntimeCredential(slot.slot, slot.rowVersion);
+			await load();
+			await onChanged?.();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : "暂时无法退休凭据。");
+		} finally {
+			setPending(undefined);
+		}
+	}
+
+	return (
+		<section className="flex flex-col gap-4">
+			<div className="flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<h3 className="text-sm font-medium">运行时注册与轮换</h3>
+					<p className="mt-1 text-sm text-muted-foreground">
+						首次注册与替代注册均只显示一次令牌。
+					</p>
+				</div>
+				<Button
+					size="sm"
+					variant="outline"
+					disabled={suspended || loading || !!pending}
+					onClick={() => void refresh()}
+				>
+					{loading ? "正在刷新…" : "刷新"}
+				</Button>
+			</div>
+			{error && (
+				<Alert variant="destructive">
+					<AlertDescription>
+						{error}{" "}
+						<Button
+							variant="link"
+							className="h-auto p-0 align-baseline"
+							disabled={suspended || loading || !!pending}
+							onClick={() => void load()}
+						>
+							重试
+						</Button>
+					</AlertDescription>
+				</Alert>
+			)}
+			{secret && (
+				<Alert>
+					<AlertDescription className="w-full">
+						<FieldGroup>
+							<Field>
+								<FieldLabel htmlFor="runtime-registration-json">
+									一次性注册凭据 JSON
+								</FieldLabel>
+								<Textarea
+									id="runtime-registration-json"
+									readOnly
+									value={secret}
+									rows={3}
+								/>
+								<FieldDescription>
+									将完整 JSON 作为一行粘贴到{" "}
+									<code>
+										plinth register --config /etc/quoin/component.yaml
+									</code>{" "}
+									的标准输入；不要将秘密放入命令参数或环境变量。
+								</FieldDescription>
+							</Field>
+						</FieldGroup>
+						<p>
+							一次性注册令牌仅在此处显示。关闭、页面挂起或准备另一枚令牌后立即清除，系统不会再次显示。
+						</p>
+						<Button size="sm" variant="outline" onClick={clearSecret}>
+							关闭并清除
+						</Button>
+					</AlertDescription>
+				</Alert>
+			)}
+			{!loading && !error && items.length === 0 && (
+				<p className="text-sm text-muted-foreground">暂无运行时事实。</p>
+			)}
+			<Table>
+				<TableHeader>
+					<TableRow>
+						<TableHead>槽位</TableHead>
+						<TableHead>状态</TableHead>
+						<TableHead>凭据代</TableHead>
+						<TableHead>连接</TableHead>
+						<TableHead />
+					</TableRow>
+				</TableHeader>
+				<TableBody>
+					{items.map((item) => {
+						const registrationLabel =
+							item.state === "registered" ? "准备替代注册" : "准备首次注册";
+						const isPending = !!pending;
+						return (
+							<TableRow key={item.slot}>
+								<TableCell>{item.slot}</TableCell>
+								<TableCell>
+									<Badge
+										variant={
+											item.state === "registered" ? "default" : "secondary"
+										}
+									>
+										{item.state}
+									</Badge>
+								</TableCell>
+								<TableCell>
+									当前 {item.currentGeneration}
+									{item.pendingGeneration !== undefined && (
+										<span> · 待注册 {item.pendingGeneration}</span>
+									)}
+									{item.retiringGeneration !== undefined && (
+										<span> · 待退休 {item.retiringGeneration}</span>
+									)}
+									<small className="block text-muted-foreground">
+										{item.retirementState ?? "未知"}
+									</small>
+								</TableCell>
+								<TableCell>
+									{item.connected
+										? `已连接 ${formatRuntimeTime(item.lastSeenAt)}`
+										: "未连接"}
+								</TableCell>
+								<TableCell>
+									<div className="flex gap-2">
+										<ConfirmAction
+											title={
+												item.state === "registered"
+													? `替代 ${item.slot} 的注册凭据？`
+													: `首次注册 ${item.slot}？`
+											}
+											description={
+												item.state === "registered"
+													? "将准备新的注册令牌。新凭据首次认证前，当前凭据保持有效。"
+													: "将准备该组件的首次注册令牌。令牌只会显示一次。"
+											}
+											disabled={suspended || isPending}
+											onConfirm={() => void prepare(item)}
+										>
+											{pending === `prepare:${item.slot}`
+												? "正在准备…"
+												: registrationLabel}
+										</ConfirmAction>
+										<ConfirmAction
+											title={`退休 ${item.slot} 的待退休凭据？`}
+											description="只会退休服务端已经标记为待退休的凭据代；当前凭据不会被此命令退休。"
+											disabled={
+												suspended ||
+												isPending ||
+												item.retirementState !== "PendingRetirement" ||
+												item.retiringGeneration === undefined
+											}
+											onConfirm={() => void retire(item)}
+										>
+											{pending === `retire:${item.slot}`
+												? "正在退休…"
+												: "退休凭据"}
+										</ConfirmAction>
+									</div>
+								</TableCell>
+							</TableRow>
+						);
+					})}
+				</TableBody>
+			</Table>
+		</section>
+	);
 }

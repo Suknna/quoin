@@ -13,7 +13,7 @@ vi.mock('@/features/investigation/tools/api', () => ({ listToolCalls: vi.fn() })
 vi.mock('@/features/investigation/stream', () => ({ streamInvestigationMessage: vi.fn() }))
 vi.mock('@/features/feedback/api', () => ({ appendFeedback: vi.fn(), fetchFeedback: vi.fn(), feedbackValueLabels: {} }))
 vi.mock('@/features/knowledge/api', () => ({ api: { createMessageCandidate: vi.fn() } }))
-const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, lastLoginAt: null, rowVersion: 1 }
+const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }
 function View({ route, suspended = false }: { route: string; suspended?: boolean }) { const view = useInvestigationsModule({ user, route, suspended, navigate: vi.fn(), openEvidence: vi.fn() }); return <>{view.list}{view.content}</> }
 const detail = { id: 'i1', displayTitle: 'CPU 排查', lastActivityAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z', createdBy: 'u', headMessageId: 'm1', activeAttemptId: 'a1', messageCount: 1, attemptCount: 1, sources: [] }
 beforeEach(() => { api.businessSystems.mockResolvedValue([]); Element.prototype.scrollIntoView ??= vi.fn() })

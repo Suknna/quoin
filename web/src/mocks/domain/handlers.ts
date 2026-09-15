@@ -1,10 +1,10 @@
 import { delay, HttpResponse, http, type JsonBodyType } from "msw";
 import type {
 	PluginInspectionScope,
-	UserSummary,
 } from "../../api/generated/types";
 import type { InvestigationMessage } from "../../features/investigation/api";
-import { getMockScenario, getMockState, nextId } from "./store";
+import type { AuthDeliveryConfiguration, AuthFlow } from "../../features/authentication/api";
+import { DEMO_CREDENTIALS, adminUser, getMockScenario, getMockState, nextId } from "./store";
 
 const json = <T extends JsonBodyType>(body: T, init?: ResponseInit) =>
 	HttpResponse.json(body, init);
@@ -109,7 +109,49 @@ function viewFor(viewKey: string) {
 	return getMockState().businessViews.find((view) => view.viewKey === viewKey);
 }
 function planFor(planKey: string) {
-	return getMockState().inspectionPlans.find((plan) => plan.planKey === planKey);
+	return getMockState().inspectionPlans.find((item) => item.planKey === planKey);
+}
+
+/** Auth-flow helpers: the flow lives server-side; the cookie only points at it. */
+const maskTarget = (target: string) =>
+	target.includes("@")
+		? `${target.slice(0, 1)}***${target.slice(target.indexOf("@"))}`
+		: `${target.slice(0, 3)}***`;
+const newFlowExpiry = () =>
+	new Date(Date.now() + 15 * 60_000).toISOString();
+function flowView(flow: NonNullable<ReturnType<typeof getMockState>["authFlow"]>): AuthFlow {
+	const listed = getMockState().users.find((user) => user.id === flow.userId);
+	const user = listed ?? {
+		id: flow.userId,
+		username: flow.userId === "user-admin" ? "admin" : flow.userId,
+		displayName: "演示管理员",
+	};
+	return {
+		type: flow.type,
+		user: { id: user.id, username: user.username, displayName: user.displayName },
+		expiresAt: flow.expiresAt,
+		contacts: flow.contacts,
+		...(flow.passwordSet !== undefined && { passwordSet: flow.passwordSet }),
+		// Always serialized, like the backend's non-omitempty bool.
+		factorVerified: flow.factorVerified,
+	};
+}
+/** Returns the live flow, expiring stale ones; null means the client must re-login. */
+function activeFlow() {
+	const flow = getMockState().authFlow;
+	if (!flow) return null;
+	if (Date.now() >= Date.parse(flow.expiresAt)) {
+		getMockState().authFlow = null;
+		return null;
+	}
+	return flow;
+}
+const flowGone = () => problem(401, "认证流程已失效，请重新登录。", "flow_expired");
+/** Delivery settings are readable by an admin session or an admin-role flow. */
+function deliveryAllowed() {
+	if (getMockState().currentUser?.role === "admin") return true;
+	const flow = activeFlow();
+	return flow !== null && flow.type === "admin_initialize";
 }
 
 /** Local structural checks only; the real backend stays schema-authoritative. */
@@ -248,19 +290,199 @@ export const domainHandlers = [
 	http.post("*/api/v1/auth/login", async ({ request }) => {
 		await slow();
 		const input = await body<{ username: string; password: string }>(request);
-		const matched = getMockState().users.find(
+		const state = getMockState();
+		// A fresh deployment auto-creates the pending admin whose weak default
+		// password is accepted only while initialization is outstanding; the
+		// sign-in starts the unified initialization flow directly.
+		if (!state.adminInitialized) {
+			if (input.username !== "admin" || input.password !== "admin")
+				return problem(401, "演示账号或密码不正确。", "invalid_credentials");
+		state.authFlow = {
+			type: "admin_initialize",
+			userId: adminUser.id,
+			expiresAt: newFlowExpiry(),
+			contacts: [],
+			passwordSet: false,
+			factorVerified: false,
+		};
+		return json(flowView(state.authFlow));
+	}
+		const matched = state.users.find(
 			(candidate) =>
 				candidate.username === input.username &&
-				getMockState().passwords[candidate.id] === input.password,
+				state.passwords[candidate.id] === input.password,
 		);
-		const user: UserSummary | null = matched ? { ...matched } : null;
-		if (!user)
+		if (!matched)
 			return problem(401, "演示账号或密码不正确。", "invalid_credentials");
-		getMockState().currentUser =
-			getMockScenario() === "password-change"
-				? { ...user, passwordChangeRequired: true }
-				: user;
-		return json(getMockState().currentUser);
+		// A forced temp credential becomes an operator initialization flow;
+		// a normal sign-in still owes the second-factor challenge.
+		state.authFlow =
+			getMockScenario() === "password-change" && matched.role === "operator"
+				? {
+						type: "operator_initialize",
+						userId: matched.id,
+						expiresAt: newFlowExpiry(),
+						contacts: [
+							{
+								id: `contact-${matched.id}`,
+								channel: "email" as const,
+								maskedTarget: "o***@quoin.demo",
+								verified: false,
+							},
+						],
+						passwordSet: false,
+						factorVerified: false,
+					}
+				: {
+						type: "login",
+						userId: matched.id,
+						expiresAt: newFlowExpiry(),
+						contacts: [
+							{
+								id: `contact-${matched.id}`,
+								channel: "email" as const,
+								maskedTarget: maskTarget(`${matched.username}@quoin.demo`),
+								verified: true,
+							},
+						],
+						passwordSet: true,
+						factorVerified: false,
+					};
+		// A started flow is not a session: /auth/me stays 401 until verify completes.
+		return json(flowView(state.authFlow));
+	}),
+	http.get("*/api/v1/auth/flow", () => {
+		const flow = activeFlow();
+		return flow ? json(flowView(flow)) : flowGone();
+	}),
+	http.put("*/api/v1/auth/flow/password", async ({ request }) => {
+		const flow = activeFlow();
+		if (!flow) return flowGone();
+		const input = await body<{ newPassword: string }>(request);
+		if (input.newPassword.length < 15 || input.newPassword.length > 128)
+			return problem(
+				422,
+				"新密码长度必须在 15 到 128 个字符之间。",
+				"validation_error",
+			);
+		// The new password applies only when the flow completes atomically.
+		flow.pendingPassword = input.newPassword;
+		flow.passwordSet = true;
+		return new HttpResponse(null, { status: 204 });
+	}),
+	http.post("*/api/v1/auth/flow/contacts", async ({ request }) => {
+		const flow = activeFlow();
+		if (!flow) return flowGone();
+		if (flow.type !== "admin_initialize")
+			return problem(
+				403,
+				"只有管理员初始化可以登记联系方式。",
+				"forbidden",
+			);
+		const input = await body<{ channel: string; target: string }>(request);
+		if (!input.target)
+			return problem(422, "联系方式不能为空。", "validation_error");
+		flow.contacts.push({
+			id: `contact-new-${flow.contacts.length + 1}`,
+			channel: input.channel === "sms" ? "sms" : "email",
+			maskedTarget: maskTarget(input.target),
+			verified: false,
+		});
+		return new HttpResponse(null, { status: 204 });
+	}),
+	http.post("*/api/v1/auth/flow/challenge", async ({ request }) => {
+		const flow = activeFlow();
+		if (!flow) return flowGone();
+		const input = await body<{ contactId: string }>(request);
+		const contact = flow.contacts.find(
+			(candidate) => candidate.id === input.contactId,
+		);
+		if (!contact) return problem(404, "未找到该联系方式。", "not_found");
+		// The demo "delivers" the fixed OTP the PreviewPanel documents.
+		getMockState().authChallenge = { contactId: contact.id, code: DEMO_CREDENTIALS.otp };
+		return new HttpResponse(null, { status: 204 });
+	}),
+	http.post("*/api/v1/auth/flow/verify", async ({ request }) => {
+		const flow = activeFlow();
+		if (!flow) return flowGone();
+		const state = getMockState();
+		const input = await body<{ code: string }>(request);
+		const challenge = state.authChallenge;
+		// Codes are single-use and short-lived: anything else is invalid_code.
+		if (!challenge || input.code !== challenge.code)
+			return problem(422, "验证码不正确或已失效。", "invalid_code");
+		state.authChallenge = null;
+		const contact = flow.contacts.find(
+			(candidate) => candidate.id === challenge.contactId,
+		);
+		if (contact) contact.verified = true;
+		if (flow.type === "login") {
+			const listed = state.users.find((user) => user.id === flow.userId);
+			if (!listed) return problem(401, "演示账号不可用。", "unauthorized");
+			state.currentUser = { ...listed, initialized: listed.initialized === true };
+			// The session replaces the flow: the second factor consumed it.
+			state.authFlow = null;
+			state.authChallenge = null;
+			return json({ completed: true, user: state.currentUser });
+		}
+		// Initialization only marks the per-flow factor verified; the account
+		// level contact.verified is a different fact.
+		flow.factorVerified = true;
+		return json({ completed: false });
+	}),
+	http.post("*/api/v1/auth/flow/complete", async () => {
+		const flow = activeFlow();
+		if (!flow) return flowGone();
+		const state = getMockState();
+		if (flow.type === "login")
+			return problem(409, "登录流程没有完成步骤。", "forbidden");
+		// Same gate as the backend: password plus a per-flow verified factor.
+		if (!flow.passwordSet || !flow.factorVerified)
+			return problem(422, "初始化步骤尚未完成。", "initialization_required");
+		if (flow.pendingPassword) state.passwords[flow.userId] = flow.pendingPassword;
+		if (flow.type === "admin_initialize") state.adminInitialized = true;
+		state.authFlow = null;
+		state.authChallenge = null;
+		// Initialization never starts a session.
+		return new HttpResponse(null, { status: 204 });
+	}),
+	http.get("*/api/v1/auth/flow/delivery", () => {
+		if (!deliveryAllowed())
+			return problem(403, "只有管理员可以查看验证码投递设置。", "forbidden");
+		const delivery = getMockState().authDelivery;
+		return json({
+			configuration: delivery.configuration,
+			rowVersion: delivery.rowVersion,
+			source: delivery.source,
+			configured: delivery.rowVersion > 0,
+		});
+	}),
+	http.put("*/api/v1/auth/flow/delivery", async ({ request }) => {
+		if (!deliveryAllowed())
+			return problem(403, "只有管理员可以修改验证码投递设置。", "forbidden");
+		const input = await body<{
+			configuration: AuthDeliveryConfiguration;
+			expectedRowVersion: number;
+		}>(request);
+		const delivery = getMockState().authDelivery;
+		if (!input.configuration.email && !input.configuration.sms)
+			return problem(422, "至少需要配置一个投递渠道。", "validation_error");
+		if (input.configuration.sms && input.configuration.sms.kind !== "webhook")
+			return problem(422, "短信只支持 Webhook 发送。", "validation_error");
+		if (input.expectedRowVersion !== delivery.rowVersion)
+			return problem(409, "配置已变化，请刷新后重试。", "row_version_conflict");
+		// Secret values are write-only: accepted, merged server-side, never stored readable.
+		getMockState().authDelivery = {
+			configuration: input.configuration,
+			rowVersion: delivery.rowVersion + 1,
+			source: "administrator",
+		};
+		return json({
+			configuration: input.configuration,
+			rowVersion: delivery.rowVersion + 1,
+			source: "administrator",
+			configured: true,
+		});
 	}),
 	http.put("*/api/v1/auth/password", async ({ request }) => {
 		const denied = required();

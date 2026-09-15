@@ -12,6 +12,7 @@ export const authUser: UserSummary = {
 	displayName: "Admin",
 	role: "admin",
 	enabled: true,
+	initialized: true,
 	passwordChangeRequired: false,
 	authRevision: 1,
 	rowVersion: 1,

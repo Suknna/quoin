@@ -1,6 +1,18 @@
 // Admin users feature API: typed projections and fetch helpers for the T05
 // surface (users, sessions, audit events). Errors surface the frozen
 // problem+json message field.
+//
+// Unique-admin model (docs/authentication-design.md §1): creation always
+// produces an operator (the request omits `role`; the server forces it), the
+// admin assigns receive targets (email/sms), and admins can never be disabled
+// here. These are local DTOs: the generated contract does not yet carry
+// `initialized` or the contacts command, so the wire shapes live here until
+// main regenerates the shared types.
+
+export interface AdminContactInput {
+  channel: 'email' | 'sms'
+  target: string
+}
 
 export interface AdminUser {
   id: string
@@ -8,6 +20,8 @@ export interface AdminUser {
   displayName: string
   role: 'admin' | 'operator'
   enabled: boolean
+  /** Optional until the shared generated types gain the field; absent only from stale projections. */
+  initialized?: boolean
   authRevision: number
   rowVersion: number
   passwordChangeRequired: boolean
@@ -72,7 +86,13 @@ export async function listUsers(): Promise<AdminUser[]> {
   return page.items ?? []
 }
 
-export async function createUser(input: { username: string; displayName: string; role: 'admin' | 'operator'; password: string }): Promise<AdminUser> {
+/** Role is deliberately absent: accounts created here are always operators. */
+export async function createUser(input: {
+  username: string
+  displayName: string
+  password: string
+  contacts: AdminContactInput[]
+}): Promise<AdminUser> {
   const response = await fetch('/api/v1/admin/users', {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -85,12 +105,28 @@ export async function createUser(input: { username: string; displayName: string;
 export async function updateUser(
   id: string,
   expectedRowVersion: number,
-  changes: { displayName?: string; enabled?: boolean; role?: 'admin' | 'operator' },
+  changes: { displayName?: string; enabled?: boolean },
 ): Promise<AdminUser> {
   const response = await fetch(`/api/v1/admin/users/${id}`, {
     method: 'PATCH', credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...changes, expectedRowVersion, clientCommandId: newClientCommandId() }),
+  })
+  if (!response.ok) throw await problem(response)
+  return (await response.json()) as AdminUser
+}
+
+/** Replaces the full target set (1..2, one per channel); a replaced target
+ * loses its verification and invalidates challenges bound to the old one. */
+export async function configureContacts(
+  id: string,
+  expectedRowVersion: number,
+  contacts: AdminContactInput[],
+): Promise<AdminUser> {
+  const response = await fetch(`/api/v1/admin/users/${id}/contacts`, {
+    method: 'PUT', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contacts, expectedRowVersion, clientCommandId: newClientCommandId() }),
   })
   if (!response.ok) throw await problem(response)
   return (await response.json()) as AdminUser

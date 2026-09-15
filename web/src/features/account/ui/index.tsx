@@ -19,6 +19,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { newClientCommandId, notifyUnauthorized, workbenchApi } from "@/api/workbench";
+import { ContactChange } from "@/features/account/ContactChange";
 
 type Session = {
 	id: string;
@@ -28,16 +29,6 @@ type Session = {
 	idleExpiresAt: string;
 	absoluteExpiresAt: string;
 	current: boolean;
-};
-type AuditEvent = {
-	id: string;
-	actorType: string;
-	actorId: string;
-	action: string;
-	outcome: string;
-	domainRefType?: string;
-	domainRefId?: string;
-	createdAt: string;
 };
 type Page<T> = { items?: T[]; nextCursor?: string };
 
@@ -106,17 +97,13 @@ function Sessions({ suspended }: { suspended: boolean }) {
 	return <section className="space-y-4"><div><h2 className="text-xl font-semibold">我的会话</h2><p className="text-sm text-muted-foreground">显示仍有效的登录设备及其服务端记录的活动时间。</p></div>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}<Table><TableHeader><TableRow><TableHead>客户端</TableHead><TableHead>创建时间</TableHead><TableHead>最后活动</TableHead><TableHead>过期时间</TableHead><TableHead><span className="sr-only">操作</span></TableHead></TableRow></TableHeader><TableBody>{sessions.map(session => <TableRow key={session.id}><TableCell>{session.clientLabel} {session.current && <Badge className="ml-2" variant="secondary">当前</Badge>}</TableCell><TableCell>{formatTime(session.createdAt)}</TableCell><TableCell>{formatTime(session.lastActiveAt)}</TableCell><TableCell>{formatTime(session.idleExpiresAt)}</TableCell><TableCell><Button variant="outline" size="sm" disabled={suspended} onClick={() => setPending(session)}>撤销</Button></TableCell></TableRow>)}</TableBody></Table>{cursor && <Button variant="outline" onClick={() => void load(cursor, true)}>加载更多</Button>}<AlertDialog open={Boolean(pending)} onOpenChange={open => { if (!open && !busy) setPending(undefined); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>撤销此会话？</AlertDialogTitle><AlertDialogDescription>{pending?.current ? "这是当前设备。确认后将清除本设备认证并重新加载登录页面。" : "该设备将需要重新登录；其他设备保持不变。"}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={busy}>取消</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={event => { event.preventDefault(); void revoke(); }}>确认撤销</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></section>;
 }
 
-function Audit() {
-	const [events, setEvents] = useState<AuditEvent[]>([]); const [cursor, setCursor] = useState<string>(); const [error, setError] = useState("");
-	async function load(nextCursor?: string, append = false) { setError(""); try { const page = await accountRequest<Page<AuditEvent>>(`/api/v1/audit-events?limit=50${nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : ""}`); setEvents(previous => append ? [...previous, ...(page.items ?? [])] : (page.items ?? [])); setCursor(page.nextCursor); } catch (reason) { setError(messageOf(reason)); } }
-	useEffect(() => { void Promise.resolve().then(() => load()); }, []);
-	return <section className="space-y-4"><div><h2 className="text-xl font-semibold">审计事件</h2><p className="text-sm text-muted-foreground">查看账户操作的系统审计记录。</p></div>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}<Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>操作</TableHead><TableHead>结果</TableHead><TableHead>对象</TableHead></TableRow></TableHeader><TableBody>{events.map(event => <TableRow key={event.id}><TableCell>{formatTime(event.createdAt)}</TableCell><TableCell>{event.action}</TableCell><TableCell>{event.outcome}</TableCell><TableCell>{event.domainRefType && event.domainRefId ? `${event.domainRefType} · ${event.domainRefId}` : "—"}</TableCell></TableRow>)}</TableBody></Table>{cursor && <Button variant="outline" onClick={() => void load(cursor, true)}>加载更多</Button>}</section>;
-}
-
-/** Account owns personal profile, password, sessions, and audit navigation; logout remains solely in the shell. */
+/** Account owns personal profile, password, sessions, and the admin-only contact
+ * change flow; logout remains solely in the shell. Per docs/audit-design.md §6
+ * the personal account has no audit entry — the consolidated audit log lives
+ * only under 系统管理 → 审计. Legacy /account/audit links fall back to the profile. */
 export function useAccountModule(props: WorkspaceModuleProps): WorkspaceModuleView {
 	const [updatedProfile, setUpdatedProfile] = useState<UserSummary>();
 	const profile = updatedProfile?.id === props.user.id ? updatedProfile : props.user;
-	const content = props.route === "/account/security" ? <div className="space-y-8"><PasswordForm onChanged={setUpdatedProfile} /><Sessions suspended={props.suspended} /></div> : props.route === "/account/audit" ? <Audit /> : <Profile user={profile} />;
-	return { title: "账户", list: <div className="space-y-2 p-3"><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account")}>个人资料</Button><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account/security")}>密码与会话</Button><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account/audit")}>审计事件</Button></div>, content };
+	const content = props.route === "/account/security" ? <div className="space-y-8"><PasswordForm onChanged={setUpdatedProfile} /><Sessions suspended={props.suspended} /></div> : props.route === "/account/contacts" ? <ContactChange user={profile} suspended={props.suspended} /> : <Profile user={profile} />;
+	return { title: "账户", list: <div className="space-y-2 p-3"><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account")}>个人资料</Button><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account/security")}>密码与会话</Button><Button variant="ghost" className="w-full justify-start" onClick={() => props.navigate("/account/contacts")}>收码渠道</Button></div>, content };
 }
