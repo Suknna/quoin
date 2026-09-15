@@ -89,12 +89,12 @@ describe("integration workbench", () => {
 						capabilities: ["discover"],
 					},
 					{
-						id: "kubernetes",
-						displayName: "Kubernetes",
-						description: "集群",
+						id: "alertmanager",
+						displayName: "Alertmanager",
+						description: "告警",
 						enabled: true,
 						version: "1",
-						capabilities: ["tools"],
+						capabilities: [],
 					},
 				],
 			}),
@@ -105,7 +105,7 @@ describe("integration workbench", () => {
 			target: { value: "Thanos" },
 		});
 		expect(screen.getByText("Thanos")).toBeInTheDocument();
-		expect(screen.queryByText("Kubernetes")).not.toBeInTheDocument();
+		expect(screen.queryByText("Alertmanager")).not.toBeInTheDocument();
 	});
 
 	it("shows denied content instead of a management view to an operator", () => {

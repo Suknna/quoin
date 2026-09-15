@@ -1,4 +1,3 @@
-import { lazy, Suspense } from "react";
 import { IntegrationResources } from "./resources";
 /* eslint-disable react-refresh/only-export-components -- This route module intentionally colocates its view factory with route components. */
 
@@ -107,8 +106,6 @@ import {
 	rotateMetricsInstance,
 } from "./api";
 import type { IntegrationCatalogItem, IntegrationPlatform } from "./types";
-
-const PluginConfiguration = lazy(() => import("./plugin-config").then((module) => ({ default: module.PluginConfiguration })));
 
 const messageOf = (reason: unknown) =>
 	reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
@@ -1805,7 +1802,7 @@ export function useIntegrationsModule(
 		};
 	const [, platform, id] = routeParts(props.route);
 	const content =
-		platform === "kubernetes" ? (<Suspense fallback={<p role="status">正在加载插件配置…</p>}><PluginConfiguration platform={platform} route={props.route} navigate={props.navigate} suspended={props.suspended} /></Suspense>) : platform === "alertmanager" && id === "issues" ? (
+		platform === "alertmanager" && id === "issues" ? (
 			<AlertIntakeIssues
 				navigate={props.navigate}
 				suspended={props.suspended}
@@ -1844,8 +1841,9 @@ export function useIntegrationsModule(
 			<Instances navigate={props.navigate} suspended={props.suspended} />
 		) : platform ? (
 			// Unknown platform segments are ordinary unknown routes and render the
-			// shared not-found view (retired /integrations/browser lands here);
-			// only the bare /integrations root shows the catalog.
+			// shared not-found view (the retired /integrations/browser and
+			// /integrations/kubernetes land here); only the bare /integrations
+			// root shows the catalog.
 			<Empty>
 				<EmptyHeader>
 					<EmptyTitle>找不到此页面</EmptyTitle>

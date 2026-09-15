@@ -233,14 +233,8 @@ export const domainHandlers = [
 					"collect",
 				],
 			},
-			{
-				id: "kubernetes",
-				displayName: "Kubernetes",
-				description: "受控只读集群工具。",
-				enabled: true,
-				version: "1",
-				capabilities: ["probe", "tools", "execute_tool"],
-			},
+			// The kubernetes plugin is retired (Kubernetes 插件退役) and no
+			// longer appears in the server catalog.
 		]);
 	}),
 	http.get("*/api/v1/auth/me", async () => {
