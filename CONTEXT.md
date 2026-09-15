@@ -34,6 +34,8 @@ _Avoid_: Quoin、Agent Runtime、Quoin 数据卷、浏览器 profile 备份源
 独立、无状态的告警协议入口。第一版负责 Alertmanager Webhook 的 HTTP 监听、来源认证、请求体限制以及精确原始请求转交，后续可以增加其他告警接收协议；它不解析告警领域语义，不拥有数据库、持久队列、告警历史或诊断等权威业务状态。每次外部 HTTP 请求生成一个 `relay_id`，同一次 Stele→Quoin 内部转交重试必须复用该 ID，Quoin 对其幂等。Quoin 只有在一个 SQLite 事务中保存 Delivery、处理结果并更新全部正常 Occurrence 后，Stele 才向 Alertmanager 返回 `204`；提交失败或结果不确定时返回非 2xx。Alertmanager 自己发起的重试是新的外部请求和新的 Delivery，不按正文去重。
 _Avoid_: Quoin、告警存储、Agent Runtime、消息队列、先返回 2xx 再异步持久化
 
+> **认证目标更新（2026-09-14 确认，2026-09-15 更新，实施进行中）：** [ADR-0005](docs/adr/0005-unified-authentication-foundation.md) 与[统一认证设计](docs/authentication-design.md) 替代下文多管理员、首管仅离线创建和第一版无 MFA 的旧目标约束。新目标为唯一内置 Admin、多 Operator、公开默认密码直接进入的首次初始化、密码后二级验证，以及 SMTP／部署方出站 Webhook 投递；继续采用不透明服务端会话。产品内不提供首次安装所有权证明（一次性安装凭据机制已移除，首次部署访问边界由部署环境负责）；管理员恢复保持 CLI-only：临时密码经 attached TTY 设置或打印一次，随后的正常登录进入与首次安装一致的统一初始化流程。认证流程的机器契约与 HTTP 处理器已落地，整体实施与切换仍在进行。下文旧认证细则及机器契约在切换完成前仅用于解释现有行为。审计自动记录与操作关联目标已由 [ADR-0006](docs/adr/0006-automatic-audit-and-operation-correlation.md) 确认，见[审计设计](docs/audit-design.md)，其实施进度同样以进行中为准。
+
 ## 人类角色
 
 **Operator**：
@@ -53,7 +55,7 @@ _Avoid_: 超级租户、外部身份提供方、日常任务专属角色
 React、HTTP API、SSE 和 noVNC WebSocket 由同一 Quoin Origin 提供。浏览器只持有 32-byte 随机 opaque Session ID 的 Secure、HttpOnly、SameSite=Lax、Path=/ `__Host-quoin-session` Cookie；服务端 SQLite Session 记录承担空闲 12 小时、绝对 7 天、登出、用户禁用和强制撤销。允许同账号多个浏览器 Session，用户可查看和退出自己的其他 Session，Admin 可撤销某用户全部 Session；用户自行改密撤销除当前外的其他 Session。写请求受 Go CrossOriginProtection 保护；携带 Session Cookie 的非安全方法若同时缺少 `Sec-Fetch-Site` 与 `Origin` 则拒绝，存在 `Origin` 时必须精确等于公共 Origin；`POST /auth/login` 另在认证前执行同源门：有 `Origin` 时必须精确相等，没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`，两者都缺失以及 `same-site|cross-site` 均拒绝；WebSocket 另校验 Origin，不支持带凭据的跨域 CORS，也不提供 Cookie CLI 兼容入口。Quoin 负责与应用内容相关的 CSP、`frame-ancestors`、`nosniff`、Referrer Policy、敏感响应 `no-store` 与登出 `Clear-Site-Data`，实际 TLS 终止层独占 HSTS。Session 登出、撤销或账号禁用时立即关闭对应 SSE 和 WebSocket，但不自动取消此前已经受理的后台任务。
 
 **管理员离线恢复**：
-首个 Admin 创建和全部 Admin 无法登录时的密码重置都只能通过停止长期 Quoin 后独占 SQLite 的本地命令完成：`quoin admin create` 只接受无 `users` 行的空白库，`quoin admin reset-password` 只修改已存在 Admin；部署安装向导只可在启动长期 workload 前以 attached TTY 包装前者。临时密码不进入参数、环境变量、Secret、history 或日志，创建/重置后要求首次登录修改，重置还撤销该账号全部 Session。
+唯一内置 Admin 的找回只能通过停止长期 Quoin 后独占数据库的 `quoin admin recover` 完成，凭据只经 attached TTY：`--mode password` 由操作者在 TTY 输入新的临时密码，`--mode factors` 额外重置全部收码因素并生成只在 TTY 打印一次的临时密码。临时密码不进入参数、环境变量、Secret、history、日志或数据库明文，不设单独有效期，再次执行恢复会取代先前的临时密码。恢复后服务重启，管理员以该临时密码正常登录，进入与首次安装完全一致的统一初始化流程（设置正式密码并验证收码渠道），完成前不建立工作台会话；不恢复默认密码、不创建第二管理员、不提供网络 bootstrap 或邮件找回。
 
 **服务身份**：
 Plinth、Lintel 和 Stele 分别使用类型固定、只能访问自身 RPC 的长期 service token；TLS 只承担服务端身份和传输保护，不另建 mTLS 客户端身份。Quoin 固定只有 `plinth` 和 `lintel` 两个逻辑 Runtime slot；`lintel` slot 已随受控浏览器退役：注册命令对其返回 404，Runtime 控制面拒绝其 Register/Connect，只有 `plinth` 接受注册。空库中的两个 slot 起始为 `unregistered`，Admin 可直接为 plinth 准备首次注册令牌，无需先“替换”不存在的凭据。一次性注册令牌绑定 slot 与 credential generation，supervisor 将换得的长期 token 原子保存到权限 `0600` 的专用持久状态卷，Plinth worker 不得读取。状态卷丢失时由 Admin 为原 slot 准备替换注册，不创建第二个 Runtime。轮换采用“下发新 token→Runtime 持久化确认→原子提升新 current 并把旧 generation 放入可认证 retiring 角色→新 token 首次成功认证后显示 Pending Retirement→Admin 显式吊销旧 token”的两阶段切换；新值首次认证前旧值仍可恢复连接但同一 slot 只有一个生效 connection epoch，不设置自动 TTL，记录新 token 首次成功使用时间、操作者和未收口状态。Token 吊销时 Quoin 立即关闭对应长期控制流、浏览器流和上传流并拒绝重连；Stele 不注册为 Runtime，其 service token 由部署 Secret 文件提供，普通 SQLite 备份恢复不改变该外部部署身份，只有 Secret 泄漏或安全事件响应才轮换。
@@ -76,6 +78,12 @@ v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处�
 **领域写命令契约**：
 所有经认证外部调用者发起的领域写命令都由客户端生成用户不可见的 `client_command_id`，按 `(principal_id, client_command_id)` 唯一，并保存命令类型、非秘密请求摘要和结果对象引用；相同 ID 与相同请求重放返回原结果，相同 ID 与不同请求返回冲突。修改当前状态或当前版本指针的命令还必须携带 `expected_row_version`；纯追加创建不强制 expected version。调度器用 `plan logical identity + scheduled_for UTC` 作为内部确定性 Run 创建键，并在同一事务绑定计划当前冻结的接入与模板；历史执行继续保留其旧绑定。Stele 继续使用 `relay_id`，Runtime 继续使用 `attempt_id + connection_epoch`，不强行改造成 HTTP 命令键。
 _Avoid_: 每个 handler 自定义重试语义、最后写入者静默覆盖、把内部 Runtime 围栏混为客户端命令键
+
+**操作关联（Correlation）**：
+一次完整业务操作从发起到终结的关联身份，覆盖其验证、排队、执行尝试与结果。它不同于单次请求、命令幂等键、登录会话或执行尝试，不证明权限；后台代执行保留原始发起者和实际执行主体。
+_Avoid_: 权限凭据、会话 ID、幂等键、把所有用户活动合并为一次操作
+
+> **审计目标更新（已确认、未实施）：** [ADR-0006](docs/adr/0006-automatic-audit-and-operation-correlation.md) 规定操作默认自动审计、集中受控例外、全生命周期关联，以及系统管理中的统一审计入口；默认且最低保留六个自然月，可延长。它替代下文无期限保留及“账号、Session 与审计投影”中的旧头像菜单入口约定；旧条文不表示新机制已经实现。
 
 **审计与执行溯源**：
 领域对象及其不可变版本仍是业务历史权威；另保存窄的 append-only Audit Event，只记录 actor 类型/ID、action、target 类型/ID/版本、client command/request ID、提交时间、成功或确定性拒绝结果及领域记录引用，不复制消息、Evidence、附件、Prompt 正文或秘密。持久审计覆盖登录成功、登出与 Session 生命周期、全部已认证领域写成功及确定性拒绝、用户/角色/密码、秘密 reveal/轮换、Runtime、维护/恢复/离线命令，以及敏感下载的授权和已认证权限拒绝；匿名登录失败、CSRF/畸形匿名请求、无效 Runtime/Stele token 与 429 只进入有界指标和不含密码/完整用户名/credential 的运维日志，不写 SQLite。强制 Audit Event 与领域状态写同事务，审计失败则领域写回滚；敏感下载必须先提交访问审计再发送响应头和首字节；基础设施提交结果未知只记诊断，不伪造权威失败。Audit Event 防御应用用户和 Web Admin，不声称防御拥有 PVC/数据目录 root 权限的部署操作者；v1 不建本地 hash chain 或外部 WORM。每个 Execution Attempt 和低层 Model/Tool Call 保存实际供应商连接 revision/credential generation、模型 ID、Prompt/renderer/agent/tool-schema 版本或 digest、有序输入对象及 revision/digest、Quoin/Plinth/Lintel/Journey Catalog 版本、开始结束时间、usage、延迟、重试序号、规范可见模型响应和结构化终止原因；最终领域输出正文继续由消息、Report、Candidate 和 Evidence 等记录承担。不得保存或展示隐藏思维链。结构化审计长期保留并进入备份。
@@ -162,7 +170,7 @@ _Avoid_: 每次写操作确认、仅 toast 表达结果、自动保存半完成�
 **跨模块交互状态**：
 Evidence、Initial Analysis、Inspection Report、Knowledge、配置版本和 Observed Resource 等已持久化长内容使用确定性嵌套路由铺满工作台；浏览器后退关闭阅读层，刷新和分享恢复同一对象。一次性秘密、未提交上传和未保存表单不进入可分享 URL。Stop/Cancel 提交后按钮立即变为不可重复触发的“正在停止”，保留当前阶段和已完成内容；只有服务端确认 cancellation fence/终态后才显示 `Cancelled`，失败则恢复合法操作并说明原因，用户可离开等待。部分完成不发明统一领域状态，而是并列显示父对象真实状态、每个子步骤终态和机械计数，已完成 Evidence/Artifact 继续可读，失败项原位提供合法恢复动作，程序不按比例生成健康结论。
 
-无权执行的写动作不显示；直接访问受限 URL 时显示工作区级 403，使用普通语言说明所需角色和返回入口，不伪装为对象不存在，也不建设申请权限流程。Session 失效时立即卸载工作区并直接进入完整登录页面：受保护内容、未提交草稿和页面内存中的秘密随之丢弃，不保留遮蔽层，也不做同用户草稿恢复；重新登录（无论 principal 是否相同）都从全新工作区开始，会话草稿不写浏览器持久存储。临时密码登录始终停留在登录页的第二阶段：先验证临时凭据，再在同一认证页面要求设置新密码，成功建立正常 Session 后才加载工作台数据。
+无权执行的写动作不显示；直接访问受限 URL 时显示工作区级 403，使用普通语言说明所需角色和返回入口，不伪装为对象不存在，也不建设申请权限流程。Session 失效时立即卸载工作区并直接进入完整登录页面：受保护内容、未提交草稿和页面内存中的秘密随之丢弃，不保留遮蔽层，也不做同用户草稿恢复；重新登录（无论 principal 是否相同）都从全新工作区开始，会话草稿不写浏览器持久存储。临时密码登录停留在同一认证页面的初始化步骤：验证临时凭据、设置正式密码并完成收码渠道验证后，初始化完成即返回登录页，不建立 Session；只有随后的正常两步登录成功后才加载工作台数据。
 
 对网络中断、429、可恢复 5xx 和结果不确定的命令默认自动恢复：读取与复用同一 `client_command_id` 的命令总计尝试三次，重试间隔 1 秒、2 秒；验证失败、权限不足等确定性错误不重试。三次失败后显示“内部错误”、普通语言原因、“如持续发生请联系管理员”和可复制诊断；停留 10 秒后自动重读当前对象一次，仍失败则回到所属列表上一层。倒计时只存在当前页面内存，用户主动刷新、后退、离开或成功重试后立即取消，绝不在新页面继续旧回退。错误默认先用自然语言说明发生了什么、影响和下一步，并在表单页首或对象状态中持续显示；可展开技术详情只包含稳定错误码、request/Attempt ID、阶段、必要上游原文与复制诊断，禁止堆栈、Authorization、Cookie、秘密或整份无关请求正文。
 

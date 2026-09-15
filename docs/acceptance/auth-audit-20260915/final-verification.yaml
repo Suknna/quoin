@@ -1,0 +1,169 @@
+---
+acceptance: auth-audit-20260915
+status: passed-with-explicit-scope-boundaries
+source:
+  baselineCommit: 3ebed73ce75d3c331e78f4604625ec4f273b2ae6
+  includesUncommittedChanges: true
+  committedOrPushed: false
+  canonicalSchemaSHA256: >-
+    98ea729cbfb0f88ca5c89c4245eb48cdf7b48c02f60f0ca3df66e2bcfff63abd
+  schemaMirrorsEqual: true
+checks:
+  go:
+    command: go test ./... -count=1
+    result: passed
+    packageSuites: 75
+    failedPackageSuites: 0
+    localLog: /tmp/quoin-r4-go-all-verified.log
+  vet:
+    command: go vet ./...
+    result: passed
+    localLog: /tmp/quoin-r4-vet-verified.log
+  whitespace:
+    command: git diff --check
+    result: passed
+  web:
+    commands:
+      - pnpm --dir web typecheck
+      - pnpm --dir web lint
+      - pnpm --dir web test
+      - pnpm --dir web build
+    result: passed
+    testFiles: 37
+    tests: 269
+    localLog: /tmp/quoin-web-final-regression.log
+  latestAuthenticationRace:
+    command: >-
+      go test -race ./internal/quoin/auth ./internal/quoin/operations
+      -count=1
+    result: passed
+    packages:
+      auth: 115.923s
+      operations: 1.138s
+    localLog: /tmp/quoin-r4-auth-race-verified.log
+  otherCriticalRace:
+    result: passed
+    packages:
+      - execution
+      - audit
+      - delivery
+      - attempt
+      - runtime
+      - backup
+      - recovery
+      - alerts
+      - maintenance
+      - upgrade
+      - artifact
+    localLogs:
+      - /tmp/quoin-final-critical-race.log
+      - /tmp/quoin-final-additional-race.log
+      - /tmp/quoin-final-artifact-race-verified.log
+  architectureContracts:
+    result: passed
+    activeBusinessWriteFamiliesPending: 0
+    guarantees:
+      - concrete execution.Executor aliases the guarded transaction pointer
+      - opaque execution.Reader uses the SQLite read-only factory
+      - query and snapshot interfaces cannot expose a raw writer
+      - static coverage checks supplement capability and behavioral tests
+  finalFocusedReview:
+    standards: passed
+    spec: passed
+    previousMissingSessionTargetCoverage: resolved
+  supersededFailures:
+    - test: TestAuditTargetsNameTheDeclaredAuthority
+      cause: Newly added fixture reused identifiers across tables.
+      resolution: >-
+        Strict unequal-ID guards retained; fixture corrected;
+        full Go and race runs passed.
+    - test: TestGCRechecksReferencesAfterIntent
+      cause: >-
+        Race fixture omitted the expiry required by the artifact constraint.
+      resolution: >-
+        Fixture copies valid artifact metadata;
+        subsequent artifact suite and race passed.
+deployment:
+  namespace: quoin-auth-acceptance
+  entryURL: https://localhost:18443/
+  entryMethod: Existing loopback gateway port-forward
+  buildScript: deploy/images/build.sh
+  platform: linux/amd64
+  components:
+    quoin:
+      image: quoin/quoin:auth-audit-20260915-r4
+      runningImageIndexSHA256: >-
+        dba92c33f5806ecd933e77558882fd63c7a9e80a1b37cf43b9aa6ce5ec47ff47
+    frontend:
+      image: quoin/frontend:auth-audit-20260915-r3
+    plinth:
+      image: quoin/plinth:auth-audit-20260915-r3
+    stele:
+      image: quoin/stele:auth-audit-20260915-r3
+  readyPods: 6
+  totalPods: 6
+  containerRestartsAtFinalCheck: 0
+  retainedVolumes:
+    quoin-data: pvc-a0933b2b-9771-46f7-a99c-666afc440da3
+    quoin-backups: pvc-f6005047-1dd6-46b3-b6e0-5063e6caed11
+    plinth-state: pvc-9edd3bf8-033c-4ff7-ae08-1e7c7b65b604
+  finalBackendUpdate:
+    schemaMigrationRequired: false
+    dataResetPerformed: false
+    historicalAuditRewritePerformed: false
+  testDeliveryReceiver:
+    retainedForAcceptanceLogin: true
+    externalDelivery: false
+    productDependency: false
+browser:
+  method: Main-agent interactive Browser Use against real Kubernetes
+  newE2EScripts: false
+  finalAdministratorLogin:
+    passwordOnlyWorkspaceAccess: false
+    freshLocalSMTPOTPRequired: true
+    completed: true
+    correlationID: dab57ad0a0aa18b94763f9042ceca8d8
+    correlatedEvents: 6
+    authoritativeTargets:
+      auth.login.start: {type: user, id: 1}
+      auth.challenge.issue: {type: auth_flow, id: 10}
+      auth.challenge.delivery_result: {type: auth_challenge, id: 9}
+      auth.login.complete: {type: auth_flow, id: 10}
+  retainedUsers: 2
+  retentionMonths: 7
+  plinthRegisteredAndConnected: true
+  plinthCredentialGeneration: 1
+  operatorChecks:
+    formalPasswordAndFreshOTP: passed
+    administratorPageDenied: passed
+    administratorNavigationAbsent: passed
+    contactTargetsReadOnly: passed
+  screenshots:
+    final-r4-login-correlation.png: >-
+      df394d0c7a717b75c9ad992bf54038a40b11712f468924ceaf416b4351d07e89
+    final-r4-about-runtime.png: >-
+      6d6829c3bbeb5f9303f7e3bdb7f5d2053c192f2751851aa8eab372104d37237e
+    operator-audit-denied.png: >-
+      7697f26ec53c46db94a9aed9dcc9589919627c0e80683995069baff8bb6b6d4f
+    final-operator-contacts-readonly.png: >-
+      a07347050e0268d3d72580081079821487ff3c44e1a6e98dd448609b08ffc96d
+boundaries:
+  - This is isolated local acceptance, not a signed release qualification.
+  - >-
+    External mailbox delivery and actual carrier SMS delivery
+    were not authorized or exercised.
+  - >-
+    No fresh production-volume restore or rollback drill
+    was performed in the final deployment pass.
+  - >-
+    Multi-architecture release qualification was not performed;
+    these local images are linux/amd64.
+  - >-
+    Existing append-only development audit records from before r4
+    remain unchanged, including their historical target-locator errors.
+  - >-
+    Local log paths are session evidence locations,
+    not guaranteed permanent repository artifacts.
+  - >-
+    The new CI workflow is wired and its checks passed locally;
+    no remote CI run was triggered because no changes were pushed.
