@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,7 +135,7 @@ func TestMetricsCollectorFailsClosedWithoutSecrets(t *testing.T) {
 // migrated newMetricsCall calls validate settings for real.
 func testPluginRegistry() *plugins.Registry {
 	registry := plugins.NewRegistry()
-	for _, descriptor := range attempt.BuiltinDescriptors() {
+	for _, descriptor := range builtin.Descriptors() {
 		_ = registry.RegisterDescriptor(descriptor)
 	}
 	return registry

@@ -8,6 +8,8 @@ import (
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plinth/supervisor"
+	"github.com/Suknna/quoin/internal/plinth/worker"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
 // RunServe is the long-lived serve path: ops endpoint plus the outbound
@@ -24,7 +26,20 @@ func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedo
 	if err != nil {
 		return err
 	}
-	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory}
+	// ONE plugin registry assembly for the whole process: the shared
+	// builtin declarations plus the execution bundles this host really
+	// provides. The typed-tool dispatch table derives from the same
+	// assembly — an assembly failure is a launch failure, never a silent
+	// dispatch hole.
+	registry := supervisor.HostRegistry()
+	table, err := attempt.NewImplementationTable(attempt.Implementations())
+	if err != nil {
+		return err
+	}
+	if err := worker.AssembleTypedExecutors(registry, table); err != nil {
+		return err
+	}
+	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory, Registry: registry}
 	// Terminal results retry until a ResultAck survives the stream it
 	// travelled on (T12, RUNTIME-TASK-008); the loop is boot-scoped.
 	go channel.RunResultDeliveryLoop(ctx)

@@ -44,10 +44,10 @@ type QuoinConfig struct {
 	DeploymentBinding *DeploymentBinding `json:"deploymentBinding,omitempty" yaml:"deploymentBinding,omitempty"`
 	// EnabledPlugins is the deployment's explicit plugin enablement
 	// whitelist (ADR-0004). Absent selects every plugin whose descriptor
-	// defaults to enabled (prometheus/thanos/alertmanager/kubernetes); the
-	// browser plugin is opt-in and must be listed explicitly. Unknown ids
-	// fail component startup; the same field drives Quoin's catalog and the
-	// frozen model tool directory.
+	// defaults to enabled (prometheus/thanos/alertmanager). Unknown IDs,
+	// including the retired browser and kubernetes plugins, fail component
+	// startup. The same field drives Quoin's catalog and the frozen model
+	// tool directory.
 	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
 }
 

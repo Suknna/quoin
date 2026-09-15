@@ -93,9 +93,10 @@ var locationSet = map[ExecutionLocation]bool{
 
 // Well-known plugin IDs. They are naming authorities only: this package
 // registers no descriptors and no bindings, and an ID becomes usable only
-// when a host process actually registers the plugin. The browser plugin is
-// opt-in: its descriptor must carry DefaultEnabled=false so the default
-// mainline ships without Lintel.
+// when a host process actually registers the plugin. The browser and
+// kubernetes plugins are retired: their descriptors stay registered as the
+// declaration authority of their compiled implementations (frozen-history
+// compatibility), flagged Retired so they are never advertised or enabled.
 const (
 	BrowserID      = "browser"
 	PrometheusID   = "prometheus"
@@ -126,9 +127,17 @@ type Descriptor struct {
 	// tools, CapabilityCollect only with templates.
 	Capabilities []Capability
 	// DefaultEnabled is the enablement default when deployment config is
-	// silent. The browser plugin sets false (opt-in); plugins backing the
-	// default mainline set true.
+	// silent. Retired plugins must set false (registration enforces it);
+	// plugins backing the default mainline set true.
 	DefaultEnabled bool
+	// Retired marks a plugin whose business is retired (受控退役): the
+	// descriptor stays REGISTERED — it remains the declaration authority
+	// that pins its compiled tool implementations and lets executing hosts
+	// serve frozen historical attempts — but it is never advertised or
+	// enabled again. ResolveEnabled rejects a retired ID exactly like an
+	// unknown one, and no newly frozen catalog ever carries a retired
+	// plugin's tools. Registration enforces Retired => !DefaultEnabled.
+	Retired bool
 	// ConfigSchema, when non-nil, is the closed JSON Schema (draft
 	// 2020-12, top-level object with additionalProperties disabled) every
 	// instance settings document must satisfy. A nil schema is legal only

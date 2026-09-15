@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 // exampleExecutor implements both ToolExecutor and Collector: the collector
@@ -216,7 +216,7 @@ func TestValidateConfigEnforcesDeclaredSchema(t *testing.T) {
 // newMetricsCall path validates exactly this document.
 func TestValidateConfigAcceptsBuiltinMetricsSettings(t *testing.T) {
 	registry := plugins.NewRegistry()
-	for _, descriptor := range attempt.BuiltinDescriptors() {
+	for _, descriptor := range builtin.Descriptors() {
 		if err := registry.RegisterDescriptor(descriptor); err != nil {
 			t.Fatal(err)
 		}

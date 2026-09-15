@@ -412,7 +412,7 @@ func (service *Service) CompleteModelCall(ctx context.Context, completion Comple
 			}
 			// Compatibility verification against the installed executor; the
 			// frozen bytes stay the Model Call provenance (ADR-0004).
-			def, err := frozen.InstalledDefinition()
+			def, err := service.Catalogs.InstalledDefinition(frozen)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %v", ErrLedgerDenied, err)
 			}
@@ -592,7 +592,7 @@ func (service *Service) BeginToolCall(ctx context.Context, attemptID, toolCallID
 	if !known {
 		return fmt.Errorf("%w: tool %q is not in the attempt's frozen catalog", ErrLedgerDenied, toolName)
 	}
-	definition, err := frozen.InstalledDefinition()
+	definition, err := service.Catalogs.InstalledDefinition(frozen)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrLedgerDenied, err)
 	}
@@ -684,8 +684,8 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 		}
 	}()
 	var callAttempt int64
-	var status, failureMode, toolName, agentVersion string
-	if err := conn.QueryRowContext(ctx, `SELECT t.attempt_id,t.status,t.failure_mode,t.tool_name,a.agent_version FROM tool_calls t JOIN execution_attempts a ON a.id=t.attempt_id WHERE t.id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode, &toolName, &agentVersion); err != nil {
+	var status, failureMode, toolName string
+	if err := conn.QueryRowContext(ctx, `SELECT t.attempt_id,t.status,t.failure_mode,t.tool_name FROM tool_calls t WHERE t.id=?`, result.ToolCallID).Scan(&callAttempt, &status, &failureMode, &toolName); err != nil {
 		return nil, err
 	}
 	if callAttempt != result.AttemptID {
@@ -741,12 +741,22 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 	// Observation tools commit their deterministic Evidence BEFORE the
 	// terminal state advances (DATA-EVIDENCE-001 and the frozen
 	// trg_evidence_attempt_tool_closure demand the Tool Call still
-	// running at the Evidence INSERT), all in the same transaction.
+	// running at the Evidence INSERT), all in the same transaction. The
+	// evidence behaviour is resolved through the attempt's OWN frozen
+	// catalog and the assembly's implementation table.
 	var evidenceIDs []int64
 	if result.Outcome == "succeeded" && service.EvidenceWriter != nil {
-		definition, known := LookupToolForAgentVersion(agentVersion, toolName)
+		catalog, err := frozenToolCatalogOn(ctx, conn, result.AttemptID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: frozen tool catalog: %v", ErrLedgerDenied, err)
+		}
+		frozenTool, known := catalog.Lookup(toolName)
 		if !known {
-			return nil, fmt.Errorf("%w: tool %q is not in the fixed catalog", ErrLedgerDenied, toolName)
+			return nil, fmt.Errorf("%w: tool %q is not in the attempt's frozen catalog", ErrLedgerDenied, toolName)
+		}
+		definition, err := service.Catalogs.InstalledDefinition(frozenTool)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrLedgerDenied, err)
 		}
 		if definition.ProducesEvidence {
 			ids, err := service.EvidenceWriter(ctx, conn, result.AttemptID, result.ToolCallID, result.ArtifactID,
@@ -783,12 +793,7 @@ func (service *Service) CompleteToolCall(ctx context.Context, result ToolResult)
 // (ARCH-INPUT-003): supervisor_typed observation tools resolve their
 // deployment connection per tool call; the model never selects it.
 func needsConnectionGrant(definition ToolDef) bool {
-	// Artifact tools are supervisor typed but do not carry external secrets.
-	switch definition.Name {
-	case "thanos_query", "kubernetes_read":
-		return true
-	}
-	return false
+	return definition.RequiresConnectionGrant
 }
 
 // ToolCallView is the read projection of one tool call (used by the tool

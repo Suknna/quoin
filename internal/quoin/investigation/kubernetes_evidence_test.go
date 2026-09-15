@@ -64,9 +64,10 @@ func TestInvestigationModelCallPersistsModeProvenance(t *testing.T) {
 }
 
 // TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence proves the
-// source-level admission: kubernetes_read is now a legal tool (ADR-0004),
-// but a routing miss against an attempt with no frozen kubernetes source is
-// only a recoverable preflight — no grant, no execution, no Evidence.
+// retired kubernetes_read stays a legal historical tool (受控退役: its
+// compiled implementation remains resolvable), but a routing miss against an
+// attempt with no frozen kubernetes source is only a recoverable preflight —
+// no grant, no execution, no Evidence.
 func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T) {
 	db := newTestDB(t)
 	service := NewService(db)
@@ -80,10 +81,19 @@ func TestKubernetesReadProposalIsRejectedWithoutToolCallOrEvidence(t *testing.T)
 	if err := bindRunning(t, db, created.AttemptID); err != nil {
 		t.Fatal(err)
 	}
-	if _, registered := attempt.LookupToolForAgentVersion(AgentVersion, "kubernetes_read"); !registered {
-		t.Fatal("kubernetes_read must be offered to investigations (ADR-0004)")
-	}
+	// The retired tool never enters a newly frozen catalog, yet its compiled
+	// implementation stays resolvable through the same assembly for frozen
+	// historical attempts.
 	frozen, err := service.Attempts().FrozenToolCatalog(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, offered := frozen.Lookup("kubernetes_read"); offered {
+		t.Fatal("retired kubernetes_read must not be offered to new investigations")
+	}
+	if _, resolvable := attempt.DefaultCatalogs().Implementation("kubernetes_read"); !resolvable {
+		t.Fatal("retired kubernetes_read must stay resolvable for historical attempts")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

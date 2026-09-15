@@ -23,7 +23,8 @@ import (
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/plinth/worker"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -56,76 +57,87 @@ type observedTarget struct {
 	DisplayName string            `json:"displayName,omitempty"`
 }
 
-// observationRegistry is the process plugin catalog. Descriptors come from
-// the attempt package's compiled authority; this host binds the real
-// Discoverer implementations for the plugins it can execute. Lazy and
-// process-lifetime: bindings are compile-time facts, not runtime switches.
-var (
-	observationRegistryOnce sync.Once
-	observationRegistry     *plugins.Registry
-	// descriptorSource is the authority the catalog builds from; a test may
-	// pin an isolated catalog. Production leaves the default untouched.
-	descriptorSource = attempt.BuiltinDescriptors
-)
-
-// pluginRegistry builds and freezes the supervisor-side registry once. A
+// pluginRegistry returns this process's plugin registry. Production wiring
+// assembles it once (HostRegistry) and hands it to the Supervisor; the lazy
+// default builds the same shared assembly for tests and minimal hosts. A
 // registration failure is a build/launch bug and panics: a host that cannot
 // honestly describe and bind its capabilities must not serve attempts.
 func (supervisor *Supervisor) pluginRegistry() *plugins.Registry {
+	if supervisor.Registry != nil {
+		return supervisor.Registry
+	}
 	observationRegistryOnce.Do(func() {
-		registry := plugins.NewRegistry()
-		for _, descriptor := range descriptorSource() {
-			if err := registry.RegisterDescriptor(descriptor); err != nil {
-				panic(fmt.Sprintf("plugin descriptor %s failed registration: %v", descriptor.ID, err))
-			}
-		}
-		// Bind exactly the capabilities each metrics plugin's descriptor
-		// declares, so the bundle can never advertise an execution the
-		// catalog does not own and stays correct as the catalog gains
-		// capabilities (discovery today, deterministic collection alongside).
-		for _, pluginID := range []string{plugins.PrometheusID, plugins.ThanosID} {
-			descriptor, ok := registry.Descriptor(pluginID)
-			if !ok {
-				continue
-			}
-			bundle := plugins.ExecutionBundle{PluginID: pluginID, Location: plugins.LocationPlinthSupervisor}
-			for _, capability := range descriptor.Capabilities {
-				switch capability {
-				case plugins.CapabilityDiscover:
-					bundle.Capabilities = append(bundle.Capabilities, capability)
-					bundle.Discoverer = &metricsDiscoverer{}
-				case plugins.CapabilityCollect:
-					bundle.Capabilities = append(bundle.Capabilities, capability)
-					bundle.Collector = &metricsCollector{}
-				}
-			}
-			if len(bundle.Capabilities) == 0 {
-				continue
-			}
-			if err := registry.RegisterBundle(bundle); err != nil {
-				panic(fmt.Sprintf("plugin bundle %s failed binding: %v", pluginID, err))
-			}
-		}
-		observationRegistry = registry
+		observationRegistry = HostRegistry()
 	})
 	return observationRegistry
+}
+
+// observationRegistry is the lazy default assembly for hosts that were not
+// wired with one; production serve wiring always sets Supervisor.Registry.
+var (
+	observationRegistryOnce sync.Once
+	observationRegistry     *plugins.Registry
+)
+
+// HostRegistry assembles the plinth process plugin registry from the ONE
+// shared builtin plugin source (internal/plugins/builtin): every built-in
+// descriptor — active and retired — is registered, and this process binds
+// the execution bundles it really provides. The metrics plugins' bundles
+// carry exactly the capabilities their descriptors declare (observation
+// discovery, deterministic collection and the agent typed tool executor),
+// so a bundle can never advertise an execution the catalog does not own.
+func HostRegistry() *plugins.Registry {
+	registry := builtin.Registry()
+	executors := worker.ExecutionBundles()
+	for _, pluginID := range []string{plugins.PrometheusID, plugins.ThanosID} {
+		descriptor, ok := registry.Descriptor(pluginID)
+		if !ok {
+			continue
+		}
+		bundle := plugins.ExecutionBundle{PluginID: pluginID, Location: plugins.LocationPlinthSupervisor}
+		for _, capability := range descriptor.Capabilities {
+			switch capability {
+			case plugins.CapabilityDiscover:
+				bundle.Capabilities = append(bundle.Capabilities, capability)
+				bundle.Discoverer = &metricsDiscoverer{registry: registry}
+			case plugins.CapabilityCollect:
+				bundle.Capabilities = append(bundle.Capabilities, capability)
+				bundle.Collector = &metricsCollector{}
+			case plugins.CapabilityExecuteTool:
+				if executor, ok := executors[pluginID]; ok {
+					bundle.Capabilities = append(bundle.Capabilities, capability)
+					bundle.ToolExecutor = executor
+				}
+			}
+		}
+		if len(bundle.Capabilities) == 0 {
+			continue
+		}
+		if err := registry.RegisterBundle(bundle); err != nil {
+			panic(fmt.Sprintf("plugin bundle %s failed binding: %v", pluginID, err))
+		}
+	}
+	return registry
 }
 
 // metricsDiscoverer is the one PromQL-driving discovery adapter for the
 // Prometheus-compatible plugins. It executes the descriptor-declared query
 // through the existing controlled metrics transport and derives each
 // object's canonical identity from the descriptor-declared label set.
-type metricsDiscoverer struct{}
+type metricsDiscoverer struct {
+	// registry is the process catalog the adapter validates its requests
+	// against; the binding and the validation read the same assembly.
+	registry *plugins.Registry
+}
 
 // Discover executes one bounded pass. The Call carries the frozen connection
 // settings; the request selects the descriptor-declared object type and the
 // budget. Incompleteness is reported, never collapsed into success.
 func (d *metricsDiscoverer) Discover(ctx context.Context, call *plugins.Call, request plugins.DiscoverRequest) (*plugins.DiscoverResult, error) {
-	observationRegistryOnce.Do(func() {})
-	if observationRegistry == nil {
+	if d.registry == nil {
 		return nil, fmt.Errorf("plugin registry is not initialized")
 	}
-	descriptor, ok := observationRegistry.Descriptor(call.PluginID)
+	descriptor, ok := d.registry.Descriptor(call.PluginID)
 	if !ok {
 		return nil, fmt.Errorf("plugin %q is not registered", call.PluginID)
 	}

@@ -1,10 +1,10 @@
 # Set publicOrigin to the exact externally visible HTTPS origin before first start.
 component: quoin
 # Enabled plugins (ADR 0004): the deployment YAML selects the enabled set.
-# The mainline enables exactly the four source plugins; the browser plugin is
-# retired (historical variant in deploy/retired/browser/). IDs must match the
-# well-known IDs in internal/plugins.
-enabledPlugins: [alertmanager, kubernetes, prometheus, thanos]
+# The mainline enables exactly the three source plugins; the browser and
+# kubernetes plugins are retired (listing them fails startup). IDs must match
+# the well-known IDs in internal/plugins.
+enabledPlugins: [alertmanager, prometheus, thanos]
 publicOrigin: https://quoin.example.com
 # Exact public Alertmanager receiver; never an internal container endpoint.
 stelePublicURL: https://quoin.example.com/stele/alerts

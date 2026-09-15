@@ -312,7 +312,7 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		reject("tool result schema kind does not match the fixed tool definition")
 		return
 	}
-	if err := attempt.ValidateToolResultPayload(expectedSchema, payload.GetCanonicalJson()); err != nil {
+	if err := attempt.ValidateToolResultPayload(attempts.Catalogs.Implementations, expectedSchema, payload.GetCanonicalJson()); err != nil {
 		reject("tool result payload violates the fixed schema: " + err.Error())
 		return
 	}

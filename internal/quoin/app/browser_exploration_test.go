@@ -17,6 +17,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/browser"
@@ -26,6 +27,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+
+// assembledImplementations is the assembled implementation table the browser
+// validation assertions dispatch through (same source as production).
+var assembledImplementations = attempt.DefaultCatalogs().Implementations
 
 func TestBrowserExplorationActionAcceptanceAckBindsExactResult(t *testing.T) {
 	var sent *runtimev1.ControlEnvelope
@@ -57,14 +63,14 @@ func TestStartRejectReasonMapsDownloadBlockedToModelResult(t *testing.T) {
 		t.Fatalf("DownloadBlocked mapped to %q", got)
 	}
 	payload := browserAdmissionPayload("DownloadBlocked", nil)
-	if err := attempt.ValidateToolResultPayload("browser_tool_result_v1", payload); err != nil || !bytes.Contains(payload, []byte(`"code":"DownloadBlocked"`)) || !bytes.Contains(payload, []byte(`"outcome":"session_closed"`)) || !bytes.Contains(payload, []byte(`"retryableInSession":false`)) {
+	if err := attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", payload); err != nil || !bytes.Contains(payload, []byte(`"code":"DownloadBlocked"`)) || !bytes.Contains(payload, []byte(`"outcome":"session_closed"`)) || !bytes.Contains(payload, []byte(`"retryableInSession":false`)) {
 		t.Fatalf("download admission payload=%s err=%v", payload, err)
 	}
 }
 
 func TestIdentityBusyAdmissionPayloadCarriesDurableOccupancy(t *testing.T) {
 	payload := browserAdmissionPayload("IdentityBusy", &identityBusy{OperationID: 17, Kind: "deployment_verification", OccupiedAt: "2026-03-16T12:00:00Z"})
-	if err := attempt.ValidateToolResultPayload("browser_tool_result_v1", payload); err != nil {
+	if err := attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", payload); err != nil {
 		t.Fatalf("IdentityBusy payload violates frozen schema: %v: %s", err, payload)
 	}
 	var result struct {
@@ -308,7 +314,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 	if identityState != "Ready" {
 		t.Fatalf("fixture identity state=%s", identityState)
 	}
-	if err := attempt.ValidateToolArguments(attempt.BrowserTool, arguments); err != nil {
+	if err := attempt.ValidateToolArguments(builtin.BrowserTool, arguments); err != nil {
 		t.Fatalf("fixture browser args: %v", err)
 	}
 	request := &runtimev1.RequestBrowserSubExecution{ParentAttemptId: 2, ToolCallId: 1, Input: &runtimev1.BrowserSubExecutionInput{SchemaKind: "browser_tool_v1", CanonicalJson: arguments, ContentDigest: digest[:]}}
@@ -330,7 +336,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &childState, childID)
 		mustQuery(t, db, `SELECT COUNT(*) FROM browser_exploration_actions`, &actionCount)
 		mustQuery(t, db, `SELECT COUNT(*) FROM browser_operations WHERE kind='exploration'`, &explorationCount)
-		if toolState != "succeeded" || childState != "Succeeded" || actionCount != 0 || explorationCount != 0 || attempt.ValidateToolResultPayload("browser_tool_result_v1", []byte(resultJSON)) != nil {
+		if toolState != "succeeded" || childState != "Succeeded" || actionCount != 0 || explorationCount != 0 || attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", []byte(resultJSON)) != nil {
 			t.Fatalf("admission closure tool=%s child=%s actions=%d operations=%d result=%s", toolState, childState, actionCount, explorationCount, resultJSON)
 		}
 		return
@@ -426,7 +432,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		var actionDigest []byte
 		mustQuery(t, db, `SELECT result_json FROM tool_calls WHERE id=1`, &resultJSON)
 		mustQuery(t, db, `SELECT result_digest FROM browser_exploration_actions WHERE child_attempt_id=?`, &actionDigest, childID)
-		if len(actionDigest) != 32 || attempt.ValidateToolResultPayload("browser_tool_result_v1", []byte(resultJSON)) != nil {
+		if len(actionDigest) != 32 || attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", []byte(resultJSON)) != nil {
 			t.Fatalf("interrupted action must have a replay digest and schema-valid result digest=%x payload=%s", actionDigest, resultJSON)
 		}
 		// Quoin's boot recovery owns the action/child/tool/operation terminal
@@ -678,7 +684,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 			t.Fatalf("load closed-session tool result: %v", err)
 		}
 		mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &closedChildState, closedChildID)
-		if closedToolState != "succeeded" || closedChildState != "Succeeded" || !bytes.Contains([]byte(closedResult), []byte(`"code":"ParentTerminated"`)) || attempt.ValidateToolResultPayload("browser_tool_result_v1", []byte(closedResult)) != nil {
+		if closedToolState != "succeeded" || closedChildState != "Succeeded" || !bytes.Contains([]byte(closedResult), []byte(`"code":"ParentTerminated"`)) || attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", []byte(closedResult)) != nil {
 			t.Fatalf("closed-session tombstone tool=%s child=%s result=%s", closedToolState, closedChildState, closedResult)
 		}
 		// Same Tool Call replay returns the original child, never a second
@@ -1305,21 +1311,21 @@ func TestBrowserOperationTerminalCASLossIsClassifiedForLateDrop(t *testing.T) {
 
 func TestNormalizeBrowserExplorationTerminalRequiresFrozenSessionID(t *testing.T) {
 	result := &runtimev1.BrowserExplorationActionResult{ErrorCode: "BrowserCrashed", ErrorDetail: "browser exited", SessionTerminal: true}
-	if _, err := normalizeBrowserExplorationToolResult(result, "read", `{}`); err == nil {
+	if _, err := normalizeBrowserExplorationToolResult(assembledImplementations, result, "read", `{}`); err == nil {
 		t.Fatal("terminal non-open result without frozen session ID was accepted")
 	}
-	normalized, err := normalizeBrowserExplorationToolResult(result, "read", `{"action":"read","sessionId":"12"}`)
+	normalized, err := normalizeBrowserExplorationToolResult(assembledImplementations, result, "read", `{"action":"read","sessionId":"12"}`)
 	if err != nil {
 		t.Fatalf("normalize valid terminal result: %v", err)
 	}
-	if normalized.toolState != "failed" || attempt.ValidateToolResultPayload("browser_tool_result_v1", normalized.payload) != nil || !bytes.Contains(normalized.payload, []byte(`"sessionId":"12"`)) {
+	if normalized.toolState != "failed" || attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", normalized.payload) != nil || !bytes.Contains(normalized.payload, []byte(`"sessionId":"12"`)) {
 		t.Fatalf("normalized terminal result=%+v payload=%s", normalized, normalized.payload)
 	}
 }
 
 func TestElementNotInteractableIsSchemaValidRecoverableBrowserResult(t *testing.T) {
 	payload := []byte(`{"outcome":"recoverable_error","action":"click","sessionId":"1","observation":{"version":1,"url":"https://example.test/","origin":"https://example.test","title":"Example","pages":[{"pageId":"p","current":true,"url":"https://example.test/","origin":"https://example.test","title":"Example"}],"visibleText":"","accessibilityText":"","elements":[],"events":[],"originalSizeBytes":0,"truncated":false},"error":{"code":"ElementNotInteractable","message":"target is covered","retryableInSession":true}}`)
-	if err := attempt.ValidateToolResultPayload("browser_tool_result_v1", payload); err != nil {
+	if err := attempt.ValidateToolResultPayload(assembledImplementations, "browser_tool_result_v1", payload); err != nil {
 		t.Fatalf("ElementNotInteractable is not schema-valid: %v", err)
 	}
 	if got := browserActionFailure("ElementNotInteractable", false); got != "recoverable_error" {

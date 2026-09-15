@@ -18,36 +18,35 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 func testSupervisorRegistry(t *testing.T) *plugins.Registry {
 	t.Helper()
-	// Pin an isolated catalog so these tests stay decoupled from the shared
-	// builtin catalog's tool-schema churn; discovery metadata is identical.
-	descriptorSource = func() []plugins.Descriptor {
-		return []plugins.Descriptor{
-			{
-				ID: plugins.PrometheusID, Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-				Capabilities:   []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityCollect},
-				ConnectionKind: "prometheus",
-				DiscoverObjects: []plugins.DiscoverObject{
-					{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
-				},
-			},
-			{
-				ID: plugins.ThanosID, Version: "1", DisplayName: "Thanos", Description: "global metrics source",
-				Capabilities:   []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityCollect},
-				ConnectionKind: "thanos",
-				DiscoverObjects: []plugins.DiscoverObject{
-					{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
-				},
-			},
+	// Assemble an isolated registry (the same shared builtin source the
+	// production host uses, without the agent tool-executor binding) and
+	// inject it into the Supervisor, keeping these tests decoupled from the
+	// process-global lazy assembly.
+	registry := builtin.Registry()
+	for _, pluginID := range []string{plugins.PrometheusID, plugins.ThanosID} {
+		descriptor, _ := registry.Descriptor(pluginID)
+		bundle := plugins.ExecutionBundle{PluginID: pluginID, Location: plugins.LocationPlinthSupervisor}
+		for _, capability := range descriptor.Capabilities {
+			switch capability {
+			case plugins.CapabilityDiscover:
+				bundle.Capabilities = append(bundle.Capabilities, capability)
+				bundle.Discoverer = &metricsDiscoverer{registry: registry}
+			case plugins.CapabilityCollect:
+				bundle.Capabilities = append(bundle.Capabilities, capability)
+				bundle.Collector = &metricsCollector{}
+			}
+		}
+		if err := registry.RegisterBundle(bundle); err != nil {
+			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { descriptorSource = attempt.BuiltinDescriptors })
-	supervisor := &Supervisor{}
-	registry := supervisor.pluginRegistry()
+	supervisor := &Supervisor{Registry: registry}
+	registry = supervisor.pluginRegistry()
 	bundle, bound := registry.Bundle(plugins.PrometheusID)
 	if !bound || bundle.Discoverer == nil || bundle.Location != plugins.LocationPlinthSupervisor {
 		t.Fatalf("prometheus bundle wrong: %#v bound=%v", bundle, bound)

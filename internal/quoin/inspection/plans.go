@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/robfig/cron/v3"
 
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 )
 
@@ -42,7 +42,7 @@ type Template struct {
 }
 
 // paramValidators 是模板参数形状的静态校验表；模板身份与版本的存在性权威
-// 是共享插件描述目录（attempt.BuiltinDescriptors → plugins.Registry），执行
+// 是共享插件描述目录（builtin.Descriptors → plugins.Registry），执行
 // 绑定在 Plinth supervisor。二者以 (pluginID, templateID, version) 对齐。
 var paramValidators = map[string]func(map[string]any) error{
 	"promql_instant": validateInstantParams,
@@ -50,9 +50,9 @@ var paramValidators = map[string]func(map[string]any) error{
 }
 
 // TemplateFor 返回 (pluginID, templateID) 的已注册模板；目录来自构建期
-// 描述符，绝不声明不存在的模板。
+// 描述符（共享 builtin 声明 → plugins.Registry），绝不声明不存在的模板。
 func TemplateFor(pluginID, templateID string) (Template, bool) {
-	for _, descriptor := range attempt.BuiltinDescriptors() {
+	for _, descriptor := range builtin.Descriptors() {
 		if descriptor.ID != pluginID {
 			continue
 		}

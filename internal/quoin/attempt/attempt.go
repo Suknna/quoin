@@ -16,8 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Suknna/quoin/internal/plugins"
 	"time"
+
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 // DispatchLease is the finite lease window every dispatched attempt
@@ -94,20 +95,19 @@ func NewService(db *sql.DB) *Service {
 	return &Service{db: db, now: func() time.Time { return time.Now().UTC() }, Catalogs: DefaultCatalogs()}
 }
 
-// DefaultCatalogs is the unwired-wiring fallback: the built-in descriptors
-// under their default enablement. The application wiring replaces it with a
-// registry-built set resolved from the deployment configuration; tests and
-// minimal hosts get the deterministic default mainline.
+// DefaultCatalogs is the unwired-wiring fallback: the shared builtin plugin
+// registry under its default enablement, assembled through the ONE
+// BuildCatalogs path (registry descriptors + compiled implementations).
+// The application wiring replaces it with a registry-built set resolved
+// from the deployment configuration; tests and minimal hosts get the
+// deterministic default mainline.
 func DefaultCatalogs() *Catalogs {
-	registry := plugins.NewRegistry()
-	for _, descriptor := range BuiltinDescriptors() {
-		_ = registry.RegisterDescriptor(descriptor)
-	}
+	registry := builtin.Registry()
 	enabled, err := registry.ResolveEnabled(nil)
 	if err != nil {
 		panic("builtin descriptors must always resolve: " + err.Error())
 	}
-	catalogs, err := BuildCatalogs(registry, enabled)
+	catalogs, err := BuildCatalogs(registry, Implementations(), enabled)
 	if err != nil {
 		panic("builtin descriptors must always build: " + err.Error())
 	}

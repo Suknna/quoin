@@ -13,6 +13,7 @@ import (
 	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/proto"
@@ -42,7 +43,7 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
 		return
 	}
-	if err := attempt.ValidateToolArguments(attempt.BrowserTool, input.GetCanonicalJson()); err != nil {
+	if err := attempt.ValidateToolArguments(builtin.BrowserTool, input.GetCanonicalJson()); err != nil {
 		reject(runtimev1.BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED)
 		return
 	}
@@ -272,6 +273,17 @@ func (service *RuntimeService) handleBrowserSubExecution(ctx context.Context, en
 // deliberately a model-visible result rather than a transport rejection: the
 // durable operation is the authority that the supplied session can no longer
 // execute, and the child snapshot preserves the tool-call causal history.
+
+// attemptImplementations is the browser execution slice's assembled
+// implementation table: result-payload validation dispatches through the
+// SAME assembly as catalogs and authorization, never a rebuilt table.
+func attemptImplementations(service *RuntimeService) *attempt.ImplementationTable {
+	if service == nil || service.Analyses == nil {
+		return nil
+	}
+	return service.Analyses.Attempts().Catalogs.Implementations
+}
+
 func (service *RuntimeService) completeClosedSessionCall(ctx context.Context, conn *sql.Conn, request *runtimev1.RequestBrowserSubExecution, scopeID, operationID, identityID, revisionID, profileID int64, catalogDigest, catalogVersion string, input, payload []byte, now string) (int64, error) {
 	result, err := conn.ExecContext(ctx, `INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,requested_by_tool_call_id,quoin_release_version,created_at)
 		VALUES('browser_exploration','investigation',?,'Queued',?,?,?)`, scopeID, request.GetToolCallId(), service.ReleaseVersion, now)
@@ -289,7 +301,7 @@ func (service *RuntimeService) completeClosedSessionCall(ctx context.Context, co
 		VALUES(?,?,?,?,?)`, childID, request.GetToolCallId(), operationID, request.GetParentAttemptId(), now); err != nil {
 		return 0, err
 	}
-	if err := attempt.ValidateToolResultPayload("browser_tool_result_v1", payload); err != nil {
+	if err := attempt.ValidateToolResultPayload(attemptImplementations(service), "browser_tool_result_v1", payload); err != nil {
 		return 0, fmt.Errorf("invalid closed-session browser result: %w", err)
 	}
 	result, err = conn.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
@@ -321,7 +333,7 @@ func (service *RuntimeService) completeBrowserAdmissionRejection(ctx context.Con
 	if err != nil {
 		return err
 	}
-	if attempt.ValidateToolResultPayload("browser_tool_result_v1", payload) != nil {
+	if attempt.ValidateToolResultPayload(attemptImplementations(service), "browser_tool_result_v1", payload) != nil {
 		return fmt.Errorf("invalid frozen browser admission result")
 	}
 	result, err = conn.ExecContext(ctx, `UPDATE tool_calls SET status='succeeded',ended_at=?,result_json=?,row_version=row_version+1
@@ -479,7 +491,7 @@ type normalizedBrowserExplorationToolResult struct {
 // immutable session ID for every non-open action; accepting an unvalidated
 // synthesized failure would poison the Tool Call ledger with an unverifiable
 // result.
-func normalizeBrowserExplorationToolResult(result *runtimev1.BrowserExplorationActionResult, actionKind, argumentsJSON string) (normalizedBrowserExplorationToolResult, error) {
+func normalizeBrowserExplorationToolResult(table *attempt.ImplementationTable, result *runtimev1.BrowserExplorationActionResult, actionKind, argumentsJSON string) (normalizedBrowserExplorationToolResult, error) {
 	if result == nil || actionKind == "" {
 		return normalizedBrowserExplorationToolResult{}, errors.New("browser action result is incomplete")
 	}
@@ -488,7 +500,7 @@ func normalizeBrowserExplorationToolResult(result *runtimev1.BrowserExplorationA
 			return normalizedBrowserExplorationToolResult{}, errors.New("browser result payload envelope is invalid")
 		}
 		digest := sha256.Sum256(payload.GetCanonicalJson())
-		if string(digest[:]) != string(payload.GetContentDigest()) || attempt.ValidateToolResultPayload(payload.GetSchemaKind(), payload.GetCanonicalJson()) != nil {
+		if string(digest[:]) != string(payload.GetContentDigest()) || attempt.ValidateToolResultPayload(table, payload.GetSchemaKind(), payload.GetCanonicalJson()) != nil {
 			return normalizedBrowserExplorationToolResult{}, errors.New("browser result payload is invalid")
 		}
 		var body struct {
@@ -528,7 +540,7 @@ func normalizeBrowserExplorationToolResult(result *runtimev1.BrowserExplorationA
 		body["sessionId"] = arguments.SessionID
 	}
 	payload, err := json.Marshal(body)
-	if err != nil || attempt.ValidateToolResultPayload("browser_tool_result_v1", payload) != nil {
+	if err != nil || attempt.ValidateToolResultPayload(table, "browser_tool_result_v1", payload) != nil {
 		return normalizedBrowserExplorationToolResult{}, errors.New("synthesized browser terminal payload is invalid")
 	}
 	return normalizedBrowserExplorationToolResult{outcome: "session_closed", toolState: "failed", payload: payload, errorCode: result.GetErrorCode(), errorDetail: result.GetErrorDetail()}, nil
@@ -828,7 +840,7 @@ func (service *RuntimeService) handleBrowserExplorationActionResult(ctx context.
 		terminalResult.TraceIntegrity = runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_INCOMPLETE
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	normalized, normalizeErr := normalizeBrowserExplorationToolResult(terminalResult, actionKind, argumentsJSON)
+	normalized, normalizeErr := normalizeBrowserExplorationToolResult(attemptImplementations(service), terminalResult, actionKind, argumentsJSON)
 	if normalizeErr != nil {
 		return
 	}

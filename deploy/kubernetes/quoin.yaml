@@ -61,10 +61,10 @@ data:
   component.yaml: |
     component: quoin
     # Enabled plugins (ADR 0004): the deployment YAML selects the enabled set.
-    # The stack enables exactly the four source plugins; the browser plugin is
-    # retired (historical reference in deploy/retired/browser/). IDs must
+    # The stack enables exactly the three source plugins; the browser and
+    # kubernetes plugins are retired (listing them fails startup). IDs must
     # match the well-known IDs in internal/plugins.
-    enabledPlugins: [alertmanager, kubernetes, prometheus, thanos]
+    enabledPlugins: [alertmanager, prometheus, thanos]
     publicOrigin: https://quoin.example.com
     dataDirectory: /var/lib/quoin/data
     backupDirectory: /var/lib/quoin/backups

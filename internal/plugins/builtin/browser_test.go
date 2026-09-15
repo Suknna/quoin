@@ -1,4 +1,4 @@
-package attempt
+package builtin
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 
 func TestBrowserToolRejectsArbitraryArguments(t *testing.T) {
 	valid := []byte(`{"action":"fill","sessionId":"42","locator":{"kind":"role","role":"textbox","name":"Search"},"value":"secret"}`)
-	if err := ValidateToolArguments(BrowserTool, valid); err != nil {
+	if err := BrowserTool.ValidateArguments(valid); err != nil {
 		t.Fatalf("valid closed browser action rejected: %v", err)
 	}
 	for _, body := range [][]byte{
@@ -18,7 +18,7 @@ func TestBrowserToolRejectsArbitraryArguments(t *testing.T) {
 		[]byte(`{"action":"fill","sessionId":"42","locator":{"kind":"css","selector":"#x"},"value":"x"}`),
 		[]byte(`{"action":"open","identityKey":"ops-console","extra":true}`),
 	} {
-		if err := ValidateToolArguments(BrowserTool, body); err == nil {
+		if err := BrowserTool.ValidateArguments(body); err == nil {
 			t.Fatalf("unsupported browser shape was accepted: %s", body)
 		}
 	}
@@ -32,7 +32,7 @@ func TestBrowserToolIngressUsesCompleteFrozenRequestSchema(t *testing.T) {
 		[]byte(`{"action":"scroll","sessionId":"42","deltaX":100001,"deltaY":0}`),
 		[]byte(`{"action":"fill","sessionId":"42","locator":{"kind":"role","role":"textbox"},"value":` + string(mustJSONText(t, bytes.Repeat([]byte("x"), 16385))) + `}`),
 	} {
-		if err := ValidateToolArguments(BrowserTool, body); err == nil {
+		if err := BrowserTool.ValidateArguments(body); err == nil {
 			t.Fatalf("frozen request schema bypass accepted: %s", body)
 		}
 	}
@@ -49,15 +49,15 @@ func mustJSONText(t *testing.T, value []byte) []byte {
 
 func TestBrowserToolResultPayloadIsClosed(t *testing.T) {
 	valid := []byte(`{"outcome":"session_closed","action":"close_session","sessionId":"42","error":{"code":"Cancelled","message":"cancelled","retryableInSession":false}}`)
-	if err := ValidateToolResultPayload("browser_tool_result_v1", valid); err != nil {
+	if err := validateBrowserToolResult(valid); err != nil {
 		t.Fatalf("valid browser failure rejected: %v", err)
 	}
-	if err := ValidateToolResultPayload("browser_tool_result_v1", []byte(`{"outcome":"success","action":"read","sessionId":"42","rawCDP":"Network.getCookies"}`)); err == nil {
+	if err := validateBrowserToolResult([]byte(`{"outcome":"success","action":"read","sessionId":"42","rawCDP":"Network.getCookies"}`)); err == nil {
 		t.Fatal("browser result payload bypass was accepted")
 	}
 	// This nested extra field was silently ignored by the former handwritten
 	// validator. The frozen JSON Schema must reject it as well.
-	if err := ValidateToolResultPayload("browser_tool_result_v1", []byte(`{"outcome":"session_closed","action":"close_session","sessionId":"42","error":{"code":"Cancelled","message":"cancelled","retryableInSession":false,"rawCDP":"Network.getCookies"}}`)); err == nil {
+	if err := validateBrowserToolResult([]byte(`{"outcome":"session_closed","action":"close_session","sessionId":"42","error":{"code":"Cancelled","message":"cancelled","retryableInSession":false,"rawCDP":"Network.getCookies"}}`)); err == nil {
 		t.Fatal("nested browser error payload bypass was accepted")
 	}
 }
@@ -96,7 +96,7 @@ func TestBrowserToolProviderSchemaFreezesLocatorShape(t *testing.T) {
 		if err := schema.Validate(value); err != nil {
 			t.Fatalf("provider schema rejected frozen request %s: %v", body, err)
 		}
-		if err := ValidateToolArguments(BrowserTool, []byte(body)); err != nil {
+		if err := BrowserTool.ValidateArguments([]byte(body)); err != nil {
 			t.Fatalf("real frozen request schema rejected %s: %v", body, err)
 		}
 	}
@@ -113,7 +113,7 @@ func TestBrowserToolProviderSchemaFreezesLocatorShape(t *testing.T) {
 		if err := schema.Validate(value); err == nil {
 			t.Fatalf("provider schema accepted non-frozen locator: %s", body)
 		}
-		if err := ValidateToolArguments(BrowserTool, []byte(body)); err == nil {
+		if err := BrowserTool.ValidateArguments([]byte(body)); err == nil {
 			t.Fatalf("real frozen request schema accepted %s", body)
 		}
 	}

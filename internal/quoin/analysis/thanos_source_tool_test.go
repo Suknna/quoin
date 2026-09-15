@@ -85,9 +85,9 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 // attempt machine does inside its persistence transaction.
 func resolveThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	t.Helper()
-	tool, ok := attempt.LookupTool(thanos.QueryToolName)
+	tool, ok := attempt.DefaultCatalogs().Implementation(thanos.QueryToolName)
 	if !ok {
-		t.Fatal("thanos_query missing from the analysis catalog")
+		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
 	conn, err := db.Conn(context.Background())
 	if err != nil {

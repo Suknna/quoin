@@ -52,6 +52,7 @@ func (client *thanosGrantRuntimeClient) FetchCredentialGrant(_ context.Context, 
 }
 
 func TestThanosQuerySourceModeSucceedsWithoutResourceRef(t *testing.T) {
+	assembleTestTypedExecutors(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if !strings.HasPrefix(request.URL.Path, "/api/v1/query") {
 			http.NotFound(writer, request)
@@ -97,6 +98,7 @@ func TestThanosQuerySourceModeSucceedsWithoutResourceRef(t *testing.T) {
 // grant_missing completion without fetching credentials and without
 // reaching meta.grants[0] (which panicked the supervisor).
 func TestThanosQueryWithoutGrantSealsOnceAndNeverFetches(t *testing.T) {
+	assembleTestTypedExecutors(t)
 	control := &fakeToolCallChannel{}
 	client := &thanosGrantRuntimeClient{baseURL: "http://127.0.0.1:1", denyGrantID: -1}
 	meta := toolMeta{

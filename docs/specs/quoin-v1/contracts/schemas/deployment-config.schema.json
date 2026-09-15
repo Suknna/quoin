@@ -243,7 +243,7 @@
         },
         "enabledPlugins": {
           "$ref": "#/$defs/enabledPlugins",
-          "description": "显式插件启用白名单（ADR-0004）。字段省略=启用全部 DefaultEnabled 插件（prometheus/thanos/alertmanager/kubernetes）；显式空数组=全部停用——省略与空数组是不同的部署事实。未知插件 ID 使组件启动失败。browser 为可选插件，必须显式列出才会启用。"
+          "description": "显式插件启用白名单（ADR-0004）。字段省略=启用全部 DefaultEnabled 插件（prometheus/thanos/alertmanager）；显式空数组=全部停用——省略与空数组是不同的部署事实。未知插件 ID 使组件启动失败。browser 与 kubernetes 插件已退役，显式列出同样启动失败。"
         }
       }
     },

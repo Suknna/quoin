@@ -22,6 +22,7 @@ import (
 	"github.com/Suknna/quoin/internal/plinth/modelprovider"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plinth/worker"
+	"github.com/Suknna/quoin/internal/plugins"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -33,6 +34,10 @@ type Supervisor struct {
 	// WorkspaceRoot is the per-attempt workspace parent directory
 	// (ARCH-WORKER-001: one fresh workspace per attempt).
 	WorkspaceRoot string
+	// Registry is the process plugin registry, assembled once at wiring by
+	// HostRegistry from the shared builtin plugin source. Nil (tests and
+	// minimal hosts) lazily builds the same assembly on first use.
+	Registry *plugins.Registry
 }
 
 // HandleDispatchAttempt runs one dispatched attempt to a typed terminal

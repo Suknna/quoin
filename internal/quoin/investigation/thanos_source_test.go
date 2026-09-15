@@ -173,9 +173,9 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, callID int64, 
 
 func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	t.Helper()
-	tool, ok := attempt.LookupToolForAgentVersion(AgentVersion, thanos.QueryToolName)
+	tool, ok := attempt.DefaultCatalogs().Implementation(thanos.QueryToolName)
 	if !ok {
-		t.Fatal("thanos_query missing from the investigation catalog")
+		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
 	conn, err := db.Conn(context.Background())
 	if err != nil {

@@ -13,14 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"time"
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
-	plinthtools "github.com/Suknna/quoin/internal/plinth/tools"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -221,78 +216,6 @@ func executeArtifactGrep(execution *TypedToolContext) error {
 		"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
 	}
 	return execution.Succeed(execution.DefaultResultSchemaKind(), payload, 0)
-}
-
-// executeThanosQueryTyped adapts the frozen typed read-only Thanos
-// observation to the executor registry (ARCH-WORKER-003/ARCH-CHAT-005);
-// executeThanosQuery seals its own terminal state on every path.
-func executeThanosQueryTyped(execution *TypedToolContext) error {
-	executeThanosQuery(execution.BaseCtx, execution.Runner, execution.Writer,
-		execution.AttemptID, execution.ToolCallID, execution.Args)
-	// executeThanosQuery seals its own terminal state through
-	// failTypedTool/commitTypedTool on every path.
-	return nil
-}
-
-// executeThanosQuery drives the frozen typed read-only Thanos observation
-// (ARCH-WORKER-003/ARCH-CHAT-005): the supervisor fetches the credential
-// through the tool's frozen grant, executes the instant query, streams
-// long raw bodies into the tool_result Artifact store and seals the
-// frozen thanos_query_result_v1 payload (ARCH-OUTPUT-001/005).
-func executeThanosQuery(ctx context.Context, runner *Runner, writer *FrameWriter, attemptID, toolCallID int64, args map[string]any) error {
-	// v3 契约：模型只给 query（sourceRef 仅在来源有歧义时出现）；来源连接
-	// 由授权事务冻结的 grant 决定，resourceRef 不再是执行入参。
-	query, _ := args["query"].(string)
-	if query == "" {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_arguments", "query 必须是非空字符串")
-	}
-	meta, ok := runner.tools[toolCallID]
-	if !ok || len(meta.grants) == 0 {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "该工具调用没有冻结的连接 grant")
-	}
-	grant := meta.grants[0]
-	bearer, err := runner.toolCallChannel().BearerToken()
-	if err != nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "读取状态卷 token 失败")
-	}
-	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	grantPayload, err := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
-		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch,
-	})
-	grantCancel()
-	if err != nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "获取 Thanos 凭据 grant 失败: "+err.Error())
-	}
-	if grantPayload.GetThanos() == nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "grant_missing", "grant 回复未携带 Thanos 凭据")
-	}
-	var config plinthconnections.ThanosConfig
-	if err := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config); err != nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_connection_config", "Thanos 连接配置无法解析: "+err.Error())
-	}
-	if config.BaseURL == "" {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_connection_config", "Thanos 连接配置缺少 baseUrl")
-	}
-	secret := plinthconnections.ThanosSecret{}
-	if grantPayload.GetThanos() != nil {
-		secret = plinthconnections.ThanosSecret{Username: grantPayload.GetThanos().GetUsername(), Password: grantPayload.GetThanos().GetPassword()}
-	}
-	canonical, artifactID, execErr := plinthtools.ExecuteThanosQuery(ctx, plinthtools.ThanosQueryParams{
-		Config: config, Secret: secret, Query: query,
-		WorkspaceDir: filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID)),
-		AttemptID:    attemptID, ToolCallID: toolCallID,
-		Upload: func(ctx context.Context, attemptID, toolCallID int64, path string) (int64, error) {
-			return runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, "application/json")
-		},
-	})
-	if execErr != nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "thanos_execution_failed", execErr.Error())
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(canonical, &payload); err != nil {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryToolName, "invalid_result", "结果序列化失败")
-	}
-	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, thanos.QueryResultSchemaKind, payload, artifactID)
 }
 
 // failTypedTool seals a failed supervisor_typed tool with the

@@ -1,18 +1,24 @@
 package worker
 
-// Typed tool executor registry (ADR-0004): supervisor-side tool EXECUTION is
-// plugin-ownable, not a core switch. Platform tools (artifact/thanos) register
-// their executors here at init; a plugin package registers its own executor
-// for its declared tool name during process wiring. Registration is boot-only
-// and duplicate-rejecting; Run freezes the registry, so an unknown or
-// unregistered tool fails the tool call explicitly instead of falling through
-// core code.
+// Typed tool executor assembly (ADR-0004): supervisor-side tool EXECUTION
+// is plugin-ownable, not a core switch. The dispatch table is ASSEMBLED —
+// never init-registered — from the same registry assembly every other
+// consumer derives from: platform tools register their executors here, and
+// every plugin-contributed supervisor_typed tool enters the table through
+// its plugin's registered ExecutionBundle (ToolExecutor binding), verified
+// contract-exact against the assembled implementation table. Retired
+// implementations (受控退役) keep serving frozen historical attempts
+// through the same assembled table; they can never enter a new catalog, so
+// the binding is history-serving only. Assembly is boot-only and
+// duplicate-rejecting and ends frozen, so an unknown or unregistered tool
+// fails the tool call explicitly instead of falling through core code.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/Suknna/quoin/internal/plugins"
@@ -57,10 +63,10 @@ var typedExecutorRegistry struct {
 	frozen    bool
 }
 
-// RegisterTypedExecutor binds one tool name to its executing implementation.
+// registerTypedExecutor binds one tool name to its executing implementation.
 // Duplicate names and post-freeze registration are deterministic wiring
 // failures (the tool declaration table rejects them equally).
-func RegisterTypedExecutor(toolName string, executor TypedExecutor) error {
+func registerTypedExecutor(toolName string, executor TypedExecutor) error {
 	typedExecutorRegistry.mu.Lock()
 	defer typedExecutorRegistry.mu.Unlock()
 	if typedExecutorRegistry.frozen {
@@ -94,25 +100,137 @@ func lookupTypedExecutor(toolName string) (TypedExecutor, bool) {
 }
 
 // PluginCallHost is the supervisor-side seam that resolves the frozen
-// plugins.Call of one typed tool execution: frozen instance settings plus a
-// grant-backed secret resolver. It is supplied once at wiring by the host
-// that actually owns credential resolution (this supervisor process); the
-// worker child never sees credentials.
+// connection settings and the grant-backed secret resolver of one typed
+// tool execution. It is supplied once at wiring by the host that actually
+// owns credential resolution (this supervisor process); the worker child
+// never sees credentials. Production uses the Runner itself; tests may pin
+// a stub through SetPluginCallHost.
 type PluginCallHost interface {
 	CallFor(execution *TypedToolContext) (*plugins.Call, error)
 }
 
 var pluginCallHost PluginCallHost
 
-// SetPluginCallHost wires the supervisor Call resolver before any attempt
-// runs. It must be called during process wiring, not per call.
+// SetPluginCallHost overrides the Call resolver for tests. It must run
+// before any attempt executes, never per call.
 func SetPluginCallHost(host PluginCallHost) { pluginCallHost = host }
 
-// RegisterPluginExecutor is the SINGLE extension path for plugin-owned typed
-// tool execution: the source of truth is the plugin's
-// plugins.ExecutionBundle.ToolExecutor binding — not a parallel mechanism.
-// Registration verifies, per declared tool, the full contract against the
-// compiled implementation table:
+// pluginCallError carries the frozen model-visible failure code of a Call
+// resolution failure (e.g. grant_missing): the tool's sealed failure code is
+// part of the wire contract and must survive the seam unchanged.
+type pluginCallError struct {
+	code, detail string
+}
+
+func (e *pluginCallError) Error() string { return e.detail }
+
+// pluginCall resolves the frozen plugins.Call of one execution through the
+// wired host seam, stamping the executing bundle's plugin identity. Secret
+// resolution stays in THIS supervisor process; worker children never
+// receive credentials.
+func pluginCall(execution *TypedToolContext, bundle plugins.ExecutionBundle) (*plugins.Call, error) {
+	host := pluginCallHost
+	if host == nil {
+		if execution.Runner == nil {
+			return nil, fmt.Errorf("supervisor plugin call host is not wired")
+		}
+		host = execution.Runner
+	}
+	call, err := host.CallFor(execution)
+	if err != nil {
+		return nil, err
+	}
+	if call == nil || len(call.Settings) == 0 {
+		return nil, fmt.Errorf("resolved plugin call carries no frozen connection settings")
+	}
+	call.PluginID = bundle.PluginID
+	return call, nil
+}
+
+// toolWorkspace is the bounded host seam one spill-capable tool execution
+// may use: the attempt's one-shot workspace directory plus the tool_result
+// artifact upload path.
+func (runner *Runner) toolWorkspace(attemptID, toolCallID int64) *plugins.ToolWorkspace {
+	return &plugins.ToolWorkspace{
+		Dir:        filepath.Join(runner.Config.WorkspaceRoot, fmt.Sprintf("attempt-%d", attemptID)),
+		AttemptID:  attemptID,
+		ToolCallID: toolCallID,
+		UploadFile: func(ctx context.Context, path, mediaType string) (int64, error) {
+			return runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, mediaType)
+		},
+	}
+}
+
+// AssembleTypedExecutors derives the supervisor typed-tool dispatch table
+// from the assembled plugin registry and implementation table — the SAME
+// sources every catalog and lookup consumer uses. Platform tools register
+// their own executors; every plugin tool resolves its owner descriptor and
+// bound ExecutionBundle in the registry; a retired implementation with no
+// bound executor keeps its host adapter strictly for frozen historical
+// attempts. Assembly freezes the table; calling twice is an error.
+func AssembleTypedExecutors(registry *plugins.Registry, table *attempt.ImplementationTable) error {
+	typedExecutorRegistry.mu.Lock()
+	if typedExecutorRegistry.frozen {
+		typedExecutorRegistry.mu.Unlock()
+		return fmt.Errorf("typed executor registry already assembled")
+	}
+	typedExecutorRegistry.mu.Unlock()
+	platform := platformTypedExecutors()
+	for toolName, executor := range platform {
+		if err := registerTypedExecutor(toolName, executor); err != nil {
+			return err
+		}
+	}
+	retired := retiredExecutors()
+	for _, def := range table.Definitions() {
+		if def.ExecutionMode != "supervisor_typed" {
+			continue
+		}
+		if _, isPlatform := platform[def.Name]; isPlatform {
+			continue
+		}
+		owner, ok := registry.ToolOwner(def.Name)
+		if !ok {
+			return fmt.Errorf("tool %s has no registered plugin declaration", def.Name)
+		}
+		descriptor, _ := registry.Descriptor(owner)
+		bundle, bound := registry.Bundle(owner)
+		if bound && bundle.ToolExecutor != nil {
+			if err := RegisterPluginExecutor(descriptor, bundle, table); err != nil {
+				return err
+			}
+			continue
+		}
+		// Retired plugin: no host binds a live executor for it anymore. The
+		// retired adapter keeps serving attempts whose frozen catalog
+		// predates the retirement; new catalogs can never offer the tool.
+		executor, isRetired := retired[def.Name]
+		if !isRetired {
+			return fmt.Errorf("plugin %s tool %s has no bound executor in this process", owner, def.Name)
+		}
+		if err := registerTypedExecutor(def.Name, executor); err != nil {
+			return err
+		}
+	}
+	freezeTypedExecutors()
+	return nil
+}
+
+// platformTypedExecutors are the supervisor-executed PLATFORM tools
+// (artifact tools): platform-owned implementations registered by this host,
+// never by a plugin.
+func platformTypedExecutors() map[string]TypedExecutor {
+	return map[string]TypedExecutor{
+		"artifact_read": executeArtifactRead,
+		"artifact_grep": executeArtifactGrep,
+	}
+}
+
+// RegisterPluginExecutor registers every tool of one plugin binding through
+// the plugins.ExecutionBundle.ToolExecutor seam — the single extension path
+// for plugin-owned typed tool execution. Registration verifies, per
+// declared tool, the full contract against the assembled implementation
+// table:
 //
 //   - the bundle belongs to the descriptor and carries execute_tool with a
 //     non-nil ToolExecutor, located in THIS process (plinth_supervisor);
@@ -122,14 +240,7 @@ func SetPluginCallHost(host PluginCallHost) { pluginCallHost = host }
 //     canonical schema byte-for-byte.
 //
 // A registration that fails any check is a deterministic wiring failure.
-type PluginExecutorAdapter struct {
-	Descriptor plugins.Descriptor
-	Bundle     plugins.ExecutionBundle
-}
-
-// RegisterPluginExecutor validates and registers every tool of one plugin
-// binding.
-func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.ExecutionBundle) error {
+func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.ExecutionBundle, table *attempt.ImplementationTable) error {
 	if bundle.PluginID != descriptor.ID {
 		return fmt.Errorf("plugin executor bundle %s does not belong to descriptor %s", bundle.PluginID, descriptor.ID)
 	}
@@ -146,7 +257,7 @@ func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.Execut
 		return fmt.Errorf("plugin %s bundle lacks an execute_tool ToolExecutor", descriptor.ID)
 	}
 	for _, declared := range descriptor.Tools {
-		def, ok := attempt.CompiledToolDefinition(declared.Name)
+		def, ok := table.Lookup(declared.Name)
 		if !ok {
 			return fmt.Errorf("plugin %s tool %s has no compiled implementation", descriptor.ID, declared.Name)
 		}
@@ -156,7 +267,7 @@ func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.Execut
 		if def.Version != declared.Version || def.FailureMode != declared.FailureMode {
 			return fmt.Errorf("plugin %s tool %s drifts from the compiled implementation (version/failure mode)", descriptor.ID, declared.Name)
 		}
-		installed, err := json.Marshal(attempt.CanonicalToolParameters(def))
+		installed, err := json.Marshal(def.ProviderParameters())
 		if err != nil {
 			return err
 		}
@@ -164,29 +275,40 @@ func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.Execut
 		if err != nil {
 			return err
 		}
-		if !bytes.Equal(installed, frozen) {
+		if string(installed) != string(frozen) {
 			return fmt.Errorf("plugin %s tool %s parameter schema drifts from the compiled implementation", descriptor.ID, declared.Name)
 		}
 		tool := declared
-		if err := RegisterTypedExecutor(tool.Name, func(execution *TypedToolContext) error {
+		if err := registerTypedExecutor(tool.Name, func(execution *TypedToolContext) error {
 			call, err := pluginCall(execution, bundle)
 			if err != nil {
+				var codeErr *pluginCallError
+				if errors.As(err, &codeErr) {
+					return execution.Fail(codeErr.code, codeErr.detail)
+				}
 				return execution.Fail("plugin_call_unavailable", err.Error())
 			}
 			arguments, err := json.Marshal(execution.Args)
 			if err != nil {
 				return execution.Fail("invalid_arguments", err.Error())
 			}
-			result, err := bundle.ToolExecutor.ExecuteTool(execution.BaseCtx, call, plugins.ToolRequest{
-				Name: tool.Name, ArgumentsJSON: arguments,
-			})
+			request := plugins.ToolRequest{Name: tool.Name, ArgumentsJSON: arguments}
+			if execution.Runner != nil {
+				request.Workspace = execution.Runner.toolWorkspace(execution.AttemptID, execution.ToolCallID)
+			}
+			result, err := bundle.ToolExecutor.ExecuteTool(execution.BaseCtx, call, request)
 			if err != nil {
 				return execution.Fail("plugin_execution_failed", err.Error())
 			}
-			if result.Success {
-				return execution.Succeed(execution.DefaultResultSchemaKind(), map[string]any{
-					"success": true, "payload": json.RawMessage(result.Payload),
-				}, 0)
+			if result.Success || len(result.Payload) > 0 {
+				// The executor's payload IS the tool's sealed result shape
+				// (a structured failure payload carries success=false); the
+				// commit derives the terminal outcome from it.
+				var payload map[string]any
+				if err := json.Unmarshal(result.Payload, &payload); err != nil {
+					return execution.Fail("invalid_result", err.Error())
+				}
+				return execution.Succeed(execution.DefaultResultSchemaKind(), payload, result.ArtifactID)
 			}
 			return execution.Fail(result.ErrorCode, result.ErrorDetail)
 		}); err != nil {
@@ -194,36 +316,4 @@ func RegisterPluginExecutor(descriptor plugins.Descriptor, bundle plugins.Execut
 		}
 	}
 	return nil
-}
-
-// pluginCall resolves the frozen plugins.Call through the wired host seam.
-// Secret resolution stays in THIS supervisor process; worker children never
-// receive credentials.
-func pluginCall(execution *TypedToolContext, bundle plugins.ExecutionBundle) (*plugins.Call, error) {
-	if pluginCallHost == nil {
-		return nil, fmt.Errorf("supervisor plugin call host is not wired")
-	}
-	call, err := pluginCallHost.CallFor(execution)
-	if err != nil {
-		return nil, err
-	}
-	if call.PluginID != bundle.PluginID {
-		return nil, fmt.Errorf("resolved call targets plugin %q, bundle executes %q", call.PluginID, bundle.PluginID)
-	}
-	return call, nil
-}
-
-func init() {
-	mustRegisterTypedExecutor("artifact_read", executeArtifactRead)
-	mustRegisterTypedExecutor("artifact_grep", executeArtifactGrep)
-	mustRegisterTypedExecutor("thanos_query", executeThanosQueryTyped)
-}
-
-// mustRegisterTypedExecutor panics on a platform built-in registration
-// failure: built-ins are compile-time facts pinned by tests, and a collision
-// is a programming error that must fail the process, not degrade silently.
-func mustRegisterTypedExecutor(toolName string, executor TypedExecutor) {
-	if err := RegisterTypedExecutor(toolName, executor); err != nil {
-		panic("platform typed executor registration failed: " + err.Error())
-	}
 }

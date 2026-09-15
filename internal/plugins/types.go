@@ -7,16 +7,17 @@ package plugins
 // any process to hold.
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
 
-// Tool is the declarative description of one model tool a plugin offers. It
-// mirrors the frozen attempt.ToolDef vocabulary (name, version, execution
-// location, failure mode, model-facing description) — there is no second
-// tool protocol: the provider-facing schema rendering and the digest remain
-// owned by the attempt catalog, and registration/boot verification rejects
-// any declaration that does not agree with the compiled implementation.
+// Tool is the declarative description of one model tool a plugin offers.
+// It is DERIVED from the plugin's compiled ToolDef (DescriptorTool), so
+// there is no second tool protocol: the provider-facing schema rendering
+// and the digest remain owned by the frozen catalog assembly, and
+// registration/boot verification rejects any declaration that does not
+// agree with the compiled implementation.
 type Tool struct {
 	// Name is the globally unique tool name vocabulary ([a-z][a-z0-9_]*).
 	// Identical tool contracts may share one name across plugins (shared
@@ -127,6 +128,24 @@ type DiscoverResult struct {
 type ToolRequest struct {
 	Name          string
 	ArgumentsJSON json.RawMessage
+	// Workspace, when non-nil, is the executing host's per-call execution
+	// environment for tools that spill long bodies into the host's
+	// tool_result Artifact store. Executing hosts always provide it for
+	// supervisor-side tool execution; description-only hosts never build
+	// requests at all.
+	Workspace *ToolWorkspace
+}
+
+// ToolWorkspace is the bounded host seam one spill-capable tool execution
+// may use. Dir is the attempt's one-shot workspace on the executing host
+// (transient spill staging, never a durable locator); UploadFile streams a
+// staged file into the host's tool_result Artifact store and returns the
+// committed artifact id.
+type ToolWorkspace struct {
+	Dir        string
+	AttemptID  int64
+	ToolCallID int64
+	UploadFile func(ctx context.Context, path, mediaType string) (int64, error)
 }
 
 // ToolResult is the closed, non-secret tool outcome sealed as Evidence by
@@ -134,6 +153,10 @@ type ToolRequest struct {
 type ToolResult struct {
 	Success bool
 	Payload json.RawMessage
+	// ArtifactID, when non-zero, is the long-body Artifact the executing
+	// host committed for this result; the host seals the locator together
+	// with the payload.
+	ArtifactID int64
 	// ErrorCode/ErrorDetail are set when Success is false; Detail is bounded
 	// and must not leak credentials or endpoint internals.
 	ErrorCode   string

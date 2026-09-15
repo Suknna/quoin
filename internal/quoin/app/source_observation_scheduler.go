@@ -13,24 +13,18 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/observation"
 )
 
 // newSourceObservationService builds the observation authority for one
 // deployment. A nil enabledPlugins means the deployment YAML is silent and
 // the registry's DefaultEnabled plugins are observed; an explicit list is a
-// whitelist and unknown ids fail closed. The descriptor registration errors
-// are compile-time facts, so a violation aborts the process instead of
-// serving with a lying catalog.
+// whitelist and unknown or retired ids fail closed. The shared builtin
+// source panics on a rejected built-in descriptor (a compile-time fact),
+// so a violation aborts the process instead of serving with a lying catalog.
 func newSourceObservationService(db *sql.DB, enabledPlugins []string) (*observation.Service, error) {
-	registry := plugins.NewRegistry()
-	for _, descriptor := range attempt.BuiltinDescriptors() {
-		if err := registry.RegisterDescriptor(descriptor); err != nil {
-			panic(err)
-		}
-	}
+	registry := builtin.Registry()
 	enabled, err := registry.ResolveEnabled(enabledPlugins)
 	if err != nil {
 		return nil, err

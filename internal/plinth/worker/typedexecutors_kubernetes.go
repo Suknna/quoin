@@ -22,8 +22,16 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-func init() {
-	mustRegisterTypedExecutor(kubernetes.ReadToolName, executeKubernetesReadTyped)
+// retiredExecutors are the retired implementations (受控退役) this host
+// keeps serving through the assembled dispatch table, strictly for attempts
+// whose frozen catalog predates the retirement. They can never enter a new
+// catalog (the retired plugin can never be enabled), so the binding is
+// history-serving only and derives from the same assembly as every live
+// binding.
+func retiredExecutors() map[string]TypedExecutor {
+	return map[string]TypedExecutor{
+		kubernetes.ReadToolName: executeKubernetesReadTyped,
+	}
 }
 
 func executeKubernetesReadTyped(execution *TypedToolContext) error {

@@ -95,6 +95,7 @@ users:
 // endpoint, so any regression past the preflight return is observable as a
 // fetch, not inferred from implementation structure.
 func TestKubernetesReadInvalidOrUngrantableCannotFetchCredentials(t *testing.T) {
+	assembleTestTypedExecutors(t)
 	tests := []struct {
 		name          string
 		args          map[string]any

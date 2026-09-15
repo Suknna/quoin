@@ -72,6 +72,9 @@ func validateDescriptor(descriptor Descriptor) error {
 	if descriptor.ConnectionKind != "" && (len(descriptor.ConnectionKind) > maxIDLength || !pluginIDPattern.MatchString(descriptor.ConnectionKind)) {
 		return fmt.Errorf("%w: plugin %s connectionKind %q must match [a-z][a-z0-9_-]*", ErrInvalidDescriptor, descriptor.ID, descriptor.ConnectionKind)
 	}
+	if descriptor.Retired && descriptor.DefaultEnabled {
+		return fmt.Errorf("%w: retired plugin %s must not default to enabled", ErrInvalidDescriptor, descriptor.ID)
+	}
 	if err := validateCapabilities(descriptor); err != nil {
 		return err
 	}
@@ -186,8 +189,8 @@ func validateConfigSchema(descriptor Descriptor) error {
 }
 
 // validateTool 校验单个工具声明：名字、版本、说明、封闭执行位置与失败
-// 模式。与编译实现的精确一致性由 attempt 目录的 VerifyDescriptorTools 在
-// 接线时验证（本包不依赖任何执行宿主）。
+// 模式。与编译实现的精确一致性由目录装配（attempt.BuildCatalogs）在
+// 接线时双向验证（本包不依赖任何执行宿主）。
 func validateTool(pluginID string, tool Tool) error {
 	if len(tool.Name) > maxIDLength || !toolNamePattern.MatchString(tool.Name) {
 		return fmt.Errorf("%w: plugin %s tool name %q must match [a-z][a-z0-9_]*", ErrInvalidDescriptor, pluginID, tool.Name)

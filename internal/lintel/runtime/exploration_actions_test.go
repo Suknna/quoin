@@ -46,7 +46,7 @@ func TestExplorationActionRouteCachesCanonicalChildResult(t *testing.T) {
 	if !first.GetBrowserExplorationActionResult().GetSuccess() || first.GetBrowserExplorationActionResult().GetPayload().GetSchemaKind() != "browser_tool_result_v1" {
 		t.Fatalf("unexpected first result: %#v", first.GetBrowserExplorationActionResult())
 	}
-	if err := attempt.ValidateToolResultPayload(first.GetBrowserExplorationActionResult().GetPayload().GetSchemaKind(), first.GetBrowserExplorationActionResult().GetPayload().GetCanonicalJson()); err != nil {
+	if err := attempt.ValidateToolResultPayload(attempt.DefaultCatalogs().Implementations, first.GetBrowserExplorationActionResult().GetPayload().GetSchemaKind(), first.GetBrowserExplorationActionResult().GetPayload().GetCanonicalJson()); err != nil {
 		t.Fatalf("canonical browser result violates frozen schema: %v", err)
 	}
 	channel.handleExplorationAction(&runtimev1.ControlEnvelope{MessageId: 4, BootId: "lintel", ConnectionEpoch: 4}, request)

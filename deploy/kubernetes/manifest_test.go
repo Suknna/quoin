@@ -80,8 +80,9 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 	}
 
 	// ADR 0004: the deployment YAML selects the enabled plugin set. The
-	// browser-free default stack must enable exactly the four source plugins
-	// and must never enable the browser plugin.
+	// browser-free default stack must enable exactly the three source plugins;
+	// the browser and kubernetes plugins are retired and must never be
+	// enabled.
 	quoinComponent := loadComponentYAML(t, configMaps["quoin-config"]["data"].(map[string]any)["component.yaml"].(string))
 	enabled, ok := quoinComponent["enabledPlugins"].([]any)
 	if !ok {
@@ -91,7 +92,7 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 	for _, id := range enabled {
 		got = append(got, id.(string))
 	}
-	want := []string{"alertmanager", "kubernetes", "prometheus", "thanos"}
+	want := []string{"alertmanager", "prometheus", "thanos"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("default enabledPlugins must be exactly %v, got %v", want, got)
 	}
@@ -146,12 +147,12 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 
 // TestComposeQuoinConfigDefaultsMatchThePluginContract protects the Compose
 // side of the same coordination: the default component config enables exactly
-// the four source plugins and never the browser plugin, which is retired
-// (historical variant in deploy/retired/browser/quoin-browser.yaml).
+// the three source plugins; the browser and kubernetes plugins are retired
+// (historical variants in deploy/retired/).
 func TestComposeQuoinConfigDefaultsMatchThePluginContract(t *testing.T) {
 	defaults := parseConfigFile(t, "../config/quoin.yaml")
 
-	want := []any{"alertmanager", "kubernetes", "prometheus", "thanos"}
+	want := []any{"alertmanager", "prometheus", "thanos"}
 	if got := defaults["enabledPlugins"]; !equalStrings(got, want) {
 		t.Fatalf("config/quoin.yaml must enable exactly %v, got %v", want, got)
 	}

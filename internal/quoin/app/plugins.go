@@ -12,36 +12,18 @@ import (
 	"sort"
 
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/danielgtaylor/huma/v2"
 )
 
-// initPluginRegistry registers the built-in descriptors. Registration
-// failures are programming errors pinned by contract tests, so they abort
-// construction instead of degrading into a lying catalog.
+// initPluginRegistry installs the shared builtin plugin registry. The
+// builtin package panics on a rejected built-in descriptor (a compile-time
+// fact), and declaration/implementation agreement for EVERY registered
+// descriptor is verified inside BuildCatalogs before serving.
 func (application *apiServer) initPluginRegistry() {
-	registry := plugins.NewRegistry()
-	for _, descriptor := range attempt.BuiltinDescriptors() {
-		if err := registry.RegisterDescriptor(descriptor); err != nil {
-			panic("built-in plugin descriptor rejected: " + err.Error())
-		}
-	}
-	if err := verifyPluginAgreement(registry); err != nil {
-		panic(err.Error())
-	}
-	application.pluginRegistry = registry
-}
-
-// verifyPluginAgreement pins the descriptor/implementation agreement
-// (声明不能伪装不存在的实现) for every registered descriptor, enabled or not.
-func verifyPluginAgreement(registry *plugins.Registry) error {
-	for _, descriptor := range registry.Descriptors() {
-		if err := attempt.VerifyDescriptorTools(descriptor); err != nil {
-			return err
-		}
-	}
-	return nil
+	application.pluginRegistry = builtin.Registry()
 }
 
 // configurePlugins resolves deployment enablement once at boot and projects
@@ -54,7 +36,7 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	catalogs, err := attempt.BuildCatalogs(application.pluginRegistry, enabled)
+	catalogs, err := attempt.BuildCatalogs(application.pluginRegistry, attempt.Implementations(), enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +109,12 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 	output := &integrationsPluginsOutput{CacheControl: "no-store", Pragma: "no-cache"}
 	output.Body.Items = []pluginCatalogItem{}
 	for _, descriptor := range application.pluginRegistry.Descriptors() {
+		// Retired plugins stay registered as declaration authorities for
+		// their compiled implementations, but the management catalog never
+		// re-advertises them.
+		if descriptor.Retired {
+			continue
+		}
 		capabilities := make([]string, 0, len(descriptor.Capabilities))
 		for _, capability := range descriptor.Capabilities {
 			capabilities = append(capabilities, string(capability))

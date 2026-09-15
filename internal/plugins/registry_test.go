@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 func TestRegisterDescriptor(t *testing.T) {
@@ -276,32 +276,37 @@ func TestRegisterBundleToolLocationMustMatch(t *testing.T) {
 
 func TestResolveEnabled(t *testing.T) {
 	registry := plugins.NewRegistry()
-	for _, descriptor := range attempt.BuiltinDescriptors() {
+	for _, descriptor := range builtin.Descriptors() {
 		if err := registry.RegisterDescriptor(descriptor); err != nil {
 			t.Fatalf("RegisterDescriptor(%s) = %v, want nil", descriptor.ID, err)
 		}
 	}
-	// Silent deployment config selects every DefaultEnabled descriptor.
+	// Silent deployment config selects every DefaultEnabled descriptor. The
+	// browser and kubernetes descriptors are retired and no longer register.
 	defaults, err := registry.ResolveEnabled(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"alertmanager", "kubernetes", "prometheus", "thanos"}
+	want := []string{"alertmanager", "prometheus", "thanos"}
 	if !reflect.DeepEqual(defaults, want) {
 		t.Fatalf("ResolveEnabled(nil) = %v, want %v", defaults, want)
 	}
-	// An explicit list is a whitelist: unknown ids fail deterministically.
+	// An explicit list is a whitelist: unknown ids fail deterministically —
+	// including the retired browser/kubernetes ids.
 	if _, err := registry.ResolveEnabled([]string{"prometheus", "ghost"}); !errors.Is(err, plugins.ErrUnknownPlugin) {
 		t.Fatalf("ResolveEnabled(ghost) = %v, want ErrUnknownPlugin", err)
 	}
-	explicit, err := registry.ResolveEnabled([]string{"kubernetes", "prometheus", "kubernetes"})
+	if _, err := registry.ResolveEnabled([]string{"kubernetes"}); !errors.Is(err, plugins.ErrUnknownPlugin) {
+		t.Fatalf("ResolveEnabled(retired kubernetes) = %v, want ErrUnknownPlugin", err)
+	}
+	explicit, err := registry.ResolveEnabled([]string{"thanos", "prometheus", "thanos"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(explicit, []string{"kubernetes", "prometheus"}) {
-		t.Fatalf("ResolveEnabled(explicit) = %v, want [kubernetes prometheus]", explicit)
+	if !reflect.DeepEqual(explicit, []string{"prometheus", "thanos"}) {
+		t.Fatalf("ResolveEnabled(explicit) = %v, want [prometheus thanos]", explicit)
 	}
-	if !plugins.IsEnabled(explicit, "kubernetes") || plugins.IsEnabled(explicit, "thanos") {
+	if !plugins.IsEnabled(explicit, "prometheus") || plugins.IsEnabled(explicit, "alertmanager") {
 		t.Fatal("IsEnabled disagrees with the resolved set")
 	}
 	// An explicit EMPTY whitelist disables every plugin: omission and empty
