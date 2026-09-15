@@ -31,11 +31,13 @@ component_tag() {
 
 IFS=',' read -ra selected <<< "$components"
 for target in "${selected[@]}"; do
-  case "$target" in frontend|quoin|plinth|lintel|stele) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
+  # otp-test is the test-only OTP delivery receiver used by the disposable
+  # e2e-real topology; it is never part of a production component set.
+  case "$target" in frontend|quoin|plinth|lintel|stele|otp-test) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
   image="$image_namespace/$target:$(component_tag "$target")"
   dockerfile="deploy/images/$target/Dockerfile"
   arguments=(docker build -f "$dockerfile")
-  if [ "$target" != frontend ]; then
+  if [ "$target" != frontend ] && [ "$target" != otp-test ]; then
     arguments+=(--build-arg "RELEASE_VERSION=$(component_tag "$target")")
   fi
   if [ -n "${QUOIN_IMAGE_GOPROXY:-}" ]; then

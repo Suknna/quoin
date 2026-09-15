@@ -76,6 +76,37 @@ services:
       retries: 30
       start_period: 2s
 
+  # Test-only OTP delivery receiver (see deploy/images/otp-test/Dockerfile):
+  # one process answering the administrator's configured email (implicit-TLS
+  # SMTP) and SMS (HTTPS webhook) channels and recording every accepted
+  # delivery as JSONL under the runtime fixture directory (file mode 0600).
+  # It stays inside the Compose network — never published, never a real
+  # provider — so no verification code can leave the machine.
+  otpdelivery:
+    image: ${QUOIN_OTP_TEST_IMAGE:-quoin/otp-test:v0.1.0-dev}
+    # Runs as the invoking user (set by scripts/e2e-real/up.sh) so the 0600
+    # JSONL record stays owned and readable by the harness user; the default
+    # matches the runtime UID for direct compose callers.
+    user: "${QUOIN_E2E_OTP_UID:-65532}:${QUOIN_E2E_OTP_GID:-65532}"
+    command:
+      - --tls-cert=/run/otp-tls/tls.crt
+      - --tls-key=/run/otp-tls/tls.key
+      - --https-listen=0.0.0.0:8445
+      - --smtp-listen=0.0.0.0:8587
+      - --record=/run/otp/deliveries.jsonl
+    volumes:
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/otp-tls:/run/otp-tls:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/fixture/otp:/run/otp
+    healthcheck:
+      # The fixture owns this certificate and validates it by its Compose DNS
+      # name in the quoin delivery config; the local probe only needs the
+      # endpoint to answer, so certificate checking is explicitly skipped here.
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "/dev/null", "https://127.0.0.1:8445/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
   # These deliberately small, independently authenticated upstreams prove #97
   # through the production runtime adapter. They are not Quoin mocks and expose
   # their query counters only to the private Compose network for no-scan checks.

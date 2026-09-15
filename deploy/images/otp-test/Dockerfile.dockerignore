@@ -1,0 +1,7 @@
+# The test-fixture image context excludes repository-local state; only the
+# module and source tree the build stage COPYs are relevant.
+**
+!go.mod
+!go.sum
+!test/support/otpdelivery/
+**/*.test

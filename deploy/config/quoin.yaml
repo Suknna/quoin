@@ -14,3 +14,30 @@ rootKeyFile: /run/quoin-secrets/root-key
 runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
 runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
 steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+# Audit retention (ADR-0006): default and minimum is six calendar months;
+# deployments may only extend it. Omit the whole section to keep the default.
+audit:
+  retentionMonths: 6
+# Authentication delivery bootstrap (authentication design section 8), kept
+# commented out: enabling it provisions the initial verification-code delivery
+# from this file and requires a read-only secret reference file at secretsFile
+# (reference name -> value, JSON or YAML; values never belong in this YAML).
+# Omit the section to configure delivery at runtime as an administrator;
+# runtime-configured secrets stay root-key encrypted.
+# authentication:
+#   secretsFile: /run/quoin-secrets/auth-delivery-secrets.yaml
+#   configuration:
+#     email:
+#       kind: smtp
+#       host: smtp.example.com
+#       port: 587
+#       from: noreply@quoin.example.com
+#       username: quoin
+#       passwordRef: smtp-password
+#       tlsMode: starttls
+#     sms:
+#       kind: webhook
+#       url: https://sms-gateway.example.com/send
+#       secretHeaders:
+#         X-Api-Key: sms-api-key
+#       encoding: json

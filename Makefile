@@ -1,7 +1,7 @@
 # Quoin v1 development entry points. The ticket acceptance script is the
 # authoritative verification path; these targets are conveniences.
 
-.PHONY: test vet web-typecheck web-lint web-test web-build images ticket-01 acceptance e2e-real-up e2e-real e2e-real-down clean
+.PHONY: test vet web-typecheck web-lint web-test web-build auth-audit-checks auth-audit-race images ticket-01 acceptance e2e-real-up e2e-real e2e-real-down clean
 
 test:
 	go test ./... -count=1
@@ -21,6 +21,11 @@ web-test:
 web-build:
 	pnpm --dir web install --frozen-lockfile
 	pnpm --dir web build
+
+auth-audit-checks: test vet web-typecheck web-lint web-test web-build
+
+auth-audit-race:
+	go test -race ./internal/quoin/auth ./internal/quoin/execution ./internal/quoin/audit ./internal/quoin/delivery ./internal/quoin/attempt ./internal/quoin/runtime ./internal/quoin/backup ./internal/quoin/recovery -count=1
 
 images:
 	bash deploy/images/build.sh
