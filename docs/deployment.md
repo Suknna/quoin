@@ -2,7 +2,9 @@
 
 Quoin 默认交付五个独立服务：入口 `gateway`（stock Caddy）、`frontend`、`quoin`、`plinth` 与 `stele`。浏览器、API、SSE 共用一个 HTTPS Origin；告警发送方使用同一 Origin 的 `/stele/` 路径。Caddy 优先转发 `/api/*` 到 Quoin、`/stele/*` 到 Stele，其他请求到前端，因此 SPA fallback 不会吞掉 API、SSE 或 WebSocket。
 
-Lintel 浏览器运行时已随受控浏览器业务退役（2026-09）：默认栈不构建、不部署、不探测、不挂载任何 Lintel 资源，`quoin-config` 的 `enabledPlugins` 仅支持四个源插件（alertmanager、kubernetes、prometheus、thanos），Quoin 不再接受 Lintel slot 的注册或连接，长期 Lintel 凭据一律被拒。Lintel 实现代码与历史部署工件保留作恢复参考：部署工件见 [`deploy/retired/`](../deploy/retired/)，不再有任何启用步骤。
+Lintel 浏览器运行时已随受控浏览器业务退役（2026-09）：默认栈不构建、不部署、不探测、不挂载任何 Lintel 资源，Quoin 不再接受 Lintel slot 的注册或连接，长期 Lintel 凭据一律被拒。Lintel 实现代码与历史部署工件保留作恢复参考：部署工件见 [`deploy/retired/`](../deploy/retired/)，不再有任何启用步骤。
+
+Kubernetes 插件已退役（2026-09）：`enabledPlugins` 默认仅启用三个源插件（alertmanager、prometheus、thanos）；`kubernetes` 与 `browser` 已从活动目录移除（描述符以 Retired 留在注册机制中），显式列出即启动失败。后端保留 Kubernetes 连接 API 与凭据 probe、不阻止新建，仅不再对前端通告；历史连接与记录保留可查。
 
 Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Quoin 不包含 `quoin-deploy`，不会创建、更新或删除 Kubernetes 工作负载、PVC、Secret、实例，也不会编排 Compose 安装、升级、备份或恢复。运维人员负责清单应用、镜像替换、扩缩容、数据卷和 Secret 生命周期。
 

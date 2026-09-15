@@ -4,7 +4,9 @@
 
 **Non-normative：** 本目录承载 Quoin v1 的规范性技术契约。目标是把 [`CONTEXT.md`](../../../CONTEXT.md) 中已经冻结的领域语言与业务边界，落实为可供后续实施规划和验证直接使用的数据、API、组件协议、配置、前端、安全、运维与验收规格；本目录不包含生产实现或实施任务拆分。
 
-> **状态提示（2026-09-13，受控浏览器退役）：** 受控浏览器业务已整体下线：`browser` 插件描述符已从目录移除，Lintel slot 不再接受 Register/Connect（长期凭据一律被拒），全部浏览器 HTTP/WebSocket 路由、journey-catalog 视图与 OpenAPI 操作已拆除（旧 URL 一律 404），Runtime 状态与 About 只投影 plinth 槽位。Lintel 相关实现代码与历史部署工件保留作恢复参考（部署工件见 `deploy/retired/browser`）；各主题文件与历史验收中涉及浏览器的条款仅作历史解读，其活动路由以当前 OpenAPI 为准。
+> **状态提示（2026-09-13，受控浏览器退役）：** 受控浏览器业务已整体下线：`browser` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），Lintel slot 不再接受 Register/Connect（长期凭据一律被拒），全部浏览器 HTTP/WebSocket 路由、journey-catalog 视图与 OpenAPI 操作已拆除（旧 URL 一律 404），Runtime 状态与 About 只投影 plinth 槽位。Lintel 相关实现代码与历史部署工件保留作恢复参考（部署工件见 `deploy/retired/browser`）；各主题文件与历史验收中涉及浏览器的条款仅作历史解读，其活动路由以当前 OpenAPI 为准。
+
+> **状态提示（2026-09-14，Kubernetes 插件退役）：** `kubernetes` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），默认启用主线为 alertmanager/prometheus/thanos；`enabledPlugins` 显式列出 `kubernetes` 即启动失败，前端 `/integrations/kubernetes` 入口已拆除。`kubernetes` 连接类型、OpenAPI 连接变体与连接/凭据 probe 保留且不阻止新建（仅不再对前端通告），历史连接/映射记录与 `kubernetes_read` 实现表保留用于历史数据与执行入口校验；各主题文件中涉及 Kubernetes 插件接线的条款仅作历史解读。
 
 > **状态提示（2026-09-13，ADR-0004 主线）：** [ADR-0004](../../adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即获得来源级观测、`sourceRef` 授权工具与独立巡检计划（scope integration/objects/businessView），业务视图可选，浏览器插件默认停用（独立浏览器身份 `identity_key`）。`BusinessSystem` 声明写入、配置发布、Label Contract 与独立资源刷新界面及 OpenAPI 操作已退役，仅保留只读历史资源；相关条款在各主题文件中以「历史」标注。真实部署验收进行中，逐项结果见 [docs/plugin-real-deployment-acceptance.md](../../../docs/plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。
 

@@ -2,7 +2,9 @@
 
 **状态：Draft**
 
-> **受控浏览器退役（2026-09）：** 浏览器插件配置界面已解除装配（旧 `/integrations/browser`、`/browser-login` 一律 404），插件配置现仅 Kubernetes 一个入口；Runtimes 管理只显示 plinth 槽位。文中浏览器相关章节仅作历史解读。
+> **受控浏览器退役（2026-09）：** 浏览器插件配置界面已解除装配（旧 `/integrations/browser`、`/browser-login` 一律 404）；Runtimes 管理只显示 plinth 槽位。文中浏览器相关章节仅作历史解读。
+
+> **Kubernetes 插件退役（2026-09）：** `kubernetes` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），`/integrations/kubernetes` 创建/管理入口已拆除（旧路由一律 404），接入目录不再出现 Kubernetes 卡片；历史 Kubernetes 连接与业务系统映射记录由后端保留（连接 API 与凭据 probe 不阻止新建，仅不对前端通告）。文中 Kubernetes 相关章节仅作历史解读。
 
 > **现状与迁移（ADR-0004）：** 插件化主线已实施：运维中心子页为告警列表、故障复盘、巡检、业务视图与接入管理；接入验证并启用即获得来源级观测、`sourceRef` 工具与独立巡检计划，业务视图可选，浏览器插件默认停用（独立浏览器身份以 `identity_key` 配置）。`BusinessSystem` 声明写入、配置发布与 Label Contract 界面已退出主线；第 10 节中标注（历史）的条款仅用于解读既有实现与 E2E 记录。真实部署验收进行中，逐项结果见 [docs/plugin-real-deployment-acceptance.md](../../../docs/plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。既有 E2E 文档保留原样，继续说明它们实际验证的历史系统。
 
@@ -155,7 +157,7 @@
 新主线条款（ADR-0004，现行）：
 
 - **UI-VIEW-001 —** 业务视图页（Admin）提供可选的范围组织：列表 + 创建/编辑层，表单与 YAML 是同一对象的编辑视图，按 row version 冲突裁决；视图不拥有资源、凭据或额外权限，只收窄巡检等消费者候选。没有业务视图不阻塞任何主线能力。（来源：[CONTEXT「业务视图」](../../../CONTEXT.md#业务视图business-view)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
-- **UI-INTG-001 —** 接入管理先展示支持的平台目录（Alertmanager、Kubernetes、Prometheus、Thanos；浏览器卡片仅在 browser 插件启用后出现）与已接入实例，再进入平台专属配置表单与说明；表单边界沿用 UI-ADMIN-004。浏览器插件停用时页面不提供任何浏览器配置入口。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
+- **UI-INTG-001 —** 接入管理先展示支持的平台目录（Alertmanager、Prometheus、Thanos；浏览器卡片仅在 browser 插件启用后出现；Kubernetes 卡片已随插件退役移除）与已接入实例，再进入平台专属配置表单与说明；表单边界沿用 UI-ADMIN-004。浏览器插件停用时页面不提供任何浏览器配置入口。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INTG-002 —** 接入详情分离展示验证（probe Attempt 与结果历史）、启用/停用、凭据代次轮换与观测资源；验证失败保持停用，启用说明将开始默认来源级观测并创建仅人工运行的默认基础巡检计划。（来源：[CONTEXT「接入启用」](../../../CONTEXT.md#接入启用integration-enablement)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INTG-003 —** 观测资源列表明确“当前观测到 / 当前未观测到”及陈旧标注，显示身份 labels、最后成功观测时间，并提供“刷新观测”；不得把未观测到写成已删除，失败或局部观测与完整范围内未再观测明确区分。观测范围来自当前接入，不显示业务归属。（来源：[CONTEXT「来源级观测」](../../../CONTEXT.md#来源级观测source-scoped-observation)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-BID-001 —** 浏览器身份在接入管理的浏览器卡片中按独立 `identity_key` 创建与配置（显示名、起始 URL、authentication probe 与类型化参数）；旧业务系统绑定的身份以只读引用与显式迁移状态展示。页面仅展示非秘密状态、revision、profile generation、最近验证和占用；不得编辑或回显 Cookie/profile 文件。只有 Admin 可管理浏览器身份、发起或发布人工登录；Operator 不显示也不得直接访问这些能力，服务端必须强制拒绝。（来源：[CONTEXT「浏览器身份」](../../../CONTEXT.md#浏览器身份browser-identity)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
@@ -166,7 +168,7 @@
 - **UI-ADMIN-001 —** 第二栏按设置清单、用户、Journey Catalog、模型供应商、备份与 Artifact 保留、安全、审计和“关于”分组，第三栏显示内容；不得增加 Label Contract 管理入口、第四栏或卡片墙首页。接入管理和业务视图属于运维中心；模型供应商是唯一独立的 Admin provider 管理对象。（来源：[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-ADMIN-002 —** 设置清单从权威状态派生，展示模型供应商、接入验证与启用、Plinth/Lintel（浏览器插件显式启用）、浏览器身份、Stele 告警源和备份目标的就绪、依赖及修复入口；不得保存人工完成 checkbox、显示活动 Label Contract 或阻塞无关能力。（来源：[CONTEXT「首次设置投影」](../../../CONTEXT.md#首次设置投影)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-ADMIN-003 —** 用户列表显示用户名、显示名、角色、启用状态和最后登录；详情编辑显示名/角色/状态，并提供重置密码、撤销全部 Session。禁用、降级、重置和撤销说明现有登录会立即失效；最后一个有效 Admin 冲突显示服务端真实原因。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-ADMIN-004 —** Alertmanager、Prometheus、Thanos、Kubernetes 与浏览器（仅插件启用后）的平台配置表单位于运维中心的接入管理子页，管理员设置不得建立第二写入口。管理员设置只管理模型供应商及其安全/运维规则；模型供应商表单使用类型化字段，不得提供任意 URL + JSON 表单。任何携带秘密的表单首次提交生成用户不可见的 `client_command_id`；仅原请求网络重试复用，用户修改秘密后再提交必须生成新 ID，避免持久化秘密比较 oracle。具体字段和 API 由 [`contracts/openapi.yaml`](./contracts/openapi.yaml) 的连接与接入操作承载。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[#95](https://github.com/Suknna/quoin/issues/95)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
+- **UI-ADMIN-004 —** Alertmanager、Prometheus、Thanos 与浏览器（仅插件启用后；Kubernetes 表单已随插件退役移除）的平台配置表单位于运维中心的接入管理子页，管理员设置不得建立第二写入口。管理员设置只管理模型供应商及其安全/运维规则；模型供应商表单使用类型化字段，不得提供任意 URL + JSON 表单。任何携带秘密的表单首次提交生成用户不可见的 `client_command_id`；仅原请求网络重试复用，用户修改秘密后再提交必须生成新 ID，避免持久化秘密比较 oracle。具体字段和 API 由 [`contracts/openapi.yaml`](./contracts/openapi.yaml) 的连接与接入操作承载。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[#95](https://github.com/Suknna/quoin/issues/95)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-ADMIN-005 —** Model Provider 表单先经 `discoverProviderModels` 探测上游 `/v1/models`。多个 model ID 由 Admin 选择；零项、失败或 metadata 缺失时保留手工输入，不直接禁止保存。保存后状态为“尚未验证”；真实 probe 成功并显示实测 streaming/tool/embedding 能力后才可 enable。失败保留配置及结构化非秘密错误码/允许字段供重试修正，禁止展示供应商原始响应、header 或 request body，不自动删除或宣称能力。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ADMIN-006 —** 一次性 Alert Source Bearer/Runtime token 在创建或轮换响应含 reveal handle 时立即打开全工作台层并消费；原文默认可见，提供复制和“关闭后无法再次查看”。前端不得自行缩短服务端固定 60 秒期限；同 Session 命令重放若仍返回原 handle 应继续同一流程，410 时只说明已过期/消费且必须轮换。秘密只存在当前页面内存，不进路由、toast、日志、下载或浏览器持久化。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-007 —** Alert Source 详情显示全部 credential 的非秘密 ID、Active/Pending Retirement/Retired、创建、首次使用与退休时间。新 generation 首个成功 Delivery 后旧 generation 进入 Pending Retirement；界面持续提示 Admin 更新完成后显式退休，不按时间或一次成功自动消失，退休前说明立即影响。（来源：[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）

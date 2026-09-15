@@ -4,7 +4,9 @@ status: accepted
 
 # 插件契约与冻结工具目录（ADR-0004 实施规范）
 
-> **受控浏览器退役（2026-09）：** `browser` 插件描述符已从内置目录移除：解析启用集时显式列出 `browser` 会作为未知插件启动失败，浏览器工具不再进入任何冻结目录；`quoin_browser` 工具实现保留用于历史执行的入口校验。文中浏览器插件条款仅作历史解读。
+> **受控浏览器退役（2026-09）：** `browser` 插件描述符已从活动目录移除（以 Retired 留在注册机制中）：解析启用集时显式列出 `browser` 会作为未知插件启动失败，浏览器工具不再进入任何冻结目录；`quoin_browser` 工具实现保留用于历史执行的入口校验。文中浏览器插件条款仅作历史解读。
+
+> **Kubernetes 插件退役（2026-09）：** `kubernetes` 插件描述符已从活动目录移除（以 Retired 留在注册机制中）：解析启用集时显式列出 `kubernetes` 会作为未知插件启动失败；前端 `/integrations/kubernetes` 创建/管理入口已拆除（旧路由 404）。`kubernetes` 连接类型与连接/凭据 probe API 保留且不阻止新建（仅不再对前端通告），历史连接与业务系统映射记录保留；`kubernetes_read` 实现表与探测/grant 路径保留用于历史冻结目录、Evidence 与执行入口校验。文中 Kubernetes 插件条款仅作历史解读。
 
 本规范描述 ADR-0004 的实际类型、接口与接线。以代码为准：`internal/plugins`（契约）、`internal/quoin/attempt`（冻结目录与内建描述符）、`internal/quoin/app/plugins.go`（接线与管理目录）。
 
@@ -75,16 +77,17 @@ type Collector interface {
 
 `plugins.ExecutionBundle.ToolExecutor` 是工具执行的唯一声明来源；宿主的执行路由注册表只是它的**适配层**：
 
-- Plinth supervisor：`worker.RegisterPluginExecutor(descriptor, bundle)` 把插件绑定接入 typed 执行注册表。注册即验证：bundle 归属描述符、携带 `execute_tool` 且 `ToolExecutor` 非 nil、位置为本进程（`plinth_supervisor`）、每个声明工具与编译实现表逐字段一致（版本/失败模式/执行位置/参数 schema 规范化字节相等）。`plugins.Tool.Parameters`（封闭 object schema）由 `attempt.DescriptorTool` 从实现派生，注册时核对。
-- 运行时消费者：supervisor 的 Runner 帧桥（`internal/plinth/worker/runner.go` 的 `executeTool`→`executeTypedTool`）查 `typedExecutorRegistry` 执行；worker 子进程渲染 provider schema（来自冻结目录文档），从不持凭据。`plugins.Call` 的解析经 `worker.SetPluginCallHost` 在接线期提供，秘密只在 supervisor 进程解析。
-- 注册表启动冻结（`Run` 即 `freezeTypedExecutors`）：冻结后注册/重名为确定性 wiring 失败；未注册工具显式 `unknown_tool` 失败。`attempt.RegisterImplementation` 与 `RegisterTypedExecutor`/`RegisterPluginExecutor` 的重名拒绝互为镜像——声明表、实现表、执行路由表三者由这些校验机械对齐。
-- 启用解析：`ResolveEnabled(nil)` 返回全部 `DefaultEnabled` 插件（默认 prometheus/thanos/alertmanager/kubernetes；browser 默认停用）；非 nil 白名单中未知 ID 即启动失败；**省略与空数组是不同的部署事实**（空数组=全部停用）。
+- 插件自持声明与实现：每个插件包同时拥有 Descriptor 与编译 ToolDef，工具声明由 `ToolDef.DescriptorTool()` 从实现派生，声明与实现在构造上不可漂移；`internal/plugins/builtin` 是内建插件的唯一声明源。
+- Plinth 进程装配（`supervisor.HostRegistry`）：从共享 builtin 源注册全部内建描述符，并按描述符声明的能力绑定本进程真实执行 bundle——观测 Discoverer、巡检 Collector 与指标插件的 `ToolExecutor`（`internal/plinth/worker` 的执行适配器）。一个进程每插件恰有一个 bundle。
+- 分发表装配（`worker.AssembleTypedExecutors(registry, table)`）：平台工具（artifact_read/artifact_grep）由宿主注册；每个 supervisor 位置的插件工具解析其 owner 描述符与绑定 bundle，经 `worker.RegisterPluginExecutor(descriptor, bundle, table)` 注册。注册即验证：bundle 归属描述符、携带 `execute_tool` 且 `ToolExecutor` 非 nil、位置为本进程、每个声明工具与装配实现表逐字段一致（版本/失败模式/执行位置/参数 schema 规范化字节相等）。退役实现（kubernetes_read）以宿主退役适配器进入同一装配表，仅服务退役前冻结的历史在途尝试。装配完成即冻结：二次装配与冻结后注册是确定性 wiring 失败；未注册工具显式 `unknown_tool` 失败。
+- 运行时消费者：supervisor 的 Runner 帧桥（`internal/plinth/worker` 的 `executeTool`→`executeTypedTool`）查装配表执行；`plugins.Call` 由 Runner 自身解析（冻结 grant → 连接配置与 SecretResolver），秘密只在 supervisor 进程解析，冻结失败码（如 `grant_missing`）经类型化错误保持线上语义。serve 接线（`internal/plinth/ops`）先装配 registry 与分发表再接受派发。
+- 启用解析：`ResolveEnabled(nil)` 返回全部 `DefaultEnabled` 且未退役的插件（默认 prometheus/thanos/alertmanager）；非 nil 白名单中未知 ID 与退役 ID 一律启动失败；**省略与空数组是不同的部署事实**（空数组=全部停用）。`browser` 与 `kubernetes` 描述符以 `Retired` 标志留在同一注册机制中：仍是其编译实现的声明权威，管理目录不再通告、永不可启用；`kubernetes_read` 编译实现保留用于历史冻结目录解析与退役绑定。
 - 同契约共享工具：同一工具契约（name/version/location/failureMode/description/parameters 逐字段相同）可被多个提供者插件声明（如 PromQL 查询之于 prometheus/thanos——授权按实际来源连接解析）。注册表保存一份规范声明，分叉声明被拒；冻结目录按工具名去重，`plugins` 溯源列全部启用的贡献提供者。因此 only-prometheus 与 only-thanos 部署都有真实查询工具。
 
 ## 2. 冻结工具目录 internal/quoin/attempt
 
-- 单一权威：内建描述符 `attempt.BuiltinDescriptors()` 的工具声明**派生自**编译实现表（`ImplementationTools()`），版本/位置/说明不可能漂移；描述符只在本层补插件身份元数据。工具名全局唯一由注册表保证：每个工具名保存**一份规范声明**（首个注册者即 `ToolOwner`）；其他提供者插件只能以**逐字段相同的契约**再声明（分叉即 `ErrDuplicateToolName`），不会产生第二个目录条目。
-- 组装：`attempt.BuildCatalogs(registry, enabled)` 按代际策略（`generationAccepts`：initial-analysis 接受 `worker_local|plinth_supervisor`；investigation 另接受 `lintel`）生成每 agent 代的 `FrozenCatalog`。平台工具（bash/read/write/grep/artifact_read/artifact_grep）恒在；插件工具仅当其插件启用且位置被该代接受。新增插件不改核心 map/switch。
+- 单一权威：内建插件在其包内自持描述符与编译实现，描述声明派生自实现，版本/位置/说明不可能漂移。工具名全局唯一由注册表保证：每个工具名保存**一份规范声明**（首个注册者即 `ToolOwner`）；其他提供者插件只能以**逐字段相同的契约**再声明（分叉即 `ErrDuplicateToolName`），不会产生第二个目录条目。
+- 组装：`attempt.BuildCatalogs(registry, implementations, enabled)` 从一个 registry 与实现表按代际策略（`generationAccepts`：initial-analysis 接受 `worker_local|plinth_supervisor`；investigation 另接受 `lintel`）生成每 agent 代的 `FrozenCatalog` **和**共享实现索引，并双向校验（每个声明必有逐字段一致的实现；每个非平台实现必有注册声明，退役插件的声明与实现同样参与校验）。平台工具（bash/read/write/grep/artifact_read/artifact_grep）恒在；插件工具仅当其插件启用且位置被该代接受，退役插件永不进入新目录。新增插件不改核心 map/switch。
 - 冻结文档 `FrozenCatalog`：`schemaVersion`、`agentVersion`、`plugins`（id+version 溯源）、`tools`（完整 name/version/executionMode/failureMode/resultSchemaKind/resultSchemaDigest/description/parameters）。参数与结果契约完整入文，不仅是名字。
 - 存储：创建时写入 `attempt_input_snapshots.tool_catalog_json`（可空；NULL=非 agent 尝试或历史尝试），并将**同一文档**内嵌进规范输入 JSON 的 `toolCatalog` 字段——快照 `content_digest` 真正覆盖目录，读写同语义。恢复重建从存储列读取，不从当前启用重推导，历史 active 尝试零漂移。
 - 执行：`BeginModelCall` 校验 worker 摘要 = 冻结目录 `Digest()`；`CompleteModelCall`/`BeginToolCall`/`ExpectedToolResultSchema` 按 attempt 冻结目录解析工具，并经 `InstalledDefinition()` 验证与已安装执行器逐字段兼容（参数按规范化 JSON 字节比较、结果 Schema 按 digest 比较），不兼容即显式拒绝——历史 Model Call 的实际字节保持可解释。
@@ -93,11 +96,11 @@ type Collector interface {
 
 | 表 | 内容 | 运行时消费者 |
 | --- | --- | --- |
-| 描述表（plugins.Registry） | Descriptor/Tool 声明（含 Parameters schema） | Quoin 启动 `BuildCatalogs` 冻结目录与 `verifyPluginAgreement`；`GET /api/v1/integrations/plugins`；supervisor `RegisterPluginExecutor` 注册验证 |
-| 实现表（attempt ImplementationTools） | ToolDef（参数 schema/校验器/结果契约） | 目录冻结（BuildCatalogs）；Quoin 授权 `InstalledDefinition`（每次 CompleteModelCall/BeginToolCall/ExpectedToolResultSchema）；`VerifyDescriptorTools` |
-| 执行路由表（typedExecutorRegistry，supervisor 进程） | tool name → TypedExecutor（内建或插件 bundle 适配） | supervisor Runner 帧桥 `executeTool`（runner.go:376）在收到 worker 子进程 TypedTool 帧时执行出站；`Run` 启动冻结 |
+| 描述表（plugins.Registry） | Descriptor/Tool 声明（含 Parameters schema；含 Retired 退役声明权威） | `attempt.BuildCatalogs` 装配校验与目录冻结；`GET /api/v1/integrations/plugins`（退役描述符过滤）；执行宿主分发表装配的 owner 解析 |
+| 实现表（装配派生的 ImplementationTable） | ToolDef（参数 schema/校验器/结果契约） | 目录装配；Quoin 授权 `Catalogs.InstalledDefinition`（每次 CompleteModelCall/BeginToolCall/ExpectedToolResultSchema）；结果载荷校验分发 |
+| 执行路由表（typedExecutorRegistry，supervisor 进程） | tool name → TypedExecutor（平台执行器 + 插件 bundle 适配 + 退役适配） | supervisor Runner 帧桥 `executeTool` 在收到 worker 子进程 TypedTool 帧时执行出站；`AssembleTypedExecutors` 装配即冻结 |
 - Worker/Supervisor：无新协议。worker 与 supervisor 从既有 `StartAttempt.CanonicalJson` 提取冻结目录（`attempt.CatalogFromInputDocument`）渲染/摘要；legacy 输入回退到历史代际渲染。
-- 旧尝试兼容：NULL 目录列的 agent 尝试按其 `agent_version` 从**当前二进制**的编译表推导目录（`legacyGenerationCatalog`）。同一二进制代际内与创建时字节一致；跨二进制升级若编译表变化，此类尝试的推导摘要会随之变化，须按升级流程重派发或迁移，不承诺跨代零漂移。
+- 旧尝试兼容：NULL 目录列的 agent 尝试回退到**字面冻结的历史目录文档**（`legacy_catalog.go`，钉住测试守卫）。它不随当前启用集合或编译实现变化：已安装实现按工具名+版本+契约与其匹配，漂移工具显式拒绝，不自动升级或扩权，也不用当前启用目录补齐。
 
 ## 3. 管理目录 HTTP
 
