@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/audit"
@@ -140,6 +141,8 @@ func authorizeViewManager(ctx context.Context, tx *execution.Tx) error {
 
 // View 是视图的可读投影；scope.connectionName 为空表示跨来源候选集合。
 // 计划消费视图时仍必须固定自己的接入（固定相交，绝不全源查询）。
+// scope.alertSourceKeys 为空表示该视图不参与告警归属；非空时逐 key 精确
+// 匹配交付的 Alertmanager 告警源（source_key），与 connection 身份严格区分。
 type View struct {
 	ViewKey      string    `json:"viewKey"`
 	DisplayName  string    `json:"displayName"`
@@ -150,13 +153,16 @@ type View struct {
 	UpdatedAt    string    `json:"updatedAt"`
 	viewID       int64
 	conditionsDB string
+	// scopeSourceKeys 是 alert_source_keys_json 的原样存储，viewOn 解析进投影。
+	scopeSourceKeys string
 }
 
 // ViewScope 的 wire 形状：connectionName 可空；labelConditions 是精确
-// label=value 条件集合。
+// label=value 条件集合；alertSourceKeys 是可选的显式 AM 告警源约束。
 type ViewScope struct {
 	ConnectionName  string            `json:"connectionName,omitempty"`
 	LabelConditions map[string]string `json:"labelConditions,omitempty"`
+	AlertSourceKeys []string          `json:"alertSourceKeys,omitempty"`
 }
 
 // ViewInput 是创建/更新命令载荷（wire 命名）。
@@ -166,12 +172,13 @@ type ViewInput struct {
 	Description     string
 	ConnectionName  string
 	LabelConditions map[string]string
+	AlertSourceKeys []string
 }
 
 // CreateView 在执行器的一个事务中校验并创建视图；台账与成功/拒绝审计由
 // 执行器自动持久化。
 func (s *Service) CreateView(ctx context.Context, principalID int64, clientCommandID string, input ViewInput) (View, error) {
-	digest := auth.DigestCommand(CommandCreate, map[string]any{"viewKey": input.ViewKey, "displayName": input.DisplayName, "connectionName": input.ConnectionName})
+	digest := auth.DigestCommand(CommandCreate, map[string]any{"viewKey": input.ViewKey, "displayName": input.DisplayName, "connectionName": input.ConnectionName, "alertSourceKeys": input.AlertSourceKeys})
 	outcome, err := execution.Run(ctx, s.runner, s.create, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -191,9 +198,9 @@ func (s *Service) CreateView(ctx context.Context, principalID int64, clientComma
 		}
 		now := s.nowText()
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,row_version,created_by,created_at,updated_at)
-			VALUES(?,?,?,?,?,1,?,?,?)`,
-			input.ViewKey, input.DisplayName, input.Description, nullableInt64(normalized.connectionID), normalized.conditions, principalID, now, now); err != nil {
+			INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_by,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,1,?,?,?)`,
+			input.ViewKey, input.DisplayName, input.Description, nullableInt64(normalized.connectionID), normalized.conditions, normalized.alertSourceKeys, principalID, now, now); err != nil {
 			return View{}, execution.Changed, err
 		}
 		view, err := viewOn(ctx, tx, input.ViewKey)
@@ -211,7 +218,7 @@ func (s *Service) CreateView(ctx context.Context, principalID int64, clientComma
 // UpdateView 以整体提交方式更新视图；expectedRowVersion 是并发前提。更新不
 // 改写任何已冻结该视图内容的计划或 Run。
 func (s *Service) UpdateView(ctx context.Context, principalID int64, clientCommandID string, input ViewInput, expectedRowVersion int64) (View, error) {
-	digest := auth.DigestCommand(CommandUpdate, map[string]any{"viewKey": input.ViewKey, "expectedRowVersion": expectedRowVersion, "displayName": input.DisplayName})
+	digest := auth.DigestCommand(CommandUpdate, map[string]any{"viewKey": input.ViewKey, "expectedRowVersion": expectedRowVersion, "displayName": input.DisplayName, "alertSourceKeys": input.AlertSourceKeys})
 	outcome, err := execution.Run(ctx, s.runner, s.update, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -223,10 +230,10 @@ func (s *Service) UpdateView(ctx context.Context, principalID int64, clientComma
 			return View{}, execution.Changed, err
 		}
 		result, err := tx.ExecContext(ctx, `
-			UPDATE business_views SET display_name=?,description=?,connection_id=?,label_conditions_json=?,
+			UPDATE business_views SET display_name=?,description=?,connection_id=?,label_conditions_json=?,alert_source_keys_json=?,
 			  row_version=row_version+1,updated_at=?
 			WHERE view_key=? AND row_version=?`,
-			input.DisplayName, input.Description, nullableInt64(normalized.connectionID), normalized.conditions, s.nowText(),
+			input.DisplayName, input.Description, nullableInt64(normalized.connectionID), normalized.conditions, normalized.alertSourceKeys, s.nowText(),
 			input.ViewKey, expectedRowVersion)
 		if err != nil {
 			return View{}, execution.Changed, err
@@ -288,11 +295,11 @@ func viewOn(ctx context.Context, q audit.Reader, viewKey string) (View, error) {
 	var connectionName sql.NullString
 	err := q.QueryRowContext(ctx, `
 		SELECT v.id,v.view_key,v.display_name,v.description,v.connection_id,c.name,
-		       v.label_conditions_json,v.row_version,v.created_at,v.updated_at
+		       v.label_conditions_json,v.alert_source_keys_json,v.row_version,v.created_at,v.updated_at
 		FROM business_views v LEFT JOIN connections c ON c.id=v.connection_id
 		WHERE v.view_key=?`, viewKey).
 		Scan(&view.viewID, &view.ViewKey, &view.DisplayName, &view.Description, &connectionID, &connectionName,
-			&view.conditionsDB, &view.RowVersion, &view.CreatedAt, &view.UpdatedAt)
+			&view.conditionsDB, &view.scopeSourceKeys, &view.RowVersion, &view.CreatedAt, &view.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return View{}, &ConflictError{Code: "not_found", Detail: "业务视图不存在"}
 	}
@@ -306,12 +313,19 @@ func viewOn(ctx context.Context, q audit.Reader, viewKey string) (View, error) {
 	if view.Scope.LabelConditions == nil {
 		view.Scope.LabelConditions = map[string]string{}
 	}
+	if err := json.Unmarshal([]byte(view.scopeSourceKeys), &view.Scope.AlertSourceKeys); err != nil {
+		return View{}, err
+	}
+	if view.Scope.AlertSourceKeys == nil {
+		view.Scope.AlertSourceKeys = []string{}
+	}
 	return view, nil
 }
 
 type normalizedInput struct {
-	connectionID int64
-	conditions   string
+	connectionID    int64
+	conditions      string
+	alertSourceKeys string
 }
 
 // validateViewInput 静态校验视图定义并在同一事务内解析接入引用。确定性校验
@@ -337,6 +351,40 @@ func validateViewInput(ctx context.Context, q audit.Reader, input ViewInput) (no
 		return normalized, err
 	}
 	normalized.conditions = string(conditions)
+	// 告警来源约束：显式声明参与归属的 AM 告警源。空集合是合法普通视图
+	// （不参与告警归属）；非空集合要求至少一个精确标签条件（拒绝空标签兜底），
+	// 逐 key 去重、稳定序并对照 alert_sources 精确校验——connection 身份绝不
+	// 顶替告警源身份。
+	normalized.alertSourceKeys = "[]"
+	if len(input.AlertSourceKeys) > 0 {
+		seen := map[string]bool{}
+		keys := make([]string, 0, len(input.AlertSourceKeys))
+		for _, key := range input.AlertSourceKeys {
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 && len(input.LabelConditions) == 0 {
+			return normalized, &execution.Rejection{Code: "malformed_scope", Detail: "参与告警归属的视图必须至少一个精确标签条件，空条件绝不构成兜底匹配"}
+		}
+		for _, key := range keys {
+			var exists int
+			if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_sources WHERE source_key=?`, key).Scan(&exists); err != nil {
+				return normalized, err
+			}
+			if exists == 0 {
+				return normalized, &execution.Rejection{Code: "unknown_alert_source", Detail: "告警源 " + key + " 不存在"}
+			}
+		}
+		keysJSON, err := json.Marshal(keys)
+		if err != nil {
+			return normalized, err
+		}
+		normalized.alertSourceKeys = string(keysJSON)
+	}
 	if input.ConnectionName != "" {
 		if err := q.QueryRowContext(ctx, `SELECT id FROM connections WHERE name=?`, input.ConnectionName).Scan(&normalized.connectionID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

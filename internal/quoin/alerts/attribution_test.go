@@ -1,124 +1,19 @@
 package alerts
 
-// Attribution tests cover the declaration-owned first-observation decision.
-// Only an enabled business system with a pointer-selected published declaration
-// is eligible; later changes cannot rewrite the historical decision.
+// Attribution tests cover the business-view-owned first-observation decision.
+// A view participates in alert attribution only through an explicit
+// alertSourceKeys scope naming the delivering Alertmanager source, and only
+// when every exact label condition is present. Later view edits must never
+// rewrite a frozen decision, and the legacy business_system field stays
+// history-only: new occurrences never grow one.
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
-	"strconv"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
-
-	"github.com/Suknna/quoin/internal/quoin/execution"
 )
-
-// seedBusinessSystem satisfies the schema's fresh-declaration invariant. The
-// pointer update in publishAttributionConfig enables it with its publication.
-func seedBusinessSystem(t *testing.T, service *Service, key string) {
-	t.Helper()
-	if _, err := service.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES(?,?,0,1,?)`, key, key, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// installAttributionProjections supplies the immutable projections owned by
-// the business-configuration migration. The alert package deliberately does
-// not own these tables; this fixture keeps the ingestion contract testable
-// until that coordinated schema lands in the generated authority.
-func installAttributionProjections(t *testing.T, service *Service) {
-	t.Helper()
-	for _, statement := range []string{
-		// These are the production definitions promised by the business owner;
-		// keeping the FKs here makes fixture insertion follow the same ownership
-		// and immutability relationships as the generated authority.
-		`CREATE TABLE IF NOT EXISTS config_alert_source_refs (id INTEGER PRIMARY KEY, config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT, alert_source_id INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT, UNIQUE(config_version_id, alert_source_id)) STRICT`,
-		`CREATE TABLE IF NOT EXISTS config_alert_label_conditions (id INTEGER PRIMARY KEY, config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT, label_name TEXT NOT NULL, label_value TEXT NOT NULL, UNIQUE(config_version_id, label_name)) STRICT`,
-	} {
-		if _, err := service.db.Exec(statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// seedAttributionMetricsConnection creates the required explicit metrics
-// reference for an otherwise alert-only configuration fixture. Attribution
-// never reads it, but a config version must remain structurally valid.
-func seedAttributionMetricsConnection(t *testing.T, service *Service) int64 {
-	t.Helper()
-	var existing int64
-	if err := service.db.QueryRow(`SELECT id FROM connections WHERE name='attribution-metrics'`).Scan(&existing); err == nil {
-		return existing
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := service.db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES('attribution-metrics','thanos',0,?)`, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-// publishAttributionConfig creates the smallest valid immutable configuration
-// version and advances the real current-version pointer. Attribution must read
-// this pointer, not a draft or an old published row.
-func publishAttributionConfig(t *testing.T, service *Service, key string, enabled bool, sourceIDs []int64, conditions map[string]string) {
-	t.Helper()
-	// Empty source references are a real declaration state: they must never
-	// silently become source 1, because attribution requires an explicit source.
-	if len(conditions) == 0 {
-		conditions = map[string]string{"business_system": key}
-	}
-	enabledValue := 0
-	if enabled {
-		enabledValue = 1
-	}
-	var systemID int64
-	if err := service.db.QueryRow(`SELECT id FROM business_systems WHERE key=?`, key).Scan(&systemID); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	metricsConnectionID := seedAttributionMetricsConnection(t, service)
-	var versionSeq int64
-	if err := service.db.QueryRow(`SELECT COALESCE(MAX(version_seq), 0) + 1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
-		t.Fatal(err)
-	}
-	insert, err := service.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,declaration_json,parser_version,schema_version,label_contract_version_id,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,'draft','fixture','{}','fixture','v1',NULL,?,'fixture',?,? ,?,?,?,?,?)`, systemID, versionSeq, strings.Repeat("b", 64), strings.Repeat("c", 64), now, key, key, metricsConnectionID, enabledValue, "UTC")
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionID, err := insert.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, sourceID := range sourceIDs {
-		if _, err := service.db.Exec(`INSERT INTO config_alert_source_refs(config_version_id,alert_source_id) VALUES(?,?)`, versionID, sourceID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for name, value := range conditions {
-		if _, err := service.db.Exec(`INSERT INTO config_alert_label_conditions(config_version_id,label_name,label_value) VALUES(?,?,?)`, versionID, name, value); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := service.db.Exec(`UPDATE business_systems SET display_name=?, enabled=?, timezone='UTC', current_config_version_id=?, row_version=row_version+1 WHERE id=?`, key, enabledValue, versionID, systemID); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func deliverWebhook(t *testing.T, service *Service, relayID string, labels map[string]string, startsAt string) DeliveryResult {
-	t.Helper()
-	return deliverWebhookFrom(t, service, relayID, 1, 1, labels, startsAt)
-}
 
 func deliverWebhookFrom(t *testing.T, service *Service, relayID string, sourceID, credentialID int64, labels map[string]string, startsAt string) DeliveryResult {
 	t.Helper()
@@ -153,333 +48,6 @@ func occurrenceBusinessID(t *testing.T, service *Service, occurrenceID int64) *i
 	return value
 }
 
-func TestAttributionRoutesUnderActiveContract(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	sourceID, _ := seedSource(t, service, ctx, "src")
-	seedBusinessSystem(t, service, "payments")
-
-	// Attribution is entirely declaration-owned; no global contract is needed.
-	unattributed := deliverWebhook(t, service, "t17-pre-contract", map[string]string{
-		"alertname": "PreContract", "business_system": "payments",
-	}, "2026-09-01T10:00:00Z")
-	if id := occurrenceBusinessID(t, service, unattributed.Occurrences[0].ID); id != nil {
-		t.Fatalf("pre-contract occurrence must stay unattributed, got %d", *id)
-	}
-
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{sourceID}, map[string]string{"service": "payments"})
-
-	// Exact source+labels matches attribute; unrelated labels remain unattributed.
-	known := deliverWebhook(t, service, "t17-known", map[string]string{
-		"alertname": "Known", "service": "payments",
-	}, "2026-09-01T10:01:00Z")
-	if id := occurrenceBusinessID(t, service, known.Occurrences[0].ID); id == nil || *id != 1 {
-		t.Fatalf("known value must attribute to business system 1, got %v", id)
-	}
-	unknownValue := deliverWebhook(t, service, "t17-unknown", map[string]string{
-		"alertname": "Unknown", "service": "not-a-system",
-	}, "2026-09-01T10:02:00Z")
-	if id := occurrenceBusinessID(t, service, unknownValue.Occurrences[0].ID); id != nil {
-		t.Fatalf("unknown value must stay unattributed, got %d", *id)
-	}
-	missingLabel := deliverWebhook(t, service, "t17-missing", map[string]string{
-		"alertname": "Missing",
-	}, "2026-09-01T10:03:00Z")
-	if id := occurrenceBusinessID(t, service, missingLabel.Occurrences[0].ID); id != nil {
-		t.Fatalf("missing label must stay unattributed, got %d", *id)
-	}
-}
-
-func TestAttributionEmptySourceReferencesNeverMatch(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	seedSource(t, service, ctx, "declared-empty-source")
-	seedBusinessSystem(t, service, "payments")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{}, map[string]string{"service": "payments"})
-
-	result := deliverWebhook(t, service, "empty-source-refs", map[string]string{
-		"alertname": "NoSource", "service": "payments",
-	}, "2026-09-01T12:30:00Z")
-	if id := occurrenceBusinessID(t, service, result.Occurrences[0].ID); id != nil {
-		t.Fatalf("empty source references must not attribute, got %d", *id)
-	}
-	detail, err := service.GetOccurrence(ctx, result.Occurrences[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detail.Attribution == nil || detail.Attribution.Status != "unattributed" || detail.Attribution.Reason != `{"code":"source_mismatch"}` {
-		t.Fatalf("empty source diagnostics=%+v, want source mismatch", detail.Attribution)
-	}
-}
-
-func TestAttributionDisabledBusinessCannotMatch(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	sourceID, _ := seedSource(t, service, ctx, "disabled-business-source")
-	seedBusinessSystem(t, service, "payments")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", false, []int64{sourceID}, map[string]string{"service": "payments"})
-
-	result := deliverWebhook(t, service, "disabled-business", map[string]string{
-		"alertname": "DisabledBusiness", "service": "payments",
-	}, "2026-09-01T12:45:00Z")
-	if id := occurrenceBusinessID(t, service, result.Occurrences[0].ID); id != nil {
-		t.Fatalf("disabled business must not attribute, got %d", *id)
-	}
-}
-
-func TestPersistAttributionFailsWhenDiagnosticTableIsMissing(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := adminCommandContext(t, context.Background())
-	if _, err := service.db.Exec(`DROP TABLE alert_occurrence_attributions`); err != nil {
-		t.Fatal(err)
-	}
-	// persistAttribution runs inside the runner-owned transaction exactly as
-	// the delivery operation composes it; the dedicated test declaration
-	// keeps the runner's registry closed while exercising the helper's own
-	// failure behavior. The surfaced error must roll the transaction back
-	// with no business leftovers.
-	op, err := service.runner.Register(execution.Operation{
-		Name:       "test.persist_attribution",
-		Class:      execution.ClassWrite,
-		ObjectType: objectDelivery,
-		Authorize:  func(context.Context, *execution.Tx) error { return nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = execution.Execute(ctx, service.runner, op, func(tx *execution.Tx) (int64, error) {
-		const occurrenceID = int64(1)
-		return occurrenceID, persistAttribution(ctx, tx, occurrenceID, 1, 1, attributionDecision{
-			Status:                 "unattributed",
-			CandidateSystemIDsJSON: "[]",
-			CandidateConfigIDsJSON: "[]",
-			ReasonJSON:             `{"code":"source_mismatch"}`,
-		}, time.Now().UTC().Format(time.RFC3339Nano))
-	}, func(occurrenceID int64) int64 { return occurrenceID })
-	if err == nil {
-		t.Fatal("missing attribution diagnostic table must reject persistence")
-	}
-}
-
-func TestAttributionRestrictsTheDeclaredBusiness(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	matchingSourceID, matchingCredentialID := seedSource(t, service, ctx, "matching-source")
-	otherSourceID, otherCredentialID := seedSource(t, service, ctx, "other-source")
-	seedBusinessSystem(t, service, "payments")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{matchingSourceID}, map[string]string{"environment": "production", "team": "payments"})
-
-	deliverFrom := func(relayID string, sourceID, credentialID int64, labels map[string]string, startsAt string) *int64 {
-		t.Helper()
-		result, err := service.Deliver(ctx, relayID, sourceID, credentialID, 1, mustBody(t, labels, startsAt), time.Now().UTC())
-		if err != nil || !result.Accepted || len(result.Occurrences) != 1 {
-			t.Fatalf("delivery %s: result=%+v err=%v", relayID, result, err)
-		}
-		return occurrenceBusinessID(t, service, result.Occurrences[0].ID)
-	}
-
-	// A configured source does not assign alerts without every declared exact
-	// label condition; the declaration itself owns the complete rule.
-	if id := deliverFrom("source-alone", matchingSourceID, matchingCredentialID, map[string]string{"alertname": "SourceOnly", "environment": "production", "team": "other"}, "2026-09-01T13:00:00Z"); id != nil {
-		t.Fatalf("source alone must not attribute, got %d", *id)
-	}
-	if id := deliverFrom("wrong-source", otherSourceID, otherCredentialID, map[string]string{"alertname": "WrongSource", "business_system": "payments", "environment": "production", "team": "payments"}, "2026-09-01T13:01:00Z"); id != nil {
-		t.Fatalf("unlisted source must stay unattributed, got %d", *id)
-	}
-	if id := deliverFrom("wrong-label", matchingSourceID, matchingCredentialID, map[string]string{"alertname": "WrongLabel", "business_system": "payments", "environment": "staging", "team": "payments"}, "2026-09-01T13:02:00Z"); id != nil {
-		t.Fatalf("mismatched condition must stay unattributed, got %d", *id)
-	}
-	if id := deliverFrom("matched", matchingSourceID, matchingCredentialID, map[string]string{"alertname": "Matched", "business_system": "payments", "environment": "production", "team": "payments"}, "2026-09-01T13:03:00Z"); id == nil {
-		t.Fatal("contract, source, and labels match must attribute")
-	}
-}
-
-func TestAttributionUsesOnlyCurrentPublishedRestrictions(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	firstSourceID, firstCredentialID := seedSource(t, service, ctx, "first-source")
-	secondSourceID, secondCredentialID := seedSource(t, service, ctx, "second-source")
-	seedBusinessSystem(t, service, "payments")
-	installAttributionProjections(t, service)
-
-	// The initial explicit declaration attributes through its listed source. Its
-	// attribution is a fact even after the new declaration becomes current.
-	publishAttributionConfig(t, service, "payments", true, []int64{firstSourceID}, nil)
-	first := deliverWebhookFrom(t, service, "before-restriction", firstSourceID, firstCredentialID, map[string]string{"alertname": "Before", "business_system": "payments"}, "2026-09-01T14:00:00Z")
-	if id := occurrenceBusinessID(t, service, first.Occurrences[0].ID); id == nil {
-		t.Fatal("unrestricted current declaration must attribute")
-	}
-
-	// Only the pointer-selected published version may govern later first
-	// observations. The new declaration has an explicit source reference and
-	// its exact label condition narrows first observations.
-	publishAttributionConfig(t, service, "payments", true, []int64{secondSourceID}, map[string]string{"environment": "production"})
-	if id := occurrenceBusinessID(t, service, first.Occurrences[0].ID); id == nil {
-		t.Fatal("later declaration must not rewrite historical attribution")
-	}
-	if result := deliverWebhookFrom(t, service, "explicit-source-label-mismatch", secondSourceID, secondCredentialID, map[string]string{"alertname": "Mismatch", "business_system": "payments", "environment": "staging"}, "2026-09-01T14:01:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) != nil {
-		t.Fatal("explicit source must not bypass configured exact labels")
-	}
-	if result := deliverWebhookFrom(t, service, "explicit-source-label-match", secondSourceID, secondCredentialID, map[string]string{"alertname": "Match", "business_system": "payments", "environment": "production"}, "2026-09-01T14:02:00Z"); occurrenceBusinessID(t, service, result.Occurrences[0].ID) == nil {
-		t.Fatal("explicit source and exact labels must attribute")
-	}
-}
-
-func TestAttributionConflictFreezesCandidatesAndDiagnostics(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	sourceID, _ := seedSource(t, service, ctx, "shared-source")
-	seedBusinessSystem(t, service, "payments")
-	seedBusinessSystem(t, service, "billing")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{sourceID}, map[string]string{"environment": "production"})
-	publishAttributionConfig(t, service, "billing", true, []int64{sourceID}, map[string]string{"environment": "production"})
-
-	conflict := deliverWebhook(t, service, "overlap", map[string]string{
-		"alertname": "Shared", "environment": "production",
-	}, "2026-09-01T15:00:00Z")
-	if id := occurrenceBusinessID(t, service, conflict.Occurrences[0].ID); id != nil {
-		t.Fatalf("overlapping declarations must not assign a business, got %d", *id)
-	}
-	detail, err := service.GetOccurrence(ctx, conflict.Occurrences[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detail.Attribution == nil || detail.Attribution.Status != "conflict" || detail.Attribution.CandidateSystemIDs != "[1,2]" {
-		t.Fatalf("conflict diagnostics not frozen: %+v", detail.Attribution)
-	}
-	var beforeSystems, beforeVersions, beforeReason string
-	if err := service.db.QueryRow(`SELECT candidate_system_ids_json,candidate_config_version_ids_json,reason_json FROM alert_occurrence_attributions WHERE occurrence_id=?`, conflict.Occurrences[0].ID).Scan(&beforeSystems, &beforeVersions, &beforeReason); err != nil {
-		t.Fatal(err)
-	}
-	publishAttributionConfig(t, service, "billing", true, []int64{sourceID}, map[string]string{"environment": "billing-only"})
-	var afterSystems, afterVersions, afterReason string
-	if err := service.db.QueryRow(`SELECT candidate_system_ids_json,candidate_config_version_ids_json,reason_json FROM alert_occurrence_attributions WHERE occurrence_id=?`, conflict.Occurrences[0].ID).Scan(&afterSystems, &afterVersions, &afterReason); err != nil {
-		t.Fatal(err)
-	}
-	if beforeSystems != afterSystems || beforeVersions != afterVersions || beforeReason != afterReason {
-		t.Fatalf("configuration change rewrote frozen conflict: before=(%s,%s,%s) after=(%s,%s,%s)", beforeSystems, beforeVersions, beforeReason, afterSystems, afterVersions, afterReason)
-	}
-}
-
-func TestAttributionIsWriteOnceAtCreation(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	seedSource(t, service, ctx, "src")
-
-	// Occurrence created with a value no system claims yet.
-	early := deliverWebhook(t, service, "t17-early", map[string]string{
-		"alertname": "Early", "business_system": "payments",
-	}, "2026-09-01T11:00:00Z")
-	if id := occurrenceBusinessID(t, service, early.Occurrences[0].ID); id != nil {
-		t.Fatalf("no business system exists yet; must be unattributed, got %d", *id)
-	}
-
-	seedBusinessSystem(t, service, "payments")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{1}, nil)
-
-	// A repeat firing for the SAME occurrence must not re-attribute: the
-	// frozen alert_change_log CHECK admits only created|state_changed, so a
-	// mid-life attribution flip is structurally unsupported (write-once).
-	repeat, err := service.Deliver(context.Background(), "t17-early-repeat", 1, 1, 1, mustBody(t, map[string]string{
-		"alertname": "Early", "business_system": "payments",
-	}, "2026-09-01T11:00:00Z"), time.Now().UTC())
-	if err != nil || !repeat.Accepted {
-		t.Fatalf("repeat delivery: %+v %v", repeat, err)
-	}
-	if id := occurrenceBusinessID(t, service, early.Occurrences[0].ID); id != nil {
-		t.Fatalf("repeat delivery must not rewrite historical attribution, got %d", *id)
-	}
-
-	// A NEW occurrence with the same labels attributes under the contract.
-	later := deliverWebhook(t, service, "t17-later", map[string]string{
-		"alertname": "Early", "business_system": "payments",
-	}, "2026-09-01T11:30:00Z")
-	if id := occurrenceBusinessID(t, service, later.Occurrences[0].ID); id == nil {
-		t.Fatal("new occurrence after activation must attribute")
-	}
-}
-
-func TestSnapshotFilterAndDetailKey(t *testing.T) {
-	service, _, done := newTestService(t)
-	defer done()
-	ctx := context.Background()
-	seedSource(t, service, ctx, "src")
-	seedBusinessSystem(t, service, "payments")
-	seedBusinessSystem(t, service, "billing")
-	installAttributionProjections(t, service)
-	publishAttributionConfig(t, service, "payments", true, []int64{1}, nil)
-	publishAttributionConfig(t, service, "billing", true, []int64{1}, nil)
-
-	deliverWebhook(t, service, "t17-pay-1", map[string]string{"alertname": "Pay1", "business_system": "payments"}, "2026-09-01T12:00:00Z")
-	deliverWebhook(t, service, "t17-bill-1", map[string]string{"alertname": "Bill1", "business_system": "billing"}, "2026-09-01T12:01:00Z")
-	deliverWebhook(t, service, "t17-none-1", map[string]string{"alertname": "None1"}, "2026-09-01T12:02:00Z")
-
-	unfiltered, err := service.AlertSnapshot(ctx, "Firing", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(unfiltered.Items) != 3 {
-		t.Fatalf("unfiltered snapshot must list all three, got %d", len(unfiltered.Items))
-	}
-	var payID int64
-	for _, item := range unfiltered.Items {
-		switch item.Labels["alertname"] {
-		case "Pay1":
-			if item.BusinessSystem == nil || *item.BusinessSystem != "payments" {
-				t.Fatalf("Pay1 attribution wrong: %v", item.BusinessSystem)
-			}
-			payID, _ = strconv.ParseInt(item.ID, 10, 64)
-		case "Bill1":
-			if item.BusinessSystem == nil || *item.BusinessSystem != "billing" {
-				t.Fatalf("Bill1 attribution wrong: %v", item.BusinessSystem)
-			}
-		case "None1":
-			if item.BusinessSystem != nil {
-				t.Fatalf("None1 must be unattributed, got %v", *item.BusinessSystem)
-			}
-		}
-	}
-
-	filtered, err := service.AlertSnapshot(ctx, "Firing", "payments")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(filtered.Items) != 1 || filtered.Items[0].Labels["alertname"] != "Pay1" {
-		t.Fatalf("payments filter must return exactly Pay1, got %+v", filtered.Items)
-	}
-
-	// An unknown system key is a legitimate empty filter result.
-	empty, err := service.AlertSnapshot(ctx, "Firing", "ghost")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(empty.Items) != 0 {
-		t.Fatalf("unknown key must filter to empty, got %d", len(empty.Items))
-	}
-
-	detail, err := service.GetOccurrence(ctx, payID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detail.BusinessSystem == nil || *detail.BusinessSystem != "payments" {
-		t.Fatalf("detail must carry businessSystemKey=payments, got %v", detail.BusinessSystem)
-	}
-}
-
 func mustBody(t *testing.T, labels map[string]string, startsAt string) []byte {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
@@ -495,4 +63,371 @@ func mustBody(t *testing.T, labels map[string]string, startsAt string) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+// seedAttributionView inserts a business view directly: the alerts package
+// only reads business_views, ownership of the write path lives in the
+// businessview module (validated there, including alertSourceKeys rules).
+func seedAttributionView(t *testing.T, service *Service, viewKey, displayName string, sourceKeys []string, conditions map[string]string) int64 {
+	t.Helper()
+	if sourceKeys == nil {
+		sourceKeys = []string{}
+	}
+	if conditions == nil {
+		conditions = map[string]string{}
+	}
+	sourceKeysJSON, err := json.Marshal(sourceKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditionsJSON, err := json.Marshal(conditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := service.db.Exec(`INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_at,updated_at) VALUES(?,?,'',NULL,?,?,1,?,?)`,
+		viewKey, displayName, string(conditionsJSON), string(sourceKeysJSON), now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type viewAttributionRow struct {
+	Status           string
+	AttributedViewID *int64
+	CandidatesJSON   string
+	ReasonJSON       string
+}
+
+func occurrenceViewAttribution(t *testing.T, service *Service, occurrenceID int64) viewAttributionRow {
+	t.Helper()
+	var row viewAttributionRow
+	if err := service.db.QueryRow(`SELECT status,attributed_view_id,candidates_json,reason_json FROM alert_occurrence_view_attributions WHERE occurrence_id=?`, occurrenceID).
+		Scan(&row.Status, &row.AttributedViewID, &row.CandidatesJSON, &row.ReasonJSON); err != nil {
+		t.Fatal(err)
+	}
+	return row
+}
+
+func candidatesContain(t *testing.T, candidatesJSON string, wantKey string) bool {
+	t.Helper()
+	var candidates []struct {
+		ViewKey     string `json:"viewKey"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := json.Unmarshal([]byte(candidatesJSON), &candidates); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range candidates {
+		if candidate.ViewKey == wantKey {
+			if candidate.DisplayName == "" {
+				t.Fatalf("candidate %s must freeze a display name", wantKey)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func TestViewAttributionUniqueMatchFreezesSnapshot(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments", "env": "production"})
+
+	result := deliverWebhookFrom(t, service, "view-unique", sourceID, credentialID, map[string]string{
+		"alertname": "Latency", "service": "payments", "env": "production",
+	}, "2026-09-01T10:00:00Z")
+	occurrenceID := result.Occurrences[0].ID
+
+	// 旧 business_system 字段保持历史专用：新归属绝不写它。
+	if id := occurrenceBusinessID(t, service, occurrenceID); id != nil {
+		t.Fatalf("new model must never write business_system_id, got %d", *id)
+	}
+	row := occurrenceViewAttribution(t, service, occurrenceID)
+	if row.Status != "attributed" || row.AttributedViewID == nil || *row.AttributedViewID != 1 {
+		t.Fatalf("unique match must attribute to view 1, got %+v", row)
+	}
+	if !candidatesContain(t, row.CandidatesJSON, "payments-prod") {
+		t.Fatalf("attributed candidate snapshot must carry the view identity: %s", row.CandidatesJSON)
+	}
+	if row.ReasonJSON != `{"code":"exactly_one_matching_view"}` {
+		t.Fatalf("unexpected reason %s", row.ReasonJSON)
+	}
+	detail, err := service.GetOccurrence(ctx, occurrenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ViewAttribution == nil || detail.ViewAttribution.Status != "attributed" || detail.ViewAttribution.ViewKey != "payments-prod" || detail.ViewAttribution.ViewName != "支付生产" {
+		t.Fatalf("detail must surface the real view attribution: %+v", detail.ViewAttribution)
+	}
+
+	// 冻结名字：视图改名/退役后，列表与详情的 key/name 仍来自首收快照，
+	// 绝不漂移到当前业务视图行。
+	if _, err := service.db.Exec(`UPDATE business_views SET display_name='改名后' WHERE view_key='payments-prod'`); err != nil {
+		t.Fatal(err)
+	}
+	renamedDetail, err := service.GetOccurrence(ctx, occurrenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamedDetail.ViewAttribution == nil || renamedDetail.ViewAttribution.ViewKey != "payments-prod" || renamedDetail.ViewAttribution.ViewName != "支付生产" {
+		t.Fatalf("frozen identity must not follow the renamed view: %+v", renamedDetail.ViewAttribution)
+	}
+	snapshot, err := service.AlertSnapshot(ctx, "Firing", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range snapshot.Items {
+		if item.ID == fmt.Sprintf("%d", occurrenceID) && (item.ViewAttribution == nil || item.ViewAttribution.ViewName != "支付生产") {
+			t.Fatalf("list must surface the frozen snapshot name, got %+v", item.ViewAttribution)
+		}
+	}
+}
+
+// 归属证据冻结由 schema 触发器强制：任何 UPDATE/DELETE 都必须被 SQL 拒绝，
+// 且 INSERT 必须闭合到同一 Delivery 的真实条目。
+func TestViewAttributionRowsAreFrozenBySchema(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments"})
+	result := deliverWebhookFrom(t, service, "frozen-row", sourceID, credentialID, map[string]string{
+		"alertname": "Latency", "service": "payments",
+	}, "2026-09-01T10:06:00Z")
+	occurrenceID := result.Occurrences[0].ID
+
+	if _, err := service.db.Exec(`UPDATE alert_occurrence_view_attributions SET status='unattributed', attributed_view_id=NULL, candidates_json='[]' WHERE occurrence_id=?`, occurrenceID); err == nil {
+		t.Fatal("attribution UPDATE must be rejected by the frozen trigger")
+	}
+	if _, err := service.db.Exec(`DELETE FROM alert_occurrence_view_attributions WHERE occurrence_id=?`, occurrenceID); err == nil {
+		t.Fatal("attribution DELETE must be rejected by the frozen trigger")
+	}
+	if _, err := service.db.Exec(`INSERT INTO alert_occurrence_view_attributions(occurrence_id,status,attributed_view_id,candidates_json,reason_json,evaluated_from_delivery_id,evaluated_from_delivery_item_id,created_at) VALUES(?,'unattributed',NULL,'[]','{"code":"label_mismatch"}',1,999,'2026-09-01T10:06:00Z')`, occurrenceID); err == nil {
+		t.Fatal("attribution INSERT must close to its own delivery item")
+	}
+	// 视图稳定 key 不可改写、行不可删除（退役不复用）。
+	if _, err := service.db.Exec(`UPDATE business_views SET view_key='renamed' WHERE view_key='payments-prod'`); err == nil {
+		t.Fatal("business view key must be immutable")
+	}
+	if _, err := service.db.Exec(`DELETE FROM business_views WHERE view_key='payments-prod'`); err == nil {
+		t.Fatal("business views must never be deleted")
+	}
+	if row := occurrenceViewAttribution(t, service, occurrenceID); row.Status != "attributed" {
+		t.Fatalf("rejected writes must leave the frozen row intact: %+v", row)
+	}
+}
+
+func TestViewAttributionRequiresExplicitSourceAndLabels(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	seedSource(t, service, ctx, "am-edge")
+	// 普通巡检视图：无 alertSourceKeys，绝不参与告警归属。
+	seedAttributionView(t, service, "plain-view", "普通视图", nil, map[string]string{"service": "payments"})
+	// 只声明其它 AM 源的视图。
+	seedAttributionView(t, service, "edge-view", "边缘视图", []string{"am-edge"}, map[string]string{"service": "payments"})
+
+	labels := map[string]string{"alertname": "Latency", "service": "payments"}
+	plain := deliverWebhookFrom(t, service, "plain-view-delivery", sourceID, credentialID, labels, "2026-09-01T10:01:00Z")
+	if id := occurrenceBusinessID(t, service, plain.Occurrences[0].ID); id != nil {
+		t.Fatalf("view without alertSourceKeys must not attribute, got %d", *id)
+	}
+	if row := occurrenceViewAttribution(t, service, plain.Occurrences[0].ID); row.Status != "unattributed" || row.ReasonJSON != `{"code":"source_mismatch"}` {
+		t.Fatalf("unscoped view mismatch diagnostics=%+v", row)
+	}
+	if detail, err := service.GetOccurrence(ctx, plain.Occurrences[0].ID); err != nil || detail.ViewAttribution == nil || detail.ViewAttribution.Status != "unattributed" {
+		t.Fatalf("unattributed detail must still carry view attribution diagnostics: %+v %v", detail.ViewAttribution, err)
+	}
+
+	edge := deliverWebhookFrom(t, service, "edge-view-delivery", sourceID, credentialID, labels, "2026-09-01T10:02:00Z")
+	if row := occurrenceViewAttribution(t, service, edge.Occurrences[0].ID); row.Status != "unattributed" || row.ReasonJSON != `{"code":"source_mismatch"}` {
+		t.Fatalf("other-source view mismatch diagnostics=%+v", row)
+	}
+
+	// 标签不满足：源匹配但条件不命中，仍不归属。
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments", "env": "production"})
+	mismatch := deliverWebhookFrom(t, service, "label-mismatch", sourceID, credentialID, labels, "2026-09-01T10:03:00Z")
+	if row := occurrenceViewAttribution(t, service, mismatch.Occurrences[0].ID); row.Status != "unattributed" || row.ReasonJSON != `{"code":"label_mismatch"}` {
+		t.Fatalf("label mismatch diagnostics=%+v", row)
+	}
+}
+
+func TestViewAttributionEmptyConditionsNeverSwallowAll(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	// 历史直插兜底行：无标签条件却声明了来源。空标签条件绝不构成吞掉一切的
+	// 兜底匹配；写路径已在 businessview 校验层拒绝该形状。
+	seedAttributionView(t, service, "catch-all", "兜底视图", []string{"am-prod"}, nil)
+
+	result := deliverWebhookFrom(t, service, "catch-all-delivery", sourceID, credentialID, map[string]string{
+		"alertname": "Anything",
+	}, "2026-09-01T10:04:00Z")
+	if row := occurrenceViewAttribution(t, service, result.Occurrences[0].ID); row.Status != "unattributed" || row.ReasonJSON != `{"code":"label_mismatch"}` {
+		t.Fatalf("empty label conditions must never match everything: %+v", row)
+	}
+}
+
+func TestViewAttributionAmbiguousFreezesCandidateSnapshots(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments"})
+	seedAttributionView(t, service, "payments-canary", "支付金丝雀", []string{"am-prod"}, map[string]string{"service": "payments"})
+
+	result := deliverWebhookFrom(t, service, "view-ambiguous", sourceID, credentialID, map[string]string{
+		"alertname": "Latency", "service": "payments",
+	}, "2026-09-01T10:05:00Z")
+	occurrenceID := result.Occurrences[0].ID
+	if id := occurrenceBusinessID(t, service, occurrenceID); id != nil {
+		t.Fatalf("ambiguous match must not assign anything, got %d", *id)
+	}
+	row := occurrenceViewAttribution(t, service, occurrenceID)
+	if row.Status != "ambiguous" || row.AttributedViewID != nil {
+		t.Fatalf("ambiguous decision shape=%+v", row)
+	}
+	if row.ReasonJSON != `{"code":"multiple_matching_views"}` {
+		t.Fatalf("unexpected reason %s", row.ReasonJSON)
+	}
+	for _, key := range []string{"payments-prod", "payments-canary"} {
+		if !candidatesContain(t, row.CandidatesJSON, key) {
+			t.Fatalf("ambiguous candidates must freeze every matching view snapshot (%s): %s", key, row.CandidatesJSON)
+		}
+	}
+
+	// 冻结语义：视图后续改名/改条件不得改写已冻结的歧义证据。
+	if _, err := service.db.Exec(`UPDATE business_views SET display_name='改名后', label_conditions_json='{"service":"other"}', row_version=row_version+1 WHERE view_key='payments-canary'`); err != nil {
+		t.Fatal(err)
+	}
+	after := occurrenceViewAttribution(t, service, occurrenceID)
+	if after != row {
+		t.Fatalf("frozen ambiguous evidence changed: before=%+v after=%+v", row, after)
+	}
+}
+
+func TestViewAttributionIsWriteOnceAtCreation(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+
+	early := deliverWebhookFrom(t, service, "view-early", sourceID, credentialID, map[string]string{
+		"alertname": "Early", "service": "payments",
+	}, "2026-09-01T11:00:00Z")
+	if row := occurrenceViewAttribution(t, service, early.Occurrences[0].ID); row.Status != "unattributed" {
+		t.Fatalf("no view exists yet; must be unattributed: %+v", row)
+	}
+
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments"})
+
+	// 同一 occurrence 的重复投递不得重新归属（write-once）。
+	repeat, err := service.Deliver(context.Background(), "view-early-repeat", sourceID, credentialID, 1, mustBody(t, map[string]string{
+		"alertname": "Early", "service": "payments",
+	}, "2026-09-01T11:00:00Z"), time.Now().UTC())
+	if err != nil || !repeat.Accepted {
+		t.Fatalf("repeat delivery: %+v %v", repeat, err)
+	}
+	if row := occurrenceViewAttribution(t, service, early.Occurrences[0].ID); row.Status != "unattributed" {
+		t.Fatalf("repeat delivery must not rewrite historical attribution: %+v", row)
+	}
+
+	// 新 occurrence 按当前视图归属。
+	later := deliverWebhookFrom(t, service, "view-later", sourceID, credentialID, map[string]string{
+		"alertname": "Early", "service": "payments",
+	}, "2026-09-01T11:30:00Z")
+	if row := occurrenceViewAttribution(t, service, later.Occurrences[0].ID); row.Status != "attributed" {
+		t.Fatalf("new occurrence after view creation must attribute: %+v", row)
+	}
+}
+
+func TestSnapshotViewFilterAndDetailKey(t *testing.T) {
+	service, _, done := newTestService(t)
+	defer done()
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "am-prod")
+	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments"})
+	seedAttributionView(t, service, "billing-prod", "计费生产", []string{"am-prod"}, map[string]string{"service": "billing"})
+
+	deliver := func(relayID, service_ string) int64 {
+		t.Helper()
+		result := deliverWebhookFrom(t, service, relayID, sourceID, credentialID, map[string]string{
+			"alertname": relayID, "service": service_,
+		}, fmt.Sprintf("2026-09-01T12:%02d:00Z", len(relayID)))
+		return result.Occurrences[0].ID
+	}
+	deliver("pay-1", "payments")
+	deliver("bill-1", "billing")
+	unattributed := deliver("none-1", "unknown")
+	// 平台内部故障只在无过滤读取中并列出现；归属过滤绝不拼接平台行。
+	if _, err := service.db.Exec(`INSERT INTO platform_faults(component,reason,state,first_seen_at,last_seen_at) VALUES('plinth','runtime_control_stream_disconnected','Firing','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	unfiltered, err := service.AlertSnapshot(ctx, "Firing", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfiltered.Items) != 4 {
+		t.Fatalf("unfiltered snapshot must list three occurrences plus the platform fault, got %d", len(unfiltered.Items))
+	}
+	for _, item := range unfiltered.Items {
+		switch item.Labels["alertname"] {
+		case "pay-1":
+			if item.ViewAttribution == nil || item.ViewAttribution.ViewKey != "payments-prod" || item.ViewAttribution.ViewName != "支付生产" {
+				t.Fatalf("pay-1 view attribution wrong: %+v", item.ViewAttribution)
+			}
+		case "bill-1":
+			if item.ViewAttribution == nil || item.ViewAttribution.ViewKey != "billing-prod" {
+				t.Fatalf("bill-1 view attribution wrong: %+v", item.ViewAttribution)
+			}
+		case "none-1":
+			if item.ViewAttribution == nil || item.ViewAttribution.Status != "unattributed" {
+				t.Fatalf("none-1 must stay unattributed: %+v", item.ViewAttribution)
+			}
+		}
+	}
+
+	filtered, err := service.AlertSnapshot(ctx, "Firing", "", "payments-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Items) != 1 || filtered.Items[0].Labels["alertname"] != "pay-1" {
+		t.Fatalf("view filter must return exactly pay-1 without platform faults, got %+v", filtered.Items)
+	}
+
+	// 旧 businessSystem 过滤保持兼容：无历史行时为合法空结果。
+	legacy, err := service.AlertSnapshot(ctx, "Firing", "payments", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy.Items) != 0 {
+		t.Fatalf("legacy business filter must remain usable, got %+v", legacy.Items)
+	}
+
+	unknown, err := service.AlertSnapshot(ctx, "Firing", "", "ghost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unknown.Items) != 0 {
+		t.Fatalf("unknown view key must filter to empty, got %d", len(unknown.Items))
+	}
+
+	detail, err := service.GetOccurrence(ctx, unattributed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ViewAttribution == nil || detail.ViewAttribution.ViewKey != "" {
+		t.Fatalf("unattributed detail must not fabricate a view, got %+v", detail.ViewAttribution)
+	}
 }

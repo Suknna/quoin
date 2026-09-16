@@ -11,6 +11,20 @@ export interface AttributionDiagnostic {
   reasonJson: string
 }
 
+/**
+ * The real business-view attribution frozen at first receipt (ADR-0008).
+ * Attributed rows carry the unique view identity; ambiguous rows keep every
+ * candidate snapshot in candidatesJson; unattributed rows carry the reason.
+ */
+export interface ViewAttributionDiagnostic {
+  status: 'attributed' | 'ambiguous' | 'unattributed'
+  viewKey?: string
+  viewName?: string
+  candidatesJson: string
+  reasonJson: string
+  createdAt: string
+}
+
 export interface AlertOccurrenceSummary {
   id: string
   source: 'alertmanager' | 'platform'
@@ -18,6 +32,7 @@ export interface AlertOccurrenceSummary {
   rowVersion: number
   businessSystemKey?: string
   attribution?: AttributionDiagnostic
+  viewAttribution?: ViewAttributionDiagnostic
   component?: 'plinth' | 'lintel'
   reason?: string
   firstSeenAt: string
@@ -97,9 +112,10 @@ export async function fetchBusinessSystems(): Promise<BusinessSystemOption[]> {
   return page.items ?? []
 }
 
-export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', businessSystemKey = ''): Promise<AlertSnapshot> {
+export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', businessSystemKey = '', viewKey = ''): Promise<AlertSnapshot> {
   const params = new URLSearchParams({ state })
   if (businessSystemKey) params.set('businessSystemKey', businessSystemKey)
+  if (viewKey) params.set('viewKey', viewKey)
   const response = await fetch(`/api/v1/alerts?${params.toString()}`, { credentials: 'include' })
   if (!response.ok) throw new Error('告警列表加载失败')
   return (await response.json()) as AlertSnapshot

@@ -21,7 +21,7 @@ func TestExecutionFaultLifecycleUsesAttemptOrderAndTerminalRecovery(t *testing.T
 	if err := reporter.ObserveExecutionOutcome(ctx, 10, false, "invalid_response"); err != nil {
 		t.Fatal(err)
 	}
-	if firing, err := service.AlertSnapshot(ctx, "Firing", ""); err != nil || len(firing.Items) != 0 {
+	if firing, err := service.AlertSnapshot(ctx, "Firing", "", ""); err != nil || len(firing.Items) != 0 {
 		t.Fatalf("business failure fabricated platform fault: %+v %v", firing.Items, err)
 	}
 
@@ -36,7 +36,7 @@ func TestExecutionFaultLifecycleUsesAttemptOrderAndTerminalRecovery(t *testing.T
 	if err := reporter.ObserveExecutionOutcome(ctx, 13, false, "worker_protocol_error"); err != nil {
 		t.Fatal(err)
 	}
-	firing, err := service.AlertSnapshot(ctx, "Firing", "")
+	firing, err := service.AlertSnapshot(ctx, "Firing", "", "")
 	if err != nil || len(firing.Items) != 1 || firing.Items[0].Reason != "worker_protocol_error" {
 		t.Fatalf("execution failure not projected: %+v %v", firing.Items, err)
 	}
@@ -51,11 +51,11 @@ func TestExecutionFaultLifecycleUsesAttemptOrderAndTerminalRecovery(t *testing.T
 	if err := reporter.ObserveExecutionOutcome(ctx, 11, false, "worker_protocol_error"); err != nil {
 		t.Fatal(err)
 	}
-	firing, err = service.AlertSnapshot(ctx, "Firing", "")
+	firing, err = service.AlertSnapshot(ctx, "Firing", "", "")
 	if err != nil || len(firing.Items) != 0 {
 		t.Fatalf("late failure replay revived fault: %+v %v", firing.Items, err)
 	}
-	resolved, err := service.AlertSnapshot(ctx, "Resolved", "")
+	resolved, err := service.AlertSnapshot(ctx, "Resolved", "", "")
 	closedCurrent := false
 	for _, item := range resolved.Items {
 		closedCurrent = closedCurrent || (item.ID == faultID && item.ResolvedAt != nil)
@@ -72,7 +72,7 @@ func TestExecutionFaultLifecycleUsesAttemptOrderAndTerminalRecovery(t *testing.T
 	if err := reporter.ObserveExecutionOutcome(ctx, 15, false, "worker_protocol_error"); err != nil {
 		t.Fatal(err)
 	}
-	firing, err = service.AlertSnapshot(ctx, "Firing", "")
+	firing, err = service.AlertSnapshot(ctx, "Firing", "", "")
 	if err != nil || len(firing.Items) != 1 || firing.Items[0].ID == faultID {
 		t.Fatalf("new failure did not create one distinct lifecycle: %+v %v", firing.Items, err)
 	}
@@ -140,7 +140,7 @@ func TestPlatformFaultLifecycleDeduplicatesAndResolves(t *testing.T) {
 	if err := reporter.ObserveRuntimeConnection(ctx, "plinth", false); err != nil {
 		t.Fatal(err)
 	}
-	current, err := service.AlertSnapshot(ctx, "Firing", "")
+	current, err := service.AlertSnapshot(ctx, "Firing", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,14 +163,14 @@ func TestPlatformFaultLifecycleDeduplicatesAndResolves(t *testing.T) {
 	if err := reporter.ObserveRuntimeConnection(ctx, "plinth", true); err != nil {
 		t.Fatal(err)
 	}
-	current, err = service.AlertSnapshot(ctx, "Firing", "")
+	current, err = service.AlertSnapshot(ctx, "Firing", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(current.Items) != 0 {
 		t.Fatalf("recovered fault remained firing: %+v", current.Items)
 	}
-	history, err := service.AlertSnapshot(ctx, "Resolved", "")
+	history, err := service.AlertSnapshot(ctx, "Resolved", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

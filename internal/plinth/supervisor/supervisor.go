@@ -206,10 +206,28 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 	systemPrompt := plinthagent.SystemPrompt
 	if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION {
 		failureSchema = "investigation_output_v1"
-		systemPrompt = plinthagent.InvestigationSystemPrompt
+		switch input.GetAgentVersion() {
+		case worker.LegacyInvestigationAgentVersion:
+			systemPrompt = plinthagent.LegacyInvestigationSystemPrompt
+		case worker.WorkerInvestigationAgentVersion:
+			systemPrompt = plinthagent.InvestigationSystemPrompt
+		default:
+			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported investigation agent version")
+			return
+		}
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
 		failureSchema = "inspection_report_result_v1"
-		systemPrompt = plinthagent.InspectionSystemPrompt
+		switch input.GetAgentVersion() {
+		case worker.InspectionAnalysisAgentVersion:
+			systemPrompt = plinthagent.InspectionSystemPrompt
+		case worker.PreviousInspectionAnalysisAgentVersion:
+			systemPrompt = plinthagent.PreviousInspectionSystemPrompt
+		case worker.WorkerAgentVersion:
+			systemPrompt = plinthagent.LegacyInspectionSystemPrompt
+		default:
+			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection agent version")
+			return
+		}
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
 		failureSchema = worker.KnowledgeExtractionOutputSchemaKind
 		systemPrompt = plinthagent.KnowledgeExtractionSystemPrompt

@@ -303,6 +303,14 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
 		return
 	}
+	if view.AttemptType == "inspection_collection" && view.ScopeType == "observation_run" && service.Observations != nil {
+		// The generic interruption terminalized the attempt row; the
+		// observation authority projects the honest gap and converges the Run.
+		if err := service.Observations.ConvergeInterruptedChild(ctx, view.ID, "interrupted"); err != nil {
+			sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+		}
+		return
+	}
 	if view.AttemptType == "inspection_collection" && service.BusinessSystems != nil {
 		var err error
 		switch view.ScopeType {
@@ -427,6 +435,16 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 					return
 				}
 				service.convergeCancelledJourneyChild(ctx, attemptID)
+				return
+			}
+			if scopeType == "observation_run" && service.Observations != nil {
+				if err := service.Observations.Attempts().CancelAck(ctx, attemptID); err != nil {
+					sharedops.LogEvent("quoin", "error", "source_observation.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+					return
+				}
+				if err := service.Observations.ConvergeInterruptedChild(ctx, attemptID, "cancelled"); err != nil {
+					sharedops.LogEvent("quoin", "error", "source_observation.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+				}
 				return
 			}
 		}
@@ -710,6 +728,16 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 				}
 			}
 			if view.State == "Assigned" && (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+				// Source observation children belong to the observation
+				// authority: its rebuilder is the only one that can re-seal
+				// their frozen input, so the accept must flow through the
+				// owning service, never the inspection aggregate.
+				if view.AttemptType == "inspection_collection" && view.ScopeType == "observation_run" && service.Observations != nil {
+					if err := service.Observations.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
+						sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
+					}
+					continue
+				}
 				if err := service.Inspections.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
@@ -723,6 +751,8 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 			var err error
 			if view.AttemptType == "inspection_collection" && view.ScopeType == "config_verification_run" {
 				err = service.dispatchVerificationAttempt(ctx, view.ID)
+			} else if view.AttemptType == "inspection_collection" && view.ScopeType == "observation_run" {
+				err = service.reDispatchSourceObservationAttempt(ctx, view)
 			} else if view.AttemptType == "inspection_collection" && view.ScopeType == "resource_refresh_run" {
 				// Resource refresh has no replacement producer. An historical
 				// Assigned child that the runtime did not report cannot resume;
@@ -957,6 +987,10 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 							closeErr = service.BusinessSystems.RecordVerificationTechnicalGap(ctx, item.AttemptID, "interrupted")
 						case "resource_refresh_run":
 							closeErr = service.BusinessSystems.RecordResourceRefreshTechnicalGap(ctx, item.AttemptID, "interrupted")
+						case "observation_run":
+							if service.Observations != nil {
+								closeErr = service.Observations.ConvergeInterruptedChild(ctx, item.AttemptID, "interrupted")
+							}
 						default:
 							sharedops.LogEvent("quoin", "info", "reconcile.sweep_scope_unhandled", fmt.Sprintf("attempt=%d scope=%s", item.AttemptID, item.ScopeType))
 						}

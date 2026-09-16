@@ -15,7 +15,7 @@ import (
 	"github.com/Suknna/quoin/internal/plinth/agent"
 )
 
-func TestVerifyStartAdmitsBothInspectionGenerations(t *testing.T) {
+func TestVerifyStartAdmitsInspectionGenerations(t *testing.T) {
 	canonical := []byte(`{"schemaKind":"inspection_analysis_v1","attemptId":1,"inspectionRunId":1,"artifactIds":[2],"evidenceIds":[3],"modelContract":{"modelId":"m"}}`)
 	sum := sha256.Sum256(canonical)
 
@@ -37,6 +37,13 @@ func TestVerifyStartAdmitsBothInspectionGenerations(t *testing.T) {
 	if legacy.agentVersion != WorkerAgentVersion || legacy.prompt != agent.LegacyInspectionSystemPrompt {
 		t.Fatalf("legacy mode = %s/%q", legacy.agentVersion, legacy.prompt)
 	}
+	previous, err := verifyStart(build(PreviousInspectionAnalysisAgentVersion))
+	if err != nil {
+		t.Fatalf("previous inspection generation must stay executable: %v", err)
+	}
+	if previous.prompt != agent.PreviousInspectionSystemPrompt {
+		t.Fatalf("previous mode = %s/%q", previous.agentVersion, previous.prompt)
+	}
 	// 新身份：当前 prompt 与结构化清单渲染。
 	current, err := verifyStart(build(InspectionAnalysisAgentVersion))
 	if err != nil {
@@ -45,15 +52,46 @@ func TestVerifyStartAdmitsBothInspectionGenerations(t *testing.T) {
 	if current.agentVersion != InspectionAnalysisAgentVersion || current.prompt != agent.InspectionSystemPrompt {
 		t.Fatalf("current mode = %s/%q", current.agentVersion, current.prompt)
 	}
-	// prompt digest 随实际 renderer：两代 digest 互异。
+	// 三代 prompt digest 按实际 renderer 区分。
 	legacyDigest := sha256.Sum256([]byte(legacy.prompt))
+	previousDigest := sha256.Sum256([]byte(previous.prompt))
 	currentDigest := sha256.Sum256([]byte(current.prompt))
-	if hex.EncodeToString(legacyDigest[:]) == hex.EncodeToString(currentDigest[:]) {
-		t.Fatal("the two generations must not share a prompt digest")
+	if hex.EncodeToString(legacyDigest[:]) == hex.EncodeToString(previousDigest[:]) ||
+		hex.EncodeToString(previousDigest[:]) == hex.EncodeToString(currentDigest[:]) ||
+		hex.EncodeToString(legacyDigest[:]) == hex.EncodeToString(currentDigest[:]) {
+		t.Fatal("inspection generations must not share prompt digests")
 	}
 	// 未知身份拒绝：不存在第三个巡检组合。
 	if _, err := verifyStart(build("inspection-analysis-v9")); err == nil {
 		t.Fatal("unknown inspection agent version must reject")
+	}
+}
+
+func TestVerifyStartAdmitsBothInvestigationGenerations(t *testing.T) {
+	canonical := []byte(`{"messages":[{"role":"user","content":"检查告警"}],"sources":[],"modelContract":{"modelId":"m"}}`)
+	sum := sha256.Sum256(canonical)
+	build := func(version string) *workerv1.StartAttempt {
+		return &workerv1.StartAttempt{SchemaKind: "investigation_v1", AgentVersion: version, CanonicalJson: canonical, ContentDigest: sum[:]}
+	}
+	legacy, err := verifyStart(build(LegacyInvestigationAgentVersion))
+	if err != nil {
+		t.Fatalf("legacy investigation generation must stay executable: %v", err)
+	}
+	if legacy.prompt != agent.LegacyInvestigationSystemPrompt {
+		t.Fatalf("legacy prompt drifted: %q", legacy.prompt)
+	}
+	current, err := verifyStart(build(WorkerInvestigationAgentVersion))
+	if err != nil {
+		t.Fatalf("current investigation generation must be executable: %v", err)
+	}
+	if current.prompt != agent.InvestigationSystemPrompt {
+		t.Fatalf("current prompt drifted: %q", current.prompt)
+	}
+	if legacy.prompt == current.prompt {
+		t.Fatal("legacy and current investigation prompts must differ")
+	}
+	if _, err := verifyStart(build("investigation-v9")); err == nil {
+		t.Fatal("unknown investigation agent version must reject")
 	}
 }
 

@@ -482,6 +482,41 @@ CREATE TABLE alert_occurrence_attributions (
 ) STRICT;
 CREATE INDEX idx_alert_occurrence_attributions_delivery ON alert_occurrence_attributions (evaluated_from_delivery_id);
 
+-- 业务视图告警归属投影（ADR-0008）：首次接收时一次性冻结的独立证据，与旧
+-- business_system 归属历史（上表）并存；旧表停写、旧行保留，本表绝不回写
+-- alert_occurrences.business_system_id。候选视图必须在其 alert_source_keys_json
+-- 中显式声明交付告警源且非空精确标签条件全部命中；空标签条件不构成兜底匹配。
+-- candidates_json 按序冻结每个候选视图的完整快照（viewId/viewKey/displayName/
+-- scope），使唯一归属与多候选歧义在视图改名或退役后仍可追溯。
+CREATE TABLE alert_occurrence_view_attributions (
+  occurrence_id                    INTEGER PRIMARY KEY REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  status                           TEXT NOT NULL CHECK (status IN ('attributed','ambiguous','unattributed')),
+  attributed_view_id               INTEGER REFERENCES business_views(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  candidates_json                  TEXT NOT NULL CHECK (json_valid(candidates_json) AND json_type(candidates_json) = 'array'),
+  reason_json                      TEXT NOT NULL CHECK (json_valid(reason_json)),
+  evaluated_from_delivery_id       INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  evaluated_from_delivery_item_id  INTEGER NOT NULL REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at                       TEXT NOT NULL,
+  CHECK ((status = 'attributed' AND attributed_view_id IS NOT NULL AND json_array_length(candidates_json) = 1)
+      OR (status = 'ambiguous' AND attributed_view_id IS NULL AND json_array_length(candidates_json) > 1)
+      OR (status = 'unattributed' AND attributed_view_id IS NULL AND json_array_length(candidates_json) = 0))
+) STRICT;
+CREATE INDEX idx_alert_occurrence_view_attributions_view ON alert_occurrence_view_attributions (attributed_view_id);
+
+-- 归属证据冻结：首收判定后不允许任何 UPDATE/DELETE 改写；INSERT 必须闭合到
+-- 同一 Delivery 的真实条目（DATA-ALERT 不可变证据语义）。
+CREATE TRIGGER trg_alert_occurrence_view_attributions_immutable BEFORE UPDATE ON alert_occurrence_view_attributions
+BEGIN SELECT RAISE(ABORT, 'alert view attribution is immutable delivery-time evidence'); END;
+CREATE TRIGGER trg_alert_occurrence_view_attributions_no_delete BEFORE DELETE ON alert_occurrence_view_attributions
+BEGIN SELECT RAISE(ABORT, 'alert view attribution is immutable delivery-time evidence'); END;
+CREATE TRIGGER trg_alert_occurrence_view_attributions_item_closure BEFORE INSERT ON alert_occurrence_view_attributions
+WHEN NOT EXISTS (
+  SELECT 1 FROM alert_delivery_items item
+  WHERE item.id = NEW.evaluated_from_delivery_item_id
+    AND item.delivery_id = NEW.evaluated_from_delivery_id
+)
+BEGIN SELECT RAISE(ABORT, 'alert view attribution must close to its own delivery item'); END;
+
 CREATE TABLE alert_observations (
   id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   delivery_id      INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1667,11 +1702,18 @@ CREATE TABLE business_views (
   description           TEXT NOT NULL DEFAULT '',
   connection_id         INTEGER REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- NULL = 跨来源候选集合
   label_conditions_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(label_conditions_json) AND json_type(label_conditions_json) = 'object'),
+  alert_source_keys_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(alert_source_keys_json) AND json_type(alert_source_keys_json) = 'array'), -- 明确 AM 告警源 key 约束；空数组 = 该视图不参与告警归属（与 Prom connection 身份严格区分）
   row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   created_by            INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at            TEXT NOT NULL,
   updated_at            TEXT NOT NULL
 ) STRICT;
+-- 视图 key 是跨迁移稳定引用（退役不复用）：key 不可改写，行不可删除；
+-- 内容演进走 row_version 前提下的整体提交更新。
+CREATE TRIGGER trg_business_views_key_immutable BEFORE UPDATE OF view_key ON business_views
+BEGIN SELECT RAISE(ABORT, 'business view key is immutable'); END;
+CREATE TRIGGER trg_business_views_no_delete BEFORE DELETE ON business_views
+BEGIN SELECT RAISE(ABORT, 'business views are never deleted; keys are retired, not reused'); END;
 
 -- Config Verification Run：prepublish 与 deployment_acceptance 共用唯一机械执行模型。
 -- prepublish 只绑定未发布草稿并可被 Label Contract 联合激活采用；deployment_acceptance 只绑定

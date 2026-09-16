@@ -39,9 +39,40 @@ describe("alerts module", () => {
     render(<View route="/alerts/list?id=alert-unmatched" />);
 
     await screen.findByRole("heading", { name: "Unmatched alert" });
-    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("告警标签不匹配任何业务声明");
+    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("告警标签不满足任何参与视图的标签条件");
     expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("候选业务系统 ID无");
     expect(screen.getByText("以上为告警首次接收时冻结的归属证据，不会按当前业务声明重新解释。")).toBeInTheDocument();
+  });
+
+  it("shows frozen view attribution diagnostics for unattributed and ambiguous rows", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
+      if (input === "/api/v1/alerts/alert-view-unmatched") return { id: "alert-view-unmatched", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View unmatched" }, viewAttribution: { status: "unattributed", candidatesJson: "[]", reasonJson: '{"code":"source_mismatch"}', createdAt: "2026-01-01T00:00:00Z" } };
+      if (input === "/api/v1/alerts/alert-view-ambiguous") return { id: "alert-view-ambiguous", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View ambiguous" }, viewAttribution: { status: "ambiguous", candidatesJson: '[{"viewId":1,"viewKey":"payments-prod","displayName":"支付生产","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}},{"viewId":2,"viewKey":"payments-canary","displayName":"支付金丝雀","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}}]', reasonJson: '{"code":"multiple_matching_views"}', createdAt: "2026-01-01T00:00:00Z" } };
+      if (input === "/api/v1/alerts/alert-view-attributed") return { id: "alert-view-attributed", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View attributed" }, viewAttribution: { status: "attributed", viewKey: "payments-prod", viewName: "支付生产", candidatesJson: '[{"viewId":1,"viewKey":"payments-prod","displayName":"支付生产","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}}]', reasonJson: '{"code":"exactly_one_matching_view"}', createdAt: "2026-01-01T00:00:00Z" } };
+      return { snapshotSeq: 1, items: [] };
+    } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { unmount } = render(<View route="/alerts/list?id=alert-view-unmatched" />);
+
+    await screen.findByRole("heading", { name: "View unmatched" });
+    const unmatched = screen.getByRole("alert", { name: "未归属诊断" });
+    expect(unmatched).toHaveTextContent("交付告警源不在任何参与视图的声明范围内");
+    expect(unmatched).toHaveTextContent("历史记录不会按当前视图配置重新计算");
+    unmount();
+
+    const ambiguousView = render(<View route="/alerts/list?id=alert-view-ambiguous" />);
+    await screen.findByRole("heading", { name: "View ambiguous" });
+    const ambiguous = screen.getByRole("alert", { name: "归属歧义诊断" });
+    expect(ambiguous).toHaveTextContent("多个业务视图同时匹配");
+    expect(ambiguous).toHaveTextContent("payments-prod, payments-canary");
+    ambiguousView.unmount();
+
+    const attributedView = render(<View route="/alerts/list?id=alert-view-attributed" />);
+    await screen.findByRole("heading", { name: "View attributed" });
+    expect(screen.getByText("归属视图 · 支付生产")).toBeInTheDocument();
+    expect(screen.getByText("来源：Alertmanager")).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: "未归属诊断" })).not.toBeInTheDocument();
+    attributedView.unmount();
   });
 
   it("shows conflict candidates and handles old occurrences without diagnostics", async () => {

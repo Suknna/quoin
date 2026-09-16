@@ -2920,6 +2920,8 @@ export interface components {
                 labelConditions: {
                     [key: string]: string;
                 };
+                /** @description 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；空/缺省 = 不参与告警归属，与 connection 身份互不顶替。 */
+                alertSourceKeys?: components["schemas"]["StableKey"][];
             };
             rowVersion: number;
             createdAt: components["schemas"]["Timestamp"];
@@ -2991,6 +2993,8 @@ export interface components {
                 labelConditions: {
                     [key: string]: string;
                 };
+                /** @description 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。 */
+                alertSourceKeys?: components["schemas"]["StableKey"][];
             };
             clientCommandId: string;
             expectedRowVersion?: number;
@@ -3004,6 +3008,8 @@ export interface components {
                 labelConditions: {
                     [key: string]: string;
                 };
+                /** @description 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。 */
+                alertSourceKeys?: components["schemas"]["StableKey"][];
             };
             clientCommandId: string;
             expectedRowVersion: number;
@@ -3500,8 +3506,10 @@ export interface components {
             state: "Firing" | "Resolved";
             rowVersion: number;
             businessSystemKey?: components["schemas"]["StableKey"];
-            /** @description 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。 */
+            /** @description 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。历史行专用，新 occurrence 不再写入。 */
             attribution?: components["schemas"]["AlertAttributionDiagnostic"];
+            /** @description 首次接收时冻结的业务视图归属（ADR-0008）；展示的 key/name 取自冻结候选快照，不随视图改名漂移。 */
+            viewAttribution?: components["schemas"]["AlertViewAttributionDiagnostic"];
             firstSeenAt: components["schemas"]["Timestamp"];
             lastStateChangeAt: components["schemas"]["Timestamp"];
             resolvedAt?: components["schemas"]["Timestamp"];
@@ -3521,6 +3529,19 @@ export interface components {
             candidateConfigVersionIdsJson: string;
             /** @description 冻结归属诊断的 JSON 对象，至少含 code。 */
             reasonJson: string;
+        };
+        AlertViewAttributionDiagnostic: {
+            /** @enum {string} */
+            status: "attributed" | "ambiguous" | "unattributed";
+            /** @description 唯一匹配时冻结的视图 key；来自候选快照首元素，未归属/歧义时缺省。 */
+            viewKey?: components["schemas"]["StableKey"];
+            /** @description 唯一匹配时冻结的视图显示名；来自候选快照首元素。 */
+            viewName?: string;
+            /** @description 冻结候选视图完整快照的 JSON 数组（viewId/viewKey/displayName/scope），唯一归属恰一元素。 */
+            candidatesJson: string;
+            /** @description 冻结归属诊断的 JSON 对象，至少含 code（source_mismatch/label_mismatch/exactly_one_matching_view/multiple_matching_views）。 */
+            reasonJson: string;
+            createdAt: components["schemas"]["Timestamp"];
         };
         AlertOccurrenceDetail: components["schemas"]["AlertOccurrenceSummary"] & {
             /** @description 不可变观测总数；完整时间线经 listAlertObservations 游标读取。 */
@@ -5424,6 +5445,7 @@ export type AlertSnapshot = components['schemas']['AlertSnapshot'];
 export type AdminAbout = components['schemas']['AdminAbout'];
 export type AlertOccurrenceSummary = components['schemas']['AlertOccurrenceSummary'];
 export type AlertAttributionDiagnostic = components['schemas']['AlertAttributionDiagnostic'];
+export type AlertViewAttributionDiagnostic = components['schemas']['AlertViewAttributionDiagnostic'];
 export type AlertOccurrenceDetail = components['schemas']['AlertOccurrenceDetail'];
 export type ObservationSummary = components['schemas']['ObservationSummary'];
 export type InitialAnalysisSummary = components['schemas']['InitialAnalysisSummary'];
@@ -7055,6 +7077,8 @@ export interface operations {
             query?: {
                 state?: "Firing" | "Resolved";
                 businessSystemKey?: components["schemas"]["StableKey"];
+                /** @description 按冻结的业务视图归属过滤（ADR-0008）；设置后平台内部故障不并入列表。 */
+                viewKey?: components["schemas"]["StableKey"];
                 /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
                 cursor?: components["parameters"]["Cursor"];
                 /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */

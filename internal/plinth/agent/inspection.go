@@ -8,15 +8,22 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// 巡检报告代理的系统提示只保留证据优先的认识约束（先读证据、不越权下健康
-// 结论、缺口如实可见）；用户级的报告要求与检查清单一律来自冻结的用户输入，
-// 由 BuildInspectionMessages 放进用户消息，绝不混入系统提示。
-const InspectionSystemPrompt = `你是 Quoin 的只读巡检报告代理。请先使用 artifact_read 或 artifact_grep 读取所有提供的巡检证据文件，再用中文写出事实性巡检报告。不得引用未读取的内容；不得把证据未表达的健康结论、严重性或裁决写入报告。没有数据的检查项必须如实写为缺口，不得当作 0 或正常；检查项未定义阈值时不得判断健康与否。`
+// PreviousInspectionSystemPrompt freezes inspection-analysis-v1 exactly. It
+// remains executable for attempts created before the report-compliance prompt
+// generation was introduced.
+const PreviousInspectionSystemPrompt = `你是 Quoin 的只读巡检报告代理。请先使用 artifact_read 或 artifact_grep 读取所有提供的巡检证据文件，再用中文写出事实性巡检报告。不得引用未读取的内容；不得把证据未表达的健康结论、严重性或裁决写入报告。没有数据的检查项必须如实写为缺口，不得当作 0 或正常；检查项未定义阈值时不得判断健康与否。`
+
+// InspectionSystemPrompt is the inspection-analysis-v2 contract. Concrete
+// report instructions remain frozen user input; the system prompt only states
+// how to obey and self-check whichever requirements are present.
+const InspectionSystemPrompt = `你是 Quoin 的只读巡检报告代理。请先使用 artifact_read 或 artifact_grep 读取所有提供的巡检证据文件，再用中文写出事实性巡检报告。不得引用未读取的内容；不得把证据未表达的健康结论、严重性或裁决写入报告。没有数据的检查项必须如实写为缺口，不得当作 0 或正常。
+如果输入提供了冻结的报告要求，必须严格执行其中声明的格式、字段、章节和长度等约束；这些要求不是参考建议。输出最终报告前，逐项核对报告是否满足全部冻结要求；若约束之间存在冲突，应明确指出冲突，不得静默忽略、改写要求或自行截断报告。
+检查说明明确给出的阈值、取值含义或判定语义属于本次冻结上下文，可以据此解释对应检查项；未定义时不得自行补充。即使单项证据满足其明确语义，也不得外推为整体业务健康、未受影响或不存在其他故障。`
 
 // LegacyInspectionSystemPrompt 与 BuildLegacyInspectionMessages 逐字节保留
 // 上一代巡检渲染（初始共享身份 initial-analysis-v1 下的 prompt 与消息形状），
 // 供升级时仍在途的旧 inspection Attempt 以其冻结时的原始 prompt 完成提交；
-// 新 Attempt（inspection-analysis-v1）一律使用上方新 prompt。
+// 新 Attempt（inspection-analysis-v2）一律使用当前 prompt。
 const LegacyInspectionSystemPrompt = `你是 Quoin 的只读巡检报告代理。请先使用 artifact_read 或 artifact_grep 读取所有提供的巡检证据文件，再用中文写出事实性巡检报告。不得引用未读取的内容；不得把证据未表达的健康结论、严重性或裁决写入报告。`
 
 func BuildLegacyInspectionMessages(input InspectionInput) ([]*schema.Message, error) {
@@ -101,6 +108,12 @@ func ParseInspectionInput(canonical []byte) (InspectionInput, error) {
 }
 
 func BuildInspectionMessages(input InspectionInput) ([]*schema.Message, error) {
+	return BuildInspectionMessagesWithPrompt(input, InspectionSystemPrompt)
+}
+
+// BuildInspectionMessagesWithPrompt preserves the same frozen user projection
+// while allowing the worker version router to bind the matching system prompt.
+func BuildInspectionMessagesWithPrompt(input InspectionInput, prompt string) ([]*schema.Message, error) {
 	var body strings.Builder
 	body.WriteString("请读取以下按 Evidence 顺序冻结的 Artifact，然后基于其内容撰写巡检报告。\n")
 	for index, id := range input.ArtifactIDs {
@@ -164,7 +177,7 @@ func BuildInspectionMessages(input InspectionInput) ([]*schema.Message, error) {
 		}
 		body.WriteString("以上检查项语义与对应关系均已冻结；报告中为每个检查项给出可见结论或明确缺口，未定义阈值的检查项不得判断健康。\n")
 	}
-	return []*schema.Message{schema.SystemMessage(InspectionSystemPrompt), schema.UserMessage(body.String())}, nil
+	return []*schema.Message{schema.SystemMessage(prompt), schema.UserMessage(body.String())}, nil
 }
 
 func dereferenceInt(value *int64) string {

@@ -8,6 +8,12 @@ export interface BusinessViewScope {
   /** Omitted means "candidate sources are all integrations"; purely descriptive, grants nothing. */
   connectionName?: string;
   labelConditions: Record<string, string>;
+  /**
+   * Explicit Alertmanager source keys for alert attribution (ADR-0008). Empty
+   * or omitted means the view never participates in alert attribution; the
+   * Prometheus connection identity above is never substituted for it.
+   */
+  alertSourceKeys?: string[];
 }
 
 export interface BusinessView {

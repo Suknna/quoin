@@ -19,7 +19,18 @@ export interface LiveAlerts {
   refresh: () => void
 }
 
-export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '', enabled = true): LiveAlerts {
+export interface LiveAlertsFilter {
+  /** Legacy declaration filter; stays compatible with historical rows. */
+  businessSystemKey?: string
+  /** Business-view attribution filter (ADR-0008); the primary UI filter. */
+  viewKey?: string
+}
+
+export function useLiveAlerts(view: 'Firing' | 'Resolved', filter: string | LiveAlertsFilter = '', enabled = true): LiveAlerts {
+  // String form stays the legacy businessSystemKey filter for existing callers.
+  const scope: LiveAlertsFilter = typeof filter === 'string' ? { businessSystemKey: filter } : filter
+  const businessSystemKey = scope.businessSystemKey ?? ''
+  const viewKey = scope.viewKey ?? ''
   const stream = useAlertEventStream()
   // `enabled` pauses reconciliation for this list only; another consumer may
   // still own the shared SSE stream for its independent projection.
@@ -42,9 +53,9 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
   pendingRef.current = pending
   const viewRef = useRef(view)
   viewRef.current = view
-  const filterRef = useRef(businessSystemKey)
-  filterRef.current = businessSystemKey
-  const projectionKey = `${view}\u0000${businessSystemKey}`
+  const filterRef = useRef({ businessSystemKey, viewKey })
+  filterRef.current = { businessSystemKey, viewKey }
+  const projectionKey = `${view}\u0000${businessSystemKey}\u0000${viewKey}`
   const renderedProjectionKeyRef = useRef(projectionKey)
   // React updates refs during render before its effects run. Invalidate the
   // old projection here so a browser SSE task cannot race that small window
@@ -56,7 +67,7 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
   }
 
   const loadSnapshot = useCallback(
-    async (snapshotView: 'Firing' | 'Resolved', snapshotBusinessSystemKey: string, clearVisibleProjection: boolean, allowPaused = false) => {
+    async (snapshotView: 'Firing' | 'Resolved', snapshotFilter: { businessSystemKey: string; viewKey: string }, clearVisibleProjection: boolean, allowPaused = false) => {
       // A manual refresh keeps a healthy projection live until the replacement
       // snapshot succeeds. Route/filter changes instead invalidate immediately.
       const replacingProjection = clearVisibleProjection || !projectionReadyRef.current
@@ -74,7 +85,7 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
       }
       setLoading(true)
       try {
-        const snapshot = await fetchAlerts(snapshotView, snapshotBusinessSystemKey)
+        const snapshot = await fetchAlerts(snapshotView, snapshotFilter.businessSystemKey, snapshotFilter.viewKey)
         if ((!enabledRef.current && !allowPaused) || generation !== generationRef.current) return
         versions.current = new Map(snapshot.items.map((item) => [item.id, item.rowVersion]))
         lastSeqRef.current = snapshot.snapshotSeq
@@ -99,7 +110,7 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
   )
 
   useEffect(() => {
-    if (enabled) void loadSnapshot(view, businessSystemKey, true)
+    if (enabled) void loadSnapshot(view, { businessSystemKey, viewKey }, true)
     else {
       // Invalidate every in-flight snapshot before it can start/restart this
       // shared stream. Other consumers retain their own subscriptions.
@@ -151,10 +162,19 @@ export function useLiveAlerts(view: 'Firing' | 'Resolved', businessSystemKey = '
       }
       versions.current.set(detail.id, detail.rowVersion)
       lastSeqRef.current = seq
-      // The mechanical filter mirrors the server-side businessSystemKey
-      // projection: events only carry ids, so the re-read detail decides
-      // membership in the filtered view (未归属 rows only match no filter).
-      if (filterRef.current !== '' && (detail.businessSystemKey ?? '') !== filterRef.current) {
+      // The mechanical filter mirrors the server-side businessSystemKey /
+      // viewKey projections: events only carry ids, so the re-read detail
+      // decides membership in the filtered view (未归属 rows only match no
+      // filter).
+      const scope = filterRef.current
+      const legacyKey = scope.businessSystemKey
+      if (legacyKey !== '' && (detail.businessSystemKey ?? '') !== legacyKey) {
+        setItems((previous) => previous.filter((item) => item.id !== detail.id))
+        setPending((previous) => previous.filter((item) => item.id !== detail.id))
+        return
+      }
+      const scopedViewKey = scope.viewKey
+      if (scopedViewKey !== '' && (detail.viewAttribution?.viewKey ?? '') !== scopedViewKey) {
         setItems((previous) => previous.filter((item) => item.id !== detail.id))
         setPending((previous) => previous.filter((item) => item.id !== detail.id))
         return

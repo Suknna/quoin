@@ -103,7 +103,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 
 func assertPlatformFaultState(t *testing.T, service *alerts.Service, state string, want int) {
 	t.Helper()
-	snapshot, err := service.AlertSnapshot(context.Background(), state, "")
+	snapshot, err := service.AlertSnapshot(context.Background(), state, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

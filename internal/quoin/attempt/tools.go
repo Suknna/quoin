@@ -29,7 +29,11 @@ const AgentVersion = "initial-analysis-v1"
 // version identity instead of silently drifting under the shared
 // initial-analysis generation; the dispatch row (inspection_analysis
 // creation) and the worker mode must agree on it exactly.
-const InspectionAgentVersion = "inspection-analysis-v1"
+const InspectionAgentVersion = "inspection-analysis-v2"
+
+// PreviousInspectionAgentVersion retains execution compatibility for attempts
+// created with the first dedicated inspection prompt generation.
+const PreviousInspectionAgentVersion = "inspection-analysis-v1"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen

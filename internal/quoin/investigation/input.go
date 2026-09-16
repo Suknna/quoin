@@ -33,8 +33,14 @@ type Input struct {
 	// admin-enabled integrations at creation, rendered exactly when the
 	// attempt has no business context. The declaration view narrows; this
 	// list is the whole read-only scope.
-	Integrations  []RenderedIntegration `json:"integrations,omitempty"`
-	ModelContract ModelContract         `json:"modelContract"`
+	Integrations []RenderedIntegration `json:"integrations,omitempty"`
+	// RecentOccurrences is Quoin's own recent alert history (renderer v3):
+	// resolved occurrences disappear from instant ALERTS queries, so the
+	// prompt context must carry them for "summarize current alerts" work.
+	// Only immutable occurrence facts render — state/resolvedAt may still
+	// change after the freeze, which would break digest reproduction.
+	RecentOccurrences []RenderedRecentOccurrence `json:"recentOccurrences,omitempty"`
+	ModelContract     ModelContract              `json:"modelContract"`
 	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
 	// the snapshot digest covers it via this embedding.
 	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
@@ -46,6 +52,15 @@ type Input struct {
 type RenderedIntegration struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+}
+
+// RenderedRecentOccurrence is one frozen history occurrence rendered into
+// the investigation prompt context (immutable facts only).
+type RenderedRecentOccurrence struct {
+	ID        string            `json:"id"`
+	SourceKey string            `json:"sourceKey"`
+	StartsAt  string            `json:"startsAt"`
+	Labels    map[string]string `json:"labels"`
 }
 
 // RenderedBusinessContext exposes the frozen declaration's resource choices;
@@ -203,8 +218,10 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 		return nil, err
 	}
 	// Renderer v2 renders the frozen integrations — the source-level
-	// authority of every new attempt (ADR-0004). v1 snapshots keep their
-	// exact historical bytes; old attempts are never re-interpreted.
+	// authority of every new attempt (ADR-0004). v3 additionally renders
+	// Quoin's recent alert history frozen as lineage items. v1/v2 snapshots
+	// keep their exact historical bytes; old attempts are never
+	// re-interpreted.
 	var integrations []RenderedIntegration
 	if rendererVersion != "investigation-renderer-v1" {
 		integrations, err = frozenIntegrations(ctx, service.runner.Reader(), attemptID)
@@ -212,7 +229,14 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 			return nil, err
 		}
 	}
-	return service.rebuildFor(ctx, service.runner.Reader(), investigationID, cutoffSeq, businessContext, integrations, probeResultID, toolCatalog)
+	var history []RenderedRecentOccurrence
+	if rendererVersion == RendererVersion {
+		history, err = frozenRecentOccurrences(ctx, service.runner.Reader(), attemptID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return service.rebuildFor(ctx, service.runner.Reader(), investigationID, cutoffSeq, businessContext, integrations, history, probeResultID, toolCatalog)
 }
 
 // frozenIntegrations reconstructs the frozen source-level authority from the
@@ -242,6 +266,41 @@ func frozenIntegrations(ctx context.Context, queries queryer, attemptID int64) (
 		integrations = append(integrations, integration)
 	}
 	return integrations, rows.Err()
+}
+
+// frozenRecentOccurrences reconstructs the frozen alert-history lineage:
+// the occurrences frozen into the snapshot at creation, read back through
+// the immutable lineage so later occurrence state changes cannot drift the
+// digest.
+func frozenRecentOccurrences(ctx context.Context, queries queryer, attemptID int64) ([]RenderedRecentOccurrence, error) {
+	rows, err := queries.QueryContext(ctx, `
+		SELECT o.id, src.source_key, o.starts_at, o.labels_canonical
+		FROM attempt_input_snapshots snapshot
+		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id
+			AND item.item_role='history_occurrence' AND item.occurrence_id IS NOT NULL
+		JOIN alert_occurrences o ON o.id=item.occurrence_id
+		JOIN alert_sources src ON src.id=o.source_id
+		WHERE snapshot.attempt_id=?
+		ORDER BY item.item_seq`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var occurrences []RenderedRecentOccurrence
+	for rows.Next() {
+		var id int64
+		var labelsJSON string
+		var occurrence RenderedRecentOccurrence
+		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(labelsJSON), &occurrence.Labels); err != nil {
+			return nil, fmt.Errorf("decode history occurrence %d labels: %w", id, err)
+		}
+		occurrence.ID = strconv.FormatInt(id, 10)
+		occurrences = append(occurrences, occurrence)
+	}
+	return occurrences, rows.Err()
 }
 
 // attemptUserMessage resolves the user message an attempt answers. Send
@@ -278,7 +337,7 @@ func attemptUserMessage(ctx context.Context, queries queryer, attemptID int64) (
 // investigation's durable rows; the message set freezes at the turn's
 // cutoff seq (create/send/retry pass their own user message, dispatch
 // rebuilds resolve it through attemptUserMessage).
-func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, integrations []RenderedIntegration, probeResultID int64, toolCatalog *attempt.FrozenCatalog) ([]byte, error) {
+func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, integrations []RenderedIntegration, history []RenderedRecentOccurrence, probeResultID int64, toolCatalog *attempt.FrozenCatalog) ([]byte, error) {
 	var input Input
 	rows, err := queries.QueryContext(ctx, `
 		SELECT id, role, content FROM investigation_messages
@@ -322,6 +381,7 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 		}
 	}
 	input.Integrations = integrations
+	input.RecentOccurrences = history
 	contract := ModelContract{}
 	if err := queries.QueryRowContext(ctx, `
 		SELECT chat_model_id, context_budget_tokens, max_output_tokens

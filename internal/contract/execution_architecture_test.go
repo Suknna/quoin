@@ -872,6 +872,7 @@ var executionBaseline = []executionBaselineEntry{
 	{Path: "internal/quoin/upgrade/authaudit.go", Symbol: "upgrade.seedAuditRetentionSingletons", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
 	{Path: "internal/quoin/upgrade/authsimplification.go", Symbol: "upgrade.migrateAuthSimplificationOn", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
 	{Path: "internal/quoin/upgrade/inspectionfreeze.go", Symbol: "upgrade.migrateInspectionFreezeOn", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
+	{Path: "internal/quoin/upgrade/alertviewattribution.go", Symbol: "upgrade.migrateAlertViewAttributionOn", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
 	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.cutoverCurrentLegacyConfiguration", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
 	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.insertLegacySuccessorProjections", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},
 	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migrateDeclarationCutoverOn", Rule: "sql_write_exec", Planned: "stage1", Class: "lowlevel"},

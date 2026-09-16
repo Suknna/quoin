@@ -175,6 +175,55 @@ func TestBuildInvestigationMessagesRendersSourceScopeForDeclaredAttempts(t *test
 	}
 }
 
+func TestInvestigationPromptUsesPlatformHistoryAsAlertOccurrenceAuthority(t *testing.T) {
+	for _, required := range []string{
+		"以平台提供的近期告警记录为准",
+		"时间区间查询",
+		"不能单独证明某条告警曾经触发",
+		"数值必须与工具返回逐字一致",
+	} {
+		if !strings.Contains(InvestigationSystemPrompt, required) {
+			t.Fatalf("investigation prompt missing %q: %s", required, InvestigationSystemPrompt)
+		}
+	}
+}
+
+func TestBuildInvestigationMessagesRendersRecentOccurrenceHistory(t *testing.T) {
+	input, err := ParseInvestigationInput([]byte(`{
+		"messages":[{"role":"user","content":"最近有过告警吗"}],
+		"sources":[],
+		"recentOccurrences":[
+			{"id":"12","sourceKey":"prod-am","startsAt":"2026-09-15T10:00:00Z","labels":{"alertname":"TargetDown","instance":"api-1"}},
+			{"id":"11","sourceKey":"prod-am","startsAt":"2026-09-14T10:00:00Z","labels":{"alertname":"HighLatency"}}
+		],
+		"modelContract":{"modelId":"fixture-chat-1","contextBudgetTokens":4096,"maxOutputTokens":1024}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := BuildInvestigationMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages=%d want system, history, user", len(messages))
+	}
+	history := messages[1].Content
+	for _, required := range []string{"近期告警记录", `"id": "12"`, `"sourceKey": "prod-am"`, `"alertname": "TargetDown"`, `"id": "11"`} {
+		if !strings.Contains(history, required) {
+			t.Fatalf("history prompt missing %q: %s", required, history)
+		}
+	}
+	if strings.Index(history, `"id": "12"`) > strings.Index(history, `"id": "11"`) {
+		t.Fatalf("history order changed: %s", history)
+	}
+	for _, mutable := range []string{"state", "resolvedAt", "lastStateChangeAt"} {
+		if strings.Contains(history, mutable) {
+			t.Fatalf("history prompt exposed mutable field %q: %s", mutable, history)
+		}
+	}
+}
+
 func TestParseInvestigationInputAttachments(t *testing.T) {
 	canonical := []byte(`{
 	  "messages": [

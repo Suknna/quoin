@@ -6,7 +6,9 @@
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -15,7 +17,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { messageOf } from "@/app/shared";
-import { listMetricsInstances, type MetricsInstance } from "@/features/integrations/api";
+import { listAlertmanagerInstances, listMetricsInstances, type MetricsInstance } from "@/features/integrations/api";
 import { createBusinessView, getBusinessView, updateBusinessView, type BusinessView } from "../api";
 import { draftOf, draftProblems, draftYaml, emptyDraft, parseViewYaml, toPayload, type ViewDraft } from "../view-draft";
 
@@ -35,6 +37,8 @@ export function ViewEditor({ suspended, navigate, editKey, onSaved }: {
   const [yamlText, setYamlText] = useState("");
   const [yamlError, setYamlError] = useState("");
   const [connections, setConnections] = useState<MetricsInstance[]>();
+  const [alertSources, setAlertSources] = useState<string[]>();
+  const [sourcesError, setSourcesError] = useState(false);
   const [loading, setLoading] = useState(Boolean(editKey));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -59,6 +63,15 @@ export function ViewEditor({ suspended, navigate, editKey, onSaved }: {
     return () => { cancelled = true; };
   }, []);
 
+  // 告警源列表只服务于可选的告警归属约束；加载失败不阻塞视图编辑。
+  useEffect(() => {
+    let cancelled = false;
+    void listAlertmanagerInstances()
+      .then((page) => { if (!cancelled) setAlertSources(page.items.map((item) => item.id)); })
+      .catch(() => { if (!cancelled) { setAlertSources([]); setSourcesError(true); } });
+    return () => { cancelled = true; };
+  }, []);
+
   const problems = draftProblems(draft);
   const conditions = Object.entries(draft.labelConditions);
 
@@ -73,6 +86,14 @@ export function ViewEditor({ suspended, navigate, editKey, onSaved }: {
   }
   function addCondition() {
     setDraft((current) => ({ ...current, labelConditions: { ...current.labelConditions, "": "" } }));
+  }
+  function toggleAlertSource(key: string) {
+    setDraft((current) => ({
+      ...current,
+      alertSourceKeys: current.alertSourceKeys.includes(key)
+        ? current.alertSourceKeys.filter((item) => item !== key)
+        : [...current.alertSourceKeys, key],
+    }));
   }
 
   function applyYaml(text: string) {
@@ -187,6 +208,32 @@ export function ViewEditor({ suspended, navigate, editKey, onSaved }: {
                         </div>
                       </div>
                       <FieldDescription>匹配对象的标签条件；留空表示不按标签收窄。</FieldDescription>
+                    </Field>
+                    <Field>
+                      <FieldLabel>告警归属（Alertmanager 告警源）</FieldLabel>
+                      <div className="flex flex-col gap-2" role="group" aria-label="参与告警归属的告警源">
+                        {(alertSources ?? []).map((key) => (
+                          <label key={key} className="flex items-center gap-2 text-sm">
+                            <Checkbox
+                              checked={draft.alertSourceKeys.includes(key)}
+                              onCheckedChange={() => toggleAlertSource(key)}
+                              disabled={suspended || busy}
+                              aria-label={`告警源 ${key}`}
+                            />
+                            <span className="font-mono text-xs">{key}</span>
+                          </label>
+                        ))}
+                        {alertSources?.length === 0 && <p className="text-sm text-muted-foreground">{sourcesError ? "无法读取告警源列表，可稍后重试或改用 YAML 编辑。" : "尚未创建任何 Alertmanager 告警源。"}</p>}
+                        {alertSources === undefined && <p className="text-sm text-muted-foreground">正在读取告警源…</p>}
+                      </div>
+                      <FieldDescription>
+                        勾选后该视图参与这些告警源的告警归属：交付来源必须精确匹配，且上方标签条件全部命中；两者缺一告警保持未归属。不勾选表示本视图不参与告警归属（与来源接入是两种身份，互不替换）。
+                      </FieldDescription>
+                      {draft.alertSourceKeys.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {draft.alertSourceKeys.map((key) => <Badge key={key} variant="outline">{key}</Badge>)}
+                        </div>
+                      )}
                     </Field>
                   </FieldGroup>
                 </TabsContent>

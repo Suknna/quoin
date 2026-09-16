@@ -193,6 +193,12 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 	if stored == inspectionFreezePredecessorSchemaDigest {
 		return verifyInspectionFreezePredecessorHistory(ctx, conn)
 	}
+	// The alert-view-attribution predecessor is reached by fresh installs of
+	// that release (empty ledger) and by inspection-freeze conversions (exactly
+	// its one ledger row). No other history is admissible.
+	if stored == alertViewAttributionPredecessorSchemaDigest {
+		return verifyAlertViewAttributionPredecessorHistory(ctx, conn)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -292,6 +298,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == inspectionFreezePredecessorSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateInspectionFreezeOn)
+	}
+	if digest == alertViewAttributionPredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateAlertViewAttributionOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

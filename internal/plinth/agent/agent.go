@@ -114,17 +114,27 @@ func BuildInitialMessages(input Input) ([]*schema.Message, error) {
 	return append(messages, schema.UserMessage("请分析以下告警：\n"+string(contextBody))), nil
 }
 
-// InvestigationSystemPrompt is the fixed agent contract for investigation
-// attempts (rendered identically by every worker of this agent version;
-// its digest travels in BeginModelCall.prompt_digest for audit and rebuild).
-const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
+// LegacyInvestigationSystemPrompt is the frozen investigation-v1 contract
+// used by renderer-v1/v2 attempts created before recent alert history existed.
+const LegacyInvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
 1. 用通俗中文与用户对话，先理解问题，再给出排查思路；
 2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；
 3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据。`
 
+// InvestigationSystemPrompt is the fixed agent contract for investigation-v2
+// attempts (rendered identically by every worker of this agent version; its
+// digest travels in BeginModelCall.prompt_digest for audit and rebuild).
+const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
+1. 用通俗中文与用户对话，先理解问题，再给出排查思路；
+2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；
+3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据；
+4. 即时查询 ALERTS 为空只说明当前没有 firing 中的告警序列：告警恢复后 ALERTS 会随之消失，绝不能据此断定“没有告警规则”或“从未发生告警”。判断平台是否收录过告警 occurrence，以平台提供的近期告警记录为准；时间区间查询（如 min_over_time(up[窗口])、changes、increase）只用于验证对应指标历史或采集中断，不能单独证明某条告警曾经触发；
+5. 复述证据时数值必须与工具返回逐字一致：先逐条核对再下结论，不得凭印象改写或遗漏与结论相悖的样本。`
+
 // InvestigationRendererVersion identifies the investigation prompt renderer
-// generation. v2 renders the source-level scope guidance (ADR-0004).
-const InvestigationRendererVersion = "investigation-renderer-v2"
+// generation. v2 renders the source-level scope guidance (ADR-0004); v3
+// additionally renders Quoin's recent alert history into the conversation.
+const InvestigationRendererVersion = "investigation-renderer-v3"
 
 // InvestigationInput is the worker's view of the frozen investigation_v1
 // snapshot: the active-branch messages (user messages may carry their
@@ -147,12 +157,26 @@ type InvestigationInput struct {
 	} `json:"businessContext,omitempty"`
 	// Integrations replaces the business context for blank-key attempts: the
 	// admin-enabled sources are the whole read-only scope (ADR-0004).
-	Integrations  []integrationPromptScope `json:"integrations,omitempty"`
-	ModelContract struct {
+	Integrations []integrationPromptScope `json:"integrations,omitempty"`
+	// RecentOccurrences is Quoin's own recent alert history (renderer v3):
+	// the platform record of occurrences including already-resolved ones,
+	// which instant ALERTS queries can no longer return.
+	RecentOccurrences []recentOccurrence `json:"recentOccurrences,omitempty"`
+	ModelContract     struct {
 		ModelID             string `json:"modelId"`
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
 		MaxOutputTokens     int    `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+}
+
+// recentOccurrence is one platform alert-history record rendered into the
+// investigation context (immutable occurrence facts only; labels carry the
+// alertname/severity the alert fired with).
+type recentOccurrence struct {
+	ID        string            `json:"id"`
+	SourceKey string            `json:"sourceKey"`
+	StartsAt  string            `json:"startsAt"`
+	Labels    map[string]string `json:"labels"`
 }
 
 // InputAttachment is the frozen locator projection of one message
@@ -187,7 +211,17 @@ func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 // granted artifact_read/artifact_grep tools can fetch (ARCH-WORKER-003:
 // the worker never materializes Quoin PV paths).
 func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
-	messages := []*schema.Message{schema.SystemMessage(InvestigationSystemPrompt)}
+	return buildInvestigationMessages(input, InvestigationSystemPrompt, true)
+}
+
+// BuildLegacyInvestigationMessages reproduces investigation-v1 prompt bytes and
+// omits the renderer-v3-only alert-history block for historical v1/v2 attempts.
+func BuildLegacyInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
+	return buildInvestigationMessages(input, LegacyInvestigationSystemPrompt, false)
+}
+
+func buildInvestigationMessages(input InvestigationInput, prompt string, includeHistory bool) ([]*schema.Message, error) {
+	messages := []*schema.Message{schema.SystemMessage(prompt)}
 	if len(input.Sources) > 0 {
 		contextBody, err := json.MarshalIndent(map[string]any{"调查来源引用": input.Sources}, "", "  ")
 		if err != nil {
@@ -197,6 +231,15 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 	}
 	if len(input.Integrations) > 0 {
 		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
+	}
+	if includeHistory && len(input.RecentOccurrences) > 0 {
+		contextBody, err := json.MarshalIndent(map[string]any{"近期告警记录": input.RecentOccurrences}, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		// Renderer v3: the platform's own alert history — including resolved
+		// occurrences the source's ALERTS series no longer returns.
+		messages = append(messages, schema.SystemMessage("Quoin 平台近期收录过以下告警记录（含已恢复的；即时查询 ALERTS 为空不代表这些告警没发生过）：\n"+string(contextBody)))
 	}
 	for _, item := range input.Messages {
 		switch item.Role {
