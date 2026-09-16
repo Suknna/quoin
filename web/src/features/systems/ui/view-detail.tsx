@@ -68,6 +68,14 @@ export function ViewDetail({ viewKey, suspended, navigate }: { viewKey: string; 
             <span className="text-sm font-medium">来源接入</span>
             {view.scope.connectionName ? <Badge variant="default">{view.scope.connectionName}</Badge> : <Badge variant="secondary">全部候选来源</Badge>}
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">告警归属</span>
+            {view.scope.alertSourceKeys?.length ? (
+              view.scope.alertSourceKeys.map((key) => <Badge key={key} variant="default" className="font-mono">{key}</Badge>)
+            ) : (
+              <Badge variant="secondary">不参与告警归属</Badge>
+            )}
+          </div>
           <div className="flex flex-col gap-2">
             <span className="text-sm font-medium">标签条件</span>
             {conditions.length ? (
@@ -91,7 +99,7 @@ export function ViewDetail({ viewKey, suspended, navigate }: { viewKey: string; 
               <Empty className="min-h-24">
                 <EmptyHeader>
                   <EmptyTitle>未设置标签条件</EmptyTitle>
-                  <EmptyDescription>留空表示不按标签收窄候选对象。</EmptyDescription>
+                  <EmptyDescription>留空表示不按标签收窄候选对象{view.scope.alertSourceKeys?.length ? "；参与告警归属的视图必须设置标签条件" : ""}。</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}

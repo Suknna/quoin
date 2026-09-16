@@ -38,7 +38,7 @@ func mapError(err error) *problemError {
 		switch rejection.Code {
 		case "view_exists", "row_version_conflict", "command_reused":
 			status = http.StatusConflict
-		case "not_found", "unknown_connection":
+		case "not_found", "unknown_connection", "unknown_alert_source":
 			status = http.StatusNotFound
 		}
 		return problem(status, rejection.Code, rejection.Detail)
@@ -120,11 +120,12 @@ type ViewBody struct {
 	Scope           struct {
 		ConnectionName  string            `json:"connectionName,omitempty"`
 		LabelConditions map[string]string `json:"labelConditions"`
+		AlertSourceKeys []string          `json:"alertSourceKeys,omitempty"`
 	} `json:"scope"`
 }
 
 func (body ViewBody) input() ViewInput {
-	return ViewInput{DisplayName: body.DisplayName, Description: body.Description, ConnectionName: body.Scope.ConnectionName, LabelConditions: body.Scope.LabelConditions}
+	return ViewInput{DisplayName: body.DisplayName, Description: body.Description, ConnectionName: body.Scope.ConnectionName, LabelConditions: body.Scope.LabelConditions, AlertSourceKeys: body.Scope.AlertSourceKeys}
 }
 
 func (h *Handler) createView(ctx context.Context, input *struct {

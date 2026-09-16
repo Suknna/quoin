@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -271,7 +272,14 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 	if err != nil {
 		return err
 	}
-	canonical, err := service.rebuildFor(ctx, tx, investigationID, cutoffSeq, businessContext, integrations, selected.ProbeResultID, catalog)
+	// Renderer v3: freeze Quoin's own recent alert history into the input.
+	// Resolved occurrences vanish from instant ALERTS queries, so the model
+	// must see the platform's record; the lineage keeps the digest stable.
+	history, err := recentOccurrenceHistory(ctx, tx)
+	if err != nil {
+		return err
+	}
+	canonical, err := service.rebuildFor(ctx, tx, investigationID, cutoffSeq, businessContext, integrations, history, selected.ProbeResultID, catalog)
 	if err != nil {
 		return err
 	}
@@ -289,6 +297,21 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 	itemCount, err := insertMessageLineage(ctx, tx, snapshotID, investigationID, cutoffSeq)
 	if err != nil {
 		return err
+	}
+	// History lineage: one item per frozen recent occurrence, ordered as
+	// rendered (the rebuild reads the lineage back in item_seq order).
+	for _, occurrence := range history {
+		itemCount++
+		occurrenceID, parseErr := strconv.ParseInt(occurrence.ID, 10, 64)
+		if parseErr != nil {
+			return parseErr
+		}
+		itemDigest := sha256.Sum256([]byte(fmt.Sprintf("occurrence:%d", occurrenceID)))
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,occurrence_id)
+			VALUES(?,?,?,?,?)`, snapshotID, itemCount, "history_occurrence", hex.EncodeToString(itemDigest[:]), occurrenceID); err != nil {
+			return err
+		}
 	}
 	if businessContext != nil {
 		// The declaration pair is frozen as descriptive context only; later
@@ -329,6 +352,38 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 		return err
 	}
 	return nil
+}
+
+// recentOccurrenceHistory selects Quoin's own most recent alert occurrences
+// as the bounded history context (renderer v3). Only immutable projection
+// facts render: state/resolvedAt may still change after the freeze and are
+// deliberately excluded so the digest stays reproducible (ARCH-CONTEXT-006).
+func recentOccurrenceHistory(ctx context.Context, tx writer) ([]RenderedRecentOccurrence, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT o.id, src.source_key, o.starts_at, o.labels_canonical
+		FROM alert_occurrences o
+		JOIN alert_sources src ON src.id=o.source_id
+		ORDER BY o.first_seen_at DESC, o.id DESC
+		LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var occurrences []RenderedRecentOccurrence
+	for rows.Next() {
+		var id int64
+		var labelsJSON string
+		var occurrence RenderedRecentOccurrence
+		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(labelsJSON), &occurrence.Labels); err != nil {
+			return nil, fmt.Errorf("decode recent occurrence %d labels: %w", id, err)
+		}
+		occurrence.ID = strconv.FormatInt(id, 10)
+		occurrences = append(occurrences, occurrence)
+	}
+	return occurrences, rows.Err()
 }
 
 // insertMessageLineage persists one ordered input item per active-branch

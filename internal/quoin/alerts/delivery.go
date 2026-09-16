@@ -380,8 +380,11 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 			initialState = "Resolved"
 			resolvedAt = committedAt
 		}
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, business_system_id, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?,?)`,
-			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, nullableID(attributionDecision.BusinessSystemID), committedAt, committedAt, resolvedAt)
+		// ADR-0008: business_system_id stays NULL on new occurrences — the
+		// legacy declaration field is history-only and the view attribution
+		// lives in its own frozen projection table.
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, business_system_id, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,NULL,?,?,?)`,
+			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
 			return nil, "", insertErr
 		}

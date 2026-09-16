@@ -1680,6 +1680,11 @@ paths:
           in: query
           schema:
             $ref: '#/components/schemas/StableKey'
+        - name: viewKey
+          in: query
+          description: 按冻结的业务视图归属过滤（ADR-0008）；设置后平台内部故障不并入列表。
+          schema:
+            $ref: '#/components/schemas/StableKey'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
@@ -5805,6 +5810,11 @@ components:
               type: object
               additionalProperties:
                 type: string
+            alertSourceKeys:
+              type: array
+              description: 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；空/缺省 = 不参与告警归属，与 connection 身份互不顶替。
+              items:
+                $ref: '#/components/schemas/StableKey'
         rowVersion:
           type: integer
           minimum: 1
@@ -5994,6 +6004,11 @@ components:
               type: object
               additionalProperties:
                 type: string
+            alertSourceKeys:
+              type: array
+              description: 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。
+              items:
+                $ref: '#/components/schemas/StableKey'
         clientCommandId:
           type: string
           minLength: 8
@@ -6028,6 +6043,11 @@ components:
               type: object
               additionalProperties:
                 type: string
+            alertSourceKeys:
+              type: array
+              description: 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。
+              items:
+                $ref: '#/components/schemas/StableKey'
         clientCommandId:
           type: string
           minLength: 8
@@ -7025,7 +7045,10 @@ components:
           $ref: '#/components/schemas/StableKey'
         attribution:
           $ref: '#/components/schemas/AlertAttributionDiagnostic'
-          description: 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。
+          description: 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。历史行专用，新 occurrence 不再写入。
+        viewAttribution:
+          $ref: '#/components/schemas/AlertViewAttributionDiagnostic'
+          description: 首次接收时冻结的业务视图归属（ADR-0008）；展示的 key/name 取自冻结候选快照，不随视图改名漂移。
         firstSeenAt:
           $ref: '#/components/schemas/Timestamp'
         lastStateChangeAt:
@@ -7057,6 +7080,28 @@ components:
         reasonJson:
           type: string
           description: 冻结归属诊断的 JSON 对象，至少含 code。
+    AlertViewAttributionDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [status, candidatesJson, reasonJson, createdAt]
+      properties:
+        status:
+          type: string
+          enum: [attributed, ambiguous, unattributed]
+        viewKey:
+          $ref: '#/components/schemas/StableKey'
+          description: 唯一匹配时冻结的视图 key；来自候选快照首元素，未归属/歧义时缺省。
+        viewName:
+          type: string
+          description: 唯一匹配时冻结的视图显示名；来自候选快照首元素。
+        candidatesJson:
+          type: string
+          description: 冻结候选视图完整快照的 JSON 数组（viewId/viewKey/displayName/scope），唯一归属恰一元素。
+        reasonJson:
+          type: string
+          description: 冻结归属诊断的 JSON 对象，至少含 code（source_mismatch/label_mismatch/exactly_one_matching_view/multiple_matching_views）。
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
     AlertOccurrenceDetail:
       allOf:
         - $ref: '#/components/schemas/AlertOccurrenceSummary'

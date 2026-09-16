@@ -23,28 +23,64 @@ type AttributionDiagnostic struct {
 	Reason                    string `json:"reasonJson"`
 }
 
+// ViewAttributionDiagnostic surfaces the real business-view attribution
+// (ADR-0008). Attributed rows freeze their unique view identity; ambiguous
+// rows keep every candidate snapshot; unattributed rows carry the reason.
+// BusinessSystem/Attribution above are legacy declaration history and are
+// never recomputed.
+type ViewAttributionDiagnostic struct {
+	Status         string `json:"status"`
+	ViewKey        string `json:"viewKey,omitempty"`
+	ViewName       string `json:"viewName,omitempty"`
+	CandidatesJSON string `json:"candidatesJson"`
+	Reason         string `json:"reasonJson"`
+	CreatedAt      string `json:"createdAt"`
+}
+
 type OccurrenceSummary struct {
 	// ID is an occurrence locator or platform:<fault-id>; Source is mandatory so
 	// consumers cannot mistake an internal fault for an Alertmanager occurrence.
-	ID              string                 `json:"id"`
-	Source          string                 `json:"source"`
-	State           string                 `json:"state"`
-	RowVersion      int64                  `json:"rowVersion"`
-	BusinessSystem  *string                `json:"businessSystemKey,omitempty"`
-	Attribution     *AttributionDiagnostic `json:"attribution,omitempty"`
-	Component       string                 `json:"component,omitempty"`
-	Reason          string                 `json:"reason,omitempty"`
-	FirstSeenAt     string                 `json:"firstSeenAt"`
-	LastStateChange string                 `json:"lastStateChangeAt"`
-	ResolvedAt      *string                `json:"resolvedAt,omitempty"`
-	Labels          map[string]string      `json:"labels"`
-	Annotations     map[string]string      `json:"annotations,omitempty"`
+	ID              string                     `json:"id"`
+	Source          string                     `json:"source"`
+	State           string                     `json:"state"`
+	RowVersion      int64                      `json:"rowVersion"`
+	BusinessSystem  *string                    `json:"businessSystemKey,omitempty"`
+	Attribution     *AttributionDiagnostic     `json:"attribution,omitempty"`
+	ViewAttribution *ViewAttributionDiagnostic `json:"viewAttribution,omitempty"`
+	Component       string                     `json:"component,omitempty"`
+	Reason          string                     `json:"reason,omitempty"`
+	FirstSeenAt     string                     `json:"firstSeenAt"`
+	LastStateChange string                     `json:"lastStateChangeAt"`
+	ResolvedAt      *string                    `json:"resolvedAt,omitempty"`
+	Labels          map[string]string          `json:"labels"`
+	Annotations     map[string]string          `json:"annotations,omitempty"`
 }
 
 type AlertSnapshot struct {
 	SnapshotSeq int64               `json:"snapshotSeq"`
 	Items       []OccurrenceSummary `json:"items"`
 	NextCursor  string              `json:"nextCursor,omitempty"`
+}
+
+// viewAttributionColumns is the shared projection list for the frozen
+// business-view attribution joined by both alert read queries. The surfaced
+// key/name are read from the frozen candidates snapshot's first element, so a
+// later view rename or retirement can never drift the historical identity.
+const viewAttributionColumns = `va.status, json_extract(va.candidates_json,'$[0].viewKey'), json_extract(va.candidates_json,'$[0].displayName'), va.candidates_json, va.reason_json, va.created_at`
+
+// viewAttributionJoin is the shared LEFT JOIN of the frozen projection;
+// attributed_view_id stays available for filtering, never for display.
+const viewAttributionJoin = `
+			LEFT JOIN alert_occurrence_view_attributions va ON va.occurrence_id=o.id`
+
+func scanViewAttribution(status, viewKey, viewName, candidates, reason, createdAt sql.NullString) *ViewAttributionDiagnostic {
+	if !status.Valid {
+		return nil
+	}
+	return &ViewAttributionDiagnostic{
+		Status: status.String, ViewKey: viewKey.String, ViewName: viewName.String,
+		CandidatesJSON: candidates.String, Reason: reason.String, CreatedAt: createdAt.String,
+	}
 }
 
 func occurrenceSummary(id int64, state string, version int64, businessKey sql.NullString, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason sql.NullString, first, changed string, resolved sql.NullString, labelsJSON string, annotationsJSON sql.NullString) (OccurrenceSummary, error) {
@@ -97,14 +133,16 @@ func platformFaultSummary(id int64, component, reason, state string, version int
 
 // AlertSnapshot returns occurrences and independently durable platform faults.
 // Platform rows intentionally ignore businessSystemKey: no business was declared
-// and filtering them would imply fabricated attribution.
+// and filtering them would imply fabricated attribution. viewKey filters by the
+// frozen business-view attribution (ADR-0008); businessSystemKey stays as the
+// legacy declaration filter.
 //
 // The watermark query and both unions run inside ONE read-only snapshot
 // transaction opened on the trusted execution.Reader (BeginSnapshot), so the
 // returned SnapshotSeq and items always describe the same committed state and
 // every statement degrades together: any failure rolls the whole snapshot
 // back, and only a clean read reaches the single Commit.
-func (service *Service) AlertSnapshot(ctx context.Context, state string, businessSystemKey string) (AlertSnapshot, error) {
+func (service *Service) AlertSnapshot(ctx context.Context, state string, businessSystemKey string, viewKey string) (AlertSnapshot, error) {
 	if state != "Firing" && state != "Resolved" {
 		state = "Firing"
 	}
@@ -122,7 +160,11 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		conditions += ` AND o.business_system_id=(SELECT id FROM business_systems WHERE key=?)`
 		args = append(args, businessSystemKey)
 	}
-	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+	if viewKey != "" {
+		conditions += ` AND va.attributed_view_id=(SELECT id FROM business_views WHERE view_key=?)`
+		args = append(args, viewKey)
+	}
+	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,`+viewAttributionColumns+`,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
 			(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
 
 			 FROM alert_observations observation
@@ -133,6 +175,7 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 			FROM alert_occurrences o
 			LEFT JOIN business_systems bs ON bs.id=o.business_system_id
 			LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
+			`+viewAttributionJoin+`
 			WHERE `+conditions, args...)
 	if err != nil {
 		return AlertSnapshot{}, err
@@ -142,7 +185,10 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		var id, version int64
 		var summaryState, first, changed, labels string
 		var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
-		if err := rows.Scan(&id, &summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason, &first, &changed, &resolved, &labels, &annotations); err != nil {
+		var viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt sql.NullString
+		if err := rows.Scan(&id, &summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason,
+			&viewStatus, &viewKeyDB, &viewName, &viewCandidates, &viewReason, &viewCreatedAt,
+			&first, &changed, &resolved, &labels, &annotations); err != nil {
 
 			rows.Close()
 			return AlertSnapshot{}, err
@@ -152,12 +198,16 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 			rows.Close()
 			return AlertSnapshot{}, err
 		}
+		summary.ViewAttribution = scanViewAttribution(viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt)
 		items = append(items, summary)
 	}
 	if err := rows.Close(); err != nil {
 		return AlertSnapshot{}, err
 	}
-	if businessSystemKey == "" {
+	// Platform faults join the unified list only on unfiltered reads: both
+	// attribution filters scope to Alertmanager occurrences, and listing them
+	// beside a view-filtered request would imply fabricated attribution.
+	if businessSystemKey == "" && viewKey == "" {
 		faultRows, err := snapshot.QueryContext(ctx, `SELECT id,component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE state=?`, state)
 		if err != nil {
 			return AlertSnapshot{}, err
@@ -213,7 +263,8 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 	var summaryState, first, changed, labels string
 	var version int64
 	var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
-	err = service.runner.Reader().QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
+	var viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt sql.NullString
+	err = service.runner.Reader().QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,`+viewAttributionColumns+`,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
 		(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
 		 FROM alert_observations observation
 		 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
@@ -223,11 +274,19 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 		FROM alert_occurrences o
 		LEFT JOIN business_systems bs ON bs.id=o.business_system_id
 		LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
-		WHERE o.id=?`, id).Scan(&summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason, &first, &changed, &resolved, &labels, &annotations)
+		`+viewAttributionJoin+`
+		WHERE o.id=?`, id).Scan(&summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason,
+		&viewStatus, &viewKeyDB, &viewName, &viewCandidates, &viewReason, &viewCreatedAt,
+		&first, &changed, &resolved, &labels, &annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
-	return occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
+	summary, err := occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
+	if err != nil {
+		return OccurrenceSummary{}, err
+	}
+	summary.ViewAttribution = scanViewAttribution(viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt)
+	return summary, nil
 }
 
 // GetOccurrence preserves the upstream-only public domain seam for callers

@@ -1,144 +1,135 @@
 // Alert attribution is decided once, while the first immutable delivery item
-// creates an occurrence. It deliberately has no dependency on the global Label
-// Contract: each current business declaration is a complete candidate rule.
-// Later configuration publications must never recalculate an occurrence.
+// creates an occurrence (ADR-0008). The authority is the business view
+// aggregate (ADR-0004): a view participates only through its explicit
+// alertSourceKeys scope naming the delivering Alertmanager source, and only
+// when every exact label condition is present. Empty label conditions never
+// become a catch-all match, the Alertmanager source identity is never
+// substituted by a Prometheus connection identity, and later view edits must
+// never recalculate a frozen decision.
 package alerts
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
-// attributionCandidate is retained in the immutable diagnostic so an operator
-// can distinguish a conflict from a declaration that matched nothing.
-type attributionCandidate struct {
-	SystemID        int64
-	ConfigVersionID int64
+// attributionViewScope freezes the participating scope of one candidate view
+// inside the immutable diagnostic, so a unique attribution and every
+// ambiguous candidate stay traceable after renames or retirement.
+type attributionViewScope struct {
+	AlertSourceKeys []string          `json:"alertSourceKeys"`
+	LabelConditions map[string]string `json:"labelConditions"`
+}
+
+// attributedCandidateView is one matching view's frozen snapshot.
+type attributedCandidateView struct {
+	ViewID      int64                `json:"viewId"`
+	ViewKey     string               `json:"viewKey"`
+	DisplayName string               `json:"displayName"`
+	Scope       attributionViewScope `json:"scope"`
 }
 
 type attributionDecision struct {
-	BusinessSystemID       *int64
-	Status                 string
-	CandidateSystemIDsJSON string
-	CandidateConfigIDsJSON string
-	ReasonJSON             string
+	Status           string
+	AttributedViewID *int64
+	CandidatesJSON   string
+	ReasonJSON       string
 }
 
-// loadAttribution deliberately does not load an active global contract. The
-// type remains a delivery-scoped seam so all first observations in one delivery
-// use the same authority transaction.
+// loadAttribution deliberately keeps the delivery-scoped seam: all first
+// observations in one delivery share the same authority transaction, so a
+// mid-batch view edit cannot mix authorities inside one delivery.
 func loadAttribution(context.Context, execution.Executor) (attributionIndex, error) {
 	return attributionIndex{}, nil
 }
 
 type attributionIndex struct{}
 
-// attribute evaluates all current business declarations. A declaration is a
-// candidate only when its explicit source reference contains the delivering
-// source and every exact label condition is present with its declared value.
-// The compiler supplies derived public-metric matchLabels when YAML omits
-// AlertSourceLabels, so source-only declarations never become broad matches.
+// attribute evaluates the current business views. Every returned row is a
+// view explicitly scoped to the delivering source (alert_source_keys_json
+// contains the delivering alert source's source_key); a view is a candidate
+// only when it additionally declares at least one label condition and every
+// one of them matches the incoming labels exactly.
 func (attributionIndex) attribute(ctx context.Context, conn execution.Executor, sourceID int64, labels map[string]string) (attributionDecision, error) {
 	canonical, err := CanonicalLabels(labels)
 	if err != nil {
 		return attributionDecision{}, fmt.Errorf("canonicalize labels for attribution: %w", err)
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT systems.id, versions.id,
-			EXISTS(SELECT 1 FROM config_alert_source_refs refs
-				WHERE refs.config_version_id=versions.id AND refs.alert_source_id=?) AS source_matches,
-			EXISTS(SELECT 1 FROM config_alert_label_conditions conditions
-				WHERE conditions.config_version_id=versions.id) AS has_labels,
-			NOT EXISTS(
-				SELECT 1 FROM config_alert_label_conditions conditions
-				WHERE conditions.config_version_id=versions.id
-				  AND NOT EXISTS(SELECT 1 FROM json_each(?) incoming
-					WHERE incoming.key=conditions.label_name AND incoming.value=conditions.label_value)
-			) AS labels_match
-		FROM business_systems systems
-		JOIN business_system_config_versions versions ON versions.id=systems.current_config_version_id
-		WHERE systems.enabled=1 AND versions.state='published'
-		ORDER BY systems.id`, sourceID, canonical)
+		SELECT v.id, v.view_key, v.display_name, v.alert_source_keys_json, v.label_conditions_json,
+			EXISTS(SELECT 1 FROM json_each(v.label_conditions_json) conditions
+				WHERE NOT EXISTS(SELECT 1 FROM json_each(?) incoming
+					WHERE incoming.key=conditions.key AND incoming.value=conditions.value)) AS labels_differ
+		FROM business_views v
+		WHERE EXISTS(SELECT 1 FROM json_each(v.alert_source_keys_json) scoped
+			WHERE scoped.value = (SELECT source_key FROM alert_sources WHERE id=?))
+		ORDER BY v.id`, canonical, sourceID)
 	if err != nil {
 		return attributionDecision{}, err
 	}
 	defer rows.Close()
 
-	candidates := []attributionCandidate{}
-	anyDeclaration := false
-	anySourceMatch := false
-	anyLabelsMatch := false
+	candidates := []attributedCandidateView{}
+	anyScopedView := false
 	for rows.Next() {
-		var candidate attributionCandidate
-		var sourceMatches, hasLabels, labelsMatch int
-		if err := rows.Scan(&candidate.SystemID, &candidate.ConfigVersionID, &sourceMatches, &hasLabels, &labelsMatch); err != nil {
+		var candidate attributedCandidateView
+		var sourceKeysJSON, conditionsJSON string
+		var labelsDiffer int
+		if err := rows.Scan(&candidate.ViewID, &candidate.ViewKey, &candidate.DisplayName, &sourceKeysJSON, &conditionsJSON, &labelsDiffer); err != nil {
 			return attributionDecision{}, err
 		}
-		if hasLabels == 0 {
+		anyScopedView = true
+		if err := json.Unmarshal([]byte(sourceKeysJSON), &candidate.Scope.AlertSourceKeys); err != nil {
+			return attributionDecision{}, err
+		}
+		if err := json.Unmarshal([]byte(conditionsJSON), &candidate.Scope.LabelConditions); err != nil {
+			return attributionDecision{}, err
+		}
+		// 空标签条件绝不构成吞掉一切的兜底匹配：无条件的视图即使声明了来源
+		// 也不是候选。
+		if len(candidate.Scope.LabelConditions) == 0 || labelsDiffer != 0 {
 			continue
 		}
-		anyDeclaration = true
-		if sourceMatches == 1 {
-			anySourceMatch = true
-		}
-		if labelsMatch == 1 {
-			anyLabelsMatch = true
-		}
-		if sourceMatches == 1 && labelsMatch == 1 {
-			candidates = append(candidates, candidate)
-		}
+		candidates = append(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return attributionDecision{}, err
 	}
-	systemIDs := make([]int64, 0, len(candidates))
-	configIDs := make([]int64, 0, len(candidates))
-	for _, candidate := range candidates {
-		systemIDs = append(systemIDs, candidate.SystemID)
-		configIDs = append(configIDs, candidate.ConfigVersionID)
-	}
-	systemIDsJSON, err := json.Marshal(systemIDs)
+
+	candidatesJSON, err := json.Marshal(candidates)
 	if err != nil {
 		return attributionDecision{}, err
 	}
-	configIDsJSON, err := json.Marshal(configIDs)
-	if err != nil {
-		return attributionDecision{}, err
-	}
-	decision := attributionDecision{CandidateSystemIDsJSON: string(systemIDsJSON), CandidateConfigIDsJSON: string(configIDsJSON)}
+	decision := attributionDecision{CandidatesJSON: string(candidatesJSON)}
 	switch len(candidates) {
 	case 0:
 		decision.Status = "unattributed"
-		reason := "no_matching_declaration"
-		switch {
-		case !anyDeclaration:
-			reason = "no_declaration_labels"
-		case !anySourceMatch:
+		reason := "label_mismatch"
+		if !anyScopedView {
 			reason = "source_mismatch"
-		case !anyLabelsMatch:
-			reason = "label_mismatch"
 		}
-		decision.ReasonJSON = `{"code":"` + strings.TrimSpace(reason) + `"}`
+		decision.ReasonJSON = `{"code":"` + reason + `"}`
 	case 1:
+		attributed := candidates[0].ViewID
 		decision.Status = "attributed"
-		decision.BusinessSystemID = &candidates[0].SystemID
-		decision.ReasonJSON = `{"code":"exactly_one_matching_declaration"}`
+		decision.AttributedViewID = &attributed
+		decision.ReasonJSON = `{"code":"exactly_one_matching_view"}`
 	default:
-		decision.Status = "conflict"
-		decision.ReasonJSON = `{"code":"multiple_matching_declarations"}`
+		decision.Status = "ambiguous"
+		decision.ReasonJSON = `{"code":"multiple_matching_views"}`
 	}
 	return decision, nil
 }
 
-// persistAttribution freezes the full decision alongside the occurrence and its
-// first delivery snapshot. This makes diagnostics historical facts rather than
-// a read-time re-evaluation of subsequently changed declarations.
+// persistAttribution freezes the full decision alongside the occurrence and
+// its first delivery snapshot (alert_occurrence_view_attributions). The
+// legacy business-system attribution table is history: it is never written
+// again and its existing rows are never rewritten.
 func persistAttribution(ctx context.Context, conn execution.Executor, occurrenceID, deliveryID, deliveryItemID int64, decision attributionDecision, createdAt string) error {
-	_, err := conn.ExecContext(ctx, `INSERT INTO alert_occurrence_attributions(occurrence_id,status,candidate_system_ids_json,candidate_config_version_ids_json,reason_json,evaluated_from_delivery_id,evaluated_from_delivery_item_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-		occurrenceID, decision.Status, decision.CandidateSystemIDsJSON, decision.CandidateConfigIDsJSON, decision.ReasonJSON, deliveryID, deliveryItemID, createdAt)
+	_, err := conn.ExecContext(ctx, `INSERT INTO alert_occurrence_view_attributions(occurrence_id,status,attributed_view_id,candidates_json,reason_json,evaluated_from_delivery_id,evaluated_from_delivery_item_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		occurrenceID, decision.Status, nullableID(decision.AttributedViewID), decision.CandidatesJSON, decision.ReasonJSON, deliveryID, deliveryItemID, createdAt)
 	return err
 }

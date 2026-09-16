@@ -92,6 +92,11 @@ var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
 		plugins.LocationPlinthSupervisor: true,
 		plugins.LocationLintel:           true,
 	},
+	"investigation-v2": {
+		plugins.LocationWorkerLocal:      true,
+		plugins.LocationPlinthSupervisor: true,
+		plugins.LocationLintel:           true,
+	},
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -313,7 +318,7 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 }
 
 func catalogSchemaVersionFor(agentVersion string) string {
-	if agentVersion == "investigation-v1" {
+	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" {
 		// v3 carries quoin_browser v2: the breaking identityKey locator
 		// (ADR-0004). The label keeps model-call provenance distinguishable
 		// from catalogs frozen with the retired businessSystemKey locator.

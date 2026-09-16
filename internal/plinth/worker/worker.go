@@ -87,6 +87,18 @@ var inspectionAnalysisMode = attemptMode{
 	},
 }
 
+var previousInspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: PreviousInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.PreviousInspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInspectionMessagesWithPrompt(input, agent.PreviousInspectionSystemPrompt)
+	},
+}
+
 // legacyInspectionAnalysisMode renders the frozen previous inspection
 // generation (shared initial-analysis identity, original prompt and message
 // shape) so an in-flight attempt from before the upgrade still commits under
@@ -128,6 +140,20 @@ var investigationMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInvestigationMessages(input)
+	},
+}
+
+var legacyInvestigationMode = attemptMode{
+	schemaKind:       "investigation_v1",
+	agentVersion:     LegacyInvestigationAgentVersion,
+	outputSchemaKind: InvestigationOutputSchemaKind,
+	prompt:           agent.LegacyInvestigationSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInvestigationInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildLegacyInvestigationMessages(input)
 	},
 }
 
@@ -203,13 +229,22 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 	case initialAnalysisMode.schemaKind:
 		mode = initialAnalysisMode
 	case investigationMode.schemaKind:
-		mode = investigationMode
+		switch start.GetAgentVersion() {
+		case WorkerInvestigationAgentVersion:
+			mode = investigationMode
+		case LegacyInvestigationAgentVersion:
+			mode = legacyInvestigationMode
+		default:
+			return attemptMode{}, fmt.Errorf("agent version mismatch: no investigation mode for %s", start.GetAgentVersion())
+		}
 	case inspectionAnalysisMode.schemaKind:
 		// 巡检分析有明确的 legacy 组合：旧共享身份渲染上一代冻结 prompt，
 		// 新身份渲染当前 prompt；其余身份一律拒绝。
 		switch start.GetAgentVersion() {
 		case InspectionAnalysisAgentVersion:
 			mode = inspectionAnalysisMode
+		case PreviousInspectionAnalysisAgentVersion:
+			mode = previousInspectionAnalysisMode
 		case WorkerAgentVersion:
 			mode = legacyInspectionAnalysisMode
 		default:

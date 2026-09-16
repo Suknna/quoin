@@ -5,9 +5,14 @@ package investigation
 // and the single-active-attempt invariant (DATA-INVEST-001/003).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +270,132 @@ func TestDirectBusinessContextAuthorizesMetricsGrant(t *testing.T) {
 		SELECT ?, 'thanos_query', business_system_id, ?, ?, ?, 2, ? FROM business_system_config_versions WHERE id=?`, created.AttemptID, otherID, otherRevisionID, otherGenerationID, testNow(), business.configID); err == nil {
 		t.Fatal("unselected direct metrics connection was authorized")
 	}
+}
+
+func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
+	seedProviderChain(t, db)
+
+	sourceID := seedAlertSourceForHistory(t, db, "history-prod")
+	for index := 0; index < 12; index++ {
+		firstSeen := fmt.Sprintf("2026-09-%02dT10:00:00Z", index+1)
+		seedHistoryOccurrence(t, db, sourceID, fmt.Sprintf("Alert%02d", index+1), firstSeen)
+	}
+	created, err := service.Create(ctx, principalID, "cmd-history-order", "总结最近告警", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input Input
+	if err := json.Unmarshal(canonical, &input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.RecentOccurrences) != 10 {
+		t.Fatalf("recent occurrences=%d want 10: %s", len(input.RecentOccurrences), canonical)
+	}
+	for index, occurrence := range input.RecentOccurrences {
+		want := fmt.Sprintf("Alert%02d", 12-index)
+		if occurrence.Labels["alertname"] != want {
+			t.Fatalf("history[%d] alertname=%q want %q", index, occurrence.Labels["alertname"], want)
+		}
+		if occurrence.SourceKey != "history-prod" {
+			t.Fatalf("history[%d] source=%q", index, occurrence.SourceKey)
+		}
+	}
+	if strings.Contains(string(canonical), `"state"`) || strings.Contains(string(canonical), `"resolvedAt"`) {
+		t.Fatalf("history rendered mutable occurrence facts: %s", canonical)
+	}
+	var historyItems int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items i JOIN attempt_input_snapshots s ON s.id=i.snapshot_id WHERE s.attempt_id=? AND i.item_role='history_occurrence'`, created.AttemptID).Scan(&historyItems); err != nil {
+		t.Fatal(err)
+	}
+	if historyItems != 10 {
+		t.Fatalf("history lineage items=%d want 10", historyItems)
+	}
+	// Mutable lifecycle facts may advance after freezing without changing the
+	// canonical bytes; identity/label facts used by the renderer are schema-
+	// immutable and must reject direct rewrites.
+	newestID, err := strconv.ParseInt(input.RecentOccurrences[0].ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE alert_occurrences SET state='Resolved',resolved_at=?,last_state_change_at=?,row_version=row_version+1 WHERE id=?`, testNow(), testNow(), newestID); err != nil {
+		t.Fatalf("advance occurrence lifecycle: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE alert_occurrences SET labels_canonical='{"alertname":"rewritten"}',labels_digest=?,row_version=row_version+1 WHERE id=?`, strings.Repeat("0", 64), newestID); err == nil {
+		t.Fatal("immutable history labels were rewritten")
+	}
+	rebuilt, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rebuilt, canonical) {
+		t.Fatalf("mutable lifecycle drift changed frozen input:\nold=%s\nnew=%s", canonical, rebuilt)
+	}
+}
+
+func TestRecentOccurrenceHistoryIncludesAllAlertSources(t *testing.T) {
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
+	seedProviderChain(t, db)
+
+	firstSourceID := seedAlertSourceForHistory(t, db, "history-a")
+	secondSourceID := seedAlertSourceForHistory(t, db, "history-b")
+	seedHistoryOccurrence(t, db, firstSourceID, "FromA", "2026-09-15T10:00:00Z")
+	seedHistoryOccurrence(t, db, secondSourceID, "FromB", "2026-09-16T10:00:00Z")
+	created, err := service.Create(ctx, principalID, "cmd-history-sources", "总结最近告警", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := service.RebuildInput(ctx, created.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input Input
+	if err := json.Unmarshal(canonical, &input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.RecentOccurrences) != 2 || input.RecentOccurrences[0].SourceKey != "history-b" || input.RecentOccurrences[1].SourceKey != "history-a" {
+		t.Fatalf("history sources/order=%+v", input.RecentOccurrences)
+	}
+}
+
+func seedAlertSourceForHistory(t *testing.T, db *sql.DB, key string) int64 {
+	t.Helper()
+	result, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES(?,'alertmanager',1,?)`, key, testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func seedHistoryOccurrence(t *testing.T, db *sql.DB, sourceID int64, alertName, firstSeen string) int64 {
+	t.Helper()
+	labels := fmt.Sprintf(`{"alertname":%q}`, alertName)
+	fingerprint := make([]byte, 8)
+	binary.BigEndian.PutUint64(fingerprint, uint64(len(alertName))*1000+uint64(alertName[len(alertName)-1]))
+	result, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,row_version,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',1,?,?,?,?)`,
+		sourceID, fingerprint, firstSeen, labels, fmt.Sprintf("%x", sha256Sum([]byte(labels))), firstSeen, firstSeen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestCreateRequiresContent(t *testing.T) {

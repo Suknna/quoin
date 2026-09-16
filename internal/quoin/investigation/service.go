@@ -42,13 +42,15 @@ const OutputSchemaKind = "investigation_output_v1"
 
 // RendererVersion identifies the investigation input renderer generation
 // (ARCH-CONTEXT-006). v2 renders the frozen integrations for blank-key
-// (source-level) attempts (ADR-0004); v1 snapshots keep their exact
-// historical rebuild path.
-const RendererVersion = "investigation-renderer-v2"
+// (source-level) attempts (ADR-0004); v3 additionally renders Quoin's own
+// recent alert history (frozen lineage) so free-form conversations can see
+// resolved occurrences that instant ALERTS queries can no longer return;
+// v1 snapshots keep their exact historical rebuild path.
+const RendererVersion = "investigation-renderer-v3"
 
 // AgentVersion is the frozen investigation agent generation recorded on
 // the attempt row; the worker binary pins its own copy equal to this.
-const AgentVersion = "investigation-v1"
+const AgentVersion = "investigation-v2"
 
 // Stable operation identities. The user-command names double as the audit
 // actions the runner persists automatically, matching the previous manual

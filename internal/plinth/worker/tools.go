@@ -33,11 +33,19 @@ const WorkerAgentVersion = "initial-analysis-v1"
 // is created with that identity and verifyStart rejects any mismatch, so an
 // attempt from a different prompt generation can never be rendered with this
 // binary's frozen inspection prompt.
-const InspectionAnalysisAgentVersion = "inspection-analysis-v1"
+const InspectionAnalysisAgentVersion = "inspection-analysis-v2"
+
+// PreviousInspectionAnalysisAgentVersion retains the first dedicated
+// inspection prompt generation for already-created attempts.
+const PreviousInspectionAnalysisAgentVersion = "inspection-analysis-v1"
 
 // WorkerInvestigationAgentVersion pins the investigation agent generation
 // (mirrors investigation.AgentVersion).
-const WorkerInvestigationAgentVersion = "investigation-v1"
+const WorkerInvestigationAgentVersion = "investigation-v2"
+
+// LegacyInvestigationAgentVersion retains execution compatibility for
+// investigation renderer-v1/v2 attempts created before alert history v3.
+const LegacyInvestigationAgentVersion = "investigation-v1"
 
 // Spill thresholds (ARCH-OUTPUT-001, RUNTIME-ARTIFACT-001).
 const (

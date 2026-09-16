@@ -122,6 +122,9 @@ func (service *RuntimeService) dispatchQueuedAnalyses(ctx context.Context) {
 // handleAttemptAcceptRouted records Assigned -> Running for whichever task
 // slice owns the attempt (RUNTIME-TASK-004).
 func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, accept *runtimev1.AttemptAccept) {
+	// A received frame must finish its bounded adjudication even if transport closes.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	attemptType, err := service.attemptTypeOf(ctx, accept.GetAttemptId())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "accept.lookup_failed", err.Error())
@@ -129,10 +132,32 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 	}
 	switch attemptType {
 	case "inspection_collection":
-		if service.BusinessSystems != nil {
-			if err := service.BusinessSystems.VerificationAttempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
-				sharedops.LogEvent("quoin", "error", "config_verification.accept_failed", err.Error())
+		var scopeType string
+		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, accept.GetAttemptId()).Scan(&scopeType); err != nil {
+			sharedops.LogEvent("quoin", "error", "accept.scope_lookup_failed", err.Error())
+			return
+		}
+		var owner *attempt.Service
+		switch scopeType {
+		case "observation_run":
+			if service.Observations != nil {
+				owner = service.Observations.Attempts()
 			}
+		case "run_check":
+			if service.Inspections != nil {
+				owner = service.Inspections.Attempts()
+			}
+		case "config_verification_run", "resource_refresh_run":
+			if service.BusinessSystems != nil {
+				owner = service.BusinessSystems.VerificationAttempts()
+			}
+		}
+		if owner == nil {
+			sharedops.LogEvent("quoin", "error", "accept.scope_unwired", scopeType)
+			return
+		}
+		if err := owner.Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+			sharedops.LogEvent("quoin", "error", "collection.accept_failed", scopeType+": "+err.Error())
 		}
 	case "inspection_analysis":
 		if service.Inspections != nil {
@@ -171,6 +196,8 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 // attempts seal through the analysis aggregate (DATA-ANALYSIS-002), probes
 // keep the T07 closure.
 func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, proposal *runtimev1.ResultProposal) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	attemptType, err := service.attemptTypeOf(ctx, proposal.GetAttemptId())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "result.lookup_failed", err.Error())
@@ -271,6 +298,8 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 // handleCancelAckRouted finishes Cancelling -> Cancelled for the owning
 // slice (RUNTIME-CANCEL-003).
 func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot string, ack *runtimev1.CancelAck) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	var expectedSlot sql.NullString
 	if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT runtime_slot FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&expectedSlot); err != nil {
 		sharedops.LogEvent("quoin", "error", "cancel_ack.lookup_failed", err.Error())
@@ -288,10 +317,29 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 	switch attemptType {
 	case "inspection_collection":
 		var scopeType string
-		if service.Inspections != nil {
-			_ = service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType)
+		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType); err != nil {
+			sharedops.LogEvent("quoin", "error", "cancel_ack.scope_lookup_failed", err.Error())
+			return
 		}
-		if scopeType == "run_check" && service.Inspections != nil {
+		if scopeType == "observation_run" {
+			if service.Observations == nil {
+				sharedops.LogEvent("quoin", "error", "cancel_ack.scope_unwired", scopeType)
+				return
+			}
+			if err := service.Observations.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "source_observation.cancel_ack", err.Error())
+				return
+			}
+			if err := service.Observations.ConvergeInterruptedChild(ctx, ack.GetAttemptId(), "cancelled"); err != nil {
+				sharedops.LogEvent("quoin", "error", "source_observation.cancel_converge", err.Error())
+			}
+			return
+		}
+		if scopeType == "run_check" {
+			if service.Inspections == nil {
+				sharedops.LogEvent("quoin", "error", "cancel_ack.scope_unwired", scopeType)
+				return
+			}
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "inspection.cancel_ack", err.Error())
 				return
@@ -299,6 +347,10 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 			// A cancelled journey child must release its operation and persist its
 			// cancellation gap; a PromQL child has no Browser Operation to close.
 			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
+			return
+		}
+		if scopeType != "config_verification_run" && scopeType != "resource_refresh_run" {
+			sharedops.LogEvent("quoin", "error", "cancel_ack.unhandled_scope", scopeType)
 			return
 		}
 		if service.BusinessSystems != nil {

@@ -61,12 +61,17 @@ func TestInspectionMessagesKeepInstructionsUserLevelAndExposeChecklist(t *testin
 		t.Fatalf("messages = %d", len(messages))
 	}
 	system, user := messages[0].Content, messages[1].Content
-	// 证据优先保留在系统提示；报告要求绝不进入系统提示。
+	// 证据优先与通用的冻结要求遵循规则在系统提示；具体报告要求仍只在用户消息。
 	if !strings.Contains(system, "artifact_read") || !strings.Contains(system, "不得引用未读取的内容") {
 		t.Fatalf("system prompt lost the evidence-first contract: %q", system)
 	}
-	if strings.Contains(system, "报告要求") || strings.Contains(system, "只列异常项") {
-		t.Fatalf("report requirements must stay user-level: %q", system)
+	for _, required := range []string{"冻结的报告要求", "格式、字段、章节和长度", "输出最终报告前，逐项核对", "检查说明明确给出的阈值", "不得外推为整体业务健康"} {
+		if !strings.Contains(system, required) {
+			t.Fatalf("system prompt missing %q: %q", required, system)
+		}
+	}
+	if strings.Contains(system, "只列异常项") || strings.Contains(system, "100") {
+		t.Fatalf("system prompt must not copy or hard-code a run-specific instruction: %q", system)
 	}
 	// 仅本次覆盖优先且注明只作用于本次。
 	if !strings.Contains(user, "本次报告要求（仅本次分析生效）") || !strings.Contains(user, "只列异常项") {

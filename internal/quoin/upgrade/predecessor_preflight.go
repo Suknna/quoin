@@ -26,7 +26,7 @@ func IsDeclarationPredecessor(version, digest string) bool {
 
 // IsSupportedMigrationSource includes the one pinned unpublished acceptance
 // schema without presenting that development build as a released predecessor,
-// plus the released inspection-freeze predecessor.
+// plus the released inspection-freeze and alert-view-attribution predecessors.
 func IsSupportedMigrationSource(version, digest string) bool {
-	return version == "v1" && (isReleasedPredecessorDigest(digest) || digest == authSimplificationPredecessorDigest || digest == inspectionFreezePredecessorSchemaDigest)
+	return version == "v1" && (isReleasedPredecessorDigest(digest) || digest == authSimplificationPredecessorDigest || digest == inspectionFreezePredecessorSchemaDigest || digest == alertViewAttributionPredecessorSchemaDigest)
 }

@@ -203,6 +203,42 @@ func (service *Service) CommitProposal(ctx context.Context, attemptID int64, boo
 	return err
 }
 
+// ConvergeInterruptedChild records the honest gap for one child the runtime
+// terminalized outside a result proposal — a loss interruption or an accepted
+// cancellation — and converges its Run in the same audited transaction. The
+// child attempt row is already terminal when this runs (the attempt machine
+// owns that transition); this method only projects the object row's gap fact
+// (its sealed result digest stays untouched, so an adjudicated result can
+// never be overwritten) and lets convergeRunOn close the Run. Repeats are the
+// proven no-op of an already-sealed object row and an already-terminal Run.
+func (service *Service) ConvergeInterruptedChild(ctx context.Context, attemptID int64, gapReason string) error {
+	if !validGapReasons[gapReason] {
+		return fmt.Errorf("source observation interrupted child gap reason %q is not in the closed vocabulary", gapReason)
+	}
+	ctx, err := ensureSystemScope(ctx, execution.SourceTask)
+	if err != nil {
+		return err
+	}
+	var runID int64
+	_, err = execution.Execute(ctx, service.runner, service.convergeOp, func(tx *execution.Tx) (struct{}, error) {
+		err := tx.QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND scope_type='observation_run'`, attemptID).Scan(&runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Not an observation child (or the sweep already raced it away):
+			// nothing to converge here.
+			runID = 0
+			return struct{}{}, nil
+		}
+		if err != nil {
+			return struct{}{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason=? WHERE attempt_id=? AND result_digest IS NULL`, gapReason, attemptID); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, service.convergeRunOn(ctx, tx, runID)
+	}, func(struct{}) int64 { return runID })
+	return err
+}
+
 // projectObservedObjects re-projects one complete object-type pass. The pass
 // is complete by construction (the proposal envelope is success), so marking
 // previously observed identities absent (current=0) is the only place

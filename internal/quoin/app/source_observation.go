@@ -94,7 +94,10 @@ func (service *RuntimeService) prepareSourceObservationDispatch(ctx context.Cont
 		return sourceObservationDispatchInput{}, err
 	}
 	var scopeID int64
-	if err := service.Observations.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='inspection_collection' AND scope_type='observation_run' AND state='Queued'`, attemptID).Scan(&scopeID); err != nil {
+	// No state filter: BindToStream is the durable Queued→Assigned fence, and
+	// the same frozen prepare also serves the reconnect redispatch of an
+	// already-Assigned child the runtime never accepted (RUNTIME-TASK-005).
+	if err := service.Observations.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=? AND attempt_type='inspection_collection' AND scope_type='observation_run'`, attemptID).Scan(&scopeID); err != nil {
 		return sourceObservationDispatchInput{}, err
 	}
 	rows, err := service.Observations.Reader().QueryContext(ctx, `
@@ -144,6 +147,46 @@ func (service *RuntimeService) dispatchQueuedSourceObservationAttempts(ctx conte
 			}
 		}
 	}
+}
+
+// reDispatchSourceObservationAttempt re-sends the DispatchAttempt frame for
+// one Assigned observation child with its frozen input, echoing the stored
+// (boot, epoch) binding exactly like the first dispatch (RUNTIME-TASK-005):
+// the persisted row stays the single correlation authority and the schema
+// forbids rebinding. The observation authority — not the inspection
+// aggregate — owns the source_observation_execution_v1 rebuild.
+func (service *RuntimeService) reDispatchSourceObservationAttempt(ctx context.Context, view attempt.View) error {
+	if service.Observations == nil {
+		return fmt.Errorf("source observation is not wired")
+	}
+	prepared, err := service.prepareSourceObservationDispatch(ctx, view.ID)
+	if err != nil {
+		return err
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Observations.Reader(), view.ID)
+	if err != nil {
+		return err
+	}
+	bindingEpoch := uint64(0)
+	if view.ConnectionEpoch != nil {
+		bindingEpoch = uint64(*view.ConnectionEpoch)
+	}
+	bindingBoot := ""
+	if view.BootID != nil {
+		bindingBoot = *view.BootID
+	}
+	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
+		ConnectionEpoch: bindingEpoch,
+		CorrelationId:   uint64(view.ID),
+		BootId:          bindingBoot,
+		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
+			AttemptId: view.ID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
+			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_OBSERVATION_RUN, ScopeId: prepared.scopeID,
+			OperationCorrelationId: operationCorrelationID,
+			LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+			Input:                  &runtimev1.AttemptInputSnapshot{SchemaKind: prepared.input.SchemaKind, CanonicalJson: prepared.input.CanonicalJSON, ContentDigest: prepared.input.ContentDigest, ConnectionGrants: prepared.grants},
+		}},
+	})
 }
 
 // handleSourceObservationResultProposal adjudicates the sealed

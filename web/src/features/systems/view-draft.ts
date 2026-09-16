@@ -11,13 +11,15 @@ export interface ViewDraft {
   description: string;
   connectionName?: string;
   labelConditions: Record<string, string>;
+  /** 显式参与告警归属的 AM 告警源；空数组 = 不参与（绝不空标签兜底）。 */
+  alertSourceKeys: string[];
 }
 
 /** Stable user-readable keys follow the deployment-wide DNS-like convention; the server stays authoritative. */
 export const viewKeyPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function emptyDraft(): ViewDraft {
-  return { viewKey: "", displayName: "", description: "", labelConditions: {} };
+  return { viewKey: "", displayName: "", description: "", labelConditions: {}, alertSourceKeys: [] };
 }
 
 export function draftOf(view: { viewKey: string; displayName: string; description: string; scope: BusinessViewScope }): ViewDraft {
@@ -27,6 +29,7 @@ export function draftOf(view: { viewKey: string; displayName: string; descriptio
     description: view.description,
     ...(view.scope.connectionName ? { connectionName: view.scope.connectionName } : {}),
     labelConditions: { ...view.scope.labelConditions },
+    alertSourceKeys: [...(view.scope.alertSourceKeys ?? [])],
   };
 }
 
@@ -38,6 +41,10 @@ export function draftProblems(draft: ViewDraft): string[] {
   for (const [key, value] of Object.entries(draft.labelConditions)) {
     if (!key.trim()) problems.push("标签条件的键不能为空。");
     if (!value.trim()) problems.push("标签条件的值不能为空。");
+  }
+  // 参与告警归属必须有标签条件：空条件绝不构成吞掉一切的兜底匹配。
+  if (draft.alertSourceKeys.length > 0 && Object.keys(draft.labelConditions).length === 0) {
+    problems.push("参与告警归属的视图必须至少一个标签条件。");
   }
   return problems;
 }
@@ -55,6 +62,7 @@ export function toPayload(draft: ViewDraft): {
     scope: {
       ...(draft.connectionName ? { connectionName: draft.connectionName } : {}),
       labelConditions: { ...draft.labelConditions },
+      ...(draft.alertSourceKeys.length ? { alertSourceKeys: [...draft.alertSourceKeys] } : {}),
     },
   };
 }
@@ -72,7 +80,7 @@ export function draftYaml(draft: ViewDraft): string {
     apiVersion: "quoin/v1",
     kind: "BusinessView",
     metadata: { name: draft.viewKey, displayName: draft.displayName, ...(draft.description ? { description: draft.description } : {}) },
-    spec: { scope: { ...(draft.connectionName ? { connectionName: draft.connectionName } : {}), ...(Object.keys(draft.labelConditions).length ? { labelConditions: draft.labelConditions } : {}) } },
+    spec: { scope: { ...(draft.connectionName ? { connectionName: draft.connectionName } : {}), ...(Object.keys(draft.labelConditions).length ? { labelConditions: draft.labelConditions } : {}), ...(draft.alertSourceKeys.length ? { alertSourceKeys: draft.alertSourceKeys } : {}) } },
   });
 }
 
@@ -94,8 +102,11 @@ export function parseViewYaml(yaml: string): ViewDraft {
     rejectUnknown(root.spec, ["scope"], "spec");
     if (root.spec.scope !== undefined) {
       if (!isObject(root.spec.scope)) throw new Error("spec.scope 必须是映射。");
-      rejectUnknown(root.spec.scope, ["connectionName", "labelConditions"], "spec.scope");
-      const { connectionName, labelConditions } = root.spec.scope;
+      rejectUnknown(root.spec.scope, ["connectionName", "labelConditions", "alertSourceKeys"], "spec.scope");
+      const { connectionName, labelConditions, alertSourceKeys } = root.spec.scope;
+      if (alertSourceKeys !== undefined) {
+        if (!Array.isArray(alertSourceKeys) || alertSourceKeys.some((item) => typeof item !== "string" || !item.trim())) throw new Error("spec.scope.alertSourceKeys 必须是非空字符串数组。");
+      }
       if (connectionName !== undefined && (typeof connectionName !== "string" || !connectionName.trim())) throw new Error("spec.scope.connectionName 必须是非空字符串。");
       if (labelConditions !== undefined) {
         if (!isObject(labelConditions)) throw new Error("标签条件必须是非空字符串映射。");
@@ -103,9 +114,10 @@ export function parseViewYaml(yaml: string): ViewDraft {
         scope = {
           ...(typeof connectionName === "string" && connectionName ? { connectionName } : {}),
           labelConditions: labelConditions as Record<string, string>,
+          alertSourceKeys: (alertSourceKeys as string[] | undefined) ?? [],
         };
       } else if (typeof connectionName === "string" && connectionName) {
-        scope = { connectionName, labelConditions: {} };
+        scope = { connectionName, labelConditions: {}, alertSourceKeys: (alertSourceKeys as string[] | undefined) ?? [] };
       }
     }
   }
@@ -115,5 +127,6 @@ export function parseViewYaml(yaml: string): ViewDraft {
     description: typeof metadata.description === "string" ? metadata.description : "",
     ...(scope.connectionName ? { connectionName: scope.connectionName } : {}),
     labelConditions: { ...scope.labelConditions },
+    alertSourceKeys: [...(scope.alertSourceKeys ?? [])],
   };
 }

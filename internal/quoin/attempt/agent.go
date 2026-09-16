@@ -936,16 +936,23 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 // independently from the executor generation carried by the attempt. The
 // literals MUST match the snapshot renderer_version constants the owning
 // scope writes (analysis.RendererVersion / investigation.RendererVersion):
-// b58's source-integration input shape is renderer v4 / investigation v2.
+// b58's source-integration input shape is renderer v4 / investigation v2;
+// investigation v3 adds the frozen recent alert-history context.
 // The inspection report prompt has its own renderer generation: its prompt
 // text evolves independently of the initial-analysis prompt, so changing it
 // MUST bump InspectionAgentVersion and this mapping together — a model call
 // row never records a renderer version whose prompt bytes it did not see.
 func promptRendererVersionFor(agentVersion string) string {
+	if agentVersion == "investigation-v2" {
+		return "investigation-renderer-v3"
+	}
 	if agentVersion == "investigation-v1" {
 		return "investigation-renderer-v2"
 	}
 	if agentVersion == InspectionAgentVersion {
+		return "inspection-analysis-renderer-v2"
+	}
+	if agentVersion == PreviousInspectionAgentVersion {
 		return "inspection-analysis-renderer-v1"
 	}
 	return "initial-analysis-renderer-v4"

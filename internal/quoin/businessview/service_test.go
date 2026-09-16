@@ -431,3 +431,87 @@ func TestSetReaderWiresReadOnlyCapability(t *testing.T) {
 		t.Fatalf("wired missing view must surface its typed rejection, got %v", err)
 	}
 }
+
+// seedAlertSourceForView 在 fixture 库里插入一个告警源，供 alertSourceKeys
+// 引用校验使用。
+func seedAlertSourceForView(t *testing.T, db *sql.DB, sourceKey string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,row_version,created_at) VALUES(?,'alertmanager',1,1,'2026-09-13T00:00:00Z')`, sourceKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 告警归属来源约束：alertSourceKeys 显式声明 AM 告警源（与 Prom connection
+// 身份严格区分）；非空时必须至少一个精确标签条件且逐 key 校验存在；空
+// alertSourceKeys 是合法普通视图（不参与告警归属），不破坏原保存行为。
+func TestBusinessViewAlertSourceKeysScope(t *testing.T) {
+	service, db := newViewHarness(t)
+	ctx := adminContext(t, "corr-alert-scope-0001")
+	seedAlertSourceForView(t, db, "am-prod")
+	seedAlertSourceForView(t, db, "am-edge")
+
+	view, err := service.CreateView(ctx, 1, "create-scope-0001", ViewInput{
+		ViewKey: "payments-prod", DisplayName: "支付生产",
+		AlertSourceKeys: []string{"am-edge", "am-prod", "am-prod"},
+		LabelConditions: map[string]string{"service": "payments"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 去重且稳定序存储，投影回读一致。
+	got, err := service.GetView(ctx, "payments-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Scope.AlertSourceKeys) != 2 || got.Scope.AlertSourceKeys[0] != "am-edge" || got.Scope.AlertSourceKeys[1] != "am-prod" {
+		t.Fatalf("alert source keys must dedupe and sort, got %+v", got.Scope.AlertSourceKeys)
+	}
+	if got.Scope.LabelConditions["service"] != "payments" || view.RowVersion != 1 {
+		t.Fatalf("scoped view = %+v", got)
+	}
+
+	// 普通（非告警）视图保持原语义：空 alertSourceKeys + 空标签条件可保存。
+	if _, err := service.CreateView(ctx, 1, "create-scope-0002", ViewInput{ViewKey: "plain-view", DisplayName: "普通视图"}); err != nil {
+		t.Fatalf("plain view without alert scope must still save: %v", err)
+	}
+
+	// 参与告警归属必须有标签条件：拒绝空标签兜底视图。
+	var rejection *ConflictError
+	if _, err := service.CreateView(ctx, 1, "create-scope-0003", ViewInput{
+		ViewKey: "catch-all", DisplayName: "兜底", AlertSourceKeys: []string{"am-prod"},
+	}); !errors.As(err, &rejection) || rejection.Code != "malformed_scope" {
+		t.Fatalf("scoped view without label conditions must be rejected, got %v", err)
+	}
+
+	// 未知告警源 key 拒绝；不存在“跨身份”兜底。
+	if _, err := service.CreateView(ctx, 1, "create-scope-0004", ViewInput{
+		ViewKey: "ghost-scope", DisplayName: "幽灵", AlertSourceKeys: []string{"no-such-source"},
+		LabelConditions: map[string]string{"service": "payments"},
+	}); !errors.As(err, &rejection) || rejection.Code != "unknown_alert_source" {
+		t.Fatalf("unknown alert source key must be rejected, got %v", err)
+	}
+
+	// 更新可整体改来源约束；row_version 前提不变。
+	updated, err := service.UpdateView(ctx, 1, "update-scope-0001", ViewInput{
+		ViewKey: "payments-prod", DisplayName: "支付生产 v2",
+		AlertSourceKeys: []string{"am-prod"}, LabelConditions: map[string]string{"service": "payments", "env": "prod"},
+	}, got.RowVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Scope.AlertSourceKeys) != 1 || updated.Scope.AlertSourceKeys[0] != "am-prod" || updated.RowVersion != 2 {
+		t.Fatalf("updated scoped view = %+v", updated)
+	}
+
+	// 连接身份与告警源身份互不替换：connectionName 不进 alertSourceKeys。
+	if _, err := service.CreateView(ctx, 1, "create-scope-0005", ViewInput{
+		ViewKey: "mixed-scope", DisplayName: "混合", ConnectionName: "fixture-metrics",
+		AlertSourceKeys: []string{"am-prod"}, LabelConditions: map[string]string{"service": "payments"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mixed, err := service.GetView(ctx, "mixed-scope")
+	if err != nil || mixed.Scope.ConnectionName != "fixture-metrics" || len(mixed.Scope.AlertSourceKeys) != 1 {
+		t.Fatalf("connection and alert-source scopes must stay separate: %+v err=%v", mixed.Scope, err)
+	}
+}
