@@ -6,7 +6,7 @@
 
 ## 1. 一个插件是什么
 
-一个插件 = 一个 `plugins.Descriptor`（描述，含工具/模板目录）+ 按需的执行绑定 `plugins.ExecutionBundle`（真实出站执行）。部署 YAML `quoinConfig.enabledPlugins` 选择启用；未知 ID 启动失败；字段缺省时启用 `DefaultEnabled` 插件（prometheus/thanos/alertmanager；browser 与 kubernetes 已退役，显式列出同样启动失败）：
+一个插件 = 一个 `plugins.Descriptor`（描述，含工具/模板目录）+ 按需的执行绑定 `plugins.ExecutionBundle`（真实出站执行）。部署 YAML `quoinConfig.enabledPlugins` 选择启用；未知 ID 启动失败；字段缺省时启用 `DefaultEnabled` 插件。当前可用插件为 Prometheus、Thanos、Alertmanager；浏览器与 Kubernetes 插件计划后续接入。当前版本的启用配置如下：
 
 ```yaml
 component: quoin

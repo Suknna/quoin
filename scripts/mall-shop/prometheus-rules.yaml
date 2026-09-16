@@ -1,0 +1,89 @@
+# mall-shop rehearsal alert rules — canonical source.
+#
+# Applied as ConfigMap prometheus-mall-shop-rules in namespace quoin-lab and
+# mounted into the Prometheus pod at /etc/prometheus/rules/ (rule_files in
+# prometheus.yml). Scrape jobs stamp system_id="mall-shop" (Prometheus label
+# NAMES cannot contain hyphens; label VALUES can, so the id travels as the
+# value of the `system_id` label — alerts inherit it).
+#
+# Evaluation: 15s group interval, `for: 40s` — a real outage flips pending ->
+# firing within ~1 minute and resolves one evaluation after the target
+# recovers, which keeps the drill honest but fast.
+#
+# Trigger/recover drill (real fault, reversible):
+#   kubectl -n mall-lab scale deploy mall-redis-exporter --replicas=0  # firing
+#   kubectl -n mall-lab scale deploy mall-redis-exporter --replicas=1  # resolved
+# See scripts/mall-shop/alert-drill.sh for the automated version.
+groups:
+  - name: mall-shop-targets
+    interval: 15s
+    rules:
+      - alert: MallShopVmTargetDown
+        expr: up{system_id="mall-shop", job=~"vm-(node|nginx)"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop VM target unscrapeable ({{ $labels.job }})"
+          description: >-
+            Scrape of {{ $labels.instance }} ({{ $labels.job }}) has failed for
+            40s: that exporter endpoint is unreachable. Both vm-node and
+            vm-nginx targets dropping together means the VM or the path to it
+            is unreachable; it cannot by itself distinguish a shut-down VM from
+            a network/routing fault. Check MallShopNginxDown for a
+            process-level view.
+      - alert: MallShopNginxDown
+        expr: nginx_up{system_id="mall-shop"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop nginx service failing ({{ $labels.instance }})"
+          description: >-
+            The nginx exporter is reachable but reports nginx_up=0: the nginx
+            service on the VM no longer answers its status endpoint (nginx
+            process stopped or failing while the VM itself is still up).
+      - alert: MallShopMiddlewareTargetDown
+        expr: up{system_id="mall-shop", job=~"mall-(mysql|redis)-exporter"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop middleware exporter down ({{ $labels.job }})"
+          description: >-
+            Exporter {{ $labels.instance }} ({{ $labels.job }}) has been
+            unscrapeable for 40s; the database itself may still be healthy.
+            Check MallShopMySQLUnavailable / MallShopRedisUnavailable for the
+            data-plane view.
+      - alert: MallShopAppTargetDown
+        expr: up{system_id="mall-shop", job="mall-tiny-jmx"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop app JVM target unscrapeable"
+          description: >-
+            The mall-tiny JMX exporter {{ $labels.instance }} has been
+            unscrapeable for 40s. This proves the exporter endpoint is
+            unreachable; it cannot by itself prove why (app stopped, pod
+            rescheduled, or network path fault).
+      - alert: MallShopMySQLUnavailable
+        expr: mysql_up{system_id="mall-shop"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop MySQL not serving connections"
+          description: >-
+            mysqld-exporter reports mysql_up=0: the exporter is alive but
+            cannot get a working MySQL connection.
+      - alert: MallShopRedisUnavailable
+        expr: redis_up{system_id="mall-shop"} == 0
+        for: 40s
+        labels:
+          severity: critical
+        annotations:
+          summary: "mall-shop Redis not serving commands"
+          description: >-
+            redis_exporter reports redis_up=0: the exporter is alive but the
+            Redis instance does not answer PING.
