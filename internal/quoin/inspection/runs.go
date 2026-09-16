@@ -125,13 +125,16 @@ func (s *Service) ListReports(ctx context.Context, runID int64, limit int) ([]Re
 }
 
 // GetReport returns one immutable report version with its bound Evidence set.
+// ReportInstructions 投影该版本分析实际生效的报告要求：报告 Attempt 的不可变
+// requirements 行（仅本次覆盖或显式清除）优先，缺省回退 Run 冻结的初始报告
+// 要求；历史 Attempt（无行）同样回退 Run 冻结值。
 func (s *Service) GetReport(ctx context.Context, runID, version int64) (ReportDetail, error) {
 	var detail ReportDetail
-	var reportID, runIDValue int64
+	var reportID, runIDValue, attemptID int64
 	err := s.reader.QueryRowContext(ctx, `
-		SELECT id, run_id, version, evidence_digest, model_id, content, created_at
+		SELECT id, run_id, version, evidence_digest, model_id, content, created_at, attempt_id
 		FROM inspection_reports WHERE run_id=? AND version=?`, runID, version).
-		Scan(&reportID, &runIDValue, &detail.Version, &detail.EvidenceDigest, &detail.ModelID, &detail.Content, &detail.CreatedAt)
+		Scan(&reportID, &runIDValue, &detail.Version, &detail.EvidenceDigest, &detail.ModelID, &detail.Content, &detail.CreatedAt, &attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReportDetail{}, ErrNotFound
 	}
@@ -140,6 +143,25 @@ func (s *Service) GetReport(ctx context.Context, runID, version int64) (ReportDe
 	}
 	detail.ID = locatorID(reportID)
 	detail.RunID = locatorID(runIDValue)
+	// 每个报告版本的实际生效要求：attempt 行（不可变）优先，Run 冻结值回退。
+	var override sql.NullString
+	requirementsErr := s.reader.QueryRowContext(ctx,
+		`SELECT report_instructions_override FROM inspection_analysis_requirements WHERE attempt_id=?`, attemptID).Scan(&override)
+	if requirementsErr == nil && override.Valid {
+		detail.ReportInstructions = &override.String
+	} else if requirementsErr != nil && !errors.Is(requirementsErr, sql.ErrNoRows) {
+		return ReportDetail{}, requirementsErr
+	}
+	if detail.ReportInstructions == nil {
+		var frozen sql.NullString
+		if err := s.reader.QueryRowContext(ctx,
+			`SELECT frozen_report_instructions FROM inspection_runs WHERE id=?`, runID).Scan(&frozen); err != nil {
+			return ReportDetail{}, err
+		}
+		if frozen.Valid {
+			detail.ReportInstructions = &frozen.String
+		}
+	}
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT evidence_id FROM inspection_report_evidence WHERE report_id=(
 			SELECT id FROM inspection_reports WHERE run_id=? AND version=?) ORDER BY ordinal`, runID, version)
@@ -335,6 +357,20 @@ func (s *Service) detailOn(ctx context.Context, q audit.Reader, runID int64) (Ru
 			return RunDetail{}, err
 		}
 		detail.ConnectionName = &name
+		// 计划 Run 的冻结分析语义投影（Run 创建时从计划复制的名称/检查说明/
+		// 单位/初始报告要求；origin 触发器保证不可变）。
+		var frozen RunFrozenConfig
+		var displayName sql.NullString
+		if err := q.QueryRowContext(ctx, `
+			SELECT frozen_display_name, frozen_check_description, frozen_metric_unit, frozen_report_instructions
+			FROM inspection_runs WHERE id=?`, runID).
+			Scan(&displayName, &frozen.CheckDescription, &frozen.MetricUnit, &frozen.ReportInstructions); err != nil {
+			return RunDetail{}, err
+		}
+		if displayName.Valid {
+			frozen.DisplayName = &displayName.String
+		}
+		detail.FrozenConfig = &frozen
 	}
 	if scheduledFor.Valid {
 		detail.ScheduledFor = &scheduledFor.String

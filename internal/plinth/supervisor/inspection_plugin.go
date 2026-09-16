@@ -443,16 +443,21 @@ func (supervisor *Supervisor) proposeInspectionPlugin(sink *runtime.FrameSink, a
 	if result == nil {
 		result = json.RawMessage("null")
 	}
+	// 真实采集消息按结果类型分流：error 的诊断进 errors；gap 的观察事实（如
+	// 截断/局部响应说明）进 warnings——控制面把它们冻结进检查结果元数据，分
+	// 析清单据此保持缺口可见。绝不丢弃为空数组。
+	warnings := []string{}
+	errorMessages := []string{}
+	if outcome == "error" {
+		errorMessages = messages
+	} else if len(messages) != 0 {
+		warnings = messages
+	}
 	canonical, err := json.Marshal(map[string]any{
 		"schemaKind": pluginResultSchemaKind, "attemptId": attemptID, "inspectionRunId": input.InspectionRunID,
 		"checkKey": input.CheckKey, "outcome": outcome,
 		"observedAt": time.Now().UTC().Format(time.RFC3339Nano), "executionWindow": window, "result": result,
-		"warnings": []string{}, "errors": func() []string {
-			if outcome == "error" {
-				return messages
-			}
-			return []string{}
-		}(), "gapReason": gap,
+		"warnings": warnings, "errors": errorMessages, "gapReason": gap,
 	})
 	if err != nil {
 		return

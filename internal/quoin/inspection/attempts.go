@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
@@ -231,7 +232,10 @@ func (s *Service) rebuildJourneyInput(ctx context.Context, attemptID int64) ([]b
 func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	// 历史 Run 携带声明版本谱系；独立计划 Run（ADR-0004）的 config_version_id
 	// 为 NULL，其模型上下文改由 Run 冻结的计划绑定重建。两条路径必须与各自
-	// 冻结时的字节逐一致。
+	// 冻结时的字节逐一致。分析语义（检查说明/单位/报告要求/逐检查项清单）只在
+	// Attempt 存在 inspection_analysis_requirements 行（新快照）时参与重建：
+	// 旧行为无此行，重建字节保持不变；有此行时重建只读 Run 冻结列与本表，绝不
+	// 回读计划当前定义。
 	var runID sql.NullInt64
 	var configVersionID, planID, connectionID sql.NullInt64
 	var planKey string
@@ -306,11 +310,22 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	if err := grantRows.Close(); err != nil {
 		return nil, err
 	}
+	// 冻结的分析要求行：存在即新快照（检查项清单 + 冻结语义 + 仅本次覆盖）。
+	var override sql.NullString
+	requirementsErr := s.db.QueryRowContext(ctx,
+		`SELECT report_instructions_override FROM inspection_analysis_requirements WHERE attempt_id=?`, attemptID).Scan(&override)
+	hasRequirements := requirementsErr == nil
+	if requirementsErr != nil && !errors.Is(requirementsErr, sql.ErrNoRows) {
+		return nil, requirementsErr
+	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: attemptID, InspectionRunID: runID.Int64,
 		ReportVersion: reportVersion, ConfigVersionID: configVersionID.Int64, PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: modelID, ContextBudgetTokens: contextBudget, MaxOutputTokens: maxOutput},
+	}
+	if hasRequirements && override.Valid {
+		input.ReportInstructionsOverride = &override.String
 	}
 	if planID.Valid {
 		// 计划 Run：与冻结时同一来源重建计划上下文（frozen_params_json /
@@ -323,9 +338,12 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 			input.ConnectionName = connectionName
 		}
 		var paramsRaw, scopeRaw, templateID, templateVersion string
+		var checkDescription, metricUnit, reportInstructions sql.NullString
 		if err := s.db.QueryRowContext(ctx, `
-			SELECT frozen_params_json, frozen_scope_json, template_id, template_version FROM inspection_runs WHERE id=?`, runID.Int64).
-			Scan(&paramsRaw, &scopeRaw, &templateID, &templateVersion); err != nil {
+			SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
+			       frozen_check_description, frozen_metric_unit, frozen_report_instructions
+			FROM inspection_runs WHERE id=?`, runID.Int64).
+			Scan(&paramsRaw, &scopeRaw, &templateID, &templateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
 			return nil, err
 		}
 		params := map[string]any{}
@@ -335,6 +353,21 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 		input.TemplateID = templateID
 		input.TemplateVersion = templateVersion
 		input.Plan = &planReportContext{Key: planKey, Params: params, Scope: scope}
+		if hasRequirements {
+			if checkDescription.Valid {
+				input.Plan.CheckDescription = &checkDescription.String
+			}
+			if metricUnit.Valid {
+				input.Plan.MetricUnit = &metricUnit.String
+			}
+			if reportInstructions.Valid {
+				input.Plan.ReportInstructions = &reportInstructions.String
+			}
+			input.Checks, err = reportCheckItemsOn(ctx, s.db, runID.Int64)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	return json.Marshal(input)
 }

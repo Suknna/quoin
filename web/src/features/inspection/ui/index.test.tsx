@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
-  listInspectionPlans: vi.fn(), createInspectionPlan: vi.fn(), updateInspectionPlan: vi.fn(),
+  listInspectionPlans: vi.fn(), createInspectionPlan: vi.fn(), updateInspectionPlan: vi.fn(), getInspectionPlan: vi.fn(),
   listInspectionRuns: vi.fn(), createInspectionRun: vi.fn(), getInspectionRun: vi.fn(), listInspectionReports: vi.fn(),
   getInspectionReport: vi.fn(), cancelInspectionRun: vi.fn(), reanalyzeInspectionRun: vi.fn(), rerunInspection: vi.fn(),
 }));
@@ -88,9 +88,92 @@ describe("inspection report feedback", () => {
     api.reanalyzeInspectionRun.mockResolvedValue({ id: "att-1", type: "inspection_analysis", state: "Queued", rowVersion: 1, createdAt: "2026-09-10T10:02:00Z" });
     api.rerunInspection.mockResolvedValue({ ...detail, id: "run-10" });
     fireEvent.click(await screen.findByRole("button", { name: "重新分析现有证据" }));
-    await waitFor(() => expect(api.reanalyzeInspectionRun).toHaveBeenCalledWith("6"));
+    // 弹框确认后才提交；未编辑时仅本次覆盖缺省（沿用冻结要求）。
+    fireEvent.click(await screen.findByRole("button", { name: "开始分析" }));
+    await waitFor(() => expect(api.reanalyzeInspectionRun).toHaveBeenCalledWith("6", undefined));
     fireEvent.click(await screen.findByRole("button", { name: "重新采证（新 Run）" }));
     await waitFor(() => expect(onOpenRun).toHaveBeenCalledWith("run-10"));
+  });
+
+  it("prefills the reanalysis dialog with the frozen requirement and sends edited text as a this-run override", async () => {
+    const frozenDetail = { ...detail, frozenConfig: { displayName: "Prometheus 连通巡检", checkDescription: "连通性检查", metricUnit: "1=在线", reportInstructions: "冻结的初始要求" } };
+    api.getInspectionRun.mockResolvedValue(frozenDetail);
+    api.listInspectionReports.mockResolvedValue([]);
+    api.reanalyzeInspectionRun.mockResolvedValue({ id: "att-2", type: "inspection_analysis", state: "Queued", rowVersion: 1, createdAt: "2026-09-10T10:02:00Z" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "重新分析现有证据" }));
+    const dialog = await screen.findByRole("dialog", { name: "重新分析现有证据" });
+    // 默认展示 Run 冻结的初始报告要求（只读，继承模式）。
+    const textarea = within(dialog).getByLabelText("本次报告要求");
+    expect(textarea).toHaveValue("冻结的初始要求");
+    expect(textarea).toBeDisabled();
+    // 打开“仅本次自定义”后可编辑，提交按原文作为仅本次覆盖。
+    fireEvent.click(within(dialog).getByLabelText("仅本次自定义报告要求"));
+    expect(within(dialog).getByLabelText("本次报告要求")).toBeEnabled();
+    fireEvent.change(within(dialog).getByLabelText("本次报告要求"), { target: { value: "仅本次：只看异常" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始分析" }));
+    await waitFor(() => expect(api.reanalyzeInspectionRun).toHaveBeenCalledWith("6", "仅本次：只看异常"));
+  });
+
+  it("distinguishes inherit from an explicit empty-clear in the reanalysis dialog", async () => {
+    const frozenDetail = { ...detail, frozenConfig: { displayName: "旧名", reportInstructions: "冻结的初始要求" } };
+    api.getInspectionRun.mockResolvedValue(frozenDetail);
+    api.listInspectionReports.mockResolvedValue([]);
+    api.reanalyzeInspectionRun.mockResolvedValue({ id: "att-3", type: "inspection_analysis", state: "Queued", rowVersion: 1, createdAt: "2026-09-10T10:02:00Z" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "重新分析现有证据" }));
+    const dialog = await screen.findByRole("dialog", { name: "重新分析现有证据" });
+    // 继承模式提交：请求不含 reportInstructions 字段。
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始分析" }));
+    await waitFor(() => expect(api.reanalyzeInspectionRun).toHaveBeenCalledWith("6", undefined));
+    // 自定义模式清空后提交：显式空串（本次无要求），不是继承。
+    fireEvent.click(await screen.findByRole("button", { name: "重新分析现有证据" }));
+    const reopened = await screen.findByRole("dialog", { name: "重新分析现有证据" });
+    fireEvent.click(within(reopened).getByLabelText("仅本次自定义报告要求"));
+    fireEvent.change(within(reopened).getByLabelText("本次报告要求"), { target: { value: "" } });
+    fireEvent.click(within(reopened).getByRole("button", { name: "开始分析" }));
+    await waitFor(() => expect(api.reanalyzeInspectionRun).toHaveBeenLastCalledWith("6", ""));
+  });
+
+  it("loads the current plan requirement into the reanalysis dialog only on the explicit action", async () => {
+    const frozenDetail = { ...detail, frozenConfig: { displayName: "旧名", reportInstructions: "冻结的初始要求" } };
+    api.getInspectionRun.mockResolvedValue(frozenDetail);
+    api.listInspectionReports.mockResolvedValue([]);
+    api.getInspectionPlan.mockResolvedValue({ ...integrationPlan, reportInstructions: "计划当前的最新要求" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "重新分析现有证据" }));
+    const dialog = await screen.findByRole("dialog", { name: "重新分析现有证据" });
+    expect(within(dialog).getByLabelText("本次报告要求")).toHaveValue("冻结的初始要求");
+    // 继承模式下加载按钮不可用；计划读取只在显式开启自定义并点击后发生。
+    expect(within(dialog).getByRole("button", { name: "加载当前计划要求" })).toBeDisabled();
+    fireEvent.click(within(dialog).getByLabelText("仅本次自定义报告要求"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "加载当前计划要求" }));
+    await waitFor(() => expect(api.getInspectionPlan).toHaveBeenCalledWith("prom-up"));
+    expect(within(dialog).getByLabelText("本次报告要求")).toHaveValue("计划当前的最新要求");
+  });
+
+  it("shows each report version's effective instructions", async () => {
+    renderRunDetail();
+    api.getInspectionReport.mockResolvedValue({ id: "42", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content: "# 报告", createdAt: "2026-09-10T10:01:00Z", reportInstructions: "仅本次：只看异常" });
+    expect(await screen.findByTestId("report-content")).toBeInTheDocument();
+    expect(screen.getByText(/本次报告要求：仅本次：只看异常/)).toBeInTheDocument();
+  });
+
+  it("shows the run's frozen analysis config", async () => {
+    const frozenDetail = { ...detail, frozenConfig: { displayName: "Prometheus 连通巡检", checkDescription: "连通性检查", metricUnit: "1=在线", reportInstructions: "冻结的初始要求" } };
+    api.getInspectionRun.mockResolvedValue(frozenDetail);
+    api.listInspectionReports.mockResolvedValue([]);
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    // 冻结配置默认展开（defaultValue 含 frozen 段）。
+    expect(await screen.findByText("冻结的分析配置（Run 创建时）")).toBeInTheDocument();
+    expect(await screen.findByText("连通性检查")).toBeInTheDocument();
+    expect(screen.getByText("1=在线")).toBeInTheDocument();
+    expect(screen.getByText("冻结的初始要求")).toBeInTheDocument();
+    expect(screen.getByText("Prometheus 连通巡检", { selector: "dd" })).toBeInTheDocument();
   });
 
   it("disables cancellation once the run is terminal even while its analysis is active", async () => {
@@ -205,7 +288,7 @@ describe("plan workspace", () => {
     expect(await screen.findByLabelText("接入连接名")).toHaveValue("lab-prometheus");
   });
 
-  it("creates a plan with YAML params and integration scope", async () => {
+  it("creates a plan with YAML params, integration scope, and analysis semantics", async () => {
     api.createInspectionPlan.mockResolvedValue(integrationPlan);
     render(<InspectionView />);
     fireEvent.click(await screen.findByRole("button", { name: "新建计划" }));
@@ -215,13 +298,28 @@ describe("plan workspace", () => {
     fireEvent.change(screen.getByLabelText("插件 ID"), { target: { value: "prometheus" } });
     fireEvent.change(screen.getByLabelText("模板 ID"), { target: { value: "prometheus-up" } });
     fireEvent.change(screen.getByLabelText("采集参数（YAML）"), { target: { value: "expression: up\n" } });
+    fireEvent.change(screen.getByLabelText("检查说明（可选）"), { target: { value: "连通性检查" } });
+    fireEvent.change(screen.getByLabelText("指标单位（可选）"), { target: { value: "1=在线" } });
+    fireEvent.change(screen.getByLabelText("初始报告要求（可选）"), { target: { value: "逐检查项给出结论" } });
     fireEvent.click(screen.getByRole("button", { name: "保存计划" }));
     await waitFor(() => expect(api.createInspectionPlan).toHaveBeenCalledWith({
       planKey: "prom-up", displayName: "Prometheus 连通巡检", enabled: true, connectionName: "lab-prometheus",
       pluginId: "prometheus", templateId: "prometheus-up", templateVersion: null, params: { expression: "up" },
-      scope: { kind: "integration" }, cron: null, timezone: expect.any(String),
+      scope: { kind: "integration" }, checkDescription: "连通性检查", metricUnit: "1=在线",
+      reportInstructions: "逐检查项给出结论", cron: null, timezone: expect.any(String),
     }));
     await waitFor(() => expect(api.listInspectionPlans).toHaveBeenCalledTimes(2));
+  });
+
+  it("prefills the editor with the plan's analysis semantics when editing", async () => {
+    api.listInspectionPlans.mockResolvedValue([{ ...integrationPlan, checkDescription: "连通性检查", metricUnit: "1=在线", reportInstructions: "逐检查项给出结论" }]);
+    render(<InspectionView />);
+    await screen.findByText("Prometheus 连通巡检");
+    fireEvent.click(screen.getByRole("button", { name: "编辑 Prometheus 连通巡检" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑巡检计划" });
+    expect(within(dialog).getByLabelText("检查说明（可选）")).toHaveValue("连通性检查");
+    expect(within(dialog).getByLabelText("指标单位（可选）")).toHaveValue("1=在线");
+    expect(within(dialog).getByLabelText("初始报告要求（可选）")).toHaveValue("逐检查项给出结论");
   });
 
   it("creates an objects-scoped plan from explicit object rows", async () => {

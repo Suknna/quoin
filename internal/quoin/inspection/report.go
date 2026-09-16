@@ -29,6 +29,151 @@ type reportModelContract struct {
 	MaxOutputTokens     int64  `json:"maxOutputTokens"`
 }
 
+// reportCheckItem 是分析输入携带的单检查项结构化清单：检查身份、冻结语义
+// （名称/说明/单位）、冻结查询形状（表达式与范围）、真实执行窗口与结果对应
+// 关系。gap 是显式事实：没有数据绝不当 0，没有阈值绝不判断健康。
+type reportCheckItem struct {
+	CheckKey    string `json:"checkKey"`
+	DisplayName string `json:"displayName"`
+	Status      string `json:"status"`
+	EvidenceID  *int64 `json:"evidenceId,omitempty"`
+	ArtifactID  *int64 `json:"artifactId,omitempty"`
+	// 冻结的查询形状（来自 Run 冻结参数）。
+	Expression   string `json:"expression,omitempty"`
+	RangeSeconds *int64 `json:"rangeSeconds,omitempty"`
+	StepSeconds  *int64 `json:"stepSeconds,omitempty"`
+	// 真实执行事实：observedAt 与（范围查询的）实际窗口/步长；缺口检查没有
+	// 执行事实，只携带 gapReason。
+	ObservedAt          string   `json:"observedAt,omitempty"`
+	WindowStartAt       string   `json:"windowStartAt,omitempty"`
+	WindowEndAt         string   `json:"windowEndAt,omitempty"`
+	ExecutedStepSeconds *int64   `json:"executedStepSeconds,omitempty"`
+	Warnings            []string `json:"warnings,omitempty"`
+	GapReason           *string  `json:"gapReason,omitempty"`
+}
+
+// checkItemQuerier 抽象冻结路径（执行器事务）与重建路径（只读池）共用的查询面。
+type checkItemQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// reportCheckItemsOn 推导一个 Run 的逐检查项结构化清单。冻结与重建使用同一
+// SQL 与同一解析路径，输入只来自不可变行（run_checks / check_results 的冻结
+// 元数据 / evidence / artifacts 的 evidence 归属关联），因此两次推导字节一致。
+// 元数据来源：新检查结果行自带 meta_json（observedAt/warnings/窗口，gap 亦有）；
+// 历史行（meta_json NULL）显式回退 Evidence 形状。malformed 的冻结 JSON 是
+// 数据完整性故障，带 run/check 身份返回错误，绝不静默吞掉。
+func reportCheckItemsOn(ctx context.Context, q checkItemQuerier, runID int64) ([]reportCheckItem, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT c.check_key, c.display_name, c.params_json,
+		       x.status, x.gap_reason, x.evidence_id, x.meta_json,
+		       e.observed_at, e.params_json, e.warnings_json,
+		       a.id
+		FROM inspection_run_checks c
+		LEFT JOIN inspection_check_results x ON x.run_id=c.run_id AND x.check_key=c.check_key
+		LEFT JOIN evidence e ON e.id=x.evidence_id
+		LEFT JOIN artifacts a ON a.owner_type='evidence' AND a.owner_id=x.evidence_id AND a.kind='report_file'
+		WHERE c.run_id=? ORDER BY c.check_key`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []reportCheckItem{}
+	for rows.Next() {
+		var item reportCheckItem
+		var checkParams, resultMeta, observedAt, evidenceParams, warningsJSON sql.NullString
+		var gapReason sql.NullString
+		var evidenceID, artifactID sql.NullInt64
+		if err := rows.Scan(&item.CheckKey, &item.DisplayName, &checkParams,
+			&item.Status, &gapReason, &evidenceID, &resultMeta,
+			&observedAt, &evidenceParams, &warningsJSON, &artifactID); err != nil {
+			return nil, err
+		}
+		if gapReason.Valid {
+			item.GapReason = &gapReason.String
+		}
+		if checkParams.Valid {
+			var params struct {
+				Expression   string `json:"expression"`
+				RangeSeconds *int64 `json:"rangeSeconds"`
+				StepSeconds  *int64 `json:"stepSeconds"`
+			}
+			if err := json.Unmarshal([]byte(checkParams.String), &params); err != nil {
+				return nil, fmt.Errorf("inspection checklist run=%d check=%s params_json malformed: %w", runID, item.CheckKey, err)
+			}
+			item.Expression = params.Expression
+			item.RangeSeconds = params.RangeSeconds
+			item.StepSeconds = params.StepSeconds
+		}
+		if evidenceID.Valid {
+			item.EvidenceID = &evidenceID.Int64
+		}
+		if artifactID.Valid {
+			item.ArtifactID = &artifactID.Int64
+		}
+		// 执行元数据：新检查结果行优先（gap 亦有观察时间/warnings/窗口事实）；
+		// 历史行显式回退 Evidence 形状。两个来源都是提交时冻结的不可变事实。
+		if resultMeta.Valid {
+			var meta struct {
+				ObservedAt      string   `json:"observedAt"`
+				Warnings        []string `json:"warnings"`
+				ExecutionWindow *struct {
+					StartAt     string `json:"startAt"`
+					EndAt       string `json:"endAt"`
+					StepSeconds int64  `json:"stepSeconds"`
+				} `json:"executionWindow"`
+			}
+			if err := json.Unmarshal([]byte(resultMeta.String), &meta); err != nil {
+				return nil, fmt.Errorf("inspection checklist run=%d check=%s result meta_json malformed: %w", runID, item.CheckKey, err)
+			}
+			item.ObservedAt = meta.ObservedAt
+			item.Warnings = meta.Warnings
+			if meta.ExecutionWindow != nil {
+				item.WindowStartAt = meta.ExecutionWindow.StartAt
+				item.WindowEndAt = meta.ExecutionWindow.EndAt
+				if meta.ExecutionWindow.StepSeconds > 0 {
+					step := meta.ExecutionWindow.StepSeconds
+					item.ExecutedStepSeconds = &step
+				}
+			}
+		} else {
+			if observedAt.Valid {
+				item.ObservedAt = observedAt.String
+			}
+			if evidenceParams.Valid {
+				// 真实执行窗口由采集闭包冻结进 evidence params；缺省（旧证据或
+				// 即时查询）保持缺失，绝不从样本时间戳推断。
+				var params struct {
+					ExecutionWindow *struct {
+						StartAt     string `json:"startAt"`
+						EndAt       string `json:"endAt"`
+						StepSeconds int64  `json:"stepSeconds"`
+					} `json:"executionWindow"`
+				}
+				if err := json.Unmarshal([]byte(evidenceParams.String), &params); err != nil {
+					return nil, fmt.Errorf("inspection checklist run=%d check=%s evidence params_json malformed: %w", runID, item.CheckKey, err)
+				}
+				if params.ExecutionWindow != nil {
+					item.WindowStartAt = params.ExecutionWindow.StartAt
+					item.WindowEndAt = params.ExecutionWindow.EndAt
+					if params.ExecutionWindow.StepSeconds > 0 {
+						step := params.ExecutionWindow.StepSeconds
+						item.ExecutedStepSeconds = &step
+					}
+				}
+			}
+			if warningsJSON.Valid {
+				if err := json.Unmarshal([]byte(warningsJSON.String), &item.Warnings); err != nil {
+					return nil, fmt.Errorf("inspection checklist run=%d check=%s evidence warnings_json malformed: %w", runID, item.CheckKey, err)
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 type reportInput struct {
 	SchemaKind         string              `json:"schemaKind"`
 	AttemptID          int64               `json:"attemptId"`
@@ -46,13 +191,24 @@ type reportInput struct {
 	ConnectionName  string             `json:"connectionName,omitempty"`
 	TemplateID      string             `json:"templateId,omitempty"`
 	TemplateVersion string             `json:"templateVersion,omitempty"`
+	// 计划 Run 的逐检查项结构化清单（冻结语义 + 真实执行事实 + 缺口）；历史
+	// 声明 Run 与旧 Attempt 保持缺失。
+	Checks []reportCheckItem `json:"checks,omitempty"`
+	// 仅本次重分析的报告要求覆盖；缺省表示沿用 Run 冻结的初始报告要求。覆盖
+	// 只改本次报告的指令文本，绝不改写旧证据、冻结语义或检查项含义。
+	ReportInstructionsOverride *string `json:"reportInstructionsOverride,omitempty"`
 }
 
-// planReportContext 是模型可见的计划事实摘要（非秘密、非正文）。
+// planReportContext 是模型可见的计划事实摘要（非秘密、非正文）。检查说明、
+// 单位与初始报告要求来自 Run 冻结列，不读计划当前定义。
 type planReportContext struct {
 	Key    string         `json:"key"`
 	Params map[string]any `json:"params"`
 	Scope  map[string]any `json:"scope"`
+	// Run 冻结的分析语义（可选；旧 Run 为 NULL 时保持缺失以维持重建字节）。
+	CheckDescription   *string `json:"checkDescription,omitempty"`
+	MetricUnit         *string `json:"metricUnit,omitempty"`
+	ReportInstructions *string `json:"reportInstructions,omitempty"`
 }
 
 // modelProviderSelection mirrors the single enabled model provider resolution
@@ -108,9 +264,9 @@ func selectReportModelProvider(ctx context.Context, tx execution.Executor) (mode
 
 // startReportAnalysisOn creates the first analysis attempt after collection
 // closes. A missing model provider is recoverable here: the reconciler retries
-// later instead of creating a placeholder report.
+// later instead of creating a placeholder report. 自动分析只使用 Run 冻结值。
 func (s *Service) startReportAnalysisOn(ctx context.Context, tx execution.Executor, runID int64, now string) error {
-	_, err := s.createReportAnalysisOn(ctx, tx, runID, now, false)
+	_, err := s.createReportAnalysisOn(ctx, tx, runID, now, false, nil)
 	if errors.Is(err, ErrModelProviderMissing) {
 		return nil
 	}
@@ -120,8 +276,10 @@ func (s *Service) startReportAnalysisOn(ctx context.Context, tx execution.Execut
 // createReportAnalysisOn freezes one report attempt. allowPrior is used only
 // by the explicit re-analysis command: it permits prior terminal attempts but
 // never an additional concurrent attempt, so every report version has exactly
-// one live producer.
-func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Executor, runID int64, now string, allowPrior bool) (int64, error) {
+// one live producer. reportInstructionsOverride 仅由显式重分析提供（nil = 沿用
+// Run 冻结的初始报告要求）；实际生效的全部分析要求冻结进本次 Attempt 的输入
+// 快照与 inspection_analysis_requirements 行，重建摘要因此稳定。
+func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Executor, runID int64, now string, allowPrior bool, reportInstructionsOverride *string) (int64, error) {
 	var runState string
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM inspection_runs WHERE id=?`, runID).Scan(&runState); err != nil {
 		return 0, err
@@ -151,8 +309,9 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 		Scan(&configVersionID, &planKey, &planID, &connectionID); err != nil {
 		return 0, err
 	}
-	// 计划 Run：模型上下文携带 Run 冻结的计划绑定（连接与模板）；在任何快照
-	// 写入前读取完毕，快照行保持 append-only。
+	// 计划 Run：模型上下文携带 Run 冻结的计划绑定（连接与模板）与冻结的分析
+	// 语义（检查说明/单位/初始报告要求）；在任何快照写入前读取完毕，快照行保
+	// 持 append-only。
 	var planContext *planReportContext
 	var planConnectionName, planTemplateID, planTemplateVersion string
 	if planID.Valid {
@@ -162,9 +321,12 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 			}
 		}
 		var paramsRaw, scopeRaw string
+		var checkDescription, metricUnit, reportInstructions sql.NullString
 		if err = tx.QueryRowContext(ctx, `
-			SELECT frozen_params_json, frozen_scope_json, template_id, template_version FROM inspection_runs WHERE id=?`, runID).
-			Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion); err != nil {
+			SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
+			       frozen_check_description, frozen_metric_unit, frozen_report_instructions
+			FROM inspection_runs WHERE id=?`, runID).
+			Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
 			return 0, err
 		}
 		params := map[string]any{}
@@ -172,6 +334,15 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 		scope := map[string]any{}
 		_ = json.Unmarshal([]byte(scopeRaw), &scope)
 		planContext = &planReportContext{Key: planKey, Params: params, Scope: scope}
+		if checkDescription.Valid {
+			planContext.CheckDescription = &checkDescription.String
+		}
+		if metricUnit.Valid {
+			planContext.MetricUnit = &metricUnit.String
+		}
+		if reportInstructions.Valid {
+			planContext.ReportInstructions = &reportInstructions.String
+		}
 	}
 	var reportVersion int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
@@ -232,9 +403,27 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 	// execution metadata fails closed.
 	analysisID, err := attempt.CreateOn(ctx, tx, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
-		VALUES('inspection_analysis','run',?,'Queued',?,?,?)`, runID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
+		VALUES('inspection_analysis','run',?,'Queued',?,?,?)`, runID, attempt.ReleaseVersion(), attempt.InspectionAgentVersion, now)
 	if err != nil {
 		return 0, err
+	}
+	// 实际生效的分析要求冻结（本次 Attempt 专属）：覆盖仅影响本次报告指令。
+	var overrideValue any
+	if reportInstructionsOverride != nil {
+		overrideValue = *reportInstructionsOverride
+	}
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO inspection_analysis_requirements(attempt_id,report_instructions_override,created_at) VALUES(?,?,?)`,
+		analysisID, overrideValue, now); err != nil {
+		return 0, err
+	}
+	// 计划 Run 冻结的逐检查项结构化清单：与重建路径同一推导（只读不可变行）。
+	var checkItems []reportCheckItem
+	if planID.Valid {
+		checkItems, err = reportCheckItemsOn(ctx, tx, runID)
+		if err != nil {
+			return 0, err
+		}
 	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
@@ -242,6 +431,7 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
 		Plan:          planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
+		Checks: checkItems, ReportInstructionsOverride: reportInstructionsOverride,
 	}
 	body, err := json.Marshal(input)
 	if err != nil {

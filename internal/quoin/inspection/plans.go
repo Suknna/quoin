@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/robfig/cron/v3"
@@ -153,16 +154,20 @@ type Plan struct {
 	TemplateVersion *string `json:"templateVersion,omitempty"`
 	Params          any     `json:"params"`
 	Scope           any     `json:"scope"`
-	Cron            *string `json:"cron,omitempty"`
-	Timezone        string  `json:"timezone"`
-	RowVersion      int64   `json:"rowVersion"`
-	CreatedAt       string  `json:"createdAt"`
-	UpdatedAt       string  `json:"updatedAt"`
-	planID          int64
-	connectionID    int64
-	paramsJSON      string
-	scopeJSON       string
-	scopeKind       string
+	// 分析语义元数据（可选）：Run 创建时冻结，计划修改不改写已存在 Run。
+	CheckDescription   *string `json:"checkDescription,omitempty"`
+	MetricUnit         *string `json:"metricUnit,omitempty"`
+	ReportInstructions *string `json:"reportInstructions,omitempty"`
+	Cron               *string `json:"cron,omitempty"`
+	Timezone           string  `json:"timezone"`
+	RowVersion         int64   `json:"rowVersion"`
+	CreatedAt          string  `json:"createdAt"`
+	UpdatedAt          string  `json:"updatedAt"`
+	planID             int64
+	connectionID       int64
+	paramsJSON         string
+	scopeJSON          string
+	scopeKind          string
 }
 
 // PlanInput 是创建/更新命令的载荷。Scope 是已按 DTO 形状反序列化的结构：
@@ -182,6 +187,39 @@ type PlanInput struct {
 	Objects         []PlanObject
 	Cron            *string
 	Timezone        string
+	// 可选分析语义字段；空串视为未提供（存储为 NULL）。
+	CheckDescription   string
+	MetricUnit         string
+	ReportInstructions string
+}
+
+// 分析语义字段的合理长度上界：说明/要求是给模型与报告读者的自然语言，
+// 单位是短标签。长度按 rune（码点）计数——与 SQLite length() 的字符计数和
+// JSON maxLength 语义一致；字节计数会对中文等非 ASCII 文本错误拒绝。
+const (
+	maxCheckDescriptionLength   = 2000
+	maxMetricUnitLength         = 100
+	maxReportInstructionsLength = 4000
+)
+
+// validateAnalysisSemantics 校验可选分析语义字段；空串归一为 NULL。
+func validateAnalysisSemantics(input *PlanInput) (checkDescription, metricUnit, reportInstructions any, err error) {
+	textOrNull := func(value string) any {
+		if value == "" {
+			return nil
+		}
+		return value
+	}
+	if utf8.RuneCountInString(input.CheckDescription) > maxCheckDescriptionLength {
+		return nil, nil, nil, &PlanConflictError{Code: "malformed_plan", Detail: fmt.Sprintf("检查说明不能超过 %d 字符", maxCheckDescriptionLength)}
+	}
+	if utf8.RuneCountInString(input.MetricUnit) > maxMetricUnitLength {
+		return nil, nil, nil, &PlanConflictError{Code: "malformed_plan", Detail: fmt.Sprintf("指标单位不能超过 %d 字符", maxMetricUnitLength)}
+	}
+	if utf8.RuneCountInString(input.ReportInstructions) > maxReportInstructionsLength {
+		return nil, nil, nil, &PlanConflictError{Code: "malformed_plan", Detail: fmt.Sprintf("报告要求不能超过 %d 字符", maxReportInstructionsLength)}
+	}
+	return textOrNull(input.CheckDescription), textOrNull(input.MetricUnit), textOrNull(input.ReportInstructions), nil
 }
 
 // wireScopeKind 把 DB 存储值映射为 wire 命名（camelCase）；integration 与
@@ -258,6 +296,37 @@ func translatePlanError(err error) error {
 	return err
 }
 
+// planDigest 载荷携带创建/更新的全部语义字段：分析语义字段纳入命令 digest，
+// 防止同 commandID 不同语义的错误 replay。向后兼容：三个语义字段全部缺省
+// （空）时保持升级前的 map 布局，旧 ledger 命令的同载荷重放 digest 逐字节
+// 稳定；任一字段实际携带语义才追加对应键。
+func planDigest(command string, input PlanInput, expectedRowVersion int64) string {
+	// 基线布局与升级前逐键相同（create 含 connectionName，update 含
+	// expectedRowVersion），语义字段全部缺省时 digest 不变。
+	var payload map[string]any
+	if command == CommandUpdatePlan {
+		payload = map[string]any{
+			"planKey": input.PlanKey, "expectedRowVersion": expectedRowVersion,
+			"displayName": input.DisplayName, "enabled": input.Enabled,
+		}
+	} else {
+		payload = map[string]any{
+			"planKey": input.PlanKey, "connectionName": input.ConnectionName,
+			"displayName": input.DisplayName, "enabled": input.Enabled,
+		}
+	}
+	if input.CheckDescription != "" {
+		payload["checkDescription"] = input.CheckDescription
+	}
+	if input.MetricUnit != "" {
+		payload["metricUnit"] = input.MetricUnit
+	}
+	if input.ReportInstructions != "" {
+		payload["reportInstructions"] = input.ReportInstructions
+	}
+	return auth.DigestCommand(command, payload)
+}
+
 // CreatePlan 在执行器的一个事务中校验并创建计划：会话复核、幂等重放、业务
 // 修改、命令台账与审计事件同事务提交。计划不改变任何运行中的对象；只有随后
 // 创建的 Run 消费它。
@@ -265,7 +334,7 @@ func (s *Service) CreatePlan(ctx context.Context, principalID int64, clientComma
 	if err := validatePlanKey(input.PlanKey); err != nil {
 		return Plan{}, err
 	}
-	digest := auth.DigestCommand(CommandCreatePlan, map[string]any{"planKey": input.PlanKey, "connectionName": input.ConnectionName, "displayName": input.DisplayName, "enabled": input.Enabled})
+	digest := planDigest(CommandCreatePlan, input, 0)
 	outcome, err := execution.Run(ctx, s.runner, s.createPlan, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -273,6 +342,10 @@ func (s *Service) CreatePlan(ctx context.Context, principalID int64, clientComma
 		Digest:          digest,
 	}, func(tx *execution.Tx) (Plan, execution.Change, error) {
 		frozen, err := s.validatePlanInput(ctx, tx, input)
+		if err != nil {
+			return Plan{}, execution.Unchanged, planRejection(err)
+		}
+		checkDescription, metricUnit, reportInstructions, err := validateAnalysisSemantics(&input)
 		if err != nil {
 			return Plan{}, execution.Unchanged, planRejection(err)
 		}
@@ -285,10 +358,10 @@ func (s *Service) CreatePlan(ctx context.Context, principalID int64, clientComma
 		}
 		now := s.nowText()
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
+			INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,check_description,metric_unit,report_instructions,cron,timezone,row_version,created_by,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`,
 			input.PlanKey, input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
-			frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, principalID, now, now); err != nil {
+			frozen.params, frozen.scope, frozen.scopeKind, checkDescription, metricUnit, reportInstructions, nullableText(input.Cron), input.Timezone, principalID, now, now); err != nil {
 			return Plan{}, execution.Unchanged, err
 		}
 		plan, err := s.planOn(ctx, tx, input.PlanKey)
@@ -306,7 +379,7 @@ func (s *Service) CreatePlan(ctx context.Context, principalID int64, clientComma
 // UpdatePlan 以整体提交方式更新计划定义；expectedRowVersion 是并发前提。更新
 // 创建新的定义事实，但不改写任何已存在 Run 的冻结绑定。
 func (s *Service) UpdatePlan(ctx context.Context, principalID int64, clientCommandID string, input PlanInput, expectedRowVersion int64) (Plan, error) {
-	digest := auth.DigestCommand(CommandUpdatePlan, map[string]any{"planKey": input.PlanKey, "expectedRowVersion": expectedRowVersion, "displayName": input.DisplayName, "enabled": input.Enabled})
+	digest := planDigest(CommandUpdatePlan, input, expectedRowVersion)
 	outcome, err := execution.Run(ctx, s.runner, s.updatePlan, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -317,12 +390,16 @@ func (s *Service) UpdatePlan(ctx context.Context, principalID int64, clientComma
 		if err != nil {
 			return Plan{}, execution.Unchanged, planRejection(err)
 		}
+		checkDescription, metricUnit, reportInstructions, err := validateAnalysisSemantics(&input)
+		if err != nil {
+			return Plan{}, execution.Unchanged, planRejection(err)
+		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE inspection_plans SET display_name=?,enabled=?,connection_id=?,plugin_id=?,template_id=?,template_version=?,
-			  params_json=?,scope_json=?,scope_kind=?,cron=?,timezone=?,row_version=row_version+1,updated_at=?
+			  params_json=?,scope_json=?,scope_kind=?,check_description=?,metric_unit=?,report_instructions=?,cron=?,timezone=?,row_version=row_version+1,updated_at=?
 			WHERE plan_key=? AND row_version=?`,
 			input.DisplayName, boolInt(input.Enabled), frozen.connectionID, input.PluginID, input.TemplateID, input.TemplateVersion,
-			frozen.params, frozen.scope, frozen.scopeKind, nullableText(input.Cron), input.Timezone, s.nowText(),
+			frozen.params, frozen.scope, frozen.scopeKind, checkDescription, metricUnit, reportInstructions, nullableText(input.Cron), input.Timezone, s.nowText(),
 			input.PlanKey, expectedRowVersion)
 		if err != nil {
 			return Plan{}, execution.Unchanged, err
@@ -380,13 +457,16 @@ func (s *Service) planOn(ctx context.Context, q audit.Reader, planKey string) (P
 	var plan Plan
 	var enabled int
 	var templateVersion, cron sql.NullString
+	var checkDescription, metricUnit, reportInstructions sql.NullString
 	err := q.QueryRowContext(ctx, `
 		SELECT p.id,p.plan_key,p.display_name,p.enabled,c.name,p.plugin_id,p.template_id,p.template_version,
-		       p.params_json,p.scope_json,p.scope_kind,p.cron,p.timezone,p.row_version,p.created_at,p.updated_at
+		       p.params_json,p.scope_json,p.scope_kind,p.check_description,p.metric_unit,p.report_instructions,
+		       p.cron,p.timezone,p.row_version,p.created_at,p.updated_at
 		FROM inspection_plans p JOIN connections c ON c.id=p.connection_id
 		WHERE p.plan_key=?`, planKey).
 		Scan(&plan.planID, &plan.PlanKey, &plan.DisplayName, &enabled, &plan.ConnectionName, &plan.PluginID, &plan.TemplateID, &templateVersion,
-			&plan.paramsJSON, &plan.scopeJSON, &plan.scopeKind, &cron, &plan.Timezone, &plan.RowVersion, &plan.CreatedAt, &plan.UpdatedAt)
+			&plan.paramsJSON, &plan.scopeJSON, &plan.scopeKind, &checkDescription, &metricUnit, &reportInstructions,
+			&cron, &plan.Timezone, &plan.RowVersion, &plan.CreatedAt, &plan.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return Plan{}, &PlanConflictError{Code: "not_found", Detail: "巡检计划不存在"}
 	}
@@ -399,6 +479,15 @@ func (s *Service) planOn(ctx context.Context, q audit.Reader, planKey string) (P
 	}
 	if cron.Valid {
 		plan.Cron = &cron.String
+	}
+	if checkDescription.Valid {
+		plan.CheckDescription = &checkDescription.String
+	}
+	if metricUnit.Valid {
+		plan.MetricUnit = &metricUnit.String
+	}
+	if reportInstructions.Valid {
+		plan.ReportInstructions = &reportInstructions.String
 	}
 	if err := json.Unmarshal([]byte(plan.paramsJSON), &plan.Params); err != nil {
 		return Plan{}, err

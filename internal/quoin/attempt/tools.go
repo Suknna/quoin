@@ -23,6 +23,14 @@ import (
 // the worker binary and the dispatch row carry it (DATA-ATTEMPT-001).
 const AgentVersion = "initial-analysis-v1"
 
+// InspectionAgentVersion is the inspection report analysis' own frozen
+// executor generation. The inspection prompt evolves independently of the
+// initial-analysis prompt, so its attempts and model calls carry a distinct
+// version identity instead of silently drifting under the shared
+// initial-analysis generation; the dispatch row (inspection_analysis
+// creation) and the worker mode must agree on it exactly.
+const InspectionAgentVersion = "inspection-analysis-v1"
+
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen
 // catalog document or the fixed legacy fallback — never against this

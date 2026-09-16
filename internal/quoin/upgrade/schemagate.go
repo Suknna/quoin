@@ -187,6 +187,12 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return verifyUnifiedAuthHistory(ctx, conn, false)
 	}
+	// The inspection-freeze predecessor is reached by fresh installs of that
+	// release (empty ledger) and by auth-simplification conversions (exactly
+	// its one ledger row). No other history is admissible.
+	if stored == inspectionFreezePredecessorSchemaDigest {
+		return verifyInspectionFreezePredecessorHistory(ctx, conn)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -283,6 +289,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == authSimplificationPredecessorDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateAuthSimplificationOn)
+	}
+	if digest == inspectionFreezePredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateInspectionFreezeOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

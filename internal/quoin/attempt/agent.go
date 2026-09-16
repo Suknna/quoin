@@ -937,9 +937,16 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 // literals MUST match the snapshot renderer_version constants the owning
 // scope writes (analysis.RendererVersion / investigation.RendererVersion):
 // b58's source-integration input shape is renderer v4 / investigation v2.
+// The inspection report prompt has its own renderer generation: its prompt
+// text evolves independently of the initial-analysis prompt, so changing it
+// MUST bump InspectionAgentVersion and this mapping together — a model call
+// row never records a renderer version whose prompt bytes it did not see.
 func promptRendererVersionFor(agentVersion string) string {
 	if agentVersion == "investigation-v1" {
 		return "investigation-renderer-v2"
+	}
+	if agentVersion == InspectionAgentVersion {
+		return "inspection-analysis-renderer-v1"
 	}
 	return "initial-analysis-renderer-v4"
 }

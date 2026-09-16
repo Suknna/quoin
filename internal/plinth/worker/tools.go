@@ -28,6 +28,13 @@ import (
 // attempt.AgentVersion.
 const WorkerAgentVersion = "initial-analysis-v1"
 
+// InspectionAnalysisAgentVersion pins the inspection report analysis agent
+// generation. It must equal attempt.InspectionAgentVersion: the dispatch row
+// is created with that identity and verifyStart rejects any mismatch, so an
+// attempt from a different prompt generation can never be rendered with this
+// binary's frozen inspection prompt.
+const InspectionAnalysisAgentVersion = "inspection-analysis-v1"
+
 // WorkerInvestigationAgentVersion pins the investigation agent generation
 // (mirrors investigation.AgentVersion).
 const WorkerInvestigationAgentVersion = "investigation-v1"

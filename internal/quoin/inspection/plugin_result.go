@@ -142,12 +142,15 @@ func (s *Service) CommitPluginProposal(ctx context.Context, attemptID int64, boo
 		}
 		var evidenceID any
 		if proposal.Outcome == "success" {
-			paramsPayload, _ := json.Marshal(map[string]string{"check_key": checkKey})
+			// 冻结闭包校验 evidence params 的 check_key 键（形状保持不变）；
+			// 采集元数据（observedAt/warnings/执行窗口事实）统一由检查结果的
+			// meta_json 一次性承载，成功与 gap 同一来源，绝不双写第二份。
+			paramsPayload := fmt.Sprintf(`{"check_key":%q}`, checkKey)
 			warnings, _ := json.Marshal(proposal.Warnings)
 			insert, err := tx.ExecContext(commandCtx, `
 				INSERT INTO evidence(attempt_id,target_type,target_id,params_json,observed_at,result_json,warnings_json,integrity,created_at)
 				VALUES(?,'inspection_run',?,?,?,?,?,'complete',?)`,
-				attemptID, runID, string(paramsPayload), proposal.ObservedAt, string(proposal.Result), string(warnings), s.nowText())
+				attemptID, runID, paramsPayload, proposal.ObservedAt, string(proposal.Result), string(warnings), s.nowText())
 			if err != nil {
 				return struct{}{}, err
 			}
@@ -161,13 +164,27 @@ func (s *Service) CommitPluginProposal(ctx context.Context, attemptID int64, boo
 		if proposal.GapReason != nil {
 			nullableGap = *proposal.GapReason
 		}
+		// 采集元数据冻结（observedAt/真实 warnings/执行窗口事实）随检查结果一
+		// 次性写入：gap/error 没有 Evidence，其观察时间与 warnings 只由本列承
+		// 载，分析清单据此保持缺口可见。窗口是采集实际执行的查询窗口（以冻结
+		// evidence_at 为终点），gap 行携带的是请求窗口元数据，绝不是伪造的成
+		// 功结果；即时查询与未携带窗口的失败保持缺失。
+		warningsJSON, marshalErr := json.Marshal(proposal.Warnings)
+		if marshalErr != nil {
+			return struct{}{}, marshalErr
+		}
+		metaPayload := fmt.Sprintf(`{"observedAt":%q,"warnings":%s`, proposal.ObservedAt, string(warningsJSON))
+		if len(proposal.ExecutionWindow) != 0 && string(proposal.ExecutionWindow) != "null" {
+			metaPayload += `,"executionWindow":` + string(proposal.ExecutionWindow)
+		}
+		metaPayload += `}`
 		status := "ok"
 		if proposal.Outcome != "success" {
 			status = "gap"
 		}
 		if _, err := tx.ExecContext(commandCtx, `
-			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, s.nowText()); err != nil {
+			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,meta_json,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, metaPayload, s.nowText()); err != nil {
 			return struct{}{}, err
 		}
 		if err := s.convergeOn(commandCtx, tx, runID); err != nil {

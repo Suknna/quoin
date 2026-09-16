@@ -223,6 +223,16 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 	if templateVersion.Valid {
 		frozenVersion = templateVersion.String
 	}
+	// 名称与可选分析语义字段（检查说明/单位/初始报告要求）随 Run 冻结：计划后续
+	// 修改不改写本 Run；重采证按源 Run 的冻结列原样复制。
+	var frozenDisplayName sql.NullString
+	var frozenCheckDescription, frozenMetricUnit, frozenReportInstructions sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT display_name, check_description, metric_unit, report_instructions
+		FROM inspection_plans WHERE id=?`, planID).
+		Scan(&frozenDisplayName, &frozenCheckDescription, &frozenMetricUnit, &frozenReportInstructions); err != nil {
+		return RunDetail{}, nil, err
+	}
 	// 展开发生在 INSERT 之前：业务视图的标签条件与对象已观测身份标签在 Run
 	// 创建时确定性冻结进 frozen_scope_json（origin 触发器随后使其不可变），
 	// 视图/观测的后续变化不影响已创建 Run。
@@ -231,9 +241,11 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 		return RunDetail{}, nil, expansionErr
 	}
 	insert, err := tx.ExecContext(ctx, `
-		INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?, 'Queued',?)`,
-		planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
+		INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,
+			frozen_display_name,frozen_check_description,frozen_metric_unit,frozen_report_instructions,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'Queued',?)`,
+		planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON,
+		frozenDisplayName, frozenCheckDescription, frozenMetricUnit, frozenReportInstructions, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
 	if err != nil {
 		// 活动唯一索引是提交顺序上的重叠裁决：只有真正活动的 Run 才把定时
 		// 到期转换成 SkippedOverlap，绝不把其它数据库故障伪装成调度决策。
@@ -241,9 +253,11 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 			var activeID int64
 			_ = tx.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&activeID)
 			skip, err := tx.ExecContext(ctx, `
-				INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
-				VALUES(?,?,?,?,?,?,?,?,?,?,?, 'SkippedOverlap',?)`,
-				planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
+				INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,
+					frozen_display_name,frozen_check_description,frozen_metric_unit,frozen_report_instructions,trigger_kind,scheduled_for,rerun_of_id,state,created_at)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'SkippedOverlap',?)`,
+				planID, planKey, connectionID, pluginID, templateID, frozenVersion, paramsJSON, frozenScopeJSON,
+				frozenDisplayName, frozenCheckDescription, frozenMetricUnit, frozenReportInstructions, triggerKind, scheduledFor, nullableInt64(request.rerunOf), now)
 			if err != nil {
 				return RunDetail{}, nil, err
 			}

@@ -2823,6 +2823,7 @@ paths:
       operationId: retryInspectionAnalysis
       x-external-dependency: true
       summary: 重试分析（复用原 Evidence，创建新 Report 版本；不重新采证）
+      description: reportInstructions 缺省表示沿用 Run 冻结的初始报告要求；提供时仅对本次分析生成的报告版本生效，绝不改写旧证据或旧报告的含义。
       parameters:
         - $ref: '#/components/parameters/RunId'
       requestBody:
@@ -2830,7 +2831,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CommandRequest'
+              $ref: '#/components/schemas/InspectionReanalysisRequest'
       responses:
         '429':
           $ref: '#/components/responses/RateLimited'
@@ -5748,6 +5749,18 @@ components:
         params:
           type: object
           additionalProperties: true
+        checkDescription:
+          description: 检查说明（可选）；Run 创建时冻结，计划修改不改写已存在 Run。
+          type: [string, 'null']
+          maxLength: 2000
+        metricUnit:
+          description: 指标单位（可选）；Run 创建时冻结。
+          type: [string, 'null']
+          maxLength: 100
+        reportInstructions:
+          description: 初始报告要求（可选，用户级）；Run 创建时冻结，重分析默认沿用。
+          type: [string, 'null']
+          maxLength: 4000
         scope:
           $ref: '#/components/schemas/PluginInspectionScope'
         cron:
@@ -5929,6 +5942,15 @@ components:
         params:
           type: object
           additionalProperties: true
+        checkDescription:
+          type: [string, 'null']
+          maxLength: 2000
+        metricUnit:
+          type: [string, 'null']
+          maxLength: 100
+        reportInstructions:
+          type: [string, 'null']
+          maxLength: 4000
         scope:
           $ref: '#/components/schemas/PluginInspectionScope'
         cron:
@@ -7570,6 +7592,9 @@ components:
             latestAnalysis:
               $ref: '#/components/schemas/InspectionAnalysisStatus'
               description: 最新 inspection_analysis Attempt 的只读生命周期投影；失败、取消和中断时用于说明恢复路径，不携带模型输入或报告内容。
+            frozenConfig:
+              $ref: '#/components/schemas/InspectionRunFrozenConfig'
+              description: Run 创建时冻结的分析语义投影（名称/检查说明/单位/初始报告要求）；仅计划 Run 携带，重分析弹框默认要求与其同源。
     InspectionAnalysisStatus:
       type: object
       required: [id, state]
@@ -7584,6 +7609,31 @@ components:
           type: string
           maxLength: 128
           description: Runtime 以受控枚举提交的非秘密终止原因；只在失败或中断等终态投影。
+    InspectionReanalysisRequest:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            reportInstructions:
+              description: 报告要求三态——字段缺省继承 Run 冻结的初始报告要求；空串为本次分析显式无要求（清除）；非空文本为仅本次覆盖。覆盖只对本次生成的报告版本生效，绝不改写旧证据或旧报告的含义。
+              type: string
+              maxLength: 4000
+    InspectionRunFrozenConfig:
+      type: object
+      description: Run 创建时从计划复制的不可变分析语义；origin 触发器保证不可变，重采证原样复制。
+      properties:
+        displayName:
+          description: 冻结的计划显示名。
+          type: string
+        checkDescription:
+          type: [string, 'null']
+          maxLength: 2000
+        metricUnit:
+          type: [string, 'null']
+          maxLength: 100
+        reportInstructions:
+          type: [string, 'null']
+          maxLength: 4000
     CheckResultSummary:
       oneOf:
         - type: object
@@ -7654,6 +7704,10 @@ components:
           type: string
         createdAt:
           $ref: '#/components/schemas/Timestamp'
+        reportInstructions:
+          description: 该版本分析实际生效的报告要求（Attempt 不可变覆盖优先，Run 冻结初始要求回退；两者都缺失时缺省）。
+          type: [string, 'null']
+          maxLength: 4000
     ManualRunRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'

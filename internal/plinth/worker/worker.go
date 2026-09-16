@@ -76,7 +76,7 @@ var initialAnalysisMode = attemptMode{
 }
 
 var inspectionAnalysisMode = attemptMode{
-	schemaKind: "inspection_analysis_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	schemaKind: "inspection_analysis_v1", agentVersion: InspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.InspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
 		input, err := agent.ParseInspectionInput(canonical)
@@ -84,6 +84,24 @@ var inspectionAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInspectionMessages(input)
+	},
+}
+
+// legacyInspectionAnalysisMode renders the frozen previous inspection
+// generation (shared initial-analysis identity, original prompt and message
+// shape) so an in-flight attempt from before the upgrade still commits under
+// its own recorded prompt digest. verifyStart admits it only for the exact
+// (inspection_analysis_v1, initial-analysis-v1) combination — no other mode
+// gains a legacy alias.
+var legacyInspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.LegacyInspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildLegacyInspectionMessages(input)
 	},
 }
 
@@ -187,7 +205,16 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 	case investigationMode.schemaKind:
 		mode = investigationMode
 	case inspectionAnalysisMode.schemaKind:
-		mode = inspectionAnalysisMode
+		// 巡检分析有明确的 legacy 组合：旧共享身份渲染上一代冻结 prompt，
+		// 新身份渲染当前 prompt；其余身份一律拒绝。
+		switch start.GetAgentVersion() {
+		case InspectionAnalysisAgentVersion:
+			mode = inspectionAnalysisMode
+		case WorkerAgentVersion:
+			mode = legacyInspectionAnalysisMode
+		default:
+			return attemptMode{}, fmt.Errorf("agent version mismatch: no inspection mode for %s", start.GetAgentVersion())
+		}
 	case knowledgeExtractionMode.schemaKind:
 		mode = knowledgeExtractionMode
 	default:

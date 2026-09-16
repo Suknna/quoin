@@ -3,6 +3,7 @@ package appinspection
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/danielgtaylor/huma/v2"
@@ -18,7 +19,11 @@ type planRequest struct {
 	TemplateID      string         `json:"templateId" minLength:"1"`
 	TemplateVersion *string        `json:"templateVersion,omitempty"`
 	Params          map[string]any `json:"params"`
-	Scope           struct {
+	// 可选分析语义字段：Run 创建时冻结进 Run，计划修改不改写已存在 Run。
+	CheckDescription   *string `json:"checkDescription,omitempty" maxLength:"2000"`
+	MetricUnit         *string `json:"metricUnit,omitempty" maxLength:"100"`
+	ReportInstructions *string `json:"reportInstructions,omitempty" maxLength:"4000"`
+	Scope              struct {
 		Kind            string                  `json:"kind" enum:"integration,businessView,objects"`
 		BusinessViewKey string                  `json:"businessViewKey,omitempty"`
 		Objects         []inspection.PlanObject `json:"objects,omitempty"`
@@ -28,7 +33,24 @@ type planRequest struct {
 }
 
 func (input planRequest) domain() inspection.PlanInput {
-	return inspection.PlanInput{PlanKey: input.PlanKey, DisplayName: input.DisplayName, Enabled: input.Enabled, ConnectionName: input.ConnectionName, PluginID: input.PluginID, TemplateID: input.TemplateID, TemplateVersion: input.TemplateVersion, Params: input.Params, ScopeKind: input.Scope.Kind, BusinessViewKey: input.Scope.BusinessViewKey, Objects: input.Scope.Objects, Cron: input.Cron, Timezone: input.Timezone}
+	return inspection.PlanInput{
+		PlanKey: input.PlanKey, DisplayName: input.DisplayName, Enabled: input.Enabled, ConnectionName: input.ConnectionName,
+		PluginID: input.PluginID, TemplateID: input.TemplateID, TemplateVersion: input.TemplateVersion, Params: input.Params,
+		ScopeKind: input.Scope.Kind, BusinessViewKey: input.Scope.BusinessViewKey, Objects: input.Scope.Objects,
+		Cron: input.Cron, Timezone: input.Timezone,
+		CheckDescription:   derefText(input.CheckDescription),
+		MetricUnit:         derefText(input.MetricUnit),
+		ReportInstructions: derefText(input.ReportInstructions),
+	}
+}
+
+// derefText 归一可选文本：nil 或空白归一为空串（域层存储为 NULL），其余去除
+// 首尾空白。
+func derefText(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 type planOutput struct {

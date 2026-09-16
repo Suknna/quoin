@@ -320,6 +320,8 @@ func (handler *Handler) reanalyzeRun(ctx context.Context, input *struct {
 	RunID   string `path:"runId"`
 	Body    struct {
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		// 仅本次报告要求覆盖：nil/空 = 沿用 Run 冻结的初始报告要求。
+		ReportInstructions *string `json:"reportInstructions,omitempty" maxLength:"4000"`
 	}
 }) (*struct {
 	Status       int                       `header:"-"`
@@ -335,7 +337,7 @@ func (handler *Handler) reanalyzeRun(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, err
 	}
-	result, err := handler.Inspections.ReanalyzeRun(ctx, principalID, input.Body.ClientCommandID, runID)
+	result, err := handler.Inspections.ReanalyzeRun(ctx, principalID, input.Body.ClientCommandID, runID, input.Body.ReportInstructions)
 	if errors.Is(err, inspection.ErrModelProviderMissing) {
 		return nil, problem(http.StatusServiceUnavailable, "model_unavailable", "尚无可用的模型连接，请先完成连接探测并启用后重试。")
 	}

@@ -101,7 +101,7 @@ func TestReanalyzeCreatesNextImmutableReportVersionFromExistingEvidence(t *testi
 	run, evidenceIDs, artifactIDs := completeRunWithFirstReport(t, h)
 	ctx := commandContext(t)
 
-	next, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID)
+	next, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,11 +122,11 @@ func TestReanalyzeCreatesNextImmutableReportVersionFromExistingEvidence(t *testi
 		t.Fatalf("reanalyze must grant the original artifact set: got %v want %v", got, artifactIDs)
 	}
 
-	replayed, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID)
+	replayed, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID, nil)
 	if err != nil || replayed.AttemptID != next.AttemptID {
 		t.Fatalf("same command must replay its Attempt: %+v err=%v", replayed, err)
 	}
-	if _, err = h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0002", run.RunID); err == nil {
+	if _, err = h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0002", run.RunID, nil); err == nil {
 		t.Fatal("a second active re-analysis must be rejected")
 	} else {
 		var rejection *RejectionError
@@ -232,7 +232,7 @@ func TestCancelRunFencesRunningAnalysisWithoutRewritingTheRun(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
 	ctx := commandContext(t)
-	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID)
+	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-run-0001", run.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestCancelFirstRejectsLateReportProposal(t *testing.T) {
 	h := newTestHarness(t)
 	run, evidenceIDs, artifactIDs := completeRunWithFirstReport(t, h)
 	ctx := commandContext(t)
-	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-late-result-0001", run.RunID)
+	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-late-result-0001", run.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestRunDetailProjectsLatestFailedAnalysisForRecovery(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
 	ctx := commandContext(t)
-	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-failed-detail-0001", run.RunID)
+	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-failed-detail-0001", run.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestCancelRunDispatchesAssignedAnalysisBecauseRuntimeMayAlreadyHaveIt(t *te
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)
 	ctx := commandContext(t)
-	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-assigned-0001", run.RunID)
+	retry, err := h.service.ReanalyzeRun(ctx, h.principal, "reanalyze-assigned-0001", run.RunID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

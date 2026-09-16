@@ -44,6 +44,8 @@ export function newClientCommandId(): string {
 export type InspectionRunState = InspectionRunSummary['state']
 export type InspectionCheckResult = CheckResultSummary
 export type InspectionAnalysisAttempt = AttemptSummary
+/** Run 创建时冻结的分析语义投影（名称/检查说明/单位/初始报告要求）。 */
+export type InspectionRunFrozenConfig = InspectionRunDetail['frozenConfig']
 
 /**
  * Plan scope resolved at run creation: the whole integration, one versioned
@@ -136,11 +138,18 @@ export async function cancelInspectionRun(runId: string, expectedRowVersion: num
   return (await response.json()) as InspectionRunDetail
 }
 
-/** Reuses this Run's immutable collected Evidence to create its next Report version. */
-export async function reanalyzeInspectionRun(runId: string): Promise<InspectionAnalysisAttempt> {
+/**
+ * Reuses this Run's immutable collected Evidence to create its next Report
+ * version. The report instructions are a tri-state: `undefined` inherits the
+ * Run's frozen initial requirement (field omitted on the wire); a string —
+ * including the empty string, which clears this run's requirement — is sent
+ * verbatim as a this-run-only override.
+ */
+export async function reanalyzeInspectionRun(runId: string, reportInstructions?: string): Promise<InspectionAnalysisAttempt> {
+  const override = reportInstructions === undefined ? {} : { reportInstructions }
   const response = await fetch(`/api/v1/inspections/runs/${encodeURIComponent(runId)}/analyze`, {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientCommandId: newClientCommandId() }),
+    body: JSON.stringify({ clientCommandId: newClientCommandId(), ...override }),
   })
   if (!response.ok) throw await failure(response)
   return (await response.json()) as InspectionAnalysisAttempt

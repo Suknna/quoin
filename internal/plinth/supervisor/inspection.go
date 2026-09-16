@@ -112,16 +112,20 @@ func (supervisor *Supervisor) proposeInspectionPromQL(sink *runtime.FrameSink, a
 	if result == nil {
 		result = json.RawMessage("null")
 	}
+	// 真实采集消息按结果类型分流：error 的诊断进 errors；gap 的观察事实进
+	// warnings——绝不满丢为空数组。
+	warnings := []string{}
+	errorMessages := []string{}
+	if outcome == "error" {
+		errorMessages = messages
+	} else if len(messages) != 0 {
+		warnings = messages
+	}
 	canonical, err := json.Marshal(map[string]any{
 		"schemaKind": "inspection_promql_result_v1", "attemptId": attemptID, "inspectionRunId": input.InspectionRunID,
 		"checkKey": input.CheckKey, "queryMode": input.Query.Mode, "outcome": outcome,
 		"observedAt": time.Now().UTC().Format(time.RFC3339Nano), "executionWindow": window, "result": result,
-		"warnings": []string{}, "errors": func() []string {
-			if outcome == "error" {
-				return messages
-			}
-			return []string{}
-		}(), "gapReason": gap,
+		"warnings": warnings, "errors": errorMessages, "gapReason": gap,
 	})
 	if err != nil {
 		return

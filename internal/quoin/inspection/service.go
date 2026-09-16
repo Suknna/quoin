@@ -359,6 +359,18 @@ type RunDetail struct {
 	ReportCount       int                      `json:"reportCount"`
 	AnalysisActive    bool                     `json:"analysisActive"`
 	LatestAnalysis    *InspectionAttemptStatus `json:"latestAnalysis,omitempty"`
+	// FrozenConfig 是 Run 创建时冻结的分析语义投影（名称/检查说明/单位/初始
+	// 报告要求）；仅计划 Run 携带，历史声明 Run 不产生该字段。
+	FrozenConfig *RunFrozenConfig `json:"frozenConfig,omitempty"`
+}
+
+// RunFrozenConfig 是 UI 展示用的 Run 冻结分析语义；与重分析弹框的默认要求
+// 同源（Run 冻结列），计划后续修改不改写。
+type RunFrozenConfig struct {
+	DisplayName        *string `json:"displayName,omitempty"`
+	CheckDescription   *string `json:"checkDescription,omitempty"`
+	MetricUnit         *string `json:"metricUnit,omitempty"`
+	ReportInstructions *string `json:"reportInstructions,omitempty"`
 }
 
 // InspectionAttemptStatus is the safe, read-only lifecycle projection for the
@@ -387,6 +399,9 @@ type ReportDetail struct {
 	ModelID        string   `json:"modelId"`
 	Content        string   `json:"content"`
 	CreatedAt      string   `json:"createdAt"`
+	// ReportInstructions 是该版本分析实际生效的报告要求投影（Attempt 不可变
+	// requirements 优先，Run 冻结初始要求回退）；两者都缺失时不出现。
+	ReportInstructions *string `json:"reportInstructions,omitempty"`
 }
 
 func locatorID(id int64) string { return strconv.FormatInt(id, 10) }

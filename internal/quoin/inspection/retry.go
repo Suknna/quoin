@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
@@ -33,8 +34,19 @@ type AttemptSummary struct {
 
 // ReanalyzeRun queues one fresh analysis against the Run's existing immutable
 // check results and Evidence. It does not recollect or alter an old report.
-func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCommandID string, runID int64) (AttemptSummary, error) {
-	digest := auth.DigestCommand(CommandReanalyzeRun, map[string]any{"runId": runID})
+// reportInstructionsOverride 三态：nil = 沿用 Run 冻结的初始报告要求（继承）；
+// 指向空串 = 本次分析显式无报告要求（清除）；指向非空文本 = 仅本次覆盖。三态
+// 随本次 Attempt 输入快照与 inspection_analysis_requirements 冻结，不改写旧
+// 证据、冻结语义或任何旧报告的含义。
+func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCommandID string, runID int64, reportInstructionsOverride *string) (AttemptSummary, error) {
+	var override *string
+	if reportInstructionsOverride != nil {
+		if utf8.RuneCountInString(*reportInstructionsOverride) > maxReportInstructionsLength {
+			return AttemptSummary{}, &PlanConflictError{Code: "malformed_plan", Detail: fmt.Sprintf("报告要求不能超过 %d 字符", maxReportInstructionsLength)}
+		}
+		override = reportInstructionsOverride
+	}
+	digest := reanalyzeDigest(runID, override)
 	outcome, err := execution.Run(ctx, s.runner, s.reanalyzeRun, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -65,7 +77,7 @@ func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCom
 		if !errors.Is(err, sql.ErrNoRows) {
 			return AttemptSummary{}, execution.Unchanged, err
 		}
-		attemptID, err := s.createReportAnalysisOn(ctx, tx, runID, s.nowText(), true)
+		attemptID, err := s.createReportAnalysisOn(ctx, tx, runID, s.nowText(), true, override)
 		if err != nil {
 			return AttemptSummary{}, execution.Unchanged, err
 		}
@@ -135,12 +147,15 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		if planEnabled == 0 || connectionEnabled == 0 {
 			return RunDetail{}, execution.Unchanged, &execution.Rejection{Code: "plan_disabled", Detail: "计划或其来源接入未启用，不能重新采证", ObjectID: sourceRunID}
 		}
-		// 重新采证逐字段复制源 Run 的冻结绑定（模板/参数/范围/接入），不受计划
-		// 当前定义影响；展开的检查目录同样来自源 Run。
+		// 重新采证逐字段复制源 Run 的冻结绑定（模板/参数/范围/接入）与冻结的
+		// 名称、检查说明、单位、初始报告要求，不受计划当前定义影响；展开的检查
+		// 目录同样来自源 Run。
 		now := s.nowText()
 		insert, err := tx.ExecContext(ctx, `
-			INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,rerun_of_id,state,created_at)
-			SELECT plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,'manual',id,'Queued',?
+			INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,
+				frozen_display_name,frozen_check_description,frozen_metric_unit,frozen_report_instructions,trigger_kind,rerun_of_id,state,created_at)
+			SELECT plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,
+				frozen_display_name,frozen_check_description,frozen_metric_unit,frozen_report_instructions,'manual',id,'Queued',?
 			FROM inspection_runs WHERE id=?`, now, sourceRunID)
 		if err != nil {
 			var active int64
@@ -202,6 +217,17 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		detail.RunID = mustLocator(detail.ID)
 	}
 	return detail, nil
+}
+
+// reanalyzeDigest 保持向后兼容的命令 digest 布局：nil（继承 Run 冻结要求）
+// 与升级前完全同布局；仅当本次显式携带要求（空串清除或非空覆盖）时才追加
+// reportInstructions 键，使三态互不可混淆 replay。
+func reanalyzeDigest(runID int64, override *string) string {
+	payload := map[string]any{"runId": runID}
+	if override != nil {
+		payload["reportInstructions"] = *override
+	}
+	return auth.DigestCommand(CommandReanalyzeRun, payload)
 }
 
 func attemptSummaryOn(ctx context.Context, q audit.Reader, attemptID int64) (AttemptSummary, error) {

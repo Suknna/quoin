@@ -1476,7 +1476,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 重试分析（复用原 Evidence，创建新 Report 版本；不重新采证） */
+        /**
+         * 重试分析（复用原 Evidence，创建新 Report 版本；不重新采证）
+         * @description reportInstructions 缺省表示沿用 Run 冻结的初始报告要求；提供时仅对本次分析生成的报告版本生效，绝不改写旧证据或旧报告的含义。
+         */
         post: operations["retryInspectionAnalysis"];
         delete?: never;
         options?: never;
@@ -2895,6 +2898,12 @@ export interface components {
             params: {
                 [key: string]: unknown;
             };
+            /** @description 检查说明（可选）；Run 创建时冻结，计划修改不改写已存在 Run。 */
+            checkDescription?: string | null;
+            /** @description 指标单位（可选）；Run 创建时冻结。 */
+            metricUnit?: string | null;
+            /** @description 初始报告要求（可选，用户级）；Run 创建时冻结，重分析默认沿用。 */
+            reportInstructions?: string | null;
             scope: components["schemas"]["PluginInspectionScope"];
             cron?: string | null;
             timezone: string;
@@ -2964,6 +2973,9 @@ export interface components {
             params: {
                 [key: string]: unknown;
             };
+            checkDescription?: string | null;
+            metricUnit?: string | null;
+            reportInstructions?: string | null;
             scope: components["schemas"]["PluginInspectionScope"];
             cron?: string | null;
             timezone: string;
@@ -3771,6 +3783,8 @@ export interface components {
             analysisActive: boolean;
             /** @description 最新 inspection_analysis Attempt 的只读生命周期投影；失败、取消和中断时用于说明恢复路径，不携带模型输入或报告内容。 */
             latestAnalysis?: components["schemas"]["InspectionAnalysisStatus"];
+            /** @description Run 创建时冻结的分析语义投影（名称/检查说明/单位/初始报告要求）；仅计划 Run 携带，重分析弹框默认要求与其同源。 */
+            frozenConfig?: components["schemas"]["InspectionRunFrozenConfig"];
         };
         InspectionAnalysisStatus: {
             id: components["schemas"]["LocatorId"];
@@ -3778,6 +3792,18 @@ export interface components {
             state: "Queued" | "Assigned" | "Running" | "Cancelling" | "Succeeded" | "Failed" | "Cancelled" | "Interrupted";
             /** @description Runtime 以受控枚举提交的非秘密终止原因；只在失败或中断等终态投影。 */
             terminationReason?: string;
+        };
+        InspectionReanalysisRequest: components["schemas"]["CommandRequest"] & {
+            /** @description 报告要求三态——字段缺省继承 Run 冻结的初始报告要求；空串为本次分析显式无要求（清除）；非空文本为仅本次覆盖。覆盖只对本次生成的报告版本生效，绝不改写旧证据或旧报告的含义。 */
+            reportInstructions?: string;
+        };
+        /** @description Run 创建时从计划复制的不可变分析语义；origin 触发器保证不可变，重采证原样复制。 */
+        InspectionRunFrozenConfig: {
+            /** @description 冻结的计划显示名。 */
+            displayName?: string;
+            checkDescription?: string | null;
+            metricUnit?: string | null;
+            reportInstructions?: string | null;
         };
         /** @description ok 必须且只能携带 Evidence locator；error/gap 必须且只能携带缺口原因；cancelling 表示 Runtime 尚未确认物理停止。 */
         CheckResultSummary: {
@@ -3811,6 +3837,8 @@ export interface components {
             modelId: string;
             content: string;
             createdAt: components["schemas"]["Timestamp"];
+            /** @description 该版本分析实际生效的报告要求（Attempt 不可变覆盖优先，Run 冻结初始要求回退；两者都缺失时缺省）。 */
+            reportInstructions?: string | null;
         };
         ManualRunRequest: components["schemas"]["CommandBase"] & {
             planKey: components["schemas"]["StableKey"];
@@ -5421,6 +5449,8 @@ export type CreateCandidateRequest = components['schemas']['CreateCandidateReque
 export type InspectionRunSummary = components['schemas']['InspectionRunSummary'];
 export type InspectionRunDetail = components['schemas']['InspectionRunDetail'];
 export type InspectionAnalysisStatus = components['schemas']['InspectionAnalysisStatus'];
+export type InspectionReanalysisRequest = components['schemas']['InspectionReanalysisRequest'];
+export type InspectionRunFrozenConfig = components['schemas']['InspectionRunFrozenConfig'];
 export type CheckResultSummary = components['schemas']['CheckResultSummary'];
 export type ReportSummary = components['schemas']['ReportSummary'];
 export type ReportDetail = components['schemas']['ReportDetail'];
@@ -8168,7 +8198,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CommandRequest"];
+                "application/json": components["schemas"]["InspectionReanalysisRequest"];
             };
         };
         responses: {

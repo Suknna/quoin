@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createInspectionPlan, createInspectionRun, getInspectionReport, listInspectionPlans,
-  listInspectionReports, listInspectionRuns, updateInspectionPlan,
+  listInspectionReports, listInspectionRuns, reanalyzeInspectionRun, updateInspectionPlan,
 } from "./api";
 
 /** A recorded fetch that answers every inspection call with the server's real JSON. */
@@ -120,5 +120,21 @@ describe("inspection HTTP wire contract", () => {
     const plans = await listInspectionPlans();
     expect(plans).toHaveLength(1);
     expect(plans[0].scope).toEqual({ kind: "integration" });
+  });
+
+  it("sends the reanalysis override only when provided, keeping the frozen default wire-clean", async () => {
+    const attempts = stubFetch([
+      { method: "POST", path: /\/api\/v1\/inspections\/runs\/1\/analyze$/, body: { id: "9", type: "inspection_analysis", state: "Queued", rowVersion: 1, createdAt: "2026-09-16T08:00:00Z" } },
+    ]);
+    // 缺省（沿用 Run 冻结要求）：请求体不携带 reportInstructions。
+    await reanalyzeInspectionRun("1");
+    expect(attempts[0].body).not.toHaveProperty("reportInstructions");
+    // 仅本次覆盖：文本原样上送（域层按原文冻结，不做静默修剪）。
+    await reanalyzeInspectionRun("1", "只看异常项");
+    expect((attempts[1].body as Record<string, unknown>).reportInstructions).toBe("只看异常项");
+    // 仅本次显式清除：空串原样上送，与继承（字段缺省）可区分。
+    await reanalyzeInspectionRun("1", "");
+    expect(attempts[2].body as Record<string, unknown>).toHaveProperty("reportInstructions", "");
+    expect(attempts[0].body).toHaveProperty("clientCommandId");
   });
 });

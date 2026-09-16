@@ -19,7 +19,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import type { WorkspaceModuleProps, WorkspaceModuleView } from "@/app/module-contract";
 import { messageOf } from "@/app/shared";
 import {
-  cancelInspectionRun, createInspectionPlan, createInspectionRun, formatInspectionTime, getInspectionReport, getInspectionRun,
+  cancelInspectionRun, createInspectionPlan, createInspectionRun, formatInspectionTime, getInspectionPlan, getInspectionReport, getInspectionRun,
   inspectionActive, inspectionGapReasonText, inspectionScheduleText, inspectionScopeKindText, inspectionScopeText, inspectionStateText,
   listInspectionPlans, listInspectionReports, listInspectionRuns, reanalyzeInspectionRun, rerunInspection, updateInspectionPlan,
   type InspectionPlan, type InspectionPlanInput, type InspectionPlanScope, type InspectionReportDetail, type InspectionRunDetail,
@@ -74,17 +74,75 @@ function Feedback({ reportId, suspended }: { reportId: string; suspended: boolea
 export function RunDetail({ runId, props, onBack, onOpenRun }: { runId: string; props: WorkspaceModuleProps; onBack: () => void; onOpenRun: (id: string) => void }) {
   const [detail, setDetail] = useState<InspectionRunDetail>(); const [report, setReport] = useState<InspectionReportDetail>();
   const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const alive = useRef(true);
+  // 重分析弹框三态：默认“沿用 Run 冻结要求”（inherit，请求不含该字段）；
+  // 打开“仅本次自定义”后输入框可编辑，提交按原文上送（清空=本次显式无要求）。
+  // “加载当前计划要求”是显式动作，只在自定义模式下可用。
+  const [analyzeOpen, setAnalyzeOpen] = useState(false);
+  const [instructions, setInstructions] = useState("");
+  const [customInstructions, setCustomInstructions] = useState(false);
+  const [loadNote, setLoadNote] = useState("");
   const load = useCallback(async () => { try { const current = await getInspectionRun(runId); if (!alive.current) return; setDetail(current); if (current.reportCount) { const reports = await listInspectionReports(runId); if (reports[0]) setReport(await getInspectionReport(runId, reports[0].version)); } else setReport(undefined); } catch (e) { if (alive.current) setError(messageOf(e, "无法读取巡检 Run。")); } }, [runId]);
   useEffect(() => { alive.current = true; void load(); return () => { alive.current = false; }; }, [load]);
   useEffect(() => { if (props.suspended || !detail || (terminal.has(detail.state) && !detail.analysisActive)) return; const timer = window.setTimeout(() => void load(), 2000); return () => clearTimeout(timer); }, [detail, load, props.suspended]);
   // Reanalysis reuses this Run's frozen Evidence; recollection always starts a distinct Run.
-  async function action(kind: "cancel" | "analyze" | "rerun") { if (!detail || props.suspended) return; setBusy(true); setError(""); try { if (kind === "cancel") await cancelInspectionRun(detail.id, detail.rowVersion); else if (kind === "analyze") await reanalyzeInspectionRun(detail.id); else { onOpenRun((await rerunInspection(detail.id)).id); return; } await load(); } catch (e) { setError(messageOf(e, "操作未完成。")); await load(); } finally { setBusy(false); } }
+  async function action(kind: "cancel" | "analyze" | "rerun") {
+    if (!detail || props.suspended) return;
+    setBusy(true); setError("");
+    try {
+      if (kind === "cancel") await cancelInspectionRun(detail.id, detail.rowVersion);
+      else if (kind === "analyze") { await reanalyzeInspectionRun(detail.id, customInstructions ? instructions : undefined); setAnalyzeOpen(false); }
+      else { onOpenRun((await rerunInspection(detail.id)).id); return; }
+      await load();
+    } catch (e) { setError(messageOf(e, "操作未完成。")); await load(); } finally { setBusy(false); }
+  }
+  /** 显式把计划当前定义的初始报告要求加载进输入框（不静默改写）。 */
+  async function loadCurrentPlanInstructions() {
+    if (!detail) return;
+    setLoadNote("");
+    try {
+      const plan = await getInspectionPlan(detail.planKey);
+      setInstructions(plan.reportInstructions ?? "");
+      setLoadNote(plan.reportInstructions ? "已加载计划当前的报告要求。" : "计划当前没有报告要求。");
+    } catch (e) { setLoadNote(messageOf(e, "无法读取巡检计划。")); }
+  }
+  function openAnalyzeDialog() {
+    setInstructions(detail?.frozenConfig?.reportInstructions ?? "");
+    setCustomInstructions(false);
+    setLoadNote("");
+    setAnalyzeOpen(true);
+  }
   if (!detail) return <div className="p-6">正在读取 Run…</div>;
   const canAnalyze = detail.state === "Completed" || detail.state === "CompletedWithGaps";
   // Cancellation only applies while the Run itself is active; a terminal Run keeps
   // the button visible during an active analysis but it can no longer be fired.
   const runActive = inspectionActive(detail.state);
-  return <div className="space-y-6"><Button variant="ghost" onClick={onBack}>返回巡检记录</Button><header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{detail.planKey} · Run {detail.id}</h2><p className="text-sm text-muted-foreground">来源接入 {detail.connectionName ?? "—"} · 采证冻结于 {formatInspectionTime(detail.evidenceAt)}，报告版本不可修改。</p></div><span className={statusClass(detail.state)}>{inspectionStateText[detail.state]}</span></header>{error && <Alert variant="destructive"><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2">{runActive || detail.analysisActive ? <Button variant="outline" disabled={busy || props.suspended || !runActive} title={runActive ? undefined : "Run 已到终态，取消不再可用"} onClick={() => void action("cancel")}>取消</Button> : null}{canAnalyze ? <Button variant="outline" disabled={busy || props.suspended || detail.analysisActive} onClick={() => void action("analyze")}>重新分析现有证据</Button> : null}{terminal.has(detail.state) ? <Button variant="outline" disabled={busy || props.suspended} onClick={() => void action("rerun")}>重新采证（新 Run）</Button> : null}</div><Accordion type="multiple" defaultValue={["checks", "phase"]}><AccordionItem value="checks"><AccordionTrigger>检查项与缺口</AccordionTrigger><AccordionContent><Table><TableHeader><TableRow><TableHead>检查</TableHead><TableHead>状态</TableHead><TableHead>证据 / 原因</TableHead></TableRow></TableHeader><TableBody>{detail.checks.map((check) => <TableRow key={check.checkKey}><TableCell>{check.checkKey}</TableCell><TableCell>{check.status}</TableCell><TableCell>{check.status === "ok" ? <Button variant="link" className="h-auto p-0" onClick={() => props.openEvidence(check.evidenceId)}>#{check.evidenceId}</Button> : check.status === "cancelling" ? "正在停止" : inspectionGapReasonText[check.gapReason] ?? check.gapReason}</TableCell></TableRow>)}</TableBody></Table></AccordionContent></AccordionItem><AccordionItem value="phase"><AccordionTrigger>运行阶段与事件</AccordionTrigger><AccordionContent><dl className="grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">触发</dt><dd>{detail.triggerKind}</dd></div><div><dt className="text-muted-foreground">创建</dt><dd>{formatInspectionTime(detail.createdAt)}</dd></div><div><dt className="text-muted-foreground">分析</dt><dd>{detail.latestAnalysis?.state ?? "尚未开始"}</dd></div><div><dt className="text-muted-foreground">报告版本</dt><dd>{detail.reportCount}</dd></div></dl></AccordionContent></AccordionItem></Accordion>{report ? <section className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">报告 v{report.version}</h3><p className="text-xs text-muted-foreground">模型 {report.modelId} · {formatInspectionTime(report.createdAt)}</p></div><Button variant="outline" disabled title="知识库开发中，暂不可整理报告">整理为知识候选（开发中）</Button></div><div data-testid="report-content" className="max-h-[28rem] overflow-y-auto rounded-md border p-4"><ReportBody content={report.content} evidenceIds={report.evidenceIds} openEvidence={props.openEvidence} /></div><div className="text-sm">证据引用：{report.evidenceIds.map((id) => <Button key={id} variant="link" className="h-auto p-1" onClick={() => props.openEvidence(id)}>#{id}</Button>)}</div><Feedback reportId={report.id} suspended={props.suspended} /></section> : <Alert><AlertDescription>{detail.analysisActive ? "分析正在生成报告。" : "该 Run 尚无报告版本。"}</AlertDescription></Alert>}</div>;
+  const frozen = detail.frozenConfig;
+  const frozenRows: Array<[string, string | undefined]> = frozen ? [
+    ["名称", frozen.displayName ?? undefined],
+    ["检查说明", frozen.checkDescription ?? undefined],
+    ["单位", frozen.metricUnit ?? undefined],
+    ["初始报告要求", frozen.reportInstructions ?? undefined],
+  ] : [];
+  const analyzeDialog = <Dialog open={analyzeOpen} onOpenChange={setAnalyzeOpen}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>重新分析现有证据</DialogTitle><DialogDescription>复用本 Run 冻结的 Evidence 生成下一个报告版本。报告要求默认为本 Run 冻结值；编辑仅对本次分析生效，不改变旧证据与旧报告。</DialogDescription></DialogHeader>
+    <FieldGroup>
+      <Field orientation="horizontal">
+        <Switch id="analyze-custom" checked={customInstructions} disabled={busy || props.suspended} onCheckedChange={(checked) => { setCustomInstructions(checked === true); setLoadNote(""); }} />
+        <FieldLabel htmlFor="analyze-custom">仅本次自定义报告要求</FieldLabel>
+        <FieldDescription>关闭时沿用本 Run 冻结的初始报告要求；开启后可编辑，清空表示本次分析无附加要求（仅本次生效）。</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="analyze-instructions">本次报告要求</FieldLabel>
+        <Textarea id="analyze-instructions" aria-label="本次报告要求" className="min-h-24" value={instructions} disabled={busy || props.suspended || !customInstructions} onChange={(event) => { setInstructions(event.target.value); setLoadNote(""); }} placeholder="留空表示本次分析无附加报告要求" />
+        <FieldDescription>{customInstructions ? "提交时按原文作为仅本次覆盖；清空即本次无要求。" : "当前沿用本 Run 冻结的初始报告要求。"}</FieldDescription>
+      </Field>
+      <div className="flex items-center justify-between gap-2">
+        <Button type="button" variant="outline" size="sm" disabled={busy || props.suspended || !customInstructions} onClick={() => void loadCurrentPlanInstructions()}>加载当前计划要求</Button>
+        {loadNote && <span className="text-xs text-muted-foreground">{loadNote}</span>}
+      </div>
+    </FieldGroup>
+    <DialogFooter><Button variant="outline" onClick={() => setAnalyzeOpen(false)} disabled={busy}>取消</Button><Button onClick={() => void action("analyze")} disabled={busy || props.suspended}>{busy ? "正在提交…" : "开始分析"}</Button></DialogFooter>
+  </DialogContent></Dialog>;
+  return <div className="space-y-6">{analyzeDialog}<Button variant="ghost" onClick={onBack}>返回巡检记录</Button><header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">{detail.planKey} · Run {detail.id}</h2><p className="text-sm text-muted-foreground">来源接入 {detail.connectionName ?? "—"} · 采证冻结于 {formatInspectionTime(detail.evidenceAt)}，报告版本不可修改。</p></div><span className={statusClass(detail.state)}>{inspectionStateText[detail.state]}</span></header>{error && <Alert variant="destructive"><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2">{runActive || detail.analysisActive ? <Button variant="outline" disabled={busy || props.suspended || !runActive} title={runActive ? undefined : "Run 已到终态，取消不再可用"} onClick={() => void action("cancel")}>取消</Button> : null}{canAnalyze ? <Button variant="outline" disabled={busy || props.suspended || detail.analysisActive} onClick={openAnalyzeDialog}>重新分析现有证据</Button> : null}{terminal.has(detail.state) ? <Button variant="outline" disabled={busy || props.suspended} onClick={() => void action("rerun")}>重新采证（新 Run）</Button> : null}</div>{frozen && <Accordion type="multiple" defaultValue={["frozen"]}><AccordionItem value="frozen"><AccordionTrigger>冻结的分析配置（Run 创建时）</AccordionTrigger><AccordionContent><dl className="grid gap-2 text-sm sm:grid-cols-2">{frozenRows.map(([label, value]) => <div key={label}><dt className="text-muted-foreground">{label}</dt><dd>{value || "—"}</dd></div>)}</dl><p className="text-xs text-muted-foreground">计划后续修改不改写本 Run；重新分析默认沿用这里的初始报告要求。</p></AccordionContent></AccordionItem></Accordion>}<Accordion type="multiple" defaultValue={["checks", "phase"]}><AccordionItem value="checks"><AccordionTrigger>检查项与缺口</AccordionTrigger><AccordionContent><Table><TableHeader><TableRow><TableHead>检查</TableHead><TableHead>状态</TableHead><TableHead>证据 / 原因</TableHead></TableRow></TableHeader><TableBody>{detail.checks.map((check) => <TableRow key={check.checkKey}><TableCell>{check.checkKey}</TableCell><TableCell>{check.status}</TableCell><TableCell>{check.status === "ok" ? <Button variant="link" className="h-auto p-0" onClick={() => props.openEvidence(check.evidenceId)}>#{check.evidenceId}</Button> : check.status === "cancelling" ? "正在停止" : inspectionGapReasonText[check.gapReason] ?? check.gapReason}</TableCell></TableRow>)}</TableBody></Table></AccordionContent></AccordionItem><AccordionItem value="phase"><AccordionTrigger>运行阶段与事件</AccordionTrigger><AccordionContent><dl className="grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">触发</dt><dd>{detail.triggerKind}</dd></div><div><dt className="text-muted-foreground">创建</dt><dd>{formatInspectionTime(detail.createdAt)}</dd></div><div><dt className="text-muted-foreground">分析</dt><dd>{detail.latestAnalysis?.state ?? "尚未开始"}</dd></div><div><dt className="text-muted-foreground">报告版本</dt><dd>{detail.reportCount}</dd></div></dl></AccordionContent></AccordionItem></Accordion>{report ? <section className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">报告 v{report.version}</h3><p className="text-xs text-muted-foreground">模型 {report.modelId} · {formatInspectionTime(report.createdAt)}{report.reportInstructions ? ` · 本次报告要求：${report.reportInstructions}` : ""}</p></div><Button variant="outline" disabled title="知识库开发中，暂不可整理报告">整理为知识候选（开发中）</Button></div><div data-testid="report-content" className="max-h-[28rem] overflow-y-auto rounded-md border p-4"><ReportBody content={report.content} evidenceIds={report.evidenceIds} openEvidence={props.openEvidence} /></div><div className="text-sm">证据引用：{report.evidenceIds.map((id) => <Button key={id} variant="link" className="h-auto p-1" onClick={() => props.openEvidence(id)}>#{id}</Button>)}</div><Feedback reportId={report.id} suspended={props.suspended} /></section> : <Alert><AlertDescription>{detail.analysisActive ? "分析正在生成报告。" : "该 Run 尚无报告版本。"}</AlertDescription></Alert>}</div>;
 }
 
 /** Form projection of one plan; params stay as YAML text until save parses them. */
@@ -94,6 +152,8 @@ interface PlanFormState {
   scopeKind: InspectionPlanScope["kind"]; businessViewKey: string;
   objects: Array<{ objectType: string; identityKey: string }>;
   cron: string; timezone: string;
+  /** 可选分析语义：Run 创建时冻结，计划修改不改写已存在 Run。 */
+  checkDescription: string; metricUnit: string; reportInstructions: string;
 }
 
 /** The operator's own timezone is the least surprising default for scheduled plans. */
@@ -103,6 +163,7 @@ function emptyPlanForm(connectionName: string): PlanFormState {
   return {
     planKey: "", displayName: "", enabled: true, connectionName, pluginId: "", templateId: "", templateVersion: "",
     paramsText: "", scopeKind: "integration", businessViewKey: "", objects: [], cron: "", timezone: defaultTimezone(),
+    checkDescription: "", metricUnit: "", reportInstructions: "",
   };
 }
 
@@ -114,6 +175,7 @@ function planFormOf(plan: InspectionPlan): PlanFormState {
     scopeKind: plan.scope.kind, businessViewKey: plan.scope.kind === "businessView" ? plan.scope.businessViewKey : "",
     objects: plan.scope.kind === "objects" ? plan.scope.objects.map((object) => ({ ...object })) : [],
     cron: plan.cron ?? "", timezone: plan.timezone,
+    checkDescription: plan.checkDescription ?? "", metricUnit: plan.metricUnit ?? "", reportInstructions: plan.reportInstructions ?? "",
   };
 }
 
@@ -202,6 +264,8 @@ function PlanEditorDialog({ open, plan, prefill, suspended, onOpenChange, onSave
       planKey: form.planKey.trim(), displayName: form.displayName.trim(), enabled: form.enabled,
       connectionName: form.connectionName.trim(), pluginId: form.pluginId.trim(), templateId: form.templateId.trim(),
       templateVersion: form.templateVersion.trim() || null, params: params.params, scope: scope.scope,
+      checkDescription: form.checkDescription.trim() || null, metricUnit: form.metricUnit.trim() || null,
+      reportInstructions: form.reportInstructions.trim() || null,
       cron: form.cron.trim() || null, timezone: form.timezone.trim() || defaultTimezone(),
     };
     setBusy(true); setError("");
@@ -251,6 +315,15 @@ function PlanEditorDialog({ open, plan, prefill, suspended, onOpenChange, onSave
         <Textarea id="plan-params" aria-label="采集参数（YAML）" className="min-h-24 font-mono text-xs" value={form.paramsText} disabled={busy || suspended} onChange={(event) => update({ paramsText: event.target.value })} placeholder={"expression: up"} />
         <FieldDescription>模板参数以 YAML 键值对填写；服务端会按模板 schema 复核。</FieldDescription>
       </Field>
+      <Field>
+        <FieldLabel htmlFor="plan-check-description">检查说明（可选）</FieldLabel>
+        <Textarea id="plan-check-description" aria-label="检查说明（可选）" className="min-h-16" value={form.checkDescription} disabled={busy || suspended} onChange={(event) => update({ checkDescription: event.target.value })} placeholder="这项检查在观测什么、如何解读结果" />
+        <FieldDescription>随 Run 冻结并进入分析上下文；最长 2000 字。</FieldDescription>
+      </Field>
+      <div className="grid gap-3 md:grid-cols-2">
+        <Field><FieldLabel htmlFor="plan-metric-unit">指标单位（可选）</FieldLabel><Input id="plan-metric-unit" value={form.metricUnit} disabled={busy || suspended} onChange={(event) => update({ metricUnit: event.target.value })} placeholder="如 %、ms、个" /><FieldDescription>结果数值的语义单位；最长 100 字。</FieldDescription></Field>
+        <Field><FieldLabel htmlFor="plan-report-instructions">初始报告要求（可选）</FieldLabel><Input id="plan-report-instructions" value={form.reportInstructions} disabled={busy || suspended} onChange={(event) => update({ reportInstructions: event.target.value })} placeholder="报告的默认侧重点" /><FieldDescription>每次 Run 冻结后作为分析默认要求；重分析可仅本次覆盖；最长 4000 字。</FieldDescription></Field>
+      </div>
       <Field orientation="horizontal"><FieldLabel htmlFor="plan-enabled">启用计划</FieldLabel><Switch id="plan-enabled" checked={form.enabled} disabled={busy || suspended} onCheckedChange={(checked) => update({ enabled: checked === true })} /></Field>
     </FieldGroup>
     <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>取消</Button><Button onClick={() => void save()} disabled={busy || suspended}>{busy ? "正在保存…" : "保存计划"}</Button></DialogFooter>

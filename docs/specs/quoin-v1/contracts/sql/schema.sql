@@ -1444,6 +1444,11 @@ CREATE TABLE inspection_plans (
   template_id      TEXT NOT NULL CHECK (length(template_id) > 0),
   template_version TEXT,                  -- NULL = Run 创建时冻结当时 ready 版本
   params_json      TEXT NOT NULL CHECK (json_valid(params_json) AND json_type(params_json) = 'object'),
+  -- 分析语义元数据（全部可选）：Run 创建时冻结进 inspection_runs 的对应列，
+  -- 计划后续修改不改写任何已存在 Run。
+  check_description   TEXT CHECK (check_description IS NULL OR length(check_description) <= 2000),   -- 检查说明：这项检查在量什么
+  metric_unit         TEXT CHECK (metric_unit IS NULL OR length(metric_unit) <= 100),                -- 指标单位：结果数值的语义单位
+  report_instructions TEXT CHECK (report_instructions IS NULL OR length(report_instructions) <= 4000), -- 初始报告要求：分析的用户级指令基线
   scope_kind       TEXT NOT NULL CHECK (scope_kind IN ('integration','business_view','objects')),
   scope_json       TEXT NOT NULL CHECK (json_valid(scope_json)), -- business_view key 或显式对象集合
   cron             TEXT,                  -- 标准五字段 cron；NULL = 仅人工运行（不产生定时模型费用）
@@ -1473,6 +1478,13 @@ CREATE TABLE inspection_runs (
   template_version          TEXT,                   -- 新 Run 冻结：模板版本
   frozen_params_json        TEXT CHECK (frozen_params_json IS NULL OR json_valid(frozen_params_json)),
   frozen_scope_json         TEXT CHECK (frozen_scope_json IS NULL OR json_valid(frozen_scope_json)),
+  -- 分析语义冻结（新 Run 创建时从计划复制；历史声明 Run 为 NULL）：名称、检查
+  -- 说明、单位与初始报告要求随 Run 冻结，计划后续修改不改写已存在 Run，重采证
+  -- 原样复制；实际分析要求最终冻结在每个 analysis Attempt 的输入快照。
+  frozen_display_name        TEXT,
+  frozen_check_description   TEXT,
+  frozen_metric_unit         TEXT,
+  frozen_report_instructions TEXT,
   trigger_kind              TEXT NOT NULL CHECK (trigger_kind IN ('schedule','manual')),
   scheduled_for             TEXT,                    -- UTC；NULL = 人工触发
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Completed','CompletedWithGaps','Failed','Cancelled','Interrupted','SkippedOverlap')),
@@ -1534,6 +1546,11 @@ CREATE TABLE inspection_check_results (
   gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
                 'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
                 'artifact_commit_failed','journey_failed','query_failed','partial_response','no_data','cancelled','interrupted')),
+  -- 采集元数据冻结（提交时一次性写入后不可变）：observedAt、真实 warnings 与
+  -- （范围模板的）执行窗口事实。成功结果的正文仍在 Evidence；gap/error 没有
+  -- Evidence，其观察时间/warnings/窗口元数据只由本列承载，分析清单据此保持
+  -- 缺口可见，绝不为缺口伪造执行事实。历史行（升级前）为 NULL。
+  meta_json   TEXT CHECK (meta_json IS NULL OR json_valid(meta_json)),
   created_at  TEXT NOT NULL,
   UNIQUE (run_id, check_key),
   CHECK (
@@ -1544,6 +1561,30 @@ CREATE TABLE inspection_check_results (
   CHECK (result_digest IS NULL OR status IN ('error','gap') OR evidence_id IS NOT NULL)
 ) STRICT;
 CREATE UNIQUE INDEX ux_inspection_check_result_evidence ON inspection_check_results (evidence_id) WHERE evidence_id IS NOT NULL;
+
+-- 每次 inspection_analysis Attempt 实际生效的分析要求冻结（CREATE 后不可改）：
+-- report_instructions_override 三态——NULL 行/缺行/列 NULL 表示沿用 Run 冻结的
+-- 初始报告要求；'' 表示本次显式无报告要求（清除）；非空文本为仅本次覆盖。检查
+-- 说明与单位永远来自 Run 冻结列（本表不复制），旧 Attempt（本表无行）重建字节
+-- 保持不变。
+CREATE TABLE inspection_analysis_requirements (
+  attempt_id                   INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  report_instructions_override TEXT CHECK (report_instructions_override IS NULL OR length(report_instructions_override) <= 4000),
+  created_at                   TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER trg_inspection_analysis_requirements_immutable BEFORE UPDATE ON inspection_analysis_requirements
+BEGIN SELECT RAISE(ABORT, 'inspection analysis requirements are immutable'); END;
+CREATE TRIGGER trg_inspection_analysis_requirements_no_delete BEFORE DELETE ON inspection_analysis_requirements
+BEGIN SELECT RAISE(ABORT, 'inspection analysis requirements are not deletable'); END;
+-- 闭合约束：要求行只能绑定 inspection_analysis × run 的 Attempt（与
+-- trg_inspection_analysis_requires_closed_run 同一引用模式），绝不允许把分析
+-- 要求挂到采集/探测等其它 Attempt 身份上。
+CREATE TRIGGER trg_inspection_analysis_requirements_scope BEFORE INSERT ON inspection_analysis_requirements
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_analysis' AND a.scope_type = 'run'
+)
+BEGIN SELECT RAISE(ABORT, 'inspection analysis requirements must bind an inspection_analysis run Attempt'); END;
 
 -- ============================================================================
 -- 7.5 来源级观测（ADR-0004）：接入即有界观测，身份 = 接入 + 对象类型 + 规范来源身份
@@ -3736,6 +3777,7 @@ CREATE TRIGGER trg_inspection_runs_origin_immutable BEFORE UPDATE OF
   business_system_id, plan_key, config_version_id, label_contract_version_id,
   plan_id, connection_id, plugin_id, template_id, template_version,
   frozen_params_json, frozen_scope_json,
+  frozen_display_name, frozen_check_description, frozen_metric_unit, frozen_report_instructions,
   trigger_kind, scheduled_for, rerun_of_id, created_at ON inspection_runs
 BEGIN SELECT RAISE(ABORT, 'inspection_run binding is immutable'); END;
 CREATE TRIGGER trg_execution_attempts_origin_immutable BEFORE UPDATE OF
