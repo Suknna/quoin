@@ -128,6 +128,22 @@ docker run --rm --user 65532:65532 \
 
 预期生成 `root-key`、`stele-service-token`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`。根密钥和内部 Stele token 为 32 字节原始二进制；Runtime 服务端证书覆盖 `quoin`。全套秘密已存在时命令验证而不覆盖，部分存在则拒绝。
 
+#### 确认密钥已生成
+
+生成文件位于宿主机的 `$HOME/quoin-k8s/secrets/runtime/`，不是仓库目录。使用 sudo 查看文件名、权限与大小，不读取密钥内容：
+
+```bash
+sudo ls -lh "$HOME/quoin-k8s/secrets/runtime"
+sudo stat -c '%n | %s bytes | mode=%a | uid=%u gid=%g' \
+  "$HOME/quoin-k8s/secrets/runtime/"{root-key,stele-service-token,runtime-ca.pem,runtime-ca.key,runtime-tls.crt,runtime-tls.key}
+```
+
+检查上述六个文件均存在，属主 UID 为 `65532`，文件权限为 `600`；`root-key` 和 `stele-service-token` 应各为 **32 字节**。证书和 PEM 私钥大小可能随生成结果变化，不要求固定字节数。
+
+**普通用户看不到文件不等于生成失败。** 本步骤将目录属主设为容器用户 `65532`、目录权限设为 `0700`，因此普通宿主用户可能无法展开目录或收到 `Permission denied`。这是密钥保护措施，应通过上述 sudo 命令检查，不要因此重新生成密钥，也不要将目录或文件改成所有用户可读。
+
+如果 sudo 检查仍显示文件缺失，再核对 bootstrap 命令的退出结果、错误输出和挂载路径；部分文件存在时不要删除后盲目重试。检查通过即可继续 **3.2 Gateway TLS**，无需查看或复制密钥内容到终端。
+
 **禁止对已有 PVC 用这个空的本地目录重新生成密钥。** 已有部署必须保留与其数据库匹配的原始身份。`runtime-ca.key` 离线保管，不装入运行 Pod；所有秘密应独立备份。
 
 ### 3.2 Gateway TLS
