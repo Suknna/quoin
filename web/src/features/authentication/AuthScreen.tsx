@@ -1,3 +1,4 @@
+import { MailIcon, MessageSquareIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError } from "@/api/workbench";
@@ -12,24 +13,13 @@ import {
 	FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-	InputOTP,
-	InputOTPGroup,
-	InputOTPSlot,
-} from "@/components/ui/input-otp";
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 import { type AuthContactChannel, type AuthFlow, authFlowApi } from "./api";
 import { DeliveryPane } from "./DeliveryPane";
 
 /**
  * The unified authentication surface: login, first-run initialization
- * (admin/operator) and the second-factor challenge share one shell, driven by
+ * (admin/operator) and the second-factor challenge use separate login and centered verification shells, driven by
  * the server-side flow behind the __Host-quoin-flow cookie. Admin recovery is
  * CLI-only: it sets a temporary password, and the following normal sign-in is
  * classified (and initialized) like a first run. Completing an initialization
@@ -255,12 +245,13 @@ function ContactPane({
 	onFlow: (flow: AuthFlow) => void;
 	onFlowGone: () => void;
 }) {
-	const [channel, setChannel] = useState<AuthContactChannel>("email");
+	const [channel, setChannel] = useState<AuthContactChannel | null>(null);
 	const [target, setTarget] = useState("");
 	const [error, setError] = useState("");
 	const [saving, setSaving] = useState(false);
 	async function submit(event: FormEvent) {
 		event.preventDefault();
+		if (!channel) return;
 		setError("");
 		setSaving(true);
 		try {
@@ -277,31 +268,38 @@ function ContactPane({
 			setTarget("");
 		}
 	}
-	return (
-		<form className="flex flex-col gap-6" onSubmit={submit}>
+	if (!channel)
+		return (
 			<FieldGroup>
-				<div className="flex flex-col items-center gap-1 text-center">
-					<h1 className="text-2xl font-bold">登记管理员联系方式</h1>
-					<p className="text-sm text-balance text-muted-foreground">
-						登记至少一种邮箱或手机号，用于接收登录验证码。
-					</p>
-				</div>
+				<h1 className="text-center text-2xl font-semibold">选择验证方式</h1>
+				<Button
+					variant="outline"
+					className="h-14"
+					onClick={() => setChannel("email")}
+				>
+					<MailIcon data-icon="inline-start" />
+					邮箱验证码
+				</Button>
+				<Button
+					variant="outline"
+					className="h-14"
+					onClick={() => setChannel("sms")}
+				>
+					<MessageSquareIcon data-icon="inline-start" />
+					短信验证码
+				</Button>
+			</FieldGroup>
+		);
+	return (
+		<form
+			className="flex flex-col gap-6 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-right-2"
+			onSubmit={submit}
+		>
+			<FieldGroup>
+				<h1 className="text-center text-2xl font-semibold">
+					{channel === "email" ? "绑定邮箱" : "绑定手机号"}
+				</h1>
 				{error && <ErrorMessage>{error}</ErrorMessage>}
-				<Field>
-					<FieldLabel htmlFor="channel">方式</FieldLabel>
-					<Select
-						value={channel}
-						onValueChange={(value) => setChannel(value as AuthContactChannel)}
-					>
-						<SelectTrigger id="channel">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="email">邮箱</SelectItem>
-							<SelectItem value="sms">短信</SelectItem>
-						</SelectContent>
-					</Select>
-				</Field>
 				<Field>
 					<FieldLabel htmlFor="target">
 						{channel === "email" ? "邮箱地址" : "手机号"}
@@ -309,14 +307,27 @@ function ContactPane({
 					<Input
 						id="target"
 						type={channel === "email" ? "email" : "tel"}
-						autoComplete="off"
+						autoComplete={channel === "email" ? "email" : "tel"}
 						value={target}
 						onChange={(e) => setTarget(e.target.value)}
 						required
+						autoFocus
 					/>
 				</Field>
 				<Button type="submit" disabled={saving}>
 					{saving ? "正在保存…" : "保存联系方式"}
+				</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					disabled={saving}
+					onClick={() => {
+						setChannel(null);
+						setTarget("");
+						setError("");
+					}}
+				>
+					选择其他方式
 				</Button>
 			</FieldGroup>
 		</form>
@@ -334,7 +345,7 @@ function OtpPane({
 	onAuthenticated: (user: UserSummary) => void;
 	onFlowGone: () => void;
 }) {
-	const [contactId, setContactId] = useState(() => flow.contacts[0]?.id ?? "");
+	const [contactId, setContactId] = useState("");
 	const [code, setCode] = useState("");
 	const [sentContactId, setSentContactId] = useState<string>();
 	const [cooldown, setCooldown] = useState(0);
@@ -352,11 +363,9 @@ function OtpPane({
 		return () => window.clearInterval(timer);
 	}, [cooling]);
 	function selectContact(nextId: string) {
-		// A fresh target needs a fresh challenge; server rate limits still apply.
+		// Returning to the chooser must not discard an already sent challenge or its cooldown.
 		setContactId(nextId);
-		setSentContactId(undefined);
 		setCode("");
-		setCooldown(0);
 	}
 	async function send() {
 		if (!contact || sending) return;
@@ -403,7 +412,7 @@ function OtpPane({
 			setVerifying(false);
 		}
 	}
-	if (!contact) {
+	if (flow.contacts.length === 0) {
 		return (
 			<FieldGroup>
 				<h1 className="text-2xl font-bold">输入验证码</h1>
@@ -414,70 +423,117 @@ function OtpPane({
 			</FieldGroup>
 		);
 	}
+	if (!contact)
+		return (
+			<FieldGroup>
+				<div className="flex flex-col gap-2 text-center">
+					<h1 className="text-2xl font-semibold">二次验证</h1>
+					<p className="text-sm text-muted-foreground">选择验证码接收方式</p>
+				</div>
+				{(["email", "sms"] as const).map((channel) => {
+					const contacts = flow.contacts.filter(
+						(item) => item.channel === channel,
+					);
+					const Icon = channel === "email" ? MailIcon : MessageSquareIcon;
+					return contacts.length ? (
+						contacts.map((candidate) => (
+							<Button
+								key={candidate.id}
+								variant="outline"
+								className="h-14 justify-between"
+								onClick={() => selectContact(candidate.id)}
+							>
+								<span className="flex items-center gap-2">
+									<Icon data-icon="inline-start" />
+									{channelLabel(channel)}验证码
+								</span>
+								<span className="min-w-0 truncate">
+									{candidate.maskedTarget}
+								</span>
+							</Button>
+						))
+					) : (
+						<Button
+							key={channel}
+							variant="outline"
+							className="h-14 justify-between"
+							disabled
+						>
+							<span className="flex items-center gap-2">
+								<Icon data-icon="inline-start" />
+								{channelLabel(channel)}验证码
+							</span>
+							<span>未绑定</span>
+						</Button>
+					);
+				})}
+			</FieldGroup>
+		);
 	const challengeSent = sentContactId === contact.id;
 	return (
-		<form className="flex flex-col gap-6" onSubmit={submit}>
+		<form
+			className="flex flex-col gap-6 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-right-2"
+			onSubmit={submit}
+		>
 			<FieldGroup>
-				<div className="flex flex-col items-center gap-1 text-center">
-					<h1 className="text-2xl font-bold">输入验证码</h1>
-					<p className="text-sm text-balance text-muted-foreground">
-						输入发送到 {channelLabel(contact.channel)} {contact.maskedTarget}{" "}
-						的六位验证码。
+				<div className="flex flex-col items-center gap-2 text-center">
+					<h1 className="text-2xl font-semibold">
+						{challengeSent ? "输入验证码" : "接收验证码"}
+					</h1>
+					<p className="text-sm text-muted-foreground">
+						{contact.maskedTarget}
 					</p>
 				</div>
 				{error && <ErrorMessage>{error}</ErrorMessage>}
-				{flow.contacts.length > 1 && (
-					<Field>
-						<FieldLabel htmlFor="contact">收码方式</FieldLabel>
-						<Select value={contactId} onValueChange={selectContact}>
-							<SelectTrigger id="contact">
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								{flow.contacts.map((candidate) => (
-									<SelectItem key={candidate.id} value={candidate.id}>
-										{channelLabel(candidate.channel)} {candidate.maskedTarget}
-									</SelectItem>
-								))}
-							</SelectContent>
-						</Select>
-					</Field>
-				)}
-				<Field>
-					<FieldLabel htmlFor="otp">验证码</FieldLabel>
-					<div className="flex flex-wrap items-center gap-3">
-						<InputOTP
-							id="otp"
-							maxLength={6}
-							value={code}
-							onChange={setCode}
-							disabled={verifying}
-						>
-							<InputOTPGroup>
-								{Array.from({ length: 6 }, (_, index) => (
-									<InputOTPSlot key={index} index={index} />
-								))}
-							</InputOTPGroup>
-						</InputOTP>
-						<Button
-							type="button"
-							variant="outline"
-							onClick={() => void send()}
-							disabled={sending || cooling}
-						>
-							{!challengeSent
-								? "发送验证码"
-								: cooling
-									? `重新发送（${cooldown}s）`
-									: "重新发送"}
+				{challengeSent && (
+					<>
+						<Field>
+							<FieldLabel htmlFor="otp" className="sr-only">
+								验证码
+							</FieldLabel>
+							<Input
+								id="otp"
+								inputMode="numeric"
+								autoComplete="one-time-code"
+								pattern="[0-9]{6}"
+								maxLength={6}
+								placeholder="六位验证码"
+								value={code}
+								onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, ""))}
+								disabled={verifying}
+								autoFocus
+								className="h-12 text-center"
+							/>
+						</Field>
+						<Button type="submit" disabled={verifying || code.length !== 6}>
+							{verifying ? "正在验证…" : "验证并继续"}
 						</Button>
-					</div>
-					<FieldDescription>
-						验证码短时有效且只能使用一次，失败次数跨重发累计。
-					</FieldDescription>
-				</Field>
-				<Button type="submit" disabled={verifying || code.length !== 6}>
-					{verifying ? "正在验证…" : "验证并继续"}
+					</>
+				)}
+				<Button
+					type="button"
+					variant={challengeSent ? "outline" : "default"}
+					onClick={() => void send()}
+					disabled={sending || cooling || verifying}
+				>
+					{sending
+						? "正在发送…"
+						: !challengeSent
+							? "发送验证码"
+							: cooling
+								? `重新发送（${cooldown}s）`
+								: "重新发送"}
+				</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					disabled={sending || verifying}
+					onClick={() => {
+						selectContact("");
+						setError("");
+					}}
+				>
+					选择其他方式
 				</Button>
 			</FieldGroup>
 		</form>
@@ -524,9 +580,6 @@ function FinishPane({
 					密码与联系方式（{targets}）已就绪。
 				</p>
 			</div>
-			<FieldDescription>
-				完成初始化将清除流程并返回登录页；初始化成功不会自动进入工作台。
-			</FieldDescription>
 			{error && <ErrorMessage>{error}</ErrorMessage>}
 			<Button onClick={() => void complete()} disabled={completing}>
 				{completing ? "正在完成…" : "完成初始化"}
@@ -603,13 +656,29 @@ export function AuthScreen({
 		!deliveryOverride &&
 		(pane === "contact" || pane === "otp" || pane === "finish");
 	return (
-		<div className="grid min-h-svh lg:grid-cols-2">
-			<div className="flex flex-col gap-4 p-6 md:p-10">
-				<div className="flex justify-center md:justify-start">
+		<div className={cn("min-h-svh", !flow && "grid lg:grid-cols-2")}>
+			<div
+				className={cn(
+					"flex flex-col gap-4 p-6 md:p-10",
+					flow && "mx-auto min-h-svh w-full max-w-lg pt-16 md:pt-20",
+				)}
+			>
+				<div className={cn("flex justify-center", !flow && "md:justify-start")}>
 					<BrandLockup className="h-7" />
 				</div>
-				<div className="flex flex-1 items-center justify-center">
-					<div className="w-full max-w-xs">
+				<main
+					className={cn(
+						"flex justify-center",
+						flow ? "pt-8" : "flex-1 items-center",
+					)}
+				>
+					<div
+						key={deliveryOverride ? "delivery" : pane}
+						className={cn(
+							"w-full motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-300",
+							flow ? "max-w-sm" : "max-w-xs",
+						)}
+					>
 						{phase === "resuming" ? (
 							<p role="status">正在恢复认证状态…</p>
 						) : (
@@ -651,16 +720,21 @@ export function AuthScreen({
 									/>
 								)}
 								{deliveryEntry && (
-									<Button variant="ghost" type="button" onClick={openDelivery}>
+									<Button
+										className="mt-6 w-full"
+										variant="ghost"
+										type="button"
+										onClick={openDelivery}
+									>
 										验证码投递设置
 									</Button>
 								)}
 							</>
 						)}
 					</div>
-				</div>
+				</main>
 			</div>
-			<AuthBrandPanel />
+			{!flow && <AuthBrandPanel />}
 		</div>
 	);
 }

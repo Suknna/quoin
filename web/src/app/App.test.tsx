@@ -102,8 +102,9 @@ async function signInThroughFlow(user: UserSummary) {
 		target: { value: "a password long enough" },
 	});
 	fireEvent.click(screen.getByRole("button", { name: "登录" }));
-	await screen.findByText(/a\*\*\*@quoin\.dev/);
-	fireEvent.change(screen.getByLabelText("验证码"), {
+	fireEvent.click(await screen.findByRole("button", { name: /邮箱验证码/ }));
+	fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+	fireEvent.change(await screen.findByLabelText("验证码"), {
 		target: { value: "012345" },
 	});
 	fireEvent.click(screen.getByRole("button", { name: "验证并继续" }));
@@ -151,8 +152,9 @@ describe("authentication workflow", () => {
 		);
 		render(<App />);
 		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
-		expect(screen.getByRole("img", { name: "Quoin" }).querySelector("img"))
-			.toHaveAttribute("src", "/brand/lockup-light.png");
+		expect(
+			screen.getByRole("img", { name: "Quoin" }).querySelector("img"),
+		).toHaveAttribute("src", "/brand/lockup-light.png");
 		const brandPanel = screen.getByRole("complementary", {
 			name: "关于 Quoin",
 		});
@@ -188,11 +190,10 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
 		vi.spyOn(workbenchApi, "listConnections").mockResolvedValue([]);
 		render(<App />);
-		expect(await screen.findByRole("button", { name: "创建模型提供方" }))
-			.toBeInTheDocument();
 		expect(
-			screen.queryByLabelText("当前临时密码"),
-		).not.toBeInTheDocument();
+			await screen.findByRole("button", { name: "创建模型提供方" }),
+		).toBeInTheDocument();
+		expect(screen.queryByLabelText("当前临时密码")).not.toBeInTheDocument();
 	});
 
 	it("keeps an operator read-only and does not make mutation requests", async () => {

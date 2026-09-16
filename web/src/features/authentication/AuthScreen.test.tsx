@@ -13,14 +13,42 @@ const flowApi = vi.hoisted(() => ({
 	sendChallenge: vi.fn(),
 	verify: vi.fn(),
 	complete: vi.fn(),
-	readDelivery: vi.fn(),
-	saveDelivery: vi.fn(),
 }));
 
 vi.mock("@/features/authentication/api", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("@/features/authentication/api")>();
 	return { ...actual, authFlowApi: flowApi };
+});
+
+// DeliveryPane is an independent component with its own dedicated test suite;
+// this stub keeps the focus on how AuthScreen mounts the pane and reacts to
+// its onDone/onFlowGone callbacks.
+vi.mock("./DeliveryPane", async () => {
+	const { createElement } = await import("react");
+	function DeliveryPaneStub({
+		onDone,
+		onFlowGone,
+	}: {
+		onDone: () => void;
+		onFlowGone: () => void;
+	}) {
+		return createElement(
+			"div",
+			{ "data-testid": "delivery-pane-stub" },
+			createElement(
+				"button",
+				{ type: "button", onClick: onDone },
+				"模拟返回初始化",
+			),
+			createElement(
+				"button",
+				{ type: "button", onClick: onFlowGone },
+				"模拟投递流程失效",
+			),
+		);
+	}
+	return { DeliveryPane: DeliveryPaneStub };
 });
 
 import { AuthScreen } from "./AuthScreen";
@@ -33,6 +61,12 @@ const unverifiedEmail = {
 	verified: false,
 } as const;
 const verifiedEmail = { ...unverifiedEmail, verified: true };
+const smsContact = {
+	id: "c2",
+	channel: "sms",
+	maskedTarget: "1****5678",
+	verified: false,
+} as const;
 const sessionUser: UserSummary = {
 	id: "1",
 	username: "admin",
@@ -46,12 +80,6 @@ const sessionUser: UserSummary = {
 	lastLoginAt: null,
 };
 const noFlow = () => new WorkbenchApiError(404, "没有进行中的认证流程");
-const emptyDelivery = {
-	configuration: {},
-	rowVersion: 0,
-	source: "",
-	configured: false,
-};
 
 /** Builds a flow projection; factorVerified defaults to the pending false. */
 function flowOf(overrides: Partial<AuthFlow>): AuthFlow {
@@ -66,28 +94,13 @@ function flowOf(overrides: Partial<AuthFlow>): AuthFlow {
 }
 
 beforeEach(() => {
-	vi.stubGlobal(
-		"ResizeObserver",
-		class {
-			observe() {}
-			unobserve() {}
-			disconnect() {}
-		},
-	);
-	// jsdom lacks scrollIntoView, which the Radix select popup calls on open.
-	Element.prototype.scrollIntoView ??= vi.fn();
-	if (!document.elementFromPoint) {
-		document.elementFromPoint = () => null;
-	}
 	flowApi.resume.mockRejectedValue(noFlow());
-	flowApi.readDelivery.mockResolvedValue(emptyDelivery);
 });
 
 afterEach(() => {
 	cleanup();
 	// reset (not clear) so leftover once-queues never leak across tests.
 	vi.resetAllMocks();
-	vi.unstubAllGlobals();
 });
 
 async function submitCredentials() {
@@ -100,8 +113,13 @@ async function submitCredentials() {
 	fireEvent.click(screen.getByRole("button", { name: "登录" }));
 }
 
+/**
+ * The challenge step now opens at a receiving-contact chooser; pick the email
+ * contact, send the challenge and enter the code.
+ */
 async function sendAndEnterCode(code = "012345") {
-	fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+	fireEvent.click(await screen.findByRole("button", { name: /邮箱验证码/ }));
+	fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
 	await waitFor(() =>
 		expect(flowApi.sendChallenge).toHaveBeenCalledWith("c1"),
 	);
@@ -117,15 +135,26 @@ describe("AuthScreen", () => {
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		expect(screen.getByRole("status")).toHaveTextContent("正在恢复认证状态…");
 		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		// The two-column login screen owns the brand panel.
+		expect(
+			screen.getByRole("complementary", { name: "关于 Quoin" }),
+		).toBeInTheDocument();
 		expect(flowApi.resume).toHaveBeenCalledTimes(1);
 	});
 
-	it("resumes a running login flow after a refresh instead of the login form", async () => {
+	it("resumes a running login flow after a refresh into the OTP chooser", async () => {
 		flowApi.resume.mockResolvedValue(
 			flowOf({ type: "login", contacts: [verifiedEmail] }),
 		);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		expect(await screen.findByText(/a\*\*\*@quoin\.dev/)).toBeInTheDocument();
+		expect(await screen.findByRole("heading", { name: "二次验证" })).toBeInTheDocument();
+		// The chooser name joins the channel label and masked target; the exact
+		// spacing between the inline spans is irrelevant to a11y matching.
+		expect(
+			screen.getByRole("button", { name: /邮箱验证码\s*a\*\*\*@quoin\.dev/ }),
+		).toBeInTheDocument();
+		// The unbound channel stays visible but disabled instead of vanishing.
+		expect(screen.getByRole("button", { name: /短信验证码\s*未绑定/ })).toBeDisabled();
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
 		// No code is requested behind the user's back; sending is explicit.
 		expect(flowApi.sendChallenge).not.toHaveBeenCalled();
@@ -144,6 +173,21 @@ describe("AuthScreen", () => {
 		expect(screen.queryByLabelText("新密码")).not.toBeInTheDocument();
 	});
 
+	it("offers the way back to login when a resumed flow has no contacts", async () => {
+		// Defensive against a flow projection without contacts: the challenge
+		// cannot be sent, so the only escape hatch is a fresh login.
+		flowApi.resume.mockResolvedValue(
+			flowOf({ type: "login", contacts: [] }),
+		);
+		render(<AuthScreen onAuthenticated={vi.fn()} />);
+		expect(
+			await screen.findByText("没有可用的验证方式，请重新登录。"),
+		).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "返回登录" }));
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.getByRole("status")).toHaveTextContent("认证流程已失效");
+	});
+
 	it("completes a login challenge into a workbench session", async () => {
 		flowApi.start.mockResolvedValue(
 			flowOf({ type: "login", contacts: [verifiedEmail] }),
@@ -157,6 +201,11 @@ describe("AuthScreen", () => {
 		await waitFor(() => expect(authenticated).toHaveBeenCalledWith(sessionUser));
 		// A completed login never touches the initialization finish endpoint.
 		expect(flowApi.complete).not.toHaveBeenCalled();
+		// After success the workbench takes over as a separate screen: the
+		// flow shell carries no brand complementary panel.
+		expect(
+			screen.queryByRole("complementary", { name: "关于 Quoin" }),
+		).not.toBeInTheDocument();
 	});
 
 	it("renders invalid credentials generically and keeps the form mounted", async () => {
@@ -200,6 +249,48 @@ describe("AuthScreen", () => {
 		expect(screen.getByRole("status")).toHaveTextContent("初始化完成");
 	});
 
+	it("sends the challenge to the contact chosen in the OTP chooser", async () => {
+		// Both channels are offered with their masked targets, and the
+		// challenge only goes out for the one the user actually picks.
+		flowApi.resume.mockResolvedValue(
+			flowOf({ type: "login", contacts: [verifiedEmail, smsContact] }),
+		);
+		render(<AuthScreen onAuthenticated={vi.fn()} />);
+		expect(
+			await screen.findByRole("button", { name: /邮箱验证码\s*a\*\*\*@quoin\.dev/ }),
+		).toBeInTheDocument();
+		const smsChoice = screen.getByRole("button", { name: /短信验证码\s*1\*\*\*\*5678/ });
+		expect(smsChoice).toBeInTheDocument();
+		fireEvent.click(smsChoice);
+		fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
+		await waitFor(() => expect(flowApi.sendChallenge).toHaveBeenCalledWith("c2"));
+		expect(flowApi.sendChallenge).not.toHaveBeenCalledWith("c1");
+	});
+
+	it("keeps the sent challenge and cooldown when re-selecting the same contact", async () => {
+		// Going back to the chooser and picking the same target again is pure
+		// navigation: it must not discard the already sent challenge, so the
+		// code entry stays available and resending stays cooldown-gated — no
+		// second send, which would only burn the server rate limit.
+		flowApi.start.mockResolvedValue(
+			flowOf({ type: "login", contacts: [verifiedEmail] }),
+		);
+		render(<AuthScreen onAuthenticated={vi.fn()} />);
+		await submitCredentials();
+		await screen.findByText(/a\*\*\*@quoin\.dev/);
+		fireEvent.click(screen.getByRole("button", { name: /邮箱验证码/ }));
+		fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
+		await waitFor(() => expect(flowApi.sendChallenge).toHaveBeenCalledTimes(1));
+		// Back to the chooser, then re-select the same email target.
+		fireEvent.click(screen.getByRole("button", { name: "选择其他方式" }));
+		fireEvent.click(await screen.findByRole("button", { name: /邮箱验证码/ }));
+		// The sent challenge survived the round-trip: the code field is still
+		// offered and the resend button remains disabled by the cooldown.
+		expect(screen.getByLabelText("验证码")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /重新发送（\d+s）/ })).toBeDisabled();
+		expect(flowApi.sendChallenge).toHaveBeenCalledTimes(1);
+	});
+
 	it("keeps a delivery-settings entry after a refresh at the OTP step", async () => {
 		// The post-password delivery overlay is transient state; a refresh at
 		// contact/OTP must still reach the missing channel configuration.
@@ -211,16 +302,31 @@ describe("AuthScreen", () => {
 		fireEvent.click(
 			screen.getByRole("button", { name: "验证码投递设置" }),
 		);
-		expect(await screen.findByLabelText("SMTP 服务器")).toBeInTheDocument();
+		expect(await screen.findByTestId("delivery-pane-stub")).toBeInTheDocument();
 		// Returning lands back on the same flow-derived OTP step, unharmed.
-		fireEvent.click(screen.getByRole("button", { name: "返回继续初始化" }));
+		fireEvent.click(screen.getByRole("button", { name: "模拟返回初始化" }));
 		expect(await screen.findByText(/a\*\*\*@quoin\.dev/)).toBeInTheDocument();
 		expect(flowApi.resume).toHaveBeenCalledTimes(1);
 		await sendAndEnterCode();
 		expect(flowApi.verify).toHaveBeenCalledWith("012345");
 	});
 
-	it("walks admin initialization: password, contact, verification, completion", async () => {
+	it("resets to the login form when the delivery pane reports the flow gone", async () => {
+		flowApi.resume.mockResolvedValue(
+			flowOf({ contacts: [unverifiedEmail], passwordSet: true }),
+		);
+		render(<AuthScreen onAuthenticated={vi.fn()} />);
+		await screen.findByText(/a\*\*\*@quoin\.dev/);
+		fireEvent.click(screen.getByRole("button", { name: "验证码投递设置" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "模拟投递流程失效" }),
+		);
+		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
+		expect(screen.getByRole("status")).toHaveTextContent("认证流程已失效");
+		expect(screen.queryByTestId("delivery-pane-stub")).not.toBeInTheDocument();
+	});
+
+	it("walks admin initialization: password, delivery skip, contact choice, verification, completion", async () => {
 		flowApi.start.mockResolvedValue(
 			flowOf({ contacts: [], passwordSet: false }),
 		);
@@ -260,12 +366,12 @@ describe("AuthScreen", () => {
 		expect(flowApi.setPassword).toHaveBeenCalledWith("brand new password");
 
 		// Delivery settings open before the contact step; the admin may skip them.
-		await screen.findByText("验证码投递设置");
-		fireEvent.click(screen.getByRole("button", { name: "返回继续初始化" }));
+		expect(await screen.findByTestId("delivery-pane-stub")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "模拟返回初始化" }));
 
-		// Contact step opens for an admin flow without any contact.
-		await screen.findByLabelText("邮箱地址");
-		fireEvent.change(screen.getByLabelText("邮箱地址"), {
+		// The contact step starts at a channel chooser, then the email form.
+		fireEvent.click(await screen.findByRole("button", { name: "邮箱验证码" }));
+		fireEvent.change(await screen.findByLabelText("邮箱地址"), {
 			target: { value: "root@quoin.dev" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "保存联系方式" }));
@@ -280,6 +386,40 @@ describe("AuthScreen", () => {
 		await waitFor(() => expect(flowApi.complete).toHaveBeenCalledTimes(1));
 		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
 		expect(screen.getByRole("status")).toHaveTextContent("初始化完成");
+	});
+
+	it("registers an SMS contact through the contact channel chooser", async () => {
+		flowApi.start.mockResolvedValue(
+			flowOf({ contacts: [], passwordSet: false }),
+		);
+		flowApi.resume
+			.mockRejectedValueOnce(noFlow()) // the mount-time resume finds no flow
+			.mockResolvedValueOnce(flowOf({ passwordSet: true }))
+			.mockResolvedValueOnce(
+				flowOf({ contacts: [smsContact], passwordSet: true }),
+			);
+		render(<AuthScreen onAuthenticated={vi.fn()} />);
+		await submitCredentials();
+		fireEvent.change(await screen.findByLabelText("新密码"), {
+			target: { value: "brand new password" },
+		});
+		fireEvent.change(screen.getByLabelText("再次输入新密码"), {
+			target: { value: "brand new password" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
+		fireEvent.click(await screen.findByRole("button", { name: "模拟返回初始化" }));
+		// The SMS choice swaps the form to a phone number, and the channel
+		// reaches addContact so the challenge can go out over SMS.
+		fireEvent.click(await screen.findByRole("button", { name: "短信验证码" }));
+		fireEvent.change(await screen.findByLabelText("手机号"), {
+			target: { value: "13800138000" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "保存联系方式" }));
+		expect(flowApi.addContact).toHaveBeenCalledWith("sms", "13800138000");
+		// The registered SMS target then shows up in the OTP chooser.
+		expect(
+			await screen.findByRole("button", { name: /短信验证码\s*1\*\*\*\*5678/ }),
+		).toBeInTheDocument();
 	});
 
 	it("walks operator initialization without offering a contact form", async () => {
@@ -333,181 +473,6 @@ describe("AuthScreen", () => {
 		expect(await screen.findByRole("status")).toHaveTextContent("初始化完成");
 	});
 
-	it("saves SMTP delivery settings during admin initialization", async () => {
-		flowApi.start.mockResolvedValue(
-			flowOf({ contacts: [], passwordSet: false }),
-		);
-		flowApi.resume
-			.mockRejectedValueOnce(noFlow()) // the mount-time resume finds no flow
-			.mockResolvedValueOnce(flowOf({ passwordSet: true }));
-		flowApi.saveDelivery.mockResolvedValue({
-			configuration: {
-				email: {
-					kind: "smtp",
-					host: "smtp.example.com",
-					port: 587,
-					from: "quoin@example.com",
-					username: "quoin",
-					passwordRef: "smtp_password",
-					tlsMode: "starttls",
-				},
-			},
-			rowVersion: 1,
-			source: "administrator",
-			configured: true,
-		});
-		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		await submitCredentials();
-		// The default password is replaced before delivery settings open.
-		fireEvent.change(await screen.findByLabelText("新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.change(screen.getByLabelText("再次输入新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
-		await screen.findByText("验证码投递设置");
-		fireEvent.change(await screen.findByLabelText("SMTP 服务器"), {
-			target: { value: "smtp.example.com" },
-		});
-		fireEvent.change(screen.getByLabelText("端口"), {
-			target: { value: "587" },
-		});
-		fireEvent.change(screen.getByLabelText("发件地址"), {
-			target: { value: "quoin@example.com" },
-		});
-		fireEvent.change(screen.getByLabelText("SMTP 用户名（可选）"), {
-			target: { value: "quoin" },
-		});
-		fireEvent.change(screen.getByLabelText("SMTP 密码（可选）"), {
-			target: { value: "mail-secret" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "保存投递设置" }));
-		await waitFor(() => expect(flowApi.saveDelivery).toHaveBeenCalledTimes(1));
-		expect(flowApi.saveDelivery).toHaveBeenCalledWith({
-			configuration: {
-				email: {
-					kind: "smtp",
-					host: "smtp.example.com",
-					port: 587,
-					from: "quoin@example.com",
-					username: "quoin",
-					// The reference is written; the value only travels write-only.
-					passwordRef: "smtp_password",
-					tlsMode: "starttls",
-				},
-			},
-			secrets: { smtp_password: "mail-secret" },
-			expectedRowVersion: 0,
-		});
-		expect(await screen.findByRole("status")).toHaveTextContent(
-			"投递设置已保存",
-		);
-		// The typed secret is dropped from memory after a successful save.
-		expect(screen.getByLabelText("SMTP 密码（可选）")).toHaveValue("");
-		fireEvent.click(screen.getByRole("button", { name: "返回继续初始化" }));
-		expect(await screen.findByLabelText("邮箱地址")).toBeInTheDocument();
-	});
-
-	it("saves webhook HTTPS private CIDRs together with the private CA", async () => {
-		flowApi.start.mockResolvedValue(
-			flowOf({ contacts: [], passwordSet: false }),
-		);
-		flowApi.resume
-			.mockRejectedValueOnce(noFlow()) // the mount-time resume finds no flow
-			.mockResolvedValueOnce(flowOf({ passwordSet: true }));
-		flowApi.saveDelivery.mockResolvedValue({
-			configuration: {
-				email: {
-					kind: "webhook",
-					url: "https://gateway.quoin.demo.invalid/sms",
-					allowPrivateCIDRs: ["172.16.0.0/12"],
-					rootCaPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----",
-				},
-			},
-			rowVersion: 1,
-			source: "administrator",
-			configured: true,
-		});
-		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		await submitCredentials();
-		fireEvent.change(await screen.findByLabelText("新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.change(screen.getByLabelText("再次输入新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
-		await screen.findByText("验证码投递设置");
-		// The email channel switches to the webhook kind, which exposes the
-		// same private-HTTPS controls as the SMTP section.
-		fireEvent.click(screen.getByRole("combobox", { name: "邮箱渠道" }));
-		fireEvent.click(await screen.findByRole("option", { name: "出站 Webhook" }));
-		fireEvent.change(await screen.findByLabelText("Webhook 地址"), {
-			target: { value: "https://gateway.quoin.demo.invalid/sms" },
-		});
-		fireEvent.change(
-			screen.getByLabelText("允许的私网 CIDR（高级，可选）"),
-			{ target: { value: "172.16.0.0/12" } },
-		);
-		fireEvent.change(
-			screen.getByLabelText("私有根 CA 证书 PEM（高级，可选）"),
-			{ target: { value: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----" } },
-		);
-		fireEvent.click(screen.getByRole("button", { name: "保存投递设置" }));
-		await waitFor(() => expect(flowApi.saveDelivery).toHaveBeenCalledTimes(1));
-		expect(flowApi.saveDelivery).toHaveBeenCalledWith({
-			configuration: {
-				email: {
-					kind: "webhook",
-					url: "https://gateway.quoin.demo.invalid/sms",
-					allowPrivateCIDRs: ["172.16.0.0/12"],
-					rootCaPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----",
-				},
-			},
-			secrets: {},
-			expectedRowVersion: 0,
-		});
-	});
-
-	it("shows deployment-owned delivery settings read-only", async () => {
-		flowApi.start.mockResolvedValue(
-			flowOf({ contacts: [], passwordSet: false }),
-		);
-		flowApi.resume
-			.mockRejectedValueOnce(noFlow()) // the mount-time resume finds no flow
-			.mockResolvedValueOnce(flowOf({ passwordSet: true }));
-		flowApi.readDelivery.mockResolvedValue({
-			configuration: {
-				email: { kind: "smtp", host: "smtp.example.com", port: 587 },
-			},
-			rowVersion: 2,
-			source: "deployment",
-			configured: true,
-		});
-		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		await submitCredentials();
-		// The password step completes first; the delivery pane then opens read-only.
-		fireEvent.change(await screen.findByLabelText("新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.change(screen.getByLabelText("再次输入新密码"), {
-			target: { value: "brand new password" },
-		});
-		fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
-		// Wait for the read-only branch that replaces the editable form once
-		// the deployment-owned settings load.
-		expect(
-			await screen.findByText(/投递配置由部署文件管理，此处只读/),
-		).toBeInTheDocument();
-		expect(screen.getByText("验证码投递设置")).toBeInTheDocument();
-		expect(
-			screen.queryByRole("button", { name: "保存投递设置" }),
-		).not.toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "返回继续初始化" }));
-		expect(await screen.findByLabelText("邮箱地址")).toBeInTheDocument();
-	});
-
 	it("reports an invalid code generically and never auto-resends", async () => {
 		flowApi.start.mockResolvedValue(
 			flowOf({ type: "login", contacts: [verifiedEmail] }),
@@ -543,7 +508,8 @@ describe("AuthScreen", () => {
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		await submitCredentials();
 		await screen.findByText(/a\*\*\*@quoin\.dev/);
-		fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+		fireEvent.click(screen.getByRole("button", { name: /邮箱验证码/ }));
+		fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
 		expect(await screen.findByRole("status")).toHaveTextContent(
 			"认证流程已失效",
 		);
