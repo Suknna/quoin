@@ -1,4 +1,4 @@
-import { MailIcon, MessageSquareIcon } from "lucide-react";
+import { LoaderCircle, MailIcon, MessageSquareIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError } from "@/api/workbench";
@@ -13,6 +13,7 @@ import {
 	FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { type AuthContactChannel, type AuthFlow, authFlowApi } from "./api";
 import { DeliveryPane } from "./DeliveryPane";
@@ -144,7 +145,18 @@ function LoginPane({
 					/>
 				</Field>
 				<Button type="submit" disabled={saving}>
-					{saving ? "正在登录…" : "登录"}
+					{saving ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							登录中…
+						</>
+					) : (
+						"登录"
+					)}
 				</Button>
 			</FieldGroup>
 		</form>
@@ -231,7 +243,18 @@ function PasswordPane({
 					/>
 				</Field>
 				<Button type="submit" disabled={saving}>
-					{saving ? "正在保存…" : "保存并继续"}
+					{saving ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							保存中…
+						</>
+					) : (
+						"保存并继续"
+					)}
 				</Button>
 			</FieldGroup>
 		</form>
@@ -315,7 +338,18 @@ function ContactPane({
 					/>
 				</Field>
 				<Button type="submit" disabled={saving}>
-					{saving ? "正在保存…" : "保存联系方式"}
+					{saving ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							保存中…
+						</>
+					) : (
+						"保存联系方式"
+					)}
 				</Button>
 				<Button
 					type="button"
@@ -506,7 +540,18 @@ function OtpPane({
 							/>
 						</Field>
 						<Button type="submit" disabled={verifying || code.length !== 6}>
-							{verifying ? "正在验证…" : "验证并继续"}
+							{verifying ? (
+								<>
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+										aria-hidden="true"
+									/>
+									验证中…
+								</>
+							) : (
+								"验证并继续"
+							)}
 						</Button>
 					</>
 				)}
@@ -516,13 +561,22 @@ function OtpPane({
 					onClick={() => void send()}
 					disabled={sending || cooling || verifying}
 				>
-					{sending
-						? "正在发送…"
-						: !challengeSent
-							? "发送验证码"
-							: cooling
-								? `重新发送（${cooldown}s）`
-								: "重新发送"}
+					{sending ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							发送中…
+						</>
+					) : !challengeSent ? (
+						"发送验证码"
+					) : cooling ? (
+						`重新发送（${cooldown}s）`
+					) : (
+						"重新发送"
+					)}
 				</Button>
 				<Button
 					type="button"
@@ -582,7 +636,18 @@ function FinishPane({
 			</div>
 			{error && <ErrorMessage>{error}</ErrorMessage>}
 			<Button onClick={() => void complete()} disabled={completing}>
-				{completing ? "正在完成…" : "完成初始化"}
+				{completing ? (
+					<>
+						<LoaderCircle
+							className="animate-spin"
+							data-icon="inline-start"
+							aria-hidden="true"
+						/>
+						完成中…
+					</>
+				) : (
+					"完成初始化"
+				)}
 			</Button>
 		</FieldGroup>
 	);
@@ -680,7 +745,16 @@ export function AuthScreen({
 						)}
 					>
 						{phase === "resuming" ? (
-							<p role="status">正在恢复认证状态…</p>
+							<div
+								className="flex flex-col items-center gap-3"
+								role="status"
+								aria-label="正在恢复认证状态"
+							>
+								<Skeleton className="h-7 w-2/3" />
+								<Skeleton className="h-9 w-full" />
+								<Skeleton className="h-9 w-full" />
+								<Skeleton className="h-9 w-1/2" />
+							</div>
 						) : (
 							<>
 								{pane === "login" && (

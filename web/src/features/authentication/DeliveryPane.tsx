@@ -1,4 +1,14 @@
 import {
+	ChevronDown,
+	ChevronLeft,
+	ChevronRight,
+	LoaderCircle,
+	Mail,
+	Plus,
+	Trash2,
+	Webhook,
+} from "lucide-react";
+import {
 	type FormEvent,
 	type ReactNode,
 	useCallback,
@@ -32,15 +42,6 @@ import {
 	ItemTitle,
 } from "@/components/ui/item";
 import {
-	ChevronDown,
-	ChevronLeft,
-	ChevronRight,
-	Mail,
-	Plus,
-	Trash2,
-	Webhook,
-} from "lucide-react";
-import {
 	Select,
 	SelectContent,
 	SelectGroup,
@@ -48,30 +49,31 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import {
-	type DeliverySlot,
-	type KVRow,
-	type SmtpDraft,
-	type SmtpPresetId,
-	type WebhookAuthMode,
-	type WebhookDraft,
-	buildSmtpChannel,
-	buildWebhookChannel,
-	channelSummary,
-	newRow,
-	slotFrom,
-	SMTP_PRESETS,
-	smtpDraftWithPreset,
-	smtpPresetById,
-	webhookDraftWithAuthMode,
-} from "./delivery";
 import {
 	type AuthDeliveryChannel,
 	type AuthDeliveryConfiguration,
 	type AuthDeliveryView,
 	authFlowApi,
 } from "./api";
+import {
+	buildSmtpChannel,
+	buildWebhookChannel,
+	channelSummary,
+	type DeliverySlot,
+	type KVRow,
+	newRow,
+	SMTP_PRESETS,
+	type SmtpDraft,
+	type SmtpPresetId,
+	slotFrom,
+	smtpDraftWithPreset,
+	smtpPresetById,
+	type WebhookAuthMode,
+	type WebhookDraft,
+	webhookDraftWithAuthMode,
+} from "./delivery";
 
 /**
  * Verification-code delivery settings (SMTP / outbound webhook), editable by
@@ -205,9 +207,16 @@ export function DeliveryPane({
 			{loadError ? (
 				<LoadFailure message={loadError} onRetry={load} onDone={onDone} />
 			) : !view ? (
-				<p role="status" className="text-sm text-muted-foreground">
-					正在加载投递设置…
-				</p>
+				<div
+					className="flex flex-col gap-3"
+					role="status"
+					aria-label="正在加载投递设置"
+				>
+					<Skeleton className="h-6 w-1/3" />
+					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-16 w-4/5" />
+				</div>
 			) : readOnly ? (
 				<ReadOnlyDelivery view={view} onDone={onDone} />
 			) : screen === "choose" ? (
@@ -556,7 +565,18 @@ function SmtpForm({
 						</Field>
 					</AdvancedSettings>
 					<Button type="submit" disabled={saving}>
-						{saving ? "正在保存…" : "保存投递设置"}
+						{saving ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								保存中…
+							</>
+						) : (
+							"保存投递设置"
+						)}
 					</Button>
 				</FieldGroup>
 			</form>
@@ -974,7 +994,18 @@ function WebhookForm({
 						</Field>
 					</AdvancedSettings>
 					<Button type="submit" disabled={saving}>
-						{saving ? "正在保存…" : "保存投递设置"}
+						{saving ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								保存中…
+							</>
+						) : (
+							"保存投递设置"
+						)}
 					</Button>
 				</FieldGroup>
 			</form>

@@ -1,8 +1,14 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WorkbenchApiError } from "@/api/workbench";
 import type { UserSummary } from "@/api/generated/types";
+import { WorkbenchApiError } from "@/api/workbench";
 import type { AuthFlow } from "./api";
 
 const flowApi = vi.hoisted(() => ({
@@ -120,9 +126,7 @@ async function submitCredentials() {
 async function sendAndEnterCode(code = "012345") {
 	fireEvent.click(await screen.findByRole("button", { name: /邮箱验证码/ }));
 	fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
-	await waitFor(() =>
-		expect(flowApi.sendChallenge).toHaveBeenCalledWith("c1"),
-	);
+	await waitFor(() => expect(flowApi.sendChallenge).toHaveBeenCalledWith("c1"));
 	fireEvent.change(screen.getByLabelText("验证码"), {
 		target: { value: code },
 	});
@@ -133,7 +137,9 @@ async function sendAndEnterCode(code = "012345") {
 describe("AuthScreen", () => {
 	it("shows the login form when no flow is active", async () => {
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		expect(screen.getByRole("status")).toHaveTextContent("正在恢复认证状态…");
+		expect(
+			screen.getByRole("status", { name: "正在恢复认证状态" }),
+		).toBeInTheDocument();
 		expect(await screen.findByLabelText("用户名")).toBeInTheDocument();
 		// The two-column login screen owns the brand panel.
 		expect(
@@ -147,14 +153,18 @@ describe("AuthScreen", () => {
 			flowOf({ type: "login", contacts: [verifiedEmail] }),
 		);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
-		expect(await screen.findByRole("heading", { name: "二次验证" })).toBeInTheDocument();
+		expect(
+			await screen.findByRole("heading", { name: "二次验证" }),
+		).toBeInTheDocument();
 		// The chooser name joins the channel label and masked target; the exact
 		// spacing between the inline spans is irrelevant to a11y matching.
 		expect(
 			screen.getByRole("button", { name: /邮箱验证码\s*a\*\*\*@quoin\.dev/ }),
 		).toBeInTheDocument();
 		// The unbound channel stays visible but disabled instead of vanishing.
-		expect(screen.getByRole("button", { name: /短信验证码\s*未绑定/ })).toBeDisabled();
+		expect(
+			screen.getByRole("button", { name: /短信验证码\s*未绑定/ }),
+		).toBeDisabled();
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
 		// No code is requested behind the user's back; sending is explicit.
 		expect(flowApi.sendChallenge).not.toHaveBeenCalled();
@@ -176,9 +186,7 @@ describe("AuthScreen", () => {
 	it("offers the way back to login when a resumed flow has no contacts", async () => {
 		// Defensive against a flow projection without contacts: the challenge
 		// cannot be sent, so the only escape hatch is a fresh login.
-		flowApi.resume.mockResolvedValue(
-			flowOf({ type: "login", contacts: [] }),
-		);
+		flowApi.resume.mockResolvedValue(flowOf({ type: "login", contacts: [] }));
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		expect(
 			await screen.findByText("没有可用的验证方式，请重新登录。"),
@@ -198,7 +206,9 @@ describe("AuthScreen", () => {
 		await submitCredentials();
 		expect(await screen.findByText(/a\*\*\*@quoin\.dev/)).toBeInTheDocument();
 		await sendAndEnterCode();
-		await waitFor(() => expect(authenticated).toHaveBeenCalledWith(sessionUser));
+		await waitFor(() =>
+			expect(authenticated).toHaveBeenCalledWith(sessionUser),
+		);
 		// A completed login never touches the initialization finish endpoint.
 		expect(flowApi.complete).not.toHaveBeenCalled();
 		// After success the workbench takes over as a separate screen: the
@@ -231,7 +241,11 @@ describe("AuthScreen", () => {
 				flowOf({ contacts: [verifiedEmail], passwordSet: true }),
 			)
 			.mockResolvedValueOnce(
-				flowOf({ contacts: [verifiedEmail], passwordSet: true, factorVerified: true }),
+				flowOf({
+					contacts: [verifiedEmail],
+					passwordSet: true,
+					factorVerified: true,
+				}),
 			);
 		flowApi.verify.mockResolvedValue({ completed: false });
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
@@ -257,13 +271,19 @@ describe("AuthScreen", () => {
 		);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		expect(
-			await screen.findByRole("button", { name: /邮箱验证码\s*a\*\*\*@quoin\.dev/ }),
+			await screen.findByRole("button", {
+				name: /邮箱验证码\s*a\*\*\*@quoin\.dev/,
+			}),
 		).toBeInTheDocument();
-		const smsChoice = screen.getByRole("button", { name: /短信验证码\s*1\*\*\*\*5678/ });
+		const smsChoice = screen.getByRole("button", {
+			name: /短信验证码\s*1\*\*\*\*5678/,
+		});
 		expect(smsChoice).toBeInTheDocument();
 		fireEvent.click(smsChoice);
 		fireEvent.click(await screen.findByRole("button", { name: "发送验证码" }));
-		await waitFor(() => expect(flowApi.sendChallenge).toHaveBeenCalledWith("c2"));
+		await waitFor(() =>
+			expect(flowApi.sendChallenge).toHaveBeenCalledWith("c2"),
+		);
 		expect(flowApi.sendChallenge).not.toHaveBeenCalledWith("c1");
 	});
 
@@ -287,7 +307,9 @@ describe("AuthScreen", () => {
 		// The sent challenge survived the round-trip: the code field is still
 		// offered and the resend button remains disabled by the cooldown.
 		expect(screen.getByLabelText("验证码")).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: /重新发送（\d+s）/ })).toBeDisabled();
+		expect(
+			screen.getByRole("button", { name: /重新发送（\d+s）/ }),
+		).toBeDisabled();
 		expect(flowApi.sendChallenge).toHaveBeenCalledTimes(1);
 	});
 
@@ -299,9 +321,7 @@ describe("AuthScreen", () => {
 		);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		expect(await screen.findByText(/a\*\*\*@quoin\.dev/)).toBeInTheDocument();
-		fireEvent.click(
-			screen.getByRole("button", { name: "验证码投递设置" }),
-		);
+		fireEvent.click(screen.getByRole("button", { name: "验证码投递设置" }));
 		expect(await screen.findByTestId("delivery-pane-stub")).toBeInTheDocument();
 		// Returning lands back on the same flow-derived OTP step, unharmed.
 		fireEvent.click(screen.getByRole("button", { name: "模拟返回初始化" }));
@@ -337,7 +357,11 @@ describe("AuthScreen", () => {
 				flowOf({ contacts: [unverifiedEmail], passwordSet: true }),
 			)
 			.mockResolvedValueOnce(
-				flowOf({ contacts: [unverifiedEmail], passwordSet: true, factorVerified: true }),
+				flowOf({
+					contacts: [unverifiedEmail],
+					passwordSet: true,
+					factorVerified: true,
+				}),
 			);
 		flowApi.verify.mockResolvedValue({ completed: false });
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
@@ -407,7 +431,9 @@ describe("AuthScreen", () => {
 			target: { value: "brand new password" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
-		fireEvent.click(await screen.findByRole("button", { name: "模拟返回初始化" }));
+		fireEvent.click(
+			await screen.findByRole("button", { name: "模拟返回初始化" }),
+		);
 		// The SMS choice swaps the form to a phone number, and the channel
 		// reaches addContact so the challenge can go out over SMS.
 		fireEvent.click(await screen.findByRole("button", { name: "短信验证码" }));
@@ -490,7 +516,9 @@ describe("AuthScreen", () => {
 		// A spent code is a plain failure: no automatic resend happens.
 		expect(flowApi.sendChallenge).toHaveBeenCalledTimes(1);
 		// Resending stays governed by the normal cooldown.
-		expect(screen.getByRole("button", { name: /重新发送（\d+s）/ })).toBeDisabled();
+		expect(
+			screen.getByRole("button", { name: /重新发送（\d+s）/ }),
+		).toBeDisabled();
 		// The user may retry a fresh code without resending first.
 		fireEvent.change(screen.getByLabelText("验证码"), {
 			target: { value: "543210" },
