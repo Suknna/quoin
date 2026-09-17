@@ -1,3 +1,4 @@
+import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -139,7 +140,18 @@ export function Runtimes({
 					disabled={suspended || loading || !!pending}
 					onClick={() => void refresh()}
 				>
-					{loading ? "正在刷新…" : "刷新"}
+					{loading ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							刷新中…
+						</>
+					) : (
+						"刷新"
+					)}
 				</Button>
 			</div>
 			{error && (
@@ -252,9 +264,18 @@ export function Runtimes({
 											disabled={suspended || isPending}
 											onConfirm={() => void prepare(item)}
 										>
-											{pending === `prepare:${item.slot}`
-												? "正在准备…"
-												: registrationLabel}
+											{pending === `prepare:${item.slot}` ? (
+												<>
+													<LoaderCircle
+														className="animate-spin"
+														data-icon="inline-start"
+														aria-hidden="true"
+													/>
+													准备中…
+												</>
+											) : (
+												registrationLabel
+											)}
 										</ConfirmAction>
 										<ConfirmAction
 											title={`退休 ${item.slot} 的待退休凭据？`}
@@ -267,9 +288,18 @@ export function Runtimes({
 											}
 											onConfirm={() => void retire(item)}
 										>
-											{pending === `retire:${item.slot}`
-												? "正在退休…"
-												: "退休凭据"}
+											{pending === `retire:${item.slot}` ? (
+												<>
+													<LoaderCircle
+														className="animate-spin"
+														data-icon="inline-start"
+														aria-hidden="true"
+													/>
+													退休中…
+												</>
+											) : (
+												"退休凭据"
+											)}
 										</ConfirmAction>
 									</div>
 								</TableCell>

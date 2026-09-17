@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronsUpDown, LoaderCircle } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -193,13 +193,13 @@ export function ModelProviderEditor({
 			<Field><FieldLabel htmlFor="model-connection-name">名称</FieldLabel><Input id="model-connection-name" value={name} onChange={(event) => setName(event.target.value)} disabled={disabled} required /></Field>
 			<Field><FieldLabel htmlFor="model-base-url">Base URL</FieldLabel><Input id="model-base-url" type="url" value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); invalidateDiscovery(); }} disabled={disabled} required placeholder="https://api.example.com" /></Field>
 			<Field><FieldLabel htmlFor="model-api-key">API Key</FieldLabel><Input id="model-api-key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); invalidateDiscovery(); }} disabled={disabled} required /></Field>
-			<div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" onClick={() => void discover()} disabled={disabled || discovering || !baseUrl}>{discovering ? "正在发现…" : "发现模型"}</Button><span className="text-sm text-muted-foreground">发现仅辅助填写，不构成验证。</span></div>
+			<div className="flex flex-wrap items-center gap-2"><Button type="button" variant="outline" onClick={() => void discover()} disabled={disabled || discovering || !baseUrl}>{discovering ? <><LoaderCircle className="animate-spin" data-icon="inline-start" aria-hidden="true" />发现中…</> : "发现模型"}</Button><span className="text-sm text-muted-foreground">发现仅辅助填写，不构成验证。</span></div>
 			{discoveryNote && <p role="status" className="text-sm text-muted-foreground">{discoveryNote}</p>}
 			<ModelPicker id="chat-model-id" label="对话模型 ID" value={chatModelId} onChange={setChatModelId} models={models} disabled={disabled} required />
 				<ModelPicker id="embedding-model-id" label="Embedding 模型 ID（可选，知识库使用）" value={embeddingModelId} onChange={setEmbeddingModelId} models={models} disabled={disabled} />
 			<Field><FieldLabel htmlFor="context-budget-tokens">Context 预算 tokens</FieldLabel><Input id="context-budget-tokens" type="number" min="1" step="1" inputMode="numeric" value={contextBudgetTokens} onChange={(event) => setContextBudgetTokens(event.target.value)} disabled={disabled} required /></Field>
 			<Field><FieldLabel htmlFor="max-output-tokens">最大输出 tokens</FieldLabel><Input id="max-output-tokens" type="number" min="1" step="1" inputMode="numeric" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} disabled={disabled} required /></Field>
-			<Button type="submit" disabled={disabled}>{saving ? "正在创建…" : "创建模型提供方"}</Button>
+			<Button type="submit" disabled={disabled}>{saving ? <><LoaderCircle className="animate-spin" data-icon="inline-start" aria-hidden="true" />创建中…</> : "创建模型提供方"}</Button>
 		</form>
 	);
 }

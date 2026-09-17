@@ -1,4 +1,4 @@
-import { Search } from "lucide-react";
+import { LoaderCircle, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { newClientCommandId, WorkbenchApiError } from "@/api/workbench";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -38,6 +38,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -302,7 +303,15 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				</Alert>
 			)}
 			{loading ? (
-				<p role="status">正在读取审计事件…</p>
+				<div
+					className="flex flex-col gap-3"
+					role="status"
+					aria-label="正在读取审计事件"
+				>
+					<Skeleton className="h-4 w-full" />
+					<Skeleton className="h-4 w-5/6" />
+					<Skeleton className="h-4 w-2/3" />
+				</div>
 			) : items.length === 0 && !error ? (
 				<Empty>
 					<EmptyHeader>
@@ -468,7 +477,15 @@ function CorrelationDetails({
 					</Alert>
 				)}
 				{loading ? (
-					<p role="status">正在读取关联事件…</p>
+					<div
+						className="flex flex-col gap-3"
+						role="status"
+						aria-label="正在读取关联事件"
+					>
+						<Skeleton className="h-4 w-full" />
+						<Skeleton className="h-4 w-5/6" />
+						<Skeleton className="h-4 w-2/3" />
+					</div>
 				) : events.length === 0 ? (
 					<Empty>
 						<EmptyHeader>
@@ -743,13 +760,35 @@ function RetentionDialog({
 						disabled={!valid || previewing || saving}
 						onClick={() => void runPreview()}
 					>
-						{previewing ? "正在预览…" : "预览影响"}
+						{previewing ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								预览中…
+							</>
+						) : (
+							"预览影响"
+						)}
 					</Button>
 					<Button
 						disabled={!previewMatches || previewing || saving}
 						onClick={() => void save()}
 					>
-						{saving ? "正在保存…" : "确认调整"}
+						{saving ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								保存中…
+							</>
+						) : (
+							"确认调整"
+						)}
 					</Button>
 				</DialogFooter>
 			</DialogContent>

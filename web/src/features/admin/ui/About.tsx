@@ -1,8 +1,10 @@
+import { LoaderCircle } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { fetchAbout, type AboutStatus } from '../about/api'
 import { Maintenance } from './Maintenance'
@@ -41,10 +43,10 @@ export function About({ suspended }: { suspended: boolean }) {
   return <section className="mx-auto flex w-full max-w-6xl flex-col gap-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="text-xl font-semibold">关于平台</h2><p className="mt-1 text-sm text-muted-foreground">组件版本、连接事实和必要的平台维护。未知信息不会被推断为健康。</p></div>
-      <Button variant="outline" onClick={() => void load()} disabled={suspended || loading}>{loading ? '正在刷新…' : '刷新'}</Button>
+      <Button variant="outline" onClick={() => void load()} disabled={suspended || loading}>{loading ? <><LoaderCircle className="animate-spin" data-icon="inline-start" aria-hidden="true" />刷新中…</> : '刷新'}</Button>
     </div>
     {error && <Alert variant="destructive"><AlertDescription>{error} <Button variant="link" className="h-auto p-0 align-baseline" onClick={() => void load()} disabled={suspended || loading}>重试</Button></AlertDescription></Alert>}
-    {!status && !error && <p role="status" className="text-sm text-muted-foreground">正在读取平台事实…</p>}
+    {!status && !error && <div className="flex flex-col gap-3" role="status" aria-label="正在读取平台事实"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-24 w-full" /><Skeleton className="h-4 w-2/3" /></div>}
     {status && <div className="flex flex-col gap-6">
       <section className="flex flex-col gap-3"><h3 className="text-sm font-medium">Quoin</h3><p className="wrap-anywhere font-mono text-sm">版本：{unknown(status.releaseVersion)}</p></section>
       <Separator />
