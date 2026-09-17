@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- Flow client functions are exported for direct wire-contract tests. */
+import { LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import { request } from "@/api/workbench";
@@ -202,7 +203,18 @@ function AdminContactChange({ suspended }: { suspended: boolean }) {
 						<FieldDescription>密码证明只用于开启本次流程，不会被保存。</FieldDescription>
 					</Field>
 					<Button type="submit" disabled={busy || suspended || !password}>
-						{busy ? "正在开启…" : "开始更换"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								开启中…
+							</>
+						) : (
+							"开始更换"
+						)}
 					</Button>
 				</form>
 			)}
@@ -247,7 +259,18 @@ function AdminContactChange({ suspended }: { suspended: boolean }) {
 						/>
 					</Field>
 					<Button disabled={busy || !target.trim()} onClick={() => void stageContact()}>
-						{busy ? "正在暂存…" : "暂存新渠道"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								暂存中…
+							</>
+						) : (
+							"暂存新渠道"
+						)}
 					</Button>
 					<Button variant="ghost" onClick={abandon}>
 						放弃本次变更
@@ -262,7 +285,18 @@ function AdminContactChange({ suspended }: { suspended: boolean }) {
 					</div>
 					<p className="text-muted-foreground">向候选渠道发送一次性验证码以证明可以接收；旧渠道暂不改动。</p>
 					<Button disabled={busy} onClick={() => void send()}>
-						{busy ? "正在发送…" : "发送验证码"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								发送中…
+							</>
+						) : (
+							"发送验证码"
+						)}
 					</Button>
 					<Button variant="ghost" onClick={() => setStage("stage")}>
 						返回修改目标
@@ -281,7 +315,18 @@ function AdminContactChange({ suspended }: { suspended: boolean }) {
 							</InputOTPGroup>
 						</InputOTP>
 						<Button disabled={busy || code.length < 6} onClick={() => void verify()}>
-							{busy ? "正在验证…" : "验证"}
+							{busy ? (
+								<>
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+										aria-hidden="true"
+									/>
+									验证中…
+								</>
+							) : (
+								"验证"
+							)}
 						</Button>
 					</div>
 					<FieldDescription>验证码短时有效且单次消费；失败次数跨重发累计。</FieldDescription>
@@ -312,14 +357,30 @@ function AdminContactChange({ suspended }: { suspended: boolean }) {
 						<FieldDescription>确认后立即生效：所有会话（含本机）将被撤销并返回登录页。</FieldDescription>
 					</Field>
 					<Button type="submit" disabled={busy || suspended || !password}>
-						{busy ? "正在生效…" : "确认更换"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								生效中…
+							</>
+						) : (
+							"确认更换"
+						)}
 					</Button>
 					<Button type="button" variant="ghost" onClick={abandon}>
 						放弃本次变更
 					</Button>
 				</form>
 			)}
-			{stage === "finished" && <p role="status">所有会话已撤销，正在返回登录页…</p>}
+			{stage === "finished" && (
+				<p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+					<LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+					所有会话已撤销，正在返回登录页…
+				</p>
+			)}
 		</section>
 	);
 }

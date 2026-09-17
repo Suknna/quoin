@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -89,8 +90,15 @@ function EvidenceReadingSession({
 	}, [id]);
 	if (loading)
 		return (
-			<section className="p-6">
-				<p className="text-sm text-muted-foreground">正在读取证据…</p>
+			<section
+				className="flex flex-col gap-3 p-6"
+				role="status"
+				aria-label="正在读取证据"
+			>
+				<Skeleton className="h-7 w-1/2" />
+				<Skeleton className="h-4 w-1/3" />
+				<Skeleton className="h-4 w-full" />
+				<Skeleton className="h-4 w-5/6" />
 			</section>
 		);
 	if (error)
@@ -241,7 +249,17 @@ function ArtifactContent({
 	user: UserSummary;
 }) {
 	if (!artifact)
-		return <p className="text-sm text-muted-foreground">正在读取产物元数据…</p>;
+		return (
+			<div
+				className="flex flex-col gap-3"
+				role="status"
+				aria-label="正在读取产物元数据"
+			>
+				<Skeleton className="h-4 w-2/3" />
+				<Skeleton className="h-4 w-full" />
+				<Skeleton className="h-4 w-5/6" />
+			</div>
+		);
 	if (artifact.bodyExpired)
 		return (
 			<Alert>

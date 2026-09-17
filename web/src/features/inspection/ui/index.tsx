@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parse as parseYaml } from "yaml";
 import type {
@@ -445,7 +445,19 @@ export function RunDetail({
 		setLoadNote("");
 		setAnalyzeOpen(true);
 	}
-	if (!detail) return <div className="p-6">正在读取 Run…</div>;
+	if (!detail)
+		return (
+			<div
+				className="flex flex-col gap-3 p-6"
+				role="status"
+				aria-label="正在读取 Run"
+			>
+				<Skeleton className="h-7 w-1/3" />
+				<Skeleton className="h-4 w-full" />
+				<Skeleton className="h-4 w-5/6" />
+				<Skeleton className="h-4 w-2/3" />
+			</div>
+		);
 	const canAnalyze =
 		detail.state === "Completed" || detail.state === "CompletedWithGaps";
 	// Cancellation only applies while the Run itself is active; a terminal Run keeps
@@ -536,7 +548,18 @@ export function RunDetail({
 						onClick={() => void action("analyze")}
 						disabled={busy || props.suspended}
 					>
-						{busy ? "正在提交…" : "开始分析"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								提交中…
+							</>
+						) : (
+							"开始分析"
+						)}
 					</Button>
 				</DialogFooter>
 			</DialogContent>
@@ -642,13 +665,20 @@ export function RunDetail({
 					<Skeleton className="h-4 w-full" />
 					<Skeleton className="h-4 w-5/6" />
 				</div>
+			) : detail.analysisActive ? (
+				<div
+					className="space-y-3 rounded-md border p-4"
+					role="status"
+					aria-label="分析正在生成报告"
+				>
+					<p className="text-sm text-muted-foreground">分析正在生成报告。</p>
+					<Skeleton className="h-4 w-full" />
+					<Skeleton className="h-4 w-5/6" />
+					<Skeleton className="h-4 w-2/3" />
+				</div>
 			) : (
 				<Alert>
-					<AlertDescription>
-						{detail.analysisActive
-							? "分析正在生成报告。"
-							: "该 Run 尚无报告版本。"}
-					</AlertDescription>
+					<AlertDescription>该 Run 尚无报告版本。</AlertDescription>
 				</Alert>
 			)}
 			<Separator />
@@ -686,7 +716,13 @@ export function RunDetail({
 														#{check.evidenceId}
 													</Button>
 												) : check.status === "cancelling" ? (
-													"正在停止"
+													<span className="flex items-center gap-1.5 text-muted-foreground">
+														<LoaderCircle
+															className="size-3.5 animate-spin"
+															aria-hidden="true"
+														/>
+														停止中…
+													</span>
 												) : (
 													(inspectionGapReasonText[check.gapReason] ??
 													check.gapReason)
@@ -1305,7 +1341,18 @@ function PlanEditorDialog({
 						取消
 					</Button>
 					<Button onClick={() => void save()} disabled={busy || suspended}>
-						{busy ? "正在保存…" : "保存计划"}
+						{busy ? (
+							<>
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+									aria-hidden="true"
+								/>
+								保存中…
+							</>
+						) : (
+							"保存计划"
+						)}
 					</Button>
 				</DialogFooter>
 			</DialogContent>
@@ -1400,7 +1447,18 @@ function RunChooserDialog({
 					onClick={onStart}
 					disabled={!planKey || !enabled.length || busy || suspended}
 				>
-					{busy ? "正在启动…" : "开始巡检"}
+					{busy ? (
+						<>
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+							启动中…
+						</>
+					) : (
+						"开始巡检"
+					)}
 				</Button>
 			</DialogFooter>
 		</DialogContent>
@@ -1654,13 +1712,15 @@ export function useInspectionsModule(
 					Run，或先创建计划并立即采证。计划绑定接入与模板，范围可为整个接入、业务视图或显式对象。
 				</p>
 				{!loaded ? (
-					<p
+					<div
+						className="flex flex-col gap-3"
 						role="status"
 						aria-label="正在读取巡检计划"
-						className="text-sm text-muted-foreground"
 					>
-						正在读取巡检计划…
-					</p>
+						<Skeleton className="h-4 w-full" />
+						<Skeleton className="h-4 w-5/6" />
+						<Skeleton className="h-4 w-2/3" />
+					</div>
 				) : plans.length ? (
 					<Table>
 						<TableHeader>
