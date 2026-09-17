@@ -20,7 +20,7 @@ it("keeps the error layout visible and prevents duplicate retries while pending"
 	const retry = vi.fn();
 	render(<ServiceUnavailable pending onRetry={retry} />);
 	expect(screen.getByText("暂时无法连接 Quoin")).toBeInTheDocument();
-	const button = screen.getByRole("button", { name: "正在重新连接…" });
+	const button = screen.getByRole("button", { name: "重新连接中…" });
 	expect(button).toBeDisabled();
 	fireEvent.click(button);
 	expect(retry).not.toHaveBeenCalled();

@@ -1,4 +1,4 @@
-import { RefreshCw, ServerOff } from "lucide-react";
+import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
 	Empty,
@@ -30,8 +30,16 @@ export function ServiceUnavailable({
 				</EmptyHeader>
 				<EmptyContent>
 					<Button onClick={onRetry} disabled={pending}>
-						<RefreshCw aria-hidden="true" />
-						{pending ? "正在重新连接…" : "重新连接"}
+						{pending ? (
+							<LoaderCircle
+								className="animate-spin"
+								data-icon="inline-start"
+								aria-hidden="true"
+							/>
+						) : (
+							<RefreshCw aria-hidden="true" />
+						)}
+						{pending ? "重新连接中…" : "重新连接"}
 					</Button>
 				</EmptyContent>
 			</Empty>

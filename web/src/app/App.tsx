@@ -1,11 +1,4 @@
-import {
-	lazy,
-	StrictMode,
-	Suspense,
-	useEffect,
-	useRef,
-	useState,
-} from "react";
+import { lazy, StrictMode, Suspense, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { UserSummary } from "@/api/generated/types";
 import {
@@ -20,6 +13,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { AuthScreen } from "@/features/authentication/AuthScreen";
 import { EvidenceReader } from "@/features/evidence/ui";
 import type { WorkspaceModuleProps } from "./module-contract";
@@ -54,8 +48,24 @@ const ACTIVITY_THROTTLE_MS = 5 * 60_000;
 
 function RouteFallback() {
 	return (
-		<main className="flex min-h-svh items-center justify-center p-6">
-			<p role="status">正在加载工作台…</p>
+		<main className="flex min-h-svh" role="status" aria-label="正在加载工作台">
+			<div className="hidden w-56 flex-col gap-3 border-r bg-sidebar p-3 md:flex">
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-4/5" />
+			</div>
+			<div className="flex min-w-0 flex-1 flex-col">
+				<div className="flex items-center gap-2 border-b p-4">
+					<Skeleton className="h-5 w-28" />
+				</div>
+				<div className="flex flex-col gap-4 p-6">
+					<Skeleton className="h-7 w-1/3" />
+					<Skeleton className="h-24 w-full" />
+					<Skeleton className="h-24 w-full" />
+					<Skeleton className="h-24 w-3/4" />
+				</div>
+			</div>
 		</main>
 	);
 }
@@ -299,8 +309,18 @@ export function App() {
 						onRetry={() => void bootstrap()}
 					/>
 				) : (
-					<main className="flex min-h-svh items-center justify-center p-6">
-						<p role="status">正在验证会话…</p>
+					<main
+						className="flex min-h-svh items-center justify-center p-6"
+						role="status"
+						aria-label="正在验证会话"
+					>
+						<div className="flex w-full max-w-sm flex-col items-center gap-4">
+							<Skeleton className="h-10 w-10 rounded-full" />
+							<div className="flex w-full flex-col gap-2">
+								<Skeleton className="h-4 w-full" />
+								<Skeleton className="h-4 w-3/5" />
+							</div>
+						</div>
 					</main>
 				))}
 			{screen === "auth" && <AuthScreen onAuthenticated={authenticated} />}

@@ -43,13 +43,14 @@ import {
 	SidebarProvider,
 	SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { WorkspaceModuleView } from "./module-contract";
 import { BrandMark } from "./Brand";
+import type { WorkspaceModuleView } from "./module-contract";
 
 type OperationItem = {
 	title: string;
@@ -440,9 +441,32 @@ export function ModuleFallback({
 }) {
 	return {
 		title,
-		list: null,
+		list: (
+			<div
+				className="flex flex-col gap-2 p-2"
+				role="status"
+				aria-label={`正在加载${title}`}
+			>
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-full" />
+				<Skeleton className="h-9 w-4/5" />
+			</div>
+		),
 		content: children ?? (
-			<div className="text-sm text-muted-foreground">正在加载…</div>
+			<div
+				className="flex flex-col gap-4"
+				role="status"
+				aria-label={`正在加载${title}`}
+			>
+				<Skeleton className="h-7 w-1/3" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-3/4" />
+			</div>
 		),
 	} satisfies WorkspaceModuleView;
 }
