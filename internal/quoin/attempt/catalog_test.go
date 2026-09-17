@@ -187,6 +187,35 @@ func TestFrozenCatalogRendersStableBytes(t *testing.T) {
 	}
 }
 
+// Keep 提示词迁入新增的执行代必须拥有自己的冻结目录：initial-analysis-v2 与
+// investigation-v3 可供创建期冻结，且 investigation-v3 沿用 investigation 工具
+// schema 标签，溯源不漂到 initial-analysis 工具代；knowledge 固定的原共享身份
+// 照常可冻结；investigation 各代的 NULL-catalog 历史回退都命中 investigation
+// 冻结文档。
+func TestKeepGenerationCatalogsAssemble(t *testing.T) {
+	_, catalogs := buildTestCatalogs(t, nil)
+	for _, agentVersion := range []string{AgentVersion, PreviousAgentVersion, KnowledgeAgentVersion} {
+		if _, err := catalogs.CatalogFor(agentVersion); err != nil {
+			t.Fatalf("initial-analysis generation %s has no frozen catalog: %v", agentVersion, err)
+		}
+	}
+	for _, agentVersion := range []string{"investigation-v2", "investigation-v3"} {
+		catalog, err := catalogs.CatalogFor(agentVersion)
+		if err != nil {
+			t.Fatalf("investigation generation %s has no frozen catalog: %v", agentVersion, err)
+		}
+		if catalog.SchemaVersion != "investigation-tools-v3" {
+			t.Fatalf("investigation generation %s schema version = %q", agentVersion, catalog.SchemaVersion)
+		}
+	}
+	for _, agentVersion := range []string{"investigation-v1", "investigation-v2", "investigation-v3"} {
+		fallback := legacyGenerationCatalog(agentVersion)
+		if fallback.SchemaVersion == ToolSchemaVersion {
+			t.Fatalf("investigation generation %s legacy fallback resolved the initial-analysis document", agentVersion)
+		}
+	}
+}
+
 // TestFrozenBrowserToolV1RejectsExplicitly pins the breaking quoin_browser
 // locator change (ADR-0004): a catalog frozen with v1 semantics (the retired
 // businessSystemKey locator) must drift-reject against the installed v2

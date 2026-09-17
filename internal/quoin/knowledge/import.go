@@ -205,19 +205,22 @@ func selectImportProvider(ctx context.Context, q audit.Reader) (importProvider, 
 }
 
 func (service *Service) insertImportAttempt(ctx context.Context, w execution.Executor, batchID, materialID int64, text string, provider importProvider, now string) (int64, error) {
+	// knowledge 抽取固定在原共享执行身份上（attempt.KnowledgeAgentVersion）：
+	// 其 prompt 从未随 analysis prompt 代际演进，身份与输出契约不随
+	// initial-analysis 升级漂移。
 	// attempt.CreateOn centrally persists the caller's correlation metadata
 	// onto the new attempt in this same transaction (ADR-0006).
 	attemptID, err := attempt.CreateOn(ctx, w, `
 		INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
 		VALUES('knowledge_extraction','knowledge_import_batch',?,'Queued',?,?,?)`,
-		batchID, attempt.ReleaseVersion(), attempt.AgentVersion, now)
+		batchID, attempt.ReleaseVersion(), attempt.KnowledgeAgentVersion, now)
 	if err != nil {
 		return 0, err
 	}
 	input := importInput{SchemaKind: importInputKind, AttemptID: attemptID, BatchID: batchID, Generation: 1, SourceMaterialID: materialID, Text: text}
 	input.ModelContract.ModelID, input.ModelContract.ContextBudgetTokens, input.ModelContract.MaxOutputTokens = provider.ChatModelID, provider.ContextBudget, provider.MaxOutput
 	// Freeze THIS attempt's tool catalog at creation (ADR-0004).
-	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(service.attempts.Catalogs, attempt.AgentVersion)
+	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(service.attempts.Catalogs, attempt.KnowledgeAgentVersion)
 	if err != nil {
 		return 0, err
 	}

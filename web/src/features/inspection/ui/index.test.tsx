@@ -155,11 +155,84 @@ describe("inspection report feedback", () => {
     expect(within(dialog).getByLabelText("本次报告要求")).toHaveValue("计划当前的最新要求");
   });
 
-  it("shows each report version's effective instructions", async () => {
+  it("shows each report version's effective instructions inside generation details", async () => {
     renderRunDetail();
     api.getInspectionReport.mockResolvedValue({ id: "42", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content: "# 报告", createdAt: "2026-09-10T10:01:00Z", reportInstructions: "仅本次：只看异常" });
     expect(await screen.findByTestId("report-content")).toBeInTheDocument();
-    expect(screen.getByText(/本次报告要求：仅本次：只看异常/)).toBeInTheDocument();
+    // 结论优先：本版本要求不占据首屏，仅在生成详情展开后可读。
+    expect(screen.queryByText("仅本次：只看异常")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "生成详情" }));
+    expect(await screen.findByText("仅本次：只看异常")).toBeInTheDocument();
+    expect(screen.getByText("本次报告要求")).toBeInTheDocument();
+  });
+
+  it("keeps generation details expanded across an evidence round trip remount", async () => {
+    api.getInspectionRun.mockResolvedValue({ ...detail });
+    api.listInspectionReports.mockResolvedValue([{ version: 1, modelId: "fixture-chat", createdAt: "2026-09-10T10:01:00Z" }]);
+    api.getInspectionReport.mockResolvedValue({ id: "persist-1", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content: "# 报告", createdAt: "2026-09-10T10:01:00Z", reportInstructions: "仅本次：只看异常" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    const first = render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    await screen.findByTestId("report-content");
+    fireEvent.click(screen.getByRole("button", { name: "生成详情" }));
+    expect(await screen.findByText("仅本次：只看异常")).toBeInTheDocument();
+    first.unmount();
+    // 证据阅读层往返按路由重建 Run 页面，展开状态按报告 ID 保留。
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    await screen.findByTestId("report-content");
+    expect(screen.getByRole("button", { name: "生成详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("仅本次：只看异常")).toBeInTheDocument();
+  });
+
+  it("renders a complete JSON report as real fields while preserving the original text", async () => {
+    const content = JSON.stringify({ conclusion: "连通正常", unknown_field: { deep: 1 } });
+    api.getInspectionRun.mockResolvedValue({ ...detail });
+    api.listInspectionReports.mockResolvedValue([{ version: 1, modelId: "fixture-chat", createdAt: "2026-09-10T10:01:00Z" }]);
+    api.getInspectionReport.mockResolvedValue({ id: "43", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content, createdAt: "2026-09-10T10:01:00Z" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(await screen.findByText("conclusion")).toBeInTheDocument();
+    expect(screen.getByText("连通正常")).toBeInTheDocument();
+    // 未知字段保留，不猜测标签，也不生成额外摘要。
+    expect(screen.getByText("unknown_field")).toBeInTheDocument();
+    expect(screen.getByText(/按真实字段展示/)).toBeInTheDocument();
+    // 原文折叠保留，展开即原文。
+    fireEvent.click(screen.getByRole("button", { name: "原始 JSON" }));
+    expect(await screen.findByText(content)).toBeInTheDocument();
+  });
+
+  it("falls back to the preserved original when JSON-like report content fails to parse", async () => {
+    const content = '{"truncated';
+    api.getInspectionRun.mockResolvedValue({ ...detail });
+    api.listInspectionReports.mockResolvedValue([{ version: 1, modelId: "fixture-chat", createdAt: "2026-09-10T10:01:00Z" }]);
+    api.getInspectionReport.mockResolvedValue({ id: "44", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content, createdAt: "2026-09-10T10:01:00Z" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(await screen.findByText(/原样保留全部原文/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "报告原文" }));
+    expect(await screen.findByText(content)).toBeInTheDocument();
+  });
+
+  it("keeps the report conclusion ahead of inspection facts on the continuous run page", async () => {
+    renderRunDetail();
+    const reportBody = await screen.findByTestId("report-content");
+    const facts = screen.getByText("检查项与缺口");
+    // 连续单页不拆 tab：阅读顺序为报告结论在前，检查资料在后。
+    expect(Boolean(reportBody.compareDocumentPosition(facts) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+  });
+
+  it("shows a reading state instead of claiming no report while the report request is in flight", async () => {
+    api.getInspectionRun.mockResolvedValue({ ...detail });
+    let resolveReports: (reports: unknown[]) => void = () => {};
+    api.listInspectionReports.mockReturnValue(new Promise((resolve) => { resolveReports = resolve; }));
+    api.getInspectionReport.mockResolvedValue({ id: "45", runId: "6", version: 1, evidenceDigest: "digest", evidenceIds: [], modelId: "fixture-chat", content: "# 报告", createdAt: "2026-09-10T10:01:00Z" });
+    feedback.fetchFeedback.mockResolvedValue({ items: [] });
+    render(<RunDetail runId="6" props={props} onBack={vi.fn()} onOpenRun={vi.fn()} />);
+    // 报告请求在途时只显示读取状态，不发出“尚无报告”的错误断言。
+    expect(await screen.findByRole("status", { name: "正在读取报告" })).toBeInTheDocument();
+    expect(screen.queryByText("该 Run 尚无报告版本。")).not.toBeInTheDocument();
+    resolveReports([{ version: 1, modelId: "fixture-chat", createdAt: "2026-09-10T10:01:00Z" }]);
+    expect(await screen.findByTestId("report-content")).toBeInTheDocument();
+    expect(screen.queryByText("该 Run 尚无报告版本。")).not.toBeInTheDocument();
   });
 
   it("shows the run's frozen analysis config", async () => {

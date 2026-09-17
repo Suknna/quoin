@@ -4,242 +4,327 @@
 // in place (UI-LIST-003), buffering new rows behind an explicit merge so the
 // reading position is never disturbed (UI-LIST-002).
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useAlertEventStream } from '../../app/realtime/hooks'
-import { fetchAlerts, fetchOccurrence, type AlertOccurrenceSummary } from './api'
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useAlertEventStream } from "../../app/realtime/hooks";
+import {
+	type AlertOccurrenceSummary,
+	fetchAlerts,
+	fetchOccurrence,
+} from "./api";
 
 export interface LiveAlerts {
-  items: AlertOccurrenceSummary[]
-  loading: boolean
-  error: string
-  pendingNew: number
-  mergePending: () => void
-  setAtTop: (value: boolean) => void
-  /** Explicit snapshot re-read for user refresh and recoverable list errors. */
-  refresh: () => void
+	items: AlertOccurrenceSummary[];
+	loading: boolean;
+	error: string;
+	pendingNew: number;
+	mergePending: () => void;
+	setAtTop: (value: boolean) => void;
+	/** Explicit snapshot re-read for user refresh and recoverable list errors. */
+	refresh: () => void;
 }
 
 export interface LiveAlertsFilter {
-  /** Legacy declaration filter; stays compatible with historical rows. */
-  businessSystemKey?: string
-  /** Business-view attribution filter (ADR-0008); the primary UI filter. */
-  viewKey?: string
+	/** Legacy declaration filter; stays compatible with historical rows. */
+	businessSystemKey?: string;
+	/** Business-view attribution filter (ADR-0008); the primary UI filter. */
+	viewKey?: string;
 }
 
-export function useLiveAlerts(view: 'Firing' | 'Resolved', filter: string | LiveAlertsFilter = '', enabled = true): LiveAlerts {
-  // String form stays the legacy businessSystemKey filter for existing callers.
-  const scope: LiveAlertsFilter = typeof filter === 'string' ? { businessSystemKey: filter } : filter
-  const businessSystemKey = scope.businessSystemKey ?? ''
-  const viewKey = scope.viewKey ?? ''
-  const stream = useAlertEventStream()
-  // `enabled` pauses reconciliation for this list only; another consumer may
-  // still own the shared SSE stream for its independent projection.
-  const enabledRef = useRef(enabled)
-  enabledRef.current = enabled
-  const [items, setItems] = useState<AlertOccurrenceSummary[]>([])
-  const [pending, setPending] = useState<AlertOccurrenceSummary[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const versions = useRef(new Map<string, number>())
-  const atTopRef = useRef(true)
-  const pendingRef = useRef<AlertOccurrenceSummary[]>([])
-  const generationRef = useRef(0)
-  const projectionReadyRef = useRef(false)
-  const lastSeqRef = useRef(0)
-  // Detail reads are serialized in event order. A later event cannot commit
-  // ahead of an older read, and a failed read forces a snapshot rebuild before
-  // any queued event may be treated as applied.
-  const eventQueueRef = useRef<Promise<void>>(Promise.resolve())
-  pendingRef.current = pending
-  const viewRef = useRef(view)
-  viewRef.current = view
-  const filterRef = useRef({ businessSystemKey, viewKey })
-  filterRef.current = { businessSystemKey, viewKey }
-  const projectionKey = `${view}\u0000${businessSystemKey}\u0000${viewKey}`
-  const renderedProjectionKeyRef = useRef(projectionKey)
-  // React updates refs during render before its effects run. Invalidate the
-  // old projection here so a browser SSE task cannot race that small window
-  // and apply an event under the newly rendered filter.
-  if (renderedProjectionKeyRef.current !== projectionKey) {
-    renderedProjectionKeyRef.current = projectionKey
-    generationRef.current += 1
-    projectionReadyRef.current = false
-  }
+export function useLiveAlerts(
+	view: "Firing" | "Resolved",
+	filter: string | LiveAlertsFilter = "",
+	enabled = true,
+): LiveAlerts {
+	// String form stays the legacy businessSystemKey filter for existing callers.
+	const scope: LiveAlertsFilter =
+		typeof filter === "string" ? { businessSystemKey: filter } : filter;
+	const businessSystemKey = scope.businessSystemKey ?? "";
+	const viewKey = scope.viewKey ?? "";
+	const stream = useAlertEventStream();
+	// `enabled` pauses reconciliation for this list only; another consumer may
+	// still own the shared SSE stream for its independent projection.
+	const enabledRef = useRef(enabled);
+	enabledRef.current = enabled;
+	const [items, setItems] = useState<AlertOccurrenceSummary[]>([]);
+	const [pending, setPending] = useState<AlertOccurrenceSummary[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
+	const versions = useRef(new Map<string, number>());
+	const atTopRef = useRef(true);
+	const pendingRef = useRef<AlertOccurrenceSummary[]>([]);
+	const generationRef = useRef(0);
+	const projectionReadyRef = useRef(false);
+	const lastSeqRef = useRef(0);
+	// Detail reads are serialized in event order. A later event cannot commit
+	// ahead of an older read, and a failed read forces a snapshot rebuild before
+	// any queued event may be treated as applied.
+	const eventQueueRef = useRef<Promise<void>>(Promise.resolve());
+	pendingRef.current = pending;
+	const viewRef = useRef(view);
+	viewRef.current = view;
+	const filterRef = useRef({ businessSystemKey, viewKey });
+	filterRef.current = { businessSystemKey, viewKey };
+	const projectionKey = `${view}\u0000${businessSystemKey}\u0000${viewKey}`;
+	const renderedProjectionKeyRef = useRef(projectionKey);
+	// React updates refs during render before its effects run. Invalidate the
+	// old projection here so a browser SSE task cannot race that small window
+	// and apply an event under the newly rendered filter.
+	if (renderedProjectionKeyRef.current !== projectionKey) {
+		renderedProjectionKeyRef.current = projectionKey;
+		generationRef.current += 1;
+		projectionReadyRef.current = false;
+	}
 
-  const loadSnapshot = useCallback(
-    async (snapshotView: 'Firing' | 'Resolved', snapshotFilter: { businessSystemKey: string; viewKey: string }, clearVisibleProjection: boolean, allowPaused = false) => {
-      // A manual refresh keeps a healthy projection live until the replacement
-      // snapshot succeeds. Route/filter changes instead invalidate immediately.
-      const replacingProjection = clearVisibleProjection || !projectionReadyRef.current
-      // Every request owns a generation, including a manual refresh, so an
-      // older slow snapshot cannot overwrite a newer explicit refresh.
-      const generation = generationRef.current + 1
-      generationRef.current = generation
-      if (replacingProjection) {
-        projectionReadyRef.current = false
-        versions.current = new Map()
-      }
-      if (clearVisibleProjection) {
-        setItems([])
-        setPending([])
-      }
-      setLoading(true)
-      try {
-        const snapshot = await fetchAlerts(snapshotView, snapshotFilter.businessSystemKey, snapshotFilter.viewKey)
-        if ((!enabledRef.current && !allowPaused) || generation !== generationRef.current) return
-        versions.current = new Map(snapshot.items.map((item) => [item.id, item.rowVersion]))
-        lastSeqRef.current = snapshot.snapshotSeq
-        setItems(snapshot.items)
-        setPending([])
-        setError('')
-        // Every snapshot, including a view/filter switch, owns a fresh SSE
-        // boundary. Closing the old source before start makes a delayed old
-        // event structurally unable to advance this projection's cursor.
-        // A paused list may still take a manual snapshot, but it must not
-        // re-enable real-time reconciliation or restart the shared stream.
-        projectionReadyRef.current = enabledRef.current
-        if (enabledRef.current) stream.start(snapshot.snapshotSeq)
-      } catch (reason) {
-        if (generation !== generationRef.current) return
-        setError(reason instanceof Error ? reason.message : '告警列表加载失败')
-      } finally {
-        if (generation === generationRef.current) setLoading(false)
-      }
-    },
-    [stream],
-  )
+	const loadSnapshot = useCallback(
+		async (
+			snapshotView: "Firing" | "Resolved",
+			snapshotFilter: { businessSystemKey: string; viewKey: string },
+			clearVisibleProjection: boolean,
+			allowPaused = false,
+		) => {
+			// A manual refresh keeps a healthy projection live until the replacement
+			// snapshot succeeds. Route/filter changes instead invalidate immediately.
+			const replacingProjection =
+				clearVisibleProjection || !projectionReadyRef.current;
+			// Every request owns a generation, including a manual refresh, so an
+			// older slow snapshot cannot overwrite a newer explicit refresh.
+			const generation = generationRef.current + 1;
+			generationRef.current = generation;
+			if (replacingProjection) {
+				projectionReadyRef.current = false;
+				versions.current = new Map();
+			}
+			if (clearVisibleProjection) {
+				setItems([]);
+				setPending([]);
+			}
+			setLoading(true);
+			try {
+				const snapshot = await fetchAlerts(
+					snapshotView,
+					snapshotFilter.businessSystemKey,
+					snapshotFilter.viewKey,
+				);
+				if (
+					(!enabledRef.current && !allowPaused) ||
+					generation !== generationRef.current
+				)
+					return;
+				versions.current = new Map(
+					snapshot.items.map((item) => [item.id, item.rowVersion]),
+				);
+				lastSeqRef.current = snapshot.snapshotSeq;
+				setItems(snapshot.items);
+				setPending([]);
+				setError("");
+				// Every snapshot, including a view/filter switch, owns a fresh SSE
+				// boundary. Closing the old source before start makes a delayed old
+				// event structurally unable to advance this projection's cursor.
+				// A paused list may still take a manual snapshot, but it must not
+				// re-enable real-time reconciliation or restart the shared stream.
+				projectionReadyRef.current = enabledRef.current;
+				if (enabledRef.current) stream.start(snapshot.snapshotSeq);
+			} catch (reason) {
+				if (generation !== generationRef.current) return;
+				setError(reason instanceof Error ? reason.message : "告警列表加载失败");
+			} finally {
+				if (generation === generationRef.current) setLoading(false);
+			}
+		},
+		[stream],
+	);
 
-  useEffect(() => {
-    if (enabled) void loadSnapshot(view, { businessSystemKey, viewKey }, true)
-    else {
-      // Invalidate every in-flight snapshot before it can start/restart this
-      // shared stream. Other consumers retain their own subscriptions.
-      generationRef.current += 1
-      projectionReadyRef.current = false
-      setLoading(false)
-    }
-  }, [enabled, loadSnapshot, view, businessSystemKey])
+	useEffect(() => {
+		if (enabled) void loadSnapshot(view, { businessSystemKey, viewKey }, true);
+		else {
+			// Invalidate every in-flight snapshot before it can start/restart this
+			// shared stream. Other consumers retain their own subscriptions.
+			generationRef.current += 1;
+			projectionReadyRef.current = false;
+			setLoading(false);
+		}
+	}, [enabled, loadSnapshot, view, businessSystemKey, viewKey]);
 
-  useEffect(() => {
-    return stream.onResync(() => {
-      // Silent full re-read (UI-ERROR-001): cursor expiry and terminal SSE
-      // failures heal through a fresh snapshot rather than a stale retry.
-      if (enabledRef.current) void loadSnapshot(viewRef.current, filterRef.current, false)
-    })
-  }, [stream, loadSnapshot])
+	useEffect(() => {
+		return stream.onResync(() => {
+			// Silent full re-read (UI-ERROR-001): cursor expiry and terminal SSE
+			// failures heal through a fresh snapshot rather than a stale retry.
+			if (enabledRef.current)
+				void loadSnapshot(viewRef.current, filterRef.current, false);
+		});
+	}, [stream, loadSnapshot]);
 
-  useEffect(() => {
-    let cancelled = false
-    const applyEvent = async (event: { seq: string; type: 'created' | 'state_changed'; occurrenceId: string; rowVersion: number }, eventGeneration: number, sourceGeneration: number) => {
-      if (!enabledRef.current || !projectionReadyRef.current || eventGeneration !== generationRef.current || sourceGeneration !== stream.generation) return
-      const seq = Number(event.seq)
-      if (seq <= lastSeqRef.current) return
-      if ((versions.current.get(event.occurrenceId) ?? 0) >= event.rowVersion) {
-        lastSeqRef.current = seq
-        return
-      }
-      let detail: AlertOccurrenceSummary
-      try {
-        detail = await fetchOccurrence(event.occurrenceId)
-      } catch {
-        // Do not advance the local cursor for an unapplied event. The stream
-        // cursor is only transport state, so rebuilding from an HTTP snapshot
-        // is the sole authority-safe recovery path.
-        if (!cancelled && eventGeneration === generationRef.current) stream.resync()
-        return
-      }
-      if (cancelled || !projectionReadyRef.current || eventGeneration !== generationRef.current) return
-      // A detail older than the change which requested it cannot be made
-      // current by waiting; drop the projection and replay from a snapshot.
-      if (detail.rowVersion < event.rowVersion) {
-        stream.resync()
-        return
-      }
-      const knownVersion = versions.current.get(detail.id) ?? 0
-      if (knownVersion >= detail.rowVersion) {
-        lastSeqRef.current = seq
-        return
-      }
-      versions.current.set(detail.id, detail.rowVersion)
-      lastSeqRef.current = seq
-      // The mechanical filter mirrors the server-side businessSystemKey /
-      // viewKey projections: events only carry ids, so the re-read detail
-      // decides membership in the filtered view (未归属 rows only match no
-      // filter).
-      const scope = filterRef.current
-      const legacyKey = scope.businessSystemKey
-      if (legacyKey !== '' && (detail.businessSystemKey ?? '') !== legacyKey) {
-        setItems((previous) => previous.filter((item) => item.id !== detail.id))
-        setPending((previous) => previous.filter((item) => item.id !== detail.id))
-        return
-      }
-      const scopedViewKey = scope.viewKey
-      if (scopedViewKey !== '' && (detail.viewAttribution?.viewKey ?? '') !== scopedViewKey) {
-        setItems((previous) => previous.filter((item) => item.id !== detail.id))
-        setPending((previous) => previous.filter((item) => item.id !== detail.id))
-        return
-      }
-      if (detail.state !== viewRef.current) {
-        // Left this view (e.g. resolved): row leaves the list; an open
-        // detail URL keeps rendering with its own re-read (CONTEXT 实时投影).
-        setItems((previous) => previous.filter((item) => item.id !== detail.id))
-        setPending((previous) => previous.filter((item) => item.id !== detail.id))
-        return
-      }
-      if (event.type === 'created') {
-        if (atTopRef.current) {
-          setItems((previous) => [detail, ...previous.filter((item) => item.id !== detail.id)])
-        } else {
-          // New occurrence buffers behind the merge control (UI-LIST-002).
-          setPending((previous) => [detail, ...previous.filter((item) => item.id !== detail.id)])
-        }
-        return
-      }
-      // state_changed: in-place reconcile keeps the row position (UI-LIST-003);
-      // an occurrence that just ENTERED this view (e.g. newly resolved rows
-      // joining the history view) is added at the top instead.
-      setItems((previous) => {
-        if (previous.some((item) => item.id === detail.id)) {
-          return previous.map((item) => (item.id === detail.id ? detail : item))
-        }
-        return [detail, ...previous]
-      })
-      setPending((previous) => previous.filter((item) => item.id !== detail.id))
-    }
-    const unsubscribe = stream.onChange((event, sourceGeneration) => {
-      // Capture before enqueue: an old EventSource callback must never become
-      // eligible merely because a newer view has finished its snapshot.
-      const eventGeneration = generationRef.current
-      eventQueueRef.current = eventQueueRef.current
-        .then(() => applyEvent(event, eventGeneration, sourceGeneration))
-        .catch(() => {
-          if (!cancelled) stream.resync()
-        })
-    })
-    return () => {
-      cancelled = true
-      unsubscribe()
-    }
-  }, [stream])
+	useEffect(() => {
+		let cancelled = false;
+		const applyEvent = async (
+			event: {
+				seq: string;
+				type: "created" | "state_changed";
+				occurrenceId: string;
+				rowVersion: number;
+			},
+			eventGeneration: number,
+			sourceGeneration: number,
+		) => {
+			if (
+				!enabledRef.current ||
+				!projectionReadyRef.current ||
+				eventGeneration !== generationRef.current ||
+				sourceGeneration !== stream.generation
+			)
+				return;
+			const seq = Number(event.seq);
+			if (seq <= lastSeqRef.current) return;
+			if ((versions.current.get(event.occurrenceId) ?? 0) >= event.rowVersion) {
+				lastSeqRef.current = seq;
+				return;
+			}
+			let detail: AlertOccurrenceSummary;
+			try {
+				detail = await fetchOccurrence(event.occurrenceId);
+			} catch {
+				// Do not advance the local cursor for an unapplied event. The stream
+				// cursor is only transport state, so rebuilding from an HTTP snapshot
+				// is the sole authority-safe recovery path.
+				if (!cancelled && eventGeneration === generationRef.current)
+					stream.resync();
+				return;
+			}
+			if (
+				cancelled ||
+				!projectionReadyRef.current ||
+				eventGeneration !== generationRef.current
+			)
+				return;
+			// A detail older than the change which requested it cannot be made
+			// current by waiting; drop the projection and replay from a snapshot.
+			if (detail.rowVersion < event.rowVersion) {
+				stream.resync();
+				return;
+			}
+			const knownVersion = versions.current.get(detail.id) ?? 0;
+			if (knownVersion >= detail.rowVersion) {
+				lastSeqRef.current = seq;
+				return;
+			}
+			versions.current.set(detail.id, detail.rowVersion);
+			lastSeqRef.current = seq;
+			// The mechanical filter mirrors the server-side businessSystemKey /
+			// viewKey projections: events only carry ids, so the re-read detail
+			// decides membership in the filtered view (未归属 rows only match no
+			// filter).
+			const scope = filterRef.current;
+			const legacyKey = scope.businessSystemKey;
+			if (legacyKey !== "" && (detail.businessSystemKey ?? "") !== legacyKey) {
+				setItems((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				setPending((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				return;
+			}
+			const scopedViewKey = scope.viewKey;
+			if (
+				scopedViewKey !== "" &&
+				(detail.viewAttribution?.viewKey ?? "") !== scopedViewKey
+			) {
+				setItems((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				setPending((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				return;
+			}
+			if (detail.state !== viewRef.current) {
+				// Left this view (e.g. resolved): row leaves the list; an open
+				// detail URL keeps rendering with its own re-read (CONTEXT 实时投影).
+				setItems((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				setPending((previous) =>
+					previous.filter((item) => item.id !== detail.id),
+				);
+				return;
+			}
+			if (event.type === "created") {
+				if (atTopRef.current) {
+					setItems((previous) => [
+						detail,
+						...previous.filter((item) => item.id !== detail.id),
+					]);
+				} else {
+					// New occurrence buffers behind the merge control (UI-LIST-002).
+					setPending((previous) => [
+						detail,
+						...previous.filter((item) => item.id !== detail.id),
+					]);
+				}
+				return;
+			}
+			// state_changed: in-place reconcile keeps the row position (UI-LIST-003);
+			// an occurrence that just ENTERED this view (e.g. newly resolved rows
+			// joining the history view) is added at the top instead.
+			setItems((previous) => {
+				if (previous.some((item) => item.id === detail.id)) {
+					return previous.map((item) =>
+						item.id === detail.id ? detail : item,
+					);
+				}
+				return [detail, ...previous];
+			});
+			setPending((previous) =>
+				previous.filter((item) => item.id !== detail.id),
+			);
+		};
+		const unsubscribe = stream.onChange((event, sourceGeneration) => {
+			// Capture before enqueue: an old EventSource callback must never become
+			// eligible merely because a newer view has finished its snapshot.
+			const eventGeneration = generationRef.current;
+			eventQueueRef.current = eventQueueRef.current
+				.then(() => applyEvent(event, eventGeneration, sourceGeneration))
+				.catch(() => {
+					if (!cancelled) stream.resync();
+				});
+		});
+		return () => {
+			cancelled = true;
+			unsubscribe();
+		};
+	}, [stream]);
 
-  const mergePending = useCallback(() => {
-    const buffered = pendingRef.current
-    if (buffered.length > 0) {
-      setItems((previous) => [...buffered, ...previous.filter((item) => !buffered.some((pendingItem) => pendingItem.id === item.id))])
-      setPending([])
-    }
-    // Merging is explicit but never changes the reader's viewport.
-  }, [])
+	const mergePending = useCallback(() => {
+		const buffered = pendingRef.current;
+		if (buffered.length > 0) {
+			setItems((previous) => [
+				...buffered,
+				...previous.filter(
+					(item) => !buffered.some((pendingItem) => pendingItem.id === item.id),
+				),
+			]);
+			setPending([]);
+		}
+		// Merging is explicit but never changes the reader's viewport.
+	}, []);
 
-  const setAtTop = useCallback((value: boolean) => {
-    atTopRef.current = value
-  }, [])
+	const setAtTop = useCallback((value: boolean) => {
+		atTopRef.current = value;
+	}, []);
 
-  const refresh = useCallback(() => {
-    // Manual refresh is intentionally available while automatic list updates
-    // are paused; it is a one-shot HTTP snapshot, not a stream restart.
-    void loadSnapshot(viewRef.current, filterRef.current, false, true)
-  }, [loadSnapshot])
+	const refresh = useCallback(() => {
+		// Manual refresh is intentionally available while automatic list updates
+		// are paused; it is a one-shot HTTP snapshot, not a stream restart.
+		void loadSnapshot(viewRef.current, filterRef.current, false, true);
+	}, [loadSnapshot]);
 
-  return { items, loading, error, pendingNew: pending.length, mergePending, setAtTop, refresh }
+	return {
+		items,
+		loading,
+		error,
+		pendingNew: pending.length,
+		mergePending,
+		setAtTop,
+		refresh,
+	};
 }

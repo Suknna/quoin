@@ -21,7 +21,7 @@ func TestLegacyCatalogDocumentsAreByteFrozen(t *testing.T) {
 		frozen       string
 		wantDigest   string
 	}{
-		{AgentVersion, legacyInitialAnalysisCatalogJSON, "487fa17d8eb82d0363af6d2e131bc4b49cc43fde0e3924d2035297f69614aabd"},
+		{PreviousAgentVersion, legacyInitialAnalysisCatalogJSON, "487fa17d8eb82d0363af6d2e131bc4b49cc43fde0e3924d2035297f69614aabd"},
 		{"investigation-v1", legacyInvestigationCatalogJSON, "b6cdda30dff77535364c4e736fa0fff211f5872e74da081c3e81274ef2f6110f"},
 	} {
 		sum := sha256.Sum256([]byte(tc.frozen))
@@ -53,7 +53,7 @@ func TestLegacyToolsCompatibilityIsExplicit(t *testing.T) {
 		agentVersion string
 		frozen       string
 	}{
-		{AgentVersion, legacyInitialAnalysisCatalogJSON},
+		{PreviousAgentVersion, legacyInitialAnalysisCatalogJSON},
 		{"investigation-v1", legacyInvestigationCatalogJSON},
 	} {
 		var catalog FrozenCatalog

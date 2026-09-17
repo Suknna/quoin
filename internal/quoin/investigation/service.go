@@ -48,9 +48,16 @@ const OutputSchemaKind = "investigation_output_v1"
 // v1 snapshots keep their exact historical rebuild path.
 const RendererVersion = "investigation-renderer-v3"
 
+// PreviousAgentVersion retains execution compatibility for investigation-v2
+// attempts created before the Keep-adapted prompt generation; they share the
+// renderer-v3 alert-history input shape.
+const PreviousAgentVersion = "investigation-v2"
+
 // AgentVersion is the frozen investigation agent generation recorded on
 // the attempt row; the worker binary pins its own copy equal to this.
-const AgentVersion = "investigation-v2"
+// The Keep 提示词迁入 advances the prompt to its own generation without
+// changing the renderer-v3 input shape.
+const AgentVersion = "investigation-v3"
 
 // Stable operation identities. The user-command names double as the audit
 // actions the runner persists automatically, matching the previous manual

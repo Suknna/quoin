@@ -931,18 +931,21 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 }
 
 // promptRendererVersionFor records the immutable input renderer independently
-// from the executor generation carried by the attempt.
-// promptRendererVersionFor records the immutable input renderer
-// independently from the executor generation carried by the attempt. The
-// literals MUST match the snapshot renderer_version constants the owning
-// scope writes (analysis.RendererVersion / investigation.RendererVersion):
+// from the executor generation carried by the attempt. The literals MUST
+// track the rendering generation each scope actually rendered:
 // b58's source-integration input shape is renderer v4 / investigation v2;
 // investigation v3 adds the frozen recent alert-history context.
-// The inspection report prompt has its own renderer generation: its prompt
-// text evolves independently of the initial-analysis prompt, so changing it
-// MUST bump InspectionAgentVersion and this mapping together — a model call
-// row never records a renderer version whose prompt bytes it did not see.
+// The Keep 提示词迁入 (Issue #105) is a pure prompt-text change: the input
+// snapshot shapes stay v4 / investigation-v3 / inspection v1, and each new
+// executor generation records its own renderer identity so a model call row
+// never records a renderer version whose prompt bytes it did not see. The
+// inspection report prompt has its own renderer generation: its prompt text
+// evolves independently of the initial-analysis prompt, so changing it
+// MUST bump InspectionAgentVersion and this mapping together.
 func promptRendererVersionFor(agentVersion string) string {
+	if agentVersion == "investigation-v3" {
+		return "investigation-renderer-v4"
+	}
 	if agentVersion == "investigation-v2" {
 		return "investigation-renderer-v3"
 	}
@@ -950,10 +953,16 @@ func promptRendererVersionFor(agentVersion string) string {
 		return "investigation-renderer-v2"
 	}
 	if agentVersion == InspectionAgentVersion {
+		return "inspection-analysis-renderer-v3"
+	}
+	if agentVersion == ReportComplianceInspectionAgentVersion {
 		return "inspection-analysis-renderer-v2"
 	}
 	if agentVersion == PreviousInspectionAgentVersion {
 		return "inspection-analysis-renderer-v1"
+	}
+	if agentVersion == AgentVersion {
+		return "initial-analysis-renderer-v5"
 	}
 	return "initial-analysis-renderer-v4"
 }

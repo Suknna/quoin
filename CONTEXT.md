@@ -147,7 +147,7 @@ _Avoid_: 删除消息、只隐藏输入而保留其结论、并发主线、通�
 _Avoid_: 任意文件、图片、压缩包、用户控制的工作区路径、确定性工具证据
 
 **诊断（Diagnosis）**：
-某个不可变模型输出基于已有证据形成的解释与结论；它可以是 Initial Analysis 的成功输出、某个 Inspection Report 版本，或用户明确选择的 Investigation assistant message/Attempt 输出。系统不维护会被后续回复覆盖的 Investigation 级“当前诊断”；诊断在被人确认前不代表已验证事实。
+某个不可变模型输出基于已有证据形成的解释与结论；它可以是 Initial Analysis 的成功输出、某个 Inspection Report 版本，或用户明确选择的 Investigation assistant message/Attempt 输出。面向人的诊断简短回答当前问题，保留影响判断的关键事实、证据引用与不确定性，并在有依据时建议下一步；原始观测和取证过程不是诊断正文，仍归属于对应告警、巡检运行或调查回合。显式要求结构化格式的输出仍保留该格式，阅读投影不得伪造摘要或改写不可变原文。系统不维护会被后续回复覆盖的 Investigation 级“当前诊断”；诊断在被人确认前不代表已验证事实。
 _Avoid_: 事实、告警、整个调查、可覆盖的当前结论
 
 ## 工作台投影
@@ -191,7 +191,7 @@ _Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、
 调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，既有调查 URL 为 `/investigations/:investigation`。列表标题由程序从当前分支第一条有效用户消息机械生成，空白时回退为关联来源或“新调查 + 创建时间”，不持久化独立标题、不调用模型；列表按当前分支最后消息/Attempt 活动时间倒序。点击新建先进入 `/investigations/new` 空白对话，第一条消息被服务端接受时才原子创建 Investigation、消息和 Attempt；未发送即离开不产生空记录，也不先要求标题、业务系统、告警、模型或工具。从告警进入时在发送框上方显示当前 Occurrence 与用户选中 Initial Analysis 的不可变来源项并直接聚焦输入，第一条消息提交时与来源原子写入。用户位于底部时跟随新 token/message；用户向上阅读后停止自动滚动并显示“查看新回复”，不得抢焦点或改变阅读位置。失败 Attempt 对应的用户消息左侧显示环形重试按钮，点击后按既有消息创建新 Attempt；active Attempt 期间发送按钮变为方形停止按钮，点击提交 cancellation fence，终态后恢复发送按钮。Tool Call 在对话中显示为可折叠状态卡片，默认展示工具名、真实阶段、耗时或终态与人类可读摘要，原始参数、输出和诊断详情原位展开；窄屏不为工具调用增加第二页面或上下分屏。点击 Evidence 引用后，内容从右向左渐入并铺满整个工作台，关闭后恢复原消息与滚动位置；Initial Analysis 完整正文与 Inspection Report 也使用同一全工作台阅读层，详情只保留状态、摘要和版本入口；减少动态效果模式直接切换到同一终态。巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。noVNC 瞬断进入短暂 `AwaitingReconnect`，同一 Session 可重附着，宽限期后关闭 BrowserSession 释放身份锁，且不自动发布 profile generation。
 
 **巡检工作台投影**：
-巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示来源接入、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的计划和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合），从接入详情进入时按接入预选；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，按状态与时间、检查结果、Evidence 缺口、分析状态、报告版本排列，并提供简短页内 section navigation，不拆成隐藏上下文的多 tab。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。历史 Journey Run 的 `AuthenticationRequired` 直达对应浏览器身份的 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
+巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示来源接入、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的计划和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合），从接入详情进入时按接入预选；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，先展示状态与时间、分析状态及最新可读报告，再展示检查结果、Evidence 缺口和运行资料；报告不存在或分析失败时如实展示状态，不生成替代结论。提供简短页内 section navigation，不拆成隐藏上下文的多 tab，报告生成要求与执行详情按需展开。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。历史 Journey Run 的 `AuthenticationRequired` 直达对应浏览器身份的 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
 _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试、登录后改写或自动补跑旧 Run
 
 **知识工作台投影**：

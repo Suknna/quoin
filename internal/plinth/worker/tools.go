@@ -24,16 +24,35 @@ import (
 )
 
 // WorkerAgentVersion is the frozen executor generation this worker binary
-// carries (DATA-ATTEMPT-001); a unit test pins it equal to the Quoin-side
-// attempt.AgentVersion.
-const WorkerAgentVersion = "initial-analysis-v1"
+// carries for initial-analysis attempts (DATA-ATTEMPT-001); a unit test pins
+// it equal to the Quoin-side attempt.AgentVersion. The Keep 提示词迁入 bumps
+// the analysis prompt to its own generation while every older identity stays
+// executable below.
+const WorkerAgentVersion = "initial-analysis-v2"
+
+// LegacyInitialAnalysisAgentVersion retains execution compatibility for
+// initial-analysis-v1 attempts created before the Keep-adapted prompt
+// generation; the same identity is the legacy inspection alias (the shared
+// executor generation inspection attempts originally rode) and the identity
+// in-flight knowledge attempts still carry.
+const LegacyInitialAnalysisAgentVersion = "initial-analysis-v1"
+
+// KnowledgeExtractionAgentVersion pins knowledge extraction to its ORIGINAL
+// shared executor identity: the knowledge prompt never evolved with the
+// analysis prompt, so new knowledge attempts keep the original identity and
+// output contract instead of silently riding a new analysis generation.
+const KnowledgeExtractionAgentVersion = "initial-analysis-v1"
 
 // InspectionAnalysisAgentVersion pins the inspection report analysis agent
 // generation. It must equal attempt.InspectionAgentVersion: the dispatch row
 // is created with that identity and verifyStart rejects any mismatch, so an
 // attempt from a different prompt generation can never be rendered with this
 // binary's frozen inspection prompt.
-const InspectionAnalysisAgentVersion = "inspection-analysis-v2"
+const InspectionAnalysisAgentVersion = "inspection-analysis-v3"
+
+// ReportComplianceInspectionAnalysisAgentVersion retains the report-compliance
+// inspection prompt generation for already-created attempts.
+const ReportComplianceInspectionAnalysisAgentVersion = "inspection-analysis-v2"
 
 // PreviousInspectionAnalysisAgentVersion retains the first dedicated
 // inspection prompt generation for already-created attempts.
@@ -41,7 +60,12 @@ const PreviousInspectionAnalysisAgentVersion = "inspection-analysis-v1"
 
 // WorkerInvestigationAgentVersion pins the investigation agent generation
 // (mirrors investigation.AgentVersion).
-const WorkerInvestigationAgentVersion = "investigation-v2"
+const WorkerInvestigationAgentVersion = "investigation-v3"
+
+// PreviousInvestigationAgentVersion retains execution compatibility for
+// investigation-v2 attempts created before the Keep-adapted prompt
+// generation; they share the renderer-v3 alert-history input shape.
+const PreviousInvestigationAgentVersion = "investigation-v2"
 
 // LegacyInvestigationAgentVersion retains execution compatibility for
 // investigation renderer-v1/v2 attempts created before alert history v3.

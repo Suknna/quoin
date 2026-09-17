@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/investigation"
 )
 
 func TestToolSchemaMatchesQuoinCatalog(t *testing.T) {
@@ -44,6 +45,30 @@ func TestToolSchemaMatchesQuoinCatalog(t *testing.T) {
 func TestAgentVersionMatchesQuoinContract(t *testing.T) {
 	if WorkerAgentVersion != attempt.AgentVersion {
 		t.Fatalf("agent version drift: worker=%s quoin=%s", WorkerAgentVersion, attempt.AgentVersion)
+	}
+	if LegacyInitialAnalysisAgentVersion != attempt.PreviousAgentVersion {
+		t.Fatalf("previous initial-analysis identity drift: worker=%s quoin=%s", LegacyInitialAnalysisAgentVersion, attempt.PreviousAgentVersion)
+	}
+	if KnowledgeExtractionAgentVersion != attempt.KnowledgeAgentVersion {
+		t.Fatalf("knowledge identity drift: worker=%s quoin=%s", KnowledgeExtractionAgentVersion, attempt.KnowledgeAgentVersion)
+	}
+	if InspectionAnalysisAgentVersion != attempt.InspectionAgentVersion {
+		t.Fatalf("inspection identity drift: worker=%s quoin=%s", InspectionAnalysisAgentVersion, attempt.InspectionAgentVersion)
+	}
+	if ReportComplianceInspectionAnalysisAgentVersion != attempt.ReportComplianceInspectionAgentVersion {
+		t.Fatalf("report-compliance inspection identity drift: worker=%s quoin=%s", ReportComplianceInspectionAnalysisAgentVersion, attempt.ReportComplianceInspectionAgentVersion)
+	}
+	if PreviousInspectionAnalysisAgentVersion != attempt.PreviousInspectionAgentVersion {
+		t.Fatalf("initial inspection identity drift: worker=%s quoin=%s", PreviousInspectionAnalysisAgentVersion, attempt.PreviousInspectionAgentVersion)
+	}
+	if WorkerInvestigationAgentVersion != investigation.AgentVersion {
+		t.Fatalf("investigation identity drift: worker=%s quoin=%s", WorkerInvestigationAgentVersion, investigation.AgentVersion)
+	}
+	if PreviousInvestigationAgentVersion != investigation.PreviousAgentVersion {
+		t.Fatalf("previous investigation identity drift: worker=%s quoin=%s", PreviousInvestigationAgentVersion, investigation.PreviousAgentVersion)
+	}
+	if LegacyInvestigationAgentVersion != "investigation-v1" {
+		t.Fatalf("legacy investigation identity drift: %s", LegacyInvestigationAgentVersion)
 	}
 }
 

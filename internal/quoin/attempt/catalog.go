@@ -81,9 +81,16 @@ type FrozenTool struct {
 
 // generationAccepts is the per-agent-generation execution-location strategy.
 // A plugin tool joins a generation's catalog iff its declared execution
-// location is accepted here; adding a plugin never touches this table.
+// location is accepted here; adding a plugin never touches this table. The
+// Keep 提示词迁入 generations (initial-analysis-v2 / investigation-v3) accept
+// exactly the locations of their predecessors — a prompt generation never
+// changes the tool surface.
 var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
 	"initial-analysis-v1": {
+		plugins.LocationWorkerLocal:      true,
+		plugins.LocationPlinthSupervisor: true,
+	},
+	"initial-analysis-v2": {
 		plugins.LocationWorkerLocal:      true,
 		plugins.LocationPlinthSupervisor: true,
 	},
@@ -93,6 +100,11 @@ var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
 		plugins.LocationLintel:           true,
 	},
 	"investigation-v2": {
+		plugins.LocationWorkerLocal:      true,
+		plugins.LocationPlinthSupervisor: true,
+		plugins.LocationLintel:           true,
+	},
+	"investigation-v3": {
 		plugins.LocationWorkerLocal:      true,
 		plugins.LocationPlinthSupervisor: true,
 		plugins.LocationLintel:           true,
@@ -318,7 +330,7 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 }
 
 func catalogSchemaVersionFor(agentVersion string) string {
-	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" {
+	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" || agentVersion == "investigation-v3" {
 		// v3 carries quoin_browser v2: the breaking identityKey locator
 		// (ADR-0004). The label keeps model-call provenance distinguishable
 		// from catalogs frozen with the retired businessSystemKey locator.
@@ -455,7 +467,10 @@ func providerParametersEqual(def ToolDef, stored map[string]any) bool {
 // denied explicitly at InstalledDefinition instead of being reinterpreted.
 func legacyGenerationCatalog(agentVersion string) *FrozenCatalog {
 	var document string
-	if agentVersion == "investigation-v1" {
+	// NULL-catalog attempts only exist from before per-attempt freezing, but
+	// every investigation generation must resolve the investigation document,
+	// never the initial-analysis one.
+	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" || agentVersion == "investigation-v3" {
 		document = legacyInvestigationCatalogJSON
 	} else {
 		document = legacyInitialAnalysisCatalogJSON

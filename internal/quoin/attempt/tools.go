@@ -19,9 +19,23 @@ import (
 	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
-// AgentVersion is the frozen executor generation for the T10 vertical. Both
-// the worker binary and the dispatch row carry it (DATA-ATTEMPT-001).
-const AgentVersion = "initial-analysis-v1"
+// AgentVersion is the frozen executor generation for initial-analysis
+// attempts (DATA-ATTEMPT-001). Both the worker binary and the dispatch row
+// carry it; the Keep 提示词迁入 advances the analysis prompt to its own
+// generation while every older identity stays executable.
+const AgentVersion = "initial-analysis-v2"
+
+// PreviousAgentVersion retains the initial-analysis-v1 identity: in-flight
+// analysis attempts still commit under it, it is the legacy inspection alias
+// (the shared generation inspection attempts originally rode), and in-flight
+// knowledge attempts carry it.
+const PreviousAgentVersion = "initial-analysis-v1"
+
+// KnowledgeAgentVersion pins knowledge extraction to its ORIGINAL shared
+// executor identity: the knowledge prompt never evolved with the analysis
+// prompt, so new knowledge attempts keep the original identity and output
+// contract instead of silently riding a new analysis generation.
+const KnowledgeAgentVersion = "initial-analysis-v1"
 
 // InspectionAgentVersion is the inspection report analysis' own frozen
 // executor generation. The inspection prompt evolves independently of the
@@ -29,7 +43,11 @@ const AgentVersion = "initial-analysis-v1"
 // version identity instead of silently drifting under the shared
 // initial-analysis generation; the dispatch row (inspection_analysis
 // creation) and the worker mode must agree on it exactly.
-const InspectionAgentVersion = "inspection-analysis-v2"
+const InspectionAgentVersion = "inspection-analysis-v3"
+
+// ReportComplianceInspectionAgentVersion retains the report-compliance
+// inspection prompt generation for already-created attempts.
+const ReportComplianceInspectionAgentVersion = "inspection-analysis-v2"
 
 // PreviousInspectionAgentVersion retains execution compatibility for attempts
 // created with the first dedicated inspection prompt generation.

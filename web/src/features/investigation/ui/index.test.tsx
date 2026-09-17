@@ -3,13 +3,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useInvestigationsModule } from './index'
 import { streamInvestigationMessage } from '@/features/investigation/stream'
+import { type ToolCallItem } from '@/features/investigation/tools/api'
 
 const { api, uploadAttachment } = vi.hoisted(() => ({ api: {
   list: vi.fn(), get: vi.fn(), listMessages: vi.fn(), listAttempts: vi.fn(), businessSystems: vi.fn(), create: vi.fn(), sendMessage: vi.fn(), cancelAttempt: vi.fn(), retryAttempt: vi.fn(), undo: vi.fn(),
 }, uploadAttachment: vi.fn() }))
 vi.mock('@/features/investigation/api', () => ({ api, sourceLabel: (type: string) => type }))
 vi.mock('@/features/investigation/attachments/api', () => ({ attachmentCommandId: () => 'upload-command', uploadAttachment }))
-vi.mock('@/features/investigation/tools/api', () => ({ listToolCalls: vi.fn() }))
+vi.mock('@/features/investigation/tools/api', async (original) => ({ ...await original<typeof import('@/features/investigation/tools/api')>(), listToolCalls: vi.fn() }))
 vi.mock('@/features/investigation/stream', () => ({ streamInvestigationMessage: vi.fn() }))
 vi.mock('@/features/feedback/api', () => ({ appendFeedback: vi.fn(), fetchFeedback: vi.fn(), feedbackValueLabels: {} }))
 vi.mock('@/features/knowledge/api', () => ({ api: { createMessageCandidate: vi.fn() } }))
@@ -118,5 +119,86 @@ describe('investigations module', () => {
     api.list.mockRejectedValue(new Error('调查服务不可用'))
     render(<View route="/investigations" />)
     expect(await screen.findByText('调查服务不可用')).toBeInTheDocument()
+  })
+})
+
+describe('turn-bound tool cards', () => {
+  const baseMessage = { attachments: [], evidenceIds: [], createdAt: '2026-01-01T00:00:00Z' }
+  const messageOf = (partial: Record<string, unknown>) => ({ ...baseMessage, ...partial })
+  const toolCall: ToolCallItem = { id: 't1', attemptId: 'a1', modelCallId: 'c1', callSeq: 1, toolIndex: 0, providerToolCallId: 'p1', toolName: 'thanos_query', toolVersion: '1', arguments: { query: 'up' }, executionMode: 'read_only', failureMode: 'best_effort', status: 'succeeded', rowVersion: 2, result: { resultType: 'vector', result: [] }, createdAt: '2026-01-01T00:00:00Z' }
+
+  function renderTurn(messages: unknown[], attempts: unknown[]) {
+    api.list.mockResolvedValue({ items: [] }); api.get.mockResolvedValue(detail)
+    api.listMessages.mockResolvedValue({ items: messages })
+    api.listAttempts.mockResolvedValue({ items: attempts })
+    return render(<View route="/investigations/i1" />)
+  }
+
+  async function mockToolCalls() {
+    const tools = await import('@/features/investigation/tools/api')
+    return vi.mocked(tools.listToolCalls)
+  }
+
+  it('binds tool calls to their own turn with real status, summary, and expandable structured detail', async () => {
+    const listToolCalls = await mockToolCalls()
+    listToolCalls.mockResolvedValue([toolCall])
+    renderTurn(
+      [messageOf({ id: 'm1', seq: 1, role: 'user', status: 'active', content: '查一下连通性', attemptId: 'a1' }), messageOf({ id: 'm2', seq: 2, role: 'assistant', status: 'active', content: '连通正常', attemptId: 'a1' })],
+      [{ id: 'a1', type: 'chat', state: 'Succeeded', rowVersion: 1, createdAt: '2026-01-01T00:00:00Z' }],
+    )
+    expect(await screen.findByText('Thanos 查询')).toBeInTheDocument()
+    expect(screen.getByText('已完成')).toBeInTheDocument()
+    // 摘要只来自真实结果形态，不是编造语义。
+    expect(screen.getByText('返回对象 · 2 个字段。')).toBeInTheDocument()
+    // 展开后是结构化字段，而不是一整块 JSON。
+    fireEvent.click(screen.getByRole('button', { name: /Thanos 查询/ }))
+    expect(await screen.findByText('query')).toBeInTheDocument()
+    expect(screen.getByText('resultType')).toBeInTheDocument()
+    // 完整原文折叠保留，展开后可核查。
+    fireEvent.click(screen.getAllByRole('button', { name: '原始 JSON' })[0])
+    await waitFor(() => expect(document.body.textContent).toContain('"query": "up"'))
+    // 旧的线程底部堆叠入口不再存在。
+    expect(screen.queryByRole('button', { name: '工具调用' })).not.toBeInTheDocument()
+  })
+
+  it('keeps tool cards bound to their own attempt without mixing turns', async () => {
+    const listToolCalls = await mockToolCalls()
+    listToolCalls.mockImplementation(async (_investigationId: string, attemptId: string) => attemptId === 'a1' ? [{ ...toolCall, id: 't1', toolName: 'thanos_query' }] : [{ ...toolCall, id: 't2', toolName: 'read' }])
+    renderTurn(
+      [
+        messageOf({ id: 'm1', seq: 1, role: 'user', status: 'active', content: '第一问', attemptId: 'a1' }),
+        messageOf({ id: 'm2', seq: 2, role: 'assistant', status: 'active', content: '答一', attemptId: 'a1' }),
+        messageOf({ id: 'm3', seq: 3, role: 'user', status: 'active', content: '第二问', attemptId: 'a2' }),
+        messageOf({ id: 'm4', seq: 4, role: 'assistant', status: 'active', content: '答二', attemptId: 'a2' }),
+      ],
+      [
+        { id: 'a1', type: 'chat', state: 'Succeeded', rowVersion: 1, createdAt: '2026-01-01T00:00:00Z' },
+        { id: 'a2', type: 'chat', state: 'Succeeded', rowVersion: 2, createdAt: '2026-01-01T00:01:00Z' },
+      ],
+    )
+    expect(await screen.findByText('Thanos 查询')).toBeInTheDocument()
+    expect(await screen.findByText('读取文件')).toBeInTheDocument()
+    expect(listToolCalls).toHaveBeenCalledWith('i1', 'a1')
+    expect(listToolCalls).toHaveBeenCalledWith('i1', 'a2')
+    expect(screen.getAllByText('Thanos 查询')).toHaveLength(1)
+    expect(screen.getAllByText('读取文件')).toHaveLength(1)
+  })
+
+  it('distinguishes failed, cancelled, and empty tool results without fabricating success', async () => {
+    const listToolCalls = await mockToolCalls()
+    listToolCalls.mockResolvedValue([
+      { ...toolCall, id: 't1', toolName: 'thanos_query', status: 'failed', errorDetail: '上游查询超时', result: undefined },
+      { ...toolCall, id: 't2', toolName: 'read', status: 'cancelled', result: undefined },
+      { ...toolCall, id: 't3', toolName: 'grep', status: 'succeeded', result: undefined },
+    ])
+    renderTurn(
+      [messageOf({ id: 'm1', seq: 1, role: 'user', status: 'active', content: '查一下', attemptId: 'a1' }), messageOf({ id: 'm2', seq: 2, role: 'assistant', status: 'active', content: '答', attemptId: 'a1' })],
+      [{ id: 'a1', type: 'chat', state: 'Succeeded', rowVersion: 1, createdAt: '2026-01-01T00:00:00Z' }],
+    )
+    expect(await screen.findByText('失败')).toBeInTheDocument()
+    expect(screen.getByText('失败原因：上游查询超时')).toBeInTheDocument()
+    expect(screen.getByText('已取消')).toBeInTheDocument()
+    expect(screen.getByText('执行已取消。')).toBeInTheDocument()
+    expect(screen.getByText('成功返回，无结果内容。')).toBeInTheDocument()
   })
 })

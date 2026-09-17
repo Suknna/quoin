@@ -75,6 +75,23 @@ var initialAnalysisMode = attemptMode{
 	},
 }
 
+// previousInitialAnalysisMode renders the frozen initial-analysis-v1 prompt
+// for attempts created before the Keep-adapted generation; the message shape
+// is byte-identical and only the system prompt differs.
+var previousInitialAnalysisMode = attemptMode{
+	schemaKind:       "initial_analysis_v1",
+	agentVersion:     LegacyInitialAnalysisAgentVersion,
+	outputSchemaKind: OutputSchemaKind,
+	prompt:           agent.PreviousAnalysisSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildPreviousInitialMessages(input)
+	},
+}
+
 var inspectionAnalysisMode = attemptMode{
 	schemaKind: "inspection_analysis_v1", agentVersion: InspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.InspectionSystemPrompt,
@@ -84,6 +101,18 @@ var inspectionAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInspectionMessages(input)
+	},
+}
+
+var reportComplianceInspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: ReportComplianceInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.ReportComplianceInspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInspectionMessagesWithPrompt(input, agent.ReportComplianceInspectionSystemPrompt)
 	},
 }
 
@@ -106,7 +135,7 @@ var previousInspectionAnalysisMode = attemptMode{
 // (inspection_analysis_v1, initial-analysis-v1) combination — no other mode
 // gains a legacy alias.
 var legacyInspectionAnalysisMode = attemptMode{
-	schemaKind: "inspection_analysis_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	schemaKind: "inspection_analysis_v1", agentVersion: LegacyInitialAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.LegacyInspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
 		input, err := agent.ParseInspectionInput(canonical)
@@ -118,7 +147,7 @@ var legacyInspectionAnalysisMode = attemptMode{
 }
 
 var knowledgeExtractionMode = attemptMode{
-	schemaKind: "knowledge_extraction_v1", agentVersion: WorkerAgentVersion, outputSchemaKind: KnowledgeExtractionOutputSchemaKind,
+	schemaKind: "knowledge_extraction_v1", agentVersion: KnowledgeExtractionAgentVersion, outputSchemaKind: KnowledgeExtractionOutputSchemaKind,
 	prompt: agent.KnowledgeExtractionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
 		input, err := agent.ParseKnowledgeExtractionInput(canonical)
@@ -140,6 +169,23 @@ var investigationMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInvestigationMessages(input)
+	},
+}
+
+// previousInvestigationMode renders the frozen investigation-v2 prompt under
+// the identical renderer-v3 message shape for attempts created before the
+// Keep-adapted generation.
+var previousInvestigationMode = attemptMode{
+	schemaKind:       "investigation_v1",
+	agentVersion:     PreviousInvestigationAgentVersion,
+	outputSchemaKind: InvestigationOutputSchemaKind,
+	prompt:           agent.PreviousInvestigationSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInvestigationInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildPreviousInvestigationMessages(input)
 	},
 }
 
@@ -222,36 +268,57 @@ func Run(ctx context.Context, config Config) error {
 }
 
 // verifyStart enforces the frozen input contract (ARCH-WORKER-006) and
-// resolves the attempt mode.
+// resolves the attempt mode. Every prompt generation keeps its own mode: old
+// identities bind their frozen prompt bytes, new identities bind the current
+// prompt, and anything else is rejected.
 func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 	var mode attemptMode
 	switch start.GetSchemaKind() {
 	case initialAnalysisMode.schemaKind:
-		mode = initialAnalysisMode
+		switch start.GetAgentVersion() {
+		case WorkerAgentVersion:
+			mode = initialAnalysisMode
+		case LegacyInitialAnalysisAgentVersion:
+			mode = previousInitialAnalysisMode
+		default:
+			return attemptMode{}, fmt.Errorf("agent version mismatch: no initial-analysis mode for %s", start.GetAgentVersion())
+		}
 	case investigationMode.schemaKind:
 		switch start.GetAgentVersion() {
 		case WorkerInvestigationAgentVersion:
 			mode = investigationMode
+		case PreviousInvestigationAgentVersion:
+			mode = previousInvestigationMode
 		case LegacyInvestigationAgentVersion:
 			mode = legacyInvestigationMode
 		default:
 			return attemptMode{}, fmt.Errorf("agent version mismatch: no investigation mode for %s", start.GetAgentVersion())
 		}
 	case inspectionAnalysisMode.schemaKind:
-		// 巡检分析有明确的 legacy 组合：旧共享身份渲染上一代冻结 prompt，
-		// 新身份渲染当前 prompt；其余身份一律拒绝。
+		// 巡检分析有明确的代际组合：旧共享身份渲染最初的冻结 prompt，第一代与
+		// report-compliance 代各绑定自己的冻结 prompt，新身份渲染当前 prompt；
+		// 其余身份一律拒绝。
 		switch start.GetAgentVersion() {
 		case InspectionAnalysisAgentVersion:
 			mode = inspectionAnalysisMode
+		case ReportComplianceInspectionAnalysisAgentVersion:
+			mode = reportComplianceInspectionAnalysisMode
 		case PreviousInspectionAnalysisAgentVersion:
 			mode = previousInspectionAnalysisMode
-		case WorkerAgentVersion:
+		case LegacyInitialAnalysisAgentVersion:
 			mode = legacyInspectionAnalysisMode
 		default:
 			return attemptMode{}, fmt.Errorf("agent version mismatch: no inspection mode for %s", start.GetAgentVersion())
 		}
 	case knowledgeExtractionMode.schemaKind:
-		mode = knowledgeExtractionMode
+		// knowledge 抽取固定在原共享身份上：prompt 从未随 analysis 代际演进，
+		// 新 analysis 身份不得重定向 knowledge 输出契约。
+		switch start.GetAgentVersion() {
+		case KnowledgeExtractionAgentVersion:
+			mode = knowledgeExtractionMode
+		default:
+			return attemptMode{}, fmt.Errorf("agent version mismatch: no knowledge mode for %s", start.GetAgentVersion())
+		}
 	default:
 		return attemptMode{}, fmt.Errorf("unsupported schema_kind %q", start.GetSchemaKind())
 	}

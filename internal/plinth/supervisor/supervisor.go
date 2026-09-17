@@ -209,6 +209,8 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		switch input.GetAgentVersion() {
 		case worker.LegacyInvestigationAgentVersion:
 			systemPrompt = plinthagent.LegacyInvestigationSystemPrompt
+		case worker.PreviousInvestigationAgentVersion:
+			systemPrompt = plinthagent.PreviousInvestigationSystemPrompt
 		case worker.WorkerInvestigationAgentVersion:
 			systemPrompt = plinthagent.InvestigationSystemPrompt
 		default:
@@ -220,12 +222,26 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		switch input.GetAgentVersion() {
 		case worker.InspectionAnalysisAgentVersion:
 			systemPrompt = plinthagent.InspectionSystemPrompt
+		case worker.ReportComplianceInspectionAnalysisAgentVersion:
+			systemPrompt = plinthagent.ReportComplianceInspectionSystemPrompt
 		case worker.PreviousInspectionAnalysisAgentVersion:
 			systemPrompt = plinthagent.PreviousInspectionSystemPrompt
-		case worker.WorkerAgentVersion:
+		case worker.LegacyInitialAnalysisAgentVersion:
 			systemPrompt = plinthagent.LegacyInspectionSystemPrompt
 		default:
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection agent version")
+			return
+		}
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS {
+		// 初步分析的 prompt 已分代：旧身份必须绑定冻结的上一代 prompt，
+		// BeginModelCall 记录的 prompt_digest 才与实际渲染一致。
+		switch input.GetAgentVersion() {
+		case worker.WorkerAgentVersion:
+			systemPrompt = plinthagent.SystemPrompt
+		case worker.LegacyInitialAnalysisAgentVersion:
+			systemPrompt = plinthagent.PreviousAnalysisSystemPrompt
+		default:
+			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported initial-analysis agent version")
 			return
 		}
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {

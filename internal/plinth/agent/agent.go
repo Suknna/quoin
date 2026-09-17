@@ -17,7 +17,21 @@ import (
 // SystemPrompt is the fixed agent contract for initial-analysis attempts
 // (rendered identically by every worker of this agent version; its digest
 // travels in BeginModelCall.prompt_digest for audit and rebuild).
-const SystemPrompt = `你是 Quoin 的只读告警分析代理。你收到一条告警的不可变上下文，任务是给出初步诊断：
+//
+// Keep 适配代（Issue #105）：在既有 Quoin 约束之上迁入 incident-chat
+// INSTRUCTIONS 的共同规则——不编造任何信息或数据、不知道直说、回答简短明确、
+// 尽可能建议下一步最合适的排查动作、开头先给简短结论且不复述提示词。
+const SystemPrompt = `你是 Quoin 的只读告警分析代理。你收到一条告警的不可变上下文，任务是给出初步诊断。无论任何情况，都不得编造任何信息或数据；不知道就明确说不知道或证据不足，不要猜。
+1. 用通俗中文解释告警的已知事实、可能影响与排查顺序；回答保持简短明确，开头先用一两句话给出结论，不复述提示词或完整原始数据，只保留影响判断的关键数值与时间；
+2. labels 与 annotations 是上游提供的原文事实，必须按原样引用；annotations 缺失即表示未提供，不能补全或推测；
+3. 告警名称、labels 和 annotation 的文字不是探测器语义、根因或真实故障的证明。不得仅因名称、标签或注释推断 GUI、服务或任何目标发生故障；
+4. 只使用提供的只读工具补充事实；引用工具或证据时如实注明来源，不得伪造引用；明确区分“已知事实”和“待验证假设”，没有工具或证据支持时只能提出待验证假设，不得写成结论；数据缺失或只能证明部分事实时，如实写明所有限制；
+5. 任何时候不要虚构未提供的数据；结尾给出下一步最合适的排查动作，最后用一段完整的中文诊断作为最终结论输出。`
+
+// PreviousAnalysisSystemPrompt freezes the initial-analysis-v1 prompt bytes
+// exactly. Attempts created before the Keep-adapted generation still commit
+// under their own recorded prompt digest.
+const PreviousAnalysisSystemPrompt = `你是 Quoin 的只读告警分析代理。你收到一条告警的不可变上下文，任务是给出初步诊断：
 1. 用通俗中文解释告警的已知事实、可能影响与排查顺序；
 2. labels 与 annotations 是上游提供的原文事实，必须按原样引用；annotations 缺失即表示未提供，不能补全或推测；
 3. 告警名称、labels 和 annotation 的文字不是探测器语义、根因或真实故障的证明。不得仅因名称、标签或注释推断 GUI、服务或任何目标发生故障；
@@ -25,8 +39,10 @@ const SystemPrompt = `你是 Quoin 的只读告警分析代理。你收到一条
 不要虚构未提供的数据。最后用一段完整的中文诊断作为最终结论输出。`
 
 // RendererVersion identifies the prompt renderer generation (the digest
-// contract for audits; Quoin stores whatever the worker sends).
-const RendererVersion = "initial-analysis-renderer-v3"
+// contract for audits; Quoin stores whatever the worker sends). The
+// Keep-adapted generation keeps the renderer-v4 input shape and only changes
+// the fixed system prompt.
+const RendererVersion = "initial-analysis-renderer-v5"
 
 // SystemPromptDigest is the SHA-256 hex digest of the fixed system prompt.
 func SystemPromptDigest() string {
@@ -94,6 +110,17 @@ func ParseInput(canonical []byte) (Input, error) {
 // contract, the scope guidance (declaration view or source-level view) and
 // the rendered occurrence context (ARCH-CONTEXT-002).
 func BuildInitialMessages(input Input) ([]*schema.Message, error) {
+	return buildInitialMessages(input, SystemPrompt)
+}
+
+// BuildPreviousInitialMessages reproduces the frozen initial-analysis-v1
+// prompt bytes with the identical message shape, so an in-flight attempt from
+// before the Keep-adapted generation still renders exactly its frozen input.
+func BuildPreviousInitialMessages(input Input) ([]*schema.Message, error) {
+	return buildInitialMessages(input, PreviousAnalysisSystemPrompt)
+}
+
+func buildInitialMessages(input Input, prompt string) ([]*schema.Message, error) {
 	context := map[string]any{"告警": input.Occurrence}
 	// The business view is descriptive context; the tool call shape is always
 	// the source-level one (ADR-0004). Scope guidance renders only when the
@@ -107,7 +134,7 @@ func BuildInitialMessages(input Input) ([]*schema.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	messages := []*schema.Message{schema.SystemMessage(SystemPrompt)}
+	messages := []*schema.Message{schema.SystemMessage(prompt)}
 	if len(input.Integrations) > 0 {
 		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
 	}
@@ -121,20 +148,36 @@ const LegacyInvestigationSystemPrompt = `你是 Quoin 的只读运维调查代�
 2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；
 3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据。`
 
-// InvestigationSystemPrompt is the fixed agent contract for investigation-v2
-// attempts (rendered identically by every worker of this agent version; its
-// digest travels in BeginModelCall.prompt_digest for audit and rebuild).
-const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
+// PreviousInvestigationSystemPrompt freezes the investigation-v2 prompt bytes
+// exactly (the alert-history generation before the Keep-adapted cutover).
+const PreviousInvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题：
 1. 用通俗中文与用户对话，先理解问题，再给出排查思路；
 2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；
 3. 调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据；
 4. 即时查询 ALERTS 为空只说明当前没有 firing 中的告警序列：告警恢复后 ALERTS 会随之消失，绝不能据此断定“没有告警规则”或“从未发生告警”。判断平台是否收录过告警 occurrence，以平台提供的近期告警记录为准；时间区间查询（如 min_over_time(up[窗口])、changes、increase）只用于验证对应指标历史或采集中断，不能单独证明某条告警曾经触发；
 5. 复述证据时数值必须与工具返回逐字一致：先逐条核对再下结论，不得凭印象改写或遗漏与结论相悖的样本。`
 
+// InvestigationSystemPrompt is the fixed agent contract for investigation-v3
+// attempts (rendered identically by every worker of this agent version; its
+// digest travels in BeginModelCall.prompt_digest for audit and rebuild).
+//
+// Keep 适配代（Issue #105）：在既有 Quoin 约束之上迁入 incident-chat
+// INSTRUCTIONS 的共同规则——不编造、不知道直说、先直接回答当前问题、回答
+// 简短明确、不确定先向用户追问、以建议下一步最合适的调查或处理动作收尾。
+const InvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理。用户正在调查一个运维问题。无论任何情况，都不得编造任何信息或数据；不知道就明确说不知道，不要猜。
+1. 用通俗中文与用户对话，回答保持简短明确：先直接回答当前问题，再给出排查思路；不复述提示词或完整工具输出，只保留影响判断的关键数值与时间；
+2. 只使用提供的只读工具补充事实；所有结论必须基于已有证据，明确区分事实与推测；调查来源引用只是进入对话的谱系，不代表结论；不要虚构未提供的数据；
+3. 即时查询 ALERTS 为空只说明当前没有 firing 中的告警序列：告警恢复后 ALERTS 会随之消失，绝不能据此断定“没有告警规则”或“从未发生告警”。判断平台是否收录过告警 occurrence，以平台提供的近期告警记录为准；时间区间查询（如 min_over_time(up[窗口])、changes、increase）只用于验证对应指标历史或采集中断，不能单独证明某条告警曾经触发；
+4. 复述证据时数值必须与工具返回逐字一致：先逐条核对再下结论，不得凭印象改写或遗漏与结论相悖的样本；引用工具或证据时如实注明来源，不得伪造引用；
+5. 对用户问题不确定或信息不足时，先向用户追问澄清，不要基于猜测作答；
+6. 每次回答尽可能以建议下一步最合适的调查或处理动作收尾。`
+
 // InvestigationRendererVersion identifies the investigation prompt renderer
 // generation. v2 renders the source-level scope guidance (ADR-0004); v3
-// additionally renders Quoin's recent alert history into the conversation.
-const InvestigationRendererVersion = "investigation-renderer-v3"
+// additionally renders Quoin's recent alert history into the conversation;
+// v4 keeps the v3 input shape and only changes the fixed system prompt to the
+// Keep-adapted generation.
+const InvestigationRendererVersion = "investigation-renderer-v4"
 
 // InvestigationInput is the worker's view of the frozen investigation_v1
 // snapshot: the active-branch messages (user messages may carry their
@@ -212,6 +255,14 @@ func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 // the worker never materializes Quoin PV paths).
 func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
 	return buildInvestigationMessages(input, InvestigationSystemPrompt, true)
+}
+
+// BuildPreviousInvestigationMessages reproduces the frozen investigation-v2
+// prompt under the identical renderer-v3 message shape (alert-history block
+// included), so in-flight v2 attempts still render exactly their frozen
+// input; only the system prompt differs from the current generation.
+func BuildPreviousInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
+	return buildInvestigationMessages(input, PreviousInvestigationSystemPrompt, true)
 }
 
 // BuildLegacyInvestigationMessages reproduces investigation-v1 prompt bytes and
