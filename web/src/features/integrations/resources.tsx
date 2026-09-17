@@ -9,6 +9,7 @@ import {
 	EmptyHeader,
 	EmptyTitle,
 } from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -95,24 +96,40 @@ export function IntegrationResources({
 	useEffect(() => {
 		if (suspended || !resourceId) return;
 		let active = true;
-		request<Resource>(`${base}/resources/${encodeURIComponent(resourceId)}`).then((item) => { if (active) setSelected(item); }).catch((reason) => { if (active) setError(message(reason)); });
-		return () => { active = false; };
+		request<Resource>(`${base}/resources/${encodeURIComponent(resourceId)}`)
+			.then((item) => {
+				if (active) setSelected(item);
+			})
+			.catch((reason) => {
+				if (active) setError(message(reason));
+			});
+		return () => {
+			active = false;
+		};
 	}, [base, resourceId, suspended]);
 	useEffect(() => {
 		if (suspended || !enabled) return;
 		let active = true;
 		const poll = async () => {
 			try {
-				const page = await request<{ items: ObservationRun[] }>(`${base}/observation-runs?limit=1`);
+				const page = await request<{ items: ObservationRun[] }>(
+					`${base}/observation-runs?limit=1`,
+				);
 				if (!active) return;
 				const latest = page.items[0];
 				if (latest) setRun(latest);
-				if (!latest || !["Queued", "Running"].includes(latest.state)) await load();
-			} catch (reason) { if (active) setError(message(reason)); }
+				if (!latest || !["Queued", "Running"].includes(latest.state))
+					await load();
+			} catch (reason) {
+				if (active) setError(message(reason));
+			}
 		};
 		void poll();
 		const timer = setInterval(() => void poll(), 5000);
-		return () => { active = false; clearInterval(timer); };
+		return () => {
+			active = false;
+			clearInterval(timer);
+		};
 	}, [base, enabled, load, suspended]);
 	useEffect(() => {
 		if (suspended || !run || !["Queued", "Running"].includes(run.state)) return;
@@ -157,7 +174,8 @@ export function IntegrationResources({
 					<Button
 						variant="outline"
 						disabled={
-							suspended || !enabled ||
+							suspended ||
+							!enabled ||
 							busy ||
 							Boolean(run && ["Queued", "Running"].includes(run.state))
 						}
@@ -192,7 +210,18 @@ export function IntegrationResources({
 					</Button>
 				</Alert>
 			)}
-			{loading && <p role="status">正在读取观测结果…</p>}
+			{loading && (
+				<div
+					className="flex flex-col gap-2"
+					role="status"
+					aria-label="正在读取观测结果"
+				>
+					<Skeleton className="h-10 w-full" />
+					<Skeleton className="h-10 w-full" />
+					<Skeleton className="h-10 w-full" />
+					<Skeleton className="h-10 w-5/6" />
+				</div>
+			)}
 			{!loading && !error && items.length === 0 ? (
 				<Empty>
 					<EmptyHeader>
@@ -217,7 +246,14 @@ export function IntegrationResources({
 							{items.map((item) => (
 								<TableRow key={item.id}>
 									<TableCell>
-										<Button variant="link" onClick={() => navigate(`${detailBase}/resources/${encodeURIComponent(item.id)}`)}>
+										<Button
+											variant="link"
+											onClick={() =>
+												navigate(
+													`${detailBase}/resources/${encodeURIComponent(item.id)}`,
+												)
+											}
+										>
 											{item.displayName ?? item.labels.instance ?? item.id}
 										</Button>
 									</TableCell>

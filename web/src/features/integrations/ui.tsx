@@ -67,6 +67,7 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -125,23 +126,138 @@ function integrationRoute(
 	return ["/integrations", platform, instanceId].filter(Boolean).join("/");
 }
 
-function CatalogCard({ item, navigate }: { item: IntegrationCatalogItem; navigate: (to: string) => void }) {
- const route = `/integrations/${encodeURIComponent(item.id)}`;
- return <Card className="flex flex-col"><CardHeader><CardTitle>{item.displayName}</CardTitle><CardDescription>{item.description}</CardDescription></CardHeader><CardContent className="mt-auto flex flex-col gap-3"><div className="flex flex-wrap gap-2">{item.capabilities.includes("discover") && <Badge variant="secondary">自动观测</Badge>}{item.capabilities.includes("tools") && <Badge variant="secondary">Agent 工具</Badge>}</div><Button onClick={() => navigate(route)}>配置 {item.displayName}<ChevronRight data-icon="inline-end" /></Button></CardContent></Card>;
+function CatalogCard({
+	item,
+	navigate,
+}: {
+	item: IntegrationCatalogItem;
+	navigate: (to: string) => void;
+}) {
+	const route = `/integrations/${encodeURIComponent(item.id)}`;
+	return (
+		<Card className="flex flex-col">
+			<CardHeader>
+				<CardTitle>{item.displayName}</CardTitle>
+				<CardDescription>{item.description}</CardDescription>
+			</CardHeader>
+			<CardContent className="mt-auto flex flex-col gap-3">
+				<div className="flex flex-wrap gap-2">
+					{item.capabilities.includes("discover") && (
+						<Badge variant="secondary">自动观测</Badge>
+					)}
+					{item.capabilities.includes("tools") && (
+						<Badge variant="secondary">Agent 工具</Badge>
+					)}
+				</div>
+				<Button onClick={() => navigate(route)}>
+					配置 {item.displayName}
+					<ChevronRight data-icon="inline-end" />
+				</Button>
+			</CardContent>
+		</Card>
+	);
 }
 function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
- const [search, setSearch] = useState("");
- const [catalog, setCatalog] = useState<IntegrationCatalogItem[]>([]);
- const [loading, setLoading] = useState(true);
- const [error, setError] = useState("");
- const [revision, setRevision] = useState(0);
- useEffect(() => {
-  let active = true;
-  listIntegrationPlugins().then((items) => { if (active) setCatalog(items.filter((item) => item.enabled)); }).catch((reason) => { if (active) setError(messageOf(reason)); }).finally(() => { if (active) setLoading(false); });
-  return () => { active = false; };
- }, [revision]);
- const items = useMemo(() => { const needle = search.trim().toLowerCase(); return catalog.filter((item) => `${item.displayName} ${item.description}`.toLowerCase().includes(needle)); }, [catalog, search]);
- return <section className="flex flex-col gap-5"><div className="flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">接入管理</h1><p className="mt-1 text-sm text-muted-foreground">配置已启用的平台能力。验证启用后自动观测，无需先定义业务系统。</p></div><Button variant="outline" onClick={() => navigate("/integrations/instances")}>查看已接入实例<ChevronRight data-icon="inline-end" /></Button></div><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索支持的平台" aria-label="搜索支持的平台" />{loading ? <p role="status">正在加载插件目录…</p> : error ? <Alert variant="destructive"><AlertTitle>无法加载插件目录</AlertTitle><AlertDescription>{error}</AlertDescription><Button variant="outline" onClick={() => { setLoading(true); setError(""); setRevision((value) => value + 1); }}>重试</Button></Alert> : items.length === 0 ? <Empty><EmptyHeader><EmptyTitle>{search ? "没有匹配的平台" : "没有已启用的接入插件"}</EmptyTitle><EmptyDescription>{search ? "尝试使用平台名称重新搜索。" : "请检查部署中的插件启用配置。"}</EmptyDescription></EmptyHeader></Empty> : <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{items.map((item) => <CatalogCard key={item.id} item={item} navigate={navigate} />)}</div>}</section>;
+	const [search, setSearch] = useState("");
+	const [catalog, setCatalog] = useState<IntegrationCatalogItem[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
+	const [revision, setRevision] = useState(0);
+	useEffect(() => {
+		let active = true;
+		listIntegrationPlugins()
+			.then((items) => {
+				if (active) setCatalog(items.filter((item) => item.enabled));
+			})
+			.catch((reason) => {
+				if (active) setError(messageOf(reason));
+			})
+			.finally(() => {
+				if (active) setLoading(false);
+			});
+		return () => {
+			active = false;
+		};
+	}, [revision]);
+	const items = useMemo(() => {
+		const needle = search.trim().toLowerCase();
+		return catalog.filter((item) =>
+			`${item.displayName} ${item.description}`.toLowerCase().includes(needle),
+		);
+	}, [catalog, search]);
+	return (
+		<section className="flex flex-col gap-5">
+			<div className="flex flex-wrap items-end justify-between gap-3">
+				<div>
+					<h1 className="text-2xl font-semibold tracking-tight">接入管理</h1>
+					<p className="mt-1 text-sm text-muted-foreground">
+						配置已启用的平台能力。验证启用后自动观测，无需先定义业务系统。
+					</p>
+				</div>
+				<Button
+					variant="outline"
+					onClick={() => navigate("/integrations/instances")}
+				>
+					查看已接入实例
+					<ChevronRight data-icon="inline-end" />
+				</Button>
+			</div>
+			<Input
+				value={search}
+				onChange={(event) => setSearch(event.target.value)}
+				placeholder="搜索支持的平台"
+				aria-label="搜索支持的平台"
+			/>
+			{loading ? (
+				<div
+					className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+					role="status"
+					aria-label="正在加载插件目录"
+				>
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-40 w-full" />
+					<Skeleton className="h-40 w-full" />
+				</div>
+			) : error ? (
+				<Alert variant="destructive">
+					<AlertTitle>无法加载插件目录</AlertTitle>
+					<AlertDescription>{error}</AlertDescription>
+					<Button
+						variant="outline"
+						onClick={() => {
+							setLoading(true);
+							setError("");
+							setRevision((value) => value + 1);
+						}}
+					>
+						重试
+					</Button>
+				</Alert>
+			) : items.length === 0 ? (
+				<Empty>
+					<EmptyHeader>
+						<EmptyTitle>
+							{search ? "没有匹配的平台" : "没有已启用的接入插件"}
+						</EmptyTitle>
+						<EmptyDescription>
+							{search
+								? "尝试使用平台名称重新搜索。"
+								: "请检查部署中的插件启用配置。"}
+						</EmptyDescription>
+					</EmptyHeader>
+				</Empty>
+			) : (
+				<div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+					{items.map((item) => (
+						<CatalogCard key={item.id} item={item} navigate={navigate} />
+					))}
+				</div>
+			)}
+		</section>
+	);
 }
 
 function Instances({
@@ -258,9 +374,16 @@ function Instances({
 					</Button>
 				</Alert>
 			) : loading ? (
-				<p role="status" className="text-sm text-muted-foreground">
-					正在加载实例…
-				</p>
+				<div
+					className="flex flex-col gap-2"
+					role="status"
+					aria-label="正在加载实例"
+				>
+					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-16 w-5/6" />
+				</div>
 			) : filtered.length === 0 ? (
 				<Empty className="min-h-56">
 					<EmptyHeader>
@@ -331,18 +454,18 @@ function Instances({
 												? formatEventTime(item.latestValidEventAt)
 												: ((item as MetricsInstance).endpoint ?? "—")}
 										</TableCell>
-											<TableCell>
-												<Button
-													size="sm"
-													variant="ghost"
-													onClick={() =>
-														// Detail routes carry the stable connection name,
-														// matching the server's name-keyed read contract.
-														navigate(
-															integrationRoute(item.platform, item.displayName),
-														)
-													}
-												>
+										<TableCell>
+											<Button
+												size="sm"
+												variant="ghost"
+												onClick={() =>
+													// Detail routes carry the stable connection name,
+													// matching the server's name-keyed read contract.
+													navigate(
+														integrationRoute(item.platform, item.displayName),
+													)
+												}
+											>
 												管理
 												<ChevronRight aria-hidden="true" />
 											</Button>
@@ -757,7 +880,7 @@ function MetricsForm({
 									/>
 								)}
 								{saving
-									? "正在处理…"
+									? "处理中…"
 									: created
 										? "重新验证并启用"
 										: "创建、验证并启用"}
@@ -834,9 +957,17 @@ function MetricsDetail({
 	}
 	if (loading)
 		return (
-			<p role="status" className="text-sm text-muted-foreground">
-				正在加载指标接入…
-			</p>
+			<div
+				className="flex flex-col gap-4"
+				role="status"
+				aria-label="正在加载指标接入"
+			>
+				<Skeleton className="h-7 w-1/3" />
+				<Skeleton className="h-4 w-1/4" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-3/4" />
+			</div>
 		);
 	if (!item)
 		return (
@@ -930,7 +1061,7 @@ function MetricsDetail({
 							onClick={() => void action("probe")}
 						>
 							<RefreshCw data-icon="inline-start" />
-							{busy === "probe" ? "正在验证…" : "验证连通性"}
+							{busy === "probe" ? "验证中…" : "验证连通性"}
 						</Button>
 						<Button
 							disabled={
@@ -950,7 +1081,7 @@ function MetricsDetail({
 							}
 							action={() => void action("disable")}
 						>
-							{busy === "disable" ? "正在停用…" : "停用接入"}
+							{busy === "disable" ? "停用中…" : "停用接入"}
 						</ConfirmButton>
 						<Button
 							variant="outline"
@@ -967,7 +1098,14 @@ function MetricsDetail({
 					</div>
 				</CardContent>
 			</Card>
-			<IntegrationResources connectionName={item.displayName} navigate={navigate} suspended={suspended} enabled={item.status === "active"} platform={item.platform} resourceId={resourceId} />
+			<IntegrationResources
+				connectionName={item.displayName}
+				navigate={navigate}
+				suspended={suspended}
+				enabled={item.status === "active"}
+				platform={item.platform}
+				resourceId={resourceId}
+			/>
 		</section>
 	);
 }
@@ -1184,7 +1322,14 @@ function MetricsRotate({
 									(authType === "bearer" && !bearerToken)
 								}
 							>
-								{saving ? "正在保存…" : "保存新版本"}
+								{saving && (
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+										aria-hidden="true"
+									/>
+								)}
+								{saving ? "保存中…" : "保存新版本"}
 							</Button>
 						</FieldGroup>
 					</CardContent>
@@ -1312,7 +1457,7 @@ function AlertmanagerForm({
 											data-icon="inline-start"
 										/>
 									)}
-									{saving ? "正在创建…" : "创建并显示一次凭据"}
+									{saving ? "创建中…" : "创建并显示一次凭据"}
 								</Button>
 							</FieldGroup>
 						</CardContent>
@@ -1437,9 +1582,16 @@ function AlertIntakeIssues({
 				</p>
 			</div>
 			{loading ? (
-				<p role="status" className="text-sm text-muted-foreground">
-					正在加载…
-				</p>
+				<div
+					className="flex flex-col gap-2"
+					role="status"
+					aria-label="正在加载接入问题"
+				>
+					<Skeleton className="h-12 w-full" />
+					<Skeleton className="h-12 w-full" />
+					<Skeleton className="h-12 w-full" />
+					<Skeleton className="h-12 w-5/6" />
+				</div>
 			) : (
 				<>
 					{error && (
@@ -1478,7 +1630,18 @@ function AlertIntakeIssues({
 														disabled={suspended || busy === item.id}
 														onClick={() => void acknowledge(item)}
 													>
-														{busy === item.id ? "正在确认…" : "确认"}
+														{busy === item.id ? (
+															<>
+																<LoaderCircle
+																	className="animate-spin"
+																	data-icon="inline-start"
+																	aria-hidden="true"
+																/>
+																确认中…
+															</>
+														) : (
+															"确认"
+														)}
 													</Button>
 												</TableCell>
 											</TableRow>
@@ -1583,9 +1746,17 @@ function AlertmanagerDetail({
 	}
 	if (loading)
 		return (
-			<p role="status" className="text-sm text-muted-foreground">
-				正在加载 Alertmanager 实例…
-			</p>
+			<div
+				className="flex flex-col gap-4"
+				role="status"
+				aria-label="正在加载 Alertmanager 实例"
+			>
+				<Skeleton className="h-7 w-1/3" />
+				<Skeleton className="h-4 w-1/4" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-3/4" />
+			</div>
 		);
 	if (!source)
 		return (
@@ -1673,7 +1844,7 @@ function AlertmanagerDetail({
 								onClick={() => void rotate()}
 							>
 								<RotateCw data-icon="inline-start" />
-								{busy === "rotate" ? "正在轮换…" : "轮换凭据"}
+								{busy === "rotate" ? "轮换中…" : "轮换凭据"}
 							</Button>
 							<ConfirmButton
 								title={`停用 ${source.displayName}？`}
@@ -1760,7 +1931,7 @@ function AlertmanagerDetail({
 														disabled={suspended || Boolean(busy)}
 														action={() => void retire(credential)}
 													>
-														{busy === credential.id ? "正在退休…" : "退休"}
+														{busy === credential.id ? "退休中…" : "退休"}
 													</ConfirmButton>
 												)}
 											</TableCell>
@@ -1825,7 +1996,11 @@ export function useIntegrationsModule(
 				/>
 			) : id ? (
 				<MetricsDetail
-					resourceId={routeParts(props.route)[3] === "resources" ? decodeURIComponent(routeParts(props.route)[4] ?? "") : undefined}
+					resourceId={
+						routeParts(props.route)[3] === "resources"
+							? decodeURIComponent(routeParts(props.route)[4] ?? "")
+							: undefined
+					}
 					id={decodeURIComponent(id)}
 					navigate={props.navigate}
 					suspended={props.suspended}

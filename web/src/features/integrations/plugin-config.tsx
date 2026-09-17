@@ -22,8 +22,8 @@
 import RFB from "@novnc/novnc";
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { messageOf } from "@/app/shared";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
+import { messageOf } from "@/app/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,8 +47,15 @@ import {
 	FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -61,9 +68,9 @@ import {
 	type BrowserIdentity,
 	type BrowserOperation,
 	type BusinessSystemSummary,
-	type JourneyCatalogView,
 	getBrowserIdentity,
 	getJourneyCatalog,
+	type JourneyCatalogView,
 	listBusinessSystems,
 	newClientCommandId,
 } from "@/features/admin/business-systems/api";
@@ -102,10 +109,14 @@ function asStandaloneIdentity(value: BrowserIdentity): StandaloneIdentity {
 	return { ...value, identityKey: key };
 }
 
-async function apiProblem(response: Response, fallback: string): Promise<Error> {
+async function apiProblem(
+	response: Response,
+	fallback: string,
+): Promise<Error> {
 	let message = fallback;
 	try {
-		message = ((await response.json()) as { message?: string }).message ?? message;
+		message =
+			((await response.json()) as { message?: string }).message ?? message;
 	} catch {
 		// Non-JSON problem responses keep the safe fallback.
 	}
@@ -116,7 +127,8 @@ async function listBrowserIdentities(): Promise<StandaloneIdentity[]> {
 	const response = await fetch(`${browserIdentitiesBase}?limit=100`, {
 		credentials: "include",
 	});
-	if (!response.ok) throw await apiProblem(response, "暂时无法读取浏览器身份列表。");
+	if (!response.ok)
+		throw await apiProblem(response, "暂时无法读取浏览器身份列表。");
 	const page = (await response.json()) as { items?: BrowserIdentity[] };
 	return (page.items ?? []).map(asStandaloneIdentity);
 }
@@ -124,7 +136,11 @@ async function listBrowserIdentities(): Promise<StandaloneIdentity[]> {
 async function createBrowserIdentity(input: {
 	name: string;
 	startUrl: string;
-	authenticationProbe: { journeyId: string; journeyVersion: number; params: Record<string, unknown> };
+	authenticationProbe: {
+		journeyId: string;
+		journeyVersion: number;
+		params: Record<string, unknown>;
+	};
 }): Promise<StandaloneIdentity> {
 	const response = await fetch(browserIdentitiesBase, {
 		method: "POST",
@@ -142,7 +158,11 @@ async function updateBrowserIdentity(
 	input: {
 		name: string;
 		startUrl: string;
-		authenticationProbe: { journeyId: string; journeyVersion: number; params: Record<string, unknown> };
+		authenticationProbe: {
+			journeyId: string;
+			journeyVersion: number;
+			params: Record<string, unknown>;
+		};
 		expectedRowVersion: number;
 	},
 ): Promise<StandaloneIdentity> {
@@ -159,29 +179,46 @@ async function updateBrowserIdentity(
 	return asStandaloneIdentity((await response.json()) as BrowserIdentity);
 }
 
-async function getBrowserIdentityByIdentityKey(identityKey: string): Promise<StandaloneIdentity> {
-	const response = await fetch(`${browserIdentitiesBase}/${encodeURIComponent(identityKey)}`, {
-		credentials: "include",
-	});
+async function getBrowserIdentityByIdentityKey(
+	identityKey: string,
+): Promise<StandaloneIdentity> {
+	const response = await fetch(
+		`${browserIdentitiesBase}/${encodeURIComponent(identityKey)}`,
+		{
+			credentials: "include",
+		},
+	);
 	if (!response.ok) throw await apiProblem(response, "无法读取浏览器身份。");
 	return asStandaloneIdentity((await response.json()) as BrowserIdentity);
 }
 
-async function startIdentityOperation(operationsBase: string, expectedRowVersion: number): Promise<BrowserOperation> {
+async function startIdentityOperation(
+	operationsBase: string,
+	expectedRowVersion: number,
+): Promise<BrowserOperation> {
 	const response = await fetch(`${operationsBase}/operations`, {
 		method: "POST",
 		credentials: "include",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
+		body: JSON.stringify({
+			clientCommandId: newClientCommandId(),
+			expectedRowVersion,
+		}),
 	});
 	if (!response.ok) throw await apiProblem(response, "无法开始浏览器登录。");
 	return (await response.json()) as BrowserOperation;
 }
 
-async function fetchIdentityOperation(operationsBase: string, operationId: string): Promise<BrowserOperation> {
-	const response = await fetch(`${operationsBase}/operations/${encodeURIComponent(operationId)}`, {
-		credentials: "include",
-	});
+async function fetchIdentityOperation(
+	operationsBase: string,
+	operationId: string,
+): Promise<BrowserOperation> {
+	const response = await fetch(
+		`${operationsBase}/operations/${encodeURIComponent(operationId)}`,
+		{
+			credentials: "include",
+		},
+	);
 	if (!response.ok) throw await apiProblem(response, "无法读取浏览器操作。");
 	return (await response.json()) as BrowserOperation;
 }
@@ -191,12 +228,18 @@ async function commandIdentityOperation(
 	operation: BrowserOperation,
 	action: "publish" | "cancel",
 ): Promise<BrowserOperation> {
-	const response = await fetch(`${operationsBase}/operations/${encodeURIComponent(operation.id)}/${action}`, {
-		method: "POST",
-		credentials: "include",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedOperationRowVersion: operation.rowVersion }),
-	});
+	const response = await fetch(
+		`${operationsBase}/operations/${encodeURIComponent(operation.id)}/${action}`,
+		{
+			method: "POST",
+			credentials: "include",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				clientCommandId: newClientCommandId(),
+				expectedOperationRowVersion: operation.rowVersion,
+			}),
+		},
+	);
 	if (!response.ok) throw await apiProblem(response, "浏览器操作失败。");
 	return (await response.json()) as BrowserOperation;
 }
@@ -226,8 +269,18 @@ export function PluginConfiguration({
 	);
 }
 
-type CatalogProperty = { type?: string; title?: string; enum?: unknown[]; default?: unknown };
-type CatalogJourney = { purpose?: string; version?: number; summary?: string; params_schema?: { properties?: Record<string, CatalogProperty> } };
+type CatalogProperty = {
+	type?: string;
+	title?: string;
+	enum?: unknown[];
+	default?: unknown;
+};
+type CatalogJourney = {
+	purpose?: string;
+	version?: number;
+	summary?: string;
+	params_schema?: { properties?: Record<string, CatalogProperty> };
+};
 
 /** Uses the versioned server catalog, never free-form journey IDs or versions. */
 function authenticationJourneys(
@@ -254,7 +307,10 @@ function BrowserConfiguration({
 	const [catalog, setCatalog] = useState<JourneyCatalogView>();
 	const [systems, setSystems] = useState<BusinessSystemSummary[]>([]);
 	const [identities, setIdentities] = useState<StandaloneIdentity[]>([]);
-	const [selected, setSelected] = useState<{ key: string; kind: "standalone" | "legacy" }>();
+	const [selected, setSelected] = useState<{
+		key: string;
+		kind: "standalone" | "legacy";
+	}>();
 	const [error, setError] = useState("");
 
 	const load = useCallback(async () => {
@@ -292,9 +348,16 @@ function BrowserConfiguration({
 
 	if (checking)
 		return (
-			<p role="status" className="text-sm text-muted-foreground">
-				正在读取浏览器接入状态…
-			</p>
+			<div
+				className="flex flex-col gap-4"
+				role="status"
+				aria-label="正在读取浏览器接入状态"
+			>
+				<Skeleton className="h-7 w-1/3" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-full" />
+				<Skeleton className="h-24 w-3/4" />
+			</div>
 		);
 	if (error)
 		return (
@@ -318,7 +381,8 @@ function BrowserConfiguration({
 				<EmptyHeader>
 					<EmptyTitle>浏览器接入未启用</EmptyTitle>
 					<EmptyDescription>
-						当前部署未启用受控浏览器插件，因此没有身份或 Journey 入口。启用后这里会出现配置与登录入口。
+						当前部署未启用受控浏览器插件，因此没有身份或 Journey
+						入口。启用后这里会出现配置与登录入口。
 					</EmptyDescription>
 				</EmptyHeader>
 			</Empty>
@@ -331,9 +395,12 @@ function BrowserConfiguration({
 	return (
 		<section className="flex flex-col gap-6">
 			<div>
-				<h1 className="text-2xl font-semibold tracking-tight">配置受控浏览器</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">
+					配置受控浏览器
+				</h1>
 				<p className="mt-1 text-sm text-muted-foreground">
-					管理认证探测 Journey 与已保存的浏览器身份；登录始终通过受控远程浏览器完成。
+					管理认证探测 Journey
+					与已保存的浏览器身份；登录始终通过受控远程浏览器完成。
 				</p>
 			</div>
 			<Card>
@@ -394,11 +461,16 @@ function BrowserConfiguration({
 						</div>
 						<IdentityRevisionForm
 							journeys={journeys}
-							initial={{ name: "", startUrl: "", journeyId: journeys[0]?.[0] ?? "", params: {} }}
+							initial={{
+								name: "",
+								startUrl: "",
+								journeyId: journeys[0]?.[0] ?? "",
+								params: {},
+							}}
 							idPrefix="identity-create"
 							suspended={suspended}
 							submitLabel="创建身份"
-							busyLabel="正在创建…"
+							busyLabel="创建中…"
 							errorFallback="无法创建浏览器身份。"
 							onSubmit={async (input) => {
 								const identity = await createBrowserIdentity(input);
@@ -425,12 +497,16 @@ function BrowserConfiguration({
 								<Button
 									key={identity.id}
 									variant={
-										selected?.kind === "standalone" && selected.key === identity.identityKey
+										selected?.kind === "standalone" &&
+										selected.key === identity.identityKey
 											? "secondary"
 											: "outline"
 									}
 									onClick={() =>
-										setSelected({ key: identity.identityKey, kind: "standalone" })
+										setSelected({
+											key: identity.identityKey,
+											kind: "standalone",
+										})
 									}
 								>
 									{identity.currentRevision.name}
@@ -452,9 +528,7 @@ function BrowserConfiguration({
 											? "secondary"
 											: "outline"
 									}
-									onClick={() =>
-										setSelected({ key: item.key, kind: "legacy" })
-									}
+									onClick={() => setSelected({ key: item.key, kind: "legacy" })}
 								>
 									{item.displayName}
 									<Badge
@@ -528,7 +602,11 @@ function IdentityRevisionForm({
 	onSubmit: (input: {
 		name: string;
 		startUrl: string;
-		authenticationProbe: { journeyId: string; journeyVersion: number; params: Record<string, unknown> };
+		authenticationProbe: {
+			journeyId: string;
+			journeyVersion: number;
+			params: Record<string, unknown>;
+		};
 	}) => Promise<void>;
 }) {
 	const [name, setName] = useState(initial.name);
@@ -555,7 +633,13 @@ function IdentityRevisionForm({
 	}, [journeyId, selectedJourney]);
 
 	async function submit() {
-		if (!selectedJourney || suspended || saving || !name.trim() || !startUrl.trim())
+		if (
+			!selectedJourney ||
+			suspended ||
+			saving ||
+			!name.trim() ||
+			!startUrl.trim()
+		)
 			return;
 		setSaving(true);
 		setError("");
@@ -604,9 +688,7 @@ function IdentityRevisionForm({
 			)}
 			<FieldGroup>
 				<Field>
-					<FieldLabel htmlFor={`${idPrefix}-name`}>
-						名称
-					</FieldLabel>
+					<FieldLabel htmlFor={`${idPrefix}-name`}>名称</FieldLabel>
 					<Input
 						id={`${idPrefix}-name`}
 						value={name}
@@ -615,9 +697,7 @@ function IdentityRevisionForm({
 					/>
 				</Field>
 				<Field>
-					<FieldLabel htmlFor={`${idPrefix}-url`}>
-						起始 URL
-					</FieldLabel>
+					<FieldLabel htmlFor={`${idPrefix}-url`}>起始 URL</FieldLabel>
 					<Input
 						id={`${idPrefix}-url`}
 						type="url"
@@ -653,9 +733,7 @@ function IdentityRevisionForm({
 				{Object.entries(selectedJourney?.params_schema?.properties ?? {}).map(
 					([key, schema]) => (
 						<Field key={key}>
-							<FieldLabel
-								htmlFor={`${idPrefix}-${key}`}
-							>
+							<FieldLabel htmlFor={`${idPrefix}-${key}`}>
 								{schema.title ?? key}
 							</FieldLabel>
 							{schema.enum ? (
@@ -666,10 +744,7 @@ function IdentityRevisionForm({
 									}
 									disabled={suspended || saving}
 								>
-									<SelectTrigger
-										id={`${idPrefix}-${key}`}
-										className="w-full"
-									>
+									<SelectTrigger id={`${idPrefix}-${key}`} className="w-full">
 										<SelectValue />
 									</SelectTrigger>
 									<SelectContent>
@@ -688,10 +763,7 @@ function IdentityRevisionForm({
 									}
 									disabled={suspended || saving}
 								>
-									<SelectTrigger
-										id={`${idPrefix}-${key}`}
-										className="w-full"
-									>
+									<SelectTrigger id={`${idPrefix}-${key}`} className="w-full">
 										<SelectValue />
 									</SelectTrigger>
 									<SelectContent>
@@ -723,7 +795,11 @@ function IdentityRevisionForm({
 				<Button
 					className="self-start"
 					disabled={
-						suspended || saving || !journeyId || !name.trim() || !startUrl.trim()
+						suspended ||
+						saving ||
+						!journeyId ||
+						!name.trim() ||
+						!startUrl.trim()
 					}
 					onClick={() => void submit()}
 				>
@@ -791,7 +867,12 @@ function SavedIdentityPanel({
 	}, [load]);
 
 	useEffect(() => {
-		if (!operationsBase || suspended || !operation || !activeOperationStates.includes(operation.state))
+		if (
+			!operationsBase ||
+			suspended ||
+			!operation ||
+			!activeOperationStates.includes(operation.state)
+		)
 			return;
 		const timer = setTimeout(
 			() =>
@@ -804,7 +885,13 @@ function SavedIdentityPanel({
 	}, [operation, operationsBase, suspended]);
 
 	useEffect(() => {
-		if (!operationsBase || !operation?.canAttach || !viewport.current || client.current) return;
+		if (
+			!operationsBase ||
+			!operation?.canAttach ||
+			!viewport.current ||
+			client.current
+		)
+			return;
 		const scheme = location.protocol === "https:" ? "wss" : "ws";
 		const rfb = new RFB(
 			viewport.current,
@@ -846,7 +933,9 @@ function SavedIdentityPanel({
 		setBusy(true);
 		setError("");
 		try {
-			setOperation(await commandIdentityOperation(operationsBase, operation, action));
+			setOperation(
+				await commandIdentityOperation(operationsBase, operation, action),
+			);
 		} catch (reason) {
 			setError(messageOf(reason, "浏览器操作失败。"));
 		} finally {
@@ -860,13 +949,23 @@ function SavedIdentityPanel({
 				<AlertDescription>{error}</AlertDescription>
 			</Alert>
 		) : (
-			<p role="status" className="text-sm text-muted-foreground">
-				正在读取身份…
-			</p>
+			<div
+				className="flex flex-col gap-3 rounded-md border p-4"
+				role="status"
+				aria-label="正在读取身份"
+			>
+				<Skeleton className="h-6 w-1/3" />
+				<Skeleton className="h-4 w-1/4" />
+				<Skeleton className="h-20 w-full" />
+				<Skeleton className="h-9 w-1/3" />
+			</div>
 		);
 
 	return (
-		<section className="flex flex-col gap-3 rounded-md border p-4" aria-label={`浏览器身份：${identityKey}`}>
+		<section
+			className="flex flex-col gap-3 rounded-md border p-4"
+			aria-label={`浏览器身份：${identityKey}`}
+		>
 			<div className="flex flex-wrap items-center justify-between gap-2">
 				<div>
 					<h3 className="font-semibold">{identity.currentRevision.name}</h3>
@@ -885,11 +984,14 @@ function SavedIdentityPanel({
 					{identity.currentProfile.chromiumRevision}
 				</p>
 			) : (
-				<p className="text-sm text-muted-foreground">尚无已发布的浏览器配置。</p>
+				<p className="text-sm text-muted-foreground">
+					尚无已发布的浏览器配置。
+				</p>
 			)}
 			{identity.lastProbe ? (
 				<p className="text-xs text-muted-foreground">
-					最近探测：{identity.lastProbe.result} · {identity.lastProbe.observedAt}
+					最近探测：{identity.lastProbe.result} ·{" "}
+					{identity.lastProbe.observedAt}
 				</p>
 			) : null}
 			{error && (
@@ -929,7 +1031,8 @@ function SavedIdentityPanel({
 								initial={{
 									name: identity.currentRevision.name,
 									startUrl: identity.currentRevision.startUrl,
-									journeyId: identity.currentRevision.authenticationProbe.journeyId,
+									journeyId:
+										identity.currentRevision.authenticationProbe.journeyId,
 									params: Object.fromEntries(
 										Object.entries(
 											identity.currentRevision.authenticationProbe.params,
@@ -939,7 +1042,7 @@ function SavedIdentityPanel({
 								idPrefix="identity-edit"
 								suspended={suspended}
 								submitLabel="保存新修订"
-								busyLabel="正在保存…"
+								busyLabel="保存中…"
 								errorFallback="无法保存身份修订。"
 								onSubmit={async (input) => {
 									const next = await updateBrowserIdentity(identityKey, {
@@ -961,7 +1064,10 @@ function SavedIdentityPanel({
 							onClick={() => void start()}
 						>
 							{busy && (
-								<LoaderCircle className="animate-spin" data-icon="inline-start" />
+								<LoaderCircle
+									className="animate-spin"
+									data-icon="inline-start"
+								/>
 							)}
 							开始人工登录
 						</Button>
@@ -991,7 +1097,10 @@ function SavedIdentityPanel({
 							)}
 							<div className="flex gap-2">
 								{operation.canPublish ? (
-									<Button disabled={suspended || busy} onClick={() => void command("publish")}>
+									<Button
+										disabled={suspended || busy}
+										onClick={() => void command("publish")}
+									>
 										完成并发布
 									</Button>
 								) : null}
