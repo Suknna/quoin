@@ -35,6 +35,21 @@ export function consolidatedRouteTarget(pathname: string): string | undefined {
 	if (pathname === "/admin/audit") return "/settings/platform/audit";
 	if (pathname === "/admin/runtime") return "/settings/platform/runtime";
 	if (pathname === "/admin/labels") return "/settings/platform/users";
+	if (pathname.startsWith("/inspections/runs/")) {
+		const runId = pathname.slice("/inspections/runs/".length);
+		if (runId) return `/inspections?run=${runId}`;
+	}
+	if (pathname.startsWith("/knowledge/items/")) {
+		const itemId = pathname.slice("/knowledge/items/".length);
+		if (itemId) return `/knowledge?item=${itemId}`;
+	}
+	// Instance details are drawers over the instances list; only rotate/editor
+	// sub-routes stay real pages.
+	const instanceMatch = pathname.match(
+		/^\/settings\/platform\/integrations\/(prometheus|thanos|alertmanager)\/([^/]+)$/,
+	);
+	if (instanceMatch)
+		return `${integrationsBase}/instances?platform=${instanceMatch[1]}&instance=${instanceMatch[2]}`;
 	if (pathname === "/integrations" || pathname.startsWith("/integrations/"))
 		return `${integrationsBase}${pathname.slice("/integrations".length)}`;
 	if (
