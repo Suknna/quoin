@@ -1,10 +1,17 @@
 import { delay, HttpResponse, http, type JsonBodyType } from "msw";
+import type { PluginInspectionScope } from "../../api/generated/types";
 import type {
-	PluginInspectionScope,
-} from "../../api/generated/types";
+	AuthDeliveryConfiguration,
+	AuthFlow,
+} from "../../features/authentication/api";
 import type { InvestigationMessage } from "../../features/investigation/api";
-import type { AuthDeliveryConfiguration, AuthFlow } from "../../features/authentication/api";
-import { DEMO_CREDENTIALS, adminUser, getMockScenario, getMockState, nextId } from "./store";
+import {
+	adminUser,
+	DEMO_CREDENTIALS,
+	getMockScenario,
+	getMockState,
+	nextId,
+} from "./store";
 
 const json = <T extends JsonBodyType>(body: T, init?: ResponseInit) =>
 	HttpResponse.json(body, init);
@@ -67,13 +74,17 @@ async function replayableCommand(
 			return HttpResponse.json(cached.body as JsonBodyType, {
 				status: cached.status,
 			});
-		return problem(409, "相同命令 ID 已被用于不同请求。", "command_id_conflict");
+		return problem(
+			409,
+			"相同命令 ID 已被用于不同请求。",
+			"command_id_conflict",
+		);
 	}
 	const response = await run();
 	if (response.status >= 400) return response;
-	const responseBody = (await response.json().catch(() => null)) as
-		| JsonBodyType
-		| null;
+	const responseBody = (await response
+		.json()
+		.catch(() => null)) as JsonBodyType | null;
 	if (responseBody === null) return response;
 	getMockState().commands.set(key, {
 		commandType,
@@ -109,7 +120,9 @@ function viewFor(viewKey: string) {
 	return getMockState().businessViews.find((view) => view.viewKey === viewKey);
 }
 function planFor(planKey: string) {
-	return getMockState().inspectionPlans.find((item) => item.planKey === planKey);
+	return getMockState().inspectionPlans.find(
+		(item) => item.planKey === planKey,
+	);
 }
 
 /** Auth-flow helpers: the flow lives server-side; the cookie only points at it. */
@@ -117,9 +130,10 @@ const maskTarget = (target: string) =>
 	target.includes("@")
 		? `${target.slice(0, 1)}***${target.slice(target.indexOf("@"))}`
 		: `${target.slice(0, 3)}***`;
-const newFlowExpiry = () =>
-	new Date(Date.now() + 15 * 60_000).toISOString();
-function flowView(flow: NonNullable<ReturnType<typeof getMockState>["authFlow"]>): AuthFlow {
+const newFlowExpiry = () => new Date(Date.now() + 15 * 60_000).toISOString();
+function flowView(
+	flow: NonNullable<ReturnType<typeof getMockState>["authFlow"]>,
+): AuthFlow {
 	const listed = getMockState().users.find((user) => user.id === flow.userId);
 	const user = listed ?? {
 		id: flow.userId,
@@ -128,7 +142,11 @@ function flowView(flow: NonNullable<ReturnType<typeof getMockState>["authFlow"]>
 	};
 	return {
 		type: flow.type,
-		user: { id: user.id, username: user.username, displayName: user.displayName },
+		user: {
+			id: user.id,
+			username: user.username,
+			displayName: user.displayName,
+		},
 		expiresAt: flow.expiresAt,
 		contacts: flow.contacts,
 		...(flow.passwordSet !== undefined && { passwordSet: flow.passwordSet }),
@@ -146,7 +164,8 @@ function activeFlow() {
 	}
 	return flow;
 }
-const flowGone = () => problem(401, "认证流程已失效，请重新登录。", "flow_expired");
+const flowGone = () =>
+	problem(401, "认证流程已失效，请重新登录。", "flow_expired");
 /** Delivery settings are readable by an admin session or an admin-role flow. */
 function deliveryAllowed() {
 	if (getMockState().currentUser?.role === "admin") return true;
@@ -162,7 +181,11 @@ function validViewInput(input: {
 	scope?: { labelConditions?: unknown };
 }) {
 	if (input.viewKey !== undefined && !viewKeyPattern.test(input.viewKey))
-		return problem(422, "视图标识需为小写字母、数字或连字符。", "validation_error");
+		return problem(
+			422,
+			"视图标识需为小写字母、数字或连字符。",
+			"validation_error",
+		);
 	if (!input.displayName || !input.displayName.trim())
 		return problem(422, "显示名称不能为空。", "validation_error");
 	const conditions = input.scope?.labelConditions;
@@ -171,7 +194,9 @@ function validViewInput(input: {
 		(conditions === null ||
 			typeof conditions !== "object" ||
 			Array.isArray(conditions) ||
-			Object.values(conditions).some((value) => typeof value !== "string" || !value))
+			Object.values(conditions).some(
+				(value) => typeof value !== "string" || !value,
+			))
 	)
 		return problem(422, "标签条件必须是非空字符串映射。", "validation_error");
 	return null;
@@ -194,9 +219,13 @@ async function validatedPlanInput(request: Request) {
 		expectedRowVersion?: number;
 	}>(request);
 	if (!input.displayName || !input.displayName.trim())
-		return { error: problem(422, "计划显示名称不能为空。", "validation_error") };
+		return {
+			error: problem(422, "计划显示名称不能为空。", "validation_error"),
+		};
 	if (
-		!getMockState().connections.some((item) => item.name === input.connectionName)
+		!getMockState().connections.some(
+			(item) => item.name === input.connectionName,
+		)
 	)
 		return { error: problem(422, "来源接入不存在。", "validation_error") };
 	if (input.scope.kind === "businessView") {
@@ -206,9 +235,13 @@ async function validatedPlanInput(request: Request) {
 		input.scope.kind === "objects" &&
 		(!Array.isArray(input.scope.objects) || input.scope.objects.length === 0)
 	)
-		return { error: problem(422, "指定对象范围不能为空。", "validation_error") };
+		return {
+			error: problem(422, "指定对象范围不能为空。", "validation_error"),
+		};
 	else if (input.scope.kind !== "integration")
-		return { error: problem(422, "巡检范围类型不受支持。", "validation_error") };
+		return {
+			error: problem(422, "巡检范围类型不受支持。", "validation_error"),
+		};
 	return { input };
 }
 
@@ -219,13 +252,19 @@ function typedScope(scope: {
 	objects?: unknown[];
 }): PluginInspectionScope {
 	if (scope.kind === "businessView")
-		return { kind: "businessView", businessViewKey: String(scope.businessViewKey ?? "") };
+		return {
+			kind: "businessView",
+			businessViewKey: String(scope.businessViewKey ?? ""),
+		};
 	if (scope.kind === "objects")
 		return {
 			kind: "objects",
 			objects: (scope.objects ?? []).map((item) => {
 				const value = item as { objectType?: unknown; identityKey?: unknown };
-				return { objectType: String(value.objectType ?? ""), identityKey: String(value.identityKey ?? "") };
+				return {
+					objectType: String(value.objectType ?? ""),
+					identityKey: String(value.identityKey ?? ""),
+				};
 			}),
 		};
 	return { kind: "integration" };
@@ -297,16 +336,16 @@ export const domainHandlers = [
 		if (!state.adminInitialized) {
 			if (input.username !== "admin" || input.password !== "admin")
 				return problem(401, "演示账号或密码不正确。", "invalid_credentials");
-		state.authFlow = {
-			type: "admin_initialize",
-			userId: adminUser.id,
-			expiresAt: newFlowExpiry(),
-			contacts: [],
-			passwordSet: false,
-			factorVerified: false,
-		};
-		return json(flowView(state.authFlow));
-	}
+			state.authFlow = {
+				type: "admin_initialize",
+				userId: adminUser.id,
+				expiresAt: newFlowExpiry(),
+				contacts: [],
+				passwordSet: false,
+				factorVerified: false,
+			};
+			return json(flowView(state.authFlow));
+		}
 		const matched = state.users.find(
 			(candidate) =>
 				candidate.username === input.username &&
@@ -374,11 +413,7 @@ export const domainHandlers = [
 		const flow = activeFlow();
 		if (!flow) return flowGone();
 		if (flow.type !== "admin_initialize")
-			return problem(
-				403,
-				"只有管理员初始化可以登记联系方式。",
-				"forbidden",
-			);
+			return problem(403, "只有管理员初始化可以登记联系方式。", "forbidden");
 		const input = await body<{ channel: string; target: string }>(request);
 		if (!input.target)
 			return problem(422, "联系方式不能为空。", "validation_error");
@@ -399,7 +434,10 @@ export const domainHandlers = [
 		);
 		if (!contact) return problem(404, "未找到该联系方式。", "not_found");
 		// The demo "delivers" the fixed OTP the PreviewPanel documents.
-		getMockState().authChallenge = { contactId: contact.id, code: DEMO_CREDENTIALS.otp };
+		getMockState().authChallenge = {
+			contactId: contact.id,
+			code: DEMO_CREDENTIALS.otp,
+		};
 		return new HttpResponse(null, { status: 204 });
 	}),
 	http.post("*/api/v1/auth/flow/verify", async ({ request }) => {
@@ -419,7 +457,10 @@ export const domainHandlers = [
 		if (flow.type === "login") {
 			const listed = state.users.find((user) => user.id === flow.userId);
 			if (!listed) return problem(401, "演示账号不可用。", "unauthorized");
-			state.currentUser = { ...listed, initialized: listed.initialized === true };
+			state.currentUser = {
+				...listed,
+				initialized: listed.initialized === true,
+			};
 			// The session replaces the flow: the second factor consumed it.
 			state.authFlow = null;
 			state.authChallenge = null;
@@ -439,7 +480,8 @@ export const domainHandlers = [
 		// Same gate as the backend: password plus a per-flow verified factor.
 		if (!flow.passwordSet || !flow.factorVerified)
 			return problem(422, "初始化步骤尚未完成。", "initialization_required");
-		if (flow.pendingPassword) state.passwords[flow.userId] = flow.pendingPassword;
+		if (flow.pendingPassword)
+			state.passwords[flow.userId] = flow.pendingPassword;
 		if (flow.type === "admin_initialize") state.adminInitialized = true;
 		state.authFlow = null;
 		state.authChallenge = null;
@@ -517,6 +559,13 @@ export const domainHandlers = [
 	http.get("*/api/v1/auth/sessions", () => {
 		const denied = required();
 		return denied ?? page(getMockState().sessions);
+	}),
+	http.get("*/api/v1/auth/contacts", () => {
+		const denied = required();
+		if (denied) return denied;
+		const user = getMockState().currentUser;
+		if (!user) return problem(401, "请重新登录。");
+		return json({ items: getMockState().contacts[user.id] ?? [] });
 	}),
 	http.post("*/api/v1/auth/sessions/:id/revoke", ({ params }) => {
 		const denied = required();
@@ -1115,17 +1164,6 @@ export const domainHandlers = [
 		const denied = required();
 		return denied ?? page(getMockState().labels);
 	}),
-	http.get("*/api/v1/journey-catalog", () => {
-		const denied = required();
-		return (
-			denied ??
-			json({
-				version: "1",
-				digest: "sha256:journeys",
-				catalogJson: { journeys: [] },
-			})
-		);
-	}),
 
 	// Business views are optional admin-scoped scope-and-description objects
 	// (ADR 0004). The mock keeps the real command shapes: clientCommandId on
@@ -1142,7 +1180,10 @@ export const domainHandlers = [
 				viewKey: string;
 				displayName: string;
 				description: string;
-				scope: { connectionName?: string; labelConditions: Record<string, string> };
+				scope: {
+					connectionName?: string;
+					labelConditions: Record<string, string>;
+				};
 			}>(request);
 			const invalid = validViewInput(input);
 			if (invalid) return invalid;
@@ -1153,7 +1194,10 @@ export const domainHandlers = [
 				viewKey: input.viewKey,
 				displayName: input.displayName,
 				description: input.description ?? "",
-				scope: { ...input.scope, labelConditions: { ...(input.scope?.labelConditions ?? {}) } },
+				scope: {
+					...input.scope,
+					labelConditions: { ...(input.scope?.labelConditions ?? {}) },
+				},
 				rowVersion: 1,
 				createdAt: now,
 				updatedAt: now,
@@ -1177,7 +1221,10 @@ export const domainHandlers = [
 			const input = await body<{
 				displayName: string;
 				description: string;
-				scope: { connectionName?: string; labelConditions: Record<string, string> };
+				scope: {
+					connectionName?: string;
+					labelConditions: Record<string, string>;
+				};
 				expectedRowVersion: number;
 			}>(request);
 			const invalid = validViewInput(input);
@@ -1186,7 +1233,10 @@ export const domainHandlers = [
 			if (stale) return stale;
 			view.displayName = input.displayName;
 			view.description = input.description ?? "";
-			view.scope = { ...input.scope, labelConditions: { ...(input.scope?.labelConditions ?? {}) } };
+			view.scope = {
+				...input.scope,
+				labelConditions: { ...(input.scope?.labelConditions ?? {}) },
+			};
 			view.updatedAt = "2026-09-09T09:30:00.000Z";
 			view.rowVersion += 1;
 			return json(view);
@@ -1945,68 +1995,62 @@ export const domainHandlers = [
 		batch.rowVersion += 1;
 		return json(batch);
 	}),
-	http.post(
-		"*/api/v1/inspections/runs/:runId/cancel",
-		({ params, request }) =>
-			replayableCommand("cancel_inspection_run", request, async () => {
-				const denied = adminRequired();
-				if (denied) return denied;
-				const run = getMockState().inspectionRuns.find(
-					(item) => item.id === params.runId,
-				);
-				if (!run) return problem(404, "未找到巡检运行。");
-				if (!["Queued", "Running"].includes(run.state))
-					return problem(409, "演示巡检运行已结束。", "invalid_state");
-				const input = await body<{ expectedRowVersion: number }>(request);
-				const stale = conflict(input.expectedRowVersion, run.rowVersion);
-				if (stale) return stale;
-				run.state = "Cancelled";
-				run.rowVersion += 1;
-				return json(run);
-			}),
+	http.post("*/api/v1/inspections/runs/:runId/cancel", ({ params, request }) =>
+		replayableCommand("cancel_inspection_run", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const run = getMockState().inspectionRuns.find(
+				(item) => item.id === params.runId,
+			);
+			if (!run) return problem(404, "未找到巡检运行。");
+			if (!["Queued", "Running"].includes(run.state))
+				return problem(409, "演示巡检运行已结束。", "invalid_state");
+			const input = await body<{ expectedRowVersion: number }>(request);
+			const stale = conflict(input.expectedRowVersion, run.rowVersion);
+			if (stale) return stale;
+			run.state = "Cancelled";
+			run.rowVersion += 1;
+			return json(run);
+		}),
 	),
-	http.post(
-		"*/api/v1/inspections/runs/:runId/analyze",
-		({ params, request }) =>
-			replayableCommand("analyze_inspection_run", request, async () => {
-				const denied = adminRequired();
-				if (denied) return denied;
-				const run = getMockState().inspectionRuns.find(
-					(item) => item.id === params.runId,
-				);
-				if (!run) return problem(404, "未找到巡检运行。");
-				const attempt = {
-					id: nextId("inspection-attempt"),
-					type: "inspection_analysis" as const,
-					state: "Succeeded" as const,
-					rowVersion: 1,
-					createdAt: "2026-09-09T09:30:00.000Z",
-				};
-				run.analysisActive = false;
-				run.latestAnalysis = { id: attempt.id, state: attempt.state };
-				run.rowVersion += 1;
-				return json(attempt);
-			}),
+	http.post("*/api/v1/inspections/runs/:runId/analyze", ({ params, request }) =>
+		replayableCommand("analyze_inspection_run", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const run = getMockState().inspectionRuns.find(
+				(item) => item.id === params.runId,
+			);
+			if (!run) return problem(404, "未找到巡检运行。");
+			const attempt = {
+				id: nextId("inspection-attempt"),
+				type: "inspection_analysis" as const,
+				state: "Succeeded" as const,
+				rowVersion: 1,
+				createdAt: "2026-09-09T09:30:00.000Z",
+			};
+			run.analysisActive = false;
+			run.latestAnalysis = { id: attempt.id, state: attempt.state };
+			run.rowVersion += 1;
+			return json(attempt);
+		}),
 	),
-	http.post(
-		"*/api/v1/inspections/runs/:runId/rerun",
-		({ params, request }) =>
-			replayableCommand("rerun_inspection_run", request, async () => {
-				const denied = adminRequired();
-				if (denied) return denied;
-				const prior = getMockState().inspectionRuns.find(
-					(item) => item.id === params.runId,
-				);
-				if (!prior) return problem(404, "未找到巡检运行。");
-				const run = {
-					...prior,
-					id: nextId("inspection-run"),
-					rowVersion: 1,
-					createdAt: "2026-09-09T09:30:00.000Z",
-				};
-				getMockState().inspectionRuns.unshift(run);
-				return json(run, { status: 201 });
-			}),
+	http.post("*/api/v1/inspections/runs/:runId/rerun", ({ params, request }) =>
+		replayableCommand("rerun_inspection_run", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const prior = getMockState().inspectionRuns.find(
+				(item) => item.id === params.runId,
+			);
+			if (!prior) return problem(404, "未找到巡检运行。");
+			const run = {
+				...prior,
+				id: nextId("inspection-run"),
+				rowVersion: 1,
+				createdAt: "2026-09-09T09:30:00.000Z",
+			};
+			getMockState().inspectionRuns.unshift(run);
+			return json(run, { status: 201 });
+		}),
 	),
 	// Retired with the old declaration publish fence; configuration versions
 	// stay readable as immutable history only.

@@ -3,23 +3,129 @@ import type {
 	PluginInspectionPlan,
 	UserSummary,
 } from "../../api/generated/types";
-import type {
-	BusinessSystemDetail,
-	ConfigVersionDetail,
-	LabelContractSummary,
-	ResourceRefreshRunDetail,
-	VerificationRunDetail,
-} from "../../features/admin/business-systems/api";
+
+// Business-system payload shapes used by the mock domain state. The former
+// features/admin/business-systems API client was retired with the browser
+// plugin surface; these local DTOs keep the mock state typed without it.
+interface CheckView {
+	checkKey: string;
+	displayName: string;
+	analysisQuestion: string;
+	kind: "promql";
+	queryMode?: "instant" | "range";
+	expression?: string;
+	rangeSeconds?: number;
+	stepSeconds?: number;
+}
+interface PlanView {
+	planKey: string;
+	displayName: string;
+	cron?: string;
+	checks: CheckView[];
+}
+interface DiscoveryView {
+	discoveryKey: string;
+	displayName: string;
+	selector: string;
+	identityLabels: string[];
+}
+interface BusinessSystemDetail {
+	key: string;
+	displayName: string;
+	enabled: boolean;
+	rowVersion: number;
+	currentConfigVersionId?: string;
+	timezone?: string | null;
+	resourceRefreshIntervalSeconds?: number | null;
+	configVersionCount: number;
+	discoveries: DiscoveryView[];
+	plans: PlanView[];
+}
+type ResourceRefreshState =
+	| "Queued"
+	| "Running"
+	| "Completed"
+	| "CompletedWithWarnings"
+	| "Failed"
+	| "Cancelled"
+	| "Interrupted";
+interface ResourceRefreshRunDetail {
+	id: string;
+	businessSystemId: string;
+	configVersionId: string;
+	labelContractVersionId: string;
+	triggerKind: "manual" | "schedule";
+	state: ResourceRefreshState;
+	rowVersion: number;
+	evidenceAt?: string;
+	resultDetail?: string;
+	createdAt: string;
+}
+interface ConfigVersionDetail {
+	id: string;
+	versionSeq: number;
+	state: "draft" | "published" | "superseded";
+	createdAt: string;
+	publishedAt?: string;
+	digest: string;
+	parserVersion: string;
+	schemaVersion: string;
+	systemKey: string;
+	displayName: string;
+	enabled: boolean;
+	labelContractVersionId: string;
+	yamlBody: string;
+	timezone: string;
+	resourceRefreshIntervalSeconds?: number;
+	discoveries: DiscoveryView[];
+	plans: PlanView[];
+}
+interface LabelContractSummary {
+	id: string;
+	version: number;
+	state: "draft" | "active" | "retired";
+	rowVersion: number;
+	parserVersion: string;
+	schemaVersion: string;
+	createdAt: string;
+	activatedAt?: string;
+}
+interface VerificationCheckResultView {
+	planKey: string;
+	checkKey: string;
+	status: "ok" | "error" | "gap";
+	evidenceId?: string;
+	gapReason?: string;
+}
+interface VerificationRunDetail {
+	id: string;
+	purpose: "prepublish" | "deployment_acceptance";
+	configVersionId: string;
+	labelContractVersionId: string;
+	state:
+		| "Queued"
+		| "Running"
+		| "Passed"
+		| "Failed"
+		| "Cancelled"
+		| "Interrupted";
+	rowVersion: number;
+	evidenceAt?: string;
+	createdAt: string;
+	checkResults: VerificationCheckResultView[];
+	resultDetail?: string;
+}
+
 import type {
 	ConnectionDetailView,
 	ProbeAttemptView,
 	ProbeResultView,
-} from "../../features/admin/connections/api";
+} from "../../features/settings/platform/connections/api";
 import type {
 	AdminUser,
 	AuditEventInfo,
 	SessionInfo,
-} from "../../features/admin/users/api";
+} from "../../features/settings/platform/users/api";
 import type {
 	AlertOccurrenceSummary,
 	AlertSourceDetail,
@@ -133,6 +239,16 @@ export interface MockState {
 		source: string;
 	};
 	users: AdminUser[];
+	/** Masked receive targets per user; the mock never holds plaintext targets. */
+	contacts: Record<
+		string,
+		{
+			id: string;
+			channel: "email" | "sms";
+			maskedTarget: string;
+			verified: boolean;
+		}[]
+	>;
 	sessions: SessionInfo[];
 	auditEvents: AuditEventInfo[];
 	passwords: Record<string, string>;
@@ -372,7 +488,6 @@ function baseState(scenario: MockScenario): MockState {
 		currentConfigVersionId: "config-checkout-1",
 		timezone: "Asia/Shanghai",
 		resourceRefreshIntervalSeconds: 300,
-		browserIdentityState: "Ready",
 		configVersionCount: 1,
 		discoveries: [
 			{
@@ -415,8 +530,6 @@ function baseState(scenario: MockScenario): MockState {
 		displayName: checkout.displayName,
 		enabled: true,
 		labelContractVersionId: "label-1",
-		journeyCatalogDigest: "sha256:journeys",
-		journeyCatalogVersion: "1",
 		yamlBody:
 			'apiVersion: quoin/v1\nkind: BusinessSystem\nmetadata:\n  name: checkout\n  displayName: 结算系统\n  description: 结算工作负载\nspec:\n  metrics:\n    connectionRef: thanos-primary\n    matchLabels: {service: checkout}\n    resources:\n      - name: pods\n        displayName: 结算工作负载\n        matchLabels: {app: checkout}\n        discoveryMetric: up\n        identityLabels: [namespace, pod]\n        allowedMetrics: [up, checkout_latency]\n  alerts:\n    sourceRefs: [demo-alertmanager]\n    matchLabels: {service: checkout}\n  inspections:\n    - name: checkout-health\n      displayName: 结算健康检查\n      schedule: "*/5 * * * *"\n      timezone: Asia/Shanghai\n      checks:\n        - name: latency\n          resourceRef: pods\n          expression: checkout_latency\n          question: 延迟是否异常？\n  discovery:\n    refresh: 5m\n',
 		timezone: "Asia/Shanghai",
@@ -602,6 +715,24 @@ function baseState(scenario: MockScenario): MockState {
 		authChallenge: null,
 		authDelivery: { configuration: {}, rowVersion: 0, source: "" },
 		users: [adminUser, operatorUser].map((user) => ({ ...user })),
+		contacts: {
+			[adminUser.id]: [
+				{
+					id: "contact-admin-email",
+					channel: "email",
+					maskedTarget: "a***@example.test",
+					verified: true,
+				},
+			],
+			[operatorUser.id]: [
+				{
+					id: "contact-operator-email",
+					channel: "email",
+					maskedTarget: "o***@example.test",
+					verified: true,
+				},
+			],
+		},
 		passwords: {
 			[adminUser.id]: DEMO_CREDENTIALS.admin.password,
 			[operatorUser.id]: DEMO_CREDENTIALS.operator.password,
