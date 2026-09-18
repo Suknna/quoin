@@ -14,8 +14,10 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Toaster } from "@/components/ui/sonner";
 import { AuthScreen } from "@/features/authentication/AuthScreen";
 import { EvidenceReader } from "@/features/evidence/ui";
+import { parseRoute } from "@/lib/parse-route";
 import type { WorkspaceModuleProps } from "./module-contract";
 import {
 	consolidatedRouteTarget,
@@ -25,7 +27,6 @@ import {
 } from "./router";
 import { type RouteHostComponents, RouteHosts } from "./routes/RouteHosts";
 import { ServiceUnavailable } from "./ServiceUnavailable";
-import { parseRoute } from "@/lib/parse-route";
 import { messageOf } from "./shared";
 import "@/styles/index.css";
 
@@ -137,8 +138,8 @@ function Workspace({
 	// Evidence can be linked from retired URLs; consolidating here keeps the
 	// module behind the overlay mounted on its live route instead of a dead host.
 	const consolidatedSource = requestedSource
-			? (consolidatedRouteTarget(parseRoute(requestedSource).pathname) ??
-				requestedSource)
+		? (consolidatedRouteTarget(parseRoute(requestedSource).pathname) ??
+			requestedSource)
 		: undefined;
 	const sourceRoute = evidenceSource ?? consolidatedSource ?? "/investigations";
 	const activeRoute = evidenceId ? sourceRoute : route.route;
@@ -313,6 +314,7 @@ export function App() {
 	}, [screen, user?.id]);
 	return (
 		<>
+			<Toaster />
 			{screen === "loading" &&
 				(bootstrapError ? (
 					<ServiceUnavailable
