@@ -58,7 +58,7 @@ export function IntegrationResources({
 	platform?: "prometheus" | "thanos";
 	resourceId?: string;
 }) {
-	const detailBase = `/integrations/${platform}/${encodeURIComponent(connectionName)}`;
+	const detailBase = `/settings/platform/integrations/${platform}/${encodeURIComponent(connectionName)}`;
 	const base = `/api/v1/integrations/${encodeURIComponent(connectionName)}`;
 	const [items, setItems] = useState<Resource[]>([]);
 	const [cursor, setCursor] = useState<string>();

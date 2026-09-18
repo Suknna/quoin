@@ -65,7 +65,7 @@ test("Admin creates Alertmanager, Stele persists its alert, and Operator is rest
 	);
 
 	const sourceKey = `e2e-alertmanager-${Date.now()}`;
-	await adminPage.goto("/integrations/alertmanager");
+	await adminPage.goto("/settings/platform/integrations/alertmanager");
 	await expect(
 		adminPage.getByRole("heading", { name: "配置 Alertmanager" }),
 	).toBeVisible();

@@ -87,13 +87,6 @@ const operationItems: readonly OperationItem[] = [
 		icon: LayoutDashboard,
 		adminOnly: true,
 	},
-	{
-		title: "接入管理",
-		route: "/integrations",
-		matches: (route) => route.startsWith("/integrations"),
-		icon: Settings,
-		adminOnly: true,
-	},
 ];
 
 function isOperationsRoute(route: string) {
@@ -306,25 +299,20 @@ export function WorkspaceShell({
 											onClick={() => navigate("/investigations")}
 										/>
 									</SidebarMenuItem>
+									<SidebarMenuItem>
+										<RailButton
+											label="设置"
+											active={route.startsWith("/settings")}
+											icon={Settings}
+											onClick={() => navigate("/settings/profile")}
+										/>
+									</SidebarMenuItem>
 								</SidebarMenu>
 							</SidebarGroupContent>
 						</SidebarGroup>
 					</SidebarContent>
 					<SidebarFooter className="px-2 py-3">
 						<SidebarMenu>
-							{user.role === "admin" && (
-								<SidebarMenuItem>
-									<SidebarMenuButton
-										tooltip="管理"
-										isActive={route.startsWith("/admin")}
-										onClick={() => navigate("/admin")}
-										className="size-9 p-0"
-									>
-										<Settings />
-										<span className="sr-only">管理</span>
-									</SidebarMenuButton>
-								</SidebarMenuItem>
-							)}
 							<SidebarMenuItem>
 								<DropdownMenu>
 									<DropdownMenuTrigger asChild>
@@ -357,7 +345,7 @@ export function WorkspaceShell({
 										</DropdownMenuLabel>
 										<DropdownMenuSeparator />
 										<DropdownMenuItem
-											onClick={() => navigate("/account/profile")}
+											onClick={() => navigate("/settings/profile")}
 										>
 											<Settings />
 											设置

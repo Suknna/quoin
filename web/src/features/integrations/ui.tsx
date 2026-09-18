@@ -24,6 +24,9 @@ import type {
 	WorkspaceModuleView,
 } from "@/app/module-contract";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
+/** Integrations live under the settings platform group (平台接入). */
+const INTEGRATIONS_BASE = "/settings/platform/integrations";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -114,16 +117,22 @@ const formatEventTime = (value?: string | null) =>
 	value ? new Date(value).toLocaleString() : "等待首条有效事件";
 const formatTime = (value?: string | null) =>
 	value ? new Date(value).toLocaleString() : "—";
+
 function routeParts(route: string) {
-	return new URL(route, "https://workbench.invalid").pathname
-		.split("/")
-		.filter(Boolean);
+	const pathname = new URL(route, "https://workbench.invalid").pathname;
+	const sub =
+		pathname === INTEGRATIONS_BASE
+			? ""
+			: pathname.startsWith(`${INTEGRATIONS_BASE}/`)
+				? pathname.slice(INTEGRATIONS_BASE.length + 1)
+				: pathname.replace(/^\//, "");
+	return sub.split("/").filter(Boolean);
 }
 function integrationRoute(
 	platform?: IntegrationPlatform | "instances",
 	instanceId?: string,
 ) {
-	return ["/integrations", platform, instanceId].filter(Boolean).join("/");
+	return [INTEGRATIONS_BASE, platform, instanceId].filter(Boolean).join("/");
 }
 
 function CatalogCard({
@@ -196,7 +205,7 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 				</div>
 				<Button
 					variant="outline"
-					onClick={() => navigate("/integrations/instances")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
 				>
 					查看已接入实例
 					<ChevronRight data-icon="inline-end" />
@@ -330,7 +339,7 @@ function Instances({
 					<Button
 						variant="ghost"
 						className="-ml-3"
-						onClick={() => navigate("/integrations")}
+						onClick={() => navigate(INTEGRATIONS_BASE)}
 					>
 						返回平台目录
 					</Button>
@@ -689,7 +698,7 @@ function MetricsForm({
 				<Button
 					variant="ghost"
 					className="-ml-3"
-					onClick={() => navigate("/integrations")}
+					onClick={() => navigate(INTEGRATIONS_BASE)}
 				>
 					返回接入管理
 				</Button>
@@ -980,7 +989,7 @@ function MetricsDetail({
 				</Alert>
 				<Button
 					className="self-start"
-					onClick={() => navigate("/integrations/instances")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
 				>
 					返回实例列表
 				</Button>
@@ -999,7 +1008,7 @@ function MetricsDetail({
 				<Button
 					variant="ghost"
 					className="-ml-3"
-					onClick={() => navigate("/integrations/instances")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
 				>
 					返回已接入实例
 				</Button>
@@ -1390,7 +1399,7 @@ function AlertmanagerForm({
 				<Button
 					variant="ghost"
 					className="-ml-3"
-					onClick={() => navigate("/integrations")}
+					onClick={() => navigate(INTEGRATIONS_BASE)}
 				>
 					返回接入管理
 				</Button>
@@ -1486,7 +1495,7 @@ function AlertmanagerForm({
 				onClose={() => {
 					setSecret("");
 					setReceiverUrl("");
-					navigate("/integrations/instances");
+					navigate(`${INTEGRATIONS_BASE}/instances`);
 				}}
 			/>
 		</section>
@@ -1572,7 +1581,7 @@ function AlertIntakeIssues({
 				<Button
 					variant="ghost"
 					className="-ml-3"
-					onClick={() => navigate("/integrations/alertmanager")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/alertmanager`)}
 				>
 					返回 Alertmanager
 				</Button>
@@ -1769,7 +1778,7 @@ function AlertmanagerDetail({
 				</Alert>
 				<Button
 					className="self-start"
-					onClick={() => navigate("/integrations/instances")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
 				>
 					返回实例列表
 				</Button>
@@ -1781,7 +1790,7 @@ function AlertmanagerDetail({
 				<Button
 					variant="ghost"
 					className="-ml-3"
-					onClick={() => navigate("/integrations/instances")}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
 				>
 					返回已接入实例
 				</Button>
@@ -1971,7 +1980,7 @@ export function useIntegrationsModule(
 				</Alert>
 			),
 		};
-	const [, platform, id] = routeParts(props.route);
+	const [platform, id] = routeParts(props.route);
 	const content =
 		platform === "alertmanager" && id === "issues" ? (
 			<AlertIntakeIssues
@@ -1987,7 +1996,7 @@ export function useIntegrationsModule(
 		) : platform === "alertmanager" ? (
 			<AlertmanagerForm navigate={props.navigate} suspended={props.suspended} />
 		) : platform === "prometheus" || platform === "thanos" ? (
-			id && routeParts(props.route)[3] === "rotate" ? (
+			id && routeParts(props.route)[2] === "rotate" ? (
 				<MetricsRotate
 					platform={platform}
 					id={decodeURIComponent(id)}
@@ -1997,8 +2006,8 @@ export function useIntegrationsModule(
 			) : id ? (
 				<MetricsDetail
 					resourceId={
-						routeParts(props.route)[3] === "resources"
-							? decodeURIComponent(routeParts(props.route)[4] ?? "")
+						routeParts(props.route)[2] === "resources"
+							? decodeURIComponent(routeParts(props.route)[3] ?? "")
 							: undefined
 					}
 					id={decodeURIComponent(id)}
@@ -2028,5 +2037,16 @@ export function useIntegrationsModule(
 		) : (
 			<IntegrationCatalog navigate={props.navigate} />
 		);
-	return { title: "接入管理", list: null, content };
+	return {
+		title: "接入管理",
+		list: (
+			<SettingsNavigation
+				groups={settingsNavGroups}
+				route={props.route}
+				user={props.user}
+				navigate={props.navigate}
+			/>
+		),
+		content,
+	};
 }

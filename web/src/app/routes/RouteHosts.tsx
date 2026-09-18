@@ -91,11 +91,10 @@ export function RouteHosts({
 	// Module selection is pathname-only; the query belongs to the selected module's view state.
 	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
 	const operatorManagementRoute =
-		pathname.startsWith("/integrations") ||
 		pathname.startsWith("/business-views") ||
 		pathname.startsWith("/inspections") ||
-		pathname.startsWith("/admin") ||
-		pathname.startsWith("/audit");
+		pathname.startsWith("/settings/platform") ||
+		pathname.startsWith("/admin");
 	if (props.user.role === "operator" && operatorManagementRoute)
 		return <ForbiddenRoute props={props} onLogout={onLogout} />;
 	const Host =
@@ -107,21 +106,16 @@ export function RouteHosts({
 				? components.investigations
 				: pathname.startsWith("/inspections")
 					? components.inspections
-					: pathname === "/integrations" ||
-							pathname.startsWith("/integrations/")
+					: pathname === "/settings/platform/integrations" ||
+							pathname.startsWith("/settings/platform/integrations/")
 						? components.integrations
-						: pathname === "/admin/model_provider" ||
-								pathname.startsWith("/admin/model_provider/")
-							? components.modelProvider
-							: pathname.startsWith("/business-views")
-								? components.systems
-								: pathname.startsWith("/knowledge")
-									? components.knowledge
-									: pathname.startsWith("/account")
-										? components.account
-										: pathname === "/admin" || pathname.startsWith("/admin/")
-											? components.administration
-											: undefined;
+						: pathname.startsWith("/business-views")
+							? components.systems
+							: pathname.startsWith("/knowledge")
+								? components.knowledge
+								: pathname === "/settings" || pathname.startsWith("/settings/")
+									? components.settings
+									: undefined;
 	return Host ? (
 		<Host props={props} onLogout={onLogout} />
 	) : (

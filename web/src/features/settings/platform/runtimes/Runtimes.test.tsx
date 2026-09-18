@@ -7,7 +7,7 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isRuntimeSlotView } from "@/features/admin/runtimes/api";
+import { isRuntimeSlotView } from "@/features/settings/platform/runtimes/api";
 import { Runtimes } from "./Runtimes";
 
 const runtime = {

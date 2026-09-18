@@ -3,7 +3,7 @@ import {
 	disableConnection,
 	enableConnection,
 	rotateConnection,
-} from "@/features/admin/connections/api";
+} from "@/features/settings/platform/connections/api";
 import {
 	type AlertSourceCredentialMetadata,
 	createAlertSource,

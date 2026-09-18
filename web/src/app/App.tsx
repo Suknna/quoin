@@ -35,10 +35,8 @@ const routeHostComponents = {
 	inspections: lazy(() => import("./routes/InspectionsRoute")),
 	systems: lazy(() => import("./routes/SystemsRoute")),
 	knowledge: lazy(() => import("./routes/KnowledgeRoute")),
-	administration: lazy(() => import("./routes/AdministrationRoute")),
-	modelProvider: lazy(() => import("./routes/ModelProviderRoute")),
 	integrations: lazy(() => import("./routes/IntegrationsRoute")),
-	account: lazy(() => import("./routes/AccountRoute")),
+	settings: lazy(() => import("./routes/SettingsRoute")),
 } satisfies RouteHostComponents;
 
 type AuthScreenStage = "loading" | "auth" | "workbench";
@@ -126,7 +124,14 @@ function Workspace({
 
 	const evidenceId = route.pathname.match(/^\/evidence\/([^/]+)$/)?.[1];
 	const requestedSource = new URLSearchParams(route.search).get("from");
-	const sourceRoute = evidenceSource ?? requestedSource ?? "/investigations";
+	// Evidence can be linked from retired URLs; consolidating here keeps the
+	// module behind the overlay mounted on its live route instead of a dead host.
+	const consolidatedSource = requestedSource
+		? (consolidatedRouteTarget(
+				new URL(requestedSource, "https://workbench.invalid").pathname,
+			) ?? requestedSource)
+		: undefined;
+	const sourceRoute = evidenceSource ?? consolidatedSource ?? "/investigations";
 	const activeRoute = evidenceId ? sourceRoute : route.route;
 	const props: WorkspaceModuleProps = {
 		user,
@@ -147,7 +152,8 @@ function Workspace({
 		},
 	};
 	function closeEvidence() {
-		const destination = evidenceSource ?? requestedSource ?? "/investigations";
+		const destination =
+			evidenceSource ?? consolidatedSource ?? "/investigations";
 		setEvidenceSource(undefined);
 		navigate(destination);
 		requestAnimationFrame(() => {

@@ -114,7 +114,7 @@ describe("Users", () => {
 		// The backend rejects admin password reset (account self-service or CLI
 		// only); the row must not offer an inevitably rejected action.
 		expect(within(adminRowElement).queryByRole("button", { name: "重置密码" })).not.toBeInTheDocument();
-		expect(within(adminRowElement).getByText(/我的账户 → 收码渠道/)).toBeInTheDocument();
+		expect(within(adminRowElement).getByText(/设置 → 个人资料/)).toBeInTheDocument();
 
 		const operatorRowElement = screen.getByText("Operator").closest("tr") as HTMLTableRowElement;
 		expect(within(operatorRowElement).getByText("操作员")).toBeInTheDocument();

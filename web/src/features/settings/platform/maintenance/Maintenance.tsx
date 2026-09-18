@@ -7,8 +7,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/u
 import { FieldDescription } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cancelDrainTarget, drainTargetOf, exitMaintenance, fetchMaintenanceState, prepareUpgrade, type MaintenanceStateView } from "@/features/admin/maintenance/api";
-import { ConfirmAction } from "./controls";
+import { cancelDrainTarget, drainTargetOf, exitMaintenance, fetchMaintenanceState, prepareUpgrade, type MaintenanceStateView } from "@/features/settings/platform/maintenance/api";
+import { ConfirmAction } from "../controls";
 
 /** Maintenance actions use the server reason allowlist; no force or skip escape hatch exists. */
 export function Maintenance({ refreshRevision = 0, onChanged }: { refreshRevision?: number; onChanged?: () => Promise<void> }) {

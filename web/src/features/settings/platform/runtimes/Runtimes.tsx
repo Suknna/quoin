@@ -26,8 +26,8 @@ import {
 	type RuntimeSlotView,
 	retireRuntimeCredential,
 	revealRegistrationToken,
-} from "@/features/admin/runtimes/api";
-import { ConfirmAction } from "./controls";
+} from "@/features/settings/platform/runtimes/api";
+import { ConfirmAction } from "../controls";
 
 /** In-memory secrets are epoch-fenced and removed when this surface closes, suspends, or replaces one. */
 export function Runtimes({

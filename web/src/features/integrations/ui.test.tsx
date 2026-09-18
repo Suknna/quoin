@@ -24,13 +24,13 @@ const props: WorkspaceModuleProps = {
 		lastLoginAt: null,
 		rowVersion: 1,
 	},
-	route: "/integrations",
+	route: "/settings/platform/integrations",
 	navigate: vi.fn(),
 	suspended: false,
 	openEvidence: vi.fn(),
 };
 
-function IntegrationView({ route = "/integrations" }: { route?: string }) {
+function IntegrationView({ route = "/settings/platform/integrations" }: { route?: string }) {
 	const view = useIntegrationsModule({ ...props, route });
 	return <>{view.content}</>;
 }
@@ -149,7 +149,7 @@ describe("integration workbench", () => {
 				],
 			}),
 		);
-		render(<IntegrationView route="/integrations/alertmanager/issues" />);
+		render(<IntegrationView route="/settings/platform/integrations/alertmanager/issues" />);
 		expect(
 			await screen.findByRole("heading", { name: "告警接入问题" }),
 		).toBeInTheDocument();
@@ -213,7 +213,7 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/integrations/prometheus" />);
+		render(<IntegrationView route="/settings/platform/integrations/prometheus" />);
 		fireEvent.change(screen.getByLabelText("实例名称"), {
 			target: { value: "prom-main" },
 		});
@@ -229,7 +229,7 @@ describe("integration workbench", () => {
 		fireEvent.click(screen.getByRole("button", { name: "创建、验证并启用" }));
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/integrations/prometheus/prom-main",
+				"/settings/platform/integrations/prometheus/prom-main",
 			),
 		);
 		const payload = JSON.parse(
@@ -258,10 +258,10 @@ describe("integration workbench", () => {
 
 	it("ignores the retired business declaration return route", () => {
 		render(
-			<IntegrationView route="/integrations/prometheus?returnTo=/business-systems/new?draft=local" />,
+			<IntegrationView route="/settings/platform/integrations/prometheus?returnTo=/business-systems/new?draft=local" />,
 		);
 		fireEvent.click(screen.getByRole("button", { name: "返回接入管理" }));
-		expect(props.navigate).toHaveBeenCalledWith("/integrations");
+		expect(props.navigate).toHaveBeenCalledWith("/settings/platform/integrations");
 	});
 
 	it("keeps the created metrics connection after a failed probe and retries without creating it again", async () => {
@@ -316,7 +316,7 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/integrations/prometheus" />);
+		render(<IntegrationView route="/settings/platform/integrations/prometheus" />);
 		fireEvent.change(screen.getByLabelText("实例名称"), {
 			target: { value: "prom-main" },
 		});
@@ -335,7 +335,7 @@ describe("integration workbench", () => {
 		fireEvent.click(screen.getByRole("button", { name: "重新验证并启用" }));
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/integrations/prometheus/prom-main",
+				"/settings/platform/integrations/prometheus/prom-main",
 			),
 		);
 		expect(
@@ -397,7 +397,7 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/integrations/prometheus/prom-main" />);
+		render(<IntegrationView route="/settings/platform/integrations/prometheus/prom-main" />);
 		await waitFor(() =>
 			expect(screen.getAllByText("需要重新验证").length).toBeGreaterThan(0),
 		);
@@ -461,7 +461,7 @@ describe("integration workbench", () => {
 				);
 			});
 		render(
-			<IntegrationView route="/integrations/prometheus/prom-main/rotate" />,
+			<IntegrationView route="/settings/platform/integrations/prometheus/prom-main/rotate" />,
 		);
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "保存新版本" })).toBeEnabled(),
@@ -487,7 +487,7 @@ describe("integration workbench", () => {
 		fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/integrations/prometheus/prom-main",
+				"/settings/platform/integrations/prometheus/prom-main",
 			),
 		);
 		const payload = JSON.parse(
@@ -549,16 +549,16 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/integrations/instances" />);
+		render(<IntegrationView route="/settings/platform/integrations/instances" />);
 		expect(await screen.findByText("mall-prometheus")).toBeInTheDocument();
 		expect(screen.getByText("已停用")).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "管理" }));
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/integrations/prometheus/mall-prometheus",
+				"/settings/platform/integrations/prometheus/mall-prometheus",
 			),
 		);
-		expect(props.navigate).not.toHaveBeenCalledWith("/integrations/prometheus/1");
+		expect(props.navigate).not.toHaveBeenCalledWith("/settings/platform/integrations/prometheus/1");
 		fetchMock.mockRestore();
 	});
 
@@ -584,7 +584,7 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/integrations/alertmanager" />);
+		render(<IntegrationView route="/settings/platform/integrations/alertmanager" />);
 		fireEvent.change(screen.getByLabelText("来源键"), {
 			target: { value: "production" },
 		});

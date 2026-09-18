@@ -16,8 +16,8 @@ import {
 	type AdminContactInput,
 	type AdminUser,
 	updateUser,
-} from "@/features/admin/users/api";
-import { ConfirmAction } from "./controls";
+} from "@/features/settings/platform/users/api";
+import { ConfirmAction } from "../controls";
 
 const roleLabels: Record<AdminUser["role"], string> = { admin: "管理员", operator: "操作员" };
 
@@ -154,7 +154,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 										配置渠道
 									</Button>
 								) : (
-									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">管理员收码渠道请在「我的账户 → 收码渠道」中通过密码与验证码流程更换，此处不提供编辑。</small>
+									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">管理员收码渠道请在「设置 → 个人资料」中通过密码与验证码流程更换，此处不提供编辑。</small>
 								)}
 								{user.role === "operator" && (
 									// Only operators: the backend deliberately rejects admin
