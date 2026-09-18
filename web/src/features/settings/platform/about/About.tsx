@@ -1,20 +1,14 @@
-import { formatDateTime } from "@/lib/format";
-import { messageOf } from "@/app/shared";
 import { useCallback, useEffect, useState } from "react";
+import { messageOf } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { RefreshButton } from "@/components/workbench/RefreshButton";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
+import { RefreshButton } from "@/components/workbench/RefreshButton";
+import { formatDateTime } from "@/lib/format";
 import { Maintenance } from "../maintenance/Maintenance";
 import { type AboutStatus, fetchAbout } from "./api";
 
@@ -36,9 +30,7 @@ export function About({ suspended }: { suspended: boolean }) {
 			setStatus(await fetchAbout());
 			setRefreshRevision((current) => current + 1);
 		} catch (reason) {
-			setError(
-				messageOf(reason, "暂时无法读取平台关于信息。"),
-			);
+			setError(messageOf(reason, "暂时无法读取平台关于信息。"));
 		} finally {
 			setLoading(false);
 		}
@@ -100,50 +92,48 @@ export function About({ suspended }: { suspended: boolean }) {
 					<Separator />
 					<section className="flex flex-col gap-3">
 						<h3 className="text-sm font-medium">内部组件</h3>
-						<Table>
-							<TableHeader>
-								<TableRow>
-									<TableHead>组件</TableHead>
-									<TableHead>注册</TableHead>
-									<TableHead>连接</TableHead>
-									<TableHead>版本</TableHead>
-									<TableHead>最近事实</TableHead>
+						<DataTable
+							columns={[
+								{ label: "组件" },
+								{ label: "注册" },
+								{ label: "连接" },
+								{ label: "版本" },
+								{ label: "最近事实" },
+							]}
+							emptyTitle="暂无内部组件事实。"
+						>
+							{status.components.map((component) => (
+								<TableRow key={component.slot}>
+									<TableCell className="font-medium">
+										{component.slot}
+									</TableCell>
+									<TableCell>
+										<Badge
+											variant={
+												component.state === "registered"
+													? "secondary"
+													: "outline"
+											}
+										>
+											{component.state}
+										</Badge>
+									</TableCell>
+									<TableCell>
+										<Badge
+											variant={component.connected ? "secondary" : "outline"}
+										>
+											{component.connected ? "已连接" : "未连接"}
+										</Badge>
+									</TableCell>
+									<TableCell className="max-w-72 whitespace-normal wrap-anywhere font-mono text-xs">
+										{unknown(component.releaseVersion)}
+									</TableCell>
+									<TableCell className="whitespace-normal text-xs tabular-nums text-muted-foreground">
+										{component.connected ? time(component.lastSeenAt) : "未知"}
+									</TableCell>
 								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{status.components.map((component) => (
-									<TableRow key={component.slot}>
-										<TableCell>{component.slot}</TableCell>
-										<TableCell>
-											<Badge
-												variant={
-													component.state === "registered"
-														? "secondary"
-														: "outline"
-												}
-											>
-												{component.state}
-											</Badge>
-										</TableCell>
-										<TableCell>
-											<Badge
-												variant={component.connected ? "secondary" : "outline"}
-											>
-												{component.connected ? "已连接" : "未连接"}
-											</Badge>
-										</TableCell>
-										<TableCell className="max-w-72 whitespace-normal wrap-anywhere font-mono text-xs">
-											{unknown(component.releaseVersion)}
-										</TableCell>
-										<TableCell className="whitespace-normal">
-											{component.connected
-												? time(component.lastSeenAt)
-												: "未知"}
-										</TableCell>
-									</TableRow>
-								))}
-							</TableBody>
-						</Table>
+							))}
+						</DataTable>
 					</section>
 					<Separator />
 					<Maintenance refreshRevision={refreshRevision} onChanged={load} />

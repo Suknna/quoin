@@ -7,15 +7,18 @@ import {
 	WorkbenchApiError,
 } from "@/api/workbench";
 import { messageOf, notify } from "@/app/shared";
-import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { usePolling } from "@/hooks/use-polling";
+import { formatDateTime } from "@/lib/format";
 
 type Backup = {
 	id: string;
@@ -42,6 +45,13 @@ type BackupSettings = {
 type ArtifactRetention = { generatedRetentionDays: number; rowVersion: number };
 const active = (value: Backup) =>
 	["queued", "running", "pending"].includes(value.status.toLowerCase());
+
+const formatBytes = (value: number) => {
+	if (value >= 1 << 30) return `${(value / 2 ** 30).toFixed(1)} GB`;
+	if (value >= 1 << 20) return `${(value / 2 ** 20).toFixed(1)} MB`;
+	if (value >= 1 << 10) return `${(value / 2 ** 10).toFixed(1)} KB`;
+	return `${value} B`;
+};
 
 /** Backups are asynchronous server tasks; this view never invents restore or cancellation commands. */
 export function Backups({ suspended }: { suspended: boolean }) {
@@ -278,41 +288,59 @@ export function Backups({ suspended }: { suspended: boolean }) {
 			)}
 			<section className="space-y-3">
 				<h3 className="font-semibold">备份记录</h3>
-				<EntityList
-					items={items.map((item) => ({
-						id: item.id,
-						title: item.id,
-						subtitle: `阶段 ${item.stage} · 创建 ${item.createdAt}`,
-						badge: {
-							text: item.status,
-							variant:
-								item.status.toLowerCase() === "succeeded"
-									? ("secondary" as const)
-									: ("outline" as const),
-						},
-						item,
-					}))}
-					columns={["title", "subtitle", "status", "actions"]}
-					renderActions={(row) => (
-						<div className="flex items-center gap-2">
-							{row.item.errorDetail && (
-								<small className="text-destructive">
-									{row.item.errorDetail}
-								</small>
-							)}
-							{row.item.status.toLowerCase() === "succeeded" && (
-								<Button asChild variant="link" className="h-auto p-0">
-									<a href={`/api/v1/backups/${row.item.id}/download`}>
-										下载归档
-									</a>
-								</Button>
-							)}
-						</div>
-					)}
+				<DataTable
+					columns={[
+						{ label: "ID" },
+						{ label: "状态" },
+						{ label: "阶段" },
+						{ label: "大小" },
+						{ label: "创建时间" },
+						{ label: "操作" },
+					]}
 					loading={loading && !items.length}
 					loadingLabel="正在读取备份记录"
 					emptyTitle="尚无备份记录"
-				/>
+				>
+					{items.map((item) => (
+						<TableRow key={item.id}>
+							<TableCell className="font-mono text-xs">{item.id}</TableCell>
+							<TableCell>
+								<Badge
+									variant={
+										item.status.toLowerCase() === "succeeded"
+											? "secondary"
+											: "outline"
+									}
+								>
+									{item.status}
+								</Badge>
+							</TableCell>
+							<TableCell>{item.stage}</TableCell>
+							<TableCell className="text-xs tabular-nums text-muted-foreground">
+								{formatBytes(item.sizeBytes)}
+							</TableCell>
+							<TableCell className="text-xs tabular-nums text-muted-foreground">
+								{formatDateTime(item.createdAt)}
+							</TableCell>
+							<TableCell>
+								<div className="flex items-center gap-2">
+									{item.errorDetail && (
+										<small className="text-destructive">
+											{item.errorDetail}
+										</small>
+									)}
+									{item.status.toLowerCase() === "succeeded" && (
+										<Button asChild variant="link" className="h-auto p-0">
+											<a href={`/api/v1/backups/${item.id}/download`}>
+												下载归档
+											</a>
+										</Button>
+									)}
+								</div>
+							</TableCell>
+						</TableRow>
+					))}
+				</DataTable>
 				<LoadMoreButton
 					loading={loading}
 					hasMore={Boolean(cursor)}

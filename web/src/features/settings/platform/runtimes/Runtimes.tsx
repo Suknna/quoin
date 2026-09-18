@@ -1,9 +1,8 @@
-import { messageOf, notify } from "@/app/shared";
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { RefreshButton } from "@/components/workbench/RefreshButton";
 import { Button } from "@/components/ui/button";
 import {
 	Field,
@@ -11,15 +10,10 @@ import {
 	FieldGroup,
 	FieldLabel,
 } from "@/components/ui/field";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { TableCell, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { DataTable } from "@/components/workbench/DataTable";
+import { RefreshButton } from "@/components/workbench/RefreshButton";
 import {
 	fetchRuntimeStatus,
 	formatRuntimeTime,
@@ -71,9 +65,7 @@ export function Runtimes({
 			// Retired browser runtimes must not regain a registration entry from a stale server projection.
 			setItems([status.plinth].filter(isRuntimeSlotView));
 		} catch (reason) {
-			setError(
-				messageOf(reason, "暂时无法读取运行时状态。"),
-			);
+			setError(messageOf(reason, "暂时无法读取运行时状态。"));
 		} finally {
 			setLoading(false);
 		}
@@ -202,116 +194,113 @@ export function Runtimes({
 					</AlertDescription>
 				</Alert>
 			)}
-			{!loading && !error && items.length === 0 && (
-				<p className="text-sm text-muted-foreground">暂无运行时事实。</p>
-			)}
-			<Table>
-				<TableHeader>
-					<TableRow>
-						<TableHead>槽位</TableHead>
-						<TableHead>状态</TableHead>
-						<TableHead>凭据代</TableHead>
-						<TableHead>连接</TableHead>
-						<TableHead />
-					</TableRow>
-				</TableHeader>
-				<TableBody>
-					{items.map((item) => {
-						const registrationLabel =
-							item.state === "registered" ? "准备替代注册" : "准备首次注册";
-						const isPending = !!pending;
-						return (
-							<TableRow key={item.slot}>
-								<TableCell>{item.slot}</TableCell>
-									<TableCell>
-										<Badge
-											variant={
-												item.state === "registered" ? "default" : "secondary"
-											}
-										>
-											{runtimeStateLabels[item.state] ?? item.state}
-										</Badge>
-									</TableCell>
-								<TableCell>
-									当前 {item.currentGeneration}
-									{item.pendingGeneration !== undefined && (
-										<span> · 待注册 {item.pendingGeneration}</span>
-									)}
-									{item.retiringGeneration !== undefined && (
-										<span> · 待退休 {item.retiringGeneration}</span>
-									)}
-									<small className="block text-muted-foreground">
-										{item.retirementState
-											? (retirementStateLabels[item.retirementState] ??
-												item.retirementState)
-											: "未知"}
-									</small>
-								</TableCell>
-								<TableCell>
-									{item.connected
-										? `已连接 ${formatRuntimeTime(item.lastSeenAt)}`
-										: "未连接"}
-								</TableCell>
-								<TableCell>
-									<div className="flex gap-2">
-										<ConfirmAction
-											title={
-												item.state === "registered"
-													? `替代 ${item.slot} 的注册凭据？`
-													: `首次注册 ${item.slot}？`
-											}
-											description={
-												item.state === "registered"
-													? "将准备新的注册令牌。新凭据首次认证前，当前凭据保持有效。"
-													: "将准备该组件的首次注册令牌。令牌只会显示一次。"
-											}
-											disabled={suspended || isPending}
-											onConfirm={() => void prepare(item)}
-										>
-											{pending === `prepare:${item.slot}` ? (
-												<>
-													<LoaderCircle
-														className="animate-spin"
-														data-icon="inline-start"
-														aria-hidden="true"
-													/>
-													准备中…
-												</>
-											) : (
-												registrationLabel
-											)}
-										</ConfirmAction>
-										<ConfirmAction
-											title={`退休 ${item.slot} 的待退休凭据？`}
-											description="只会退休服务端已经标记为待退休的凭据代；当前凭据不会被此命令退休。"
-											disabled={
-												suspended ||
-												isPending ||
-												item.retirementState !== "PendingRetirement" ||
-												item.retiringGeneration === undefined
-											}
-											onConfirm={() => void retire(item)}
-										>
-											{pending === `retire:${item.slot}` ? (
-												<>
-													<LoaderCircle
-														className="animate-spin"
-														data-icon="inline-start"
-														aria-hidden="true"
-													/>
-													退休中…
-												</>
-											) : (
-												"退休凭据"
-											)}
-										</ConfirmAction>
-									</div>
-								</TableCell>
-							</TableRow>
-						);
-					})}
-				</TableBody>
-			</Table>
+			<DataTable
+				columns={[
+					{ label: "槽位" },
+					{ label: "状态" },
+					{ label: "凭据代" },
+					{ label: "连接" },
+					{ label: <span className="sr-only">操作</span> },
+				]}
+				loading={loading && items.length === 0}
+				loadingLabel="正在读取运行时状态"
+				emptyTitle="暂无运行时事实。"
+			>
+				{items.map((item) => {
+					const registrationLabel =
+						item.state === "registered" ? "准备替代注册" : "准备首次注册";
+					const isPending = !!pending;
+					return (
+						<TableRow key={item.slot}>
+							<TableCell className="font-medium">{item.slot}</TableCell>
+							<TableCell>
+								<Badge
+									variant={
+										item.state === "registered" ? "default" : "secondary"
+									}
+								>
+									{runtimeStateLabels[item.state] ?? item.state}
+								</Badge>
+							</TableCell>
+							<TableCell>
+								当前 {item.currentGeneration}
+								{item.pendingGeneration !== undefined && (
+									<span> · 待注册 {item.pendingGeneration}</span>
+								)}
+								{item.retiringGeneration !== undefined && (
+									<span> · 待退休 {item.retiringGeneration}</span>
+								)}
+								<small className="block text-muted-foreground">
+									{item.retirementState
+										? (retirementStateLabels[item.retirementState] ??
+											item.retirementState)
+										: "未知"}
+								</small>
+							</TableCell>
+							<TableCell className="text-xs tabular-nums text-muted-foreground">
+								{item.connected
+									? `已连接 ${formatRuntimeTime(item.lastSeenAt)}`
+									: "未连接"}
+							</TableCell>
+							<TableCell>
+								<div className="flex gap-2">
+									<ConfirmAction
+										title={
+											item.state === "registered"
+												? `替代 ${item.slot} 的注册凭据？`
+												: `首次注册 ${item.slot}？`
+										}
+										description={
+											item.state === "registered"
+												? "将准备新的注册令牌。新凭据首次认证前，当前凭据保持有效。"
+												: "将准备该组件的首次注册令牌。令牌只会显示一次。"
+										}
+										disabled={suspended || isPending}
+										onConfirm={() => void prepare(item)}
+									>
+										{pending === `prepare:${item.slot}` ? (
+											<>
+												<LoaderCircle
+													className="animate-spin"
+													data-icon="inline-start"
+													aria-hidden="true"
+												/>
+												准备中…
+											</>
+										) : (
+											registrationLabel
+										)}
+									</ConfirmAction>
+									<ConfirmAction
+										title={`退休 ${item.slot} 的待退休凭据？`}
+										description="只会退休服务端已经标记为待退休的凭据代；当前凭据不会被此命令退休。"
+										disabled={
+											suspended ||
+											isPending ||
+											item.retirementState !== "PendingRetirement" ||
+											item.retiringGeneration === undefined
+										}
+										onConfirm={() => void retire(item)}
+									>
+										{pending === `retire:${item.slot}` ? (
+											<>
+												<LoaderCircle
+													className="animate-spin"
+													data-icon="inline-start"
+													aria-hidden="true"
+												/>
+												退休中…
+											</>
+										) : (
+											"退休凭据"
+										)}
+									</ConfirmAction>
+								</div>
+							</TableCell>
+						</TableRow>
+					);
+				})}
+			</DataTable>
 		</section>
 	);
 }

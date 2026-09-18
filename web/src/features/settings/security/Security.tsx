@@ -1,4 +1,3 @@
-import { formatDateTime } from "@/lib/format";
 import { LoaderCircle } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
@@ -7,6 +6,7 @@ import {
 	notifyUnauthorized,
 	workbenchApi,
 } from "@/api/workbench";
+import { messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
@@ -19,20 +19,13 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { messageOf, notify } from "@/app/shared";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
-import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { formatDateTime } from "@/lib/format";
 
 type Session = {
 	id: string;
@@ -45,9 +38,7 @@ type Session = {
 };
 type Page<T> = { items?: T[]; nextCursor?: string };
 
-
-const formatTime = (value: string | null) =>
-	formatDateTime(value, "从未");
+const formatTime = (value: string | null) => formatDateTime(value, "从未");
 
 /** Security requests use the shared unauthorized recovery rather than rendering a misleading local error. */
 async function securityRequest<T>(
@@ -258,60 +249,50 @@ function Sessions({ suspended }: { suspended: boolean }) {
 					<AlertDescription>{error}</AlertDescription>
 				</Alert>
 			)}
-			<Table>
-				<TableHeader>
-					<TableRow>
-						<TableHead>客户端</TableHead>
-						<TableHead>创建时间</TableHead>
-						<TableHead>最后活动</TableHead>
-						<TableHead>过期时间</TableHead>
-						<TableHead>
-							<span className="sr-only">操作</span>
-						</TableHead>
+			<DataTable
+				columns={[
+					{ label: "客户端" },
+					{ label: "创建时间" },
+					{ label: "最后活动" },
+					{ label: "过期时间" },
+					{ label: <span className="sr-only">操作</span> },
+				]}
+				loading={sessionsLoading}
+				loadingLabel="正在读取登录设备"
+				emptyTitle="没有登录设备记录。"
+			>
+				{sessions.map((session) => (
+					<TableRow key={session.id}>
+						<TableCell>
+							{session.clientLabel}{" "}
+							{session.current && (
+								<Badge className="ml-2" variant="secondary">
+									当前
+								</Badge>
+							)}
+						</TableCell>
+						<TableCell className="text-xs tabular-nums text-muted-foreground">
+							{formatTime(session.createdAt)}
+						</TableCell>
+						<TableCell className="text-xs tabular-nums text-muted-foreground">
+							{formatTime(session.lastActiveAt)}
+						</TableCell>
+						<TableCell className="text-xs tabular-nums text-muted-foreground">
+							{formatTime(session.idleExpiresAt)}
+						</TableCell>
+						<TableCell>
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={suspended}
+								onClick={() => setPending(session)}
+							>
+								撤销
+							</Button>
+						</TableCell>
 					</TableRow>
-				</TableHeader>
-				<TableBody>
-					{sessionsLoading ? (
-						<TableRow>
-							<TableCell colSpan={5}>
-								<DetailSkeleton label="正在读取登录设备" rows={["line", "line", "line"]} />
-							</TableCell>
-						</TableRow>
-					) : sessions.length === 0 ? (
-						<TableRow>
-							<TableCell colSpan={5} className="text-center text-muted-foreground">
-								没有登录设备记录。
-							</TableCell>
-						</TableRow>
-					) : (
-						sessions.map((session) => (
-						<TableRow key={session.id}>
-							<TableCell>
-								{session.clientLabel}{" "}
-								{session.current && (
-									<Badge className="ml-2" variant="secondary">
-										当前
-									</Badge>
-								)}
-							</TableCell>
-							<TableCell>{formatTime(session.createdAt)}</TableCell>
-							<TableCell>{formatTime(session.lastActiveAt)}</TableCell>
-							<TableCell>{formatTime(session.idleExpiresAt)}</TableCell>
-							<TableCell>
-								<Button
-									variant="outline"
-									size="sm"
-									disabled={suspended}
-									onClick={() => setPending(session)}
-								>
-									撤销
-								</Button>
-							</TableCell>
-							</TableRow>
-						))
-					)}
-				</TableBody>
-			</Table>
+				))}
+			</DataTable>
 			<LoadMoreButton
 				loading={sessionsLoading}
 				hasMore={Boolean(cursor)}

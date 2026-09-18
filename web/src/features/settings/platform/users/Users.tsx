@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -11,7 +12,8 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { EntityList } from "@/components/EntityList";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
 import { roleLabels } from "@/features/settings/labels";
 import {
 	type AdminContactInput,
@@ -182,111 +184,118 @@ export function Users({ suspended }: { suspended: boolean }) {
 					<AlertDescription role="status">{note}</AlertDescription>
 				</Alert>
 			)}
-			<EntityList
-				items={items.map((user) => ({
-					id: user.id,
-					title: user.displayName,
-					subtitle: [
-						user.username,
-						user.enabled ? "已启用" : "已停用",
-						user.initialized !== undefined
-							? user.initialized
-								? "已初始化"
-								: "未初始化"
-							: "",
-					]
-						.filter(Boolean)
-						.join(" · "),
-					badge: {
-						text: roleLabels[user.role],
-						variant:
-							user.role === "admin"
-								? ("default" as const)
-								: ("secondary" as const),
-					},
-					user,
-				}))}
-				columns={["title", "subtitle", "status", "actions"]}
-				renderActions={(row) => {
-					const user = row.user;
-					return (
-						<div className="flex flex-wrap items-center gap-2">
-							{user.role === "operator" && (
-								<ConfirmAction
-									title={
-										user.enabled
-											? `停用 ${user.displayName}？`
-											: `启用 ${user.displayName}？`
-									}
-									description={
-										user.enabled
-											? "停用后该操作员将立即无法登录工作台。"
-											: "启用后该操作员可以立即登录工作台。"
-									}
-									destructive={user.enabled}
-									disabled={suspended}
-									onConfirm={() =>
-										void update(user, { enabled: !user.enabled })
-									}
-								>
-									{user.enabled ? "停用" : "启用"}
-								</ConfirmAction>
-							)}
-							{user.role === "operator" ? (
-								<Button
-									size="sm"
-									variant="outline"
-									disabled={suspended}
-									onClick={() => {
-										setConfiguring(user);
-										setContactDraft(emptyContactDraft);
-									}}
-								>
-									配置渠道
-								</Button>
-							) : (
-								<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">
-									管理员收码渠道请在「设置 →
-									个人资料」中通过密码与验证码流程更换，此处不提供编辑。
-								</small>
-							)}
-							{user.role === "operator" && (
-								// Only operators: the backend deliberately rejects admin
-								// password reset here (account self-service or CLI only),
-								// so the button must never offer an inevitable error.
-								<Button
-									size="sm"
-									variant="outline"
-									disabled={suspended}
-									onClick={() => setResetting(user)}
-								>
-									重置密码
-								</Button>
-							)}
-							<ConfirmAction
-								title="撤销该用户的所有会话？"
-								description="该用户需要重新登录后才能继续使用工作台。"
-								disabled={suspended}
-								onConfirm={() =>
-									void revokeSessions(user.id)
-										.then(() => {
-											notify.success("已撤销会话");
-											return load();
-										})
-										.catch((reason) =>
-											notify.error(reason, "暂时无法撤销会话。"),
-										)
-								}
-							>
-								撤销会话
-							</ConfirmAction>
-						</div>
-					);
-				}}
+			<DataTable
+				columns={[
+					{ label: "显示名" },
+					{ label: "用户名" },
+					{ label: "角色" },
+					{ label: "状态" },
+					{ label: "初始化" },
+					{ label: "操作" },
+				]}
 				loading={loading}
 				loadingLabel="正在读取用户"
 				emptyTitle="尚无用户"
-			/>
+			>
+				{items.map((user) => (
+					<TableRow key={user.id}>
+						<TableCell className="font-medium">{user.displayName}</TableCell>
+						<TableCell>{user.username}</TableCell>
+						<TableCell>
+							<Badge variant={user.role === "admin" ? "default" : "secondary"}>
+								{roleLabels[user.role]}
+							</Badge>
+						</TableCell>
+						<TableCell
+							className={user.enabled ? undefined : "text-muted-foreground"}
+						>
+							{user.enabled ? "已启用" : "已停用"}
+						</TableCell>
+						<TableCell
+							className={user.initialized ? undefined : "text-muted-foreground"}
+						>
+							{user.initialized !== undefined
+								? user.initialized
+									? "已初始化"
+									: "未初始化"
+								: "—"}
+						</TableCell>
+						<TableCell className="whitespace-normal">
+							<div className="flex flex-wrap items-center gap-1.5">
+								{user.role === "operator" && (
+									<ConfirmAction
+										title={
+											user.enabled
+												? `停用 ${user.displayName}？`
+												: `启用 ${user.displayName}？`
+										}
+										description={
+											user.enabled
+												? "停用后该操作员将立即无法登录工作台。"
+												: "启用后该操作员可以立即登录工作台。"
+										}
+										destructive={user.enabled}
+										disabled={suspended}
+										onConfirm={() =>
+											void update(user, { enabled: !user.enabled })
+										}
+									>
+										{user.enabled ? "停用" : "启用"}
+									</ConfirmAction>
+								)}
+								{user.role === "operator" ? (
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={suspended}
+										onClick={() => {
+											setConfiguring(user);
+											setContactDraft(emptyContactDraft);
+										}}
+									>
+										配置渠道
+									</Button>
+								) : (
+									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">
+										管理员收码渠道请在「设置 →
+										个人资料」中通过密码与验证码流程更换，此处不提供编辑。
+									</small>
+								)}
+								{user.role === "operator" && (
+									// Only operators: the backend deliberately rejects admin
+									// password reset here (account self-service or CLI only),
+									// so the button must never offer an inevitable error.
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={suspended}
+										onClick={() => setResetting(user)}
+									>
+										重置密码
+									</Button>
+								)}
+								<ConfirmAction
+									title="撤销该用户的所有会话？"
+									description="该用户需要重新登录后才能继续使用工作台。"
+									disabled={suspended}
+									onConfirm={() =>
+										void revokeSessions(user.id)
+											.then(() => {
+												notify.success("已撤销会话");
+												return load();
+											})
+											.catch((reason) =>
+												notify.error(reason, "暂时无法撤销会话。"),
+											)
+									}
+								>
+									撤销会话
+								</ConfirmAction>
+							</div>
+						</TableCell>
+					</TableRow>
+				))}
+			</DataTable>
 			<Dialog open={creating} onOpenChange={setCreating}>
 				<DialogContent>
 					<DialogHeader>

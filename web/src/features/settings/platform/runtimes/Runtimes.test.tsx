@@ -43,12 +43,10 @@ describe("Runtimes", () => {
 		});
 	});
 	it("labels an unregistered slot as first registration", async () => {
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValue({
-				ok: true,
-				json: async () => ({ plinth: { ...runtime, state: "unregistered" } }),
-			});
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ plinth: { ...runtime, state: "unregistered" } }),
+		});
 		vi.stubGlobal("fetch", fetchMock);
 		render(<Runtimes suspended={false} />);
 		expect(
@@ -57,14 +55,12 @@ describe("Runtimes", () => {
 	});
 	it("renders exactly the plinth slot", async () => {
 		// 受控浏览器退役: the server projects only the plinth slot.
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValue({
-				ok: true,
-				json: async () => ({
-					plinth: { ...runtime, slot: "plinth", state: "unregistered" },
-				}),
-			});
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({
+				plinth: { ...runtime, slot: "plinth", state: "unregistered" },
+			}),
+		});
 		vi.stubGlobal("fetch", fetchMock);
 		const view = render(<Runtimes suspended={false} />);
 		await waitFor(() =>
@@ -76,17 +72,19 @@ describe("Runtimes", () => {
 		).toContain("plinth");
 	});
 	it("drops a malformed slot projection instead of rendering an unusable registration row", async () => {
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValue({
-				ok: true,
-				json: async () => ({ plinth: { slot: "plinth" } }),
-			});
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ plinth: { slot: "plinth" } }),
+		});
 		vi.stubGlobal("fetch", fetchMock);
 		const view = render(<Runtimes suspended={false} />);
+		// 畸形投影被丢弃后只剩 DataTable 的空状态行。
 		await waitFor(() =>
-			expect(view.container.querySelectorAll("tbody tr")).toHaveLength(0),
+			expect(view.container.textContent).toContain("暂无运行时事实"),
 		);
+		expect(
+			view.container.querySelectorAll("tbody tr:not(:has([data-slot=empty]))"),
+		).toHaveLength(0);
 	});
 	it("guards slot projections before registration actions", () => {
 		const valid = {
@@ -117,22 +115,20 @@ describe("Runtimes", () => {
 		};
 		vi.stubGlobal(
 			"fetch",
-			vi
-				.fn()
-				.mockImplementation((path: string) =>
-					Promise.resolve({
-						ok: true,
-						json: async () =>
-							path === "/api/v1/runtime"
-								? { plinth: runtime }
-								: path.includes("prepare")
-									? {
-											registrationTokenAvailable: true,
-											registrationTokenHandle: "x".repeat(32),
-										}
-									: revealed,
-					}),
-				),
+			vi.fn().mockImplementation((path: string) =>
+				Promise.resolve({
+					ok: true,
+					json: async () =>
+						path === "/api/v1/runtime"
+							? { plinth: runtime }
+							: path.includes("prepare")
+								? {
+										registrationTokenAvailable: true,
+										registrationTokenHandle: "x".repeat(32),
+									}
+								: revealed,
+				}),
+			),
 		);
 		render(<Runtimes suspended={false} />);
 		fireEvent.click(
@@ -155,27 +151,25 @@ describe("Runtimes", () => {
 		).not.toBeInTheDocument();
 	});
 	it("clears a revealed secret explicitly", async () => {
-		const fetchMock = vi
-			.fn()
-			.mockImplementation((path: string) =>
-				path === "/api/v1/runtime"
+		const fetchMock = vi.fn().mockImplementation((path: string) =>
+			path === "/api/v1/runtime"
+				? Promise.resolve({
+						ok: true,
+						json: async () => ({ plinth: runtime }),
+					})
+				: path.includes("prepare")
 					? Promise.resolve({
 							ok: true,
-							json: async () => ({ plinth: runtime }),
-						})
-					: path.includes("prepare")
-						? Promise.resolve({
-								ok: true,
-								json: async () => ({
-									registrationTokenAvailable: true,
-									registrationTokenHandle: "x".repeat(32),
-								}),
-							})
-						: Promise.resolve({
-								ok: true,
-								json: async () => ({ registrationToken: "secret" }),
+							json: async () => ({
+								registrationTokenAvailable: true,
+								registrationTokenHandle: "x".repeat(32),
 							}),
-			);
+						})
+					: Promise.resolve({
+							ok: true,
+							json: async () => ({ registrationToken: "secret" }),
+						}),
+		);
 		vi.stubGlobal("fetch", fetchMock);
 		render(<Runtimes suspended={false} />);
 		fireEvent.click(

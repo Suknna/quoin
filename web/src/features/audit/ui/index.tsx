@@ -1,4 +1,4 @@
-import { LoaderCircle, Search } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { newClientCommandId, WorkbenchApiError } from "@/api/workbench";
 import { messageOf, notify } from "@/app/shared";
@@ -25,7 +25,6 @@ import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
-	EmptyMedia,
 	EmptyTitle,
 } from "@/components/ui/empty";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
@@ -39,7 +38,8 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { EntityList } from "@/components/EntityList";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import {
@@ -100,7 +100,9 @@ const outcomeVariant = (outcome: AuditOutcome) =>
 				: "secondary";
 
 function OutcomeBadge({ outcome }: { outcome: AuditOutcome }) {
-	return <Badge variant={outcomeVariant(outcome)}>{outcomeLabels[outcome]}</Badge>;
+	return (
+		<Badge variant={outcomeVariant(outcome)}>{outcomeLabels[outcome]}</Badge>
+	);
 }
 
 /** 统一审计入口（docs/audit-design.md §6）：仅管理员，按时间/主体/动作/结果/关联筛选。 */
@@ -297,61 +299,57 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 					<AlertDescription>{error}</AlertDescription>
 				</Alert>
 			)}
-			{loading ? (
-				<DetailSkeleton
-					label="正在读取审计事件"
-					rows={["line", "line", "line"]}
-				/>
-			) : items.length === 0 && !error ? (
-				<Empty>
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<Search />
-						</EmptyMedia>
-						<EmptyTitle>没有匹配的审计事件</EmptyTitle>
-						<EmptyDescription>
-							当前筛选没有可显示的记录；请调整时间范围或其他条件。
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			) : items.length > 0 ? (
+			{!(error && items.length === 0) && (
 				<>
-					<EntityList
-						items={items.map((event) => ({
-							id: event.id,
-							title: `${actorLabels[event.actorType]} · ${event.action}`,
-							subtitle: [
-								event.actorId,
-								phaseLabel(event.phase),
-								event.domainRefType
-									? `${event.domainRefType} · ${event.domainRefId ?? "—"}`
-									: "",
-							]
-								.filter(Boolean)
-								.join(" · "),
-							badge: {
-								text: outcomeLabels[event.outcome],
-								variant: outcomeVariant(event.outcome),
-							},
-							time: formatTimestamp(event.createdAt),
-							event,
-						}))}
-						columns={["title", "subtitle", "status", "time", "actions"]}
-						renderActions={(row) =>
-							row.event.correlationId ? (
-								<Button
-									size="sm"
-									variant="outline"
-									onClick={() => setViewingCorrelation(row.event.correlationId)}
-								>
-									查看关联
-								</Button>
-							) : (
-								<Badge variant="secondary">历史无关联</Badge>
-							)
-						}
+					<DataTable
+						columns={[
+							{ label: "时间" },
+							{ label: "主体" },
+							{ label: "操作" },
+							{ label: "阶段" },
+							{ label: "对象" },
+							{ label: "结果" },
+							{ label: "关联" },
+						]}
+						loading={loading}
+						loadingLabel="正在读取审计事件"
 						emptyTitle="没有匹配的审计事件"
-					/>
+						emptyDescription="当前筛选没有可显示的记录；请调整时间范围或其他条件。"
+					>
+						{items.map((event) => (
+							<TableRow key={event.id}>
+								<TableCell className="text-xs tabular-nums text-muted-foreground">
+									{formatTimestamp(event.createdAt)}
+								</TableCell>
+								<TableCell>
+									{actorLabels[event.actorType]} · {event.actorId}
+								</TableCell>
+								<TableCell className="font-medium">{event.action}</TableCell>
+								<TableCell>{phaseLabel(event.phase)}</TableCell>
+								<TableCell>
+									{event.domainRefType
+										? `${event.domainRefType} · ${event.domainRefId ?? "—"}`
+										: "—"}
+								</TableCell>
+								<TableCell>
+									<OutcomeBadge outcome={event.outcome} />
+								</TableCell>
+								<TableCell>
+									{event.correlationId ? (
+										<Button
+											size="sm"
+											variant="outline"
+											onClick={() => setViewingCorrelation(event.correlationId)}
+										>
+											查看关联
+										</Button>
+									) : (
+										<span className="text-muted-foreground">—</span>
+									)}
+								</TableCell>
+							</TableRow>
+						))}
+					</DataTable>
 					{cursor && (
 						<div>
 							<LoadMoreButton
@@ -362,7 +360,7 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 						</div>
 					)}
 				</>
-			) : null}
+			)}
 			{viewingCorrelation !== undefined && (
 				<CorrelationDetails
 					correlationId={viewingCorrelation}

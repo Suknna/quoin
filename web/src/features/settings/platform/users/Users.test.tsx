@@ -106,7 +106,7 @@ describe("Users", () => {
 	it("shows initialization status and refuses to disable, re-channel, or reset the unique admin", async () => {
 		stubUserFetch();
 		render(<Users suspended={false} />);
-		const adminRowElement = (await screen.findByText("Root")).closest("li") as HTMLLIElement;
+		const adminRowElement = (await screen.findByText("Root")).closest("tr") as HTMLTableRowElement;
 		expect(within(adminRowElement).getByText("管理员")).toBeInTheDocument();
 		expect(within(adminRowElement).getByText(/已初始化/)).toBeInTheDocument();
 		expect(within(adminRowElement).queryByRole("button", { name: "停用" })).not.toBeInTheDocument();
@@ -116,7 +116,7 @@ describe("Users", () => {
 		expect(within(adminRowElement).queryByRole("button", { name: "重置密码" })).not.toBeInTheDocument();
 		expect(within(adminRowElement).getByText(/设置 → 个人资料/)).toBeInTheDocument();
 
-		const operatorRowElement = screen.getByText("Operator").closest("li") as HTMLLIElement;
+		const operatorRowElement = screen.getByText("Operator").closest("tr") as HTMLTableRowElement;
 		expect(within(operatorRowElement).getByText("操作员")).toBeInTheDocument();
 		expect(within(operatorRowElement).getByText(/未初始化/)).toBeInTheDocument();
 		expect(within(operatorRowElement).getByRole("button", { name: "停用" })).toBeInTheDocument();
@@ -127,7 +127,7 @@ describe("Users", () => {
 	it("requires at least one channel and replaces targets through the contacts command", async () => {
 		const fetchMock = stubUserFetch();
 		render(<Users suspended={false} />);
-		const operatorRowElement = (await screen.findByText("Operator")).closest("li") as HTMLLIElement;
+		const operatorRowElement = (await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement;
 		fireEvent.click(within(operatorRowElement).getByRole("button", { name: "配置渠道" }));
 
 		const save = screen.getByRole("button", { name: "保存渠道" });
@@ -150,7 +150,7 @@ describe("Users", () => {
 	it("sends the enabled toggle with the row-version fence and no role field", async () => {
 		const fetchMock = stubUserFetch();
 		render(<Users suspended={false} />);
-		const operatorRowElement = (await screen.findByText("Operator")).closest("li") as HTMLLIElement;
+		const operatorRowElement = (await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement;
 		fireEvent.click(within(operatorRowElement).getByRole("button", { name: "停用" }));
 		// 停用现在经过确认弹框；确认后才发送更新命令。
 		fireEvent.click(await screen.findByRole("button", { name: "确认" }));

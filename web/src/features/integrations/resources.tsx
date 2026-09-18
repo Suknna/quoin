@@ -2,16 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { newClientCommandId, request } from "@/api/workbench";
 import { messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-	Empty,
-	EmptyDescription,
-	EmptyHeader,
-	EmptyTitle,
-} from "@/components/ui/empty";
-import { EntityList } from "@/components/EntityList";
-import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { TableCell, TableRow } from "@/components/ui/table";
+import { DataTable } from "@/components/workbench/DataTable";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { PropertyList } from "@/components/workbench/PropertyList";
+import { formatDateTime } from "@/lib/format";
 
 interface Resource {
 	id: string;
@@ -204,44 +201,51 @@ export function IntegrationResources({
 					</Button>
 				</Alert>
 			)}
-			{loading && (
-				<DetailSkeleton
-					label="正在读取观测结果"
-					rows={["line", "line", "line", "line"]}
-				/>
-			)}
-			{!loading && !error && items.length === 0 ? (
-				<Empty>
-					<EmptyHeader>
-						<EmptyTitle>尚无观测对象</EmptyTitle>
-						<EmptyDescription>
-							接入启用后自动观测。空结果不代表整个接入范围健康。
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			) : (
-				items.length > 0 && (
-					<EntityList
-						items={items.map((item) => ({
-							id: item.id,
-							title: item.displayName ?? item.labels.instance ?? item.id,
-							subtitle: item.objectType,
-							badge: { text: states[item.state], variant: "outline" as const },
-							time: item.lastObservedAt
-								? new Date(item.lastObservedAt).toLocaleString()
-								: "尚无成功观测",
-							item,
-						}))}
-						columns={["title", "subtitle", "status", "time"]}
-						onSelect={(row) =>
-							navigate(
-								`${detailBase}&resource=${encodeURIComponent(row.item.id)}`,
-							)
-						}
-						emptyTitle="尚无观测对象"
-						emptyDescription="接入启用后自动观测。空结果不代表整个接入范围健康。"
-					/>
-				)
+			{!(error && items.length === 0) && (
+				<DataTable
+					columns={[
+						{ label: "名称" },
+						{ label: "类型" },
+						{ label: "状态" },
+						{ label: "最近观测" },
+					]}
+					loading={loading && items.length === 0}
+					loadingLabel="正在读取观测结果"
+					emptyTitle="尚无观测对象"
+					emptyDescription="接入启用后自动观测。空结果不代表整个接入范围健康。"
+				>
+					{items.map((item) => {
+						const name = item.displayName ?? item.labels.instance ?? item.id;
+						return (
+							<TableRow key={item.id}>
+								<TableCell>
+									<Button
+										variant="link"
+										className="h-auto p-0 font-medium text-foreground"
+										onClick={() =>
+											navigate(
+												`${detailBase}&resource=${encodeURIComponent(item.id)}`,
+											)
+										}
+									>
+										{name}
+									</Button>
+								</TableCell>
+								<TableCell className="text-muted-foreground">
+									{item.objectType}
+								</TableCell>
+								<TableCell>
+									<Badge variant="outline">{states[item.state]}</Badge>
+								</TableCell>
+								<TableCell className="text-xs tabular-nums text-muted-foreground">
+									{item.lastObservedAt
+										? formatDateTime(item.lastObservedAt)
+										: "尚无成功观测"}
+								</TableCell>
+							</TableRow>
+						);
+					})}
+				</DataTable>
 			)}
 			<LoadMoreButton
 				loading={loading || suspended}
@@ -258,12 +262,20 @@ export function IntegrationResources({
 							关闭详情
 						</Button>
 					</div>
-					<dl>
-						<dt>来源接入</dt>
-						<dd>{connectionName}</dd>
-						<dt>来源身份</dt>
-						<dd className="break-all">{selected.identityKey}</dd>
-					</dl>
+					<PropertyList
+						layout="grid-2"
+						entries={[
+							{ label: "来源接入", value: connectionName },
+							{
+								label: "来源身份",
+								value: (
+									<span className="break-all font-mono text-xs">
+										{selected.identityKey}
+									</span>
+								),
+							},
+						]}
+					/>
 					<pre className="overflow-auto rounded-md bg-muted p-3 text-xs">
 						{JSON.stringify(selected.labels, null, 2)}
 					</pre>
