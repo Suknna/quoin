@@ -69,6 +69,13 @@ import {
 	FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -773,19 +780,11 @@ function MetricsForm({
 							</Field>
 							<Field>
 								<FieldLabel>认证方式</FieldLabel>
-								<select
-									aria-label="认证方式"
-									value={authType}
-									onChange={(event) =>
-										setAuthType(event.target.value as typeof authType)
-									}
-									disabled={saving || suspended || Boolean(created)}
-									className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-								>
-									<option value="none">无认证</option>
-									<option value="basic">HTTP Basic</option>
-									<option value="bearer">Bearer Token</option>
-								</select>
+								<AuthTypeSelect
+										value={authType}
+										onChange={setAuthType}
+										disabled={saving || suspended || Boolean(created)}
+									/>
 							</Field>
 							{authType === "basic" && (
 								<>
@@ -1233,18 +1232,11 @@ function MetricsRotate({
 							</Field>
 							<Field>
 								<FieldLabel>认证方式</FieldLabel>
-								<select
-									aria-label="认证方式"
-									value={authType}
-									onChange={(event) =>
-										setAuthType(event.target.value as typeof authType)
-									}
-									disabled={saving || suspended}
-								>
-									<option value="none">无认证</option>
-									<option value="basic">HTTP Basic</option>
-									<option value="bearer">Bearer Token</option>
-								</select>
+								<AuthTypeSelect
+										value={authType}
+										onChange={setAuthType}
+										disabled={saving || suspended}
+									/>
 							</Field>
 							{authType === "basic" && (
 								<>
@@ -2049,4 +2041,34 @@ export function useIntegrationsModule(
 		),
 		content,
 	};
+}
+
+type AuthType = "none" | "basic" | "bearer";
+
+/** Shared authentication-mode picker for Alertmanager metrics endpoints. */
+function AuthTypeSelect({
+	value,
+	onChange,
+	disabled,
+}: {
+	value: AuthType;
+	onChange: (value: AuthType) => void;
+	disabled?: boolean;
+}) {
+	return (
+		<Select
+			value={value}
+			onValueChange={(next) => onChange(next as AuthType)}
+			disabled={disabled}
+		>
+			<SelectTrigger aria-label="认证方式" className="w-full">
+				<SelectValue />
+			</SelectTrigger>
+			<SelectContent>
+				<SelectItem value="none">无认证</SelectItem>
+				<SelectItem value="basic">HTTP Basic</SelectItem>
+				<SelectItem value="bearer">Bearer Token</SelectItem>
+			</SelectContent>
+		</Select>
+	);
 }

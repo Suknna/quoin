@@ -11,6 +11,16 @@ import type { WorkspaceModuleProps } from "@/app/module-contract";
 import { alertmanagerReceiverYaml } from "./api";
 import { useIntegrationsModule } from "./ui";
 
+
+async function pickBearerAuth() {
+	// Radix Select opens from the keyboard in jsdom; pointer events need APIs
+	// the environment does not implement.
+	fireEvent.keyDown(screen.getByRole("combobox", { name: "认证方式" }), {
+		key: "ArrowDown",
+	});
+	fireEvent.click(await screen.findByRole("option", { name: "Bearer Token" }));
+}
+
 const props: WorkspaceModuleProps = {
 	user: {
 		id: "admin-1",
@@ -220,9 +230,7 @@ describe("integration workbench", () => {
 		fireEvent.change(screen.getByLabelText("端点 URL"), {
 			target: { value: "https://metrics.example" },
 		});
-		fireEvent.change(screen.getByLabelText("认证方式"), {
-			target: { value: "bearer" },
-		});
+		await pickBearerAuth();
 		fireEvent.change(screen.getByLabelText("Bearer Token"), {
 			target: { value: "never-return-this" },
 		});
@@ -478,9 +486,7 @@ describe("integration workbench", () => {
 		fireEvent.change(screen.getByLabelText("端点 URL"), {
 			target: { value: "https://replacement.example" },
 		});
-		fireEvent.change(screen.getByLabelText("认证方式"), {
-			target: { value: "bearer" },
-		});
+		await pickBearerAuth();
 		fireEvent.change(screen.getByLabelText("Bearer Token"), {
 			target: { value: "rotation-secret" },
 		});
