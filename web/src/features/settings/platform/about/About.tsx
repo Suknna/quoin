@@ -1,9 +1,9 @@
-import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { RefreshButton } from "@/components/workbench/RefreshButton";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
@@ -59,24 +59,11 @@ export function About({ suspended }: { suspended: boolean }) {
 						组件版本、连接事实和必要的平台维护。未知信息不会被推断为健康。
 					</p>
 				</div>
-				<Button
-					variant="outline"
+				<RefreshButton
+					loading={loading}
+					disabled={suspended}
 					onClick={() => void load()}
-					disabled={suspended || loading}
-				>
-					{loading ? (
-						<>
-							<LoaderCircle
-								className="animate-spin"
-								data-icon="inline-start"
-								aria-hidden="true"
-							/>
-							刷新中…
-						</>
-					) : (
-						"刷新"
-					)}
-				</Button>
+				/>
 			</div>
 			{error && (
 				<Alert variant="destructive">

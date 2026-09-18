@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { newClientCommandId, request } from "@/api/workbench";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { Button } from "@/components/ui/button";
 import {
 	Empty,
@@ -9,7 +11,6 @@ import {
 	EmptyHeader,
 	EmptyTitle,
 } from "@/components/ui/empty";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -211,16 +212,7 @@ export function IntegrationResources({
 				</Alert>
 			)}
 			{loading && (
-				<div
-					className="flex flex-col gap-2"
-					role="status"
-					aria-label="正在读取观测结果"
-				>
-					<Skeleton className="h-10 w-full" />
-					<Skeleton className="h-10 w-full" />
-					<Skeleton className="h-10 w-full" />
-					<Skeleton className="h-10 w-5/6" />
-				</div>
+				<DetailSkeleton label="正在读取观测结果" rows={["line", "line", "line", "line"]} />
 			)}
 			{!loading && !error && items.length === 0 ? (
 				<Empty>
@@ -272,15 +264,11 @@ export function IntegrationResources({
 					</Table>
 				)
 			)}
-			{cursor && (
-				<Button
-					variant="outline"
-					disabled={loading || suspended}
-					onClick={() => void load(cursor)}
-				>
-					加载更多
-				</Button>
-			)}
+			<LoadMoreButton
+				loading={loading || suspended}
+				hasMore={Boolean(cursor)}
+				onLoadMore={() => void load(cursor)}
+			/>
 			{resourceId && selected && (
 				<section className="flex flex-col gap-3" aria-label="资源详情">
 					<div className="flex items-center justify-between">

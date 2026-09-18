@@ -56,7 +56,6 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
 	Table,
@@ -67,6 +66,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	appendFeedback,
 	type FeedbackTimeline,
@@ -447,15 +447,11 @@ export function RunDetail({
 	}
 	if (!detail)
 		return (
-			<div
-				className="flex flex-col gap-3 p-6"
-				role="status"
-				aria-label="正在读取 Run"
-			>
-				<Skeleton className="h-7 w-1/3" />
-				<Skeleton className="h-4 w-full" />
-				<Skeleton className="h-4 w-5/6" />
-				<Skeleton className="h-4 w-2/3" />
+			<div className="p-6">
+				<DetailSkeleton
+					label="正在读取 Run"
+					rows={["title", "line", "line", "line"]}
+				/>
 			</div>
 		);
 	const canAnalyze =
@@ -656,14 +652,11 @@ export function RunDetail({
 					<Feedback reportId={report.id} suspended={props.suspended} />
 				</section>
 			) : reportPending ? (
-				<div
-					className="space-y-3 rounded-md border p-4"
-					role="status"
-					aria-label="正在读取报告"
-				>
-					<Skeleton className="h-5 w-1/4" />
-					<Skeleton className="h-4 w-full" />
-					<Skeleton className="h-4 w-5/6" />
+				<div className="space-y-3 rounded-md border p-4">
+					<DetailSkeleton
+						label="正在读取报告"
+						rows={["title", "line", "line"]}
+					/>
 				</div>
 			) : detail.analysisActive ? (
 				<div
@@ -672,9 +665,10 @@ export function RunDetail({
 					aria-label="分析正在生成报告"
 				>
 					<p className="text-sm text-muted-foreground">分析正在生成报告。</p>
-					<Skeleton className="h-4 w-full" />
-					<Skeleton className="h-4 w-5/6" />
-					<Skeleton className="h-4 w-2/3" />
+					<DetailSkeleton
+						label="分析正在生成报告"
+						rows={["line", "line", "line"]}
+					/>
 				</div>
 			) : (
 				<Alert>
@@ -1710,15 +1704,7 @@ export function useInspectionsModule(
 					Run，或先创建计划并立即采证。计划绑定接入与模板，范围可为整个接入、业务视图或显式对象。
 				</p>
 				{!loaded ? (
-					<div
-						className="flex flex-col gap-3"
-						role="status"
-						aria-label="正在读取巡检计划"
-					>
-						<Skeleton className="h-4 w-full" />
-						<Skeleton className="h-4 w-5/6" />
-						<Skeleton className="h-4 w-2/3" />
-					</div>
+					<DetailSkeleton label="正在读取巡检计划" rows={["line", "line", "line"]} />
 				) : plans.length ? (
 					<Table>
 						<TableHeader>

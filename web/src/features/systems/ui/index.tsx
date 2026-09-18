@@ -30,7 +30,7 @@ import {
 	ItemTitle,
 } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { type BusinessView, listBusinessViews } from "../api";
 import { ViewDetail } from "./view-detail";
 import { ViewEditor } from "./view-editor";
@@ -77,16 +77,7 @@ export function useSystemsModule(
 			<ScrollArea className="min-h-0 min-w-0 flex-1 overflow-x-hidden [&_[data-slot=scroll-area-viewport]]:overflow-x-hidden">
 				{views.length === 0 ? (
 					!loaded ? (
-						<div
-							className="flex flex-col gap-2"
-							role="status"
-							aria-label="正在加载业务视图"
-						>
-							<Skeleton className="h-9 w-full" />
-							<Skeleton className="h-9 w-full" />
-							<Skeleton className="h-9 w-full" />
-							<Skeleton className="h-9 w-4/5" />
-						</div>
+						<DetailSkeleton label="正在加载业务视图" rows={["line", "line", "line", "line"]} />
 					) : (
 						<Empty className="min-h-40">
 							<EmptyHeader>
@@ -190,16 +181,7 @@ export function useSystemsModule(
 					<AlertDescription>{error}</AlertDescription>
 				</Alert>
 			) : !loaded ? (
-				<div
-					className="flex flex-col gap-4"
-					role="status"
-					aria-label="正在读取业务视图"
-				>
-					<Skeleton className="h-7 w-1/3" />
-					<Skeleton className="h-24 w-full" />
-					<Skeleton className="h-24 w-full" />
-					<Skeleton className="h-24 w-3/4" />
-				</div>
+				<DetailSkeleton label="正在读取业务视图" rows={["title", "card", "card", "card"]} />
 			) : (
 				<Empty className="min-h-56">
 					<EmptyHeader>

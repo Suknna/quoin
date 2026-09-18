@@ -39,6 +39,7 @@ import {
 	AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -77,7 +78,6 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -87,6 +87,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	acknowledgeIntakeIssue,
 	fetchIntakeIssues,
@@ -225,18 +226,7 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 				aria-label="搜索支持的平台"
 			/>
 			{loading ? (
-				<div
-					className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
-					role="status"
-					aria-label="正在加载插件目录"
-				>
-					<Skeleton className="h-40 w-full" />
-					<Skeleton className="h-40 w-full" />
-					<Skeleton className="h-40 w-full" />
-					<Skeleton className="h-40 w-full" />
-					<Skeleton className="h-40 w-full" />
-					<Skeleton className="h-40 w-full" />
-				</div>
+				<DetailSkeleton label="正在加载插件目录" rows={["card", "card", "card", "card", "card", "card"]} />
 			) : error ? (
 				<Alert variant="destructive">
 					<AlertTitle>无法加载插件目录</AlertTitle>
@@ -390,16 +380,7 @@ function Instances({
 					</Button>
 				</Alert>
 			) : loading ? (
-				<div
-					className="flex flex-col gap-2"
-					role="status"
-					aria-label="正在加载实例"
-				>
-					<Skeleton className="h-16 w-full" />
-					<Skeleton className="h-16 w-full" />
-					<Skeleton className="h-16 w-full" />
-					<Skeleton className="h-16 w-5/6" />
-				</div>
+				<DetailSkeleton label="正在加载实例" rows={["card", "card", "card", "card"]} />
 			) : filtered.length === 0 ? (
 				<Empty className="min-h-56">
 					<EmptyHeader>
@@ -493,16 +474,14 @@ function Instances({
 					</CardContent>
 				</Card>
 			)}
-			{cursor && (
-				<Button
-					variant="outline"
-					className="self-start"
-					disabled={loadingMore}
-					onClick={() => void loadMore()}
-				>
-					{loadingMore ? "正在加载…" : "加载更多 Alertmanager 实例"}
-				</Button>
-			)}
+			<LoadMoreButton
+				loading={loadingMore}
+				hasMore={Boolean(cursor)}
+				onLoadMore={() => void loadMore()}
+				className="self-start"
+			>
+				加载更多 Alertmanager 实例
+			</LoadMoreButton>
 		</section>
 	);
 }
@@ -965,17 +944,7 @@ function MetricsDetail({
 	}
 	if (loading)
 		return (
-			<div
-				className="flex flex-col gap-4"
-				role="status"
-				aria-label="正在加载指标接入"
-			>
-				<Skeleton className="h-7 w-1/3" />
-				<Skeleton className="h-4 w-1/4" />
-				<Skeleton className="h-24 w-full" />
-				<Skeleton className="h-24 w-full" />
-				<Skeleton className="h-24 w-3/4" />
-			</div>
+			<DetailSkeleton label="正在加载指标接入" rows={["title", "line", "card", "card", "card"]} />
 		);
 	if (!item)
 		return (
@@ -1583,16 +1552,7 @@ function AlertIntakeIssues({
 				</p>
 			</div>
 			{loading ? (
-				<div
-					className="flex flex-col gap-2"
-					role="status"
-					aria-label="正在加载接入问题"
-				>
-					<Skeleton className="h-12 w-full" />
-					<Skeleton className="h-12 w-full" />
-					<Skeleton className="h-12 w-full" />
-					<Skeleton className="h-12 w-5/6" />
-				</div>
+				<DetailSkeleton label="正在加载接入问题" rows={["line", "line", "line", "line"]} />
 			) : (
 				<>
 					{error && (
@@ -1601,9 +1561,14 @@ function AlertIntakeIssues({
 						</Alert>
 					)}
 					{!error && items.length === 0 ? (
-						<p className="text-sm text-muted-foreground">
-							没有待处理接入问题。
-						</p>
+						<Empty>
+							<EmptyHeader>
+								<EmptyTitle>没有待处理接入问题</EmptyTitle>
+								<EmptyDescription>
+									上游投递正常，新异常会出现在这里。
+								</EmptyDescription>
+							</EmptyHeader>
+						</Empty>
 					) : (
 						<Card>
 							<CardContent className="p-0">
@@ -1747,17 +1712,7 @@ function AlertmanagerDetail({
 	}
 	if (loading)
 		return (
-			<div
-				className="flex flex-col gap-4"
-				role="status"
-				aria-label="正在加载 Alertmanager 实例"
-			>
-				<Skeleton className="h-7 w-1/3" />
-				<Skeleton className="h-4 w-1/4" />
-				<Skeleton className="h-24 w-full" />
-				<Skeleton className="h-24 w-full" />
-				<Skeleton className="h-24 w-3/4" />
-			</div>
+			<DetailSkeleton label="正在加载 Alertmanager 实例" rows={["title", "line", "card", "card", "card"]} />
 		);
 	if (!source)
 		return (

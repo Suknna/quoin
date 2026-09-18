@@ -2,6 +2,7 @@ import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { RefreshButton } from "@/components/workbench/RefreshButton";
 import { Button } from "@/components/ui/button";
 import {
 	Field,
@@ -134,25 +135,12 @@ export function Runtimes({
 						首次注册与替代注册均只显示一次令牌。
 					</p>
 				</div>
-				<Button
+				<RefreshButton
 					size="sm"
-					variant="outline"
-					disabled={suspended || loading || !!pending}
+					loading={loading}
+					disabled={suspended || !!pending}
 					onClick={() => void refresh()}
-				>
-					{loading ? (
-						<>
-							<LoaderCircle
-								className="animate-spin"
-								data-icon="inline-start"
-								aria-hidden="true"
-							/>
-							刷新中…
-						</>
-					) : (
-						"刷新"
-					)}
-				</Button>
+				/>
 			</div>
 			{error && (
 				<Alert variant="destructive">

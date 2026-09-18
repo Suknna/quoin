@@ -32,9 +32,9 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	listAlertmanagerInstances,
 	listMetricsInstances,
@@ -243,19 +243,7 @@ export function ViewEditor({
 				</CardHeader>
 				<CardContent>
 					{loading ? (
-						<div
-							className="flex flex-col gap-4"
-							role="status"
-							aria-label="正在读取业务视图"
-						>
-							<div className="grid gap-3 md:grid-cols-2">
-								<Skeleton className="h-9 w-full" />
-								<Skeleton className="h-9 w-full" />
-							</div>
-							<Skeleton className="h-20 w-full" />
-							<Skeleton className="h-9 w-full" />
-							<Skeleton className="h-9 w-2/3" />
-						</div>
+						<DetailSkeleton label="正在读取业务视图" rows={["line", "line", "card", "line", "line"]} />
 					) : (
 						<FieldGroup>
 							{error && (
@@ -347,7 +335,7 @@ export function ViewEditor({
 												<SelectTrigger aria-label="来源接入">
 													<SelectValue
 														placeholder={
-															connections === undefined ? "读取中…" : "选择接入"
+															connections === undefined ? "读取中" : "选择接入"
 														}
 													/>
 												</SelectTrigger>
@@ -447,14 +435,7 @@ export function ViewEditor({
 													</p>
 												)}
 												{alertSources === undefined && (
-													<div
-														className="flex flex-col gap-2"
-														role="status"
-														aria-label="正在读取告警源"
-													>
-														<Skeleton className="h-5 w-2/3" />
-														<Skeleton className="h-5 w-1/2" />
-													</div>
+													<DetailSkeleton label="正在读取告警源" rows={["line", "line"]} />
 												)}
 											</div>
 											<FieldDescription>

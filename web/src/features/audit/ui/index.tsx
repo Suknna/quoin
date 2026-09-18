@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { newClientCommandId, WorkbenchApiError } from "@/api/workbench";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -38,7 +40,6 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Table,
 	TableBody,
@@ -303,15 +304,7 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				</Alert>
 			)}
 			{loading ? (
-				<div
-					className="flex flex-col gap-3"
-					role="status"
-					aria-label="正在读取审计事件"
-				>
-					<Skeleton className="h-4 w-full" />
-					<Skeleton className="h-4 w-5/6" />
-					<Skeleton className="h-4 w-2/3" />
-				</div>
+				<DetailSkeleton label="正在读取审计事件" rows={["line", "line", "line"]} />
 			) : items.length === 0 && !error ? (
 				<Empty>
 					<EmptyHeader>
@@ -383,13 +376,11 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 						</Table>
 						{cursor && (
 							<div>
-								<Button
-									variant="outline"
-									disabled={loadingMore}
-									onClick={() => void loadMore()}
-								>
-									{loadingMore ? "正在加载…" : "加载更多"}
-								</Button>
+								<LoadMoreButton
+									loading={loadingMore}
+									hasMore={Boolean(cursor)}
+									onLoadMore={() => void loadMore()}
+								/>
 							</div>
 						)}
 					</>
@@ -477,15 +468,7 @@ function CorrelationDetails({
 					</Alert>
 				)}
 				{loading ? (
-					<div
-						className="flex flex-col gap-3"
-						role="status"
-						aria-label="正在读取关联事件"
-					>
-						<Skeleton className="h-4 w-full" />
-						<Skeleton className="h-4 w-5/6" />
-						<Skeleton className="h-4 w-2/3" />
-					</div>
+					<DetailSkeleton label="正在读取关联事件" rows={["line", "line", "line"]} />
 				) : events.length === 0 ? (
 					<Empty>
 						<EmptyHeader>
@@ -534,13 +517,11 @@ function CorrelationDetails({
 				)}
 				{cursor && (
 					<DialogFooter>
-						<Button
-							variant="outline"
-							disabled={loadingMore}
-							onClick={() => void loadMore()}
-						>
-							{loadingMore ? "正在加载…" : "加载更多"}
-						</Button>
+						<LoadMoreButton
+							loading={loadingMore}
+							hasMore={Boolean(cursor)}
+							onLoadMore={() => void loadMore()}
+						/>
 					</DialogFooter>
 				)}
 			</DialogContent>

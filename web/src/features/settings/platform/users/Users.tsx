@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
@@ -41,6 +42,7 @@ function collectContacts(draft: ContactDraft): AdminContactInput[] {
  * 因此管理员的行不提供停用或渠道编辑入口。 */
 export function Users({ suspended }: { suspended: boolean }) {
 	const [items, setItems] = useState<AdminUser[]>([]);
+	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 	/** One-shot creation feedback; survives the dialog closing. */
 	const [note, setNote] = useState("");
@@ -59,6 +61,8 @@ export function Users({ suspended }: { suspended: boolean }) {
 			setItems(await listUsers());
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法读取用户。"));
+		} finally {
+			setLoading(false);
 		}
 	};
 	useEffect(() => {
@@ -128,8 +132,21 @@ export function Users({ suspended }: { suspended: boolean }) {
 					</TableRow>
 				</TableHeader>
 				<TableBody>
-					{items.map(user => (
-						<TableRow key={user.id}>
+					{loading ? (
+						<TableRow>
+							<TableCell colSpan={4}>
+								<DetailSkeleton label="正在读取用户" rows={["line", "line", "line"]} />
+							</TableCell>
+						</TableRow>
+					) : items.length === 0 ? (
+						<TableRow>
+							<TableCell colSpan={4} className="text-center text-muted-foreground">
+								尚无用户。
+							</TableCell>
+						</TableRow>
+					) : (
+						items.map(user => (
+							<TableRow key={user.id}>
 							<TableCell>
 								{user.displayName}
 								<small className="block text-muted-foreground">{user.username}</small>
@@ -169,10 +186,11 @@ export function Users({ suspended }: { suspended: boolean }) {
 									onConfirm={() => void revokeSessions(user.id).then(load).catch(reason => setError(messageOf(reason, "暂时无法撤销会话。")))}
 								>
 									撤销会话
-								</ConfirmAction>
-							</TableCell>
-						</TableRow>
-					))}
+									</ConfirmAction>
+								</TableCell>
+							</TableRow>
+						))
+					)}
 				</TableBody>
 			</Table>
 			<Dialog open={creating} onOpenChange={setCreating}>

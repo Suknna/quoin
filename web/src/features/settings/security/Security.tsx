@@ -18,6 +18,8 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -196,8 +198,10 @@ function Sessions({ suspended }: { suspended: boolean }) {
 	const [error, setError] = useState("");
 	const [pending, setPending] = useState<Session>();
 	const [busy, setBusy] = useState(false);
+	const [sessionsLoading, setSessionsLoading] = useState(true);
 	async function load(nextCursor?: string, append = false) {
 		setError("");
+		setSessionsLoading(true);
 		try {
 			const page = await securityRequest<Page<Session>>(
 				`/api/v1/auth/sessions?limit=50${nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : ""}`,
@@ -208,6 +212,8 @@ function Sessions({ suspended }: { suspended: boolean }) {
 			setCursor(page.nextCursor);
 		} catch (reason) {
 			setError(messageOf(reason));
+		} finally {
+			setSessionsLoading(false);
 		}
 	}
 	useEffect(() => {
@@ -263,7 +269,20 @@ function Sessions({ suspended }: { suspended: boolean }) {
 					</TableRow>
 				</TableHeader>
 				<TableBody>
-					{sessions.map((session) => (
+					{sessionsLoading ? (
+						<TableRow>
+							<TableCell colSpan={5}>
+								<DetailSkeleton label="正在读取登录设备" rows={["line", "line", "line"]} />
+							</TableCell>
+						</TableRow>
+					) : sessions.length === 0 ? (
+						<TableRow>
+							<TableCell colSpan={5} className="text-center text-muted-foreground">
+								没有登录设备记录。
+							</TableCell>
+						</TableRow>
+					) : (
+						sessions.map((session) => (
 						<TableRow key={session.id}>
 							<TableCell>
 								{session.clientLabel}{" "}
@@ -286,15 +305,16 @@ function Sessions({ suspended }: { suspended: boolean }) {
 									撤销
 								</Button>
 							</TableCell>
-						</TableRow>
-					))}
+							</TableRow>
+						))
+					)}
 				</TableBody>
 			</Table>
-			{cursor && (
-				<Button variant="outline" onClick={() => void load(cursor, true)}>
-					加载更多
-				</Button>
-			)}
+			<LoadMoreButton
+				loading={sessionsLoading}
+				hasMore={Boolean(cursor)}
+				onLoadMore={() => void load(cursor, true)}
+			/>
 			<AlertDialog
 				open={Boolean(pending)}
 				onOpenChange={(open) => {

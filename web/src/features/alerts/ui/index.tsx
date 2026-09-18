@@ -69,6 +69,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	type AlertOccurrenceSummary,
 	type AttributionDiagnostic,
@@ -917,14 +918,11 @@ function AlertDetailSheet({
 							</Alert>
 						</div>
 					) : !occurrence ? (
-						<div
-							className="flex flex-col gap-4 p-6"
-							role="status"
-							aria-label="正在加载告警详情"
-						>
-							<Skeleton className="h-7 w-1/3" />
-							<Skeleton className="h-24 w-full" />
-							<Skeleton className="h-24 w-full" />
+						<div className="p-6">
+							<DetailSkeleton
+								label="正在加载告警详情"
+								rows={["title", "card", "card"]}
+							/>
 						</div>
 					) : (
 						<Tabs
@@ -1223,11 +1221,10 @@ function InitialAnalysis({
 				aria-label="正在准备初步分析"
 			>
 				<h2 className="text-sm font-medium">初步分析</h2>
-				<div className="flex flex-col gap-3">
-					<Skeleton className="h-4 w-1/4" />
-					<Skeleton className="h-4 w-full" />
-					<Skeleton className="h-4 w-4/5" />
-				</div>
+				<DetailSkeleton
+					label="正在准备初步分析"
+					rows={["line", "line", "line"]}
+				/>
 			</section>
 		);
 	const running = isActive(analysis.state);
