@@ -11,7 +11,6 @@ import type { WorkspaceModuleProps } from "@/app/module-contract";
 import { alertmanagerReceiverYaml } from "./api";
 import { useIntegrationsModule } from "./ui";
 
-
 async function pickBearerAuth() {
 	// Radix Select opens from the keyboard in jsdom; pointer events need APIs
 	// the environment does not implement.
@@ -40,7 +39,11 @@ const props: WorkspaceModuleProps = {
 	openEvidence: vi.fn(),
 };
 
-function IntegrationView({ route = "/settings/platform/integrations" }: { route?: string }) {
+function IntegrationView({
+	route = "/settings/platform/integrations",
+}: {
+	route?: string;
+}) {
 	const view = useIntegrationsModule({ ...props, route });
 	return <>{view.content}</>;
 }
@@ -159,11 +162,13 @@ describe("integration workbench", () => {
 				],
 			}),
 		);
-		render(<IntegrationView route="/settings/platform/integrations/alertmanager/issues" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/alertmanager/issues" />,
+		);
 		expect(
 			await screen.findByRole("heading", { name: "告警接入问题" }),
 		).toBeInTheDocument();
-		expect(screen.getByText("identity_conflict")).toBeInTheDocument();
+		expect(screen.getByText(/identity_conflict/)).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "确认" })).toBeEnabled();
 	});
 
@@ -223,7 +228,9 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/settings/platform/integrations/prometheus" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/prometheus" />,
+		);
 		fireEvent.change(screen.getByLabelText("实例名称"), {
 			target: { value: "prom-main" },
 		});
@@ -262,14 +269,6 @@ describe("integration workbench", () => {
 		expect(enablePayload).toMatchObject({ qualifiedProbeResultId: "result-1" });
 		expect(screen.getByLabelText("Bearer Token")).toHaveValue("");
 		fetchMock.mockRestore();
-	});
-
-	it("ignores the retired business declaration return route", () => {
-		render(
-			<IntegrationView route="/settings/platform/integrations/prometheus?returnTo=/business-systems/new?draft=local" />,
-		);
-		fireEvent.click(screen.getByRole("button", { name: "返回接入管理" }));
-		expect(props.navigate).toHaveBeenCalledWith("/settings/platform/integrations");
 	});
 
 	it("keeps the created metrics connection after a failed probe and retries without creating it again", async () => {
@@ -324,7 +323,9 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/settings/platform/integrations/prometheus" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/prometheus" />,
+		);
 		fireEvent.change(screen.getByLabelText("实例名称"), {
 			target: { value: "prom-main" },
 		});
@@ -405,7 +406,9 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/settings/platform/integrations/prometheus/prom-main" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/instances?platform=prometheus&instance=prom-main" />,
+		);
 		await waitFor(() =>
 			expect(screen.getAllByText("需要重新验证").length).toBeGreaterThan(0),
 		);
@@ -555,16 +558,22 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/settings/platform/integrations/instances" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/instances" />,
+		);
 		expect(await screen.findByText("mall-prometheus")).toBeInTheDocument();
 		expect(screen.getByText("已停用")).toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "管理" }));
+		fireEvent.click(
+			screen.getByRole("button", { name: /mall-prometheus/ }),
+		);
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/settings/platform/integrations/prometheus/mall-prometheus",
+				"/settings/platform/integrations/instances?platform=prometheus&instance=mall-prometheus",
 			),
 		);
-		expect(props.navigate).not.toHaveBeenCalledWith("/settings/platform/integrations/prometheus/1");
+		expect(props.navigate).not.toHaveBeenCalledWith(
+			"/settings/platform/integrations/prometheus/1",
+		);
 		fetchMock.mockRestore();
 	});
 
@@ -590,7 +599,9 @@ describe("integration workbench", () => {
 					{ status: 500 },
 				);
 			});
-		render(<IntegrationView route="/settings/platform/integrations/alertmanager" />);
+		render(
+			<IntegrationView route="/settings/platform/integrations/alertmanager" />,
+		);
 		fireEvent.change(screen.getByLabelText("来源键"), {
 			target: { value: "production" },
 		});

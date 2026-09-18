@@ -39,9 +39,9 @@ it("shows source observations and opens inspection without loading business syst
 	);
 	expect(await screen.findByText("mall-mysql-exporter")).toBeInTheDocument();
 	expect(screen.getByText("当前观测到")).toBeInTheDocument();
-	fireEvent.click(screen.getByRole("button", { name: "mall-mysql-exporter" }));
+	fireEvent.click(screen.getByRole("button", { name: /mall-mysql-exporter/ }));
 	expect(navigate).toHaveBeenCalledWith(
-		"/settings/platform/integrations/prometheus/lab-prometheus/resources/42",
+		"/settings/platform/integrations/instances?platform=prometheus&instance=lab-prometheus&resource=42",
 	);
 	fireEvent.click(screen.getByRole("button", { name: "立即巡检" }));
 	expect(navigate).toHaveBeenCalledWith(

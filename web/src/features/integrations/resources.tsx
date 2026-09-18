@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { newClientCommandId, request } from "@/api/workbench";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { messageOf, notify } from "@/app/shared";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
 	Empty,
@@ -12,14 +9,9 @@ import {
 	EmptyHeader,
 	EmptyTitle,
 } from "@/components/ui/empty";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { EntityList } from "@/components/EntityList";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 
 interface Resource {
 	id: string;
@@ -43,7 +35,6 @@ const states = {
 	stale: "数据陈旧",
 };
 
-
 export function IntegrationResources({
 	connectionName,
 	navigate,
@@ -59,7 +50,7 @@ export function IntegrationResources({
 	platform?: "prometheus" | "thanos";
 	resourceId?: string;
 }) {
-	const detailBase = `/settings/platform/integrations/${platform}/${encodeURIComponent(connectionName)}`;
+	const detailBase = `/settings/platform/integrations/instances?platform=${platform}&instance=${encodeURIComponent(connectionName)}`;
 	const base = `/api/v1/integrations/${encodeURIComponent(connectionName)}`;
 	const [items, setItems] = useState<Resource[]>([]);
 	const [cursor, setCursor] = useState<string>();
@@ -142,7 +133,9 @@ export function IntegrationResources({
 					setRun(next);
 					if (!["Queued", "Running"].includes(next.state)) void load();
 				})
-				.catch((reason) => setError(messageOf(reason, "暂时无法读取观测结果。")));
+				.catch((reason) =>
+					setError(messageOf(reason, "暂时无法读取观测结果。")),
+				);
 		}, 1500);
 		return () => clearTimeout(timer);
 	}, [base, load, run, suspended]);
@@ -212,7 +205,10 @@ export function IntegrationResources({
 				</Alert>
 			)}
 			{loading && (
-				<DetailSkeleton label="正在读取观测结果" rows={["line", "line", "line", "line"]} />
+				<DetailSkeleton
+					label="正在读取观测结果"
+					rows={["line", "line", "line", "line"]}
+				/>
 			)}
 			{!loading && !error && items.length === 0 ? (
 				<Empty>
@@ -225,43 +221,26 @@ export function IntegrationResources({
 				</Empty>
 			) : (
 				items.length > 0 && (
-					<Table>
-						<TableHeader>
-							<TableRow>
-								<TableHead>对象</TableHead>
-								<TableHead>类型</TableHead>
-								<TableHead>观测状态</TableHead>
-								<TableHead>最后观测时间</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{items.map((item) => (
-								<TableRow key={item.id}>
-									<TableCell>
-										<Button
-											variant="link"
-											onClick={() =>
-												navigate(
-													`${detailBase}/resources/${encodeURIComponent(item.id)}`,
-												)
-											}
-										>
-											{item.displayName ?? item.labels.instance ?? item.id}
-										</Button>
-									</TableCell>
-									<TableCell>{item.objectType}</TableCell>
-									<TableCell>
-										<Badge variant="outline">{states[item.state]}</Badge>
-									</TableCell>
-									<TableCell>
-										{item.lastObservedAt
-											? new Date(item.lastObservedAt).toLocaleString()
-											: "尚无成功观测"}
-									</TableCell>
-								</TableRow>
-							))}
-						</TableBody>
-					</Table>
+					<EntityList
+						items={items.map((item) => ({
+							id: item.id,
+							title: item.displayName ?? item.labels.instance ?? item.id,
+							subtitle: item.objectType,
+							badge: { text: states[item.state], variant: "outline" as const },
+							time: item.lastObservedAt
+								? new Date(item.lastObservedAt).toLocaleString()
+								: "尚无成功观测",
+							item,
+						}))}
+						columns={["title", "subtitle", "status", "time"]}
+						onSelect={(row) =>
+							navigate(
+								`${detailBase}&resource=${encodeURIComponent(row.item.id)}`,
+							)
+						}
+						emptyTitle="尚无观测对象"
+						emptyDescription="接入启用后自动观测。空结果不代表整个接入范围健康。"
+					/>
 				)
 			)}
 			<LoadMoreButton

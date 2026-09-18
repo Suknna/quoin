@@ -5,7 +5,6 @@ import { IntegrationResources } from "./resources";
 /* eslint-disable react-refresh/only-export-components -- This route module intentionally colocates its view factory with route components. */
 
 import {
-	BellRing,
 	ChevronRight,
 	Copy,
 	LoaderCircle,
@@ -28,11 +27,13 @@ import type {
 } from "@/app/module-contract";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
+
 /** Integrations live under the settings platform group (平台接入). */
 const INTEGRATIONS_BASE = "/settings/platform/integrations";
-import { Badge } from "@/components/ui/badge";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+
 import { messageOf, notify } from "@/app/shared";
+import { EntityList } from "@/components/EntityList";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -53,7 +54,6 @@ import {
 	Empty,
 	EmptyDescription,
 	EmptyHeader,
-	EmptyMedia,
 	EmptyTitle,
 } from "@/components/ui/empty";
 import {
@@ -71,16 +71,10 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { DetailSheet } from "@/components/workbench/DetailSheet";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import {
 	acknowledgeIntakeIssue,
 	fetchIntakeIssues,
@@ -112,11 +106,9 @@ import {
 } from "./api";
 import type { IntegrationCatalogItem, IntegrationPlatform } from "./types";
 
-
 const formatEventTime = (value?: string | null) =>
 	formatDateTime(value, "等待首条有效事件");
-const formatTime = (value?: string | null) =>
-	formatDateTime(value);
+const formatTime = (value?: string | null) => formatDateTime(value);
 
 function routeParts(route: string) {
 	const pathname = parseRoute(route).pathname;
@@ -133,6 +125,10 @@ function integrationRoute(
 	instanceId?: string,
 ) {
 	return [INTEGRATIONS_BASE, platform, instanceId].filter(Boolean).join("/");
+}
+/** Instance details are a right-hand drawer over the instances list, not routes. */
+function instanceSheetRoute(platform: IntegrationPlatform, name: string) {
+	return `${INTEGRATIONS_BASE}/instances?platform=${encodeURIComponent(platform)}&instance=${encodeURIComponent(name)}`;
 }
 
 function CatalogCard({
@@ -218,7 +214,10 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 				aria-label="搜索支持的平台"
 			/>
 			{loading ? (
-				<DetailSkeleton label="正在加载插件目录" rows={["card", "card", "card", "card", "card", "card"]} />
+				<DetailSkeleton
+					label="正在加载插件目录"
+					rows={["card", "card", "card", "card", "card", "card"]}
+				/>
 			) : error ? (
 				<Alert variant="destructive">
 					<AlertTitle>无法加载插件目录</AlertTitle>
@@ -325,13 +324,6 @@ function Instances({
 		<section className="flex flex-col gap-5">
 			<div className="flex flex-wrap items-end justify-between gap-3">
 				<div>
-					<Button
-						variant="ghost"
-						className="-ml-3"
-						onClick={() => navigate(INTEGRATIONS_BASE)}
-					>
-						返回平台目录
-					</Button>
 					<h1 className="text-2xl font-semibold tracking-tight">已接入实例</h1>
 					<p className="mt-1 text-sm text-muted-foreground">
 						Alertmanager、Prometheus 与 Thanos 接入实例。
@@ -345,127 +337,55 @@ function Instances({
 					新建指标接入
 				</Button>
 			</div>
-			<div className="relative max-w-md">
-				<Search
-					className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
-					aria-hidden="true"
-				/>
-				<Input
-					className="pl-9"
-					value={query}
-					onChange={(event) => setQuery(event.target.value)}
-					placeholder="搜索已加载实例"
-					aria-label="搜索已加载实例"
-				/>
-			</div>
-			{error ? (
-				<Alert variant="destructive">
-					<AlertTitle>无法加载实例</AlertTitle>
-					<AlertDescription>{error}</AlertDescription>
-					<Button
-						className="mt-3"
-						size="sm"
-						variant="outline"
-						onClick={() => void loadFirstPage()}
-					>
-						重试
-					</Button>
-				</Alert>
-			) : loading ? (
-				<DetailSkeleton label="正在加载实例" rows={["card", "card", "card", "card"]} />
-			) : filtered.length === 0 ? (
-				<Empty className="min-h-56">
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<BellRing />
-						</EmptyMedia>
-						<EmptyTitle>
-							{query ? "没有匹配的已加载实例" : "尚未接入实例"}
-						</EmptyTitle>
-						<EmptyDescription>
-							{query
-								? "请使用其他名称搜索。"
-								: "创建接入后，在此管理探测、启用、停用与轮换。"}
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			) : (
-				<Card>
-					<CardContent className="overflow-x-auto p-0">
-						<Table className="w-full min-w-180 table-fixed">
-							<TableHeader>
-								<TableRow>
-									<TableHead className="w-[30%]">实例</TableHead>
-									<TableHead className="w-[12%]">平台</TableHead>
-									<TableHead className="w-[10%]">状态</TableHead>
-									<TableHead className="w-[30%]">端点 / 最近事件</TableHead>
-									<TableHead className="w-[18%]">
-										<span className="sr-only">操作</span>
-									</TableHead>
-								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{filtered.map((item) => (
-									<TableRow
-										key={`${item.platform}-${item.id}`}
-										className="hover:bg-muted/50"
-									>
-										<TableCell
-											className="truncate font-medium"
-											title={item.displayName}
-										>
-											{item.displayName}
-										</TableCell>
-										<TableCell
-											className="truncate"
-											title={platformName(item.platform)}
-										>
-											{platformName(item.platform)}
-										</TableCell>
-										<TableCell>
-											<Badge
-												variant={
-													item.status === "active" ? "secondary" : "outline"
-												}
-											>
-												{statusLabel(item)}
-											</Badge>
-										</TableCell>
-										<TableCell
-											className="truncate"
-											title={
-												item.platform === "alertmanager"
-													? formatEventTime(item.latestValidEventAt)
-													: ((item as MetricsInstance).endpoint ?? "—")
-											}
-										>
-											{item.platform === "alertmanager"
-												? formatEventTime(item.latestValidEventAt)
-												: ((item as MetricsInstance).endpoint ?? "—")}
-										</TableCell>
-										<TableCell>
-											<Button
-												size="sm"
-												variant="ghost"
-												onClick={() =>
-													// Detail routes carry the stable connection name,
-													// matching the server's name-keyed read contract.
-													navigate(
-														integrationRoute(item.platform, item.displayName),
-													)
-												}
-											>
-												管理
-												<ChevronRight aria-hidden="true" />
-											</Button>
-										</TableCell>
-									</TableRow>
-								))}
-							</TableBody>
-						</Table>
-					</CardContent>
-				</Card>
-			)}
+			<EntityList
+				items={filtered.map((item) => ({
+					id: `${item.platform}-${item.id}`,
+					title: item.displayName,
+					subtitle: `${platformName(item.platform)} · ${
+						item.platform === "alertmanager"
+							? formatEventTime(item.latestValidEventAt)
+							: ((item as MetricsInstance).endpoint ?? "—")
+					}`,
+					badge: {
+						text: statusLabel(item),
+						variant:
+							item.status === "active"
+								? ("secondary" as const)
+								: ("outline" as const),
+					},
+					item,
+				}))}
+				columns={["title", "subtitle", "status"]}
+				onSelect={(row) =>
+					// 详情抽屉按稳定连接名寻址，与服务端 name-keyed 读取契约一致。
+					navigate(instanceSheetRoute(row.item.platform, row.item.displayName))
+				}
+				loading={loading}
+				loadingLabel="正在加载实例"
+				error={error}
+				onRetry={() => void loadFirstPage()}
+				emptyTitle={query ? "没有匹配的已加载实例" : "尚未接入实例"}
+				emptyDescription={
+					query
+						? "请使用其他名称搜索。"
+						: "创建接入后，在此管理探测、启用、停用与轮换。"
+				}
+				controls={
+					<div className="relative max-w-md">
+						<Search
+							className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
+							aria-hidden="true"
+						/>
+						<Input
+							className="pl-9"
+							value={query}
+							onChange={(event) => setQuery(event.target.value)}
+							placeholder="搜索已加载实例"
+							aria-label="搜索已加载实例"
+						/>
+					</div>
+				}
+			/>
 			<LoadMoreButton
 				loading={loadingMore}
 				hasMore={Boolean(cursor)}
@@ -674,13 +594,6 @@ function MetricsForm({
 	return (
 		<section className="flex flex-col gap-6">
 			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(INTEGRATIONS_BASE)}
-				>
-					返回接入管理
-				</Button>
 				<h1 className="text-2xl font-semibold tracking-tight">
 					配置 {displayName}
 				</h1>
@@ -753,10 +666,10 @@ function MetricsForm({
 							<Field>
 								<FieldLabel>认证方式</FieldLabel>
 								<AuthTypeSelect
-										value={authType}
-										onChange={setAuthType}
-										disabled={saving || suspended || Boolean(created)}
-									/>
+									value={authType}
+									onChange={setAuthType}
+									disabled={saving || suspended || Boolean(created)}
+								/>
 							</Field>
 							{authType === "basic" && (
 								<>
@@ -940,7 +853,10 @@ function MetricsDetail({
 	}
 	if (loading)
 		return (
-			<DetailSkeleton label="正在加载指标接入" rows={["title", "line", "card", "card", "card"]} />
+			<DetailSkeleton
+				label="正在加载指标接入"
+				rows={["title", "line", "card", "card", "card"]}
+			/>
 		);
 	if (!item)
 		return (
@@ -951,12 +867,6 @@ function MetricsDetail({
 						{error || "该实例不存在或暂时无法读取。"}
 					</AlertDescription>
 				</Alert>
-				<Button
-					className="self-start"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
-				>
-					返回实例列表
-				</Button>
 			</section>
 		);
 	const needsRevalidation = item.revalidationRequired;
@@ -968,21 +878,7 @@ function MetricsDetail({
 				: "已停用";
 	return (
 		<section className="flex flex-col gap-6">
-			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
-				>
-					返回已接入实例
-				</Button>
-				<h1 className="text-2xl font-semibold tracking-tight">
-					{item.displayName}
-				</h1>
-				<p className="mt-1 text-sm text-muted-foreground">
-					{item.platform === "prometheus" ? "Prometheus" : "Thanos"} 指标接入。
-				</p>
-			</div>
+			{/* 抽屉头部（DetailSheet）负责实例名标题。 */}
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>{error}</AlertDescription>
@@ -1116,7 +1012,9 @@ function MetricsRotate({
 				setTlsServerName(current.tlsServerName ?? "");
 				setTlsSkipVerify(current.tlsSkipVerify);
 			})
-			.catch((reason) => setError(messageOf(reason, "暂时无法完成操作，请重试。")));
+			.catch((reason) =>
+				setError(messageOf(reason, "暂时无法完成操作，请重试。")),
+			);
 	}, [id]);
 	useEffect(() => {
 		if (suspended) {
@@ -1158,13 +1056,6 @@ function MetricsRotate({
 	return (
 		<section className="flex flex-col gap-6">
 			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(integrationRoute(platform, id))}
-				>
-					返回接入详情
-				</Button>
 				<h1 className="text-2xl font-semibold tracking-tight">编辑 {id}</h1>
 				<p className="mt-1 text-sm text-muted-foreground">
 					提交将创建新配置与凭据代次；已保存的非秘密字段已预填，旧秘密不会回显。
@@ -1200,10 +1091,10 @@ function MetricsRotate({
 							<Field>
 								<FieldLabel>认证方式</FieldLabel>
 								<AuthTypeSelect
-										value={authType}
-										onChange={setAuthType}
-										disabled={saving || suspended}
-									/>
+									value={authType}
+									onChange={setAuthType}
+									disabled={saving || suspended}
+								/>
 							</Field>
 							{authType === "basic" && (
 								<>
@@ -1353,13 +1244,6 @@ function AlertmanagerForm({
 	return (
 		<section className="flex flex-col gap-6">
 			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(INTEGRATIONS_BASE)}
-				>
-					返回接入管理
-				</Button>
 				<h1 className="text-2xl font-semibold tracking-tight">
 					配置 Alertmanager
 				</h1>
@@ -1443,9 +1327,8 @@ function AlertmanagerForm({
 
 /** Alert delivery faults belong with the Alertmanager lifecycle that produces them. */
 function AlertIntakeIssues({
-	navigate,
 	suspended,
-}: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
+}: Pick<WorkspaceModuleProps, "suspended">) {
 	const [items, setItems] = useState<IntakeIssue[]>([]);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState<string>();
@@ -1485,20 +1368,16 @@ function AlertIntakeIssues({
 	return (
 		<section className="flex flex-col gap-5">
 			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/alertmanager`)}
-				>
-					返回 Alertmanager
-				</Button>
 				<h1 className="text-2xl font-semibold tracking-tight">告警接入问题</h1>
 				<p className="mt-1 text-sm text-muted-foreground">
 					查看上游投递异常并确认已处理的问题。
 				</p>
 			</div>
 			{loading ? (
-				<DetailSkeleton label="正在加载接入问题" rows={["line", "line", "line", "line"]} />
+				<DetailSkeleton
+					label="正在加载接入问题"
+					rows={["line", "line", "line", "line"]}
+				/>
 			) : (
 				<>
 					{error && (
@@ -1516,52 +1395,37 @@ function AlertIntakeIssues({
 							</EmptyHeader>
 						</Empty>
 					) : (
-						<Card>
-							<CardContent className="p-0">
-								<Table>
-									<TableHeader>
-										<TableRow>
-											<TableHead>类型</TableHead>
-											<TableHead>问题键</TableHead>
-											<TableHead>出现次数</TableHead>
-											<TableHead>
-												<span className="sr-only">操作</span>
-											</TableHead>
-										</TableRow>
-									</TableHeader>
-									<TableBody>
-										{items.map((item) => (
-											<TableRow key={item.id}>
-												<TableCell>{item.kind}</TableCell>
-												<TableCell>{item.issueKey}</TableCell>
-												<TableCell>{item.occurrenceCount}</TableCell>
-												<TableCell>
-													<Button
-														size="sm"
-														variant="outline"
-														disabled={suspended || busy === item.id}
-														onClick={() => void acknowledge(item)}
-													>
-														{busy === item.id ? (
-															<>
-																<LoaderCircle
-																	className="animate-spin"
-																	data-icon="inline-start"
-																	aria-hidden="true"
-																/>
-																确认中…
-															</>
-														) : (
-															"确认"
-														)}
-													</Button>
-												</TableCell>
-											</TableRow>
-										))}
-									</TableBody>
-								</Table>
-							</CardContent>
-						</Card>
+						<EntityList
+							items={items.map((item) => ({
+								id: item.id,
+								title: item.issueKey,
+								subtitle: `类型 ${item.kind} · 出现 ${item.occurrenceCount} 次`,
+								issue: item,
+							}))}
+							columns={["title", "subtitle", "actions"]}
+							renderActions={(row) => (
+								<Button
+									size="sm"
+									variant="outline"
+									disabled={suspended || busy === row.issue.id}
+									onClick={() => void acknowledge(row.issue)}
+								>
+									{busy === row.issue.id ? (
+										<>
+											<LoaderCircle
+												className="animate-spin"
+												data-icon="inline-start"
+												aria-hidden="true"
+											/>
+											确认中…
+										</>
+									) : (
+										"确认"
+									)}
+								</Button>
+							)}
+							emptyTitle="没有待处理接入问题"
+						/>
 					)}
 				</>
 			)}
@@ -1577,11 +1441,9 @@ const credentialStateLabels: Record<string, string> = {
 
 function AlertmanagerDetail({
 	id,
-	navigate,
 	suspended,
 }: {
 	id: string;
-	navigate: (to: string) => void;
 	suspended: boolean;
 }) {
 	const [source, setSource] = useState<AlertmanagerInstance>();
@@ -1666,7 +1528,10 @@ function AlertmanagerDetail({
 	}
 	if (loading)
 		return (
-			<DetailSkeleton label="正在加载 Alertmanager 实例" rows={["title", "line", "card", "card", "card"]} />
+			<DetailSkeleton
+				label="正在加载 Alertmanager 实例"
+				rows={["title", "line", "card", "card", "card"]}
+			/>
 		);
 	if (!source)
 		return (
@@ -1677,31 +1542,11 @@ function AlertmanagerDetail({
 						{error || "该实例不存在或暂时无法读取。"}
 					</AlertDescription>
 				</Alert>
-				<Button
-					className="self-start"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
-				>
-					返回实例列表
-				</Button>
 			</section>
 		);
 	return (
 		<section className="flex flex-col gap-6">
-			<div>
-				<Button
-					variant="ghost"
-					className="-ml-3"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
-				>
-					返回已接入实例
-				</Button>
-				<h1 className="text-2xl font-semibold tracking-tight">
-					{source.displayName}
-				</h1>
-				<p className="mt-1 text-sm text-muted-foreground">
-					Alertmanager 告警来源。
-				</p>
-			</div>
+			{/* 抽屉头部（DetailSheet）负责实例名标题。 */}
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>{error}</AlertDescription>
@@ -1763,7 +1608,7 @@ function AlertmanagerDetail({
 									suspended || source.status !== "active" || Boolean(busy)
 								}
 								destructive
-									onConfirm={() => void disable()}
+								onConfirm={() => void disable()}
 							>
 								停用来源
 							</ConfirmAction>
@@ -1799,61 +1644,38 @@ function AlertmanagerDetail({
 						</EmptyHeader>
 					</Empty>
 				) : (
-					<Card>
-						<CardContent className="p-0">
-							<Table>
-								<TableHeader>
-									<TableRow>
-										<TableHead>凭据 ID</TableHead>
-										<TableHead>状态</TableHead>
-										<TableHead>创建时间</TableHead>
-										<TableHead>首次使用</TableHead>
-										<TableHead>
-											<span className="sr-only">操作</span>
-										</TableHead>
-									</TableRow>
-								</TableHeader>
-								<TableBody>
-									{credentials.map((credential) => (
-										<TableRow key={credential.id}>
-											<TableCell className="font-mono text-xs">
-												{credential.id}
-											</TableCell>
-											<TableCell>
-												<Badge
-													variant={
-														credential.state === "Retired"
-															? "outline"
-															: "secondary"
-													}
-												>
-													{credentialStateLabels[credential.state] ??
-														credential.state}
-												</Badge>
-											</TableCell>
-											<TableCell>{formatTime(credential.createdAt)}</TableCell>
-											<TableCell>
-												{formatTime(credential.firstUsedAt)}
-											</TableCell>
-											<TableCell>
-												{credential.state === "PendingRetirement" && (
-													<ConfirmAction
-														title="退休此凭据？"
-														description="确认新凭据已经在上游 Alertmanager 中使用。退休后旧凭据无法恢复。"
-														disabled={suspended || Boolean(busy)}
-														destructive
-													onConfirm={() => void retire(credential)}
-													>
-														{busy === credential.id ? "退休中…" : "退休"}
-													</ConfirmAction>
-												)}
-											</TableCell>
-										</TableRow>
-									))}
-								</TableBody>
-							</Table>
-						</CardContent>
-					</Card>
+					<EntityList
+						items={credentials.map((credential) => ({
+							id: credential.id,
+							title: credential.id,
+							subtitle: `创建 ${formatTime(credential.createdAt)} · 首次使用 ${formatTime(credential.firstUsedAt)}`,
+							badge: {
+								text:
+									credentialStateLabels[credential.state] ?? credential.state,
+								variant:
+									credential.state === "Retired"
+										? ("outline" as const)
+										: ("secondary" as const),
+							},
+							credential,
+						}))}
+						columns={["title", "subtitle", "status", "actions"]}
+						renderActions={(row) =>
+							row.credential.state === "PendingRetirement" ? (
+								<ConfirmAction
+									title="退休此凭据？"
+									description="确认新凭据已经在上游 Alertmanager 中使用。退休后旧凭据无法恢复。"
+									disabled={suspended || Boolean(busy)}
+									destructive
+									onConfirm={() => void retire(row.credential)}
+								>
+									{busy === row.credential.id ? "退休中…" : "退休"}
+								</ConfirmAction>
+							) : null
+						}
+						emptyTitle="没有凭据元数据"
+						emptyDescription="请刷新，或检查来源是否已被退休。"
+					/>
 				)}
 			</section>
 			<SecretReveal
@@ -1885,35 +1707,52 @@ export function useIntegrationsModule(
 			),
 		};
 	const [platform, id] = routeParts(props.route);
+	const routeQuery = parseRoute(props.route).searchParams;
+	// 实例详情是实例列表页上的右侧抽屉（与告警一致），由 query 标志驱动。
+	const sheetPlatform = routeQuery.get(
+		"platform",
+	) as IntegrationPlatform | null;
+	const sheetInstance = routeQuery.get("instance");
+	const instanceSheet =
+		platform === "instances" && sheetPlatform && sheetInstance ? (
+			<DetailSheet
+				open
+				onClose={() => props.navigate(`${INTEGRATIONS_BASE}/instances`)}
+				title={sheetInstance}
+				description={
+					sheetPlatform === "alertmanager"
+						? "Alertmanager 告警来源。"
+						: `${sheetPlatform === "prometheus" ? "Prometheus" : "Thanos"} 指标接入。`
+				}
+			>
+				<div className="min-h-0 flex-1 overflow-y-auto">
+					<div className="p-4 sm:p-6">
+						{sheetPlatform === "alertmanager" ? (
+							<AlertmanagerDetail
+								id={decodeURIComponent(sheetInstance)}
+								suspended={props.suspended}
+							/>
+						) : (
+							<MetricsDetail
+								resourceId={routeQuery.get("resource") ?? undefined}
+								id={decodeURIComponent(sheetInstance)}
+								navigate={props.navigate}
+								suspended={props.suspended}
+							/>
+						)}
+					</div>
+				</div>
+			</DetailSheet>
+		) : null;
 	const content =
 		platform === "alertmanager" && id === "issues" ? (
-			<AlertIntakeIssues
-				navigate={props.navigate}
-				suspended={props.suspended}
-			/>
-		) : platform === "alertmanager" && id ? (
-			<AlertmanagerDetail
-				id={decodeURIComponent(id)}
-				navigate={props.navigate}
-				suspended={props.suspended}
-			/>
+			<AlertIntakeIssues suspended={props.suspended} />
 		) : platform === "alertmanager" ? (
 			<AlertmanagerForm navigate={props.navigate} suspended={props.suspended} />
 		) : platform === "prometheus" || platform === "thanos" ? (
 			id && routeParts(props.route)[2] === "rotate" ? (
 				<MetricsRotate
 					platform={platform}
-					id={decodeURIComponent(id)}
-					navigate={props.navigate}
-					suspended={props.suspended}
-				/>
-			) : id ? (
-				<MetricsDetail
-					resourceId={
-						routeParts(props.route)[2] === "resources"
-							? decodeURIComponent(routeParts(props.route)[3] ?? "")
-							: undefined
-					}
 					id={decodeURIComponent(id)}
 					navigate={props.navigate}
 					suspended={props.suspended}
@@ -1926,7 +1765,10 @@ export function useIntegrationsModule(
 				/>
 			)
 		) : platform === "instances" ? (
-			<Instances navigate={props.navigate} suspended={props.suspended} />
+			<>
+				<Instances navigate={props.navigate} suspended={props.suspended} />
+				{instanceSheet}
+			</>
 		) : platform ? (
 			// Unknown platform segments are ordinary unknown routes and render the
 			// shared not-found view (the retired /integrations/browser and
@@ -1943,6 +1785,7 @@ export function useIntegrationsModule(
 		);
 	return {
 		title: "接入管理",
+		crumbs: integrationCrumbs(props.route),
 		list: (
 			<SettingsNavigation
 				groups={settingsNavGroups}
@@ -1953,6 +1796,42 @@ export function useIntegrationsModule(
 		),
 		content,
 	};
+}
+
+/** Breadcrumb trail for editor-style pages; instance details are drawers without crumbs. */
+function integrationCrumbs(route: string) {
+	const segments = routeParts(route);
+	const [platform, id] = segments;
+	const catalog = { label: "接入管理", to: INTEGRATIONS_BASE };
+	const instances = {
+		label: "已接入实例",
+		to: `${INTEGRATIONS_BASE}/instances`,
+	};
+	if (!platform) return undefined;
+	if (platform === "instances") return [catalog, { label: "已接入实例" }];
+	if (platform === "alertmanager" && id === "issues")
+		return [
+			catalog,
+			{ label: "Alertmanager", to: `${INTEGRATIONS_BASE}/alertmanager` },
+			{ label: "告警接入问题" },
+		];
+	if (platform === "alertmanager")
+		return [catalog, { label: "配置 Alertmanager" }];
+	if (platform === "prometheus" || platform === "thanos") {
+		const name = platform === "prometheus" ? "Prometheus" : "Thanos";
+		if (id && segments[2] === "rotate")
+			return [
+				catalog,
+				instances,
+				{
+					label: decodeURIComponent(id),
+					to: instanceSheetRoute(platform, decodeURIComponent(id)),
+				},
+				{ label: "编辑接入" },
+			];
+		return [catalog, { label: `配置 ${name}` }];
+	}
+	return undefined;
 }
 
 type AuthType = "none" | "basic" | "bearer";
