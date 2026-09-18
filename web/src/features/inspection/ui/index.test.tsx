@@ -246,14 +246,7 @@ describe("inspection run result summary", () => {
 			createdAt: "2026-09-10T10:01:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		const summary = await screen.findByLabelText("巡检结果摘要");
 		expect(within(summary).getByText("已完成")).toBeInTheDocument();
 		expect(within(summary).getByText("1 项检查全部通过")).toBeInTheDocument();
@@ -285,14 +278,7 @@ describe("inspection run result summary", () => {
 		});
 		api.listInspectionReports.mockResolvedValue([]);
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		const summary = await screen.findByLabelText("巡检结果摘要");
 		expect(
 			within(summary).getByText("1 项通过 · 1 项有缺口"),
@@ -337,14 +323,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:01:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={onOpenRun}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={onOpenRun} />);
 	}
 
 	it("keeps long report content in a bounded native scroll container", async () => {
@@ -411,14 +390,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:02:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		fireEvent.click(
 			await screen.findByRole("button", { name: "重新分析现有证据" }),
 		);
@@ -462,14 +434,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:02:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		fireEvent.click(
 			await screen.findByRole("button", { name: "重新分析现有证据" }),
 		);
@@ -520,14 +485,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:02:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		fireEvent.click(
 			await screen.findByRole("button", { name: "重新分析现有证据" }),
 		);
@@ -596,26 +554,14 @@ describe("inspection report feedback", () => {
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
 		const first = render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
+			<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />,
 		);
 		await screen.findByTestId("report-content");
 		fireEvent.click(screen.getByRole("button", { name: "生成详情" }));
 		expect(await screen.findByText("仅本次：只看异常")).toBeInTheDocument();
 		first.unmount();
 		// 证据阅读层往返按路由重建 Run 页面，展开状态按报告 ID 保留。
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		await screen.findByTestId("report-content");
 		expect(screen.getByRole("button", { name: "生成详情" })).toHaveAttribute(
 			"aria-expanded",
@@ -648,14 +594,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:01:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		expect(await screen.findByText("conclusion")).toBeInTheDocument();
 		expect(screen.getByText("连通正常")).toBeInTheDocument();
 		// 未知字段保留，不猜测标签，也不生成额外摘要。
@@ -687,14 +626,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:01:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		expect(await screen.findByText(/原样保留全部原文/)).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "报告原文" }));
 		expect(await screen.findByText(content)).toBeInTheDocument();
@@ -719,14 +651,7 @@ describe("inspection report feedback", () => {
 			createdAt: "2026-09-10T10:01:00Z",
 		});
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		// 报告请求在途时只显示读取状态，不发出“尚无报告”的错误断言。
 		expect(
 			await screen.findByRole("status", { name: "正在读取报告" }),
@@ -756,14 +681,7 @@ describe("inspection report feedback", () => {
 		api.getInspectionRun.mockResolvedValue(frozenDetail);
 		api.listInspectionReports.mockResolvedValue([]);
 		feedback.fetchFeedback.mockResolvedValue({ items: [] });
-		render(
-			<RunDetail
-				runId="6"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		// 冻结配置默认展开（defaultValue 含 frozen 段）。
 		expect(
 			await screen.findByText("冻结的分析配置（Run 创建时）"),
@@ -790,12 +708,7 @@ describe("inspection report feedback", () => {
 			checks: [],
 		});
 		const { unmount } = render(
-			<RunDetail
-				runId="run-9"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
+			<RunDetail runId="run-9" props={props} onOpenRun={vi.fn()} />,
 		);
 		// Terminal run: cancel stays visible (the analysis still shows here) but can no longer be fired.
 		expect(await screen.findByRole("button", { name: "取消" })).toBeDisabled();
@@ -812,14 +725,7 @@ describe("inspection report feedback", () => {
 			analysisActive: false,
 			checks: [],
 		});
-		render(
-			<RunDetail
-				runId="run-9"
-				props={props}
-				onBack={vi.fn()}
-				onOpenRun={vi.fn()}
-			/>,
-		);
+		render(<RunDetail runId="run-9" props={props} onOpenRun={vi.fn()} />);
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "取消" })).toBeEnabled(),
 		);
@@ -856,9 +762,13 @@ describe("plan workspace", () => {
 		// One page request, no business-system precondition and no full cursor walk.
 		expect(api.listInspectionRuns).toHaveBeenCalledTimes(1);
 		expect(api.listInspectionRuns).toHaveBeenCalledWith({});
-		expect(
-			screen.getByRole("button", { name: /Prometheus 连通巡检 · Run 1/ }),
-		).toHaveTextContent("lab-prometheus");
+		// 记录列表并入概览页右侧行式列表（与告警同款），整行点击进入详情。
+		const row = screen.getByRole("button", {
+			name: /Prometheus 连通巡检 · Run 1/,
+		});
+		expect(row).toHaveTextContent("lab-prometheus");
+		fireEvent.click(row);
+		expect(props.navigate).toHaveBeenCalledWith("/inspections?run=1");
 	});
 
 	it("filters runs by a selected plan server-side", async () => {
@@ -889,7 +799,7 @@ describe("plan workspace", () => {
 			analysisActive: false,
 			checks: [],
 		});
-		render(<InspectionView route="/inspections/runs/run-9" />);
+		render(<InspectionView route="/inspections?run=run-9" />);
 		expect(await screen.findByText(/Run run-9/)).toBeInTheDocument();
 		expect(api.getInspectionRun).toHaveBeenCalledWith("run-9");
 	});
@@ -916,7 +826,7 @@ describe("plan workspace", () => {
 			expect(api.createInspectionRun).toHaveBeenCalledWith("prom-up"),
 		);
 		await waitFor(() =>
-			expect(navigate).toHaveBeenCalledWith("/inspections/runs/run-6"),
+			expect(navigate).toHaveBeenCalledWith("/inspections?run=run-6"),
 		);
 	});
 
@@ -943,7 +853,7 @@ describe("plan workspace", () => {
 			expect(api.createInspectionRun).toHaveBeenCalledWith("prom-up"),
 		);
 		await waitFor(() =>
-			expect(navigate).toHaveBeenCalledWith("/inspections/runs/run-7"),
+			expect(navigate).toHaveBeenCalledWith("/inspections?run=run-7"),
 		);
 	});
 

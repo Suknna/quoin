@@ -510,9 +510,6 @@ export function PlanEditor({
 		})) ?? [];
 	return (
 		<div className="space-y-6">
-			<Button variant="ghost" onClick={() => navigate("/inspections")}>
-				返回巡检
-			</Button>
 			<header>
 				<h2 className="text-xl font-semibold">
 					{editing ? "编辑巡检计划" : "新建巡检计划"}

@@ -476,12 +476,10 @@ function Feedback({
 export function RunDetail({
 	runId,
 	props,
-	onBack,
 	onOpenRun,
 }: {
 	runId: string;
 	props: WorkspaceModuleProps;
-	onBack: () => void;
 	onOpenRun: (id: string) => void;
 }) {
 	const [detail, setDetail] = useState<InspectionRunDetail>();
@@ -708,20 +706,11 @@ export function RunDetail({
 	return (
 		<div className="space-y-6">
 			{analyzeDialog}
-			<Button variant="ghost" onClick={onBack}>
-				返回巡检记录
-			</Button>
-			<header className="flex flex-wrap items-start justify-between gap-3">
-				<div>
-					<h2 className="text-xl font-semibold">
-						{frozen?.displayName ?? detail.planKey} · Run {detail.id}
-					</h2>
-					<p className="text-sm text-muted-foreground">
-						{detail.planKey} · 来源接入 {detail.connectionName ?? "—"} ·
-						报告版本不可修改。
-					</p>
-				</div>
-			</header>
+			{/* 抽屉头部（DetailSheet）负责标题；这里保留来源与版本约束说明。 */}
+			<p className="text-sm text-muted-foreground">
+				{detail.planKey} · 来源接入 {detail.connectionName ?? "—"} ·
+				报告版本不可修改。
+			</p>
 			{error && (
 				<Alert variant="destructive">
 					<AlertTitle>操作失败</AlertTitle>

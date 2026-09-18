@@ -7,8 +7,8 @@ import type {
 	WorkspaceModuleView,
 } from "@/app/module-contract";
 import { messageOf, notify } from "@/app/shared";
+import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -19,18 +19,11 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import {
-	Empty,
-	EmptyDescription,
-	EmptyHeader,
-	EmptyTitle,
-} from "@/components/ui/empty";
-import {
 	Field,
 	FieldDescription,
 	FieldGroup,
 	FieldLabel,
 } from "@/components/ui/field";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
 	Select,
 	SelectContent,
@@ -39,15 +32,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
-import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { DetailSheet } from "@/components/workbench/DetailSheet";
 import {
 	createInspectionRun,
 	formatInspectionTime,
@@ -75,7 +60,8 @@ function parts(route: string) {
 	return { path: pathname, query: searchParams };
 }
 function runRoute(runId: string) {
-	return `/inspections/runs/${encodeURIComponent(runId)}`;
+	// 详情是右侧抽屉，由 query 标志驱动：列表页保持在抽屉下方挂载。
+	return `/inspections?run=${encodeURIComponent(runId)}`;
 }
 function newPlanRoute(prefill?: PlanEditorPrefill) {
 	const query = new URLSearchParams();
@@ -222,9 +208,7 @@ export function useInspectionsModule(
 	props: WorkspaceModuleProps,
 ): WorkspaceModuleView {
 	const { path, query } = parts(props.route);
-	const runId = path.startsWith("/inspections/runs/")
-		? decodeURIComponent(path.slice("/inspections/runs/".length)) || undefined
-		: undefined;
+	const runId = query.get("run") || undefined;
 	const creatingPlan = path === "/inspections/plans/new";
 	const editMatch = path.match(/^\/inspections\/plans\/([^/]+)\/edit$/);
 	const editPlanKey = editMatch ? decodeURIComponent(editMatch[1]) : undefined;
@@ -364,57 +348,6 @@ export function useInspectionsModule(
 	const hintHasEnabledPlan = plans.some(
 		(item) => item.enabled && item.connectionName === connectionHint,
 	);
-	const list = (
-		<div className="flex h-full flex-col gap-3 p-3">
-			<div className="font-medium">巡检记录</div>
-			<Select value={planFilter} onValueChange={setPlanFilter}>
-				<SelectTrigger aria-label="按计划筛选">
-					<SelectValue placeholder="全部计划" />
-				</SelectTrigger>
-				<SelectContent>
-					<SelectGroup>
-						<SelectItem value="all">全部计划</SelectItem>
-						{plans.map((item) => (
-							<SelectItem key={item.planKey} value={item.planKey}>
-								{item.displayName}
-							</SelectItem>
-						))}
-					</SelectGroup>
-				</SelectContent>
-			</Select>
-			<ScrollArea className="min-h-0 flex-1">
-				{runs.map((run) => (
-					<Button
-						key={run.id}
-						variant={runId === run.id ? "secondary" : "ghost"}
-						className="mb-1 h-auto w-full justify-start whitespace-normal text-left"
-						onClick={() => props.navigate(runRoute(run.id))}
-					>
-						<span className="block">
-							<strong className="block">
-								{planName(run.planKey)} · Run {run.id}
-							</strong>
-							<small className="block text-muted-foreground">
-								{[
-									run.connectionName,
-									run.triggerKind === "manual" ? "手动" : "定时",
-									formatInspectionTime(run.createdAt),
-								]
-									.filter(Boolean)
-									.join(" · ")}
-							</small>
-							<Badge variant="outline" className={statusBadgeClass(run.state)}>
-								{inspectionStateText[run.state]}
-							</Badge>
-						</span>
-					</Button>
-				))}
-				{runsLoaded && !runs.length && (
-					<p className="p-2 text-sm text-muted-foreground">没有巡检记录</p>
-				)}
-			</ScrollArea>
-		</div>
-	);
 	const overview = (
 		<div className="space-y-4">
 			{error && (
@@ -454,86 +387,107 @@ export function useInspectionsModule(
 				<p className="text-sm text-muted-foreground">
 					计划绑定接入与模板，按范围定期或手动采证；每次运行生成一份不可修改的报告。
 				</p>
-				{!loaded ? (
-					<DetailSkeleton
-						label="正在读取巡检计划"
-						rows={["line", "line", "line"]}
-					/>
-				) : plans.length ? (
-					<Table>
-						<TableHeader>
-							<TableRow>
-								<TableHead>计划</TableHead>
-								<TableHead>接入</TableHead>
-								<TableHead>范围</TableHead>
-								<TableHead>调度</TableHead>
-								<TableHead>状态</TableHead>
-								<TableHead>更新时间</TableHead>
-								<TableHead>
-									<span className="sr-only">操作</span>
-								</TableHead>
-							</TableRow>
-						</TableHeader>
-						<TableBody>
-							{plans.map((item) => (
-								<TableRow key={item.planKey}>
-									<TableCell>
-										<span className="block font-medium">
-											{item.displayName}
-										</span>
-										<small className="block text-muted-foreground">
-											{item.planKey}
-										</small>
-									</TableCell>
-									<TableCell>{item.connectionName}</TableCell>
-									<TableCell>{inspectionScopeText(item.scope)}</TableCell>
-									<TableCell>{inspectionScheduleText(item)}</TableCell>
-									<TableCell>
-										<Badge variant={item.enabled ? "secondary" : "outline"}>
-											{item.enabled ? "已启用" : "已停用"}
-										</Badge>
-									</TableCell>
-									<TableCell>{formatInspectionTime(item.updatedAt)}</TableCell>
-									<TableCell>
-										<div className="flex gap-2">
-											<Button
-												variant="outline"
-												size="sm"
-												aria-label={`编辑 ${item.displayName}`}
-												disabled={props.suspended}
-												onClick={() =>
-													props.navigate(
-														`/inspections/plans/${encodeURIComponent(item.planKey)}/edit`,
-													)
-												}
-											>
-												编辑
-											</Button>
-											<Button
-												variant="outline"
-												size="sm"
-												aria-label={`运行 ${item.displayName}`}
-												disabled={!item.enabled || busy || props.suspended}
-												onClick={() => void startPlan(item.planKey)}
-											>
-												运行
-											</Button>
-										</div>
-									</TableCell>
-								</TableRow>
-							))}
-						</TableBody>
-					</Table>
-				) : (
-					<Empty>
-						<EmptyHeader>
-							<EmptyTitle>还没有巡检计划</EmptyTitle>
-							<EmptyDescription>
-								使用标题栏的“新建计划”为接入创建第一个巡检计划。
-							</EmptyDescription>
-						</EmptyHeader>
-					</Empty>
-				)}
+				<EntityList
+					items={plans.map((item) => ({
+						id: item.planKey,
+						title: item.displayName,
+						subtitle: [
+							item.planKey,
+							item.connectionName,
+							inspectionScopeText(item.scope),
+							inspectionScheduleText(item),
+						].join(" · "),
+						badge: {
+							text: item.enabled ? "已启用" : "已停用",
+							variant: item.enabled
+								? ("secondary" as const)
+								: ("outline" as const),
+						},
+						time: formatInspectionTime(item.updatedAt),
+						plan: item,
+					}))}
+					columns={["title", "subtitle", "status", "time", "actions"]}
+					onSelect={(item) =>
+						props.navigate(
+							`/inspections/plans/${encodeURIComponent(item.plan.planKey)}/edit`,
+						)
+					}
+					renderActions={(item) => (
+						<div className="flex gap-2">
+							<Button
+								variant="outline"
+								size="sm"
+								aria-label={`编辑 ${item.plan.displayName}`}
+								disabled={props.suspended}
+								onClick={() =>
+									props.navigate(
+										`/inspections/plans/${encodeURIComponent(item.plan.planKey)}/edit`,
+									)
+								}
+							>
+								编辑
+							</Button>
+							<Button
+								variant="outline"
+								size="sm"
+								aria-label={`运行 ${item.plan.displayName}`}
+								disabled={!item.plan.enabled || busy || props.suspended}
+								onClick={() => void startPlan(item.plan.planKey)}
+							>
+								运行
+							</Button>
+						</div>
+					)}
+					loading={!loaded}
+					loadingLabel="正在读取巡检计划"
+					emptyTitle="还没有巡检计划"
+					emptyDescription="使用标题栏的“新建计划”为接入创建第一个巡检计划。"
+				/>
+			</section>
+			<section className="space-y-3">
+				<div className="flex flex-wrap items-center justify-between gap-2">
+					<h2 className="text-xl font-semibold">巡检记录</h2>
+					<Select value={planFilter} onValueChange={setPlanFilter}>
+						<SelectTrigger aria-label="按计划筛选" className="w-40">
+							<SelectValue placeholder="全部计划" />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectGroup>
+								<SelectItem value="all">全部计划</SelectItem>
+								{plans.map((item) => (
+									<SelectItem key={item.planKey} value={item.planKey}>
+										{item.displayName}
+									</SelectItem>
+								))}
+							</SelectGroup>
+						</SelectContent>
+					</Select>
+				</div>
+				<p className="text-sm text-muted-foreground">
+					每次运行生成一份不可修改的报告；点击记录查看详情。
+				</p>
+				<EntityList
+					items={runs.map((run) => ({
+						id: run.id,
+						title: `${planName(run.planKey)} · Run ${run.id}`,
+						subtitle: [run.connectionName, run.triggerKind === "manual" ? "手动" : "定时"]
+						.filter(Boolean)
+						.join(" · "),
+						badge: {
+							text: inspectionStateText[run.state],
+							variant: "outline" as const,
+							className: statusBadgeClass(run.state),
+						},
+						time: formatInspectionTime(run.createdAt),
+						run,
+					}))}
+					columns={["title", "subtitle", "status", "time"]}
+					selectedId={runId}
+					onSelect={(item) => props.navigate(runRoute(item.run.id))}
+					loading={!runsLoaded}
+					loadingLabel="正在读取巡检记录"
+					emptyTitle="没有巡检记录"
+				/>
 			</section>
 		</div>
 	);
@@ -574,27 +528,51 @@ export function useInspectionsModule(
 			</Button>
 		</>
 	) : undefined;
+	const runSummary = runId ? runs.find((run) => run.id === runId) : undefined;
+	const runSheet = runId && (
+		<DetailSheet
+			open
+			onClose={() => props.navigate("/inspections")}
+			title={
+				runSummary
+					? `${planName(runSummary.planKey)} · Run ${runSummary.id}`
+					: `Run ${runId}`
+			}
+			description="报告版本不可修改；关闭抽屉返回巡检概览。"
+		>
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				<div className="space-y-6 p-4 sm:p-6">
+					<RunDetail
+						runId={runId}
+						props={props}
+						onOpenRun={(id) => props.navigate(runRoute(id))}
+					/>
+				</div>
+			</div>
+		</DetailSheet>
+	);
 	return {
-		title: runId
-			? "巡检 Run"
-			: creatingPlan
-				? "新建巡检计划"
-				: editPlanKey
-					? "编辑巡检计划"
-					: "巡检",
-		list,
+		title: creatingPlan
+			? "新建巡检计划"
+			: editPlanKey
+				? "编辑巡检计划"
+				: "巡检",
+		crumbs: creatingPlan
+			? [{ label: "巡检", to: "/inspections" }, { label: "新建巡检计划" }]
+			: editPlanKey
+				? [
+						{ label: "巡检", to: "/inspections" },
+						{ label: `编辑 ${planName(editPlanKey)}` },
+					]
+				: undefined,
+		// 记录列表并入右侧概览页：第二栏只保留共享的运维模块导航，与告警列表一致。
+		list: null,
 		actions,
 		content: (
 			<>
 				{chooserDialog}
-				{runId ? (
-					<RunDetail
-						runId={runId}
-						props={props}
-						onBack={() => props.navigate("/inspections")}
-						onOpenRun={(id) => props.navigate(runRoute(id))}
-					/>
-				) : creatingPlan || editPlanKey ? (
+				{runSheet}
+				{creatingPlan || editPlanKey ? (
 					<PlanEditor
 						suspended={props.suspended}
 						navigate={props.navigate}
