@@ -16,7 +16,7 @@ import {
 	useState,
 } from "react";
 import { WorkbenchApiError } from "@/api/workbench";
-import { ErrorMessage, messageOf } from "@/app/shared";
+import { ErrorMessage, messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -132,7 +132,6 @@ export function DeliveryPane({
 	};
 	async function submit(event: FormEvent) {
 		event.preventDefault();
-		setError("");
 		if (!view) return;
 		// Only the channel owning the focused form is rebuilt; every other
 		// channel keeps its stored configuration verbatim, arbitrary settings
@@ -151,6 +150,7 @@ export function DeliveryPane({
 			channel = built.channel;
 			Object.assign(secrets, built.secrets);
 		} catch (reason) {
+			// 本地构建校验（如 Webhook 必须 https）属于表单内反馈，保留内联。
 			setError(messageOf(reason, "投递设置没有保存成功，请检查后重试。"));
 			return;
 		}
@@ -164,6 +164,7 @@ export function DeliveryPane({
 				secrets,
 				expectedRowVersion: view.rowVersion,
 			});
+			notify.success("投递设置已保存");
 			onDone();
 		} catch (reason) {
 			if (
@@ -180,17 +181,17 @@ export function DeliveryPane({
 				// Refresh only the authoritative row version; keep local edits.
 				const fresh = await authFlowApi.readDelivery().catch(() => undefined);
 				if (fresh) setView(fresh);
-				setError("配置已被其他人更新，请重试保存。");
+				notify.warning("配置已被其他人更新，请重试保存。");
 				return;
 			}
 			if (
 				reason instanceof WorkbenchApiError &&
 				reason.code === "deployment_owned"
 			) {
-				setError("投递配置由部署文件管理，无法在此修改。");
+				notify.warning("投递配置由部署文件管理，无法在此修改。");
 				return;
 			}
-			setError(messageOf(reason, "投递设置没有保存成功，请检查后重试。"));
+			notify.error(reason, "投递设置没有保存成功，请检查后重试。");
 		} finally {
 			setSaving(false);
 		}

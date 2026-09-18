@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError } from "@/api/workbench";
+import { notify } from "@/app/shared";
 import type { AuthFlow } from "./api";
 
 const flowApi = vi.hoisted(() => ({
@@ -222,10 +223,15 @@ describe("AuthScreen", () => {
 		flowApi.start.mockRejectedValue(
 			new WorkbenchApiError(401, "用户名或密码不正确。"),
 		);
+		// 登录失败由全局 toast 反馈（测试环境未挂载 Toaster，断言通知调用本身）。
+		const notifyError = vi.spyOn(notify, "error").mockImplementation(() => 0);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		await submitCredentials();
-		expect(await screen.findByRole("alert")).toHaveTextContent(
-			"用户名或密码不正确",
+		await waitFor(() =>
+			expect(notifyError).toHaveBeenCalledWith(
+				expect.any(WorkbenchApiError),
+				"登录暂时不可用，请重试。",
+			),
 		);
 		expect(screen.getByLabelText("用户名")).toHaveValue("admin");
 		expect(screen.getByLabelText("密码")).toHaveValue("");
@@ -506,12 +512,16 @@ describe("AuthScreen", () => {
 		flowApi.verify.mockRejectedValue(
 			new WorkbenchApiError(422, "验证码不正确或已失效。", "invalid_code"),
 		);
+		const notifyError = vi.spyOn(notify, "error").mockImplementation(() => 0);
 		render(<AuthScreen onAuthenticated={vi.fn()} />);
 		await submitCredentials();
 		await screen.findByText(/a\*\*\*@quoin\.dev/);
 		await sendAndEnterCode();
-		expect(await screen.findByRole("alert")).toHaveTextContent(
-			"验证码不正确或已失效",
+		await waitFor(() =>
+			expect(notifyError).toHaveBeenCalledWith(
+				expect.any(WorkbenchApiError),
+				"验证没有通过，请重试。",
+			),
 		);
 		// A spent code is a plain failure: no automatic resend happens.
 		expect(flowApi.sendChallenge).toHaveBeenCalledTimes(1);

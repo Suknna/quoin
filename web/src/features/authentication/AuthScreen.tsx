@@ -4,7 +4,7 @@ import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError } from "@/api/workbench";
 import { AuthBrandPanel } from "@/app/AuthBrandPanel";
 import { BrandLockup } from "@/app/Brand";
-import { ErrorMessage, messageOf } from "@/app/shared";
+import { ErrorMessage, notify } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Field,
@@ -92,18 +92,16 @@ function LoginPane({
 }) {
 	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
-	const [error, setError] = useState("");
 	const [saving, setSaving] = useState(false);
 	async function submit(event: FormEvent) {
 		event.preventDefault();
-		setError("");
 		setSaving(true);
 		try {
 			onFlow(await authFlowApi.start({ username, password }));
 		} catch (reason) {
-			// Invalid credentials and every other failure render the same way;
+			// Invalid credentials and every other failure surface the same way;
 			// the form stays mounted so the user can correct and retry.
-			setError(messageOf(reason, "登录暂时不可用，请重试。"));
+			notify.error(reason, "登录暂时不可用，请重试。");
 			setPassword("");
 		} finally {
 			setSaving(false);
@@ -119,7 +117,6 @@ function LoginPane({
 					</p>
 				</div>
 				{note && <Note>{note}</Note>}
-				{error && <ErrorMessage>{error}</ErrorMessage>}
 				<Field>
 					<FieldLabel htmlFor="username">用户名</FieldLabel>
 					<Input
@@ -192,7 +189,7 @@ function PasswordPane({
 				onFlowGone();
 				return;
 			}
-			setError(messageOf(reason, "没有设置成功，请重试。"));
+			notify.error(reason, "没有设置成功，请重试。");
 		} finally {
 			setSaving(false);
 			setNewPassword("");
@@ -270,12 +267,10 @@ function ContactPane({
 }) {
 	const [channel, setChannel] = useState<AuthContactChannel | null>(null);
 	const [target, setTarget] = useState("");
-	const [error, setError] = useState("");
 	const [saving, setSaving] = useState(false);
 	async function submit(event: FormEvent) {
 		event.preventDefault();
 		if (!channel) return;
-		setError("");
 		setSaving(true);
 		try {
 			await authFlowApi.addContact(channel, target);
@@ -285,7 +280,7 @@ function ContactPane({
 				onFlowGone();
 				return;
 			}
-			setError(messageOf(reason, "没有登记成功，请重试。"));
+			notify.error(reason, "没有登记成功，请重试。");
 		} finally {
 			setSaving(false);
 			setTarget("");
@@ -322,7 +317,6 @@ function ContactPane({
 				<h1 className="text-center text-2xl font-semibold">
 					{channel === "email" ? "绑定邮箱" : "绑定手机号"}
 				</h1>
-				{error && <ErrorMessage>{error}</ErrorMessage>}
 				<Field>
 					<FieldLabel htmlFor="target">
 						{channel === "email" ? "邮箱地址" : "手机号"}
@@ -358,7 +352,6 @@ function ContactPane({
 					onClick={() => {
 						setChannel(null);
 						setTarget("");
-						setError("");
 					}}
 				>
 					选择其他方式
@@ -383,7 +376,6 @@ function OtpPane({
 	const [code, setCode] = useState("");
 	const [sentContactId, setSentContactId] = useState<string>();
 	const [cooldown, setCooldown] = useState(0);
-	const [error, setError] = useState("");
 	const [sending, setSending] = useState(false);
 	const [verifying, setVerifying] = useState(false);
 	const contact = flow.contacts.find((candidate) => candidate.id === contactId);
@@ -403,7 +395,6 @@ function OtpPane({
 	}
 	async function send() {
 		if (!contact || sending) return;
-		setError("");
 		setSending(true);
 		try {
 			await authFlowApi.sendChallenge(contact.id);
@@ -415,7 +406,7 @@ function OtpPane({
 				onFlowGone();
 				return;
 			}
-			setError(messageOf(reason, "验证码发送失败，请稍后重试。"));
+			notify.error(reason, "验证码发送失败，请稍后重试。");
 		} finally {
 			setSending(false);
 		}
@@ -423,7 +414,6 @@ function OtpPane({
 	async function submit(event: FormEvent) {
 		event.preventDefault();
 		if (!contact || verifying || code.length !== 6) return;
-		setError("");
 		setVerifying(true);
 		try {
 			const result = await authFlowApi.verify(code);
@@ -441,7 +431,7 @@ function OtpPane({
 			}
 			// A spent or wrong code is just invalid_code (422): the message
 			// explains it, resending stays available through the normal cooldown.
-			setError(messageOf(reason, "验证没有通过，请重试。"));
+			notify.error(reason, "验证没有通过，请重试。");
 		} finally {
 			setVerifying(false);
 		}
@@ -518,7 +508,6 @@ function OtpPane({
 						{contact.maskedTarget}
 					</p>
 				</div>
-				{error && <ErrorMessage>{error}</ErrorMessage>}
 				{challengeSent && (
 					<>
 						<Field>
@@ -584,7 +573,6 @@ function OtpPane({
 					disabled={sending || verifying}
 					onClick={() => {
 						selectContact("");
-						setError("");
 					}}
 				>
 					选择其他方式
@@ -603,10 +591,8 @@ function FinishPane({
 	onCompleted: () => void;
 	onFlowGone: () => void;
 }) {
-	const [error, setError] = useState("");
 	const [completing, setCompleting] = useState(false);
 	async function complete() {
-		setError("");
 		setCompleting(true);
 		try {
 			await authFlowApi.complete();
@@ -616,7 +602,7 @@ function FinishPane({
 				onFlowGone();
 				return;
 			}
-			setError(messageOf(reason, "没有完成初始化，请重试。"));
+			notify.error(reason, "没有完成初始化，请重试。");
 		} finally {
 			setCompleting(false);
 		}
@@ -634,7 +620,6 @@ function FinishPane({
 					密码与联系方式（{targets}）已就绪。
 				</p>
 			</div>
-			{error && <ErrorMessage>{error}</ErrorMessage>}
 			<Button onClick={() => void complete()} disabled={completing}>
 				{completing ? (
 					<>
