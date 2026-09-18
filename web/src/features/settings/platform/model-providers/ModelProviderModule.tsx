@@ -1,9 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Polling and abort seams intentionally key on the selected connection name only. */
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { usePolling } from "@/hooks/use-polling";
-import { formatDateTime } from "@/lib/format";
-import { ChevronLeft, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import {
 	type ComponentProps,
 	type FormEvent,
@@ -26,6 +23,7 @@ import {
 } from "@/api/workbench";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
 import { ErrorMessage, messageOf, notify } from "@/app/shared";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
 	AlertDialogCancel,
@@ -41,6 +39,9 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { DetailSheet } from "@/components/workbench/DetailSheet";
+import { usePolling } from "@/hooks/use-polling";
+import { formatDateTime } from "@/lib/format";
 import { ModelProviderEditor } from "./ModelProviderEditor";
 
 const terminalStates = ["Succeeded", "Failed", "Cancelled", "Interrupted"];
@@ -241,14 +242,12 @@ function ConnectionDetail({
 	selected,
 	onUpdate,
 	onRefresh,
-	onBack,
 	readOnly,
 	suspended = false,
 }: {
 	selected: ConnectionDetailView;
 	onUpdate: (connection: ConnectionSummaryView) => void;
 	onRefresh: () => void;
-	onBack: () => void;
 	readOnly: boolean;
 	suspended?: boolean;
 }) {
@@ -417,9 +416,7 @@ function ConnectionDetail({
 					),
 				);
 			}
-			notify.success(
-				confirmation === "disable" ? "已停用连接" : "已启用连接",
-			);
+			notify.success(confirmation === "disable" ? "已停用连接" : "已启用连接");
 			setConfirmation(undefined);
 		} catch (reason) {
 			if (
@@ -463,22 +460,7 @@ function ConnectionDetail({
 	const mutationDisabled = readOnly || busy || suspended;
 	return (
 		<section className="grid gap-4">
-			<div>
-				<Button size="sm" variant="ghost" className="-ml-2" onClick={onBack}>
-					<ChevronLeft />
-					查看全部提供方
-				</Button>
-				<h2 className="text-lg font-semibold">{selected.name}</h2>
-				<p className="text-sm text-muted-foreground">
-					{selected.type === "model_provider"
-						? "模型提供方"
-						: selected.type === "kubernetes"
-							? "Kubernetes"
-							: "Thanos"}{" "}
-					· {selected.enabled ? "已启用" : "未启用"} · 版本{" "}
-					{selected.rowVersion}
-				</p>
-			</div>
+			{/* 抽屉头部（DetailSheet）负责名称、类型与版本标题。 */}
 			{error && <ErrorMessage>{error}</ErrorMessage>}
 			<div className="rounded-md border p-3 text-sm">
 				<strong>当前配置（非秘密）</strong>
@@ -588,7 +570,8 @@ function ConnectionDetail({
 					<strong>凭据 Generations（{selected.generationCount}）</strong>
 					{generations.map((generation) => (
 						<div key={generation.id} className="mt-2 border-t pt-2">
-							#{generation.generationSeq} · {formatDateTime(generation.createdAt)}
+							#{generation.generationSeq} ·{" "}
+							{formatDateTime(generation.createdAt)}
 							{generation.createdBy ? ` · 创建者 ${generation.createdBy}` : ""}
 						</div>
 					))}
@@ -753,7 +736,16 @@ export function ModelProviderPage({
 					<Skeleton className="h-24 w-full" />
 					<Skeleton className="h-4 w-2/3" />
 				</div>
-			) : error ? null : (
+			) : error ? null : isNew ? (
+				<ModelProviderEditor
+					onCreated={(connection) => {
+						setConnections((items) => [...items, connection]);
+						choose(connection);
+					}}
+					readOnly={readOnly}
+					suspended={suspended}
+				/>
+			) : (
 				<>
 					{connections.length > 0 && (
 						<div className="flex flex-wrap gap-2" aria-label="模型提供方列表">
@@ -782,25 +774,33 @@ export function ModelProviderPage({
 							尚无可管理模型提供方。
 						</p>
 					)}
-					{selected ? (
-						<ConnectionDetail
-							key={selected.name}
-							selected={selected}
-							onUpdate={update}
-							onRefresh={() => void chooseByName(selected.name)}
-							onBack={() => navigate(suffix)}
-							readOnly={readOnly}
-							suspended={suspended}
-						/>
-					) : (
-						<ModelProviderEditor
-							onCreated={(connection) => {
-								setConnections((items) => [...items, connection]);
-								choose(connection);
-							}}
-							readOnly={readOnly}
-							suspended={suspended}
-						/>
+					{/* 详情是右侧抽屉（与告警一致）；新建保留为面包屑页。 */}
+					{selected && (
+						<DetailSheet
+							open
+							onClose={() => navigate(suffix)}
+							title={selected.name}
+							description={`${
+								selected.type === "model_provider"
+									? "模型提供方"
+									: selected.type === "kubernetes"
+										? "Kubernetes"
+										: "Thanos"
+							} · ${selected.enabled ? "已启用" : "未启用"} · 版本 ${selected.rowVersion}`}
+						>
+							<div className="min-h-0 flex-1 overflow-y-auto">
+								<div className="p-4 sm:p-6">
+									<ConnectionDetail
+										key={selected.name}
+										selected={selected}
+										onUpdate={update}
+										onRefresh={() => void chooseByName(selected.name)}
+										readOnly={readOnly}
+										suspended={suspended}
+									/>
+								</div>
+							</div>
+						</DetailSheet>
 					)}
 				</>
 			)}

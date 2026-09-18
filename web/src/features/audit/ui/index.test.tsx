@@ -82,7 +82,7 @@ describe("audit admin screen", () => {
 				: { items: listedEvents },
 		);
 		render(<AuditPage suspended={false} />);
-		expect(await screen.findByText("user.created")).toBeInTheDocument();
+		expect(await screen.findByText(/user\.created/)).toBeInTheDocument();
 		expect(screen.getByText("历史无关联")).toBeInTheDocument();
 
 		fireEvent.click(screen.getAllByRole("button", { name: "查看关联" })[0]);
@@ -110,7 +110,7 @@ describe("audit admin screen", () => {
 			url.searchParams.has("cursor") ? { items: [older] } : { items: [recent], nextCursor: "page-2" },
 		);
 		render(<AuditPage suspended={false} />);
-		expect(await screen.findByText("user.created")).toBeInTheDocument();
+		expect(await screen.findByText(/user\.created/)).toBeInTheDocument();
 
 		fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-01T00:00" } });
 		fireEvent.change(screen.getByLabelText("操作"), { target: { value: "user.created" } });
@@ -127,7 +127,7 @@ describe("audit admin screen", () => {
 		expect(filtered.has("outcome")).toBe(false);
 
 		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-		expect(await screen.findByText("user.disabled")).toBeInTheDocument();
+		expect(await screen.findByText(/user\.disabled/)).toBeInTheDocument();
 		const paged = new URL(String(fetchMock.mock.calls[3][0]), "https://quoin.invalid").searchParams;
 		expect(paged.get("cursor")).toBe("page-2");
 		expect(paged.get("action")).toBe("user.created");
@@ -200,6 +200,6 @@ describe("audit admin screen", () => {
 		const messages = alerts.map((alert) => alert.textContent).join("\n");
 		expect(messages).toContain("数据库暂时不可用。");
 		expect(messages).toContain("保留设置读取失败");
-		expect(screen.queryByText("user.created")).not.toBeInTheDocument();
+		expect(screen.queryByText(/user\.created/)).not.toBeInTheDocument();
 	});
 });

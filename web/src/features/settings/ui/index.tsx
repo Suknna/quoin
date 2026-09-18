@@ -1,12 +1,18 @@
-import { parseRoute } from "@/lib/parse-route";
 import { useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
 } from "@/app/module-contract";
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import {
+	Empty,
+	EmptyDescription,
+	EmptyHeader,
+	EmptyTitle,
+} from "@/components/ui/empty";
 import { AuditPage } from "@/features/audit/ui";
+import { parseRoute } from "@/lib/parse-route";
+import { SettingsNavigation, settingsNavGroups } from "../nav";
 import { About } from "../platform/about/About";
 import { Backups } from "../platform/backups/Backups";
 import { ModelProviderPage } from "../platform/model-providers/ModelProviderModule";
@@ -14,7 +20,6 @@ import { Runtimes } from "../platform/runtimes/Runtimes";
 import { Users } from "../platform/users/Users";
 import { Profile } from "../profile/Profile";
 import { Security } from "../security/Security";
-import { SettingsNavigation, settingsNavGroups } from "../nav";
 
 /** Settings consolidates the personal account and the former /admin module.
  * Per docs/audit-design.md §6 the personal account keeps no audit entry — the
@@ -62,7 +67,20 @@ export function useSettingsModule(
 		return platform(<Runtimes suspended={props.suspended} />, "运行时");
 	}
 	if (pathname.startsWith("/settings/platform/model-providers")) {
-		return platform(<ModelProviderPage {...props} />, "模型提供方");
+		const providersBase = "/settings/platform/model-providers";
+		// 详情是列表页上的抽屉，只有新建提供方保留面包屑页。
+		const creatingProvider = pathname === `${providersBase}/new`;
+		return {
+			title: "模型提供方",
+			list,
+			crumbs: creatingProvider
+				? [
+						{ label: "模型提供方", to: providersBase },
+						{ label: "新建模型提供方" },
+					]
+				: undefined,
+			content: <ModelProviderPage {...props} />,
+		};
 	}
 	const unknown = pathname !== "/settings" && pathname !== "/settings/profile";
 	return {

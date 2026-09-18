@@ -1,11 +1,9 @@
 import { LoaderCircle, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { newClientCommandId, WorkbenchApiError } from "@/api/workbench";
+import { messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
-import { messageOf, notify } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -41,14 +39,9 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { EntityList } from "@/components/EntityList";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import {
 	type AuditEvent,
 	type AuditEventFilter,
@@ -66,8 +59,6 @@ import {
 	previewAuditSettings,
 	updateAuditSettings,
 } from "@/features/audit/api";
-
-
 
 interface FilterDraft {
 	correlationId: string;
@@ -99,16 +90,17 @@ function draftToFilter(draft: FilterDraft): AuditEventFilter {
 	};
 }
 
+const outcomeVariant = (outcome: AuditOutcome) =>
+	outcome === "success"
+		? "default"
+		: outcome === "failure"
+			? "destructive"
+			: outcome === "rejected"
+				? "outline"
+				: "secondary";
+
 function OutcomeBadge({ outcome }: { outcome: AuditOutcome }) {
-	const variant =
-		outcome === "success"
-			? "default"
-			: outcome === "failure"
-				? "destructive"
-				: outcome === "rejected"
-					? "outline"
-					: "secondary";
-	return <Badge variant={variant}>{outcomeLabels[outcome]}</Badge>;
+	return <Badge variant={outcomeVariant(outcome)}>{outcomeLabels[outcome]}</Badge>;
 }
 
 /** 统一审计入口（docs/audit-design.md §6）：仅管理员，按时间/主体/动作/结果/关联筛选。 */
@@ -135,7 +127,8 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				setCursor(page.nextCursor);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+				if (!cancelled)
+					setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			})
 			.finally(() => {
 				if (!cancelled) setLoading(false);
@@ -152,7 +145,8 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				if (!cancelled) setSettings(value);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setSettingsError(messageOf(reason, "暂时无法完成操作，请重试。"));
+				if (!cancelled)
+					setSettingsError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			});
 		return () => {
 			cancelled = true;
@@ -304,7 +298,10 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				</Alert>
 			)}
 			{loading ? (
-				<DetailSkeleton label="正在读取审计事件" rows={["line", "line", "line"]} />
+				<DetailSkeleton
+					label="正在读取审计事件"
+					rows={["line", "line", "line"]}
+				/>
 			) : items.length === 0 && !error ? (
 				<Empty>
 					<EmptyHeader>
@@ -317,75 +314,55 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 						</EmptyDescription>
 					</EmptyHeader>
 				</Empty>
-			) : (
-				items.length > 0 && (
-					<>
-						<Table>
-							<TableHeader>
-								<TableRow>
-									<TableHead>时间</TableHead>
-									<TableHead>主体</TableHead>
-									<TableHead>操作</TableHead>
-									<TableHead>对象</TableHead>
-									<TableHead>结果</TableHead>
-									<TableHead className="text-right">关联</TableHead>
-								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{items.map((event) => (
-									<TableRow key={event.id}>
-										<TableCell>{formatTimestamp(event.createdAt)}</TableCell>
-										<TableCell>
-											{actorLabels[event.actorType]}
-											<small className="block text-muted-foreground">
-												{event.actorId}
-											</small>
-										</TableCell>
-										<TableCell>
-											{event.action}
-											<small className="block text-muted-foreground">
-												{phaseLabel(event.phase)}
-											</small>
-										</TableCell>
-										<TableCell>
-											{event.domainRefType
-												? `${event.domainRefType} · ${event.domainRefId ?? "—"}`
-												: "—"}
-										</TableCell>
-										<TableCell>
-											<OutcomeBadge outcome={event.outcome} />
-										</TableCell>
-										<TableCell className="text-right">
-											{event.correlationId ? (
-												<Button
-													size="sm"
-													variant="outline"
-													onClick={() =>
-														setViewingCorrelation(event.correlationId)
-													}
-												>
-													查看关联
-												</Button>
-											) : (
-												<Badge variant="secondary">历史无关联</Badge>
-											)}
-										</TableCell>
-									</TableRow>
-								))}
-							</TableBody>
-						</Table>
-						{cursor && (
-							<div>
-								<LoadMoreButton
-									loading={loadingMore}
-									hasMore={Boolean(cursor)}
-									onLoadMore={() => void loadMore()}
-								/>
-							</div>
-						)}
-					</>
-				)
-			)}
+			) : items.length > 0 ? (
+				<>
+					<EntityList
+						items={items.map((event) => ({
+							id: event.id,
+							title: `${actorLabels[event.actorType]} · ${event.action}`,
+							subtitle: [
+								event.actorId,
+								phaseLabel(event.phase),
+								event.domainRefType
+									? `${event.domainRefType} · ${event.domainRefId ?? "—"}`
+									: "",
+							]
+								.filter(Boolean)
+								.join(" · "),
+							badge: {
+								text: outcomeLabels[event.outcome],
+								variant: outcomeVariant(event.outcome),
+							},
+							time: formatTimestamp(event.createdAt),
+							event,
+						}))}
+						columns={["title", "subtitle", "status", "time", "actions"]}
+						renderActions={(row) =>
+							row.event.correlationId ? (
+								<Button
+									size="sm"
+									variant="outline"
+									onClick={() => setViewingCorrelation(row.event.correlationId)}
+								>
+									查看关联
+								</Button>
+							) : (
+								<Badge variant="secondary">历史无关联</Badge>
+							)
+						}
+						emptyTitle="没有匹配的审计事件"
+					/>
+					{cursor && (
+						<div>
+							<LoadMoreButton
+								loading={loadingMore}
+								hasMore={Boolean(cursor)}
+								onLoadMore={() => void loadMore()}
+							/>
+						</div>
+					)}
+				</>
+			) : null}
 			{viewingCorrelation !== undefined && (
 				<CorrelationDetails
 					correlationId={viewingCorrelation}
@@ -422,7 +399,8 @@ function CorrelationDetails({
 				setCursor(page.nextCursor);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+				if (!cancelled)
+					setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			})
 			.finally(() => {
 				if (!cancelled) setLoading(false);
@@ -468,7 +446,10 @@ function CorrelationDetails({
 					</Alert>
 				)}
 				{loading ? (
-					<DetailSkeleton label="正在读取关联事件" rows={["line", "line", "line"]} />
+					<DetailSkeleton
+						label="正在读取关联事件"
+						rows={["line", "line", "line"]}
+					/>
 				) : events.length === 0 ? (
 					<Empty>
 						<EmptyHeader>
