@@ -5,7 +5,7 @@ import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
 } from "@/app/module-contract";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { AuditPage } from "@/features/audit/ui";
 import { About } from "../platform/about/About";
 import { Backups } from "../platform/backups/Backups";
@@ -69,9 +69,12 @@ export function useSettingsModule(
 		title: "个人资料",
 		list,
 		content: unknown ? (
-			<Alert variant="destructive">
-				<AlertDescription>未找到此设置页面。</AlertDescription>
-			</Alert>
+			<Empty>
+				<EmptyHeader>
+					<EmptyTitle>找不到此页面</EmptyTitle>
+					<EmptyDescription>该链接无效或页面已被移动。</EmptyDescription>
+				</EmptyHeader>
+			</Empty>
 		) : (
 			<Profile user={user} suspended={props.suspended} />
 		),

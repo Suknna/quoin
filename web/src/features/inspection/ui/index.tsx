@@ -111,12 +111,12 @@ const terminal = new Set([
 	"Interrupted",
 	"SkippedOverlap",
 ]);
-const statusClass = (state: string) =>
+const statusBadgeClass = (state: string) =>
 	inspectionActive(state as never)
-		? "text-amber-700"
+		? "border-warning/50 text-warning"
 		: state.startsWith("Completed")
-			? "text-emerald-700"
-			: "text-muted-foreground";
+			? "border-success/50 text-success"
+			: undefined;
 /** The module owns its query state: /inspections/runs/:run and ?connectionName= hint. */
 function parts(route: string) {
 	const { pathname, searchParams } = parseRoute(route);
@@ -272,6 +272,7 @@ function Feedback({
 	const [timeline, setTimeline] = useState<FeedbackTimeline>();
 	const [note, setNote] = useState("");
 	const [error, setError] = useState("");
+	const [submitting, setSubmitting] = useState(false);
 	useEffect(() => {
 		if (!suspended)
 			void fetchFeedback({ type: "inspection_report", id: reportId })
@@ -279,8 +280,9 @@ function Feedback({
 				.catch((e) => setError(messageOf(e, "无法读取反馈。")));
 	}, [reportId, suspended]);
 	async function record(value: FeedbackValue) {
-		if (suspended) return;
+		if (suspended || submitting) return;
 		setError("");
+		setSubmitting(true);
 		try {
 			await appendFeedback(
 				{ type: "inspection_report", id: reportId },
@@ -293,6 +295,8 @@ function Feedback({
 			);
 		} catch (e) {
 			setError(messageOf(e, "无法记录反馈。"));
+		} finally {
+			setSubmitting(false);
 		}
 	}
 	return (
@@ -304,7 +308,7 @@ function Feedback({
 						key={value}
 						size="sm"
 						variant="outline"
-						disabled={suspended}
+						disabled={suspended || submitting}
 						onClick={() => void record(value)}
 					>
 						{feedbackValueLabels[value]}
@@ -578,9 +582,9 @@ export function RunDetail({
 						{formatInspectionTime(detail.evidenceAt)}，报告版本不可修改。
 					</p>
 				</div>
-				<span className={statusClass(detail.state)}>
+				<Badge variant="outline" className={statusBadgeClass(detail.state)}>
 					{inspectionStateText[detail.state]}
-				</span>
+				</Badge>
 			</header>
 			{error && (
 				<Alert variant="destructive">
@@ -630,10 +634,9 @@ export function RunDetail({
 						</div>
 						<Button
 							variant="outline"
-							disabled
-							title="知识库开发中，暂不可整理报告"
+							onClick={() => props.navigate("/knowledge")}
 						>
-							整理为知识候选（开发中）
+							在知识库中检索
 						</Button>
 					</div>
 					<ReportPresentation
@@ -1652,9 +1655,9 @@ export function useInspectionsModule(
 									.filter(Boolean)
 									.join(" · ")}
 							</small>
-							<small className={statusClass(run.state)}>
+							<Badge variant="outline" className={statusBadgeClass(run.state)}>
 								{inspectionStateText[run.state]}
-							</small>
+							</Badge>
 						</span>
 					</Button>
 				))}

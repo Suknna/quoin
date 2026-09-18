@@ -31,6 +31,17 @@ import {
 } from "@/features/settings/platform/runtimes/api";
 import { ConfirmAction } from "../controls";
 
+const runtimeStateLabels: Record<string, string> = {
+	registered: "已注册",
+	unregistered: "未注册",
+	revoked: "已吊销",
+};
+
+const retirementStateLabels: Record<string, string> = {
+	AwaitingFirstUse: "待首次使用",
+	PendingRetirement: "待退休",
+};
+
 /** In-memory secrets are epoch-fenced and removed when this surface closes, suspends, or replaces one. */
 export function Runtimes({
 	suspended,
@@ -211,15 +222,15 @@ export function Runtimes({
 						return (
 							<TableRow key={item.slot}>
 								<TableCell>{item.slot}</TableCell>
-								<TableCell>
-									<Badge
-										variant={
-											item.state === "registered" ? "default" : "secondary"
-										}
-									>
-										{item.state}
-									</Badge>
-								</TableCell>
+									<TableCell>
+										<Badge
+											variant={
+												item.state === "registered" ? "default" : "secondary"
+											}
+										>
+											{runtimeStateLabels[item.state] ?? item.state}
+										</Badge>
+									</TableCell>
 								<TableCell>
 									当前 {item.currentGeneration}
 									{item.pendingGeneration !== undefined && (
@@ -229,7 +240,10 @@ export function Runtimes({
 										<span> · 待退休 {item.retiringGeneration}</span>
 									)}
 									<small className="block text-muted-foreground">
-										{item.retirementState ?? "未知"}
+										{item.retirementState
+											? (retirementStateLabels[item.retirementState] ??
+												item.retirementState)
+											: "未知"}
 									</small>
 								</TableCell>
 								<TableCell>

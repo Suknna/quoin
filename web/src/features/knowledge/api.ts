@@ -150,6 +150,14 @@ export const candidateStateLabels: Record<CandidateState, string> = {
   SourceInvalid: '来源无效',
 }
 
+export const batchStateLabels: Record<ImportBatchSummary['state'], string> = {
+  Processing: '处理中',
+  AwaitingConfirmation: '待确认',
+  Completed: '已完成',
+  Cancelled: '已取消',
+  Failed: '失败',
+}
+
 export const candidateSourceLabels: Record<CandidateSourceType, string> = {
   initial_analysis_output: '初步分析',
   inspection_report: '巡检报告',

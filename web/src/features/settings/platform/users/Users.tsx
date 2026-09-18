@@ -47,6 +47,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 	/** One-shot creation feedback; survives the dialog closing. */
 	const [note, setNote] = useState("");
 	const [creating, setCreating] = useState(false);
+	const [busy, setBusy] = useState(false);
 	const [resetting, setResetting] = useState<AdminUser>();
 	const [configuring, setConfiguring] = useState<AdminUser>();
 	const empty: { username: string; displayName: string; password: string } & ContactDraft = { username: "", displayName: "", password: "", ...emptyContactDraft };
@@ -69,6 +70,8 @@ export function Users({ suspended }: { suspended: boolean }) {
 		void load();
 	}, []);
 	async function create() {
+		if (busy) return;
+		setBusy(true);
 		try {
 			await createUser({ username: draft.username, displayName: draft.displayName, password: draft.password, contacts: createContacts });
 			// Close and clear BEFORE the list refresh: a slow or failing reload
@@ -80,6 +83,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法创建用户。"));
 		} finally {
+			setBusy(false);
 			setDraft(value => ({ ...value, password: "" }));
 		}
 	}
@@ -92,7 +96,8 @@ export function Users({ suspended }: { suspended: boolean }) {
 		}
 	}
 	async function saveContacts() {
-		if (!configuring) return;
+		if (!configuring || busy) return;
+		setBusy(true);
 		try {
 			await configureContacts(configuring.id, configuring.rowVersion, configuredContacts);
 			setConfiguring(undefined);
@@ -100,10 +105,13 @@ export function Users({ suspended }: { suspended: boolean }) {
 			await load();
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法配置验证渠道。"));
+		} finally {
+			setBusy(false);
 		}
 	}
 	async function reset() {
-		if (!resetting) return;
+		if (!resetting || busy) return;
+		setBusy(true);
 		try {
 			await resetPassword(resetting.id, resetting.rowVersion, temporaryPassword);
 			setResetting(undefined);
@@ -111,6 +119,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法重置密码。"));
 		} finally {
+			setBusy(false);
 			setTemporaryPassword("");
 		}
 	}
@@ -162,9 +171,15 @@ export function Users({ suspended }: { suspended: boolean }) {
 							</TableCell>
 							<TableCell className="space-x-2">
 								{user.role === "operator" && (
-									<Button size="sm" variant="outline" disabled={suspended} onClick={() => void update(user, { enabled: !user.enabled })}>
+									<ConfirmAction
+										title={user.enabled ? `停用 ${user.displayName}？` : `启用 ${user.displayName}？`}
+										description={user.enabled ? "停用后该操作员将立即无法登录工作台。" : "启用后该操作员可以立即登录工作台。"}
+										destructive={user.enabled}
+										disabled={suspended}
+										onConfirm={() => void update(user, { enabled: !user.enabled })}
+									>
 										{user.enabled ? "停用" : "启用"}
-									</Button>
+									</ConfirmAction>
 								)}
 								{user.role === "operator" ? (
 									<Button size="sm" variant="outline" disabled={suspended} onClick={() => { setConfiguring(user); setContactDraft(emptyContactDraft); }}>
@@ -199,13 +214,18 @@ export function Users({ suspended }: { suspended: boolean }) {
 						<DialogTitle>新建操作员</DialogTitle>
 						<DialogDescription>账户以操作员角色创建；管理员由系统初始化产生，不能在此创建或晋升。临时密码仅随这次提交发送，界面不会保存或回显。</DialogDescription>
 					</DialogHeader>
-					<UserFields draft={draft} setDraft={setDraft} />
-					<Button
-						disabled={suspended || !draft.username || !draft.displayName || draft.password.length < 15 || createContacts.length === 0}
-						onClick={() => void create()}
+					<form
+						onSubmit={event => { event.preventDefault(); void create(); }}
+						className="flex flex-col gap-4"
 					>
-						创建操作员
-					</Button>
+						<UserFields draft={draft} setDraft={setDraft} />
+						<Button
+							type="submit"
+							disabled={suspended || busy || !draft.username || !draft.displayName || draft.password.length < 15 || createContacts.length === 0}
+						>
+							{busy ? "创建中…" : "创建操作员"}
+						</Button>
+					</form>
 				</DialogContent>
 			</Dialog>
 			<Dialog open={Boolean(configuring)} onOpenChange={open => { if (!open) { setConfiguring(undefined); setContactDraft(emptyContactDraft); } }}>
@@ -216,15 +236,20 @@ export function Users({ suspended }: { suspended: boolean }) {
 							{configuring?.displayName}：替换目标会清除该渠道的已验证状态并使绑定旧目标的验证码失效；留空表示移除该渠道，至少保留一个。
 						</DialogDescription>
 					</DialogHeader>
-					<Field>
-						<FieldLabel htmlFor="contact-email-target">邮箱收码目标</FieldLabel>
-						<Input id="contact-email-target" type="email" value={contactDraft.email} onChange={event => setContactDraft(value => ({ ...value, email: event.target.value }))} />
-					</Field>
-					<Field>
-						<FieldLabel htmlFor="contact-sms-target">短信收码目标</FieldLabel>
-						<Input id="contact-sms-target" type="tel" value={contactDraft.sms} onChange={event => setContactDraft(value => ({ ...value, sms: event.target.value }))} />
-					</Field>
-					<Button disabled={suspended || configuredContacts.length === 0} onClick={() => void saveContacts()}>保存渠道</Button>
+					<form
+						onSubmit={event => { event.preventDefault(); void saveContacts(); }}
+						className="flex flex-col gap-4"
+					>
+						<Field>
+							<FieldLabel htmlFor="contact-email-target">邮箱收码目标</FieldLabel>
+							<Input id="contact-email-target" type="email" value={contactDraft.email} onChange={event => setContactDraft(value => ({ ...value, email: event.target.value }))} />
+						</Field>
+						<Field>
+							<FieldLabel htmlFor="contact-sms-target">短信收码目标</FieldLabel>
+							<Input id="contact-sms-target" type="tel" value={contactDraft.sms} onChange={event => setContactDraft(value => ({ ...value, sms: event.target.value }))} />
+						</Field>
+						<Button type="submit" disabled={suspended || busy || configuredContacts.length === 0}>{busy ? "保存中…" : "保存渠道"}</Button>
+					</form>
 				</DialogContent>
 			</Dialog>
 			<Dialog open={Boolean(resetting)} onOpenChange={open => { if (!open) { setResetting(undefined); setTemporaryPassword(""); } }}>
@@ -233,11 +258,16 @@ export function Users({ suspended }: { suspended: boolean }) {
 						<DialogTitle>重置密码</DialogTitle>
 						<DialogDescription>临时密码只在本次提交中使用，成功后会撤销现有会话。</DialogDescription>
 					</DialogHeader>
-					<Field>
-						<FieldLabel>新临时密码</FieldLabel>
-						<Input type="password" autoComplete="new-password" value={temporaryPassword} onChange={event => setTemporaryPassword(event.target.value)} />
-					</Field>
-					<Button disabled={suspended || temporaryPassword.length < 15} onClick={() => void reset()}>重置并撤销会话</Button>
+					<form
+						onSubmit={event => { event.preventDefault(); void reset(); }}
+						className="flex flex-col gap-4"
+					>
+						<Field>
+							<FieldLabel>新临时密码</FieldLabel>
+							<Input type="password" autoComplete="new-password" value={temporaryPassword} onChange={event => setTemporaryPassword(event.target.value)} />
+						</Field>
+						<Button type="submit" disabled={suspended || busy || temporaryPassword.length < 15}>{busy ? "重置中…" : "重置并撤销会话"}</Button>
+					</form>
 				</DialogContent>
 			</Dialog>
 		</section>

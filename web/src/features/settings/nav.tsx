@@ -10,6 +10,9 @@ export type SettingsNavEntry = {
 	adminOnly?: boolean;
 };
 
+/** /settings 根路径渲染个人资料内容，与个人资料入口共用高亮。 */
+const profileRoute = "/settings/profile";
+
 export type SettingsNavGroup = {
 	label: string;
 	entries: SettingsNavEntry[];
@@ -18,7 +21,7 @@ export type SettingsNavGroup = {
 export const personalGroup: SettingsNavGroup = {
 	label: "个人",
 	entries: [
-		{ key: "profile", label: "个人资料", route: "/settings/profile" },
+		{ key: "profile", label: "个人资料", route: profileRoute },
 		{ key: "security", label: "安全", route: "/settings/security" },
 	],
 };
@@ -109,6 +112,7 @@ export function SettingsNavigation({
 					{group.entries.map((entry) => {
 						const active =
 							pathname === entry.route ||
+							(entry.route === profileRoute && pathname === "/settings") ||
 							(entry.route !== "/settings" &&
 								pathname.startsWith(`${entry.route}/`));
 						return (

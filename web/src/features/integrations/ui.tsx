@@ -1,3 +1,4 @@
+import { ConfirmAction } from "@/features/settings/platform/controls";
 import { formatDateTime } from "@/lib/format";
 import { parseRoute } from "@/lib/parse-route";
 import { IntegrationResources } from "./resources";
@@ -29,17 +30,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
 /** Integrations live under the settings platform group (平台接入). */
 const INTEGRATIONS_BASE = "/settings/platform/integrations";
-import {
-	AlertDialog,
-	AlertDialogAction,
-	AlertDialogCancel,
-	AlertDialogContent,
-	AlertDialogDescription,
-	AlertDialogFooter,
-	AlertDialogHeader,
-	AlertDialogTitle,
-	AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { messageOf } from "@/app/shared";
@@ -1052,16 +1042,17 @@ function MetricsDetail({
 						>
 							{needsRevalidation ? "重新验证并启用" : "验证并启用"}
 						</Button>
-						<ConfirmButton
+						<ConfirmAction
 							title={`停用 ${item.displayName}？`}
 							description="停用后不再开始新的观测、查询和巡检；配置和历史不会删除。"
 							disabled={
 								suspended || item.status === "disabled" || Boolean(busy)
 							}
-							action={() => void action("disable")}
+							destructive
+							onConfirm={() => void action("disable")}
 						>
 							{busy === "disable" ? "停用中…" : "停用接入"}
-						</ConfirmButton>
+						</ConfirmAction>
 						<Button
 							variant="outline"
 							disabled={suspended || Boolean(busy)}
@@ -1465,39 +1456,6 @@ function AlertmanagerForm({
 	);
 }
 
-function ConfirmButton({
-	title,
-	description,
-	action,
-	disabled,
-	children,
-}: {
-	title: string;
-	description: string;
-	action: () => void;
-	disabled: boolean;
-	children: string;
-}) {
-	return (
-		<AlertDialog>
-			<AlertDialogTrigger asChild>
-				<Button size="sm" variant="outline" disabled={disabled}>
-					{children}
-				</Button>
-			</AlertDialogTrigger>
-			<AlertDialogContent>
-				<AlertDialogHeader>
-					<AlertDialogTitle>{title}</AlertDialogTitle>
-					<AlertDialogDescription>{description}</AlertDialogDescription>
-				</AlertDialogHeader>
-				<AlertDialogFooter>
-					<AlertDialogCancel>取消</AlertDialogCancel>
-					<AlertDialogAction onClick={action}>确认</AlertDialogAction>
-				</AlertDialogFooter>
-			</AlertDialogContent>
-		</AlertDialog>
-	);
-}
 /** Alert delivery faults belong with the Alertmanager lifecycle that produces them. */
 function AlertIntakeIssues({
 	navigate,
@@ -1624,6 +1582,12 @@ function AlertIntakeIssues({
 		</section>
 	);
 }
+
+const credentialStateLabels: Record<string, string> = {
+	Active: "使用中",
+	PendingRetirement: "待退休",
+	Retired: "已退休",
+};
 
 function AlertmanagerDetail({
 	id,
@@ -1804,16 +1768,17 @@ function AlertmanagerDetail({
 								<RotateCw data-icon="inline-start" />
 								{busy === "rotate" ? "轮换中…" : "轮换凭据"}
 							</Button>
-							<ConfirmButton
+							<ConfirmAction
 								title={`停用 ${source.displayName}？`}
 								description="停用后此来源不再接收告警；已保存的历史不会删除。"
 								disabled={
 									suspended || source.status !== "active" || Boolean(busy)
 								}
-								action={() => void disable()}
+								destructive
+									onConfirm={() => void disable()}
 							>
 								停用来源
-							</ConfirmButton>
+							</ConfirmAction>
 						</div>
 					</CardContent>
 				</Card>
@@ -1874,7 +1839,8 @@ function AlertmanagerDetail({
 															: "secondary"
 													}
 												>
-													{credential.state}
+													{credentialStateLabels[credential.state] ??
+														credential.state}
 												</Badge>
 											</TableCell>
 											<TableCell>{formatTime(credential.createdAt)}</TableCell>
@@ -1883,14 +1849,15 @@ function AlertmanagerDetail({
 											</TableCell>
 											<TableCell>
 												{credential.state === "PendingRetirement" && (
-													<ConfirmButton
+													<ConfirmAction
 														title="退休此凭据？"
 														description="确认新凭据已经在上游 Alertmanager 中使用。退休后旧凭据无法恢复。"
 														disabled={suspended || Boolean(busy)}
-														action={() => void retire(credential)}
+														destructive
+													onConfirm={() => void retire(credential)}
 													>
 														{busy === credential.id ? "退休中…" : "退休"}
-													</ConfirmButton>
+													</ConfirmAction>
 												)}
 											</TableCell>
 										</TableRow>

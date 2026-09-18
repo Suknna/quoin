@@ -5,7 +5,7 @@ import { useKnowledgeModule } from "./index";
 
 vi.mock("@/features/knowledge/api", () => ({
   api: { browse: vi.fn().mockResolvedValue({ items: [], nextCursor: undefined }), search: vi.fn(), getCandidate: vi.fn(), editDraft: vi.fn(), confirm: vi.fn(), exclude: vi.fn(), getKnowledge: vi.fn(), listVersions: vi.fn(), getVersion: vi.fn(), createRevision: vi.fn(), stopReuse: vi.fn(), startImport: vi.fn(), getImportBatch: vi.fn(), confirmBatch: vi.fn(), cancelBatch: vi.fn() },
-  candidateSourceLabels: { source_material: "导入原文" }, candidateStateLabels: { AwaitingConfirmation: "待确认" }, embeddingStateLabels: {}, indexStateLabels: {},
+  candidateSourceLabels: { source_material: "导入原文" }, candidateStateLabels: { AwaitingConfirmation: "待确认" }, batchStateLabels: { Processing: "处理中", AwaitingConfirmation: "待确认", Completed: "已完成", Cancelled: "已取消", Failed: "失败" }, embeddingStateLabels: {}, indexStateLabels: {},
 }));
 function View({ route = "/knowledge", suspended = false }: { route?: string; suspended?: boolean }) { const view = useKnowledgeModule({ user: { id: "1", username: "a", displayName: "A", role: "admin", passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }, route, suspended, navigate: vi.fn(), openEvidence: vi.fn() }); return <>{view.list}{view.content}</>; }
 afterEach(() => { cleanup(); vi.clearAllMocks(); });

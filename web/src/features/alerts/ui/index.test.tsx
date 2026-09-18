@@ -157,7 +157,7 @@ describe("alerts module", () => {
     detailVersion = 2;
     sources[0].emit("change", JSON.stringify({ seq: "6", type: "state_changed", occurrenceId: "platform:1", rowVersion: 2 }));
 
-    await screen.findByText("Resolved");
+    await screen.findByText("已恢复");
     // Both list and open-detail projections reconcile through the same stream;
     // the detail must therefore issue its own authoritative re-read as well.
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/alerts/platform:1").length).toBeGreaterThan(1));
@@ -318,7 +318,7 @@ describe("alerts module", () => {
 		await screen.findByRole("heading", { name: "Example" });
 		expect(screen.getByText("node-1")).toHaveClass("font-mono");
 		expect(screen.getByText("critical")).toHaveClass("bg-destructive");
-		expect(screen.getByText("Firing")).toHaveClass("bg-destructive");
+		expect(screen.getByText("触发中")).toHaveClass("bg-destructive");
 		fireEvent.mouseDown(screen.getByRole("tab", { name: "时间线" }));
 		fireEvent.click(screen.getByRole("tab", { name: "时间线" }));
 		expect(await screen.findByRole("list", { name: "观察记录时间线" })).toBeInTheDocument();

@@ -1,8 +1,59 @@
+import { cn } from "cn";
 import type { ReactNode } from "react";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+	AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 
 /** Explicit confirmation protects commands which cannot be undone. */
-export function ConfirmAction({ title, description, disabled, onConfirm, children }: { title: string; description: string; disabled?: boolean; onConfirm: () => void; children: ReactNode }) {
- return <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={disabled}>{children}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription>{description}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={onConfirm}>确认</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>;
+export function ConfirmAction({
+	title,
+	description,
+	disabled,
+	destructive,
+	onConfirm,
+	children,
+}: {
+	title: string;
+	description: string;
+	disabled?: boolean /** Paint the confirm key with the destructive tone for irreversible damage. */;
+	destructive?: boolean;
+	onConfirm: () => void;
+	children: ReactNode;
+}) {
+	return (
+		<AlertDialog>
+			<AlertDialogTrigger asChild>
+				<Button size="sm" variant="outline" disabled={disabled}>
+					{children}
+				</Button>
+			</AlertDialogTrigger>
+			<AlertDialogContent>
+				<AlertDialogHeader>
+					<AlertDialogTitle>{title}</AlertDialogTitle>
+					<AlertDialogDescription>{description}</AlertDialogDescription>
+				</AlertDialogHeader>
+				<AlertDialogFooter>
+					<AlertDialogCancel>取消</AlertDialogCancel>
+					<AlertDialogAction
+						className={cn(
+							destructive &&
+								"bg-destructive text-white hover:bg-destructive/90",
+						)}
+						onClick={onConfirm}
+					>
+						确认
+					</AlertDialogAction>
+				</AlertDialogFooter>
+			</AlertDialogContent>
+		</AlertDialog>
+	);
 }

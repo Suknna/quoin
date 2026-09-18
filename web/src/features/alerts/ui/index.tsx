@@ -177,6 +177,19 @@ function relativeTime(value: string) {
 	return `${Math.floor(seconds / 86_400)} 天前`;
 }
 
+const alertStateLabels: Record<string, string> = {
+	Firing: "触发中",
+	Resolved: "已恢复",
+};
+
+const effectLabels: Record<string, string> = {
+	initial_firing: "首次触发",
+	repeat_firing: "重复触发",
+	resolved: "已恢复",
+	resolved_first: "首次恢复",
+	late_firing_after_resolved: "恢复后迟触发",
+};
+
 const attributionReasonLabels: Record<string, string> = {
 	no_declaration_labels: "没有可用于归属的业务声明标签",
 	source_mismatch: "交付告警源不在任何参与视图的声明范围内",
@@ -496,10 +509,10 @@ function AlertList({
 			badge: {
 				text:
 					item.source === "platform"
-						? `平台内部 · ${item.state}`
+						? `平台内部 · ${alertStateLabels[item.state] ?? item.state}`
 						: diagnosticLabel
-							? `${diagnosticLabel} · ${item.state}`
-							: item.state,
+							? `${diagnosticLabel} · ${alertStateLabels[item.state] ?? item.state}`
+							: (alertStateLabels[item.state] ?? item.state),
 				variant: item.state === "Firing" ? "destructive" : "secondary",
 			},
 			media: (
@@ -874,7 +887,7 @@ function AlertDetailSheet({
 									occurrence.state === "Firing" ? "destructive" : "secondary"
 								}
 							>
-								{occurrence.state}
+								{alertStateLabels[occurrence.state] ?? occurrence.state}
 							</Badge>
 							<Separator
 								orientation="vertical"
@@ -1094,7 +1107,7 @@ function AlertDetailSheet({
 														<ItemContent>
 															<ItemTitle>{item.observedState}</ItemTitle>
 															<ItemDescription>
-																效果：{item.effect} · 提交于{" "}
+																效果：{effectLabels[item.effect] ?? item.effect} · 提交于{" "}
 																{time(item.committedAt)}
 															</ItemDescription>
 														</ItemContent>

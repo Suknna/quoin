@@ -7,7 +7,7 @@ describe("Maintenance", () => {
  it("renders SafeBlocking items and only the Upgrade drain allowlist", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ active: true, reason: "Upgrade", rowVersion: 4, items: [{ kind: "run", objectKey: "r1", safeState: "Blocking", detailCode: "running|cancel:inspection_run:run-9:6" }] }) }));
   render(<Maintenance />);
-  expect(await screen.findByText("Blocking")).toBeInTheDocument();
+  expect(await screen.findByText("阻塞")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "取消排空" })).toBeInTheDocument();
   expect(screen.queryByText("没有维护清单项目")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "退出维护" })).toBeDisabled();

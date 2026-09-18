@@ -1,10 +1,13 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Polling and abort seams intentionally key on the selected connection name only. */
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { usePolling } from "@/hooks/use-polling";
-import { Plus } from "lucide-react";
+import { formatDateTime } from "@/lib/format";
+import { ChevronLeft, Plus } from "lucide-react";
 import {
 	type ComponentProps,
 	type FormEvent,
+	Fragment,
 	useEffect,
 	useRef,
 	useState,
@@ -41,6 +44,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { ModelProviderEditor } from "./ModelProviderEditor";
 
 const terminalStates = ["Succeeded", "Failed", "Cancelled", "Interrupted"];
+
+const probeStateLabels: Record<string, string> = {
+	Queued: "排队中",
+	Assigned: "已分配",
+	Running: "执行中",
+	Cancelling: "取消中",
+	Succeeded: "成功",
+	Failed: "失败",
+	Cancelled: "已取消",
+	Interrupted: "已中断",
+};
+
 type EditableConnectionType = ConnectionType;
 
 /** Keeps secret values in component memory and removes them when the workspace is suspended. */
@@ -226,12 +241,14 @@ function ConnectionDetail({
 	selected,
 	onUpdate,
 	onRefresh,
+	onBack,
 	readOnly,
 	suspended = false,
 }: {
 	selected: ConnectionDetailView;
 	onUpdate: (connection: ConnectionSummaryView) => void;
 	onRefresh: () => void;
+	onBack: () => void;
 	readOnly: boolean;
 	suspended?: boolean;
 }) {
@@ -443,6 +460,10 @@ function ConnectionDetail({
 	return (
 		<section className="grid gap-4">
 			<div>
+				<Button size="sm" variant="ghost" className="-ml-2" onClick={onBack}>
+					<ChevronLeft />
+					查看全部提供方
+				</Button>
 				<h2 className="text-lg font-semibold">{selected.name}</h2>
 				<p className="text-sm text-muted-foreground">
 					{selected.type === "model_provider"
@@ -544,7 +565,8 @@ function ConnectionDetail({
 			)}
 			{attempt && (
 				<div className="rounded-md bg-muted p-3 text-sm">
-					探测 {attempt.id}：{attempt.state}
+					探测 {attempt.id.slice(0, 8)}：
+					{probeStateLabels[attempt.state] ?? attempt.state}
 					{attempt.terminationReason ? `（${attempt.terminationReason}）` : ""}
 				</div>
 			)}
@@ -553,7 +575,7 @@ function ConnectionDetail({
 					<strong>配置 Revisions（{selected.revisionCount}）</strong>
 					{revisions.map((revision) => (
 						<div key={revision.id} className="mt-2 border-t pt-2">
-							#{revision.revisionSeq} · {revision.createdAt}
+							#{revision.revisionSeq} · {formatDateTime(revision.createdAt)}
 							<ConfigFacts config={revision.config} />
 						</div>
 					))}
@@ -562,7 +584,7 @@ function ConnectionDetail({
 					<strong>凭据 Generations（{selected.generationCount}）</strong>
 					{generations.map((generation) => (
 						<div key={generation.id} className="mt-2 border-t pt-2">
-							#{generation.generationSeq} · {generation.createdAt}
+							#{generation.generationSeq} · {formatDateTime(generation.createdAt)}
 							{generation.createdBy ? ` · 创建者 ${generation.createdBy}` : ""}
 						</div>
 					))}
@@ -581,9 +603,22 @@ function ConnectionDetail({
 								{result.connectionRevisionId} · generation{" "}
 								{result.credentialGenerationId} · digest {result.resultDigest}
 							</div>
-							<pre className="mt-1 overflow-auto text-xs">
-								{JSON.stringify(result.details, null, 2)}
-							</pre>
+							{Object.keys(result.details).length > 0 ? (
+								<dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+									{Object.entries(result.details).map(([key, value]) => (
+										<Fragment key={key}>
+											<dt className="text-muted-foreground">{key}</dt>
+											<dd className="min-w-0 break-words font-mono text-sm">
+												{typeof value === "string"
+													? value
+													: JSON.stringify(value)}
+											</dd>
+										</Fragment>
+									))}
+								</dl>
+							) : (
+								<p className="mt-1 text-muted-foreground">无详细信息</p>
+							)}
 						</div>
 					))}
 				</div>
@@ -697,9 +732,11 @@ export function ModelProviderPage({
 				</Button>
 			</div>
 			{maintenance && (
-				<div className="rounded-md border border-amber-500 bg-amber-50 p-3 text-sm dark:bg-amber-950">
-					维护模式已启用：所有写入操作已阻止。
-				</div>
+				<Alert>
+					<AlertDescription>
+						维护模式已启用：所有写入操作已阻止。
+					</AlertDescription>
+				</Alert>
 			)}
 			{error && <ErrorMessage>{error}</ErrorMessage>}
 			{loading || detailLoading ? (
@@ -747,6 +784,7 @@ export function ModelProviderPage({
 							selected={selected}
 							onUpdate={update}
 							onRefresh={() => void chooseByName(selected.name)}
+							onBack={() => navigate(suffix)}
 							readOnly={readOnly}
 							suspended={suspended}
 						/>

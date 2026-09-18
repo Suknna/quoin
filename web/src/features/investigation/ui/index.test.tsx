@@ -15,7 +15,7 @@ vi.mock('@/features/investigation/stream', () => ({ streamInvestigationMessage: 
 vi.mock('@/features/feedback/api', () => ({ appendFeedback: vi.fn(), fetchFeedback: vi.fn(), feedbackValueLabels: {} }))
 vi.mock('@/features/knowledge/api', () => ({ api: { createMessageCandidate: vi.fn() } }))
 const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }
-function View({ route, suspended = false }: { route: string; suspended?: boolean }) { const view = useInvestigationsModule({ user, route, suspended, navigate: vi.fn(), openEvidence: vi.fn() }); return <>{view.list}{view.content}</> }
+function View({ route, suspended = false, navigate = vi.fn() }: { route: string; suspended?: boolean; navigate?: (route: string) => void }) { const view = useInvestigationsModule({ user, route, suspended, navigate, openEvidence: vi.fn() }); return <>{view.list}{view.content}</> }
 const detail = { id: 'i1', displayTitle: 'CPU 排查', lastActivityAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z', createdBy: 'u', headMessageId: 'm1', activeAttemptId: 'a1', messageCount: 1, attemptCount: 1, sources: [] }
 beforeEach(() => { api.businessSystems.mockResolvedValue([]); Element.prototype.scrollIntoView ??= vi.fn() })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
@@ -108,12 +108,14 @@ describe('investigations module', () => {
     await waitFor(() => expect(api.cancelAttempt).toHaveBeenCalledWith('i1', 'a2', 8))
     releaseStream()
   })
-  it('labels the inactive knowledge action as under development', async () => {
+  it('opens the knowledge base from an assistant reply', async () => {
     api.list.mockResolvedValue({ items: [] }); api.get.mockResolvedValue(detail)
     api.listMessages.mockResolvedValue({ items: [{ id: 'm1', seq: 1, role: 'assistant', status: 'active', content: '调查结论', attachments: [], evidenceIds: [], createdAt: '2026-01-01T00:00:00Z' }] })
     api.listAttempts.mockResolvedValue({ items: [] })
-    render(<View route="/investigations/i1" />)
-    expect(await screen.findByRole('button', { name: '知识库开发中' })).toBeDisabled()
+    const navigate = vi.fn()
+    render(<View route="/investigations/i1" navigate={navigate} />)
+    fireEvent.click(await screen.findByRole('button', { name: '查看知识库' }))
+    expect(navigate).toHaveBeenCalledWith('/knowledge')
   })
   it('shows a failed list request instead of an empty healthy state', async () => {
     api.list.mockRejectedValue(new Error('调查服务不可用'))

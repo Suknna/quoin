@@ -152,6 +152,8 @@ describe("Users", () => {
 		render(<Users suspended={false} />);
 		const operatorRowElement = (await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement;
 		fireEvent.click(within(operatorRowElement).getByRole("button", { name: "停用" }));
+		// 停用现在经过确认弹框；确认后才发送更新命令。
+		fireEvent.click(await screen.findByRole("button", { name: "确认" }));
 
 		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 		expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/admin/users/u1");
