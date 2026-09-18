@@ -4,7 +4,6 @@ import { Plus } from "lucide-react";
 import {
 	type ComponentProps,
 	type FormEvent,
-	Fragment,
 	useEffect,
 	useRef,
 	useState,
@@ -23,6 +22,7 @@ import {
 } from "@/api/workbench";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
 import { ErrorMessage, messageOf, notify } from "@/app/shared";
+import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
@@ -40,6 +40,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import { usePolling } from "@/hooks/use-polling";
 import { formatDateTime } from "@/lib/format";
 import { ModelProviderEditor } from "./ModelProviderEditor";
@@ -218,23 +219,25 @@ function ConfigFacts({ config }: { config: Record<string, unknown> }) {
 		Object.entries(config).filter(([key]) => !configFieldLabels[key]),
 	);
 	return (
-		<dl className="mt-2 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-			{known.map((key) => (
-				<div key={key} className="flex min-w-0 gap-2">
-					<dt className="shrink-0 text-muted-foreground">
-						{configFieldLabels[key]}
-					</dt>
-					<dd className="min-w-0 wrap-anywhere font-medium">
-						{String(config[key])}
-					</dd>
-				</div>
-			))}
+		<>
+			<PropertyList
+				layout="grid-2"
+				className="mt-2"
+				entries={known.map((key) => ({
+					label: configFieldLabels[key],
+					value: (
+						<span className="wrap-anywhere font-medium">
+							{String(config[key])}
+						</span>
+					),
+				}))}
+			/>
 			{Object.keys(rest).length > 0 && (
-				<pre className="overflow-auto text-xs sm:col-span-2">
+				<pre className="overflow-auto text-xs">
 					{JSON.stringify(rest, null, 2)}
 				</pre>
 			)}
-		</dl>
+		</>
 	);
 }
 
@@ -591,18 +594,19 @@ function ConnectionDetail({
 								{result.credentialGenerationId} · digest {result.resultDigest}
 							</div>
 							{Object.keys(result.details).length > 0 ? (
-								<dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-									{Object.entries(result.details).map(([key, value]) => (
-										<Fragment key={key}>
-											<dt className="text-muted-foreground">{key}</dt>
-											<dd className="min-w-0 break-words font-mono text-sm">
-												{typeof value === "string"
+								<PropertyList
+									mono
+									className="mt-1"
+									entries={Object.entries(result.details).map(
+										([key, value]) => ({
+											label: key,
+											value:
+												typeof value === "string"
 													? value
-													: JSON.stringify(value)}
-											</dd>
-										</Fragment>
-									))}
-								</dl>
+													: JSON.stringify(value),
+										}),
+									)}
+								/>
 							) : (
 								<p className="mt-1 text-muted-foreground">无详细信息</p>
 							)}
@@ -747,33 +751,28 @@ export function ModelProviderPage({
 				/>
 			) : (
 				<>
-					{connections.length > 0 && (
-						<div className="flex flex-wrap gap-2" aria-label="模型提供方列表">
-							{connections.map((connection) => (
-								<Button
-									type="button"
-									key={connection.name}
-									variant={
-										selected?.name === connection.name ? "secondary" : "outline"
-									}
-									size="sm"
-									onClick={() => choose(connection)}
-								>
-									{connection.name}
-									{connection.revalidationRequired
-										? "（需要重新验证）"
-										: connection.enabled
-											? ""
-											: "（未启用）"}
-								</Button>
-							))}
-						</div>
-					)}
-					{!loading && !error && !connections.length && (
-						<p className="text-sm text-muted-foreground">
-							尚无可管理模型提供方。
-						</p>
-					)}
+					<EntityList
+						items={connections.map((connection) => ({
+							id: connection.name,
+							title: connection.name,
+							badge: connection.revalidationRequired
+								? { text: "需要重新验证", variant: "destructive" as const }
+								: connection.enabled
+									? undefined
+									: { text: "未启用", variant: "secondary" as const },
+						}))}
+						columns={["title", "status"]}
+						selectedId={selected?.name}
+						onSelect={(row) => {
+							const connection = connections.find(
+								(item) => item.name === row.id,
+							);
+							if (connection) choose(connection);
+						}}
+						loading={loading}
+						loadingLabel="正在读取模型提供方"
+						emptyTitle="尚无可管理模型提供方。"
+					/>
 					{/* 详情是右侧抽屉（与告警一致）；新建保留为面包屑页。 */}
 					{selected && (
 						<DetailSheet

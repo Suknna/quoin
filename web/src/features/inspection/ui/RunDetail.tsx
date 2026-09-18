@@ -42,6 +42,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	appendFeedback,
 	type FeedbackTimeline,
@@ -187,36 +188,34 @@ function GenerationDetails({
 				</Button>
 			</CollapsibleTrigger>
 			<CollapsibleContent>
-				<dl className="grid gap-2 border-t px-3 py-2 text-sm">
-					<div>
-						<dt className="text-muted-foreground">本次报告要求</dt>
-						<dd className="whitespace-pre-wrap break-words">
-							{report.reportInstructions || "未设置"}
-						</dd>
-					</div>
-					<div>
-						<dt className="text-muted-foreground">触发</dt>
-						<dd>{detail.triggerKind}</dd>
-					</div>
-					<div>
-						<dt className="text-muted-foreground">创建</dt>
-						<dd>{formatInspectionTime(detail.createdAt)}</dd>
-					</div>
-					<div>
-						<dt className="text-muted-foreground">分析</dt>
-						<dd>{detail.latestAnalysis?.state ?? "尚未开始"}</dd>
-					</div>
-					<div>
-						<dt className="text-muted-foreground">证据集摘要</dt>
-						<dd className="break-all font-mono text-xs">
-							{report.evidenceDigest}
-						</dd>
-					</div>
-					<div>
-						<dt className="text-muted-foreground">报告 ID</dt>
-						<dd className="break-all font-mono text-xs">{report.id}</dd>
-					</div>
-				</dl>
+				<div className="border-t px-3 py-2">
+					<PropertyList
+						entries={[
+							{
+								label: "本次报告要求",
+								value: report.reportInstructions || "未设置",
+							},
+							{ label: "触发", value: detail.triggerKind },
+							{ label: "创建", value: formatInspectionTime(detail.createdAt) },
+							{
+								label: "分析",
+								value: detail.latestAnalysis?.state ?? "尚未开始",
+							},
+							{
+								label: "证据集摘要",
+								value: (
+									<span className="break-all font-mono text-xs">
+										{report.evidenceDigest}
+									</span>
+								),
+							},
+							{
+								label: "报告 ID",
+								value: <span className="break-all font-mono">{report.id}</span>,
+							},
+						]}
+					/>
+				</div>
 			</CollapsibleContent>
 		</Collapsible>
 	);
@@ -304,40 +303,38 @@ function ResultSummary({
 				</Badge>
 				<p className="text-lg font-semibold">{conclusionOf(detail)}</p>
 			</div>
-			<dl className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-				<div>
-					<dt className="inline">采证冻结于 </dt>
-					<dd className="inline">{formatInspectionTime(detail.evidenceAt)}</dd>
-				</div>
-				<div>
-					<dt className="inline">触发 </dt>
-					<dd className="inline">
-						{detail.triggerKind === "manual" ? "手动" : "定时"}
-					</dd>
-				</div>
-				<div>
-					<dt className="inline">报告 </dt>
-					<dd className="inline">
-						{report
+			<PropertyList
+				layout="inline"
+				className="text-muted-foreground"
+				entries={[
+					{
+						label: "采证冻结于",
+						value: formatInspectionTime(detail.evidenceAt),
+					},
+					{
+						label: "触发",
+						value: detail.triggerKind === "manual" ? "手动" : "定时",
+					},
+					{
+						label: "报告",
+						value: report
 							? `v${report.version} · ${formatInspectionTime(report.createdAt)}`
 							: reportPending
 								? "读取中…"
-								: "尚无"}
-					</dd>
-				</div>
-				<div>
-					<dt className="inline">分析 </dt>
-					<dd className="inline">
-						{analysis
+								: "尚无",
+					},
+					{
+						label: "分析",
+						value: analysis
 							? `${analysisStateText[analysis.state] ?? analysis.state}${
 									analysis.terminationReason
 										? `（${analysis.terminationReason}）`
 										: ""
 								}`
-							: "尚未开始"}
-					</dd>
-				</div>
-			</dl>
+							: "尚未开始",
+					},
+				]}
+			/>
 			{gapChecks.length > 0 && (
 				<Alert variant="destructive">
 					<AlertTitle>
@@ -823,14 +820,13 @@ export function RunDetail({
 						<AccordionItem value="frozen">
 							<AccordionTrigger>冻结的分析配置（Run 创建时）</AccordionTrigger>
 							<AccordionContent>
-								<dl className="grid gap-2 text-sm sm:grid-cols-2">
-									{frozenRows.map(([label, value]) => (
-										<div key={label}>
-											<dt className="text-muted-foreground">{label}</dt>
-											<dd>{value || "—"}</dd>
-										</div>
-									))}
-								</dl>
+								<PropertyList
+									layout="grid-2"
+									entries={frozenRows.map(([label, value]) => ({
+										label,
+										value: value || "—",
+									}))}
+								/>
 								<p className="text-xs text-muted-foreground">
 									重新分析默认沿用这里的初始报告要求。
 								</p>

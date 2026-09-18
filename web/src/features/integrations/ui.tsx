@@ -75,6 +75,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	acknowledgeIntakeIssue,
 	fetchIntakeIssues,
@@ -899,20 +900,27 @@ function MetricsDetail({
 					</div>
 				</CardHeader>
 				<CardContent className="flex flex-col gap-5">
-					<dl className="grid gap-4 text-sm sm:grid-cols-2">
-						<div>
-							<dt className="text-muted-foreground">端点</dt>
-							<dd className="mt-1 break-all font-medium">
-								{item.endpoint ?? "—"}
-							</dd>
-						</div>
-						<div>
-							<dt className="text-muted-foreground">最近验证</dt>
-							<dd className="mt-1 font-medium">
-								{item.lastProbe ? item.lastProbe.outcome : "尚未记录"}
-							</dd>
-						</div>
-					</dl>
+					<PropertyList
+						layout="grid-2"
+						entries={[
+							{
+								label: "端点",
+								value: (
+									<span className="break-all font-medium">
+										{item.endpoint ?? "—"}
+									</span>
+								),
+							},
+							{
+								label: "最近验证",
+								value: (
+									<span className="font-medium">
+										{item.lastProbe ? item.lastProbe.outcome : "尚未记录"}
+									</span>
+								),
+							},
+						]}
+					/>
 					{needsRevalidation && (
 						<Alert>
 							<AlertTitle>需要重新验证</AlertTitle>
@@ -1568,20 +1576,27 @@ function AlertmanagerDetail({
 						</div>
 					</CardHeader>
 					<CardContent className="flex flex-col gap-5">
-						<dl className="grid gap-4 text-sm sm:grid-cols-2">
-							<div>
-								<dt className="text-muted-foreground">创建时间</dt>
-								<dd className="mt-1 font-medium">
-									{formatTime(source.createdAt)}
-								</dd>
-							</div>
-							<div>
-								<dt className="text-muted-foreground">最近有效事件</dt>
-								<dd className="mt-1 font-medium">
-									{formatEventTime(source.latestValidEventAt)}
-								</dd>
-							</div>
-						</dl>
+						<PropertyList
+							layout="grid-2"
+							entries={[
+								{
+									label: "创建时间",
+									value: (
+										<span className="font-medium">
+											{formatTime(source.createdAt)}
+										</span>
+									),
+								},
+								{
+									label: "最近有效事件",
+									value: (
+										<span className="font-medium">
+											{formatEventTime(source.latestValidEventAt)}
+										</span>
+									),
+								},
+							]}
+						/>
 						<Separator />
 						<div className="flex flex-wrap gap-2">
 							<Button

@@ -4,6 +4,7 @@
 import { ClipboardCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { messageOf } from "@/app/shared";
+import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,7 @@ import {
 } from "@/components/ui/empty";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { EntityList } from "@/components/EntityList";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import { type BusinessView, formatTime, getBusinessView } from "../api";
 
 export function ViewDetail({
@@ -181,20 +182,14 @@ export function ViewDetail({
 						)}
 					</div>
 					<Separator />
-					<dl className="grid gap-2 text-sm sm:grid-cols-3">
-						<div>
-							<dt className="text-muted-foreground">创建时间</dt>
-							<dd>{formatTime(view.createdAt)}</dd>
-						</div>
-						<div>
-							<dt className="text-muted-foreground">更新时间</dt>
-							<dd>{formatTime(view.updatedAt)}</dd>
-						</div>
-						<div>
-							<dt className="text-muted-foreground">行版本</dt>
-							<dd>{view.rowVersion}</dd>
-						</div>
-					</dl>
+					<PropertyList
+						layout="grid-3"
+						entries={[
+							{ label: "创建时间", value: formatTime(view.createdAt) },
+							{ label: "更新时间", value: formatTime(view.updatedAt) },
+							{ label: "行版本", value: view.rowVersion },
+						]}
+					/>
 				</CardContent>
 			</Card>
 		</div>

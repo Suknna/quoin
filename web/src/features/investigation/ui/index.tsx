@@ -25,6 +25,7 @@ import type {
 } from "@/app/module-contract";
 import { messageOf, notify } from "@/app/shared";
 import { AiContent } from "@/components/ai/AiContent";
+import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -137,29 +138,18 @@ export function useInvestigationsModule(
 					<AlertDescription>{error}</AlertDescription>
 				</Alert>
 			)}
-			{items.length === 0 ? (
-				<p className="px-2 text-sm text-muted-foreground">尚无对话。</p>
-			) : (
-				items.map((item) => (
-					<Button
-						key={item.id}
-						variant="ghost"
-						className="h-auto w-full justify-start p-3 text-left whitespace-normal"
-						onClick={() =>
-							props.navigate(`/investigations/${encodeURIComponent(item.id)}`)
-						}
-					>
-						<span className="block w-full min-w-0">
-							<strong className="block truncate text-sm">
-								{item.displayTitle}
-							</strong>
-							<small className="mt-1 block text-muted-foreground">
-								{formatDateTime(item.lastActivityAt)}
-							</small>
-						</span>
-					</Button>
-				))
-			)}
+			<EntityList
+				items={items.map((item) => ({
+					id: item.id,
+					title: item.displayTitle,
+					time: formatDateTime(item.lastActivityAt),
+				}))}
+				columns={["title", "time"]}
+				onSelect={(row) =>
+					props.navigate(`/investigations/${encodeURIComponent(row.id)}`)
+				}
+				emptyTitle="尚无对话。"
+			/>
 		</aside>
 	);
 	// The AI SRE landing route is a draft-only conversation workspace: it must not

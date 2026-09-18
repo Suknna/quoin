@@ -6,6 +6,7 @@ import type {
 	WorkspaceModuleView,
 } from "@/app/module-contract";
 import { messageOf, notify } from "@/app/shared";
+import { EntityList } from "@/components/EntityList";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
 	AlertDialog,
@@ -137,31 +138,21 @@ export function useKnowledgeModule(
 					/>
 				) : (
 					<>
-						{items.map((item) => (
-							<Button
-								key={item.id}
-								variant="ghost"
-								className="h-auto w-full justify-start whitespace-normal text-left"
-								onClick={() => props.navigate(`/knowledge?item=${item.id}`)}
-							>
-								<span>
-									<strong>{item.title}</strong>
-									<small className="block text-muted-foreground">
-										v{item.currentVersionSeq} ·{" "}
-										{item.eligible ? "可复用" : "已退出检索"}
-									</small>
-								</span>
-							</Button>
-						))}
-						{loading && !items.length && (
-							<DetailSkeleton
-								label="正在读取知识列表"
-								rows={["line", "line", "line"]}
-							/>
-						)}
-						{!loading && !items.length && (
-							<p className="text-sm text-muted-foreground">尚无已确认知识。</p>
-						)}
+						<EntityList
+							items={items.map((item) => ({
+								id: item.id,
+								title: item.title,
+								subtitle: `v${item.currentVersionSeq} · ${
+									item.eligible ? "可复用" : "已退出检索"
+								}`,
+							}))}
+							columns={["title", "subtitle"]}
+							selectedId={knowledgeId}
+							onSelect={(row) => props.navigate(`/knowledge?item=${row.id}`)}
+							loading={loading && !items.length}
+							loadingLabel="正在读取知识列表"
+							emptyTitle="尚无已确认知识。"
+						/>
 						<LoadMoreButton
 							loading={loading}
 							hasMore={Boolean(next)}
@@ -290,24 +281,23 @@ function HitGroup({
 	return (
 		<section>
 			<h3 className="mb-1 text-sm font-medium">{title}</h3>
-			{hits.map((hit) => (
-				<Button
-					key={hit.knowledge.id}
-					variant="ghost"
-					className="h-auto w-full justify-start whitespace-normal text-left"
-					onClick={() => open(hit.knowledge.id)}
-				>
-					<span>
-						{hit.knowledge.title}
-						<small className="block text-muted-foreground">
-							分数 {hit.score.toFixed(3)}
-							{semantic && hit.indexState
+			{hits.length ? (
+				<EntityList
+					items={hits.map((hit) => ({
+						id: hit.knowledge.id,
+						title: hit.knowledge.title,
+						subtitle: `分数 ${hit.score.toFixed(3)}${
+							semantic && hit.indexState
 								? ` · ${indexStateLabels[hit.indexState]}`
-								: ""}
-						</small>
-					</span>
-				</Button>
-			)) || <p className="text-sm text-muted-foreground">没有匹配项。</p>}
+								: ""
+						}`,
+					}))}
+					columns={["title", "subtitle"]}
+					onSelect={(row) => open(row.id)}
+				/>
+			) : (
+				<p className="text-sm text-muted-foreground">没有匹配项。</p>
+			)}
 		</section>
 	);
 }
@@ -624,24 +614,23 @@ function KnowledgeItem({
 			</div>
 			<section>
 				<h3 className="font-medium">版本历史</h3>
-				{versions.map((version) => (
-					<Button
-						key={version.id}
-						variant="ghost"
-						className="h-auto w-full justify-start border-b py-2 text-left text-sm"
-						onClick={() =>
-							void api
-								.getVersion(currentDetail.id, version.id)
-								.then(setCurrent)
-								.catch((reason) =>
-									setError(messageOf(reason, "暂时无法完成操作，请重试。")),
-								)
-						}
-					>
-						v{version.versionSeq} · {version.title} ·{" "}
-						{version.eligible ? "可检索" : "已退出"}
-					</Button>
-				))}
+				<EntityList
+					items={versions.map((version) => ({
+						id: version.id,
+						title: `v${version.versionSeq} · ${version.title}`,
+						subtitle: version.eligible ? "可检索" : "已退出",
+					}))}
+					columns={["title", "subtitle"]}
+					onSelect={(row) =>
+						void api
+							.getVersion(currentDetail.id, row.id)
+							.then(setCurrent)
+							.catch((reason) =>
+								setError(messageOf(reason, "暂时无法完成操作，请重试。")),
+							)
+					}
+					emptyTitle="尚无版本历史"
+				/>
 			</section>
 			<AlertDialog open={stop} onOpenChange={setStop}>
 				<AlertDialogContent>

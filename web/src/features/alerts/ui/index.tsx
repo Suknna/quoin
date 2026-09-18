@@ -1,7 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- Alert views colocate their route lifecycle. */
 
-import { usePolling } from "@/hooks/use-polling";
-import { formatDateTime } from "@/lib/format";
 import { cn } from "cn";
 import {
 	Activity,
@@ -14,21 +12,13 @@ import {
 	FileText,
 	RefreshCw,
 } from "lucide-react";
-import {
-	Fragment,
-	useCallback,
-	useEffect,
-	useMemo,
-	useRef,
-	useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
 } from "@/app/module-contract";
-import { parseRoute } from "@/lib/parse-route";
-import { messageOf } from "@/app/shared";
 import { useAlertEventStream } from "@/app/realtime/hooks";
+import { messageOf } from "@/app/shared";
 import { AiContent, EvidenceLinks } from "@/components/ai/AiContent";
 import { EntityList, type EntityListItem } from "@/components/EntityList";
 import { FeatureUnderConstruction } from "@/components/FeatureUnderConstruction";
@@ -74,6 +64,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	type AlertOccurrenceSummary,
 	type AttributionDiagnostic,
@@ -98,7 +89,9 @@ import {
 	stateLabel,
 } from "@/features/analysis/api";
 import { listBusinessViews } from "@/features/systems/api";
-
+import { usePolling } from "@/hooks/use-polling";
+import { formatDateTime } from "@/lib/format";
+import { parseRoute } from "@/lib/parse-route";
 
 const time = (value?: string) => formatDateTime(value);
 const creating = new Map<string, Promise<InitialAnalysisDetail>>();
@@ -252,20 +245,22 @@ function AttributionDiagnosticNotice({
 						? "该告警首次接收时匹配多个业务声明，未归属到任一业务系统。"
 						: "该告警首次接收时未匹配业务声明。"}
 				</p>
-				<dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-					<dt>原因</dt>
-					<dd className="break-words font-mono">
-						{attributionReason(attribution.reasonJson)}
-					</dd>
-					<dt>候选业务系统 ID</dt>
-					<dd className="break-words font-mono">
-						{diagnosticValues(attribution.candidateSystemIdsJson)}
-					</dd>
-					<dt>候选配置版本 ID</dt>
-					<dd className="break-words font-mono">
-						{diagnosticValues(attribution.candidateConfigVersionIdsJson)}
-					</dd>
-				</dl>
+				<PropertyList
+					mono
+					entries={[
+						{ label: "原因", value: attributionReason(attribution.reasonJson) },
+						{
+							label: "候选业务系统 ID",
+							value: diagnosticValues(attribution.candidateSystemIdsJson),
+						},
+						{
+							label: "候选配置版本 ID",
+							value: diagnosticValues(
+								attribution.candidateConfigVersionIdsJson,
+							),
+						},
+					]}
+				/>
 				<p>以上为告警首次接收时冻结的归属证据，不会按当前业务声明重新解释。</p>
 			</AlertDescription>
 		</Alert>
@@ -313,20 +308,20 @@ function ViewAttributionNotice({
 						? "该告警首次接收时匹配多个业务视图，未归属到任一视图；请调整视图的告警源或标签条件后，由新告警重新归属。"
 						: "该告警首次接收时未匹配任何业务视图。"}
 				</p>
-				<dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-					<dt>原因</dt>
-					<dd className="break-words font-mono">
-						{attributionReason(attribution.reasonJson)}
-					</dd>
-					{ambiguous && (
-						<Fragment>
-							<dt>候选视图</dt>
-							<dd className="break-words font-mono">
-								{viewCandidates(attribution.candidatesJson)}
-							</dd>
-						</Fragment>
-					)}
-				</dl>
+				<PropertyList
+					mono
+					entries={[
+						{ label: "原因", value: attributionReason(attribution.reasonJson) },
+						...(ambiguous
+							? [
+									{
+										label: "候选视图",
+										value: viewCandidates(attribution.candidatesJson),
+									},
+								]
+							: []),
+					]}
+				/>
 				<p>
 					以上为告警首次接收时冻结的归属证据；历史记录不会按当前视图配置重新计算。
 				</p>
@@ -668,23 +663,21 @@ function DetailEmpty({
 }
 
 /** Machine-provided labels and annotations remain copyable while long values cannot overflow the drawer. */
-function PropertyList({ entries }: { entries: [string, string][] }) {
+function AlertProperties({ entries }: { entries: [string, string][] }) {
 	return (
-		<dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
-			{entries.map(([key, value]) => (
-				<Fragment key={key}>
-					<dt className="text-muted-foreground">{key}</dt>
-					<dd className="min-w-0 break-words font-mono text-sm">
-						{key.toLowerCase() === "severity" &&
-						value.toLowerCase() === "critical" ? (
-							<Badge variant="destructive">{value}</Badge>
-						) : (
-							value
-						)}
-					</dd>
-				</Fragment>
-			))}
-		</dl>
+		<PropertyList
+			mono
+			entries={entries.map(([label, value]) => ({
+				label,
+				value:
+					label.toLowerCase() === "severity" &&
+					value.toLowerCase() === "critical" ? (
+						<Badge variant="destructive">{value}</Badge>
+					) : (
+						value
+					),
+			}))}
+		/>
 	);
 }
 
@@ -1040,14 +1033,20 @@ function AlertDetailSheet({
 												<h2 className="text-sm font-medium">故障生命周期</h2>
 												<PropertyList
 													entries={[
-														["发生时间", time(occurrence.firstSeenAt)],
-														[
-															"恢复时间",
-															occurrence.resolvedAt
+														{
+															label: "发生时间",
+															value: time(occurrence.firstSeenAt),
+														},
+														{
+															label: "恢复时间",
+															value: occurrence.resolvedAt
 																? time(occurrence.resolvedAt)
 																: "尚未恢复",
-														],
-														["原因", occurrence.reason ?? "未知"],
+														},
+														{
+															label: "原因",
+															value: occurrence.reason ?? "未知",
+														},
 													]}
 												/>
 												<p className="text-sm text-muted-foreground">
@@ -1061,14 +1060,16 @@ function AlertDetailSheet({
 											<Separator />
 											<section className="flex flex-col gap-3">
 												<h2 className="text-sm font-medium">注释</h2>
-												<PropertyList entries={annotationEntries} />
+												<AlertProperties entries={annotationEntries} />
 											</section>
 										</>
 									)}
 									<Separator />
 									<section className="flex flex-col gap-3">
 										<h2 className="text-sm font-medium">属性</h2>
-										<PropertyList entries={Object.entries(occurrence.labels)} />
+										<AlertProperties
+											entries={Object.entries(occurrence.labels)}
+										/>
 									</section>
 								</div>
 							</TabsContent>
@@ -1107,8 +1108,8 @@ function AlertDetailSheet({
 														<ItemContent>
 															<ItemTitle>{item.observedState}</ItemTitle>
 															<ItemDescription>
-																效果：{effectLabels[item.effect] ?? item.effect} · 提交于{" "}
-																{time(item.committedAt)}
+																效果：{effectLabels[item.effect] ?? item.effect}{" "}
+																· 提交于 {time(item.committedAt)}
 															</ItemDescription>
 														</ItemContent>
 													</Item>
