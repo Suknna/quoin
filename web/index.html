@@ -3,6 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Deep-defense resource policy: the app is fully same-origin; ws: is only
+         needed by the Vite dev HMR and never in production deployments. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' ws:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
     <link rel="icon" href="/brand/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="icon" type="image/png" sizes="16x16" href="/brand/icon-16.png" />
     <link rel="icon" type="image/png" sizes="32x32" href="/brand/icon-32.png" />

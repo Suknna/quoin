@@ -109,6 +109,20 @@ export function newClientCommandId(): string {
 	).join("");
 }
 
+// Upstream or gateway problem text can embed internal hostnames, URLs, or
+// stack fragments; only prose that looks like a user-facing message is shown.
+function presentableMessage(value: string): string {
+	const text = value.trim();
+	if (
+		!text ||
+		text.length > 300 ||
+		/https?:\/\//i.test(text) ||
+		/\n/.test(text)
+	)
+		return "暂时无法完成操作，请重试。";
+	return text;
+}
+
 export async function request<T>(
 	path: string,
 	init?: RequestInit,
@@ -130,7 +144,7 @@ export async function request<T>(
 				message?: string;
 				code?: string;
 			};
-			message = body.detail ?? body.message ?? message;
+			message = presentableMessage(body.detail ?? body.message ?? message);
 			code = body.code;
 		} catch {
 			/* gateway errors do not have a problem document */
@@ -153,10 +167,14 @@ export const workbenchApi = {
 	// A rejected current password is a form validation error, not proof that the
 	// session expired; the password form must stay mounted to let users correct it.
 	changePassword: (body: PasswordChangeRequest) =>
-		request<void>("/api/v1/auth/password", {
-			method: "PUT",
-			body: JSON.stringify(body),
-		}, false),
+		request<void>(
+			"/api/v1/auth/password",
+			{
+				method: "PUT",
+				body: JSON.stringify(body),
+			},
+			false,
+		),
 	logout: () => request<void>("/api/v1/auth/logout", { method: "POST" }, false),
 	/**
 	 * Idle-clock refresh for an authenticated session. Fired only by real user
@@ -164,10 +182,14 @@ export const workbenchApi = {
 	 * stay silent because the reconcile loop owns session-expiry recovery.
 	 */
 	activity: () =>
-		request<void>("/api/v1/auth/activity", {
-			method: "POST",
-			body: JSON.stringify({}),
-		}, false),
+		request<void>(
+			"/api/v1/auth/activity",
+			{
+				method: "POST",
+				body: JSON.stringify({}),
+			},
+			false,
+		),
 	maintenance: async (): Promise<MaintenanceState | null> => {
 		try {
 			return await request<MaintenanceState>("/api/v1/maintenance");
@@ -209,77 +231,93 @@ export const workbenchApi = {
 			`/api/v1/connections/${encodeURIComponent(name)}/probe-attempts/${encodeURIComponent(response.id)}`,
 		);
 	},
-		fetchProbeAttempt: (name: string, attemptId: string) =>
-			request<ProbeAttemptView>(
-				`/api/v1/connections/${encodeURIComponent(name)}/probe-attempts/${encodeURIComponent(attemptId)}`,
-			),
-		cancelProbeAttempt: (name: string, attemptId: string, expectedRowVersion: number) =>
-			request<ProbeAttemptView>(
-				`/api/v1/connections/${encodeURIComponent(name)}/probe-attempts/${encodeURIComponent(attemptId)}/cancel`,
-				{
-					method: "POST",
-					body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
-				},
-			),
-		listProbeResults: async (name: string): Promise<ProbeResultView[]> =>
+	fetchProbeAttempt: (name: string, attemptId: string) =>
+		request<ProbeAttemptView>(
+			`/api/v1/connections/${encodeURIComponent(name)}/probe-attempts/${encodeURIComponent(attemptId)}`,
+		),
+	cancelProbeAttempt: (
+		name: string,
+		attemptId: string,
+		expectedRowVersion: number,
+	) =>
+		request<ProbeAttemptView>(
+			`/api/v1/connections/${encodeURIComponent(name)}/probe-attempts/${encodeURIComponent(attemptId)}/cancel`,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					clientCommandId: newClientCommandId(),
+					expectedRowVersion,
+				}),
+			},
+		),
+	listProbeResults: async (name: string): Promise<ProbeResultView[]> =>
 		(
 			await request<{ items?: ProbeResultView[] }>(
 				`/api/v1/connections/${encodeURIComponent(name)}/probe-results?limit=50`,
 			)
 		).items ?? [],
-		listRevisions: async (name: string): Promise<ConnectionRevisionView[]> =>
-			(
-				await request<{ items?: ConnectionRevisionView[] }>(
-					`/api/v1/connections/${encodeURIComponent(name)}/revisions?limit=50`,
-				)
-			).items ?? [],
-		listCredentialGenerations: async (name: string): Promise<CredentialGenerationView[]> =>
-			(
-				await request<{ items?: CredentialGenerationView[] }>(
-					`/api/v1/connections/${encodeURIComponent(name)}/generations?limit=50`,
-				)
-			).items ?? [],
-		discoverProviderModels: (baseUrl: string, apiKey: string) =>
+	listRevisions: async (name: string): Promise<ConnectionRevisionView[]> =>
+		(
+			await request<{ items?: ConnectionRevisionView[] }>(
+				`/api/v1/connections/${encodeURIComponent(name)}/revisions?limit=50`,
+			)
+		).items ?? [],
+	listCredentialGenerations: async (
+		name: string,
+	): Promise<CredentialGenerationView[]> =>
+		(
+			await request<{ items?: CredentialGenerationView[] }>(
+				`/api/v1/connections/${encodeURIComponent(name)}/generations?limit=50`,
+			)
+		).items ?? [],
+	discoverProviderModels: (baseUrl: string, apiKey: string) =>
 		request<ProviderDiscoveryResult>("/api/v1/model-providers/discover", {
 			method: "POST",
 			body: JSON.stringify({ baseUrl, apiKey }),
 		}),
-		enableConnection: (
-			name: string,
-			expectedRowVersion: number,
-			qualifiedProbeResultId?: string,
-		) =>
-			request<ConnectionSummaryView>(
-				`/api/v1/connections/${encodeURIComponent(name)}/enable`,
-				{
-					method: "POST",
-					body: JSON.stringify({
-						clientCommandId: newClientCommandId(),
-						expectedRowVersion,
-						...(qualifiedProbeResultId && { qualifiedProbeResultId }),
-					}),
-				},
-			),
-		disableConnection: (name: string, expectedRowVersion: number) =>
-			request<ConnectionSummaryView>(
-				`/api/v1/connections/${encodeURIComponent(name)}/disable`,
-				{
-					method: "POST",
-					body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion }),
-				},
-			),
-		rotateConnection: (name: string, expectedRowVersion: number, connection: ConnectionInput) =>
-			request<ConnectionDetailView>(
-				`/api/v1/connections/${encodeURIComponent(name)}/rotate`,
-				{
-					method: "POST",
-					body: JSON.stringify({
-						clientCommandId: newClientCommandId(),
-						expectedRowVersion,
-						connection,
-					}),
-				},
-			),
+	enableConnection: (
+		name: string,
+		expectedRowVersion: number,
+		qualifiedProbeResultId?: string,
+	) =>
+		request<ConnectionSummaryView>(
+			`/api/v1/connections/${encodeURIComponent(name)}/enable`,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					clientCommandId: newClientCommandId(),
+					expectedRowVersion,
+					...(qualifiedProbeResultId && { qualifiedProbeResultId }),
+				}),
+			},
+		),
+	disableConnection: (name: string, expectedRowVersion: number) =>
+		request<ConnectionSummaryView>(
+			`/api/v1/connections/${encodeURIComponent(name)}/disable`,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					clientCommandId: newClientCommandId(),
+					expectedRowVersion,
+				}),
+			},
+		),
+	rotateConnection: (
+		name: string,
+		expectedRowVersion: number,
+		connection: ConnectionInput,
+	) =>
+		request<ConnectionDetailView>(
+			`/api/v1/connections/${encodeURIComponent(name)}/rotate`,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					clientCommandId: newClientCommandId(),
+					expectedRowVersion,
+					connection,
+				}),
+			},
+		),
 };
 export interface ThanosConnectionInput {
 	type: "thanos";
@@ -309,7 +347,10 @@ export interface ModelProviderConnectionInput {
 	apiKey: string;
 }
 
-export type ConnectionInput = ThanosConnectionInput | KubernetesConnectionInput | ModelProviderConnectionInput;
+export type ConnectionInput =
+	| ThanosConnectionInput
+	| KubernetesConnectionInput
+	| ModelProviderConnectionInput;
 
 export interface ProviderDiscoveryResult {
 	available: boolean;
