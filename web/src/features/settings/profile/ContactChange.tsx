@@ -1,9 +1,7 @@
-import { channelLabels } from "@/features/settings/labels";
 import { LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { messageOf, notify } from "@/app/shared";
 import { Badge } from "@/components/ui/badge";
-import { messageOf } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -20,6 +18,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { channelLabels } from "@/features/settings/labels";
 import {
 	type ContactChangeFlow,
 	completeContactChange,
@@ -32,9 +31,6 @@ import {
 } from "./api";
 
 type Stage = "start" | "stage" | "send" | "verify" | "confirm" | "finished";
-
-
-
 
 /** 管理员在资料页内联自助更换收码渠道（docs/authentication-design.md §1/§4）：
  * 旧渠道在原子完成前保持有效，任何一步失败都不影响现有登录能力；完成后所有会话撤销，
@@ -53,7 +49,6 @@ export function ContactChange({
 	const [target, setTarget] = useState("");
 	const [password, setPassword] = useState("");
 	const [code, setCode] = useState("");
-	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 
 	// Completion revoked every session; a full reload guarantees a clean,
@@ -65,12 +60,15 @@ export function ContactChange({
 	const oldChannelPreserved = "原收码渠道保持不变，可重试或放弃本次变更。";
 
 	async function run(action: () => Promise<void>) {
-		setError("");
 		setBusy(true);
 		try {
 			await action();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			// 失败提示带"旧渠道保持不变"的安抚语义，随 toast 一并呈现；
+			// 面板标题也永久说明期间旧渠道可用。fallback 镜像完整文案，
+			// 保证非 Error 原因（如校验字符串）也能带安抚语义。
+			const detail = `${messageOf(reason, "暂时无法完成操作，请重试。")}${oldChannelPreserved}`;
+			notify.error(detail, detail);
 		} finally {
 			setBusy(false);
 		}
@@ -131,7 +129,6 @@ export function ContactChange({
 		setTarget("");
 		setCode("");
 		setPassword("");
-		setError("");
 		onClose();
 	};
 
@@ -152,14 +149,6 @@ export function ContactChange({
 					关闭
 				</Button>
 			</div>
-			{error && (
-				<Alert variant="destructive">
-					<AlertDescription>
-						{error}
-						<small className="block">{oldChannelPreserved}</small>
-					</AlertDescription>
-				</Alert>
-			)}
 			{stage === "start" && (
 				<form
 					className="flex max-w-sm flex-col gap-3"

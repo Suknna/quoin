@@ -9,6 +9,7 @@ import {
 	within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { notify } from "./shared";
 
 const appApiState = vi.hoisted(() => ({
 	unauthorized: undefined as (() => void) | undefined,
@@ -483,13 +484,18 @@ describe("authentication workflow", () => {
 		vi.spyOn(workbenchApi, "logout").mockRejectedValue(
 			new WorkbenchApiError(503, "退出服务不可用"),
 		);
+		// 登出失败改由全局 toast 反馈（测试环境未挂载 Toaster，断言通知调用本身）。
+		const notifyError = vi.spyOn(notify, "error").mockImplementation(() => 0);
 		render(<App />);
 		const accountMenu = await screen.findByRole("button", { name: /Admin/ });
 		fireEvent.pointerDown(accountMenu);
 		fireEvent.click(accountMenu);
 		fireEvent.click(await screen.findByText("退出登录"));
-		expect(await screen.findByRole("alert")).toHaveTextContent(
-			"退出服务不可用",
+		await waitFor(() =>
+			expect(notifyError).toHaveBeenCalledWith(
+				expect.any(WorkbenchApiError),
+				"退出登录失败，请重试。",
+			),
 		);
 		expect(screen.queryByLabelText("用户名")).not.toBeInTheDocument();
 	});

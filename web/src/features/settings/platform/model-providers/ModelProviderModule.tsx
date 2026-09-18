@@ -25,7 +25,7 @@ import {
 	workbenchApi,
 } from "@/api/workbench";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
-import { ErrorMessage, messageOf } from "@/app/shared";
+import { ErrorMessage, messageOf, notify } from "@/app/shared";
 import {
 	AlertDialog,
 	AlertDialogCancel,
@@ -352,7 +352,7 @@ function ConnectionDetail({
 				onRefresh();
 			}
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法发起探测。"));
+			notify.error(reason, "暂时无法发起探测。");
 		} finally {
 			setBusy(false);
 		}
@@ -370,7 +370,7 @@ function ConnectionDetail({
 				),
 			);
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法取消探测。"));
+			notify.error(reason, "暂时无法取消探测。");
 		} finally {
 			setBusy(false);
 		}
@@ -417,6 +417,9 @@ function ConnectionDetail({
 					),
 				);
 			}
+			notify.success(
+				confirmation === "disable" ? "已停用连接" : "已启用连接",
+			);
 			setConfirmation(undefined);
 		} catch (reason) {
 			if (
@@ -424,9 +427,9 @@ function ConnectionDetail({
 				reason.status === 409 &&
 				reason.code === "row_version_conflict"
 			) {
-				setError("连接版本冲突，正在刷新详情；请核对最新版本后重试。");
+				notify.warning("连接版本冲突，正在刷新详情；请核对最新版本后重试。");
 				onRefresh();
-			} else setError(messageOf(reason, "暂时无法更新连接。"));
+			} else notify.error(reason, "暂时无法更新连接。");
 		} finally {
 			setBusy(false);
 		}
@@ -450,8 +453,9 @@ function ConnectionDetail({
 				apiKey: "",
 			}));
 			setRotating(false);
+			notify.success("已轮换连接凭据");
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法轮换连接凭据。"));
+			notify.error(reason, "暂时无法轮换连接凭据。");
 		} finally {
 			setBusy(false);
 		}

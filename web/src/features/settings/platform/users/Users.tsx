@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
@@ -90,9 +91,10 @@ export function Users({ suspended }: { suspended: boolean }) {
 	async function update(user: AdminUser, changes: Parameters<typeof updateUser>[2]) {
 		try {
 			await updateUser(user.id, user.rowVersion, changes);
+			notify.success(changes.enabled ? "已启用" : "已停用");
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法更新用户。"));
+			notify.error(reason, "暂时无法更新用户。");
 		}
 	}
 	async function saveContacts() {
@@ -100,11 +102,12 @@ export function Users({ suspended }: { suspended: boolean }) {
 		setBusy(true);
 		try {
 			await configureContacts(configuring.id, configuring.rowVersion, configuredContacts);
+			notify.success("已保存验证渠道");
 			setConfiguring(undefined);
 			setContactDraft(emptyContactDraft);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法配置验证渠道。"));
+			notify.error(reason, "暂时无法配置验证渠道。");
 		} finally {
 			setBusy(false);
 		}
@@ -114,10 +117,11 @@ export function Users({ suspended }: { suspended: boolean }) {
 		setBusy(true);
 		try {
 			await resetPassword(resetting.id, resetting.rowVersion, temporaryPassword);
+			notify.success("已重置密码");
 			setResetting(undefined);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法重置密码。"));
+			notify.error(reason, "暂时无法重置密码。");
 		} finally {
 			setBusy(false);
 			setTemporaryPassword("");
@@ -198,7 +202,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 									title="撤销该用户的所有会话？"
 									description="该用户需要重新登录后才能继续使用工作台。"
 									disabled={suspended}
-									onConfirm={() => void revokeSessions(user.id).then(load).catch(reason => setError(messageOf(reason, "暂时无法撤销会话。")))}
+									onConfirm={() => void revokeSessions(user.id).then(() => { notify.success("已撤销会话"); return load(); }).catch(reason => notify.error(reason, "暂时无法撤销会话。"))}
 								>
 									撤销会话
 									</ConfirmAction>

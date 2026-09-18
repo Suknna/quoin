@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/popover";
 import type { ConnectionSummaryView } from "@/api/workbench";
 import { workbenchApi } from "@/api/workbench";
-import { ErrorMessage, messageOf } from "@/app/shared";
+import { ErrorMessage, notify } from "@/app/shared";
 
 /** A discovery response is only a picker aid; it never asserts provider capability. */
 function ModelPicker({
@@ -148,7 +148,7 @@ export function ModelProviderEditor({
 				setDiscoveryNote(`${result.detail ? `${result.detail}；` : ""}可以直接手工填写模型 ID。`);
 			}
 		} catch (reason) {
-			if (discoveryKey.current === requestKey) setError(messageOf(reason, "模型发现请求未完成；可以直接手工填写模型 ID。"));
+			if (discoveryKey.current === requestKey) notify.error(reason, "模型发现请求未完成；可以直接手工填写模型 ID。");
 		} finally {
 			if (discoveryKey.current === requestKey) setDiscovering(false);
 		}
@@ -175,8 +175,9 @@ export function ModelProviderEditor({
 				apiKey,
 			}));
 			setApiKey("");
+			notify.success("模型提供方已创建");
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法创建模型提供方连接。"));
+			notify.error(reason, "暂时无法创建模型提供方连接。");
 		} finally {
 			setSaving(false);
 		}

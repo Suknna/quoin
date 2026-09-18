@@ -8,7 +8,7 @@ import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
 } from "@/app/module-contract";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { AiContent, EvidenceLinks } from "@/components/ai/AiContent";
 import { RawPayload, StructuredData } from "@/components/ai/StructuredData";
 import { parseStructured } from "@/components/ai/structured";
@@ -293,8 +293,9 @@ function Feedback({
 			setTimeline(
 				await fetchFeedback({ type: "inspection_report", id: reportId }),
 			);
+			notify.success("已记录反馈");
 		} catch (e) {
-			setError(messageOf(e, "无法记录反馈。"));
+			notify.error(e, "无法记录反馈。");
 		} finally {
 			setSubmitting(false);
 		}
@@ -408,21 +409,25 @@ export function RunDetail({
 		setBusy(true);
 		setError("");
 		try {
-			if (kind === "cancel")
+			if (kind === "cancel") {
 				await cancelInspectionRun(detail.id, detail.rowVersion);
-			else if (kind === "analyze") {
+				notify.success("已取消巡检");
+			} else if (kind === "analyze") {
 				await reanalyzeInspectionRun(
 					detail.id,
 					customInstructions ? instructions : undefined,
 				);
 				setAnalyzeOpen(false);
+				notify.success("已开始分析");
 			} else {
-				onOpenRun((await rerunInspection(detail.id)).id);
+				const nextRun = await rerunInspection(detail.id);
+				notify.success("已开始重新采证");
+				onOpenRun(nextRun.id);
 				return;
 			}
 			await load();
 		} catch (e) {
-			setError(messageOf(e, "操作未完成。"));
+			notify.error(e, "操作未完成。");
 			await load();
 		} finally {
 			setBusy(false);
@@ -1012,12 +1017,11 @@ function PlanEditorDialog({
 					expectedRowVersion: plan.rowVersion,
 				});
 			else await createInspectionPlan(payload);
+			notify.success(plan ? "已保存巡检计划" : "已创建巡检计划");
 			onOpenChange(false);
 			await onSaved();
 		} catch (reason) {
-			setError(
-				messageOf(reason, plan ? "无法更新巡检计划。" : "无法创建巡检计划。"),
-			);
+			notify.error(reason, plan ? "无法更新巡检计划。" : "无法创建巡检计划。");
 		} finally {
 			setBusy(false);
 		}
@@ -1598,10 +1602,12 @@ export function useInspectionsModule(
 		setError("");
 		try {
 			const run = await createInspectionRun(chooserPlan);
+			notify.success("已开始巡检");
 			setChooserOpen(false);
 			await load();
 			props.navigate(runRoute(run.id));
 		} catch (reason) {
+			// 失败原因保留内联展示：ui/index.test.tsx 断言该文案同时出现在 chooser 与 overview，不迁移到全局 toast。
 			setError(messageOf(reason, "无法创建巡检。"));
 		} finally {
 			setBusy(false);

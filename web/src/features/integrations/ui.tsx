@@ -32,7 +32,7 @@ import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
 const INTEGRATIONS_BASE = "/settings/platform/integrations";
 import { Badge } from "@/components/ui/badge";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -661,6 +661,7 @@ function MetricsForm({
 				);
 			const enabled = await enableMetricsInstance(instance, probe.id);
 			setCreated(enabled);
+			notify.success("接入已启用");
 			navigate(integrationRoute(platform, enabled.displayName));
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
@@ -927,9 +928,12 @@ function MetricsDetail({
 				if (kind === "enable")
 					setItem(await enableMetricsInstance(item, result.id));
 			} else setItem(await disableMetricsInstance(item));
+			if (kind === "enable") notify.success("接入已启用");
+			else if (kind === "disable") notify.success("接入已停用");
+			else notify.success("验证通过");
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy("");
 		}
@@ -1141,9 +1145,10 @@ function MetricsRotate({
 			setPassword("");
 			setBearerToken("");
 			await rotating;
+			notify.success("已保存");
 			navigate(integrationRoute(platform, id));
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setSaving(false);
 			setPassword("");
@@ -1309,7 +1314,6 @@ function AlertmanagerForm({
 	const [key, setKey] = useState("");
 	const [createdKey, setCreatedKey] = useState("");
 	const [saving, setSaving] = useState(false);
-	const [error, setError] = useState("");
 	const [secret, setSecret] = useState("");
 	const [receiverUrl, setReceiverUrl] = useState("");
 	const revealEpoch = useRef(0);
@@ -1325,7 +1329,6 @@ function AlertmanagerForm({
 		if (suspended) return;
 		const epoch = revealEpoch.current;
 		setSaving(true);
-		setError("");
 		try {
 			const endpoint = await fetchPublicReceiverEndpoint();
 			const sourceKey = key.trim();
@@ -1342,7 +1345,7 @@ function AlertmanagerForm({
 				setKey("");
 			}
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setSaving(false);
 		}
@@ -1375,24 +1378,6 @@ function AlertmanagerForm({
 						</CardHeader>
 						<CardContent>
 							<FieldGroup>
-								{error && (
-									<Alert variant="destructive">
-										<AlertDescription>{error}</AlertDescription>
-										{createdKey && (
-											<Button
-												className="mt-3"
-												size="sm"
-												variant="outline"
-												type="button"
-												onClick={() =>
-													navigate(integrationRoute("alertmanager", createdKey))
-												}
-											>
-												打开已创建的实例
-											</Button>
-										)}
-									</Alert>
-								)}
 								<Field>
 									<FieldLabel htmlFor="alertmanager-key">来源键</FieldLabel>
 									<Input
@@ -1489,9 +1474,10 @@ function AlertIntakeIssues({
 			setBusy(item.id);
 			setError("");
 			await acknowledgeIntakeIssue(item.id, item.rowVersion);
+			notify.success("已确认");
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy(undefined);
 		}
@@ -1648,7 +1634,7 @@ function AlertmanagerDetail({
 			}
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy("");
 		}
@@ -1658,9 +1644,10 @@ function AlertmanagerDetail({
 		setBusy("disable");
 		try {
 			await disableAlertmanagerInstance(source);
+			notify.success("已停用");
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy("");
 		}
@@ -1669,9 +1656,10 @@ function AlertmanagerDetail({
 		setBusy(credential.id);
 		try {
 			await retireAlertmanagerCredential(id, credential);
+			notify.success("已退休");
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy("");
 		}

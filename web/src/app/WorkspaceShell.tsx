@@ -1,3 +1,4 @@
+import { cn } from "cn";
 import {
 	Bell,
 	BookOpen,
@@ -9,10 +10,9 @@ import {
 	SearchCheck,
 	Settings,
 } from "lucide-react";
-import { type CSSProperties, type ReactNode, useState } from "react";
-import { messageOf } from "@/app/shared";
-import { cn } from "cn";
+import type { CSSProperties, ReactNode } from "react";
 import type { UserSummary } from "@/api/generated/types";
+import { notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -221,7 +221,6 @@ export function WorkspaceShell({
 	/** Rendered as read-only during session expiration or system maintenance. */
 	suspended?: boolean;
 }) {
-	const [logoutError, setLogoutError] = useState("");
 	const operations = isOperationsRoute(route);
 	const aiSre = isAiSreRoute(route);
 	const moduleHeader = operations ? "运维中心" : aiSre ? "AI SRE" : view.title;
@@ -241,11 +240,10 @@ export function WorkspaceShell({
 		) : null;
 
 	async function logout() {
-		setLogoutError("");
 		try {
 			await onLogout();
 		} catch (reason) {
-			setLogoutError(messageOf(reason, "退出登录失败，请重试。"));
+			notify.error(reason, "退出登录失败，请重试。");
 		}
 	}
 
@@ -360,16 +358,6 @@ export function WorkspaceShell({
 					<SidebarContent>{moduleList}</SidebarContent>
 				</div>
 			</Sidebar>
-			{logoutError && (
-				<div className="fixed right-4 bottom-4 z-50">
-					<p
-						role="alert"
-						className="rounded-md border border-destructive bg-background p-3 text-sm text-destructive"
-					>
-						{logoutError}
-					</p>
-				</div>
-			)}
 			<SidebarInset className="min-w-0">
 				{!hideDesktopHeader && (
 					<header className="sticky top-0 z-10 hidden min-w-0 shrink-0 items-center gap-2 border-b bg-background p-4 md:flex">

@@ -1,4 +1,4 @@
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -118,7 +118,7 @@ export function Runtimes({
 			await load();
 			await onChanged?.();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法准备注册。"));
+			notify.error(reason, "暂时无法准备注册。");
 		} finally {
 			setPending(undefined);
 		}
@@ -129,10 +129,11 @@ export function Runtimes({
 			setPending(`retire:${slot.slot}`);
 			setError("");
 			await retireRuntimeCredential(slot.slot, slot.rowVersion);
+			notify.success("已退休凭据");
 			await load();
 			await onChanged?.();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法退休凭据。"));
+			notify.error(reason, "暂时无法退休凭据。");
 		} finally {
 			setPending(undefined);
 		}

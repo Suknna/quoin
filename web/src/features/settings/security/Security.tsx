@@ -19,7 +19,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { Button } from "@/components/ui/button";
@@ -105,7 +105,7 @@ function PasswordForm({
 			onChanged(await workbenchApi.currentUser());
 			setSuccess("密码已更新。其他已登录设备不会自动退出。");
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setSaving(false);
 			setCurrentPassword("");
@@ -236,10 +236,11 @@ function Sessions({ suspended }: { suspended: boolean }) {
 				window.location.reload();
 				return;
 			}
+			notify.success("已撤销会话");
 			setPending(undefined);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
 			setBusy(false);
 		}

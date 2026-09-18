@@ -5,7 +5,7 @@
 
 import { LoaderCircle, Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -221,6 +221,7 @@ export function ViewEditor({
 							existing.rowVersion,
 						)
 					: await createBusinessView(payload);
+			notify.success("已保存");
 			onSaved(saved);
 		} catch (reason) {
 			setError(messageOf(reason, "无法保存业务视图。"));

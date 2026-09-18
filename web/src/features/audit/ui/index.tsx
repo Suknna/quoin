@@ -5,7 +5,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -644,13 +644,13 @@ function RetentionDialog({
 		setError("");
 		setSaving(true);
 		try {
-			onSaved(
-				await updateAuditSettings(
-					parsed,
-					settings.rowVersion,
-					newClientCommandId(),
-				),
+			const updated = await updateAuditSettings(
+				parsed,
+				settings.rowVersion,
+				newClientCommandId(),
 			);
+			notify.success("已保存");
+			onSaved(updated);
 			onClose();
 		} catch (reason) {
 			setError(

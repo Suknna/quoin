@@ -4,7 +4,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
-import { messageOf } from "@/app/shared";
+import { messageOf, notify } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Empty,
@@ -157,7 +157,7 @@ export function IntegrationResources({
 				}),
 			);
 		} catch (reason) {
-			setError(messageOf(reason, "暂时无法读取观测结果。"));
+			notify.error(reason, "暂时无法读取观测结果。");
 		} finally {
 			setBusy(false);
 		}

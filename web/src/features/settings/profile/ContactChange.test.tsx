@@ -7,6 +7,7 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { notify } from "@/app/shared";
 import { completeContactChange } from "./api";
 import { ContactChange } from "./ContactChange";
 
@@ -172,6 +173,9 @@ describe("ContactChange", () => {
 		stubFlowFetch({
 			contacts: jsonResponse({ message: "收码目标格式不正确。" }, false, 422),
 		});
+		// 阶段失败由全局 toast 反馈（测试环境未挂载 Toaster，断言通知调用本身），
+		// 安抚语义随消息一并呈现。
+		const notifyError = vi.spyOn(notify, "error").mockImplementation(() => 0);
 		render(<ContactChange suspended={false} onClose={vi.fn()} />);
 		fireEvent.change(screen.getByLabelText("当前密码"), {
 			target: { value: "current password long" },
@@ -184,9 +188,12 @@ describe("ContactChange", () => {
 		});
 		fireEvent.click(screen.getByRole("button", { name: "暂存新渠道" }));
 
-		const alert = await screen.findByRole("alert");
-		expect(alert).toHaveTextContent("收码目标格式不正确。");
-		expect(alert).toHaveTextContent("原收码渠道保持不变");
+		await waitFor(() =>
+			expect(notifyError).toHaveBeenCalledWith(
+				"收码目标格式不正确。原收码渠道保持不变，可重试或放弃本次变更。",
+				"收码目标格式不正确。原收码渠道保持不变，可重试或放弃本次变更。",
+			),
+		);
 		expect(screen.getByText(/r\*\*\*@example\.com/)).toBeInTheDocument();
 		expect(screen.queryByText("候选渠道：")).not.toBeInTheDocument();
 	});
