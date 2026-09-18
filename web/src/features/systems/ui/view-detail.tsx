@@ -78,7 +78,7 @@ export function ViewDetail({
 	const current = state.loadedKey === viewKey ? state : undefined;
 	if (current?.error)
 		return (
-			<div className="p-6">
+			<div>
 				<Alert variant="destructive">
 					<AlertDescription>{current.error}</AlertDescription>
 				</Alert>
@@ -86,7 +86,7 @@ export function ViewDetail({
 		);
 	if (!current?.view)
 		return (
-			<div className="p-6" role="status" aria-label="正在读取业务视图">
+			<div role="status" aria-label="正在读取业务视图">
 				<div className="flex flex-col gap-4">
 					<Skeleton className="h-7 w-1/3" />
 					<Skeleton className="h-4 w-1/4" />
@@ -99,7 +99,7 @@ export function ViewDetail({
 
 	const conditions = Object.entries(view.scope.labelConditions);
 	return (
-		<div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-6">
+		<div className="flex w-full flex-col gap-4">
 			<header className="flex flex-wrap items-start justify-between gap-3">
 				<div>
 					<h2 className="text-xl font-semibold">{view.displayName}</h2>

@@ -122,7 +122,16 @@ function Workspace({
 		if (destination) navigateWorkspace(destination, true);
 	}, [route.pathname]);
 
-	const evidenceId = route.pathname.match(/^\/evidence\/([^/]+)$/)?.[1];
+	const rawEvidenceId = route.pathname.match(/^\/evidence\/([^/]+)$/)?.[1];
+	// Evidence IDs are server-generated slugs; anything else (including
+	// path-encoding tricks) must not reach the API path construction.
+	let evidenceId: string | undefined;
+	try {
+		const decoded = rawEvidenceId ? decodeURIComponent(rawEvidenceId) : "";
+		evidenceId = /^[A-Za-z0-9_-]+$/.test(decoded) ? decoded : undefined;
+	} catch {
+		evidenceId = undefined;
+	}
 	const requestedSource = new URLSearchParams(route.search).get("from");
 	// Evidence can be linked from retired URLs; consolidating here keeps the
 	// module behind the overlay mounted on its live route instead of a dead host.
@@ -180,11 +189,7 @@ function Workspace({
 				</Suspense>
 			</div>
 			{evidenceId && (
-				<EvidenceOverlay
-					id={decodeURIComponent(evidenceId)}
-					user={user}
-					onClose={closeEvidence}
-				/>
+				<EvidenceOverlay id={evidenceId} user={user} onClose={closeEvidence} />
 			)}
 		</>
 	);

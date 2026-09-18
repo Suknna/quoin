@@ -168,7 +168,7 @@ export function useSystemsModule(
 			onSaved={saved}
 		/>
 	) : selectedKey && editing ? (
-		<div className="p-6">
+		<div>
 			<ViewEditor
 				suspended={props.suspended}
 				navigate={props.navigate}
@@ -183,7 +183,7 @@ export function useSystemsModule(
 			navigate={props.navigate}
 		/>
 	) : (
-		<div className="p-6">
+		<div>
 			{error ? (
 				<Alert variant="destructive">
 					<AlertTitle>无法读取业务视图</AlertTitle>

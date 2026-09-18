@@ -51,7 +51,7 @@ export function About({ suspended }: { suspended: boolean }) {
 	}, [load]);
 
 	return (
-		<section className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+		<section className="flex w-full flex-col gap-6">
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div>
 					<h2 className="text-xl font-semibold">关于平台</h2>

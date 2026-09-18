@@ -839,11 +839,9 @@ function planFormOf(plan: InspectionPlan): PlanFormState {
 /** Round-trips the stored params object into editable YAML text; the server owns the authority. */
 function paramsToYamlText(params: Record<string, unknown>): string {
 	return Object.entries(params)
-		.map(([key, value]) =>
-			typeof value === "string"
-				? `${key}: ${value}`
-				: `${key}: ${JSON.stringify(value)}`,
-		)
+		// String values are JSON-quoted too, so colons, newlines, or quotes in a
+		// value cannot forge extra YAML keys; the server re-validates regardless.
+		.map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
 		.join("\n");
 }
 

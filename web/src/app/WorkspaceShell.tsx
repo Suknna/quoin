@@ -10,6 +10,7 @@ import {
 	Settings,
 } from "lucide-react";
 import { type CSSProperties, type ReactNode, useState } from "react";
+import { cn } from "cn";
 import type { UserSummary } from "@/api/generated/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -41,7 +42,6 @@ import {
 	SidebarMenuButton,
 	SidebarMenuItem,
 	SidebarProvider,
-	SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -196,7 +196,7 @@ function ModuleNavigation({
 					onClick={() => navigate("/knowledge")}
 				>
 					<BookOpen data-icon="inline-start" />
-					知识（开发中）
+					知识
 				</Button>
 			</nav>
 		);
@@ -344,13 +344,6 @@ export function WorkspaceShell({
 											</div>
 										</DropdownMenuLabel>
 										<DropdownMenuSeparator />
-										<DropdownMenuItem
-											onClick={() => navigate("/settings/profile")}
-										>
-											<Settings />
-											设置
-										</DropdownMenuItem>
-										<DropdownMenuSeparator />
 										<DropdownMenuItem onClick={() => void logout()}>
 											<LogOut />
 											退出登录
@@ -381,13 +374,11 @@ export function WorkspaceShell({
 			<SidebarInset className="min-w-0">
 				{!hideDesktopHeader && (
 					<header className="sticky top-0 z-10 hidden min-w-0 shrink-0 items-center gap-2 border-b bg-background p-4 md:flex">
-						<SidebarTrigger className="-ml-1" />
 						<div className="truncate text-sm font-medium">{moduleHeader}</div>
 						<div className="ml-auto flex gap-2">{view.actions}</div>
 					</header>
 				)}
 				<header className="sticky top-0 z-10 flex min-w-0 shrink-0 items-center gap-2 border-b bg-background p-4 md:hidden">
-					<SidebarTrigger className="-ml-1" />
 					<div className="truncate text-sm font-medium">{moduleHeader}</div>
 					<Sheet>
 						<SheetTrigger asChild>
@@ -405,7 +396,10 @@ export function WorkspaceShell({
 					<div className="ml-auto flex gap-2">{view.actions}</div>
 				</header>
 				<main
-					className={`mx-auto min-w-0 w-full p-6 ${operations ? "max-w-6xl" : "max-w-3xl"}`}
+					className={cn(
+						"mx-auto min-w-0 w-full p-6",
+						operations ? "max-w-6xl" : "max-w-3xl",
+					)}
 				>
 					{!canAccessOperationsRoute(route, user) ? (
 						<Alert variant="destructive">

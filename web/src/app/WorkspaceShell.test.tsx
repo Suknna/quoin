@@ -157,7 +157,7 @@ describe("WorkspaceShell navigation", () => {
 		renderShell("/knowledge/items/k-1");
 		expect(screen.getAllByText("AI SRE")).toHaveLength(4);
 		expect(
-			screen.getByRole("button", { name: "知识（开发中）" }),
+			screen.getByRole("button", { name: "知识" }),
 		).toHaveAttribute("aria-current", "page");
 		expect(screen.getByRole("button", { name: "对话" })).not.toHaveAttribute(
 			"aria-current",
