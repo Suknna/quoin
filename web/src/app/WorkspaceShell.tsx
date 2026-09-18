@@ -317,7 +317,14 @@ export function WorkspaceShell({
 		>
 			<Sidebar
 				collapsible="none"
-				className="sticky top-0 h-svh w-(--sidebar-width-icon)! self-start overflow-hidden md:flex md:w-(--sidebar-width)! md:flex-row"
+				className={cn(
+					"sticky top-0 h-svh w-(--sidebar-width-icon)! self-start overflow-hidden md:flex md:flex-row",
+					// 折叠时侧栏必须收到仅剩轨道宽度，否则被隐藏的 pane 会留下空白，
+					// 第三栏拿不到释放出来的宽度。
+					paneCollapsed
+						? "md:w-[calc(var(--sidebar-width-icon)+1px)]!"
+						: "md:w-(--sidebar-width)!",
+				)}
 			>
 				<div className="flex h-full w-[calc(var(--sidebar-width-icon)+1px)] shrink-0 flex-col border-r">
 					<SidebarHeader className="px-2 py-3">
@@ -472,7 +479,8 @@ export function WorkspaceShell({
 				<main
 					className={cn(
 						"mx-auto min-w-0 w-full p-6",
-						operations ? "max-w-6xl" : "max-w-3xl",
+						// 折叠后第三栏吃满释放的宽度；展开时保留阅读宽度上限。
+						!paneCollapsed && (operations ? "max-w-6xl" : "max-w-3xl"),
 					)}
 				>
 					{!canAccessOperationsRoute(route, user) ? (
