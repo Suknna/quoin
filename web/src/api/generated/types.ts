@@ -380,6 +380,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 当前用户的收码联系方式（掩码投影）
+         * @description 任何已完成初始化的登录用户可读自己的收码渠道列表；明文目标永不出服务器，更换仍走 contact-change（管理员自助）或管理员代改（操作员）。
+         */
+        get: operations["listOwnContacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/contact-change": {
         parameters: {
             query?: never;
@@ -6322,6 +6342,30 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listOwnContacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前用户的掩码联系方式列表。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["AuthFlowContact"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     startContactChange: {

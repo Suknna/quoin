@@ -102,14 +102,16 @@ func scanContact(row *sql.Row) (contactRow, error) {
 
 func findContactByID(ctx context.Context, reader interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, id int64) (contactRow, error) {
+}, id int64,
+) (contactRow, error) {
 	return scanContact(reader.QueryRowContext(ctx, `SELECT `+contactColumns+` FROM user_contacts WHERE id=?`, id))
 }
 
 // listMaskedContacts returns the masked projection of a user's contacts.
 func listMaskedContacts(ctx context.Context, reader interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, userID int64) ([]MaskedContact, error) {
+}, userID int64,
+) ([]MaskedContact, error) {
 	rows, err := reader.QueryContext(ctx, `SELECT `+contactColumns+` FROM user_contacts WHERE user_id=? AND enabled=1 ORDER BY id`, userID)
 	if err != nil {
 		return nil, err
@@ -131,6 +133,15 @@ func listMaskedContacts(ctx context.Context, reader interface {
 		})
 	}
 	return contacts, rows.Err()
+}
+
+// ListOwnContacts returns the masked projection of the session user's
+// receive targets. It backs the profile's contact section: every
+// authenticated user can read their own channels (masked); replacement stays
+// exclusive to the admin contact_change flow and admin-assigned operator
+// contacts.
+func (service *Service) ListOwnContacts(ctx context.Context, session Session) ([]MaskedContact, error) {
+	return listMaskedContacts(ctx, service.read(), session.User.ID)
 }
 
 // upsertContact assigns or re-activates one channel inside the caller's
@@ -196,7 +207,8 @@ func retireMissingContacts(ctx context.Context, writer flowWriter, userID int64,
 
 func listContactRows(ctx context.Context, reader interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, userID int64) ([]contactRow, error) {
+}, userID int64,
+) ([]contactRow, error) {
 	rows, err := reader.QueryContext(ctx, `SELECT `+contactColumns+` FROM user_contacts WHERE user_id=? ORDER BY id`, userID)
 	if err != nil {
 		return nil, err

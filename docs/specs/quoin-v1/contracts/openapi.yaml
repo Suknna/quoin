@@ -852,6 +852,30 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/auth/contacts:
+    get:
+      tags: [auth]
+      operationId: listOwnContacts
+      x-quoin-cache-control: no-store
+      summary: 当前用户的收码联系方式（掩码投影）
+      description: 任何已完成初始化的登录用户可读自己的收码渠道列表；明文目标永不出服务器，更换仍走 contact-change（管理员自助）或管理员代改（操作员）。
+      responses:
+        '200':
+          description: 当前用户的掩码联系方式列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuthFlowContact'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/v1/auth/contact-change:
     post:
       tags: [auth]

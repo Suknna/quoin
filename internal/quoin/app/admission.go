@@ -65,6 +65,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("completeInitialization", http.MethodPost, "/api/v1/auth/flow/complete", operations.LevelFlow, operations.KindCommand, "user"),
 		declaration("touchSessionActivity", http.MethodPost, "/api/v1/auth/activity", operations.LevelSession, operations.KindCommand, "session"),
 		declaration("getCurrentUser", http.MethodGet, "/api/v1/auth/me", operations.LevelSession, operations.KindQuery, "user"),
+		declaration("listOwnContacts", http.MethodGet, "/api/v1/auth/contacts", operations.LevelFull, operations.KindQuery, "user"),
 		declaration("changeOwnPassword", http.MethodPut, "/api/v1/auth/password", operations.LevelSession, operations.KindCommand, "user"),
 		declaration("logout", http.MethodPost, "/api/v1/auth/logout", operations.LevelSession, operations.KindCommand, "session"),
 		declaration("listOwnSessions", http.MethodGet, "/api/v1/auth/sessions", operations.LevelFull, operations.KindQuery, "session"),
