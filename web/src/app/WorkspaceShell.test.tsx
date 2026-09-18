@@ -94,20 +94,33 @@ describe("WorkspaceShell navigation", () => {
 		expect(navigate).toHaveBeenNthCalledWith(3, "/settings/profile");
 	});
 
-	it("removes the actionless alert desktop header while keeping its mobile menu", () => {
+	it("hides the desktop header on plain pages and keeps the mobile menu", () => {
 		renderShell("/alerts/list");
 		expect(document.querySelectorAll("header.md\\:flex")).toHaveLength(0);
 		expect(screen.getByRole("button", { name: "菜单" })).toBeInTheDocument();
 	});
 
-	it("keeps the common desktop header when another page has no actions", () => {
+	it("hides the desktop header on any page without actions or crumbs", () => {
 		renderShell("/inspections");
+		expect(document.querySelectorAll("header.md\\:flex")).toHaveLength(0);
+	});
+
+	it("keeps the desktop header when the page carries actions", () => {
+		render(
+			<WorkspaceShell
+				user={user}
+				route="/inspections"
+				view={{ ...view, actions: <button type="button">页面操作</button> }}
+				navigate={vi.fn()}
+				onLogout={vi.fn()}
+			/>,
+		);
 		expect(document.querySelectorAll("header.md\\:flex")).toHaveLength(1);
 	});
 
 	it("shows each administrator operations entry once with only the route-matching item active", () => {
 		renderShell("/inspections/run-1");
-		expect(screen.getAllByText("运维中心")).toHaveLength(4);
+		expect(screen.getAllByText("运维中心")).toHaveLength(3);
 		for (const name of ["告警列表", "故障复盘", "巡检", "业务视图"])
 			expect(screen.getByRole("button", { name })).toBeInTheDocument();
 		expect(
@@ -155,10 +168,11 @@ describe("WorkspaceShell navigation", () => {
 
 	it("keeps AI SRE knowledge navigation and active semantics", () => {
 		renderShell("/knowledge/items/k-1");
-		expect(screen.getAllByText("AI SRE")).toHaveLength(4);
-		expect(
-			screen.getByRole("button", { name: "知识" }),
-		).toHaveAttribute("aria-current", "page");
+		expect(screen.getAllByText("AI SRE")).toHaveLength(3);
+		expect(screen.getByRole("button", { name: "知识" })).toHaveAttribute(
+			"aria-current",
+			"page",
+		);
 		expect(screen.getByRole("button", { name: "对话" })).not.toHaveAttribute(
 			"aria-current",
 		);

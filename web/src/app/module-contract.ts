@@ -16,6 +16,11 @@ export interface WorkspaceModuleView {
 	list: ReactNode;
 	content: ReactNode;
 	actions?: ReactNode;
+	/**
+	 * Drill-down trail for pages below a module root. The last entry is the
+	 * current page (rendered without a link); earlier entries navigate.
+	 */
+	crumbs?: { label: string; to?: string }[];
 }
 
 /**

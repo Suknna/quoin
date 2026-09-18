@@ -7,14 +7,24 @@ import {
 	FileText,
 	LayoutDashboard,
 	LogOut,
+	PanelLeftClose,
+	PanelLeftOpen,
 	SearchCheck,
 	Settings,
 } from "lucide-react";
-import type { CSSProperties, ReactNode } from "react";
+import { type CSSProperties, Fragment, type ReactNode, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import { notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+	Breadcrumb,
+	BreadcrumbItem,
+	BreadcrumbLink,
+	BreadcrumbList,
+	BreadcrumbPage,
+	BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -152,10 +162,7 @@ function ModuleNavigation({
 }) {
 	if (isOperationsRoute(route) && canAccessOperationsRoute(route, user)) {
 		return (
-			<nav
-				className="flex flex-col gap-1 border-b p-3"
-				aria-label="运维中心模块"
-			>
+			<nav className="flex flex-col gap-1 p-3" aria-label="运维中心模块">
 				{operationItems
 					.filter((item) => !item.adminOnly || user.role === "admin")
 					.map((item) => (
@@ -175,10 +182,7 @@ function ModuleNavigation({
 	}
 	if (isAiSreRoute(route)) {
 		return (
-			<nav
-				className="flex flex-col gap-1 border-b p-3"
-				aria-label="AI SRE 模块"
-			>
+			<nav className="flex flex-col gap-1 p-3" aria-label="AI SRE 模块">
 				<Button
 					className="w-full justify-start"
 					variant={route.startsWith("/investigations") ? "secondary" : "ghost"}
@@ -205,6 +209,50 @@ function ModuleNavigation({
 	return null;
 }
 
+/** Persists the module pane fold across reloads; keyed outside the cookie-based Sidebar provider. */
+const PANE_STORAGE_KEY = "quoin.workbench.pane";
+
+/** Renders the drill-down trail above detail content; the last crumb is the current page. */
+function ViewBreadcrumb({
+	crumbs,
+	navigate,
+}: {
+	crumbs: NonNullable<WorkspaceModuleView["crumbs"]>;
+	navigate: (route: string) => void;
+}) {
+	return (
+		<Breadcrumb className="min-w-0">
+			<BreadcrumbList>
+				{crumbs.map((crumb, index) => {
+					const last = index === crumbs.length - 1;
+					return (
+						<Fragment key={`${crumb.label}-${crumb.to ?? "current"}`}>
+							<BreadcrumbItem>
+								{last ? (
+									<BreadcrumbPage className="truncate">
+										{crumb.label}
+									</BreadcrumbPage>
+								) : (
+									<BreadcrumbLink
+										href={crumb.to}
+										onClick={(event) => {
+											event.preventDefault();
+											if (crumb.to) navigate(crumb.to);
+										}}
+									>
+										{crumb.label}
+									</BreadcrumbLink>
+								)}
+							</BreadcrumbItem>
+							{!last && <BreadcrumbSeparator />}
+						</Fragment>
+					);
+				})}
+			</BreadcrumbList>
+		</Breadcrumb>
+	);
+}
+
 /** Shared shell: a narrow global rail and a route-owned module navigation pane. */
 export function WorkspaceShell({
 	user,
@@ -224,10 +272,21 @@ export function WorkspaceShell({
 	const operations = isOperationsRoute(route);
 	const aiSre = isAiSreRoute(route);
 	const moduleHeader = operations ? "运维中心" : aiSre ? "AI SRE" : view.title;
-	// Alert and postmortem views have no page actions, so their desktop content begins directly below the module pane.
-	const hideDesktopHeader =
-		!view.actions &&
-		(route.startsWith("/alerts") || route.startsWith("/postmortems"));
+	// The module pane folds away entirely (global rail stays), giving detail pages full width.
+	const [paneCollapsed, setPaneCollapsed] = useState(
+		() => window.localStorage.getItem(PANE_STORAGE_KEY) === "collapsed",
+	);
+	function togglePane(collapsed: boolean) {
+		setPaneCollapsed(collapsed);
+		window.localStorage.setItem(
+			PANE_STORAGE_KEY,
+			collapsed ? "collapsed" : "expanded",
+		);
+	}
+	// The desktop content header only earns its space when it carries breadcrumbs
+	// or page actions; plain pages (alerts, business views, settings…) begin
+	// directly below the module pane like the alert list.
+	const hideDesktopHeader = !view.actions && !view.crumbs?.length;
 	const moduleNavigation = (
 		<ModuleNavigation route={route} user={user} navigate={navigate} />
 	);
@@ -274,6 +333,16 @@ export function WorkspaceShell({
 									<span className="sr-only">Quoin</span>
 								</SidebarMenuButton>
 							</SidebarMenuItem>
+							{paneCollapsed && (
+								<SidebarMenuItem>
+									<RailButton
+										label="展开导航面板"
+										active={false}
+										icon={PanelLeftOpen}
+										onClick={() => togglePane(false)}
+									/>
+								</SidebarMenuItem>
+							)}
 						</SidebarMenu>
 					</SidebarHeader>
 					<SidebarContent>
@@ -351,9 +420,23 @@ export function WorkspaceShell({
 						</SidebarMenu>
 					</SidebarFooter>
 				</div>
-				<div className="hidden h-full min-w-0 flex-1 flex-col bg-sidebar md:flex">
-					<SidebarHeader className="border-b p-4">
-						<div className="text-sm font-semibold">{moduleHeader}</div>
+				<div
+					className={cn(
+						"hidden h-full min-w-0 flex-1 flex-col bg-sidebar md:flex",
+						paneCollapsed && "md:hidden",
+					)}
+				>
+					<SidebarHeader className="flex flex-row items-center justify-between gap-2 border-b p-4">
+						<div className="truncate text-sm font-semibold">{moduleHeader}</div>
+						<Button
+							variant="ghost"
+							size="icon"
+							className="size-7 shrink-0"
+							aria-label="折叠导航面板"
+							onClick={() => togglePane(true)}
+						>
+							<PanelLeftClose />
+						</Button>
 					</SidebarHeader>
 					<SidebarContent>{moduleList}</SidebarContent>
 				</div>
@@ -361,7 +444,11 @@ export function WorkspaceShell({
 			<SidebarInset className="min-w-0">
 				{!hideDesktopHeader && (
 					<header className="sticky top-0 z-10 hidden min-w-0 shrink-0 items-center gap-2 border-b bg-background p-4 md:flex">
-						<div className="truncate text-sm font-medium">{moduleHeader}</div>
+						{view.crumbs?.length ? (
+							<ViewBreadcrumb crumbs={view.crumbs} navigate={navigate} />
+						) : (
+							<div className="truncate text-sm font-medium">{moduleHeader}</div>
+						)}
 						<div className="ml-auto flex gap-2">{view.actions}</div>
 					</header>
 				)}
