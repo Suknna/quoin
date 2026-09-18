@@ -1,3 +1,5 @@
+import { formatDateTime } from "@/lib/format";
+import { messageOf } from "@/app/shared";
 import { useCallback, useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -17,11 +19,7 @@ import { Maintenance } from "../maintenance/Maintenance";
 import { type AboutStatus, fetchAbout } from "./api";
 
 const unknown = (value?: string) => value?.trim() || "未知";
-const time = (value?: string) => {
-	if (!value) return "未知";
-	const date = new Date(value);
-	return Number.isNaN(date.getTime()) ? "未知" : date.toLocaleString();
-};
+const time = (value?: string) => formatDateTime(value, "未知");
 
 /** Admin-only About gathers bounded, non-secret platform facts and the actions that maintain them. */
 export function About({ suspended }: { suspended: boolean }) {
@@ -39,7 +37,7 @@ export function About({ suspended }: { suspended: boolean }) {
 			setRefreshRevision((current) => current + 1);
 		} catch (reason) {
 			setError(
-				reason instanceof Error ? reason.message : "暂时无法读取平台关于信息。",
+				messageOf(reason, "暂时无法读取平台关于信息。"),
 			);
 		} finally {
 			setLoading(false);

@@ -4,6 +4,7 @@
 // The former business-declaration write mainline (upload/publish/refresh) is
 // gone; its history stays readable through the admin/inspection APIs only.
 
+import { parseRoute } from "@/lib/parse-route";
 import { ChevronRight, Layers } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -41,7 +42,7 @@ export function useSystemsModule(
 	const [views, setViews] = useState<BusinessView[]>([]);
 	const [loaded, setLoaded] = useState(false);
 	const [error, setError] = useState("");
-	const routeUrl = new URL(props.route, "https://workbench.invalid");
+	const routeUrl = parseRoute(props.route);
 	const selectedKey = routeUrl.searchParams.get("view");
 	const editing = routeUrl.searchParams.get("edit") === "1";
 	const creating = routeUrl.pathname.endsWith("/new");

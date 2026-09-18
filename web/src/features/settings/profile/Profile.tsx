@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/format";
 import { useCallback, useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -8,14 +9,10 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { listOwnContacts, type OwnContact } from "./api";
 import { ContactChange } from "./ContactChange";
+import { channelLabels, roleLabels } from "@/features/settings/labels";
 
-const roleLabels: Record<UserSummary["role"], string> = {
-	admin: "管理员",
-	operator: "操作员",
-};
 const formatTime = (value: string | null) =>
-	value ? new Date(value).toLocaleString("zh-CN") : "从未";
-const channelLabels = { email: "邮箱", sms: "短信" } as const;
+	formatDateTime(value, "从未");
 
 function ContactRow({ contact }: { contact: OwnContact }) {
 	return (

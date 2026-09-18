@@ -4,6 +4,7 @@
 // in place (UI-LIST-003), buffering new rows behind an explicit merge so the
 // reading position is never disturbed (UI-LIST-002).
 
+import { messageOf } from "@/app/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAlertEventStream } from "../../app/realtime/hooks";
 import {
@@ -126,7 +127,7 @@ export function useLiveAlerts(
 				if (enabledRef.current) stream.start(snapshot.snapshotSeq);
 			} catch (reason) {
 				if (generation !== generationRef.current) return;
-				setError(reason instanceof Error ? reason.message : "告警列表加载失败");
+				setError(messageOf(reason, "告警列表加载失败"));
 			} finally {
 				if (generation === generationRef.current) setLoading(false);
 			}

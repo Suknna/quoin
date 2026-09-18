@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
-import { useEffect, useRef, useState } from "react";
+import { usePolling } from "@/hooks/use-polling";
+import { useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
@@ -8,32 +9,26 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
-import { newClientCommandId, notifyUnauthorized } from "@/api/workbench";
+import { newClientCommandId, request, WorkbenchApiError } from "@/api/workbench";
+import { messageOf } from "@/app/shared";
 
 type Backup = { id: string; status: string; stage: string; createdAt: string; updatedAt: string; sizeBytes: number; errorDetail?: string };
 type BackupPage = { items?: Backup[]; nextCursor?: string; retentionHealth?: { lastFailureAt?: string; errorDetail?: string } };
 type BackupSettings = { enabled: boolean; scheduleCron?: string | null; timezone: string; backupTarget: string; retentionCount: number; rowVersion: number };
 type ArtifactRetention = { generatedRetentionDays: number; rowVersion: number };
-class BackupError extends Error { constructor(readonly status: number, message: string) { super(message); } }
-const text = (reason: unknown) => reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
 const active = (value: Backup) => ["queued", "running", "pending"].includes(value.status.toLowerCase());
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: "include", headers: init?.body ? { "Content-Type": "application/json", ...init.headers } : init?.headers, ...init });
-  if (!response.ok) { if (response.status === 401) notifyUnauthorized(); let body: { message?: string; detail?: string } = {}; try { body = await response.json() as typeof body; } catch { /* fallback */ } throw new BackupError(response.status, body.message ?? body.detail ?? "暂时无法完成操作，请重试。"); }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
-}
 
 /** Backups are asynchronous server tasks; this view never invents restore or cancellation commands. */
 export function Backups({ suspended }: { suspended: boolean }) {
-  const [items, setItems] = useState<Backup[]>([]); const [cursor, setCursor] = useState<string>(); const [settings, setSettings] = useState<BackupSettings>(); const [retention, setRetention] = useState<ArtifactRetention>(); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); const [loading, setLoading] = useState(true); const poll = useRef<number | undefined>(undefined);
+  const [items, setItems] = useState<Backup[]>([]); const [cursor, setCursor] = useState<string>(); const [settings, setSettings] = useState<BackupSettings>(); const [retention, setRetention] = useState<ArtifactRetention>(); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); const [loading, setLoading] = useState(true);
   const load = async (more = false) => {
-    try { const page = await request<BackupPage>(`/api/v1/backups?limit=50${more && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); setItems(current => more ? [...current, ...(page.items ?? [])] : page.items ?? []); setCursor(page.nextCursor); const [nextSettings, nextRetention] = await Promise.all([request<BackupSettings>("/api/v1/backups/settings"), request<ArtifactRetention>("/api/v1/artifacts/retention-settings")]); setSettings(nextSettings); setRetention(nextRetention); if (page.retentionHealth?.lastFailureAt) setError(`旧备份清理失败，将自动重试：${page.retentionHealth.errorDetail ?? "无详情"}`); } catch (reason) { setError(text(reason)); } finally { setLoading(false); }
+    try { const page = await request<BackupPage>(`/api/v1/backups?limit=50${more && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); setItems(current => more ? [...current, ...(page.items ?? [])] : page.items ?? []); setCursor(page.nextCursor); const [nextSettings, nextRetention] = await Promise.all([request<BackupSettings>("/api/v1/backups/settings"), request<ArtifactRetention>("/api/v1/artifacts/retention-settings")]); setSettings(nextSettings); setRetention(nextRetention); if (page.retentionHealth?.lastFailureAt) setError(`旧备份清理失败，将自动重试：${page.retentionHealth.errorDetail ?? "无详情"}`); } catch (reason) { setError(messageOf(reason, "暂时无法完成操作，请重试。")); } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
-  useEffect(() => { window.clearInterval(poll.current); if (!suspended && items.some(active)) poll.current = window.setInterval(() => void load(), 3000); return () => window.clearInterval(poll.current); }, [suspended, items]);
-  async function trigger() { try { await request<Backup>("/api/v1/backups", { method: "POST", body: JSON.stringify({ clientCommandId: newClientCommandId() }) }); await load(); } catch (reason) { setError(text(reason)); } }
-  async function saveSettings(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); if (!settings) return; setSaving(true); try { setSettings(await request<BackupSettings>("/api/v1/backups/settings", { method: "PUT", body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion: settings.rowVersion, enabled: settings.enabled, scheduleCron: settings.scheduleCron || null, timezone: settings.timezone, retentionCount: settings.retentionCount }) })); } catch (reason) { setError(reason instanceof BackupError && reason.status === 409 ? "备份设置已被其他管理员修改，请刷新后重试。" : text(reason)); } finally { setSaving(false); } }
-  async function saveRetention(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); if (!retention) return; setSaving(true); try { setRetention(await request<ArtifactRetention>("/api/v1/artifacts/retention-settings", { method: "PUT", body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion: retention.rowVersion, generatedRetentionDays: retention.generatedRetentionDays }) })); } catch (reason) { setError(reason instanceof BackupError && reason.status === 409 ? "产物保留设置已被其他管理员修改，请刷新后重试。" : text(reason)); } finally { setSaving(false); } }
+  usePolling(() => void load(), 3000, !suspended && items.some(active));
+  async function trigger() { try { await request<Backup>("/api/v1/backups", { method: "POST", body: JSON.stringify({ clientCommandId: newClientCommandId() }) }); await load(); } catch (reason) { setError(messageOf(reason, "暂时无法完成操作，请重试。")); } }
+  async function saveSettings(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); if (!settings) return; setSaving(true); try { setSettings(await request<BackupSettings>("/api/v1/backups/settings", { method: "PUT", body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion: settings.rowVersion, enabled: settings.enabled, scheduleCron: settings.scheduleCron || null, timezone: settings.timezone, retentionCount: settings.retentionCount }) })); } catch (reason) { setError(reason instanceof WorkbenchApiError && reason.status === 409 ? "备份设置已被其他管理员修改，请刷新后重试。" : messageOf(reason, "暂时无法完成操作，请重试。")); } finally { setSaving(false); } }
+  async function saveRetention(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); if (!retention) return; setSaving(true); try { setRetention(await request<ArtifactRetention>("/api/v1/artifacts/retention-settings", { method: "PUT", body: JSON.stringify({ clientCommandId: newClientCommandId(), expectedRowVersion: retention.rowVersion, generatedRetentionDays: retention.generatedRetentionDays }) })); } catch (reason) { setError(reason instanceof WorkbenchApiError && reason.status === 409 ? "产物保留设置已被其他管理员修改，请刷新后重试。" : messageOf(reason, "暂时无法完成操作，请重试。")); } finally { setSaving(false); } }
   return <section className="space-y-6"><div className="flex justify-between"><h2 className="text-xl font-semibold">备份与保留</h2><Button disabled={suspended} onClick={() => void trigger()}>立即备份</Button></div>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     {loading && !settings && !retention && <DetailSkeleton label="正在读取备份设置" rows={["title", "card", "card"]} />}
     {!loading && !settings && !error && <p className="text-sm text-muted-foreground">无法读取备份设置。</p>}

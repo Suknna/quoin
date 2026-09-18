@@ -1,3 +1,4 @@
+import { messageOf } from "@/app/shared";
 import { useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import {
@@ -28,8 +29,7 @@ import {
 	fetchEvidence,
 } from "@/features/analysis/tool-details/api";
 
-const message = (reason: unknown) =>
-	reason instanceof Error ? reason.message : "证据详情加载失败。";
+
 
 /** A permission-aware reading surface; inline content stays readable while artifact bytes are requested only through their authorized endpoint. */
 export function EvidenceReader({
@@ -81,7 +81,7 @@ function EvidenceReadingSession({
 				}
 			})
 			.catch((reason: unknown) => {
-				if (!controller.signal.aborted) setError(message(reason));
+				if (!controller.signal.aborted) setError(messageOf(reason, "证据详情加载失败。"));
 			})
 			.finally(() => {
 				if (!controller.signal.aborted) setLoading(false);

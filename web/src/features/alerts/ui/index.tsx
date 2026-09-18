@@ -1,5 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- Alert views colocate their route lifecycle. */
 
+import { usePolling } from "@/hooks/use-polling";
+import { formatDateTime } from "@/lib/format";
 import { cn } from "cn";
 import {
 	Activity,
@@ -24,6 +26,8 @@ import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
 } from "@/app/module-contract";
+import { parseRoute } from "@/lib/parse-route";
+import { messageOf } from "@/app/shared";
 import { useAlertEventStream } from "@/app/realtime/hooks";
 import { AiContent, EvidenceLinks } from "@/components/ai/AiContent";
 import { EntityList, type EntityListItem } from "@/components/EntityList";
@@ -95,14 +99,12 @@ import {
 } from "@/features/analysis/api";
 import { listBusinessViews } from "@/features/systems/api";
 
-const problem = (reason: unknown, fallback: string) =>
-	reason instanceof Error ? reason.message : fallback;
-const time = (value?: string) =>
-	value ? new Date(value).toLocaleString() : "—";
+
+const time = (value?: string) => formatDateTime(value);
 const creating = new Map<string, Promise<InitialAnalysisDetail>>();
 function parts(route: string) {
-	const url = new URL(route, "https://workbench.invalid");
-	return { path: url.pathname, query: url.searchParams };
+	const { pathname, searchParams } = parseRoute(route);
+	return { path: pathname, query: searchParams };
 }
 function listRoute(view: "current" | "history", viewKey: string, id?: string) {
 	const query = new URLSearchParams({ view });
@@ -782,7 +784,7 @@ function AlertDetailSheet({
 			} catch (reason) {
 				if (requestGeneration !== generationRef.current) return;
 				setOccurrence(null);
-				setError(problem(reason, "无法加载告警详情。"));
+				setError(messageOf(reason, "无法加载告警详情。"));
 			}
 		},
 		[id, stream, suspended],
@@ -1176,7 +1178,7 @@ function InitialAnalysis({
 				setAnalysis(detail);
 				setAttempts((await fetchAttempts(occurrenceId, current.id)).items);
 			} catch (reason) {
-				setError(problem(reason, "无法读取或发起初步分析。"));
+				setError(messageOf(reason, "无法读取或发起初步分析。"));
 			}
 		},
 		[analysis, occurrenceId, suspended],
@@ -1190,11 +1192,11 @@ function InitialAnalysis({
 		}
 	}, [load]);
 	// Running work is server-owned, so the open tab polls its real projection until terminal or unmounted.
-	useEffect(() => {
-		if (!analysis || !isActive(analysis.state) || suspended) return;
-		const timer = window.setInterval(() => void load(), 2000);
-		return () => window.clearInterval(timer);
-	}, [analysis, analysis?.id, analysis?.state, load, suspended]);
+	usePolling(
+		() => void load(),
+		2000,
+		Boolean(analysis && isActive(analysis.state) && !suspended),
+	);
 	if (error)
 		return (
 			<Alert variant="destructive">

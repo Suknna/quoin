@@ -123,37 +123,75 @@ function presentableMessage(value: string): string {
 	return text;
 }
 
+export interface RequestBehavior {
+	/** Retries the identical RequestInit on 429/5xx or transport failure with 1s/2s backoff. */
+	retryTransient?: boolean;
+	/** Maps a 409 problem body onto a domain error; returning undefined keeps the generic error. */
+	conflict?: (body: unknown) => Error | undefined;
+}
+
+const wait = (ms: number) =>
+	new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export async function request<T>(
 	path: string,
 	init?: RequestInit,
 	notifyUnauthorized = true,
+	behavior: RequestBehavior = {},
 ): Promise<T> {
-	const response = await fetch(apiUrl(path), {
-		credentials: "include",
-		headers: init?.body
-			? { "Content-Type": "application/json", ...init.headers }
-			: init?.headers,
-		...init,
-	});
-	if (!response.ok) {
+	for (let attempt = 0; ; attempt += 1) {
+		let response: Response;
+		try {
+			response = await fetch(apiUrl(path), {
+				credentials: "include",
+				headers: init?.body
+					? { "Content-Type": "application/json", ...init.headers }
+					: init?.headers,
+				...init,
+			});
+		} catch (error) {
+			if (behavior.retryTransient && attempt < 2) {
+				await wait(1000 * (attempt + 1));
+				continue;
+			}
+			throw error;
+		}
+		if (response.ok) {
+			if (response.status === 204) return undefined as T;
+			return (await response.json()) as T;
+		}
+		if (response.status === 401 && notifyUnauthorized) onUnauthorized?.();
+		let body: unknown;
 		let message = "暂时无法完成操作，请重试。";
 		let code: string | undefined;
 		try {
-			const body = (await response.json()) as {
+			body = await response.json();
+			const problem = body as {
 				detail?: string;
 				message?: string;
 				code?: string;
 			};
-			message = presentableMessage(body.detail ?? body.message ?? message);
-			code = body.code;
+			message = presentableMessage(
+				problem.detail ?? problem.message ?? message,
+			);
+			code = problem.code;
 		} catch {
 			/* gateway errors do not have a problem document */
 		}
-		if (response.status === 401 && notifyUnauthorized) onUnauthorized?.();
+		if (
+			behavior.retryTransient &&
+			attempt < 2 &&
+			(response.status === 429 || response.status >= 500)
+		) {
+			await wait(1000 * (attempt + 1));
+			continue;
+		}
+		if (response.status === 409 && behavior.conflict) {
+			const mapped = behavior.conflict(body);
+			if (mapped) throw mapped;
+		}
 		throw new WorkbenchApiError(response.status, message, code);
 	}
-	if (response.status === 204) return undefined as T;
-	return (await response.json()) as T;
 }
 
 export const workbenchApi = {

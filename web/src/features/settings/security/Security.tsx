@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/format";
 import { LoaderCircle } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
@@ -18,6 +19,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { messageOf } from "@/app/shared";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { Button } from "@/components/ui/button";
@@ -43,10 +45,9 @@ type Session = {
 };
 type Page<T> = { items?: T[]; nextCursor?: string };
 
-const messageOf = (reason: unknown) =>
-	reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
+
 const formatTime = (value: string | null) =>
-	value ? new Date(value).toLocaleString("zh-CN") : "从未";
+	formatDateTime(value, "从未");
 
 /** Security requests use the shared unauthorized recovery rather than rendering a misleading local error. */
 async function securityRequest<T>(
@@ -104,7 +105,7 @@ function PasswordForm({
 			onChanged(await workbenchApi.currentUser());
 			setSuccess("密码已更新。其他已登录设备不会自动退出。");
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSaving(false);
 			setCurrentPassword("");
@@ -211,7 +212,7 @@ function Sessions({ suspended }: { suspended: boolean }) {
 			);
 			setCursor(page.nextCursor);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSessionsLoading(false);
 		}
@@ -238,7 +239,7 @@ function Sessions({ suspended }: { suspended: boolean }) {
 			setPending(undefined);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy(false);
 		}

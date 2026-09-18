@@ -3,6 +3,7 @@
 // range via scope (whole integration, a business view, or explicit objects).
 // Wire shapes come from the generated OpenAPI authority; failures surface the
 // server's ordinary-language message (problem+json).
+import { formatDateTime } from "@/lib/format";
 import type {
   AttemptSummary,
   CheckResultSummary,
@@ -188,7 +189,7 @@ export const inspectionGapReasonText: Record<string, string> = {
   identity_busy: '浏览器身份正忙', artifact_commit_failed: '诊断材料提交失败', journey_failed: '浏览器巡检失败',
   query_failed: '指标查询失败', partial_response: '部分响应', no_data: '无数据', cancelled: '已取消', interrupted: '已中断',
 }
-export function formatInspectionTime(value?: string): string { return value ? (Number.isNaN(new Date(value).getTime()) ? value : new Date(value).toLocaleString()) : '—' }
+export function formatInspectionTime(value?: string): string { return formatDateTime(value, value ?? '—') }
 
 export const inspectionScopeKindText: Record<InspectionPlanScope['kind'], string> = {
   integration: '整个接入', businessView: '业务视图', objects: '指定对象',

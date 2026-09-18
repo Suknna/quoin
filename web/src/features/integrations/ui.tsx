@@ -1,3 +1,5 @@
+import { formatDateTime } from "@/lib/format";
+import { parseRoute } from "@/lib/parse-route";
 import { IntegrationResources } from "./resources";
 /* eslint-disable react-refresh/only-export-components -- This route module intentionally colocates its view factory with route components. */
 
@@ -40,6 +42,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { messageOf } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -119,15 +122,14 @@ import {
 } from "./api";
 import type { IntegrationCatalogItem, IntegrationPlatform } from "./types";
 
-const messageOf = (reason: unknown) =>
-	reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
+
 const formatEventTime = (value?: string | null) =>
-	value ? new Date(value).toLocaleString() : "等待首条有效事件";
+	formatDateTime(value, "等待首条有效事件");
 const formatTime = (value?: string | null) =>
-	value ? new Date(value).toLocaleString() : "—";
+	formatDateTime(value);
 
 function routeParts(route: string) {
-	const pathname = new URL(route, "https://workbench.invalid").pathname;
+	const pathname = parseRoute(route).pathname;
 	const sub =
 		pathname === INTEGRATIONS_BASE
 			? ""
@@ -187,7 +189,7 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 				if (active) setCatalog(items.filter((item) => item.enabled));
 			})
 			.catch((reason) => {
-				if (active) setError(messageOf(reason));
+				if (active) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			})
 			.finally(() => {
 				if (active) setLoading(false);
@@ -290,7 +292,7 @@ function Instances({
 			setItems([...alerts.items, ...metrics]);
 			setCursor(alerts.nextCursor);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoading(false);
 		}
@@ -304,7 +306,7 @@ function Instances({
 			setItems((current) => [...current, ...page.items]);
 			setCursor(page.nextCursor);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoadingMore(false);
 		}
@@ -671,7 +673,7 @@ function MetricsForm({
 			setCreated(enabled);
 			navigate(integrationRoute(platform, enabled.displayName));
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSaving(false);
 			setPassword("");
@@ -913,7 +915,7 @@ function MetricsDetail({
 			setItem(await fetchMetricsInstance(id));
 			setError("");
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoading(false);
 		}
@@ -937,7 +939,7 @@ function MetricsDetail({
 			} else setItem(await disableMetricsInstance(item));
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy("");
 		}
@@ -1119,7 +1121,7 @@ function MetricsRotate({
 				setTlsServerName(current.tlsServerName ?? "");
 				setTlsSkipVerify(current.tlsSkipVerify);
 			})
-			.catch((reason) => setError(messageOf(reason)));
+			.catch((reason) => setError(messageOf(reason, "暂时无法完成操作，请重试。")));
 	}, [id]);
 	useEffect(() => {
 		if (suspended) {
@@ -1150,7 +1152,7 @@ function MetricsRotate({
 			await rotating;
 			navigate(integrationRoute(platform, id));
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSaving(false);
 			setPassword("");
@@ -1349,7 +1351,7 @@ function AlertmanagerForm({
 				setKey("");
 			}
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSaving(false);
 		}
@@ -1515,7 +1517,7 @@ function AlertIntakeIssues({
 			setError("");
 			setItems((await fetchIntakeIssues()).items);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoading(false);
 		}
@@ -1531,7 +1533,7 @@ function AlertIntakeIssues({
 			await acknowledgeIntakeIssue(item.id, item.rowVersion);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy(undefined);
 		}
@@ -1651,7 +1653,7 @@ function AlertmanagerDetail({
 			setSource(sourceItem);
 			setCredentials(credentialItems);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoading(false);
 		}
@@ -1682,7 +1684,7 @@ function AlertmanagerDetail({
 			}
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy("");
 		}
@@ -1694,7 +1696,7 @@ function AlertmanagerDetail({
 			await disableAlertmanagerInstance(source);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy("");
 		}
@@ -1705,7 +1707,7 @@ function AlertmanagerDetail({
 			await retireAlertmanagerCredential(id, credential);
 			await load();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy("");
 		}

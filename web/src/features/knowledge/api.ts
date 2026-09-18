@@ -1,3 +1,5 @@
+import { newClientCommandId, request as workbenchRequest } from "@/api/workbench"
+
 // Knowledge candidate and knowledge API (T27): create-or-return from the
 // three diagnosis sources, revisioned draft edits, the human confirmation
 // boundary, and the browse/version projections.
@@ -156,52 +158,19 @@ export const candidateSourceLabels: Record<CandidateSourceType, string> = {
   knowledge_version: '知识修订',
 }
 
-export function knowledgeCommandId(): string {
-  const raw = crypto.getRandomValues(new Uint8Array(18))
-  return Array.from(raw, (byte) => byte.toString(16).padStart(2, '0')).join('')
-}
+export const knowledgeCommandId = newClientCommandId
 
-async function problemMessage(response: Response): Promise<string> {
-  try {
-    const problem = (await response.json()) as { message?: string }
-    if (problem.message) return problem.message
-  } catch {
-    // Keep the ordinary-language fallback.
-  }
-  return '暂时无法完成操作，请重试。'
-}
-
+// Command bodies are created once by the caller, so retrying the identical
+// RequestInit through the shared workbench request preserves clientCommandId
+// across transient transport failures.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // A command body is created once by the caller. Retrying this exact RequestInit
-  // therefore preserves clientCommandId across transient transport failures.
-  let response: Response | undefined
-  let lastError: unknown
-  for (let retry = 0; retry < 3; retry += 1) {
-    try {
-      response = await fetch(path, { credentials: 'include', ...init })
-      if (response.ok || (response.status !== 429 && response.status < 500)) break
-      lastError = new Error(`HTTP ${response.status}`)
-    } catch (error) {
-      lastError = error
-    }
-    if (retry < 2) await new Promise((resolve) => window.setTimeout(resolve, 1000 * (retry + 1)))
-  }
-  if (!response) throw (lastError instanceof Error ? lastError : new Error('网络连接暂时不可用，请重试。'))
-  if (!response.ok) {
-    if (response.status === 409) {
-      let conflict: ConflictInfo | null = null
-      try {
-        const problem = (await response.json()) as { conflict?: ConflictInfo }
-        conflict = problem.conflict ?? null
-      } catch {
-        conflict = null
-      }
-      throw new CommandConflictError(conflict)
-    }
-    throw new Error(await problemMessage(response))
-  }
-  if (response.status === 204) return undefined as T
-  return (await response.json()) as T
+  return workbenchRequest<T>(path, init, true, {
+    retryTransient: true,
+    conflict: (body) =>
+      new CommandConflictError(
+        (body as { conflict?: ConflictInfo } | null)?.conflict ?? null,
+      ),
+  })
 }
 
 function commandBody(extra: Record<string, unknown>): string {

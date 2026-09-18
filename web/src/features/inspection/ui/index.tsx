@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
+import { parseRoute } from "@/lib/parse-route";
 import { ChevronDown, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parse as parseYaml } from "yaml";
@@ -118,8 +119,8 @@ const statusClass = (state: string) =>
 			: "text-muted-foreground";
 /** The module owns its query state: /inspections/runs/:run and ?connectionName= hint. */
 function parts(route: string) {
-	const url = new URL(route, "https://workbench.invalid");
-	return { path: url.pathname, query: url.searchParams };
+	const { pathname, searchParams } = parseRoute(route);
+	return { path: pathname, query: searchParams };
 }
 function runRoute(runId: string) {
 	return `/inspections/runs/${encodeURIComponent(runId)}`;

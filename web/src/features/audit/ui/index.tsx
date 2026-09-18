@@ -5,6 +5,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { messageOf } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -66,8 +67,7 @@ import {
 	updateAuditSettings,
 } from "@/features/audit/api";
 
-const messageOf = (reason: unknown) =>
-	reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
+
 
 interface FilterDraft {
 	correlationId: string;
@@ -135,7 +135,7 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				setCursor(page.nextCursor);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setError(messageOf(reason));
+				if (!cancelled) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			})
 			.finally(() => {
 				if (!cancelled) setLoading(false);
@@ -152,7 +152,7 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 				if (!cancelled) setSettings(value);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setSettingsError(messageOf(reason));
+				if (!cancelled) setSettingsError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			});
 		return () => {
 			cancelled = true;
@@ -167,7 +167,7 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 			setItems((previous) => [...previous, ...(page.items ?? [])]);
 			setCursor(page.nextCursor);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoadingMore(false);
 		}
@@ -422,7 +422,7 @@ function CorrelationDetails({
 				setCursor(page.nextCursor);
 			})
 			.catch((reason: unknown) => {
-				if (!cancelled) setError(messageOf(reason));
+				if (!cancelled) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 			})
 			.finally(() => {
 				if (!cancelled) setLoading(false);
@@ -442,7 +442,7 @@ function CorrelationDetails({
 			);
 			setCursor(page.nextCursor);
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setLoadingMore(false);
 		}
@@ -633,7 +633,7 @@ function RetentionDialog({
 		try {
 			setPreview(await previewAuditSettings(parsed));
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setPreviewing(false);
 		}
@@ -656,7 +656,7 @@ function RetentionDialog({
 			setError(
 				reason instanceof WorkbenchApiError && reason.status === 409
 					? "审计设置已被其他管理员修改，请刷新后重试。"
-					: messageOf(reason),
+					: messageOf(reason, "暂时无法完成操作，请重试。"),
 			);
 		} finally {
 			setSaving(false);

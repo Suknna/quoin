@@ -1,3 +1,4 @@
+import { parseRoute } from "@/lib/parse-route";
 import type { ComponentType, LazyExoticComponent } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -89,7 +90,7 @@ export function RouteHosts({
 	onLogout: () => Promise<void>;
 }) {
 	// Module selection is pathname-only; the query belongs to the selected module's view state.
-	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
+	const pathname = parseRoute(props.route).pathname;
 	const operatorManagementRoute =
 		pathname.startsWith("/business-views") ||
 		pathname.startsWith("/inspections") ||

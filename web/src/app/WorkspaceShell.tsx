@@ -10,6 +10,7 @@ import {
 	Settings,
 } from "lucide-react";
 import { type CSSProperties, type ReactNode, useState } from "react";
+import { messageOf } from "@/app/shared";
 import { cn } from "cn";
 import type { UserSummary } from "@/api/generated/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -244,9 +245,7 @@ export function WorkspaceShell({
 		try {
 			await onLogout();
 		} catch (reason) {
-			setLogoutError(
-				reason instanceof Error ? reason.message : "退出登录失败，请重试。",
-			);
+			setLogoutError(messageOf(reason, "退出登录失败，请重试。"));
 		}
 	}
 

@@ -1,3 +1,4 @@
+import { messageOf } from "@/app/shared";
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -60,7 +61,7 @@ export function Runtimes({
 			setItems([status.plinth].filter(isRuntimeSlotView));
 		} catch (reason) {
 			setError(
-				reason instanceof Error ? reason.message : "暂时无法读取运行时状态。",
+				messageOf(reason, "暂时无法读取运行时状态。"),
 			);
 		} finally {
 			setLoading(false);
@@ -106,7 +107,7 @@ export function Runtimes({
 			await load();
 			await onChanged?.();
 		} catch (reason) {
-			setError(reason instanceof Error ? reason.message : "暂时无法准备注册。");
+			setError(messageOf(reason, "暂时无法准备注册。"));
 		} finally {
 			setPending(undefined);
 		}
@@ -120,7 +121,7 @@ export function Runtimes({
 			await load();
 			await onChanged?.();
 		} catch (reason) {
-			setError(reason instanceof Error ? reason.message : "暂时无法退休凭据。");
+			setError(messageOf(reason, "暂时无法退休凭据。"));
 		} finally {
 			setPending(undefined);
 		}

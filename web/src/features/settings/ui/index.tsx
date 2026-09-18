@@ -1,3 +1,4 @@
+import { parseRoute } from "@/lib/parse-route";
 import { useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import type {
@@ -23,7 +24,7 @@ export function useSettingsModule(
 ): WorkspaceModuleView {
 	const [updatedUser, setUpdatedUser] = useState<UserSummary>();
 	const user = updatedUser?.id === props.user.id ? updatedUser : props.user;
-	const pathname = new URL(props.route, "https://workbench.invalid").pathname;
+	const pathname = parseRoute(props.route).pathname;
 	const list = (
 		<SettingsNavigation
 			groups={settingsNavGroups}

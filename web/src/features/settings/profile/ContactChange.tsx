@@ -1,7 +1,9 @@
+import { channelLabels } from "@/features/settings/labels";
 import { LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { messageOf } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -31,10 +33,8 @@ import {
 
 type Stage = "start" | "stage" | "send" | "verify" | "confirm" | "finished";
 
-const messageOf = (reason: unknown) =>
-	reason instanceof Error ? reason.message : "暂时无法完成操作，请重试。";
 
-const channelLabels = { email: "邮箱", sms: "短信" } as const;
+
 
 /** 管理员在资料页内联自助更换收码渠道（docs/authentication-design.md §1/§4）：
  * 旧渠道在原子完成前保持有效，任何一步失败都不影响现有登录能力；完成后所有会话撤销，
@@ -70,7 +70,7 @@ export function ContactChange({
 		try {
 			await action();
 		} catch (reason) {
-			setError(messageOf(reason));
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy(false);
 		}

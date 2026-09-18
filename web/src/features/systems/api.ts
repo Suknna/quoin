@@ -2,6 +2,7 @@
 // introduced by ADR 0004. Views never own credentials or query permissions; the
 // server stays authoritative for validation and optimistic concurrency.
 
+import { formatDateTime } from "@/lib/format";
 import { newClientCommandId, request } from "@/api/workbench";
 
 export interface BusinessViewScope {
@@ -60,6 +61,5 @@ export function updateBusinessView(
 }
 
 export function formatTime(timestamp: string): string {
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
+  return formatDateTime(timestamp, timestamp);
 }

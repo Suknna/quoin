@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- Navigation groups are data colocated with their renderer. */
+import { parseRoute } from "@/lib/parse-route";
 import type { UserSummary } from "@/api/generated/types";
 import { Button } from "@/components/ui/button";
 
@@ -89,7 +90,7 @@ export function SettingsNavigation({
 	user: UserSummary;
 	navigate: (route: string) => void;
 }) {
-	const pathname = new URL(route, "https://workbench.invalid").pathname;
+	const pathname = parseRoute(route).pathname;
 	const visible = groups
 		.map((group) => ({
 			...group,

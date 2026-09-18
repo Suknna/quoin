@@ -4,6 +4,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { messageOf } from "@/app/shared";
 import { Button } from "@/components/ui/button";
 import {
 	Empty,
@@ -41,8 +42,7 @@ const states = {
 	not_observed: "当前未观测到",
 	stale: "数据陈旧",
 };
-const message = (error: unknown) =>
-	error instanceof Error ? error.message : "暂时无法读取观测结果。";
+
 
 export function IntegrationResources({
 	connectionName,
@@ -84,7 +84,7 @@ export function IntegrationResources({
 				);
 				setCursor(page.nextCursor);
 			} catch (reason) {
-				setError(message(reason));
+				setError(messageOf(reason, "暂时无法读取观测结果。"));
 			} finally {
 				setLoading(false);
 			}
@@ -102,7 +102,7 @@ export function IntegrationResources({
 				if (active) setSelected(item);
 			})
 			.catch((reason) => {
-				if (active) setError(message(reason));
+				if (active) setError(messageOf(reason, "暂时无法读取观测结果。"));
 			});
 		return () => {
 			active = false;
@@ -122,7 +122,7 @@ export function IntegrationResources({
 				if (!latest || !["Queued", "Running"].includes(latest.state))
 					await load();
 			} catch (reason) {
-				if (active) setError(message(reason));
+				if (active) setError(messageOf(reason, "暂时无法读取观测结果。"));
 			}
 		};
 		void poll();
@@ -142,7 +142,7 @@ export function IntegrationResources({
 					setRun(next);
 					if (!["Queued", "Running"].includes(next.state)) void load();
 				})
-				.catch((reason) => setError(message(reason)));
+				.catch((reason) => setError(messageOf(reason, "暂时无法读取观测结果。")));
 		}, 1500);
 		return () => clearTimeout(timer);
 	}, [base, load, run, suspended]);
@@ -157,7 +157,7 @@ export function IntegrationResources({
 				}),
 			);
 		} catch (reason) {
-			setError(message(reason));
+			setError(messageOf(reason, "暂时无法读取观测结果。"));
 		} finally {
 			setBusy(false);
 		}

@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Polling and abort seams intentionally key on the selected connection name only. */
 
+import { usePolling } from "@/hooks/use-polling";
 import { Plus } from "lucide-react";
 import {
 	type ComponentProps,
@@ -293,10 +294,9 @@ function ConnectionDetail({
 				apiKey: "",
 			}));
 	}, [suspended]);
-	useEffect(() => {
-		if (suspended || !attempt || terminalStates.includes(attempt.state)) return;
-		const timer = window.setInterval(() => {
-			if (polling.current) return;
+	usePolling(
+		() => {
+			if (!attempt || polling.current) return;
 			polling.current = true;
 			void workbenchApi
 				.fetchProbeAttempt(selected.name, attempt.id)
@@ -320,9 +320,10 @@ function ConnectionDetail({
 				.finally(() => {
 					polling.current = false;
 				});
-		}, 1500);
-		return () => window.clearInterval(timer);
-	}, [attempt?.id, attempt?.state, selected.name, suspended]);
+		},
+		1500,
+		Boolean(attempt && !terminalStates.includes(attempt.state) && !suspended),
+	);
 	async function probe() {
 		setBusy(true);
 		setError("");
@@ -667,11 +668,7 @@ export function ModelProviderPage({
 			setError("连接地址无效。");
 		}
 	}, [route]);
-	useEffect(() => {
-		if (suspended) return;
-		const timer = window.setInterval(() => void load(), 15_000);
-		return () => window.clearInterval(timer);
-	}, [suspended]);
+	usePolling(() => void load(), 15_000, !suspended);
 	useEffect(() => () => detailController.current?.abort(), []);
 	const choose = (connection: ConnectionSummaryView) =>
 		navigate(`${suffix}/${encodeURIComponent(connection.name)}`);

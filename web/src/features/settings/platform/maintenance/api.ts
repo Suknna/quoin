@@ -1,3 +1,7 @@
+import { newClientCommandId, request } from "@/api/workbench";
+
+const commandID = newClientCommandId;
+
 // Admin maintenance/upgrade feature API (T36): the Upgrade maintenance
 // projection, the coordinated-upgrade prepare command, the frozen drain
 // cancels and the versioned exit. The drain endpoint templates are the
@@ -15,27 +19,6 @@ export interface MaintenanceStateView {
   reason?: 'Restore' | 'Upgrade' | 'RootKeyRebind'
   rowVersion: number
   items: MaintenanceItem[]
-}
-
-class RequestError extends Error {
-  constructor(message: string, readonly status: number) { super(message) }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    credentials: 'include',
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => null) as { message?: string } | null
-    throw new RequestError(body?.message ?? '请求没有完成。', response.status)
-  }
-  return response.json() as Promise<T>
-}
-
-export function commandID() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(18)), value => value.toString(16).padStart(2, '0')).join('')
 }
 
 export async function fetchMaintenanceState(): Promise<MaintenanceStateView> {

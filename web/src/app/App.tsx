@@ -25,6 +25,7 @@ import {
 } from "./router";
 import { type RouteHostComponents, RouteHosts } from "./routes/RouteHosts";
 import { ServiceUnavailable } from "./ServiceUnavailable";
+import { parseRoute } from "@/lib/parse-route";
 import { messageOf } from "./shared";
 import "@/styles/index.css";
 
@@ -136,9 +137,8 @@ function Workspace({
 	// Evidence can be linked from retired URLs; consolidating here keeps the
 	// module behind the overlay mounted on its live route instead of a dead host.
 	const consolidatedSource = requestedSource
-		? (consolidatedRouteTarget(
-				new URL(requestedSource, "https://workbench.invalid").pathname,
-			) ?? requestedSource)
+			? (consolidatedRouteTarget(parseRoute(requestedSource).pathname) ??
+				requestedSource)
 		: undefined;
 	const sourceRoute = evidenceSource ?? consolidatedSource ?? "/investigations";
 	const activeRoute = evidenceId ? sourceRoute : route.route;

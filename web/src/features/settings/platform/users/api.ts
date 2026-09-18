@@ -176,12 +176,13 @@ export async function listAuditEvents(): Promise<AuditEventInfo[]> {
   return page.items ?? []
 }
 
+import { formatDateTime } from "@/lib/format";
+
 export function messageOf(reason: unknown, fallback: string): string {
   if (reason instanceof AdminApiError) return reason.message
   return reason instanceof Error ? reason.message : fallback
 }
 
 export function formatTime(timestamp: string): string {
-  const date = new Date(timestamp)
-  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString()
+  return formatDateTime(timestamp, timestamp)
 }

@@ -1,3 +1,5 @@
+import { formatDateTime } from "@/lib/format";
+
 // Admin runtimes feature API (T06): typed projections for runtime slots and
 // the prepare/reveal/retire flows.
 
@@ -115,7 +117,5 @@ export async function retireRuntimeCredential(slot: 'plinth' | 'lintel', expecte
 }
 
 export function formatRuntimeTime(timestamp: string | undefined): string {
-  if (!timestamp) return '—'
-  const date = new Date(timestamp)
-  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString()
+  return formatDateTime(timestamp, '—')
 }

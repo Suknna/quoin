@@ -19,8 +19,8 @@ import {
 	updateUser,
 } from "@/features/settings/platform/users/api";
 import { ConfirmAction } from "../controls";
+import { roleLabels } from "@/features/settings/labels";
 
-const roleLabels: Record<AdminUser["role"], string> = { admin: "管理员", operator: "操作员" };
 
 interface ContactDraft {
 	email: string;

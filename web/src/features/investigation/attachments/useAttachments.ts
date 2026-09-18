@@ -1,3 +1,4 @@
+import { messageOf } from "@/app/shared";
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { uploadAttachment, attachmentCommandId, type TextAttachmentSummary } from './api'
 
@@ -79,7 +80,7 @@ export function useAttachments(): AttachmentDraft {
           setItems((current) =>
             current.map((item) =>
               item.key === entry.key
-                ? { ...item, error: reason instanceof Error ? reason.message : '附件上传失败，请重试。' }
+                ? { ...item, error: messageOf(reason, '附件上传失败，请重试。') }
                 : item,
             ),
           )

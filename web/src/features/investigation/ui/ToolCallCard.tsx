@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/format";
 import { ChevronDown, Wrench } from "lucide-react";
 import { StructuredData } from "@/components/ai/StructuredData";
 import { Badge } from "@/components/ui/badge";
@@ -5,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { toolNameLabel, type ToolCallItem } from "@/features/investigation/tools/api";
 
-const when = (value: string) => new Date(value).toLocaleString();
 
 /** 状态是服务端投影，只映射 API 显式返回的五种终态/阶段。 */
 function statusLabel(status: ToolCallItem["status"]): string {
@@ -55,8 +55,8 @@ export function ToolCallCard({ call }: { call: ToolCallItem }) {
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
           <dt className="text-muted-foreground">执行模式</dt><dd className="break-words">{call.executionMode}</dd>
           <dt className="text-muted-foreground">失败模式</dt><dd className="break-words">{call.failureMode}</dd>
-          {call.startedAt && <><dt className="text-muted-foreground">开始</dt><dd>{when(call.startedAt)}</dd></>}
-          {call.endedAt && <><dt className="text-muted-foreground">结束</dt><dd>{when(call.endedAt)}</dd></>}
+          {call.startedAt && <><dt className="text-muted-foreground">开始</dt><dd>{formatDateTime(call.startedAt)}</dd></>}
+          {call.endedAt && <><dt className="text-muted-foreground">结束</dt><dd>{formatDateTime(call.endedAt)}</dd></>}
           {call.errorDetail && <><dt className="text-muted-foreground">错误</dt><dd className="break-words">{call.errorDetail}</dd></>}
         </dl>
         <section className="flex flex-col gap-2"><h4 className="text-xs font-medium text-muted-foreground">参数</h4><StructuredData value={call.arguments} raw={JSON.stringify(call.arguments, null, 2)} /></section>

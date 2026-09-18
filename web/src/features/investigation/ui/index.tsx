@@ -1,4 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
+import { usePolling } from "@/hooks/use-polling";
+import { formatDateTime } from "@/lib/format";
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { Bot, Check, FileText, LoaderCircle, Paperclip, RotateCcw, Send, ShieldAlert, Square, X } from 'lucide-react'
 import { AiContent } from '@/components/ai/AiContent'
@@ -12,6 +14,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from '@/components/ui/message'
 import { MessageScroller, MessageScrollerButton, MessageScrollerContent, MessageScrollerItem, MessageScrollerProvider, MessageScrollerViewport } from '@/components/ui/message-scroller'
 import { Textarea } from '@/components/ui/textarea'
+import { parseRoute } from "@/lib/parse-route";
+import { messageOf } from "@/app/shared";
 import type { WorkspaceModuleProps, WorkspaceModuleView } from '@/app/module-contract'
 import { api, sourceLabel, type InvestigationAttempt, type InvestigationDetail, type InvestigationMessage, type InvestigationSummary } from '@/features/investigation/api'
 import { attachmentCommandId, uploadAttachment, type TextAttachmentSummary } from '@/features/investigation/attachments/api'
@@ -21,18 +25,15 @@ import { listToolCalls, type ToolCallItem } from '@/features/investigation/tools
 import { appendFeedback, feedbackValueLabels, fetchFeedback, type FeedbackEvent, type FeedbackValue } from '@/features/feedback/api'
 import { ToolCallCard } from '@/features/investigation/ui/ToolCallCard'
 
-const text = (reason: unknown, fallback: string) => reason instanceof Error ? reason.message : fallback
-const when = (value: string) => new Date(value).toLocaleString()
-const routeParts = (route: string) => new URL(route, 'https://workbench.invalid')
 const activeStates = new Set(['Queued', 'Assigned', 'Running', 'Cancelling'])
 
 export function useInvestigationsModule(props: WorkspaceModuleProps): WorkspaceModuleView {
-  const route = routeParts(props.route); const id = route.pathname.match(/^\/investigations\/([^/]+)$/)?.[1]
+  const route = parseRoute(props.route); const id = route.pathname.match(/^\/investigations\/([^/]+)$/)?.[1]
   const [items, setItems] = useState<InvestigationSummary[]>([]); const [error, setError] = useState('')
-  const load = useCallback(async () => { if (props.suspended) return; try { setItems((await api.list()).items); setError('') } catch (reason) { setError(text(reason, '无法加载调查。')) } }, [props.suspended])
+  const load = useCallback(async () => { if (props.suspended) return; try { setItems((await api.list()).items); setError('') } catch (reason) { setError(messageOf(reason, '无法加载调查。')) } }, [props.suspended])
   useEffect(() => { const refresh = () => void load(); window.addEventListener('focus', refresh); window.addEventListener('investigation-created', refresh); return () => { window.removeEventListener('focus', refresh); window.removeEventListener('investigation-created', refresh) } }, [load])
   useEffect(() => { void Promise.resolve().then(load) }, [load])
-  const list = <aside className="space-y-3 p-3"><Button className="w-full justify-start" size="sm" onClick={() => props.navigate('/investigations/new')}><Send />新建对话</Button>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{items.length === 0 ? <p className="px-2 text-sm text-muted-foreground">尚无对话。</p> : items.map((item) => <Button key={item.id} variant="ghost" className="h-auto w-full justify-start p-3 text-left whitespace-normal" onClick={() => props.navigate(`/investigations/${encodeURIComponent(item.id)}`)}><span className="block w-full min-w-0"><strong className="block truncate text-sm">{item.displayTitle}</strong><small className="mt-1 block text-muted-foreground">{when(item.lastActivityAt)}</small></span></Button>)}</aside>
+  const list = <aside className="space-y-3 p-3"><Button className="w-full justify-start" size="sm" onClick={() => props.navigate('/investigations/new')}><Send />新建对话</Button>{error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}{items.length === 0 ? <p className="px-2 text-sm text-muted-foreground">尚无对话。</p> : items.map((item) => <Button key={item.id} variant="ghost" className="h-auto w-full justify-start p-3 text-left whitespace-normal" onClick={() => props.navigate(`/investigations/${encodeURIComponent(item.id)}`)}><span className="block w-full min-w-0"><strong className="block truncate text-sm">{item.displayTitle}</strong><small className="mt-1 block text-muted-foreground">{formatDateTime(item.lastActivityAt)}</small></span></Button>)}</aside>
   // The AI SRE landing route is a draft-only conversation workspace: it must not
   // create a backend investigation until the operator submits the first turn.
   const content = route.pathname === '/investigations' || route.pathname === '/investigations/new' ? <NewInvestigation {...props}/> : id ? <InvestigationView key={id} id={id} {...props}/> : <section className="p-6"><h1 className="text-xl font-semibold">AI SRE</h1><p className="mt-2 text-sm text-muted-foreground">未找到该调查。</p></section>
@@ -47,15 +48,15 @@ const starterPrompts = [
 ]
 
 function NewInvestigation({ route, navigate, suspended }: WorkspaceModuleProps) {
-  const query = routeParts(route).searchParams; const occurrence = query.get('occurrence'); const analysis = query.get('initialAnalysis'); const [body, setBody] = useState(''); const [files, setFiles] = useState<TextAttachmentSummary[]>([]); const [systems, setSystems] = useState<Array<{ key: string; displayName: string }>>([]); const [businessSystemKey, setBusinessSystemKey] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  useEffect(() => { void Promise.resolve(api.businessSystems()).then(setSystems).catch((reason: unknown) => setError(text(reason, '无法加载可用业务系统。'))) }, [])
-  const create = async () => { if (!body.trim() && files.length === 0) return setError('请输入第一条消息或添加附件。'); setBusy(true); setError(''); try { const sources = occurrence ? [{ type: 'occurrence', sourceId: occurrence }, ...(analysis ? [{ type: 'initial_analysis', sourceId: analysis }] : [])] : []; const item = await api.create(body, sources, files.map((file) => file.id), businessSystemKey); window.dispatchEvent(new Event('investigation-created')); navigate(`/investigations/${encodeURIComponent(item.id)}`) } catch (reason) { setError(text(reason, '无法创建调查。')) } finally { setBusy(false) } }
+  const query = parseRoute(route).searchParams; const occurrence = query.get('occurrence'); const analysis = query.get('initialAnalysis'); const [body, setBody] = useState(''); const [files, setFiles] = useState<TextAttachmentSummary[]>([]); const [systems, setSystems] = useState<Array<{ key: string; displayName: string }>>([]); const [businessSystemKey, setBusinessSystemKey] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  useEffect(() => { void Promise.resolve(api.businessSystems()).then(setSystems).catch((reason: unknown) => setError(messageOf(reason, '无法加载可用业务系统。'))) }, [])
+  const create = async () => { if (!body.trim() && files.length === 0) return setError('请输入第一条消息或添加附件。'); setBusy(true); setError(''); try { const sources = occurrence ? [{ type: 'occurrence', sourceId: occurrence }, ...(analysis ? [{ type: 'initial_analysis', sourceId: analysis }] : [])] : []; const item = await api.create(body, sources, files.map((file) => file.id), businessSystemKey); window.dispatchEvent(new Event('investigation-created')); navigate(`/investigations/${encodeURIComponent(item.id)}`) } catch (reason) { setError(messageOf(reason, '无法创建调查。')) } finally { setBusy(false) } }
   return <section className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col justify-center px-6 py-10"><div className="mx-auto w-full max-w-2xl space-y-6"><div className="text-center"><div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground"><ShieldAlert className="size-6" /></div><h1 className="text-2xl font-semibold tracking-tight">开始一次 SRE 调查</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">描述现象、附上日志或从一个提示开始。AI SRE 会保留每个结论的证据与执行记录。</p></div>{occurrence && <Alert><AlertDescription>将关联告警 {occurrence}{analysis ? ' 与初步分析' : ''}。</AlertDescription></Alert>}<div><label className="mb-1 block text-sm font-medium" htmlFor="business-system">业务系统（可选）</label><Select value={businessSystemKey || '__none'} onValueChange={(value) => setBusinessSystemKey(value === '__none' ? '' : value)} disabled={suspended || busy}><SelectTrigger id="business-system" aria-label="业务系统"><SelectValue placeholder="不绑定业务系统" /></SelectTrigger><SelectContent><SelectItem value="__none">不绑定业务系统</SelectItem>{systems.map((system) => <SelectItem key={system.key} value={system.key}>{system.displayName}</SelectItem>)}</SelectContent></Select><p className="mt-1 text-xs text-muted-foreground">AI SRE 默认可使用已启用接入授权的只读指标；绑定业务系统仅冻结其声明作为历史上下文，并非授权前提。</p></div><div className="grid gap-2 sm:grid-cols-2">{starterPrompts.map((prompt) => <Button key={prompt} type="button" variant="outline" className="h-auto justify-start whitespace-normal p-3 text-left text-sm font-normal" disabled={suspended || busy} onClick={() => setBody(prompt)}>{prompt}</Button>)}</div><Composer body={body} setBody={setBody} files={files} setFiles={setFiles} disabled={suspended || busy} placeholder="描述需要调查的问题…" onSubmit={() => void create()} submitLabel={busy ? '创建中…' : '创建并发送'} submitting={busy} />{error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}</div></section>
 }
 
 function InvestigationView({ id, suspended, openEvidence }: WorkspaceModuleProps & { id: string }) {
   const [detail, setDetail] = useState<InvestigationDetail | null>(null); const [messages, setMessages] = useState<InvestigationMessage[]>([]); const [attempts, setAttempts] = useState<InvestigationAttempt[]>([]); const [error, setError] = useState('')
-  const load = useCallback(async () => { if (suspended) return; try { const [next, messagePage, attemptPage] = await Promise.all([api.get(id), api.listMessages(id), api.listAttempts(id)]); setDetail(next); setMessages(messagePage.items); setAttempts(attemptPage.items); setError('') } catch (reason) { setError(text(reason, '无法加载调查。')) } }, [id, suspended])
+  const load = useCallback(async () => { if (suspended) return; try { const [next, messagePage, attemptPage] = await Promise.all([api.get(id), api.listMessages(id), api.listAttempts(id)]); setDetail(next); setMessages(messagePage.items); setAttempts(attemptPage.items); setError('') } catch (reason) { setError(messageOf(reason, '无法加载调查。')) } }, [id, suspended])
   useEffect(() => { void Promise.resolve().then(load) }, [load])
   if (!detail) return <section className="p-6">{error ? <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert> : <div className="flex flex-col gap-3" role="status" aria-label="正在加载调查"><div className="flex items-start gap-3"><Skeleton className="h-8 w-8 shrink-0 rounded-full" /><div className="flex min-w-0 flex-1 flex-col gap-2"><Skeleton className="h-4 w-1/4" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-5/6" /><Skeleton className="h-4 w-2/3" /></div></div></div>}</section>
   return <section className="flex min-h-0 min-w-0 flex-1 flex-col"><header className="min-w-0 border-b bg-background/95 px-6 py-4 backdrop-blur"><h1 className="break-words text-lg font-semibold">{detail.displayTitle}</h1>{detail.businessSystemKey && <div className="mt-2"><Badge variant="outline">业务系统：{detail.businessSystemName || detail.businessSystemKey}</Badge></div>}<div className="mt-2 flex flex-wrap gap-2">{detail.sources.map((source) => <SourceLink key={`${source.type}-${source.sourceId}`} type={source.type} sourceId={source.sourceId} openEvidence={openEvidence} />)}</div></header>{error && <div className="px-6 pt-4"><Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert></div>}<Thread detail={detail} messages={messages} attempts={attempts} suspended={suspended} openEvidence={openEvidence} reload={load} setError={setError}/></section>
@@ -72,7 +73,7 @@ function Thread({ detail, messages, attempts, suspended, openEvidence, reload, s
   const isBusy = suspended || mutating || stopping
   // The server assigns an attempt after accepting a sent message. While the local
   // stream is open, keep the authoritative projection polling so Stop can cancel it.
-  useEffect(() => { if ((!active && !streaming) || suspended) return; const timer = window.setInterval(() => void reload(), 500); return () => window.clearInterval(timer) }, [active, reload, streaming, suspended])
+  usePolling(() => void reload(), 500, (active || streaming) && !suspended)
   useEffect(() => {
     const revision = withdrawnRevision(messages)
     if (!restoredMessageId || revision === 0) return
@@ -103,7 +104,7 @@ function Thread({ detail, messages, attempts, suspended, openEvidence, reload, s
       }
       await reload()
     } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(text(reason, '消息发送失败。'))
+      if (!(reason instanceof DOMException && reason.name === 'AbortError')) setError(messageOf(reason, '消息发送失败。'))
     } finally {
       controller.current = null; setStreaming(false); setStreamText(''); setMutating(false)
     }
@@ -122,7 +123,7 @@ function Thread({ detail, messages, attempts, suspended, openEvidence, reload, s
       if (!target) throw new Error('正在等待服务确认执行，暂时无法停止。')
       await api.cancelAttempt(detail.id, target.id, target.rowVersion)
       await reload()
-    } catch (reason) { setError(text(reason, '无法停止。')) } finally { setStopping(false) }
+    } catch (reason) { setError(messageOf(reason, '无法停止。')) } finally { setStopping(false) }
   }
   const undo = async () => {
     if (!detail.headMessageId) return
@@ -132,9 +133,9 @@ function Thread({ detail, messages, attempts, suspended, openEvidence, reload, s
       await api.undo(detail.id, detail.headMessageId)
       setRestoredMessageId(restored?.id ?? null)
       await reload()
-    } catch (reason) { setError(text(reason, '无法撤回。')) } finally { setMutating(false) }
+    } catch (reason) { setError(messageOf(reason, '无法撤回。')) } finally { setMutating(false) }
   }
-  const retry = async (attempt: InvestigationAttempt) => { setMutating(true); setError(''); try { await api.retryAttempt(detail.id, attempt.id); await reload() } catch (reason) { setError(text(reason, '无法重试。')) } finally { setMutating(false) } }
+  const retry = async (attempt: InvestigationAttempt) => { setMutating(true); setError(''); try { await api.retryAttempt(detail.id, attempt.id); await reload() } catch (reason) { setError(messageOf(reason, '无法重试。')) } finally { setMutating(false) } }
   const attemptFacts = Object.fromEntries(attempts.map((attempt) => [attempt.id, { state: attempt.state, rowVersion: attempt.rowVersion }]))
   const canCompose = !isBusy && !active && !streaming
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col"><MessageScrollerProvider autoScroll><MessageScroller className="flex-1"><MessageScrollerViewport><MessageScrollerContent className="mx-auto w-full min-w-0 max-w-4xl gap-6 px-6 py-6">{messages.map((message) => <MessageScrollerItem key={message.id} messageId={message.id} scrollAnchor={message.role === 'user'}><ChatMessage message={message} messages={messages} attempts={attempts} attemptFacts={attemptFacts} investigationId={detail.id} activeAttemptId={active?.id} openEvidence={openEvidence} showEvents={setEvents} onUndo={undo} onRetry={retry} disabled={isBusy} /></MessageScrollerItem>)}{streaming && <MessageScrollerItem messageId="streaming-response"><StreamingMessage content={streamText} /></MessageScrollerItem>}</MessageScrollerContent></MessageScrollerViewport><MessageScrollerButton /></MessageScroller></MessageScrollerProvider><div className="border-t bg-background px-6 py-4"><div className="mx-auto w-full max-w-4xl">{(active || streaming || stopping) && <div className="mb-3 flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm"><span className="flex items-center gap-2"><span className="size-2 animate-pulse rounded-full bg-primary" />{stopping ? '正在停止执行…' : active ? `正在执行：${active.state}` : '正在生成回复'}</span><Button type="button" variant="outline" size="sm" disabled={suspended || stopping} onClick={() => void cancel()}><Square />停止</Button></div>}<Composer body={body} setBody={setBody} files={files} setFiles={setFiles} disabled={!canCompose} placeholder={active || streaming || stopping ? '等待当前回复完成…' : '输入消息，Enter 发送，Shift + Enter 换行'} onSubmit={() => void send()} submitLabel="发送" />{events.length > 0 && <p className="mt-2 text-xs text-muted-foreground">已记录反馈：{events.map((event) => feedbackValueLabels[event.value]).join('、')}</p>}</div></div></div>
@@ -144,8 +145,8 @@ function StreamingMessage({ content }: { content: string }) { return <Message><M
 
 function ChatMessage({ message, messages, attempts, attemptFacts, investigationId, activeAttemptId, openEvidence, showEvents, onUndo, onRetry, disabled }: { message: InvestigationMessage; messages: InvestigationMessage[]; attempts: InvestigationAttempt[]; attemptFacts: Record<string, { state: InvestigationAttempt['state']; rowVersion: number }>; investigationId: string; activeAttemptId?: string; openEvidence: (id: string) => void; showEvents: (items: FeedbackEvent[]) => void; onUndo: () => Promise<void>; onRetry: (attempt: InvestigationAttempt) => Promise<void>; disabled: boolean }) {
   const [error, setError] = useState(''); const isUser = message.role === 'user'; const attempt = effectiveAttemptForMessage(message, messages, attempts)
-  const feedback = async (value: FeedbackValue) => { try { await appendFeedback({ type: 'investigation_message', id: message.id }, value, ''); showEvents((await fetchFeedback({ type: 'investigation_message', id: message.id })).items) } catch (reason) { setError(text(reason, '无法提交反馈。')) } }
-  return <Message align={isUser ? 'end' : 'start'} className={message.status === 'withdrawn' ? 'opacity-50' : ''}><MessageAvatar><Avatar><AvatarFallback>{isUser ? '你' : <Bot className="size-4" />}</AvatarFallback></Avatar></MessageAvatar><MessageContent><MessageHeader>{isUser ? '你' : 'AI SRE'} <span className="ml-2 font-normal text-muted-foreground">{when(message.createdAt)}</span>{message.status === 'withdrawn' && <Badge className="ml-2" variant="outline">已撤回</Badge>}</MessageHeader><Bubble align={isUser ? 'end' : 'start'} variant={isUser ? 'default' : 'secondary'}><BubbleContent><AiContent content={message.content} evidenceIds={message.evidenceIds ?? undefined} openEvidence={openEvidence} /></BubbleContent></Bubble>{message.attachments.length > 0 && <div className="flex flex-wrap gap-1">{message.attachments.map((attachment) => <Badge key={attachment.id} variant="outline"><Paperclip />{attachment.originalFilename}</Badge>)}</div>}{message.evidenceIds?.length ? <div className="flex flex-wrap gap-1">{message.evidenceIds.map((id) => <Button key={id} size="xs" variant="outline" onClick={() => openEvidence(id)}><FileText />证据 {id}</Button>)}</div> : null}{/* 工具记录归属本回合（经重试语义解析的权威 Attempt），不再堆叠到线程底部。 */}{attempt && <AttemptToolCalls investigationId={investigationId} attemptId={attempt.id} active={activeAttemptId === attempt.id} />}{attempt && <MessageFooter>执行状态：{attempt.state}</MessageFooter>}{isUser && canOfferUndo(messages, message, activeAttemptId) && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void onUndo()}><RotateCcw />撤回此回合</Button>}{isUser && message.attemptId && canOfferRetry({ [message.attemptId]: attemptFacts[message.attemptId] ?? { state: attempt?.state ?? 'Succeeded', rowVersion: attempt?.rowVersion ?? 0 } }, message, activeAttemptId) && attempt?.state === 'Failed' && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void onRetry(attempt)}><RotateCcw />重试</Button>}{!isUser && <div className="flex flex-wrap gap-1"><span className="mr-1 self-center text-xs text-muted-foreground">此回复：</span>{(['adopted', 'executed', 'verified_effective', 'rejected'] as FeedbackValue[]).map((value) => <Button key={value} size="xs" variant="ghost" onClick={() => void feedback(value)}>{feedbackValueLabels[value]}</Button>)}{/* <--Waiting for Implementation--> Knowledge publication stays intentionally unavailable. */}<Button size="xs" variant="ghost" disabled title="知识库正在开发中，暂不可用"><Check />知识库开发中</Button></div>}{error && <p role="alert" className="text-sm text-destructive">{error}</p>}</MessageContent></Message>
+  const feedback = async (value: FeedbackValue) => { try { await appendFeedback({ type: 'investigation_message', id: message.id }, value, ''); showEvents((await fetchFeedback({ type: 'investigation_message', id: message.id })).items) } catch (reason) { setError(messageOf(reason, '无法提交反馈。')) } }
+  return <Message align={isUser ? 'end' : 'start'} className={message.status === 'withdrawn' ? 'opacity-50' : ''}><MessageAvatar><Avatar><AvatarFallback>{isUser ? '你' : <Bot className="size-4" />}</AvatarFallback></Avatar></MessageAvatar><MessageContent><MessageHeader>{isUser ? '你' : 'AI SRE'} <span className="ml-2 font-normal text-muted-foreground">{formatDateTime(message.createdAt)}</span>{message.status === 'withdrawn' && <Badge className="ml-2" variant="outline">已撤回</Badge>}</MessageHeader><Bubble align={isUser ? 'end' : 'start'} variant={isUser ? 'default' : 'secondary'}><BubbleContent><AiContent content={message.content} evidenceIds={message.evidenceIds ?? undefined} openEvidence={openEvidence} /></BubbleContent></Bubble>{message.attachments.length > 0 && <div className="flex flex-wrap gap-1">{message.attachments.map((attachment) => <Badge key={attachment.id} variant="outline"><Paperclip />{attachment.originalFilename}</Badge>)}</div>}{message.evidenceIds?.length ? <div className="flex flex-wrap gap-1">{message.evidenceIds.map((id) => <Button key={id} size="xs" variant="outline" onClick={() => openEvidence(id)}><FileText />证据 {id}</Button>)}</div> : null}{/* 工具记录归属本回合（经重试语义解析的权威 Attempt），不再堆叠到线程底部。 */}{attempt && <AttemptToolCalls investigationId={investigationId} attemptId={attempt.id} active={activeAttemptId === attempt.id} />}{attempt && <MessageFooter>执行状态：{attempt.state}</MessageFooter>}{isUser && canOfferUndo(messages, message, activeAttemptId) && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void onUndo()}><RotateCcw />撤回此回合</Button>}{isUser && message.attemptId && canOfferRetry({ [message.attemptId]: attemptFacts[message.attemptId] ?? { state: attempt?.state ?? 'Succeeded', rowVersion: attempt?.rowVersion ?? 0 } }, message, activeAttemptId) && attempt?.state === 'Failed' && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void onRetry(attempt)}><RotateCcw />重试</Button>}{!isUser && <div className="flex flex-wrap gap-1"><span className="mr-1 self-center text-xs text-muted-foreground">此回复：</span>{(['adopted', 'executed', 'verified_effective', 'rejected'] as FeedbackValue[]).map((value) => <Button key={value} size="xs" variant="ghost" onClick={() => void feedback(value)}>{feedbackValueLabels[value]}</Button>)}{/* <--Waiting for Implementation--> Knowledge publication stays intentionally unavailable. */}<Button size="xs" variant="ghost" disabled title="知识库正在开发中，暂不可用"><Check />知识库开发中</Button></div>}{error && <p role="alert" className="text-sm text-destructive">{error}</p>}</MessageContent></Message>
 }
 
 /** 本回合的工具时间线：按 Attempt 读取并原位展开；执行中的 Attempt 轮询真实阶段。 */
@@ -155,14 +156,10 @@ function AttemptToolCalls({ investigationId, attemptId, active }: { investigatio
     let cancelled = false
     listToolCalls(investigationId, attemptId)
       .then((items) => { if (!cancelled) setCalls(items) })
-      .catch((reason: unknown) => { if (!cancelled) setError(text(reason, '无法读取工具调用。')) })
+      .catch((reason: unknown) => { if (!cancelled) setError(messageOf(reason, '无法读取工具调用。')) })
     return () => { cancelled = true }
   }, [investigationId, attemptId])
-  useEffect(() => {
-    if (!active) return
-    const timer = window.setInterval(() => { listToolCalls(investigationId, attemptId).then((items) => setCalls(items)).catch(() => undefined) }, 2000)
-    return () => window.clearInterval(timer)
-  }, [active, attemptId, investigationId])
+  usePolling(() => { listToolCalls(investigationId, attemptId).then((items) => setCalls(items)).catch(() => undefined) }, 2000, active)
   if (error) return <p role="alert" className="text-xs text-destructive">{error}</p>
   if (calls.length === 0) return null
   return <div className="flex min-w-0 flex-col gap-2" aria-label="本回合工具记录">{calls.map((call) => <ToolCallCard key={call.id} call={call} />)}</div>
@@ -176,7 +173,7 @@ function Composer({ body, setBody, files, setFiles, disabled, placeholder, onSub
     try {
       const attachment = await uploadAttachment(file, attachmentCommandId())
       setFiles((current) => [...current, attachment])
-    } catch (reason) { setUploadError(text(reason, '附件上传失败，请重试。')) }
+    } catch (reason) { setUploadError(messageOf(reason, '附件上传失败，请重试。')) }
     finally { setPendingUploads((count) => count - 1) }
   }
   const blocked = disabled || pendingUploads > 0
