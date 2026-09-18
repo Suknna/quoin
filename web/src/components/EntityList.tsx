@@ -89,7 +89,7 @@ export function EntityList<T extends EntityListItem>({
 					<ItemTitle className="truncate">{item.title}</ItemTitle>
 				)}
 				{columns.includes("subtitle") && item.subtitle && (
-					<ItemDescription className="mt-1 truncate">
+					<ItemDescription className="mt-0.5 truncate">
 						{item.subtitle}
 					</ItemDescription>
 				)}
@@ -114,8 +114,9 @@ export function EntityList<T extends EntityListItem>({
 	);
 	const rowClass = (item: T) =>
 		cn(
-			"w-full rounded-none border-0 border-b px-4 py-4 text-left last:border-b-0 hover:bg-muted/50",
-			selectedId === item.id && "bg-muted",
+			"w-full gap-3 rounded-none border-0 border-b px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50",
+			selectedId === item.id &&
+				"bg-muted shadow-[inset_2px_0_0_0_var(--color-foreground)]",
 			rowClassName,
 		);
 	return (
@@ -123,12 +124,13 @@ export function EntityList<T extends EntityListItem>({
 			{controls}
 			{loading ? (
 				<div
-					className="flex flex-col gap-3 p-4"
+					className="flex flex-col gap-2"
 					role="status"
 					aria-label={loadingLabel}
 				>
-					<Skeleton className="h-16 w-full" />
-					<Skeleton className="h-16 w-full" />
+					<Skeleton className="h-14 w-full" />
+					<Skeleton className="h-14 w-full" />
+					<Skeleton className="h-14 w-full" />
 				</div>
 			) : error ? (
 				<ErrorMessage>
@@ -156,6 +158,7 @@ export function EntityList<T extends EntityListItem>({
 			) : (
 				<ul
 					className={cn("overflow-hidden rounded-lg border", listClassName)}
+					// biome-ignore lint/a11y/noRedundantRoles: Tailwind preflight strips list styling; VoiceOver needs the explicit role.
 					role="list"
 				>
 					{items.map((item) => (
