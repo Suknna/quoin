@@ -22,14 +22,7 @@ import {
 } from "@/components/ui/empty";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from "@/components/ui/table";
+import { EntityList } from "@/components/EntityList";
 import { type BusinessView, formatTime, getBusinessView } from "../api";
 
 export function ViewDetail({
@@ -100,13 +93,8 @@ export function ViewDetail({
 	const conditions = Object.entries(view.scope.labelConditions);
 	return (
 		<div className="flex w-full flex-col gap-4">
-			<header className="flex flex-wrap items-start justify-between gap-3">
-				<div>
-					<h2 className="text-xl font-semibold">{view.displayName}</h2>
-					<p className="text-sm text-muted-foreground">
-						视图标识 {view.viewKey}
-					</p>
-				</div>
+			{/* 抽屉头部（DetailSheet）负责标题；操作入口保留在内容顶部。 */}
+			<header className="flex flex-wrap items-start justify-end gap-3">
 				<div className="flex flex-wrap gap-2">
 					{/* Usage entry: hands the view scope to the inspection planner for preselection. */}
 					<Button
@@ -169,24 +157,14 @@ export function ViewDetail({
 					<div className="flex flex-col gap-2">
 						<span className="text-sm font-medium">标签条件</span>
 						{conditions.length ? (
-							<Table>
-								<TableHeader>
-									<TableRow>
-										<TableHead>标签</TableHead>
-										<TableHead>值</TableHead>
-									</TableRow>
-								</TableHeader>
-								<TableBody>
-									{conditions.map(([key, value]) => (
-										<TableRow key={key}>
-											<TableCell className="font-mono text-xs">{key}</TableCell>
-											<TableCell className="break-all font-mono text-xs">
-												{value}
-											</TableCell>
-										</TableRow>
-									))}
-								</TableBody>
-							</Table>
+							<EntityList
+								items={conditions.map(([key, value]) => ({
+									id: key,
+									title: key,
+									subtitle: value,
+								}))}
+								columns={["title", "subtitle"]}
+							/>
 						) : (
 							<Empty className="min-h-24">
 								<EmptyHeader>
