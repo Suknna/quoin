@@ -12,6 +12,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -327,7 +328,7 @@ func rebindFixture(t *testing.T) (contract.QuoinConfig, []byte, *bootstrap.Datab
 	t.Helper()
 	root := t.TempDir()
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), RootKeyFile: filepath.Join(root, "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "tls.key"), RuntimeClientCAFile: filepath.Join(root, "stele")}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	key, err := os.ReadFile(config.RootKeyFile)

@@ -153,14 +153,6 @@ func finalizeMode(arguments []string) error {
 		}
 		layouts[component] = layoutDir
 	}
-	helpers := map[string][]byte{}
-	for _, platform := range subjects.Platforms {
-		body, err := os.ReadFile(filepath.Join(releaseDir, inventory.Helpers[platform].AssetName))
-		if err != nil {
-			return err
-		}
-		helpers[inventory.Helpers[platform].AssetName] = body
-	}
 	kubernetesBody, err := os.ReadFile(filepath.Join(releaseDir, "assets", names.Kubernetes))
 	if err != nil {
 		return err
@@ -175,7 +167,6 @@ func finalizeMode(arguments []string) error {
 		Kubernetes:     kubernetesBody,
 		ComposeName:    names.Compose,
 		Compose:        composeBody,
-		Helpers:        helpers,
 		Verification:   appendVerificationMaterials(inventoryBytes, evidence),
 		ImageLayouts:   layouts,
 	}, runner)
@@ -218,7 +209,7 @@ func readEvidenceDir(dir string) (map[string]manifest.EvidenceInput, error) {
 	return evidence, nil
 }
 
-// stageAssets copies the Kubernetes and Compose bundles plus both helpers
+// stageAssets copies the Kubernetes and Compose bundles
 // into the release directory layout, asserting each recorded SHA-256
 // against the copied bytes.
 func stageAssets(assetsDir, releaseDir string, inventory *subjects.Inventory, names subjects.AssetNames) (map[string]string, error) {
@@ -246,12 +237,6 @@ func stageAssets(assetsDir, releaseDir string, inventory *subjects.Inventory, na
 	}
 	if err := copyChecked(filepath.Join(assetsDir, names.Compose), filepath.Join(releaseDir, "assets", names.Compose), inventory.Compose.SHA256); err != nil {
 		return nil, err
-	}
-	for _, platform := range subjects.Platforms {
-		helper := inventory.Helpers[platform]
-		if err := copyChecked(filepath.Join(assetsDir, helper.AssetName), filepath.Join(releaseDir, helper.AssetName), helper.SHA256); err != nil {
-			return nil, err
-		}
 	}
 	return staged, nil
 }

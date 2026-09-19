@@ -14,7 +14,6 @@
     "images",
     "kubernetes",
     "compose",
-    "deployment_helper",
     "offline",
     "sigstore_bundles",
     "contracts",
@@ -77,55 +76,6 @@
         }
       }
     },
-    "deployment_helper": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "artifacts"
-      ],
-      "properties": {
-        "artifacts": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "linux/amd64",
-            "linux/arm64"
-          ],
-          "properties": {
-            "linux/amd64": {
-              "allOf": [
-                {
-                  "$ref": "#/$defs/releaseBlob"
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "asset_name": {
-                      "const": "quoin-deploy-linux-amd64"
-                    }
-                  }
-                }
-              ]
-            },
-            "linux/arm64": {
-              "allOf": [
-                {
-                  "$ref": "#/$defs/releaseBlob"
-                },
-                {
-                  "type": "object",
-                  "properties": {
-                    "asset_name": {
-                      "const": "quoin-deploy-linux-arm64"
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        }
-      }
-    },
     "offline": {
       "type": "object",
       "additionalProperties": false,
@@ -149,7 +99,6 @@
         "kubernetes",
         "release_manifest",
         "compose",
-        "deployment_helper",
         "offline"
       ],
       "properties": {
@@ -185,9 +134,6 @@
         },
         "compose": {
           "$ref": "#/$defs/bundleAssetName"
-        },
-        "deployment_helper": {
-          "$ref": "#/$defs/platformBundleNames"
         },
         "offline": {
           "$ref": "#/$defs/bundleAssetName"

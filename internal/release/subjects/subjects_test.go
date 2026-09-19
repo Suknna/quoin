@@ -10,10 +10,8 @@ func testInventory() *Inventory {
 	names, _ := Names("v0.1.0-dev")
 	bundles := NamesForBundles()
 	bundleMap := map[string]string{
-		"kubernetes":                    bundles.Kubernetes,
-		"compose":                       bundles.Compose,
-		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
-		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
+		"kubernetes": bundles.Kubernetes,
+		"compose":    bundles.Compose,
 	}
 	for _, component := range Components {
 		bundleMap["image_indexes/"+component] = bundles.ImageIndexes[component]
@@ -48,11 +46,7 @@ func testInventory() *Inventory {
 		Images:         images,
 		Kubernetes:     BlobSubject{AssetName: names.Kubernetes, SHA256: strings.TrimPrefix(digestAt(51), "sha256:")},
 		Compose:        BlobSubject{AssetName: names.Compose, SHA256: strings.TrimPrefix(digestAt(52), "sha256:")},
-		Helpers: map[string]BlobSubject{
-			"linux/amd64": {AssetName: names.Helper["linux/amd64"], SHA256: strings.TrimPrefix(digestAt(53), "sha256:")},
-			"linux/arm64": {AssetName: names.Helper["linux/arm64"], SHA256: strings.TrimPrefix(digestAt(54), "sha256:")},
-		},
-		Bundles: bundleMap,
+		Bundles:        bundleMap,
 	}
 }
 
@@ -94,9 +88,6 @@ func TestNamesFollowReleaseContract(t *testing.T) {
 	}
 	if names.Compose != "quoin-compose-v1.2.3-rc.1.tar.gz" {
 		t.Fatalf("compose %q", names.Compose)
-	}
-	if names.Helper["linux/arm64"] != "quoin-deploy-linux-arm64" {
-		t.Fatalf("helper %q", names.Helper["linux/arm64"])
 	}
 	if _, err := Names("1.2.3"); err == nil {
 		t.Fatal("version without leading v must fail")

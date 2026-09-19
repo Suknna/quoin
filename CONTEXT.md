@@ -54,7 +54,7 @@ React、HTTP API 和 SSE 由同一 Quoin Origin 提供。浏览器只持有 32-b
 唯一内置 Admin 的找回只能通过停止长期 Quoin 后独占数据库的 `quoin admin recover` 完成，凭据只经 attached TTY：`--mode password` 由操作者在 TTY 输入新的临时密码，`--mode factors` 额外重置全部收码因素并生成只在 TTY 打印一次的临时密码。临时密码不进入参数、环境变量、Secret、history、日志或数据库明文，不设单独有效期，再次执行恢复会取代先前的临时密码。恢复后服务重启，管理员以该临时密码正常登录，进入与首次安装完全一致的统一初始化流程（设置正式密码并验证收码渠道），完成前不建立工作台会话；不恢复默认密码、不创建第二管理员、不提供网络 bootstrap 或邮件找回。
 
 **服务身份**：
-Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端证书（CN=plinth / CN=stele），内部 gRPC 全部 mTLS：quoin:8443 以 `RequireAndVerifyClientCert` 校验客户端证书并按已验证链叶证书 CN 授权服务——RuntimeControl/ArtifactService 仅 CN=plinth，SteleRelay 仅 CN=stele（ADR-0009）。证书由 `quoin secrets bootstrap` 签发、经部署 Secret 只读挂载，与 CA 同寿命；轮换经 `quoin secrets issue-client-certs --force` 重新签发后更新 Secret 并重启组件，属显式运维操作。不存在注册流程、一次性令牌或持久凭据状态：Plinth 状态卷丢失后以同一证书自动重连；Plinth worker 不接触证书私钥之外的部署秘密。持有 CA 私钥即可签发任意组件身份，该私钥只存在于部署 secrets 目录（Compose）或 Kubernetes Secret（K8s 部署），与数据卷同等级保管；普通 SQLite 备份恢复不改变这些部署身份。
+Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端证书（CN=plinth / CN=stele），内部 gRPC 全部 mTLS：quoin:8443 以 `RequireAndVerifyClientCert` 校验客户端证书并按已验证链叶证书 CN 授权服务——RuntimeControl/ArtifactService 仅 CN=plinth，SteleRelay 仅 CN=stele（ADR-0009）。证书由部署方用仓库脚本生成（或等价 PKI 流程）、经部署 Secret 只读挂载，与 CA 同寿命；轮换经 `scripts/generate-deployment-secrets.sh --issue-client-certs --force` 重新签发后更新 Secret 并重启组件，属显式运维操作。不存在注册流程、一次性令牌或持久凭据状态：Plinth 状态卷丢失后以同一证书自动重连；Plinth worker 不接触证书私钥之外的部署秘密。持有 CA 私钥即可签发任意组件身份，该私钥只存在于部署 secrets 目录（Compose）或 Kubernetes Secret（K8s 部署），与数据卷同等级保管；普通 SQLite 备份恢复不改变这些部署身份。
 
 **告警源凭据投影**：
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 以自身客户端证书经 mTLS 认证后获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多同时保留新旧两个有效凭据；新值首次成功使用后进入 Pending Retirement，由 Admin 显式吊销旧值，不设自动 TTL，并持续显示与审计未收口状态。
@@ -360,10 +360,10 @@ Caddy 是唯一公共入口，加载部署者提供的 TLS Secret（Compose 使�
 Quoin、Plinth、Stele、前端是四个应用镜像；Caddy 使用固定版本的第三方镜像。发布版本、镜像 digest 与来源信息继续用于展示、审计与溯源，但不是 Runtime 通信准入条件。任一 Proto 权威契约文件变化必须重建全部应用；OpenAPI 变化必须重建 Quoin 与前端；仅应用实现变化且契约不变时可只重建受影响应用。双架构、镜像锁、非 root 运行、持久卷、工具隔离及供应链验证要求继续适用。
 
 **首次秘密引导**：
-普通 Kubernetes YAML 的一次性 bootstrap Job 与 Compose 的一次性 bootstrap service 只可在确认空白首次安装时生成根密钥、Stele token 和所需内部 TLS 材料；已有持久状态而秘密缺失、部分存在或无效时必须 fail closed，升级不得自动重建。秘密只写入受控 Kubernetes Secret 或权限受限文件，正常容器只读挂载；不得进入镜像、前端资产、部署 YAML、环境变量、发布记录或日志。
+部署秘密（根密钥、部署 CA 与内部 TLS/组件客户端证书）由部署方在目标环境外用仓库脚本 `scripts/generate-deployment-secrets.sh`（或等价 PKI 流程）生成，再以 kubectl 创建/更新 Kubernetes Secret 或放入权限受限的本地目录，正常容器只读挂载；产品进程不在集群内生成或改写任何部署秘密。已有持久状态而秘密缺失、部分存在或无效时必须人工恢复原材料，升级不得自动重建；秘密不得进入镜像、前端资产、部署 YAML、环境变量、发布记录或日志。
 
 **组件身份供给**：
-Plinth 与 Stele 的客户端证书/私钥经部署 Secret 只读挂载，配置文件指向挂载路径；`quoin secrets bootstrap` 首装签发，`quoin secrets issue-client-certs` 为存量部署补签或 `--force` 轮换。证书不得进入镜像、版本控制、日志或模型上下文。组件启动即认证，无注册流程（ADR-0009）。
+Plinth 与 Stele 的客户端证书/私钥经部署 Secret 只读挂载，配置文件指向挂载路径；部署方用 `scripts/generate-deployment-secrets.sh` 首装生成，其 `--issue-client-certs`（可加 `--force`）为存量部署补签或轮换。证书不得进入镜像、版本控制、日志或模型上下文。组件启动即认证，无注册流程（ADR-0009）。
 
 **发布工件权威与分发**：
 `release-manifest.json` 记录四个应用镜像的独立发布版本、不可变 digest、来源、依赖锁、Compose 与离线资产、签名和验收摘要。发布运行清单只消费 digest，不使用 `latest`；删除 Helm/Chart 工件不移除适用的镜像、Compose、离线、SBOM、provenance 或 Sigstore 完整性校验。
@@ -405,7 +405,7 @@ Suite 状态为 `PASSED | WARNED | FAILED`，发布门只接受 PASSED：本 inv
 Release Qualification 只使用合成数据、短期测试凭据与唯一 sentinel，禁止生产凭据和生产数据进入流水线；公开 evidence 必须通过 sentinel/秘密扫描，敏感 trace 只留受限存储并在公开报告记录 digest、分类和受限 locator。纯状态机、SQL 约束与 HTTP/Proto framing 可以由确定性 harness 证明；调度、Pod/PV/NetworkPolicy/Ingress/Compose 生命周期必须真实运行；双架构声明必须来自原生 amd64/arm64，QEMU 只能作为构建或辅助诊断证据。确定性程序收集事实、校验契约、计算 scenario/suite verdict 并生成签名报告；Agent/模型只做失败分析、汇总和建议，不得改写结果、降低 required 门或把 WARNED/FAILED 改成 PASSED。
 
 **验证触发与支持矩阵**：
-PR 阻塞执行完整 Contract Gate（含全部确定性状态机/集成 scenario），v1 不建设 source-to-scenario 影响选择器；main 定时任务执行完整自动化矩阵；annotated SemVer tag 只针对该 tag 构建的不可变工件重新执行完整 Release Qualification 并补齐人工 observation，PR/nightly 结果不能成为 tag 发布证据，不同 tag/release manifest digest 之间也禁止复用通过证据。每次 qualification 启动时解析 Kubernetes 官方当时维护的最近三个 minor 的最新 patch，并在 evidence statement configuration 的环境描述/工具锁中冻结精确版本；三个版本都在原生 amd64/arm64 上执行完整 Kubernetes 矩阵，只声明这六个精确 cell，不外推 EOL minor、未执行 patch 或中间版本区间。Compose 每个 tag 同样只冻结一个当时 stable 的 Docker Engine+Compose CLI 精确版本对并在双架构完整验证，不外推兼容区间；这些测试环境版本都不进入产品供应链 `release-inputs.yaml`。
+验证分层保留为设计目标，但其 CI 执行链（原 release.yml / release-qualification.yml 及 quoin-deploy/qualify/aggregate 驱动）已随部署编排退役一并移除；当前由 Contract Gate（go test / quoin-verify / 发布物签名验证）承担可执行验证，Release Qualification 矩阵在驱动重建前不再由 CI 执行。
 
 **外部系统与故障执行**：
 Release Qualification 使用官方 digest-pinned Prometheus、Alertmanager、Thanos 镜像验证真实协议 happy path、查询语义和 webhook；错误码、半响应、畸形响应及应用层响应超时由 deterministic protocol fixture 拥有，传输层 TCP timeout/reset 由网络故障原语拥有；Model Provider 继续只使用 deterministic fixture，真实客户系统、生产凭据和真实模型供应商只属于 Deployment Acceptance。catalog 只声明工具无关的封闭故障原语：已有执行路径的进程、资源与网络原语映射到 Docker/Kubernetes 原生 stop/kill/pod delete/NetworkPolicy/重建操作，TCP 原语映射到 digest-pinned Toxiproxy 的 latency/timeout/reset_peer/bandwidth/limit_data；v1 不引入通用 Chaos 平台。ENOSPC、EDQUOT、EROFS、指定 fsync 失败和指定 rename 失败是互不替代的精确 required 原语；冻结 catalog 前必须通过一次性 Compose+Kubernetes 原型逐项证明 operation、注入点、所需 privilege、expected errno 与清理路径，未证明项不得以聚合“原子写失败”或 mock 冒充。

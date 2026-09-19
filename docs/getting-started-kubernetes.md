@@ -110,20 +110,14 @@ SH
 
 ### 3.1 仅首次空库生成 Runtime 密钥
 
-复用 Quoin 自带 `secrets bootstrap`，不手写根密钥。此处在构建机的一次性容器里为**尚未创建的全新部署**生成身份；不启动 Quoin、不创建管理员。
+秘密生成是部署侧职责，使用仓库提供的运维脚本（openssl，等价 PKI 流程亦可）。在构建机上为**尚未创建的全新部署**生成身份；不启动 Quoin、不创建管理员。
 
 ```bash
 cd "$HOME/quoin-k8s"
-sudo chown 65532:65532 secrets/runtime bootstrap-data
-sudo chmod 700 secrets/runtime bootstrap-data
-# Docker bind 配置文件需允许容器UID读取；其中只有部署配置，没有秘密。
-chmod 644 config/bootstrap.yaml
-
-docker run --rm --user 65532:65532 \
-  -v "$PWD/config/bootstrap.yaml:/etc/quoin/component.yaml:ro" \
-  -v "$PWD/secrets/runtime:/run/quoin-secrets" \
-  -v "$PWD/bootstrap-data:/var/lib/quoin/data" \
-  quoin/quoin:v0.1.0-dev secrets bootstrap --config /etc/quoin/component.yaml
+sudo mkdir -p secrets/runtime && sudo chown "$(id -u):$(id -g)" secrets/runtime
+bash /path/to/quoin/scripts/generate-deployment-secrets.sh "$PWD/secrets/runtime"
+sudo chown -R 65532:65532 secrets/runtime
+sudo chmod 700 secrets/runtime
 ```
 
 预期生成 `root-key`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`、`stele-client.crt/key`、`plinth-client.crt/key`。根密钥为 32 字节原始二进制；Runtime 服务端证书覆盖 `quoin`；组件客户端证书由同一 CA 签发（CN=stele / CN=plinth，ADR-0009）。全套秘密已存在时命令验证而不覆盖，部分存在则拒绝。

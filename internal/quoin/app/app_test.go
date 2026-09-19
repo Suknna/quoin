@@ -17,6 +17,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/app"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // TestPublicHandlerOnlyServesBackendRoutes guards the split deployment boundary:
@@ -36,7 +37,7 @@ func TestPublicHandlerOnlyServesBackendRoutes(t *testing.T) {
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
 		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
@@ -84,7 +85,7 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
 		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)

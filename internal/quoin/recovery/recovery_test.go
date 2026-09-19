@@ -19,12 +19,13 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/recovery"
+	"github.com/Suknna/quoin/test/support"
 )
 
 func TestTicket33RestoreReplacesSnapshotAndEntersTrustIsolation(t *testing.T) {
 	ctx := context.Background()
 	config := testConfig(t.TempDir())
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
@@ -256,7 +257,7 @@ func backupFixture(t *testing.T) (contract.QuoinConfig, backup.Summary) {
 	t.Helper()
 	ctx := context.Background()
 	config := testConfig(t.TempDir())
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
@@ -365,7 +366,7 @@ func TestRestoreEntersDirectRecoveryFlowAndReachesLogin(t *testing.T) {
 	const originalPassword = "original-password-123"
 	const restoredPassword = "Restored admin passphrase 2027!"
 	config := testConfig(t.TempDir())
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)

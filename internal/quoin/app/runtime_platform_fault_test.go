@@ -10,6 +10,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // TestRuntimeConnectionProjectionFencesSupersededDetach drives the Runtime
@@ -27,7 +28,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "secrets", "runtime.key"),
 		RuntimeClientCAFile:       filepath.Join(root, "secrets", "stele"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)

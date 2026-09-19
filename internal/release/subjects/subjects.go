@@ -1,6 +1,6 @@
 // Package subjects owns the immutable subject inventory of one source/tag
 // build: five multi-platform application image digests, the Kubernetes and
-// Compose bundles, and the two static deployment helpers, each with the deterministic
+// Compose bundles, each with the deterministic
 // asset names and digests the final Release manifest will later reference
 // (OPS-RELEASE-001/002/003). The inventory is a build fact document, never
 // the evidence-referencing Release manifest itself.
@@ -56,10 +56,9 @@ type Inventory struct {
 	GeneratedAt    string                  `json:"generated_at"`
 	Images         map[string]ImageSubject `json:"images"`
 	// Kubernetes is the digest-checked native deployment bundle.
-	Kubernetes BlobSubject            `json:"kubernetes"`
-	Compose    BlobSubject            `json:"compose"`
-	Helpers    map[string]BlobSubject `json:"deployment_helper"`
-	Bundles    map[string]string      `json:"sigstore_bundles"`
+	Kubernetes BlobSubject       `json:"kubernetes"`
+	Compose    BlobSubject       `json:"compose"`
+	Bundles    map[string]string `json:"sigstore_bundles"`
 }
 
 // ValidateReleaseVersion accepts the v-prefixed SemVer used to name a signed
@@ -77,7 +76,6 @@ var semVerPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(
 type AssetNames struct {
 	Kubernetes string
 	Compose    string
-	Helper     map[string]string
 }
 
 // Names derives all non-image asset names from one signed release closure.
@@ -88,10 +86,6 @@ func Names(releaseVersion string) (AssetNames, error) {
 	return AssetNames{
 		Kubernetes: "quoin-kubernetes-" + releaseVersion + ".tar.gz",
 		Compose:    "quoin-compose-" + releaseVersion + ".tar.gz",
-		Helper: map[string]string{
-			"linux/amd64": "quoin-deploy-linux-amd64",
-			"linux/arm64": "quoin-deploy-linux-arm64",
-		},
 	}, nil
 }
 
@@ -99,11 +93,10 @@ func Names(releaseVersion string) (AssetNames, error) {
 // (OPS-SUPPLY-001). "release_manifest" and "offline" belong to the final
 // release closure and are intentionally absent here.
 type BundleNames struct {
-	ImageIndexes     map[string]string
-	ImageManifests   map[string]map[string]string
-	Kubernetes       string
-	Compose          string
-	DeploymentHelper map[string]string
+	ImageIndexes   map[string]string
+	ImageManifests map[string]map[string]string
+	Kubernetes     string
+	Compose        string
 }
 
 func NamesForBundles() BundleNames {
@@ -122,10 +115,6 @@ func NamesForBundles() BundleNames {
 		ImageManifests: manifests,
 		Kubernetes:     "quoin-kubernetes-bundle.sigstore.json",
 		Compose:        "quoin-compose-bundle.sigstore.json",
-		DeploymentHelper: map[string]string{
-			"linux/amd64": "quoin-deploy-linux-amd64.sigstore.json",
-			"linux/arm64": "quoin-deploy-linux-arm64.sigstore.json",
-		},
 	}
 }
 
@@ -201,23 +190,9 @@ func (inventory *Inventory) Validate() error {
 	if err := checkBareSHA256(inventory.Compose.SHA256); err != nil {
 		return fmt.Errorf("compose bundle: %w", err)
 	}
-	for _, platform := range Platforms {
-		helper, ok := inventory.Helpers[platform]
-		if !ok {
-			return fmt.Errorf("helper %s missing", platform)
-		}
-		if helper.AssetName != names.Helper[platform] {
-			return fmt.Errorf("helper %s asset %q want %q", platform, helper.AssetName, names.Helper[platform])
-		}
-		if err := checkBareSHA256(helper.SHA256); err != nil {
-			return fmt.Errorf("helper %s: %w", platform, err)
-		}
-	}
 	bundles := NamesForBundles()
 	expected := map[string]string{
 		"kubernetes": bundles.Kubernetes, "compose": bundles.Compose,
-		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
-		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
 	}
 	for _, component := range Components {
 		expected["image_indexes/"+component] = bundles.ImageIndexes[component]

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 func readonlyGateFixture(t *testing.T) string {
@@ -28,7 +29,7 @@ func readonlyGateFixture(t *testing.T) string {
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "tls.key"),
 		RuntimeClientCAFile:       filepath.Join(root, "stele"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)

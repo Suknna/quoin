@@ -86,13 +86,6 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 		document.Compose.BundleSHA256 != inventory.Compose.SHA256 {
 		return fmt.Errorf("compose subject %+v != inventory %+v", document.Compose, inventory.Compose)
 	}
-	for _, platform := range subjects.Platforms {
-		helper := document.DeploymentHelper.Artifacts[platform]
-		if helper.AssetName != inventory.Helpers[platform].AssetName ||
-			helper.SHA256 != inventory.Helpers[platform].SHA256 {
-			return fmt.Errorf("helper %s subject %+v != inventory %+v", platform, helper, inventory.Helpers[platform])
-		}
-	}
 	// The manifest's bundle map must be the complete closure vocabulary
 	// projected over this inventory's bundle map plus the two closure
 	// names (OPS-RELEASE-001: read from authority and asserted equal).
@@ -108,9 +101,7 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 		}
 	}
 	if document.SigstoreBundles.Kubernetes != names.Kubernetes ||
-		document.SigstoreBundles.Compose != names.Compose ||
-		document.SigstoreBundles.DeploymentHelper["linux/amd64"] != names.DeploymentHelper["linux/amd64"] ||
-		document.SigstoreBundles.DeploymentHelper["linux/arm64"] != names.DeploymentHelper["linux/arm64"] {
+		document.SigstoreBundles.Compose != names.Compose {
 		return fmt.Errorf("bundle vocabulary drift in the blob subject names")
 	}
 	offlineBundle, err := signing.OfflineBundleName(document.ReleaseVersion)

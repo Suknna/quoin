@@ -154,10 +154,8 @@ func verifyMode(arguments []string) error {
 	// The staged assets equal their pinned digests.
 	names, _ := subjects.Names(document.ReleaseVersion)
 	for asset, digest := range map[string]string{
-		"assets/" + names.Kubernetes:                                 document.Kubernetes.BundleSHA256,
-		"assets/" + names.Compose:                                    document.Compose.BundleSHA256,
-		document.DeploymentHelper.Artifacts["linux/amd64"].AssetName: document.DeploymentHelper.Artifacts["linux/amd64"].SHA256,
-		document.DeploymentHelper.Artifacts["linux/arm64"].AssetName: document.DeploymentHelper.Artifacts["linux/arm64"].SHA256,
+		"assets/" + names.Kubernetes: document.Kubernetes.BundleSHA256,
+		"assets/" + names.Compose:    document.Compose.BundleSHA256,
 	} {
 		body, err := os.ReadFile(filepath.Join(releaseDir, filepath.FromSlash(asset)))
 		if err != nil {
@@ -196,12 +194,8 @@ func verifyMode(arguments []string) error {
 		KubernetesSHA256: document.Kubernetes.BundleSHA256,
 		ComposeName:      names.Compose,
 		ComposeSHA256:    document.Compose.BundleSHA256,
-		HelperNames: map[string]string{
-			document.DeploymentHelper.Artifacts["linux/amd64"].AssetName: document.DeploymentHelper.Artifacts["linux/amd64"].SHA256,
-			document.DeploymentHelper.Artifacts["linux/arm64"].AssetName: document.DeploymentHelper.Artifacts["linux/arm64"].SHA256,
-		},
-		Verification: appendVerificationMaterials(mustRead(filepath.Join(releaseDir, "verification", "subjects-inventory.json")), evidence),
-		IndexDigests: indexDigestsOf(document),
+		Verification:     appendVerificationMaterials(mustRead(filepath.Join(releaseDir, "verification", "subjects-inventory.json")), evidence),
+		IndexDigests:     indexDigestsOf(document),
 	}, offline.ExecRunner{})
 	if err != nil || archiveReport == nil {
 		if archiveReport != nil {

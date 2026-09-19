@@ -10,6 +10,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // TestOfflineBackupSubprocess proves the operator-facing binary acquires the
@@ -18,7 +19,7 @@ func TestOfflineBackupSubprocess(t *testing.T) {
 	root := t.TempDir()
 	secrets := filepath.Join(root, "secrets")
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)

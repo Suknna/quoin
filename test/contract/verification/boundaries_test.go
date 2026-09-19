@@ -30,6 +30,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // boundarySender is a TEST-ONLY auth.Sender fake keeping the latest code.
@@ -58,7 +59,7 @@ const (
 func TestBoundarySessionIdleExpiry(t *testing.T) {
 	ctx := context.Background()
 	config := boundaryConfig(t)
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
@@ -171,6 +172,6 @@ func boundaryConfig(t *testing.T) contract.QuoinConfig {
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		RuntimeClientCAFile:     filepath.Join(secrets, "runtime-ca.pem"),
+		RuntimeClientCAFile:       filepath.Join(secrets, "runtime-ca.pem"),
 	}
 }

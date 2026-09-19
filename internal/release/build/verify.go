@@ -114,12 +114,6 @@ func verifyMode(arguments []string) error {
 	if err := verifyBlob("compose", inventory.Bundles["compose"], "sha256:"+inventory.Compose.SHA256); err != nil {
 		return err
 	}
-	for _, platform := range subjects.Platforms {
-		key := "deployment_helper/" + platform
-		if err := verifyBlob(key, inventory.Bundles[key], "sha256:"+inventory.Helpers[platform].SHA256); err != nil {
-			return err
-		}
-	}
 
 	host := registryHostOf(inventory.Images["quoin"].Repository)
 	reader := supplychain.RegistryReader{Host: host, Username: os.Getenv("QUOIN_REGISTRY_USER"), Password: os.Getenv("QUOIN_REGISTRY_TOKEN")}

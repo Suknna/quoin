@@ -18,6 +18,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
+	"github.com/Suknna/quoin/test/support"
 )
 
 func testNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -101,7 +102,7 @@ func newFixture(t *testing.T) (*bootstrap.Database, int64) {
 	t.Helper()
 	root := t.TempDir()
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), RuntimeClientCAFile: filepath.Join(root, "secrets", "stele")}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)

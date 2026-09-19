@@ -25,6 +25,7 @@ import (
 	providerledger "github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
+	"github.com/Suknna/quoin/test/support"
 )
 
 const rootKeyHex32 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -40,7 +41,7 @@ func newService(t *testing.T) (*connections.Service, *sql.DB, string) {
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "tls.key"),
 		RuntimeClientCAFile:       filepath.Join(root, "stele"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)

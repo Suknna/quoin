@@ -45,7 +45,6 @@ type Contents struct {
 	Kubernetes     []byte
 	ComposeName    string
 	Compose        []byte
-	Helpers        map[string][]byte // asset name -> bytes (both architectures)
 	Verification   map[string][]byte
 	ImageLayouts   map[string]string // component -> OCI layout directory
 }
@@ -103,14 +102,6 @@ func writeTar(path string, contents Contents) error {
 		{name: "release-manifest.json", mode: 0o644, body: contents.Manifest},
 		{name: "assets/kubernetes/" + contents.KubernetesName, mode: 0o644, body: contents.Kubernetes},
 		{name: "assets/compose/" + contents.ComposeName, mode: 0o644, body: contents.Compose},
-	}
-	helperNames := make([]string, 0, len(contents.Helpers))
-	for name := range contents.Helpers {
-		helperNames = append(helperNames, name)
-	}
-	sort.Strings(helperNames)
-	for _, name := range helperNames {
-		entries = append(entries, entry{name: "assets/deployment_helper/" + name, mode: 0o755, body: contents.Helpers[name]})
 	}
 	verificationNames := make([]string, 0, len(contents.Verification))
 	for name := range contents.Verification {
@@ -184,7 +175,6 @@ type Expected struct {
 	KubernetesSHA256 string
 	ComposeName      string
 	ComposeSHA256    string
-	HelperNames      map[string]string // asset name -> sha256
 	Verification     map[string][]byte // name -> exact bytes
 	IndexDigests     map[string]string // component -> expected OCI index digest
 }
@@ -275,19 +265,6 @@ func Verify(archivePath string, expected Expected, runner Runner) (*Report, erro
 		}
 		pass("archive.asset-digest", asset)
 	}
-	for name, digest := range expected.HelperNames {
-		asset := "assets/deployment_helper/" + name
-		body, err := os.ReadFile(filepath.Join(report.Extracted, asset))
-		if err != nil {
-			return report, fail("archive.asset-digest", asset, err)
-		}
-		sum := sha256.Sum256(body)
-		if hex.EncodeToString(sum[:]) != digest {
-			return report, fail("archive.asset-digest", asset, fmt.Errorf("sha256 %s want %s", hex.EncodeToString(sum[:]), digest))
-		}
-		pass("archive.asset-digest", asset)
-	}
-
 	for name, want := range expected.Verification {
 		asset := "verification/" + name
 		body, err := os.ReadFile(filepath.Join(report.Extracted, asset))

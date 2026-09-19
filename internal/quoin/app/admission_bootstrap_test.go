@@ -17,6 +17,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // newUninitializedAdmissionServer boots the applied contract schema without
@@ -35,7 +36,7 @@ func newUninitializedAdmissionServer(t *testing.T) (*apiServer, *auth.Service, *
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
 		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)

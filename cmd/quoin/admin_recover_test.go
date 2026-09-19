@@ -24,6 +24,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 	"github.com/creack/pty"
 )
 
@@ -93,8 +94,8 @@ func recoverCLIFixture(t *testing.T, initialized bool, password string) (configP
 		RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token"),
 	}
-	if created, err := bootstrap.BootstrapSecrets(config); err != nil || !created {
-		t.Fatalf("bootstrap secrets: created=%v err=%v", created, err)
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
+		t.Fatalf("bootstrap secrets: %v", err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
 	if err != nil {

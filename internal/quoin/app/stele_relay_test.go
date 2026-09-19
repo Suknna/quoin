@@ -18,6 +18,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/app"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/test/support"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -45,7 +46,7 @@ func startRelayServer(t *testing.T, alertsService *alerts.Service) relayTLSFixtu
 		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
 		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	fixture := relayTLSFixture{}
@@ -121,7 +122,7 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
 		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)

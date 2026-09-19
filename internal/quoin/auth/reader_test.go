@@ -13,6 +13,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 func TestReadsFailClosedWithoutReader(t *testing.T) {
@@ -20,8 +21,8 @@ func TestReadsFailClosedWithoutReader(t *testing.T) {
 	// Deliberately NOT newAuthService: that fixture wires the read pool like
 	// production. This test needs an UNWIRED service.
 	config := testConfig(t)
-	if created, err := bootstrap.BootstrapSecrets(config); err != nil || !created {
-		t.Fatalf("bootstrap secrets: created=%v err=%v", created, err)
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
+		t.Fatalf("bootstrap secrets: %v", err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
 	if err != nil {

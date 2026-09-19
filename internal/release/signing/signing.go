@@ -75,10 +75,8 @@ func ClosureNames(releaseVersion string) (map[string]string, error) {
 func closureSubjectNames() map[string]string {
 	bundles := subjects.NamesForBundles()
 	names := map[string]string{
-		"kubernetes":                    bundles.Kubernetes,
-		"compose":                       bundles.Compose,
-		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
-		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
+		"kubernetes": bundles.Kubernetes,
+		"compose":    bundles.Compose,
 	}
 	for _, component := range subjects.Components {
 		names["image_indexes/"+component] = bundles.ImageIndexes[component]
@@ -259,13 +257,6 @@ func (closure Closure) subjectDigestOf(asset string) (string, error) {
 		return "sha256:" + closure.Inventory.Kubernetes.SHA256, nil
 	case asset == "compose":
 		return "sha256:" + closure.Inventory.Compose.SHA256, nil
-	case strings.HasPrefix(asset, "deployment_helper/"):
-		platform := strings.TrimPrefix(asset, "deployment_helper/")
-		helper, ok := closure.Inventory.Helpers[platform]
-		if !ok {
-			return "", fmt.Errorf("asset %s has no inventory subject", asset)
-		}
-		return "sha256:" + helper.SHA256, nil
 	case asset == "release_manifest":
 		return "sha256:" + closure.ManifestSHA, nil
 	case asset == "offline":

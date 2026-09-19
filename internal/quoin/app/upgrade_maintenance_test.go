@@ -18,6 +18,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
+	"github.com/Suknna/quoin/test/support"
 )
 
 // upgradeHTTPFixture builds the real normal-mode surface with the live gate.
@@ -28,7 +29,7 @@ func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.Quoin
 	t.Helper()
 	root := t.TempDir()
 	config := &contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), RuntimeClientCAFile: filepath.Join(root, "secrets", "stele")}
-	if _, err := bootstrap.BootstrapSecrets(*config); err != nil {
+	if err := support.GenerateDeploymentSecrets(*config); err != nil {
 		t.Fatal(err)
 	}
 	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
@@ -162,7 +163,7 @@ func upgradeMaintenanceFixture(t *testing.T) (context.Context, context.CancelFun
 	t.Cleanup(stop)
 	root := t.TempDir()
 	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), RuntimeClientCAFile: filepath.Join(root, "secrets", "stele")}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)

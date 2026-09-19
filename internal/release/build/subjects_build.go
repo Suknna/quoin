@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -23,10 +22,8 @@ import (
 func bundleNameMap() map[string]string {
 	bundles := subjects.NamesForBundles()
 	mapping := map[string]string{
-		"kubernetes":                    bundles.Kubernetes,
-		"compose":                       bundles.Compose,
-		"deployment_helper/linux/amd64": bundles.DeploymentHelper["linux/amd64"],
-		"deployment_helper/linux/arm64": bundles.DeploymentHelper["linux/arm64"],
+		"kubernetes": bundles.Kubernetes,
+		"compose":    bundles.Compose,
 	}
 	for _, component := range subjects.Components {
 		mapping["image_indexes/"+component] = bundles.ImageIndexes[component]
@@ -203,7 +200,7 @@ func yamlMapValue(node *yaml.Node, key string) string {
 
 // buildComposeBundle assembles the digest-pinned Compose bundle: the
 // canonical compose projection with the measured image digests, the minimal
-// input template, the deployment-config schema and the quoin-deploy wizard
+// input template and the deployment-config schema
 // entry (OPS-RELEASE-003). The bundle never contains a release manifest.
 func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 	names, err := subjects.Names(options.version)
@@ -320,11 +317,7 @@ func writeComposeBundle(path string, entries map[string][]byte) error {
 	sort.Strings(names)
 	for _, name := range names {
 		content := entries[name]
-		mode := int64(0o644)
-		if strings.HasPrefix(name, "quoin-deploy") && !strings.Contains(name, "/") {
-			mode = 0o755
-		}
-		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(content)), ModTime: time.Unix(0, 0)}); err != nil {
+		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), ModTime: time.Unix(0, 0)}); err != nil {
 			return err
 		}
 		if _, err := tarWriter.Write(content); err != nil {
@@ -335,41 +328,6 @@ func writeComposeBundle(path string, entries map[string][]byte) error {
 		return err
 	}
 	return writer.Close()
-}
-
-// buildHelpers cross-compiles the static quoin-deploy helpers for both
-// architectures regardless of the build host (OPS-HELPER-001).
-func buildHelpers(options *options, inventory *subjects.Inventory) error {
-	names, err := subjects.Names(options.version)
-	if err != nil {
-		return err
-	}
-	for _, platform := range []struct{ arch, goarch string }{{"amd64", "amd64"}, {"arm64", "arm64"}} {
-		output := filepath.Join(options.work, names.Helper["linux/"+platform.arch])
-		environment := append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+platform.goarch)
-		started := time.Now()
-		process := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", output, "./cmd/quoin-deploy")
-		process.Dir = repoRoot()
-		process.Env = environment
-		var buildOutput bytes.Buffer
-		process.Stdout, process.Stderr = &buildOutput, &buildOutput
-		if err := process.Run(); err != nil {
-			os.WriteFile(filepath.Join(options.logs, "helper-"+platform.arch+".log"), buildOutput.Bytes(), 0o644)
-			return fmt.Errorf("helper %s: %w", platform.arch, err)
-		}
-		data, err := os.ReadFile(output)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(data)
-		os.WriteFile(filepath.Join(options.logs, "helper-"+platform.arch+".json"),
-			[]byte(fmt.Sprintf(`{"asset":%q,"sha256":%q,"bytes":%d,"seconds":%.1f}`, names.Helper["linux/"+platform.arch], hex.EncodeToString(sum[:]), len(data), time.Since(started).Seconds())), 0o644)
-		inventory.Helpers["linux/"+platform.arch] = subjects.BlobSubject{
-			AssetName: names.Helper["linux/"+platform.arch],
-			SHA256:    hex.EncodeToString(sum[:]),
-		}
-	}
-	return nil
 }
 
 var latestPattern = regexp.MustCompile(`(^|[/:.\s"])latest($|[\s"':])`)

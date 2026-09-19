@@ -177,14 +177,9 @@ export QUOIN_E2E_RUNTIME="$runtime_root" QUOIN_E2E_PORT="$port"
 if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-97" ]]; then export QUOIN_E2E_PROJECT=quoin-e2e-97; fi
 
 # Bootstrap deployment secrets before the Quoin server opens its exclusive
-# data-directory lock, using the supported product CLI inside the production
-# image. The bootstrap container receives the only writable secret mount;
-# long-lived Quoin and Stele retain their read-only deployment secret mounts.
-docker run --rm --user 0:0 \
-	--mount "type=bind,source=${runtime_root}/config/quoin.yaml,target=/etc/quoin/component.yaml,readonly" \
-	--mount "type=bind,source=${runtime_root}/secrets,target=/run/quoin-secrets" \
-	"${QUOIN_IMAGE:-quoin/quoin:v0.1.0-dev}" secrets bootstrap --config /etc/quoin/component.yaml
-chmod 700 "${runtime_root}/secrets"
+# data-directory lock. Secret generation is a deployment-tooling concern:
+# the repository operator script produces the ADR-0009 set on the host.
+bash "${repo_root}/scripts/generate-deployment-secrets.sh" "${runtime_root}/secrets"
 sudo chmod 600 "${runtime_root}/secrets"/*
 sudo chown -R 65532:65532 "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/secrets" "${runtime_root}/plinth-state" "${runtime_root}/plinth-workspaces"
 

@@ -88,14 +88,10 @@ done
 sudo chown 65532:65532 secrets/quoin
 sudo chmod 700 secrets/quoin
 
-docker run --rm --user 65532:65532 \
-  -v "$PWD/config/quoin.yaml:/etc/quoin/component.yaml:ro" \
-  -v "$PWD/secrets/quoin:/run/quoin-secrets" \
-  -v quoin-mall-user_quoin-data:/var/lib/quoin/data \
-  quoin/quoin:v0.1.0-dev secrets bootstrap --config /etc/quoin/component.yaml
+bash scripts/generate-deployment-secrets.sh "$PWD/secrets/quoin"
 ```
 
-此命令挂载了正常服务的**同一数据卷**，不能在已有实例恢复时省略它。空数据库且秘密目录为空才生成；全套秘密已存在时只校验；部分秘密存在或已有数据库但缺秘密时拒绝。运行中的实例不得用这个流程重置身份。
+秘密生成是部署侧职责：脚本只向**空秘密目录**一次性生成完整身份集，目录中任一文件已存在即拒绝，不会触碰已有实例的身份。运行中的实例不得用这个流程重置身份。
 
 生成文件为 `root-key`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`、`stele-client.crt/key`、`plinth-client.crt/key`。根密钥是恰好 **32 字节原始二进制**，不是 Base64 或十六进制文本，文件权限 `0600`。Runtime 服务端证书包含 SAN `quoin`、`localhost`；两张组件客户端证书由同一 CA 签发（CN=stele / CN=plinth，ADR-0009）。不要手搓根密钥或复用历史验收秘密。
 
@@ -156,7 +152,7 @@ SMTP 必须使用 STARTTLS 或 implicit TLS；webhook 必须 HTTPS。私网接�
 
 ## 7. Plinth 自动连接
 
-Plinth 无注册步骤：组件身份是 secrets bootstrap 签发的客户端证书（CN=plinth），随配置挂载启动即连。管理员初始化完成后，在「设置 → 平台状态」确认 Plinth 显示**已连接**即可。若未连接，按顺序核对：组件配置的 `quoinRuntimeClientCertificateFile`/`quoinRuntimeClientPrivateKeyFile` 挂载、Runtime CA 一致、quoin 服务健康；Plinth 每 2 秒自动重连。
+Plinth 无注册步骤：组件身份是部署时生成的客户端证书（CN=plinth），随配置挂载启动即连。管理员初始化完成后，在「设置 → 平台状态」确认 Plinth 显示**已连接**即可。若未连接，按顺序核对：组件配置的 `quoinRuntimeClientCertificateFile`/`quoinRuntimeClientPrivateKeyFile` 挂载、Runtime CA 一致、quoin 服务健康；Plinth 每 2 秒自动重连。
 
 ## 8. 接入 mall-shop
 

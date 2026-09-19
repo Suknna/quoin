@@ -14,6 +14,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 func TestRestoreBackupArgumentRemovesOnlyRestoreFlag(t *testing.T) {
@@ -54,8 +55,8 @@ func restoreCLIFixture(t *testing.T) (configPath, backupID, dataDirectory, rootK
 		RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token"),
 	}
-	if created, err := bootstrap.BootstrapSecrets(config); err != nil || !created {
-		t.Fatalf("bootstrap secrets: created=%v err=%v", created, err)
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
+		t.Fatalf("bootstrap secrets: %v", err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
 	if err != nil {

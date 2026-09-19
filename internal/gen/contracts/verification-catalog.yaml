@@ -562,13 +562,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite production-transport
+      entrypoint: quoin-verify --suite production-transport
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite production-transport --phase assert
+      setup: quoin-verify --suite production-transport --phase setup
+      action: quoin-verify --suite production-transport --phase action
+      assert: quoin-verify --suite production-transport --phase assert
       teardown: no-op
     depends_on: []
     proof_refs: []
@@ -1340,14 +1340,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite release-qualification
+      entrypoint: quoin-verify --suite release-qualification
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase assert
-      teardown: quoin-deploy <compose|kubernetes> verify --suite release-qualification --phase teardown
+      setup: quoin-verify --suite release-qualification --phase setup
+      action: quoin-verify --suite release-qualification --phase action
+      assert: quoin-verify --suite release-qualification --phase assert
+      teardown: quoin-verify --suite release-qualification --phase teardown
     depends_on: []
     proof_refs:
       - contracts.machine
@@ -1374,7 +1374,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite release-qualification
+      entrypoint: quoin-verify --suite release-qualification
       success_assertions:
         - temporary-environment-removed
     timeout_seconds: 28800
@@ -1666,14 +1666,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack
+      entrypoint: quoin-verify --suite monitoring-stack
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase assert
-      teardown: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack --phase teardown
+      setup: quoin-verify --suite monitoring-stack --phase setup
+      action: quoin-verify --suite monitoring-stack --phase action
+      assert: quoin-verify --suite monitoring-stack --phase assert
+      teardown: quoin-verify --suite monitoring-stack --phase teardown
     depends_on:
       - release.native-matrix
       - fault.network
@@ -1699,7 +1699,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite monitoring-stack
+      entrypoint: quoin-verify --suite monitoring-stack
       success_assertions:
         - monitoring-stack-removed
         - temporary-data-removed
@@ -2310,14 +2310,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite storage-faults
+      entrypoint: quoin-verify --suite storage-faults
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase assert
-      teardown: quoin-deploy <compose|kubernetes> verify --suite storage-faults --phase teardown
+      setup: quoin-verify --suite storage-faults --phase setup
+      action: quoin-verify --suite storage-faults --phase action
+      assert: quoin-verify --suite storage-faults --phase assert
+      teardown: quoin-verify --suite storage-faults --phase teardown
     depends_on:
       - release.native-matrix
     proof_refs: []
@@ -2353,7 +2353,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite storage-faults
+      entrypoint: quoin-verify --suite storage-faults
       success_assertions:
         - fuse-unmounted
         - temporary-data-removed
@@ -2884,14 +2884,14 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite network-faults
+      entrypoint: quoin-verify --suite network-faults
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase assert
-      teardown: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase teardown
+      setup: quoin-verify --suite network-faults --phase setup
+      action: quoin-verify --suite network-faults --phase action
+      assert: quoin-verify --suite network-faults --phase assert
+      teardown: quoin-verify --suite network-faults --phase teardown
     depends_on:
       - release.native-matrix
     proof_refs:
@@ -2926,7 +2926,7 @@ scenarios:
       redaction_profile: verification-redaction-v1
     cleanup:
       required: true
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite network-faults --phase teardown
+      entrypoint: quoin-verify --suite network-faults --phase teardown
       success_assertions:
         - toxiproxy-removed
         - proxy-routes-restored
@@ -3277,13 +3277,13 @@ scenarios:
     requirement: required
     executor:
       kind: deployment_helper
-      entrypoint: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance
+      entrypoint: quoin-verify --suite deployment-acceptance
       requires_admin_session: false
       requires_product_credentials: false
     phases:
-      setup: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase setup
-      action: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase action
-      assert: quoin-deploy <compose|kubernetes> verify --suite deployment-acceptance --phase assert
+      setup: quoin-verify --suite deployment-acceptance --phase setup
+      action: quoin-verify --suite deployment-acceptance --phase action
+      assert: quoin-verify --suite deployment-acceptance --phase assert
       teardown: no-op
     depends_on: []
     proof_refs:

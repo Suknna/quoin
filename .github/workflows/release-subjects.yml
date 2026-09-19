@@ -1,7 +1,7 @@
 # Release-subject pipeline (T39, OPS-SUPPLY-001/002). One annotated SemVer
 # tag builds the five application images on native runners (linux/amd64 and
 # linux/arm64 — no QEMU), assembles the merged OCI indexes, Kubernetes YAML, Compose
-# bundle and static helpers, signs every subject with cosign keyless OIDC and
+# bundle, and signs every subject with cosign keyless OIDC and
 # runs the offline pre-qualification gate. The final evidence-referencing
 # Release manifest and offline archive belong to the release-closure ticket.
 name: release-subjects
@@ -87,7 +87,7 @@ jobs:
           retention-days: 14
 
   assemble:
-    name: Assemble indexes, Kubernetes YAML, compose bundle and helpers
+    name: Assemble indexes, Kubernetes YAML, compose bundle
     needs: [context, build-native]
     runs-on: ubuntu-24.04
     env:
@@ -127,7 +127,6 @@ jobs:
             .work/subjects-inventory.json
             .work/quoin-kubernetes-*.tar.gz
             .work/quoin-compose-*.tar.gz
-            .work/quoin-deploy-linux-*
             .work/logs/
           retention-days: 14
 
@@ -169,7 +168,6 @@ jobs:
               --certificate ".work/payloads/$component-index.crt" \
               > ".work/bundles/$component-index.sigstore.json"
             cp ".work/payloads/$component-index" ".work/bundles/$component-index.sigstore.json.payload"
-            for arch in amd64 arm64; do
               digest=$(jq -r --arg c "$component" --arg p "linux/$arch" '.images[$c].platforms[$p]' .work/subjects-inventory.json)
               docker buildx imagetools inspect --raw "${QUOIN_REGISTRY}/$component@$digest" \
                 > ".work/payloads/$component-manifest-$arch"
@@ -183,7 +181,7 @@ jobs:
               cp ".work/payloads/$component-manifest-$arch" ".work/bundles/$component-manifest-$arch.sigstore.json.payload"
             done
           done
-      - name: Sign Kubernetes YAML, compose bundle and helpers
+      - name: Sign Kubernetes YAML and compose bundle
         run: |
           set -euo pipefail
           kubernetes=$(jq -r '.kubernetes.asset_name' .work/subjects-inventory.json)
@@ -201,15 +199,6 @@ jobs:
             --signature .work/payloads/compose.sig --certificate .work/payloads/compose.crt \
             > .work/bundles/quoin-compose-bundle.sigstore.json
           cp ".work/$compose" .work/bundles/quoin-compose-bundle.sigstore.json.payload
-          for arch in amd64 arm64; do
-            cosign sign-blob --yes --output-certificate ".work/payloads/helper-$arch.crt" \
-              --output-signature ".work/payloads/helper-$arch.sig" \
-              ".work/quoin-deploy-linux-$arch"
-            cosign bundle create --artifact ".work/quoin-deploy-linux-$arch" \
-              --signature ".work/payloads/helper-$arch.sig" \
-              --certificate ".work/payloads/helper-$arch.crt" \
-              > ".work/bundles/quoin-deploy-linux-$arch.sigstore.json"
-            cp ".work/quoin-deploy-linux-$arch" ".work/bundles/quoin-deploy-linux-$arch.sigstore.json.payload"
           done
       - name: Export the current Fulcio trust roots
         run: |

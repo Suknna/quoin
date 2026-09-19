@@ -5,8 +5,7 @@
 //   - five application images with BuildKit SPDX SBOM and SLSA provenance
 //     attestations, pushed per platform by tag and merged into one OCI index;
 //   - checksum-bound Kubernetes and Compose bundles;
-//   - the two static quoin-deploy helpers.
-//
+
 // It writes the measured subject inventory the final Release manifest will
 // reference (T42). It never signs; the CI workflow signs with cosign and the
 // supplychain gate verifies.
@@ -112,14 +111,13 @@ func writeInventory(options *options, inventory *subjects.Inventory) error {
 }
 
 // assembleInventory merges the per-platform build fragments into the full
-// subject inventory and completes the Kubernetes, Compose and helper subjects.
+// subject inventory and completes the Kubernetes and Compose bundle subjects.
 func assembleInventory(options *options) (*subjects.Inventory, error) {
 	inventory := &subjects.Inventory{
 		Schema:         subjects.Schema,
 		ReleaseVersion: options.version,
 		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
 		Images:         map[string]subjects.ImageSubject{},
-		Helpers:        map[string]subjects.BlobSubject{},
 		Bundles:        bundleNameMap(),
 	}
 	var err error
@@ -134,9 +132,6 @@ func assembleInventory(options *options) (*subjects.Inventory, error) {
 		return nil, err
 	}
 	if err := buildComposeBundle(options, inventory); err != nil {
-		return nil, err
-	}
-	if err := buildHelpers(options, inventory); err != nil {
 		return nil, err
 	}
 	return inventory, nil

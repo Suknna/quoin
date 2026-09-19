@@ -81,27 +81,23 @@ var requiredCells = map[string][]string{
 // contracts/schemas/release-manifest.schema.json stays the only shape
 // authority; this struct only projects it.
 type Document struct {
-	ManifestVersion  int                   `json:"manifest_version"`
-	ReleaseVersion   string                `json:"release_version"`
-	SourceCommit     string                `json:"source_commit"`
-	GeneratedAt      string                `json:"generated_at"`
-	Images           map[string]ImageEntry `json:"images"`
-	Kubernetes       ComposeEntry          `json:"kubernetes"`
-	Compose          ComposeEntry          `json:"compose"`
-	DeploymentHelper struct {
-		Artifacts map[string]BlobEntry `json:"artifacts"`
-	} `json:"deployment_helper"`
-	Offline struct {
+	ManifestVersion int                   `json:"manifest_version"`
+	ReleaseVersion  string                `json:"release_version"`
+	SourceCommit    string                `json:"source_commit"`
+	GeneratedAt     string                `json:"generated_at"`
+	Images          map[string]ImageEntry `json:"images"`
+	Kubernetes      ComposeEntry          `json:"kubernetes"`
+	Compose         ComposeEntry          `json:"compose"`
+	Offline         struct {
 		AssetName string `json:"asset_name"`
 	} `json:"offline"`
 	SigstoreBundles struct {
-		ImageIndexes     map[string]string            `json:"image_indexes"`
-		ImageManifests   map[string]map[string]string `json:"image_manifests"`
-		Kubernetes       string                       `json:"kubernetes"`
-		ReleaseManifest  string                       `json:"release_manifest"`
-		Compose          string                       `json:"compose"`
-		DeploymentHelper map[string]string            `json:"deployment_helper"`
-		Offline          string                       `json:"offline"`
+		ImageIndexes    map[string]string            `json:"image_indexes"`
+		ImageManifests  map[string]map[string]string `json:"image_manifests"`
+		Kubernetes      string                       `json:"kubernetes"`
+		ReleaseManifest string                       `json:"release_manifest"`
+		Compose         string                       `json:"compose"`
+		Offline         string                       `json:"offline"`
 	} `json:"sigstore_bundles"`
 	Contracts  ContractsEntry            `json:"contracts"`
 	Validation map[string]PassedEvidence `json:"validation"`
@@ -184,7 +180,6 @@ func Build(inputs Inputs) (*Document, error) {
 		GeneratedAt:     inputs.GeneratedAt.UTC().Format(time.RFC3339),
 		Images:          map[string]ImageEntry{},
 	}
-	document.DeploymentHelper.Artifacts = map[string]BlobEntry{}
 	for _, component := range subjects.Components {
 		image := inputs.Inventory.Images[component]
 		document.Images[component] = ImageEntry{
@@ -196,17 +191,12 @@ func Build(inputs Inputs) (*Document, error) {
 	}
 	document.Kubernetes = ComposeEntry{AssetName: inputs.Inventory.Kubernetes.AssetName, BundleSHA256: inputs.Inventory.Kubernetes.SHA256}
 	document.Compose = ComposeEntry{AssetName: inputs.Inventory.Compose.AssetName, BundleSHA256: inputs.Inventory.Compose.SHA256}
-	for _, platform := range subjects.Platforms {
-		helper := inputs.Inventory.Helpers[platform]
-		document.DeploymentHelper.Artifacts[platform] = BlobEntry{AssetName: helper.AssetName, SHA256: helper.SHA256}
-	}
 	document.Offline.AssetName = "quoin-offline-" + inputs.Inventory.ReleaseVersion + ".tar.zst"
 	document.SigstoreBundles.ImageIndexes = bundleNames.ImageIndexes
 	document.SigstoreBundles.ImageManifests = bundleNames.ImageManifests
 	document.SigstoreBundles.Kubernetes = bundleNames.Kubernetes
 	document.SigstoreBundles.ReleaseManifest = signing.ManifestBundleName()
 	document.SigstoreBundles.Compose = bundleNames.Compose
-	document.SigstoreBundles.DeploymentHelper = bundleNames.DeploymentHelper
 	offlineBundle, err := signing.OfflineBundleName(inputs.Inventory.ReleaseVersion)
 	if err != nil {
 		return nil, err

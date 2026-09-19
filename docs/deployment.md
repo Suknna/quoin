@@ -21,14 +21,14 @@ Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Q
 
 ## 组件身份（mTLS）
 
-内部组件认证是**一套 PKI**（[ADR-0009](adr/0009-unified-mtls-component-auth.md)）：`quoin secrets bootstrap` 生成部署 CA（runtime-ca）并为 Stele、Plinth 各签发一张客户端证书（CN=stele / CN=plinth）。quoin 的 Runtime gRPC 监听（:8443）强制校验客户端证书；Stele 与 Plinth 拨号时出示各自证书，**启动即认证，不存在注册步骤**——部署完成、组件配置与 Secret 挂载正确，Plinth 就会自动连接并在「平台状态」页显示已连接。
+内部组件认证是**一套 PKI**（[ADR-0009](adr/0009-unified-mtls-component-auth.md)）：部署方用仓库脚本 `scripts/generate-deployment-secrets.sh` 生成部署 CA（runtime-ca）并为 Stele、Plinth 各签发一张客户端证书（CN=stele / CN=plinth）。quoin 的 Runtime gRPC 监听（:8443）强制校验客户端证书；Stele 与 Plinth 拨号时出示各自证书，**启动即认证，不存在注册步骤**——部署完成、组件配置与 Secret 挂载正确，Plinth 就会自动连接并在「平台状态」页显示已连接。
 
 丢失 Plinth 状态卷不再是凭据事故：组件身份来自 Secret 挂载，状态卷重建后直接重连。客户端证书与 CA 同寿命（10 年）；轮换是显式运维操作：
 
 ```bash
 # 从既有部署 CA 重新签发组件客户端证书（--force 覆盖已有文件）
-quoin secrets issue-client-certs --config /etc/quoin/component.yaml --force
-# Kubernetes：随 bootstrap Job 一样经 --kubernetes-secret 更新目标 Secret
+bash scripts/generate-deployment-secrets.sh <secrets-dir> --issue-client-certs --force
+# Kubernetes：用 kubectl 以新文件重建 quoin-secrets（见下），再 rollout restart
 ```
 
 轮换后更新部署 Secret 并重启 Stele/Plinth。持有 CA 私钥即可签发任意组件身份，该私钥只存在于部署 secrets 目录/Kubernetes Secret，与数据卷同等级保管。
@@ -54,7 +54,7 @@ kubectl -n quoin apply -f deploy/kubernetes/quoin.yaml
 kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
 ```
 
-上述 `quoin-secrets` 内容通常由一次性 bootstrap 容器生成（见 Kubernetes 启动指南）：它运行 `quoin secrets bootstrap`（可加 `--kubernetes-secret quoin-secrets` 直接写入 Secret），产出 root-key、runtime-ca、runtime-tls 与两张组件客户端证书。
+上述 `quoin-secrets` 内容由部署方用仓库脚本生成（见 Kubernetes 启动指南）：`scripts/generate-deployment-secrets.sh <secrets-dir>` 产出 root-key、runtime-ca、runtime-tls 与两张组件客户端证书，再由运维以 kubectl 从文件创建 Secret。
 
 先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 digest 替换四个默认应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
 
@@ -69,13 +69,10 @@ Quoin 定位为内网运维平台，不在产品内提供首次安装的所有�
 从仓库根目录运行：
 
 ```bash
-mkdir -p deploy/secrets/gateway deploy/secrets/quoin
-chmod 700 deploy/secrets deploy/secrets/gateway deploy/secrets/quoin
-# 一次性容器生成部署密钥（root-key、runtime-ca、runtime-tls、组件客户端证书）
-docker run --rm --user 0:0 \
-  --mount type=bind,source=deploy/config/quoin.yaml,target=/etc/quoin/component.yaml,readonly \
-  --mount type=bind,source=deploy/secrets/quoin,target=/run/quoin-secrets \
-  quoin/quoin:v0.1.0-dev secrets bootstrap --config /etc/quoin/component.yaml
+mkdir -p deploy/secrets/gateway
+chmod 700 deploy/secrets deploy/secrets/gateway
+# 运维脚本生成部署密钥（root-key、runtime-ca、runtime-tls、组件客户端证书）
+bash scripts/generate-deployment-secrets.sh deploy/secrets/quoin
 docker compose -f deploy/compose.yaml up -d
 ```
 
@@ -125,9 +122,9 @@ make image COMPONENT=quoin VERSION=v1.0.2
 注册制时代的存量部署按以下顺序一次性升级（本版契约指纹变化，五镜像须同批替换）：
 
 1. 停止全部 Quoin 服务（保留数据卷与 Secret）。
-2. 在与 secrets 目录同挂载的一次性容器中执行
-   `quoin secrets issue-client-certs --config /etc/quoin/component.yaml`
-   从既有 CA 补签 Stele/Plinth 客户端证书（Kubernetes 加 `--kubernetes-secret quoin-secrets`）。
+2. 用运维脚本从既有 CA 补签 Stele/Plinth 客户端证书：
+   `bash scripts/generate-deployment-secrets.sh <secrets-dir> --issue-client-certs`
+   （Kubernetes 随后用 kubectl 重建 `quoin-secrets`。）
 3. 更新三份组件配置：quoin 增加 `runtimeClientCaFile`、删除 `steleServiceTokenFile`；
    stele/plinth 改用 `quoinRuntimeClientCertificateFile`/`quoinRuntimeClientPrivateKeyFile`。
 4. 同批替换五个镜像为统一 mTLS 版本，先以新镜像执行

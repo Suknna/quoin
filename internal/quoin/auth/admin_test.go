@@ -16,6 +16,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 const fixtureAdminPassword = "Root admin passphrase 2026!"
@@ -31,8 +32,8 @@ type adminFixture struct {
 func newAuthService(t *testing.T) (*auth.Service, *sql.DB) {
 	t.Helper()
 	config := testConfig(t)
-	if created, err := bootstrap.BootstrapSecrets(config); err != nil || !created {
-		t.Fatalf("bootstrap secrets: created=%v err=%v", created, err)
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
+		t.Fatalf("bootstrap secrets: %v", err)
 	}
 	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
 	if err != nil {

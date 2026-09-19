@@ -95,7 +95,7 @@
 
 注册与轮换制已整体退役（[ADR-0009](../../adr/0009-unified-mtls-component-auth.md)）：`RuntimeControl.Register` RPC、一次性注册令牌、长期 token 两阶段轮换（IssueToken/TokenPersisted）、`retireRuntimeCredential` 与 `runtime_slots`/`runtime_credentials` 持久权威全部移除，对应 wire 字段编号 reserved。
 
-- **RUNTIME-REG-001 —（ADR-0009 重述）** 组件身份 **MUST** 由部署 CA 签发的客户端证书供给：`quoin secrets bootstrap` 签发 CN=stele / CN=plinth 证书，存量部署经 `quoin secrets issue-client-certs` 从既有 CA 补签；证书与 CA 同寿命，轮换是显式运维操作（重新签发 → 更新 Secret → 重启组件）。
+- **RUNTIME-REG-001 —（ADR-0009 重述）** 组件身份 **MUST** 由部署 CA 签发的客户端证书供给：部署方经仓库脚本（或等价 PKI 流程）生成 CN=stele / CN=plinth 证书，存量部署补签/轮换同经其 `--issue-client-certs`；证书与 CA 同寿命，轮换是显式运维操作（重新签发 → 更新 Secret → 重启组件）。
 - **RUNTIME-REG-002 —（ADR-0009 重述）** Plinth/Stele 启动即认证：无注册步骤、无持久凭据状态；Plinth 状态卷丢失后以同一证书直接重连。
 - **RUNTIME-REG-003 —（ADR-0009 重述）** 凭据类 Hello 拒绝原因（TOKEN_INVALID/SLOT_REVOKED）与 GoAway 原因（REVOKED/ROTATED/REPLACED）已删除：mTLS 握手失败的连接到达不了 Hello；剩余拒绝原因为 CONTRACT_MISMATCH/EPOCH_STALE。
 

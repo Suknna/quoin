@@ -17,7 +17,7 @@ make e2e-real-up
 
 The default creates only `/home/suknna/code/quoin/.artifacts/e2e-102`, uses Compose project `quoin-e2e-102`, and serves `https://localhost:8444`. It deliberately does not reuse or stop an existing `.artifacts/e2e-real` hand-debug environment. The generated credential file is `/home/suknna/code/quoin/.artifacts/e2e-102/credentials.yaml` (mode `0600`); read it privately and never paste it into a ticket, terminal history, source file, or chat.
 
-The startup path builds frontend, Quoin, Stele, and Plinth; creates deployment secrets via `quoin secrets bootstrap`; and creates the initial Admin using the attached supported `quoin admin create` CLI. It never seeds SQL or writes artificial health/registration rows.
+The startup path builds frontend, Quoin, Stele, and Plinth; creates deployment secrets via `scripts/generate-deployment-secrets.sh`; the initial Admin is created through the web initialization flow. It never seeds SQL or writes artificial health/registration rows.
 
 Stop while retaining state for debugging:
 

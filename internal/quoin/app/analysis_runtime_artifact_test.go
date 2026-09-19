@@ -15,8 +15,8 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
-	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
+	"github.com/Suknna/quoin/test/support"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -46,7 +46,7 @@ func newArtifactFixture(t *testing.T, slots *qruntime.Service, store *artifact.S
 		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
 		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	fixture := artifactMTLSFixture{}

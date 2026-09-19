@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/contract"
-	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/test/support"
 )
 
 type standaloneSurface struct {
@@ -44,7 +44,7 @@ func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface 
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
 		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
-	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
 	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
