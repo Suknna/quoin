@@ -29,7 +29,7 @@ func newTestService(t *testing.T) (*Service, *bootstrap.Database, func()) {
 		RootKeyFile:               secrets + "/root-key",
 		RuntimeTLSCertificateFile: secrets + "/runtime-tls.crt",
 		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
-		SteleServiceTokenFile:     secrets + "/stele-service-token",
+		RuntimeClientCAFile:     secrets + "/stele-service-token",
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)

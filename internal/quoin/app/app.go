@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type servers struct {
@@ -171,7 +173,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		platformFaults:   alerts.NewPlatformFaultReporter(alertService),
 		reveals:          secrets.NewStore(),
 		commands:         newCommandReplay(),
-		runtime:          qruntime.NewService(db),
+		runtime:          qruntime.NewService(),
 		analyses:         analysis.NewService(db),
 		investigations:   investigation.NewService(db),
 		systems:          businesssystem.NewService(db),
@@ -242,15 +244,12 @@ type noContentOutput struct {
 }
 
 type runtimeSlot struct {
-	Slot              string  `json:"slot"`
-	State             string  `json:"state"`
-	CurrentGeneration int64   `json:"currentGeneration"`
-	RowVersion        int64   `json:"rowVersion"`
-	Connected         bool    `json:"connected"`
-	BootID            string  `json:"bootId,omitempty"`
-	ConnectionEpoch   *uint64 `json:"connectionEpoch,omitempty"`
-	LastSeenAt        string  `json:"lastSeenAt,omitempty"`
-	ReleaseVersion    string  `json:"releaseVersion,omitempty"`
+	Slot            string  `json:"slot"`
+	Connected       bool    `json:"connected"`
+	BootID          string  `json:"bootId,omitempty"`
+	ConnectionEpoch *uint64 `json:"connectionEpoch,omitempty"`
+	LastSeenAt      string  `json:"lastSeenAt,omitempty"`
+	ReleaseVersion  string  `json:"releaseVersion,omitempty"`
 }
 
 type runtimeStatus struct {
@@ -276,6 +275,30 @@ type aboutStatus struct {
 
 type runtimeOutput struct {
 	Body runtimeStatus `json:"body"`
+}
+
+// runtimeRelayCredentials builds the Runtime gRPC server's mTLS transport
+// credentials: the quoin server identity plus mandatory client certificates
+// verified against the deployment CA (ADR-0009).
+func runtimeRelayCredentials(config contract.QuoinConfig) (credentials.TransportCredentials, error) {
+	serverIdentity, err := tls.LoadX509KeyPair(config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Runtime TLS identity: %w", err)
+	}
+	clientCA, err := os.ReadFile(config.RuntimeClientCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Runtime client CA: %w", err)
+	}
+	clientPool := x509.NewCertPool()
+	if !clientPool.AppendCertsFromPEM(clientCA) {
+		return nil, fmt.Errorf("Runtime client CA is not valid PEM")
+	}
+	// grpc-go negotiates ALPN "h2" itself; MinVersion and the client-cert
+	// policy are the deployment's transport authority.
+	return credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{serverIdentity}, MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientPool,
+	}), nil
 }
 
 func Run(ctx context.Context, config contract.QuoinConfig) error {
@@ -358,16 +381,19 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if _, err := application.configurePlugins(config.EnabledPlugins); err != nil {
 		return fmt.Errorf("configure plugins: %w", err)
 	}
-	serviceToken, err := os.ReadFile(config.SteleServiceTokenFile)
-	if err != nil {
-		return fmt.Errorf("read Stele service token: %w", err)
-	}
 	// Plinth probes network partitions every 20 seconds. Accept those idle
 	// HTTP/2 pings: the default gRPC server minimum is five minutes and sends
 	// GOAWAY(too_many_pings), which otherwise prevents every runtime task.
-	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()))
+	// TLS terminates inside gRPC (grpc.Creds) so every handler context carries
+	// the verified client identity: component identity is the leaf certificate
+	// CN (plinth/stele) verified against the deployment CA (ADR-0009).
+	runtimeTLSCreds, err := runtimeRelayCredentials(config)
+	if err != nil {
+		return err
+	}
+	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()), grpc.Creds(runtimeTLSCreds))
 	serverSet.beforeShutdown = application.runtime.CloseAll
-	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, serviceToken))
+	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts))
 	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
 	if err != nil {
 		return fmt.Errorf("open artifact store: %w", err)
@@ -640,7 +666,6 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	application.registerObservationRoutes(api)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
-	application.registerRuntimeRoutes(api)
 	application.registerConnectionRoutes(api)
 	application.registerPluginRoutes(api)
 	application.registerAnalysisRoutes(api)
@@ -797,7 +822,6 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*lo
 		return nil, authFailure(err, "完成登出")
 	}
 	application.reveals.InvalidateSession(secrets.SessionDigest(input.Session))
-	application.runtime.InvalidateSession(secrets.SessionDigest(input.Session))
 	// Commit session revocation before converging Browser Operations. The Start
 	// transaction rechecks this row under BEGIN IMMEDIATE, so the SQLite commit
 	// order now decides the race without a window that can launch Chromium.
@@ -827,7 +851,7 @@ func dereferenceString(value *string) string {
 // must use this single projection to keep their privacy and unknown semantics
 // identical.
 func runtimeSlotProjection(view qruntime.SlotView) runtimeSlot {
-	rendered := runtimeSlot{Slot: view.Slot, State: string(view.State), CurrentGeneration: view.CurrentGeneration, RowVersion: view.RowVersion, Connected: view.Connected}
+	rendered := runtimeSlot{Slot: view.Slot, Connected: view.Connected}
 	if view.Connected {
 		rendered.BootID = view.BootID
 		rendered.ConnectionEpoch = view.ConnectionEpoch
@@ -921,18 +945,12 @@ func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) 
 	if err != nil {
 		return fmt.Errorf("listen Runtime gRPC: %w", err)
 	}
-	tlsConfig, err := tls.LoadX509KeyPair(config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile)
-	if err != nil {
-		return fmt.Errorf("load Runtime TLS identity: %w", err)
-	}
 	errCh := make(chan error, 4)
 	go func() { errCh <- serverSet.public.ListenAndServe() }()
-	go func() {
-		// grpc-go enforces ALPN "h2" for TLS clients (>=1.67); the Runtime
-		// listener must offer it.
-		runtimeTLS := &tls.Config{Certificates: []tls.Certificate{tlsConfig}, MinVersion: tls.VersionTLS13, NextProtos: []string{"h2"}}
-		errCh <- serverSet.relay.Serve(tls.NewListener(runtimeListener, runtimeTLS))
-	}()
+	// TLS itself terminates inside gRPC (the server was built with
+	// grpc.Creds): Serve takes the raw listener so every handler context
+	// carries the verified mTLS client identity (ADR-0009).
+	go func() { errCh <- serverSet.relay.Serve(runtimeListener) }()
 	opsDone := make(chan error, 1)
 	go func() { opsDone <- serverSet.ops.Run(ctx) }()
 	select {

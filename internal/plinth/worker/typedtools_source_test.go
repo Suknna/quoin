@@ -18,8 +18,8 @@ import (
 	"testing"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"google.golang.org/grpc"
 	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
+	"google.golang.org/grpc"
 )
 
 // thanosGrantRuntimeClient answers FetchCredentialGrant with a Thanos secret
@@ -28,10 +28,6 @@ type thanosGrantRuntimeClient struct {
 	fetches     atomic.Int64
 	baseURL     string
 	denyGrantID int64
-}
-
-func (*thanosGrantRuntimeClient) Register(context.Context, *runtimev1.RegisterRuntimeRequest, ...grpc.CallOption) (*runtimev1.RegisterRuntimeResponse, error) {
-	return nil, fmt.Errorf("Register is not expected in typed tool execution")
 }
 
 func (*thanosGrantRuntimeClient) Connect(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[runtimev1.ControlEnvelope, runtimev1.ControlEnvelope], error) {

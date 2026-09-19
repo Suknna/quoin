@@ -2,9 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
@@ -12,25 +9,22 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
 // steleRelayServer implements the frozen SteleRelay unary service
-// (RUNTIME-STELE-001..006): service-token metadata auth, complete Proto
-// authority fingerprint admission, credential digest snapshot, and idempotent Delivery relay.
+// (RUNTIME-STELE-001..006): mTLS client-identity auth (CN=stele, ADR-0009),
+// complete Proto authority fingerprint admission, credential digest snapshot,
+// and idempotent Delivery relay.
 type steleRelayServer struct {
 	runtimev1.UnimplementedSteleRelayServer
-	alerts    *alerts.Service
-	tokenHash [32]byte
+	alerts *alerts.Service
 }
 
-// NewSteleRelayServer builds the server with the deployment service token.
-// The token file holds 32 random bytes; the wire text is the base64url form
-// (RUNTIME-AUTH-006), so the server hashes that text for comparison.
-func NewSteleRelayServer(alertsService *alerts.Service, serviceToken []byte) *steleRelayServer {
-	text := base64.RawURLEncoding.EncodeToString(serviceToken)
-	return &steleRelayServer{alerts: alertsService, tokenHash: sha256.Sum256([]byte(text))}
+// NewSteleRelayServer builds the relay adapter. Authentication is the
+// listener's mTLS client verification; there is no service token.
+func NewSteleRelayServer(alertsService *alerts.Service) *steleRelayServer {
+	return &steleRelayServer{alerts: alertsService}
 }
 
 // RegisterSteleRelay attaches the unary service to the Runtime gRPC server.
@@ -39,24 +33,10 @@ func RegisterSteleRelay(server *grpc.Server, relay *steleRelayServer) {
 }
 
 func (server *steleRelayServer) authorize(ctx context.Context) error {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "missing metadata")
-	}
-	values := md.Get("authorization")
-	if len(values) != 1 || len(values[0]) < 8 || values[0][:7] != "Bearer " {
-		return status.Error(codes.Unauthenticated, "invalid authorization metadata")
-	}
-	token := []byte(values[0][7:])
-	if subtle.ConstantTimeCompare(hashOf(token), server.tokenHash[:]) != 1 {
-		return status.Error(codes.Unauthenticated, "invalid service token")
+	if !requireComponentIdentity(ctx, "stele") {
+		return status.Error(codes.Unauthenticated, "stele client identity required")
 	}
 	return nil
-}
-
-func hashOf(value []byte) []byte {
-	sum := sha256.Sum256(value)
-	return sum[:]
 }
 
 func (server *steleRelayServer) checkContractFingerprint(value string) error {

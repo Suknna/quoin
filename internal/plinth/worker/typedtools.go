@@ -16,7 +16,6 @@ import (
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"google.golang.org/grpc/metadata"
 )
 
 // executeTool persists pending->running and answers ToolCallStarted
@@ -160,10 +159,7 @@ func executeArtifactRead(execution *TypedToolContext) error {
 	if limit, ok := args["limit"].(float64); ok && limit >= 1 && limit <= 2000 {
 		maxLines = int64(limit)
 	}
-	rpcCtx, err := runner.artifactContext(ctx)
-	if err != nil {
-		return execution.Fail("grant_missing", "读取状态卷 token 失败")
-	}
+	rpcCtx := runner.artifactContext(ctx)
 	response, rpcErr := runner.Artifacts.ReadText(rpcCtx, &runtimev1.ArtifactReadTextRequest{
 		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
 		ConnectionEpoch: runner.Sink.Epoch(), StartLine: uint64(startLine), MaxLines: uint32(maxLines),
@@ -193,10 +189,7 @@ func executeArtifactGrep(execution *TypedToolContext) error {
 	if pattern == "" {
 		return execution.Fail("invalid_arguments", "pattern 必须是非空字符串")
 	}
-	rpcCtx, err := runner.artifactContext(ctx)
-	if err != nil {
-		return execution.Fail("grant_missing", "读取状态卷 token 失败")
-	}
+	rpcCtx := runner.artifactContext(ctx)
 	response, rpcErr := runner.Artifacts.GrepText(rpcCtx, &runtimev1.ArtifactGrepTextRequest{
 		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
 		ConnectionEpoch: runner.Sink.Epoch(), Re2Pattern: pattern,
@@ -365,17 +358,11 @@ func (runner *Runner) uploadWorkspaceFile(ctx context.Context, attemptID, toolCa
 	return runner.uploadWorkspaceFileAs(ctx, attemptID, toolCallID, path, "text/plain")
 }
 
-// artifactContext attaches the runtime long-term bearer to one
-// ArtifactService RPC. The channel dial carries no per-RPC credentials
-// (FetchCredentialGrant attaches the same bearer explicitly); every
-// Upload/ReadText/GrepText call must present it or the server's upload
-// fence refuses the stream (RUNTIME-GRANT-001).
-func (runner *Runner) artifactContext(ctx context.Context) (context.Context, error) {
-	bearer, err := runner.toolCallChannel().BearerToken()
-	if err != nil {
-		return nil, err
-	}
-	return metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+bearer)), nil
+// artifactContext is the ArtifactService RPC context. The channel dial
+// itself is mTLS-authenticated (ADR-0009); Upload/ReadText/GrepText carry
+// the connection identity and no per-RPC bearer exists.
+func (runner *Runner) artifactContext(ctx context.Context) context.Context {
+	return ctx
 }
 
 // uploadWorkspaceFileAs streams one spilled workspace output with the
@@ -398,10 +385,7 @@ func (runner *Runner) uploadWorkspaceFileAs(ctx context.Context, attemptID, tool
 		return 0, err
 	}
 	uploadID := fmt.Sprintf("tool-%d-%d", attemptID, toolCallID)
-	uploadCtx, err := runner.artifactContext(ctx)
-	if err != nil {
-		return 0, err
-	}
+	uploadCtx := runner.artifactContext(ctx)
 	stream, err := runner.Artifacts.Upload(uploadCtx)
 	if err != nil {
 		return 0, err

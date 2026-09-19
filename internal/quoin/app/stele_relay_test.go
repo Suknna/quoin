@@ -3,12 +3,14 @@ package app_test
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
@@ -17,16 +19,96 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/grpc/credentials"
 )
 
-// TestSteleRelayEndToEnd drives the frozen SteleRelay service in-process over
-// a bufconn: GetCredentialSnapshot, then Deliver (firing) with metadata auth,
-// asserts the occurrence persisted, then replays the same relay_id to prove
-// idempotency.
-func TestSteleRelayEndToEnd(t *testing.T) {
+// relayTLSFixture boots the deployment-shaped mTLS listener material through
+// the real secrets bootstrap (ADR-0009): one Runtime CA, the quoin server
+// identity, and the stele/plinth client identities.
+type relayTLSFixture struct {
+	caPEM         []byte
+	steleClient   tls.Certificate
+	plinthClient  tls.Certificate
+	serverAddress string
+}
+
+func startRelayServer(t *testing.T, alertsService *alerts.Service) relayTLSFixture {
+	t.Helper()
+	root := t.TempDir()
+	secrets := root + "/secrets"
+	config := contract.QuoinConfig{
+		Component: "quoin", PublicOrigin: "https://quoin.test",
+		DataDirectory:             root + "/data",
+		BackupDirectory:           root + "/backup",
+		RootKeyFile:               secrets + "/root-key",
+		RuntimeTLSCertificateFile: secrets + "/runtime-tls.crt",
+		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
+		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
+	}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	fixture := relayTLSFixture{}
+	var err error
+	if fixture.caPEM, err = os.ReadFile(secrets + "/runtime-ca.pem"); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.steleClient, err = tls.LoadX509KeyPair(secrets+"/stele-client.crt", secrets+"/stele-client.key"); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.plinthClient, err = tls.LoadX509KeyPair(secrets+"/plinth-client.crt", secrets+"/plinth-client.key"); err != nil {
+		t.Fatal(err)
+	}
+	serverCert, err := tls.LoadX509KeyPair(secrets+"/runtime-tls.crt", secrets+"/runtime-tls.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPool := x509.NewCertPool()
+	if !clientPool.AppendCertsFromPEM(fixture.caPEM) {
+		t.Fatal("bootstrap CA cannot be parsed")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TLS terminates inside gRPC exactly like production (grpc.Creds on a raw
+	// listener): every handler context then carries the verified client
+	// identity (ADR-0009).
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{serverCert}, MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientPool,
+	})))
+	app.RegisterSteleRelay(server, app.NewSteleRelayServer(alertsService))
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	fixture.serverAddress = listener.Addr().String()
+	return fixture
+}
+
+func relayClient(t *testing.T, fixture relayTLSFixture, clientCert *tls.Certificate) runtimev1.SteleRelayClient {
+	t.Helper()
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(fixture.caPEM) {
+		t.Fatal("bootstrap CA cannot be parsed")
+	}
+	tlsConfig := &tls.Config{RootCAs: rootPool, ServerName: "localhost", MinVersion: tls.VersionTLS13}
+	if clientCert != nil {
+		tlsConfig.Certificates = []tls.Certificate{*clientCert}
+	}
+	conn, err := grpc.NewClient(fixture.serverAddress, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return runtimev1.NewSteleRelayClient(conn)
+}
+
+// TestSteleRelayMTLSIdentityAndDelivery drives the frozen SteleRelay service
+// over a real mTLS listener: the CN=stele client identity authenticates
+// GetCredentialSnapshot and idempotent Deliver, the CN=plinth identity is
+// rejected, a certificate-less dial cannot even complete the TLS handshake,
+// and a mismatched contract fingerprint never admits a request (ADR-0009).
+func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	secrets := root + "/secrets"
@@ -37,7 +119,7 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		RootKeyFile:               secrets + "/root-key",
 		RuntimeTLSCertificateFile: secrets + "/runtime-tls.crt",
 		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
-		SteleServiceTokenFile:     secrets + "/stele-service-token",
+		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -55,10 +137,6 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	serviceToken, err := os.ReadFile(config.SteleServiceTokenFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Seed a source with a bearer whose digest matches a known value. The
 	// create command verifies a real administrator session proof, so seed one
 	// and attach the execution metadata admission would provide.
@@ -88,28 +166,25 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	listener := bufconn.Listen(1 << 20)
-	server := grpc.NewServer()
-	app.RegisterSteleRelay(server, app.NewSteleRelayServer(alertsService, serviceToken))
-	go func() { _ = server.Serve(listener) }()
-	defer server.Stop()
+	fixture := startRelayServer(t, alertsService)
 
-	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-		return listener.DialContext(ctx)
-	}), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
+	// The CN=plinth identity must never reach the SteleRelay surface.
+	plinthClient := relayClient(t, fixture, &fixture.plinthClient)
+	if _, err := plinthClient.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); err == nil {
+		t.Fatal("the plinth client identity must not authorize SteleRelay")
 	}
-	defer conn.Close()
-	client := runtimev1.NewSteleRelayClient(conn)
 
-	// The deployment writes 32 random bytes; the wire text form is base64url
-	// (RUNTIME-AUTH-006). The server hashes the received text; hash the same
-	// text here.
-	tokenText := base64.RawURLEncoding.EncodeToString(serviceToken)
-	authCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText))
+	// A certificate-less dial cannot complete the mandatory-client-cert
+	// handshake at all: the RPC fails on transport, before any handler.
+	noCertClient := relayClient(t, fixture, nil)
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := noCertClient.GetCredentialSnapshot(callCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); err == nil {
+		t.Fatal("a dial without a client certificate must fail the mTLS handshake")
+	}
 
-	snapshot, err := client.GetCredentialSnapshot(authCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
+	steleClient := relayClient(t, fixture, &fixture.steleClient)
+	snapshot, err := steleClient.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +203,7 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 
 	body := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU","instance":"db-1"},"startsAt":"2026-08-17T10:00:00Z","fingerprint":"` + relayFingerprintHex(map[string]string{"alertname": "CPU", "instance": "db-1"}) + `"}],"truncatedAlerts":0}`)
 	deliver := func(relayID string) *runtimev1.DeliveryRelayResponse {
-		response, err := client.Deliver(authCtx, &runtimev1.DeliveryRelayRequest{
+		response, err := steleClient.Deliver(ctx, &runtimev1.DeliveryRelayRequest{
 			RelayId: relayID, SourceId: result.SourceID, CredentialId: result.CredentialID,
 			CredentialSnapshotVersion: snapshot.GetSnapshotVersion(), Protocol: "alertmanager",
 			Body: body, ContractFingerprint: contract.ProtoAuthorityFingerprint,
@@ -156,18 +231,12 @@ func TestSteleRelayEndToEnd(t *testing.T) {
 	}
 
 	// A missing or malformed contract fingerprint must never provide a legacy
-	// release-version admission path.
-	badCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+tokenText))
-	if _, err := client.GetCredentialSnapshot(badCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: "not-a-valid-fingerprint"}); err == nil {
+	// release-version admission path — even with a valid stele identity.
+	if _, err := steleClient.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: "not-a-valid-fingerprint"}); err == nil {
 		t.Fatal("invalid contract fingerprint must fail")
 	}
-	if _, err := client.Deliver(badCtx, &runtimev1.DeliveryRelayRequest{RelayId: "relay-bad-contract", SourceId: result.SourceID, CredentialId: result.CredentialID, CredentialSnapshotVersion: snapshot.GetSnapshotVersion(), Protocol: "alertmanager", Body: body}); err == nil {
+	if _, err := steleClient.Deliver(ctx, &runtimev1.DeliveryRelayRequest{RelayId: "relay-bad-contract", SourceId: result.SourceID, CredentialId: result.CredentialID, CredentialSnapshotVersion: snapshot.GetSnapshotVersion(), Protocol: "alertmanager", Body: body}); err == nil {
 		t.Fatal("missing contract fingerprint must fail")
-	}
-	// Wrong token must be rejected.
-	badAuth := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer wrong-token"))
-	if _, err := client.GetCredentialSnapshot(badAuth, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); err == nil {
-		t.Fatal("bad token must fail")
 	}
 }
 

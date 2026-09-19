@@ -59,7 +59,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	helloAck := ack.GetHelloAck()
 	if helloAck == nil || !helloAck.GetAccepted() {
 		if readiness != nil {
-			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.RuntimeUnregistered})
+			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
 		}
 		return fmt.Errorf("握手被拒绝: %s", helloAck.GetRejectReason())
 	}

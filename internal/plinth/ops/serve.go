@@ -13,15 +13,17 @@ import (
 )
 
 // RunServe is the long-lived serve path: ops endpoint plus the outbound
-// Connect control loop, retried with backoff while unregistered. The process
+// mTLS-authenticated Connect control loop, retried with backoff. The process
 // stays alive so the deployment keeps it running; readiness stays strict
-// (unregistered until a Quoin-accepted handshake).
+// (not ready until a Quoin-accepted handshake).
 func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedops.Server) error {
 	channel, err := runtime.NewChannel(runtime.ChannelConfig{
-		Slot:               "plinth",
-		QuoinEndpoint:      config.QuoinRuntimeEndpoint,
-		QuoinRuntimeCAFile: config.QuoinRuntimeCAFile,
-		StateDirectory:     config.StateDirectory,
+		Slot:                              "plinth",
+		QuoinEndpoint:                     config.QuoinRuntimeEndpoint,
+		QuoinRuntimeCAFile:                config.QuoinRuntimeCAFile,
+		QuoinRuntimeClientCertificateFile: config.QuoinRuntimeClientCertificateFile,
+		QuoinRuntimeClientPrivateKeyFile:  config.QuoinRuntimeClientPrivateKeyFile,
+		StateDirectory:                    config.StateDirectory,
 	})
 	if err != nil {
 		return err

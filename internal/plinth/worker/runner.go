@@ -85,7 +85,6 @@ type toolMeta struct {
 // production control-stream path.
 type toolCallChannel interface {
 	Request(context.Context, *runtimev1.ControlEnvelope) (*runtimev1.ControlEnvelope, error)
-	BearerToken() (string, error)
 }
 
 func (runner *Runner) toolCallChannel() toolCallChannel {

@@ -13,7 +13,9 @@ backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/quoin-secrets/root-key
 runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
 runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
-steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+# Deployment CA that signed the Stele/Plinth client certificates (ADR-0009):
+# the Runtime gRPC listener verifies mTLS client certificates against it.
+runtimeClientCaFile: /run/quoin-secrets/runtime-ca.pem
 # Audit retention (ADR-0006): default and minimum is six calendar months;
 # deployments may only extend it. Omit the whole section to keep the default.
 audit:

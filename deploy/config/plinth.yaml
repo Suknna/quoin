@@ -3,3 +3,7 @@ stateDirectory: /var/lib/plinth
 workspaceDirectory: /var/lib/plinth/workspaces
 quoinRuntimeEndpoint: https://quoin:8443
 quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+# mTLS client identity (CN=plinth) signed by the deployment CA (ADR-0009):
+# deployment-time identity, no registration flow.
+quoinRuntimeClientCertificateFile: /run/quoin-secrets/plinth-client.crt
+quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/plinth-client.key

@@ -34,7 +34,10 @@ type QuoinConfig struct {
 	RootKeyFile               string `json:"rootKeyFile" yaml:"rootKeyFile"`
 	RuntimeTLSCertificateFile string `json:"runtimeTlsCertificateFile" yaml:"runtimeTlsCertificateFile"`
 	RuntimeTLSPrivateKeyFile  string `json:"runtimeTlsPrivateKeyFile" yaml:"runtimeTlsPrivateKeyFile"`
-	SteleServiceTokenFile     string `json:"steleServiceTokenFile" yaml:"steleServiceTokenFile"`
+	// RuntimeClientCAFile is the deployment CA that signed the component
+	// client certificates; the Runtime gRPC listener verifies mTLS client
+	// certificates against it (ADR-0009).
+	RuntimeClientCAFile string `json:"runtimeClientCaFile" yaml:"runtimeClientCaFile"`
 	// StelePublicURL is the externally reachable Alertmanager receiver endpoint.
 	// It is deployment authority, never inferred from an HTTP request host.
 	StelePublicURL string `json:"stelePublicURL" yaml:"stelePublicURL"`
@@ -131,6 +134,12 @@ type PlinthConfig struct {
 	WorkspaceDirectory   string `json:"workspaceDirectory" yaml:"workspaceDirectory"`
 	QuoinRuntimeEndpoint string `json:"quoinRuntimeEndpoint" yaml:"quoinRuntimeEndpoint"`
 	QuoinRuntimeCAFile   string `json:"quoinRuntimeCaFile" yaml:"quoinRuntimeCaFile"`
+	// QuoinRuntimeClientCertificateFile / QuoinRuntimeClientPrivateKeyFile are
+	// the deployment CA-signed client identity (CN=plinth) presented during
+	// the mTLS handshake; they replace the retired registration tokens
+	// (ADR-0009).
+	QuoinRuntimeClientCertificateFile string `json:"quoinRuntimeClientCertificateFile" yaml:"quoinRuntimeClientCertificateFile"`
+	QuoinRuntimeClientPrivateKeyFile  string `json:"quoinRuntimeClientPrivateKeyFile" yaml:"quoinRuntimeClientPrivateKeyFile"`
 	// EnabledPlugins must mirror quoinConfig.enabledPlugins from the same
 	// deployment input: the disposable worker renders the provider-facing
 	// tool schema from the frozen catalog, and BeginModelCall rejects any
@@ -152,7 +161,11 @@ type SteleConfig struct {
 	Component            string `json:"component" yaml:"component"`
 	QuoinRuntimeEndpoint string `json:"quoinRuntimeEndpoint" yaml:"quoinRuntimeEndpoint"`
 	QuoinRuntimeCAFile   string `json:"quoinRuntimeCaFile" yaml:"quoinRuntimeCaFile"`
-	ServiceTokenFile     string `json:"serviceTokenFile" yaml:"serviceTokenFile"`
+	// QuoinRuntimeClientCertificateFile / QuoinRuntimeClientPrivateKeyFile are
+	// the deployment CA-signed client identity (CN=stele) presented during
+	// the mTLS handshake; they replace the retired service token (ADR-0009).
+	QuoinRuntimeClientCertificateFile string `json:"quoinRuntimeClientCertificateFile" yaml:"quoinRuntimeClientCertificateFile"`
+	QuoinRuntimeClientPrivateKeyFile  string `json:"quoinRuntimeClientPrivateKeyFile" yaml:"quoinRuntimeClientPrivateKeyFile"`
 }
 
 func DecodeFile(path string, target any) error {

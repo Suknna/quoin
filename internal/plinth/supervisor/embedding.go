@@ -17,7 +17,6 @@ import (
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/modelprovider"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
-	"google.golang.org/grpc/metadata"
 )
 
 // runEmbedding executes one embedding attempt to a typed terminal proposal.
@@ -49,13 +48,7 @@ func (supervisor *Supervisor) runEmbedding(parent context.Context, sink *runtime
 		return
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	bearer, bearerErr := supervisor.Channel.BearerToken()
-	if bearerErr != nil {
-		grantCancel()
-		proposeFailure("读取状态卷 token 失败: " + bearerErr.Error())
-		return
-	}
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
 	})
 	grantCancel()

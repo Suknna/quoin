@@ -50,9 +50,6 @@ func TestPrometheusAndThanosHaveIndependentCredentialsAndEnabledState(t *testing
 	// The bearer token decrypts only through the actual audited grant
 	// fulfillment path, and the Prometheus carrier stays distinct from the
 	// Thanos alias.
-	if err := registerPlinthSlot(db); err != nil {
-		t.Fatal(err)
-	}
 	revealAttempt, err := service.StartProbe(ctx, prometheus.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -116,9 +113,6 @@ func TestInterruptPrometheusProbeClosesTypedResult(t *testing.T) {
 	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "none"})
 	created, err := service.Create(ctx, connections.CreateInput{Name: "prometheus-interrupted", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, "prometheus-interrupt-create")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registerPlinthSlot(db); err != nil {
 		t.Fatal(err)
 	}
 	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)

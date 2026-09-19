@@ -95,9 +95,9 @@ func Descriptors() []plugins.Descriptor {
 			Description: "连接 Prometheus 实例：作为指标查询的来源接入，提供与 Thanos 同契约的只读 PromQL 模型工具；授权按实际来源连接解析。",
 			// 有界观测声明与 Plinth 进程中真实注册的 Discoverer 执行绑定
 			// 同切片落地（internal/plinth/supervisor）。
-			Capabilities: []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityTools, plugins.CapabilityExecuteTool, plugins.CapabilityInspectionTemplates, plugins.CapabilityCollect},
-			DiscoverObjects:      promQLDiscoverObjects(),
-			InspectionTemplates:  promQLInspectionTemplates(),
+			Capabilities:        []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityTools, plugins.CapabilityExecuteTool, plugins.CapabilityInspectionTemplates, plugins.CapabilityCollect},
+			DiscoverObjects:     promQLDiscoverObjects(),
+			InspectionTemplates: promQLInspectionTemplates(),
 			// 同契约共享工具：与 thanos 插件声明完全相同的 PromQL 查询工具，
 			// 启用任一提供者即有真实查询能力；目录去重，溯源列全部启用的
 			// 贡献提供者。
@@ -107,17 +107,17 @@ func Descriptors() []plugins.Descriptor {
 			ConnectionKind: "prometheus",
 		},
 		{
-			ID:          plugins.ThanosID,
-			Version:     "1",
-			DisplayName: "Thanos",
-			Description: "连接 Prometheus 兼容的全局查询层：提供资源范围内只读 PromQL 模型工具与来源接入。",
-			Capabilities: []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityTools, plugins.CapabilityExecuteTool, plugins.CapabilityInspectionTemplates, plugins.CapabilityCollect},
+			ID:                  plugins.ThanosID,
+			Version:             "1",
+			DisplayName:         "Thanos",
+			Description:         "连接 Prometheus 兼容的全局查询层：提供资源范围内只读 PromQL 模型工具与来源接入。",
+			Capabilities:        []plugins.Capability{plugins.CapabilityDiscover, plugins.CapabilityTools, plugins.CapabilityExecuteTool, plugins.CapabilityInspectionTemplates, plugins.CapabilityCollect},
 			DiscoverObjects:     promQLDiscoverObjects(),
 			InspectionTemplates: promQLInspectionTemplates(),
-			ConfigSchema:   metricsConfigSchema("thanos"),
-			DefaultEnabled: true,
-			ConnectionKind: "thanos",
-			Tools:          []plugins.Tool{queryDeclaration},
+			ConfigSchema:        metricsConfigSchema("thanos"),
+			DefaultEnabled:      true,
+			ConnectionKind:      "thanos",
+			Tools:               []plugins.Tool{queryDeclaration},
 		},
 		{
 			ID:             plugins.AlertmanagerID,

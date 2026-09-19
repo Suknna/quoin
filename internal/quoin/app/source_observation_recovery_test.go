@@ -138,15 +138,6 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 	// passed metrics probe → explicit enable qualification → enable.
 	mustExec(t, db, `INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now)
 	mustExec(t, db, `INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'x',?,?)`, now, now)
-	// The plinth slot is registered with a confirmed credential: the attempt
-	// binding trigger refuses dispatch against an unregistered slot.
-	mustExec(t, db, `INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now)
-	credentialResult, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('plinth',1,?,?,?,1)`, make([]byte, 32), now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := credentialResult.LastInsertId()
-	mustExec(t, db, `UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='plinth'`, credentialID)
 	mustExec(t, db, `INSERT INTO connections(id,name,type,enabled,row_version,revalidation_required,created_at) VALUES(1,'main-prometheus','prometheus',0,1,0,?)`, now)
 	mustExec(t, db, `INSERT INTO connection_revisions(id,connection_id,revision_seq,config_json,created_at) VALUES(1,1,1,'{}',?)`, now)
 	mustExec(t, db, `INSERT INTO credential_generations(id,connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(1,1,1,1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now)
@@ -219,10 +210,7 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 	if err := conns.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
 		t.Fatal(err)
 	}
-	slots := qruntime.NewService(db)
-	if err := slots.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
-		t.Fatal(err)
-	}
+	slots := qruntime.NewService()
 	var sent []*runtimev1.ControlEnvelope
 	service := &RuntimeService{
 		Slots: slots, Analyses: analyses, Inspections: inspections, Observations: observations, Connections: conns, writer: db,

@@ -32,7 +32,7 @@ func PublishKubernetesSecret(config contract.QuoinConfig, secretName string) err
 // kubernetesSecretData reads the complete bootstrap set without exposing it to
 // callers outside the in-cluster bootstrap process.
 func kubernetesSecretData(configPath string) (map[string]string, error) {
-	files := []string{"root-key", "runtime-ca.pem", "runtime-ca.key", "runtime-tls.crt", "runtime-tls.key", "stele-service-token"}
+	files := []string{"root-key", "runtime-ca.pem", "runtime-ca.key", "runtime-tls.crt", "runtime-tls.key", "stele-client.crt", "stele-client.key", "plinth-client.crt", "plinth-client.key"}
 	data := make(map[string]string, len(files))
 	for _, name := range files {
 		value, err := os.ReadFile(filepath.Join(configPath, name))

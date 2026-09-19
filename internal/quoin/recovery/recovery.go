@@ -429,8 +429,6 @@ func isolate(ctx context.Context, database *sql.DB, username string) (int64, aut
 			{`UPDATE sessions SET revoked_at=? WHERE revoked_at IS NULL`, []any{now}},
 			{`UPDATE auth_flows SET status='revoked' WHERE status='pending'`, nil},
 			{`UPDATE users SET enabled=0,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id<>? AND enabled=1`, []any{now, adminID}},
-			{`UPDATE runtime_slots SET state='revoked',current_credential_id=NULL,pending_credential_id=NULL,retiring_credential_id=NULL,row_version=row_version+1 WHERE state<>'revoked'`, nil},
-			{`UPDATE runtime_credentials SET retired_at=?,row_version=row_version+1 WHERE retired_at IS NULL`, []any{now}},
 			{`UPDATE alert_sources SET enabled=0,disabled_at=?,row_version=row_version+1 WHERE enabled=1`, []any{now}},
 			// A never-used replacement cannot retire its Active predecessor under the
 			// ordinary rotation rule. First move that replacement to its existing
@@ -527,7 +525,6 @@ func insertChecklist(ctx context.Context, conn execution.Executor, revision, adm
 		return err
 	}
 	for _, table := range []struct{ kind, query, code string }{
-		{"RuntimeSlot", `SELECT slot FROM runtime_slots ORDER BY slot`, "revoked"},
 		{"AlertSource", `SELECT source_key FROM alert_sources ORDER BY source_key`, "disabled"},
 		{"BrowserIdentity", `SELECT id FROM browser_identities ORDER BY id`, "authentication_required"},
 	} {

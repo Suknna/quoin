@@ -159,8 +159,8 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 				}
 			}
 		}
-		// Assign to the live plinth stream (slot must be registered).
-		if binding == nil || binding.State != qruntime.StateRegistered || !binding.Connected {
+		// Assign to the live plinth stream.
+		if binding == nil || !binding.Connected {
 			// Attempt stays Queued; the dispatcher retries when plinth connects.
 			return probeStartResult{attemptID: attemptID, grantID: grantID}, nil
 		}

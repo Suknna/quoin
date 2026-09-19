@@ -12,7 +12,6 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
-	"google.golang.org/grpc/metadata"
 )
 
 func (supervisor *Supervisor) runVerificationDiscovery(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
@@ -42,13 +41,8 @@ func (supervisor *Supervisor) runVerificationDiscovery(parent context.Context, s
 		supervisor.proposeVerificationDiscovery(sink, attemptID, binding, input, "error", nil, []string{"missing metrics grant"}, "query_failed")
 		return
 	}
-	bearer, err := supervisor.Channel.BearerToken()
-	if err != nil {
-		supervisor.proposeVerificationDiscovery(sink, attemptID, binding, input, "error", nil, []string{"runtime credential unavailable"}, "query_failed")
-		return
-	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
 	grantCancel()
 	if err != nil || payload.GetThanos() == nil {
 		supervisor.proposeVerificationDiscovery(sink, attemptID, binding, input, "error", nil, []string{"credential grant unavailable"}, "query_failed")

@@ -101,6 +101,6 @@ func testConfig(t *testing.T) contract.QuoinConfig {
 		Component: "quoin", PublicOrigin: "https://quoin.test",
 		DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backup"),
 		RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
-		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token"),
+		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token"),
 	}
 }

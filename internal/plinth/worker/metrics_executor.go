@@ -17,7 +17,6 @@ import (
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	plinthtools "github.com/Suknna/quoin/internal/plinth/tools"
 	"github.com/Suknna/quoin/internal/plugins"
-	"google.golang.org/grpc/metadata"
 )
 
 // metrics secret 槽位是插件的命名秘密槽；槽名即引用名（Call.SecretRefs 的
@@ -94,12 +93,8 @@ func (runner *Runner) CallFor(execution *TypedToolContext) (*plugins.Call, error
 		return nil, &pluginCallError{code: "grant_missing", detail: "该工具调用没有冻结的连接 grant"}
 	}
 	grant := meta.grants[0]
-	bearer, err := runner.toolCallChannel().BearerToken()
-	if err != nil {
-		return nil, &pluginCallError{code: "grant_missing", detail: "读取状态卷 token 失败"}
-	}
 	grantCtx, grantCancel := context.WithTimeout(execution.BaseCtx, 15*time.Second)
-	grantPayload, err := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	grantPayload, err := runner.Client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId: grant.GetGrantId(), AttemptId: execution.AttemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch,
 	})
 	grantCancel()

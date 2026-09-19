@@ -250,10 +250,6 @@ func schemaSeed() string {
 		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at)
 		 VALUES (1,1,zeroblob(32),1,'test harness','` + now + `','` + now + `','2099-01-01T00:00:00Z','2099-01-01T00:00:00Z')`,
 		`INSERT INTO root_key_state(id, binding_revision, verifier_nonce, verifier_ciphertext, bound_at) VALUES (1, 1, zeroblob(12), zeroblob(16), '` + now + `')`,
-		`INSERT INTO runtime_slots(slot, state, row_version, created_at) VALUES ('plinth','unregistered',1,'` + now + `'),('lintel','unregistered',1,'` + now + `')`,
-		`INSERT INTO runtime_credentials(slot, generation, token_digest, created_at, confirmed_at, first_authenticated_at, row_version) VALUES ('plinth', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1),('lintel', 1, zeroblob(32), '` + now + `', '` + now + `', NULL, 1)`,
-		`UPDATE runtime_slots SET state='registered', current_credential_id=(SELECT id FROM runtime_credentials WHERE slot='plinth'), row_version=2 WHERE slot='plinth'`,
-		`UPDATE runtime_slots SET state='registered', current_credential_id=(SELECT id FROM runtime_credentials WHERE slot='lintel'), row_version=2 WHERE slot='lintel'`,
 	}, "; ")
 }
 

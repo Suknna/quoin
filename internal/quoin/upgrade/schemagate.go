@@ -199,6 +199,14 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 	if stored == alertViewAttributionPredecessorSchemaDigest {
 		return verifyAlertViewAttributionPredecessorHistory(ctx, conn)
 	}
+	// The unified-mTLS predecessor is the last registration-era release; every
+	// history its own schema gate admitted stays authentic here.
+	if stored == unifiedMTLSPredecessorSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyUnifiedAuthHistory(ctx, conn, true)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -301,6 +309,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == alertViewAttributionPredecessorSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateAlertViewAttributionOn)
+	}
+	if digest == unifiedMTLSPredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateUnifiedMTLSOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

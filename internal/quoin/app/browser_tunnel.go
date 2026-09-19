@@ -183,7 +183,7 @@ type BrowserTunnelService struct {
 }
 
 func (service *BrowserTunnelService) Open(stream runtimev1.BrowserTunnel_OpenServer) error {
-	if service.Hub == nil || service.Browsers == nil || !service.Slots.ValidateBearer(stream.Context(), bearerFromContext(stream.Context()), qruntime.SlotLintel) {
+	if service.Hub == nil || service.Browsers == nil || !requireComponentIdentity(stream.Context(), qruntime.SlotLintel) {
 		return status.Error(codes.Unauthenticated, "lintel bearer required")
 	}
 	first, err := stream.Recv()

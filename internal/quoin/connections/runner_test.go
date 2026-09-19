@@ -306,9 +306,6 @@ func TestProbeResultCommitSystemAuditPreservesTaskAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := registerPlinthSlot(database); err != nil {
-		t.Fatal(err)
-	}
 	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -3,14 +3,12 @@
 package support
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -21,34 +19,10 @@ import (
 // the Compose network; providerURL is its OpenAI-compatible fixture endpoint.
 func PrepareProviderAndRuntime(t testing.TB, client *http.Client, base, origin, composeFile, project, providerURL, namePrefix string) {
 	t.Helper()
-	var runtimeView struct {
-		Plinth struct {
-			RowVersion int64 `json:"rowVersion"`
-		} `json:"plinth"`
-	}
-	mustJSON(t, get(t, client, base+"/api/v1/runtime", origin), &runtimeView)
-	prepare := post(t, client, base+"/api/v1/runtime-slots/plinth/registration/prepare", origin, fmt.Sprintf(`{"clientCommandId":%q,"expectedRowVersion":%d}`, namePrefix+"-prepare-"+randomID(t), runtimeView.Plinth.RowVersion))
-	var prepared struct {
-		RegistrationTokenHandle string `json:"registrationTokenHandle"`
-	}
-	mustJSON(t, prepare, &prepared)
-	revealed := post(t, client, base+"/api/v1/runtime-slots/registration-token/reveal", origin, fmt.Sprintf(`{"registrationTokenHandle":%q}`, prepared.RegistrationTokenHandle))
-	var token struct {
-		Slot              string `json:"slot"`
-		Generation        int64  `json:"generation"`
-		RegistrationToken string `json:"registrationToken"`
-	}
-	mustJSON(t, revealed, &token)
-	input, err := json.Marshal(map[string]any{"slot": token.Slot, "generation": token.Generation, "token": token.RegistrationToken})
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command("docker", "compose", "--project-name", project, "--file", composeFile, "run", "--rm", "--no-deps", "-i", "-T", "plinth", "register", "--config", "/etc/quoin/component.yaml")
-	command.Stdin = bytes.NewReader(append(input, '\n'))
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("plinth registration: %v: %s", err, output)
-	}
+	_ = composeFile
+	_ = project
+	// Plinth connects automatically through its deployment CA-signed mTLS
+	// client identity (ADR-0009); there is no registration step to drive.
 	name := namePrefix + "-provider"
 	post(t, client, base+"/api/v1/connections", origin, fmt.Sprintf(`{"clientCommandId":%q,"name":%q,"connection":{"type":"model_provider","baseUrl":%q,"chatModelId":"fixture-chat-1","embeddingModelId":"fixture-embed-1","contextBudgetTokens":8192,"maxOutputTokens":1024,"apiKey":"fixture-api-key-2026"}}`, namePrefix+"-create", name, providerURL))
 	post(t, client, base+"/api/v1/connections/"+name+"/probe", origin, fmt.Sprintf(`{"clientCommandId":%q}`, namePrefix+"-probe"))

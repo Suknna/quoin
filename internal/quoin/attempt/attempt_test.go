@@ -157,27 +157,6 @@ func seedProviderChain(t *testing.T, db *sql.DB) (connectionID, revisionID, gene
 		t.Fatal(err)
 	}
 	probeAttemptID, _ := probeAttempt.LastInsertId()
-	// The frozen probe ladder: Queued -> Assigned -> Running -> Succeeded,
-	// with the dispatch-ready input snapshot and probe grants first. The
-	// dispatch gate also requires a registered plinth slot (created once
-	// per database: the registration window only exists on an empty slot).
-	var slotState string
-	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&slotState); err != nil {
-		if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,created_at) VALUES('plinth','unregistered',?)`, now); err != nil {
-			t.Fatal(err)
-		}
-		slotState = "unregistered"
-	}
-	if slotState == "unregistered" {
-		runtimeCredential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at) VALUES('plinth',1,?,?,?)`, []byte(strings.Repeat("0", 32)), now, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runtimeCredentialID, _ := runtimeCredential.LastInsertId()
-		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth' AND state='unregistered'`, runtimeCredentialID); err != nil {
-			t.Fatal(err)
-		}
-	}
 	probeSnapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(?,'connection_probe_v1','connection-probe-v1',?,?)`, probeAttemptID, strings.Repeat("0", 64), now)
 	if err != nil {
 		t.Fatal(err)

@@ -134,12 +134,6 @@ func (application *apiServer) registerMaintenanceTrustRebuildRoutes(api huma.API
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/admin/users/{userId}/reset-password", OperationID: "resetUserPassword"}, application.resetUserPassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/admin/users/{userId}/revoke-sessions", OperationID: "revokeUserSessions"}, application.revokeUserSessions)
 
-	// Runtime credential reconstruction. These operations only mutate the
-	// durable slot/credential state; they do not start a scheduler or dispatch.
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/runtime-slots/{slot}/registration/prepare", OperationID: "prepareRuntimeRegistration"}, application.prepareRuntimeRegistration)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/runtime-slots/registration-token/reveal", OperationID: "revealRuntimeRegistrationToken"}, application.revealRuntimeRegistrationToken)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/runtime-slots/{slot}/retiring-credential/retire", OperationID: "retireRuntimeCredential"}, application.retireRuntimeCredential)
-
 	application.registerMaintenanceConnectionRoutes(api)
 
 	// Alert-source reconstruction operations implemented by the current app.

@@ -69,10 +69,7 @@ func (application *apiServer) configureReadOnly(reader execution.Reader) error {
 	if err != nil {
 		return err
 	}
-	slotService, err := qruntime.NewServiceWithReader(application.db, reader, runner)
-	if err != nil {
-		return err
-	}
+	slotService := qruntime.NewService()
 	if err := application.auth.SetReader(reader); err != nil {
 		return err
 	}

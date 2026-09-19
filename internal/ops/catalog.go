@@ -58,7 +58,7 @@ var enumLabelValues = map[string][]string{
 		"browser_exploration", "connection_probe", "embedding", "initial_analysis",
 		"inspection_analysis", "inspection_collection", "investigation", "knowledge_extraction",
 	},
-	"maintenance_reason": {"lintel_recovery", "restore", "root_key_rebind", "upgrade"},
+	"maintenance_reason": {"restore", "root_key_rebind", "upgrade"},
 	"attempt_termination_reason": {
 		"artifact_body_expired", "artifact_commit_failed", "business_system_disabled", "cancelled",
 		"connection_disabled", "context_too_large", "invalid_response", "lease_expired",

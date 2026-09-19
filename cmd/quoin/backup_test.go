@@ -17,7 +17,7 @@ import (
 func TestOfflineBackupSubprocess(t *testing.T) {
 	root := t.TempDir()
 	secrets := filepath.Join(root, "secrets")
-	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token")}
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestOfflineBackupSubprocess(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "quoin.yaml")
-	body := fmt.Sprintf("component: quoin\npublicOrigin: %s\ndataDirectory: %s\nbackupDirectory: %s\nrootKeyFile: %s\nruntimeTlsCertificateFile: %s\nruntimeTlsPrivateKeyFile: %s\nsteleServiceTokenFile: %s\n", config.PublicOrigin, config.DataDirectory, config.BackupDirectory, config.RootKeyFile, config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile, config.SteleServiceTokenFile)
+	body := fmt.Sprintf("component: quoin\npublicOrigin: %s\ndataDirectory: %s\nbackupDirectory: %s\nrootKeyFile: %s\nruntimeTlsCertificateFile: %s\nruntimeTlsPrivateKeyFile: %s\nruntimeClientCaFile: %s\n", config.PublicOrigin, config.DataDirectory, config.BackupDirectory, config.RootKeyFile, config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile, config.RuntimeClientCAFile)
 	if err = os.WriteFile(configPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

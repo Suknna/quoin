@@ -30,8 +30,6 @@ import (
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestLintelSlotIsRejectedBeforeAnyBrowserHandler(t *testing.T) {
@@ -41,10 +39,23 @@ func TestLintelSlotIsRejectedBeforeAnyBrowserHandler(t *testing.T) {
 	if slot := (&RuntimeService{}).slotName(runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH); slot != qruntime.SlotPlinth {
 		t.Fatalf("the Plinth slot must keep mapping: %q", slot)
 	}
-	service := &RuntimeService{Slots: qruntime.NewService(nil)}
-	_, err := service.Register(context.Background(), &runtimev1.RegisterRuntimeRequest{Slot: runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL})
-	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "unsupported slot" {
-		t.Fatalf("Lintel registration must fail closed as an unsupported slot, got %v", err)
+	// The registration-era Register RPC is retired (ADR-0009); the generated
+	// service interface must no longer carry it at all.
+	var probe interface {
+		Register(interface{}, interface{}) (interface{}, error)
+	}
+	if _, ok := any(&RuntimeService{Slots: qruntime.NewService()}).(interface {
+		Register(interface{}, interface{}) (interface{}, error)
+	}); ok {
+		_ = probe
+		t.Fatal("RuntimeService must not implement a Register RPC surface")
+	}
+	// The only remaining lintel ingress is the Connect identity fence: a
+	// CN=lintel client certificate is never issued by the deployment CA, so
+	// the browser tunnel stays unreachable.
+	ctx := context.Background()
+	if requireComponentIdentity(ctx, qruntime.SlotLintel) {
+		t.Fatal("an unauthenticated context must never satisfy the lintel identity fence")
 	}
 }
 
@@ -114,8 +125,10 @@ var retiredBrowserRegistrars = []string{
 // registerBrowserRoutes wrapper composing the standalone installer it once
 // served. The wrapper has no callers of its own, so the edge is dead code,
 // not a live route.
-const dormantCompositionFrom = "registerBrowserRoutes"
-const dormantCompositionCall = "registerBrowserStandaloneRoutes"
+const (
+	dormantCompositionFrom = "registerBrowserRoutes"
+	dormantCompositionCall = "registerBrowserStandaloneRoutes"
+)
 
 // TestRetiredBrowserRegistrarsAreNeverCalled scans the production tree and
 // fails on any callsite of the retired browser route installers outside the

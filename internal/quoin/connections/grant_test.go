@@ -31,9 +31,6 @@ func grantFixture(t *testing.T) (*connections.Service, *sql.DB, int64, int64, st
 	}
 	// Register a confirmed plinth slot (the dispatch fence requires it),
 	// then bind through the real stream-attach path.
-	if err := registerPlinthSlot(database); err != nil {
-		t.Fatal(err)
-	}
 	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-grant", 7, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("fixture bind failed: %v %v", err, ok)
@@ -194,22 +191,6 @@ func TestCreateCommandReplay(t *testing.T) {
 	}
 }
 
-func registerPlinthSlot(database *sql.DB) error {
-	if _, err := database.Exec(`INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, "2026-01-01T00:00:00Z"); err != nil {
-		return err
-	}
-	cred, err := database.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
-	if err != nil {
-		return err
-	}
-	credID, err := cred.LastInsertId()
-	if err != nil {
-		return err
-	}
-	_, err = database.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credID)
-	return err
-}
-
 func grantFixtureLight(t *testing.T) (*connections.Service, *sql.DB, int64, int64) {
 	t.Helper()
 	service, database, _ := newService(t)
@@ -237,10 +218,6 @@ func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 	}
 	if state != "Queued" || runtimeSlot.Valid {
 		t.Fatalf("expected unbound Queued attempt, got %s/%v", state, runtimeSlot)
-	}
-	// Register the slot so the dispatch fence accepts the bind.
-	if err := registerPlinthSlot(database); err != nil {
-		t.Fatal(err)
 	}
 	// The stream attach path binds and returns the dispatch tuple.
 	bound, grantID, snapshot, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-late", 3, 5*time.Minute)
@@ -289,9 +266,6 @@ func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
 	input.Name = "rotate-thanos"
 	summary, err := service.Create(ctx, input, 1, "cmd-rotate-create")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registerPlinthSlot(database); err != nil {
 		t.Fatal(err)
 	}
 	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)

@@ -26,7 +26,6 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
 	jsonschema "github.com/eino-contrib/jsonschema"
-	"google.golang.org/grpc/metadata"
 )
 
 // Contract is the frozen chat contract of one attempt (ARCH-AGENT-003).
@@ -436,16 +435,12 @@ func isContextOverflow(apiErr *openai.APIError) bool {
 		strings.Contains(code, "context_length")
 }
 
-// fetchGrant resolves the attempt-scoped credential over the authenticated
-// channel (RUNTIME-GRANT-001).
+// fetchGrant resolves the attempt-scoped credential over the
+// mTLS-authenticated channel (RUNTIME-GRANT-001, ADR-0009).
 func (executor *Executor) fetchGrant(ctx context.Context, grantID, attemptID int64) (string, error) {
-	bearer, err := executor.Channel.BearerToken()
-	if err != nil {
-		return "", err
-	}
 	grantCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	reply, err := executor.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	reply, err := executor.Client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId: grantID, AttemptId: attemptID, BootId: executor.Binding.BootID, ConnectionEpoch: executor.Binding.Epoch,
 	})
 	if err != nil {

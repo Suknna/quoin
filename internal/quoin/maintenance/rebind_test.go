@@ -326,7 +326,7 @@ func TestRootKeyRebindRejectsTamperedReplacementVerifier(t *testing.T) {
 func rebindFixture(t *testing.T) (contract.QuoinConfig, []byte, *bootstrap.Database) {
 	t.Helper()
 	root := t.TempDir()
-	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), RootKeyFile: filepath.Join(root, "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "tls.key"), SteleServiceTokenFile: filepath.Join(root, "stele")}
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), RootKeyFile: filepath.Join(root, "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "tls.key"), RuntimeClientCAFile: filepath.Join(root, "stele")}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}

@@ -72,10 +72,7 @@ func newReconcileFixture(t *testing.T) (*sql.DB, *RuntimeService, func() []*runt
 	mustExec(t, db, `UPDATE tool_calls SET status='running',started_at=?,row_version=row_version+1 WHERE id=1`, now)
 
 	var sent []*runtimev1.ControlEnvelope
-	slots := qruntime.NewService(db)
-	if err := slots.SetReader(reader); err != nil {
-		t.Fatal(err)
-	}
+	slots := qruntime.NewService()
 	slots.AttachStream(qruntime.SlotPlinth, "plinth-boot", 1)
 	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 7)
 	analyses := analysis.NewService(db)

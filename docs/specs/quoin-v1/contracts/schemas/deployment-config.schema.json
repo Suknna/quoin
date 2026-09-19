@@ -208,7 +208,7 @@
         "rootKeyFile",
         "runtimeTlsCertificateFile",
         "runtimeTlsPrivateKeyFile",
-        "steleServiceTokenFile"
+        "runtimeClientCaFile"
       ],
       "properties": {
         "component": {
@@ -232,9 +232,6 @@
         "runtimeTlsPrivateKeyFile": {
           "$ref": "#/$defs/absolutePath"
         },
-        "steleServiceTokenFile": {
-          "$ref": "#/$defs/absolutePath"
-        },
         "stelePublicURL": {
           "$ref": "#/$defs/stelePublicURL"
         },
@@ -250,6 +247,10 @@
         },
         "audit": {
           "$ref": "#/$defs/quoinAudit"
+        },
+        "runtimeClientCaFile": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "签发客户端证书的部署 CA 证书（runtime-ca.pem）；Runtime gRPC 监听以它校验 mTLS 客户端证书。"
         }
       }
     },
@@ -548,7 +549,9 @@
         "stateDirectory",
         "workspaceDirectory",
         "quoinRuntimeEndpoint",
-        "quoinRuntimeCaFile"
+        "quoinRuntimeCaFile",
+        "quoinRuntimeClientCertificateFile",
+        "quoinRuntimeClientPrivateKeyFile"
       ],
       "properties": {
         "component": {
@@ -569,6 +572,14 @@
         "enabledPlugins": {
           "$ref": "#/$defs/enabledPlugins",
           "description": "必须与 quoinConfig.enabledPlugins 保持同一部署输入一致。Plinth 不按本字段渲染目录：worker 从 attempt 冻结输入快照内嵌的工具目录渲染，Quoin 在 BeginModelCall 校验摘要；本字段是部署一致性声明，实际目录传输不经此字段。"
+        },
+        "quoinRuntimeClientCertificateFile": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "部署 CA 签发的 Plinth 客户端证书（CN=plinth）；mTLS 身份，替代已退役的注册令牌（ADR-0009）。"
+        },
+        "quoinRuntimeClientPrivateKeyFile": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "Plinth 客户端证书私钥；只读挂载的部署 Secret。"
         }
       }
     },
@@ -617,7 +628,8 @@
         "component",
         "quoinRuntimeEndpoint",
         "quoinRuntimeCaFile",
-        "serviceTokenFile"
+        "quoinRuntimeClientCertificateFile",
+        "quoinRuntimeClientPrivateKeyFile"
       ],
       "properties": {
         "component": {
@@ -629,8 +641,13 @@
         "quoinRuntimeCaFile": {
           "$ref": "#/$defs/absolutePath"
         },
-        "serviceTokenFile": {
-          "$ref": "#/$defs/absolutePath"
+        "quoinRuntimeClientCertificateFile": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "部署 CA 签发的 Stele 客户端证书（CN=stele）；mTLS 身份，替代已退役的 service token（ADR-0009）。"
+        },
+        "quoinRuntimeClientPrivateKeyFile": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "Stele 客户端证书私钥；只读挂载的部署 Secret。"
         }
       }
     }

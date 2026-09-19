@@ -63,17 +63,6 @@ func roundtripHarness(t *testing.T) (*observation.Service, func(commandID string
 	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('plinth',1,?,?,?,1)`, make([]byte, 32), now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := credential.LastInsertId()
-	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='plinth'`, credentialID); err != nil {
-		t.Fatal(err)
-	}
 	// An isolated but identical discovery catalog keeps the roundtrip focused
 	// on the wire shape rather than the shared catalog's tool-schema churn.
 	registry := plugins.NewRegistry()

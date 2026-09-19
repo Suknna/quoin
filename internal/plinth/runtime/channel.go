@@ -1,8 +1,9 @@
 // Package runtime implements Plinth's outbound Runtime channel (T06): the
-// attached-stdin one-time registration subcommand, atomic long-term token
-// persistence on the 0600 state volume, and the outbound Connect control
-// loop with Hello handshake and heartbeats. Readiness stays strict: the ops
-// endpoint flips to ready only after a Quoin-accepted handshake.
+// mTLS-authenticated outbound Connect control loop with Hello handshake and
+// heartbeats. Component identity is the deployment CA-signed client
+// certificate (ADR-0009); there is no registration or long-term token state.
+// Readiness stays strict: the ops endpoint flips to ready only after a
+// Quoin-accepted handshake.
 package runtime
 
 import (
@@ -11,7 +12,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,20 +28,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
 
-// State file layout on the state volume: token.json (0600) holds the
-// long-term bearer and its generation; boot.json identifies this process
-// boot. The file is written atomically (temp + rename) so a crash never
-// leaves a partial token (RUNTIME-REG-002 supervisor duty).
-type stateFile struct {
-	Slot          string `json:"slot"`
-	Generation    int64  `json:"generation"`
-	LongTermToken string `json:"longTermToken"`
-}
-
+// bootFile identifies this process boot on the state volume.
 type bootFile struct {
 	BootID string `json:"bootId"`
 }
@@ -108,7 +98,12 @@ type ChannelConfig struct {
 	Slot               string // "plinth"
 	QuoinEndpoint      string
 	QuoinRuntimeCAFile string
-	StateDirectory     string
+	// QuoinRuntimeClientCertificateFile / QuoinRuntimeClientPrivateKeyFile are
+	// the deployment CA-signed client identity (CN=plinth) presented during
+	// the mTLS handshake (ADR-0009).
+	QuoinRuntimeClientCertificateFile string
+	QuoinRuntimeClientPrivateKeyFile  string
+	StateDirectory                    string
 	// CatalogDigest/catalogVersion stay empty for plinth (RUNTIME-CTRL-010).
 }
 
@@ -124,128 +119,22 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 	}, nil
 }
 
-func (channel *Channel) tokenPath() string {
-	return filepath.Join(channel.Config.StateDirectory, "runtime-token.json")
-}
 func (channel *Channel) bootPath() string {
 	return filepath.Join(channel.Config.StateDirectory, "runtime-boot.json")
 }
 
-// RunRegister performs the attached-stdin one-time registration: it consumes
-// the registration token from stdin (never argv), calls Register over TLS,
-// and atomically persists the returned long-term token (first registration
-// only; re-running with an existing token file reports the current state).
-func (channel *Channel) RunRegister(ctx context.Context, stdin *os.File, stdout *os.File) error {
-	// Read exactly one line from the attached TTY (bytes never in argv).
-	buffer := make([]byte, 256)
-	total := 0
-	deadline := time.Now().Add(2 * time.Minute)
-	_ = stdin.SetReadDeadline(deadline)
-	for total < len(buffer) {
-		n, err := stdin.Read(buffer[total:])
-		if err != nil {
-			return fmt.Errorf("读取注册令牌（attached stdin）失败: %w", err)
-		}
-		total += n
-		if buffer[total-1] == '\n' || buffer[total-1] == '\r' {
-			break
-		}
-	}
-	tokenText := trimTokenWhitespace(string(buffer[:total]))
-	if tokenText == "" {
-		return errors.New("注册令牌为空")
-	}
-	var parsed struct {
-		Slot       string `json:"slot"`
-		Generation int64  `json:"generation"`
-		Token      string `json:"token"`
-	}
-	if err := json.Unmarshal([]byte(tokenText), &parsed); err != nil {
-		// Also accept a bare token with generation on argv-free stdin line
-		// two; the admin reveal returns {slot,generation,token}.
-		return fmt.Errorf("注册令牌格式必须是 {slot,generation,token} JSON: %w", err)
-	}
-	connection, err := channel.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-	client := runtimev1.NewRuntimeControlClient(connection)
-	response, err := client.Register(metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+parsed.Token)), &runtimev1.RegisterRuntimeRequest{
-		Slot:                runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH,
-		OneTimeToken:        parsed.Token,
-		Generation:          uint64(parsed.Generation),
-		BootId:              channel.bootID,
-		ContractFingerprint: contract.ProtoAuthorityFingerprint,
-	})
-	if err != nil {
-		return fmt.Errorf("注册失败: %w", err)
-	}
-	if err := channel.persist(response.GetLongTermToken(), int64(response.GetGeneration())); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "注册成功：generation=%d。长期 token 已写入状态卷。\n", response.GetGeneration())
-	return nil
-}
-
-func trimTokenWhitespace(value string) string {
-	start, end := 0, len(value)
-	for start < end && (value[start] == ' ' || value[start] == '\n' || value[start] == '\r' || value[start] == '\t') {
-		start++
-	}
-	for end > start && (value[end-1] == ' ' || value[end-1] == '\n' || value[end-1] == '\r' || value[end-1] == '\t') {
-		end--
-	}
-	return value[start:end]
-}
-
-// persist writes the long-term token atomically with 0600 permissions.
-func (channel *Channel) persist(token string, generation int64) error {
-	if err := os.MkdirAll(channel.Config.StateDirectory, 0o700); err != nil {
-		return err
-	}
-	body, err := json.Marshal(stateFile{Slot: channel.Config.Slot, Generation: generation, LongTermToken: token})
-	if err != nil {
-		return err
-	}
-	temp := channel.tokenPath() + ".tmp"
-	if err := os.WriteFile(temp, body, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(temp, channel.tokenPath())
-}
-
-func (channel *Channel) loadToken() (stateFile, error) {
-	var state stateFile
-	body, err := os.ReadFile(channel.tokenPath())
-	if err != nil {
-		return state, err
-	}
-	if err := json.Unmarshal(body, &state); err != nil {
-		return state, err
-	}
-	if state.LongTermToken == "" || state.Generation == 0 {
-		return state, errors.New("状态卷 token 不完整")
-	}
-	return state, nil
-}
-
-// RunConnect keeps the outbound control stream alive: Hello handshake, then
-// heartbeats; rejected handshakes mark readiness unregistered-equivalent and
-// the loop retries with backoff. Task frames arrive with later tickets.
+// RunConnect keeps the outbound control stream alive: mTLS-authenticated dial,
+// Hello handshake, then heartbeats; rejected handshakes flip readiness to
+// dependency-unavailable and the loop retries with backoff. Task frames
+// arrive with later tickets.
 func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Server) error {
-	state, err := channel.loadToken()
-	if err != nil {
-		return fmt.Errorf("尚未注册（读取状态卷失败）: %w", err)
-	}
 	connection, err := channel.dial(ctx)
 	if err != nil {
 		return err
 	}
 	defer connection.Close()
 	client := runtimev1.NewRuntimeControlClient(connection)
-	streamCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+state.LongTermToken))
-	stream, err := client.Connect(streamCtx)
+	stream, err := client.Connect(ctx)
 	if err != nil {
 		return err
 	}
@@ -277,7 +166,7 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	helloAck := ack.GetHelloAck()
 	if helloAck == nil || !helloAck.GetAccepted() {
 		if readiness != nil {
-			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.RuntimeUnregistered})
+			readiness.SetReadiness(sharedops.Readiness{Component: channel.Config.Slot, Release: buildinfo.Release, Mode: "normal", AcceptingWork: false, Reason: sharedops.DependencyUnavailable})
 		}
 		return fmt.Errorf("握手被拒绝: %s", helloAck.GetRejectReason())
 	}
@@ -453,6 +342,10 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read Quoin Runtime CA: %w", err)
 	}
+	clientCert, err := tls.LoadX509KeyPair(channel.Config.QuoinRuntimeClientCertificateFile, channel.Config.QuoinRuntimeClientPrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Plinth client identity: %w", err)
+	}
 	// The generated config carries a full https:// URL; gRPC dial targets
 	// are bare host:port with the TLS identity supplied by the pool below.
 	endpoint := strings.TrimPrefix(strings.TrimPrefix(channel.Config.QuoinEndpoint, "https://"), "http://")
@@ -461,7 +354,10 @@ func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 		return nil, errors.New("Quoin Runtime CA 证书无法解析")
 	}
 	return grpc.NewClient(endpoint,
-		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13,
+			Certificates: []tls.Certificate{clientCert},
+		})),
 		// Dead-stream detection: a network partition that only drops packets
 		// (docker bridge detach) leaves TCP sends buffered forever without
 		// keepalive; the heartbeat failure then breaks the loop quickly and
@@ -564,16 +460,6 @@ func (channel *Channel) waitForTask(attemptID int64) {
 	if task != nil {
 		<-task.done
 	}
-}
-
-// BearerToken returns the current long-term token for RPCs made outside
-// the control stream (FetchCredentialGrant).
-func (channel *Channel) BearerToken() (string, error) {
-	state, err := channel.loadToken()
-	if err != nil {
-		return "", err
-	}
-	return state.LongTermToken, nil
 }
 
 // allocateCorrelation reserves a unique correlation id for one

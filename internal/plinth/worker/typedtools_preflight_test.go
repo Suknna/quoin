@@ -47,10 +47,6 @@ type fetchCountingRuntimeClient struct {
 	denyGrantID int64
 }
 
-func (*fetchCountingRuntimeClient) Register(context.Context, *runtimev1.RegisterRuntimeRequest, ...grpc.CallOption) (*runtimev1.RegisterRuntimeResponse, error) {
-	return nil, fmt.Errorf("Register is not expected in typed tool execution")
-}
-
 func (*fetchCountingRuntimeClient) Connect(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[runtimev1.ControlEnvelope, runtimev1.ControlEnvelope], error) {
 	return nil, fmt.Errorf("Connect is not expected in typed tool execution")
 }

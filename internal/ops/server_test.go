@@ -12,7 +12,7 @@ import (
 )
 
 func TestHealthAndMetricsSurfacesUseFrozenShapes(t *testing.T) {
-	server, err := ops.New("plinth", "127.0.0.1:0", ops.RuntimeUnregistered)
+	server, err := ops.New("plinth", "127.0.0.1:0", ops.DependencyUnavailable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestHealthAndMetricsSurfacesUseFrozenShapes(t *testing.T) {
 	if err := json.Unmarshal(ready.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Component != "plinth" || state.Reason != ops.RuntimeUnregistered || state.AcceptingWork {
+	if state.Component != "plinth" || state.Reason != ops.DependencyUnavailable || state.AcceptingWork {
 		t.Fatalf("unexpected readiness: %+v", state)
 	}
 	metrics := httptest.NewRecorder()

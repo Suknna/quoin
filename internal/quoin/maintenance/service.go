@@ -220,7 +220,7 @@ func (service *Service) exitOn(ctx context.Context, tx *execution.Tx, request Ex
 	if err := tx.QueryRowContext(ctx, `SELECT active,COALESCE(reason,''),row_version FROM maintenance_state WHERE id=1`).Scan(&active, &reason, &current); err != nil {
 		return State{}, execution.Changed, err
 	}
-	if active != 1 || reason != request.ExpectedReason || current != request.ExpectedRowVersion || reason == "LintelRecovery" {
+	if active != 1 || reason != request.ExpectedReason || current != request.ExpectedRowVersion {
 		return State{}, execution.Changed, conflictRejection("maintenance window moved or is not exitable")
 	}
 	var total, blocking int

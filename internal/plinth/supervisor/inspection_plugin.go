@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
-	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -91,13 +90,8 @@ func (supervisor *Supervisor) runInspectionPluginCollection(parent context.Conte
 		supervisor.proposeInspectionPlugin(sink, attemptID, binding, input, "error", nil, []string{"missing config metrics grant"}, "query_failed")
 		return
 	}
-	bearer, err := supervisor.Channel.BearerToken()
-	if err != nil {
-		supervisor.proposeInspectionPlugin(sink, attemptID, binding, input, "error", nil, []string{"runtime credential unavailable"}, "query_failed")
-		return
-	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
 	grantCancel()
 	if err != nil || payload.GetThanos() == nil {
 		supervisor.proposeInspectionPlugin(sink, attemptID, binding, input, "error", nil, []string{"credential grant unavailable"}, "query_failed")

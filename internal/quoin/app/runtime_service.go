@@ -8,9 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/Suknna/quoin/internal/contract"
@@ -30,7 +28,6 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -112,63 +109,18 @@ func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {
 	}
 }
 
-func bearerFromContext(ctx context.Context) string {
-	data, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ""
-	}
-	for _, value := range data["authorization"] {
-		if strings.HasPrefix(value, "Bearer ") {
-			return strings.TrimPrefix(value, "Bearer ")
-		}
-	}
-	return ""
-}
+// Register is retired with the registration era (ADR-0009): component
+// identity is the mTLS client certificate, so there is nothing to exchange.
 
-func registerStatus(err error) error {
-	var registerErr *qruntime.RegisterError
-	if errors.As(err, &registerErr) {
-		switch registerErr.Status {
-		case "INVALID_ARGUMENT":
-			return status.Error(codes.InvalidArgument, registerErr.Detail)
-		case "UNAUTHENTICATED":
-			return status.Error(codes.Unauthenticated, registerErr.Detail)
-		case "FAILED_PRECONDITION":
-			return status.Error(codes.FailedPrecondition, registerErr.Detail)
-		}
-	}
-	return status.Error(codes.Internal, "registration failed")
-}
-
-// Register exchanges a one-time token for a long-term token
-// (RUNTIME-REG-002/003).
-func (service *RuntimeService) Register(ctx context.Context, request *runtimev1.RegisterRuntimeRequest) (*runtimev1.RegisterRuntimeResponse, error) {
-	slot := service.slotName(request.GetSlot())
-	if slot == "" {
-		return nil, status.Error(codes.InvalidArgument, "unsupported slot")
-	}
-	token, generation, err := service.Slots.Register(ctx, slot, request.GetOneTimeToken(), int64(request.GetGeneration()), request.GetBootId(), request.GetContractFingerprint(), contract.ProtoAuthorityFingerprint)
-	if err != nil {
-		return nil, registerStatus(err)
-	}
-	sharedops.LogEvent("quoin", "info", "runtime.registered", "slot="+slot)
-	return &runtimev1.RegisterRuntimeResponse{
-		Slot:          request.GetSlot(),
-		Generation:    uint64(generation),
-		LongTermToken: token,
-	}, nil
-}
-
-// Connect authenticates the bearer, adjudicates the Hello handshake and
-// keeps the transient connection projection alive. T06 implements the
-// handshake/readiness slice of the control stream; task dispatch arrives
-// with later tickets, so after Hello the loop only maintains heartbeats
-// until the stream ends.
+// Connect requires the verified mTLS client identity (CN=plinth), adjudicates
+// the Hello handshake and keeps the transient connection projection alive.
+// T06 implements the handshake/readiness slice of the control stream; task
+// dispatch arrives with later tickets, so after Hello the loop only maintains
+// heartbeats until the stream ends.
 func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectServer) error {
 	ctx := stream.Context()
-	bearer := bearerFromContext(ctx)
-	if bearer == "" {
-		return status.Error(codes.Unauthenticated, "authorization bearer required")
+	if !requireComponentIdentity(ctx, qruntime.SlotPlinth) {
+		return status.Error(codes.Unauthenticated, "plinth client identity required")
 	}
 	// First frame must be Hello (RUNTIME-CTRL-002).
 	first, err := stream.Recv()
@@ -186,7 +138,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if slot == qruntime.SlotLintel && hello.GetBrowserCapacitySlots() == 0 {
 		return status.Error(codes.InvalidArgument, "lintel browser capacity must be positive")
 	}
-	decision, err := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+	decision, err := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "runtime.hello_failed", err.Error())
 		return status.Error(codes.Internal, "handshake failed")
@@ -227,7 +179,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		// Attachment is the second, mutex-protected epoch admission point. Send
 		// the normal rejected HelloAck so a concurrently delayed reconnect keeps
 		// the established reconnect protocol rather than observing a bare EOF.
-		stale, staleErr := service.Slots.Adjudicate(ctx, bearer, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+		stale, staleErr := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
 		if staleErr != nil {
 			return status.Error(codes.Internal, "handshake failed")
 		}
@@ -549,10 +501,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 
 func mapRejectReason(reason string) string {
 	switch reason {
-	case "TOKEN_INVALID":
-		return "HELLO_REJECT_REASON_TOKEN_INVALID"
-	case "SLOT_REVOKED":
-		return "HELLO_REJECT_REASON_SLOT_REVOKED"
 	case "CONTRACT_MISMATCH":
 		return "HELLO_REJECT_REASON_CONTRACT_MISMATCH"
 	case "EPOCH_STALE":

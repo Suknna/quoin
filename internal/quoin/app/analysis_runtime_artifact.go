@@ -42,8 +42,8 @@ func NewArtifactService(slots *qruntime.Service, store *artifact.Store) *artifac
 
 // plinthArtifactFence retains Plinth's supervisor-only text Artifact access.
 func (service *artifactService) plinthArtifactFence(ctx context.Context) error {
-	if !service.Slots.ValidateBearer(ctx, bearerFromContext(ctx), qruntime.SlotPlinth) {
-		return status.Error(codes.Unauthenticated, "plinth runtime bearer required")
+	if !requireComponentIdentity(ctx, qruntime.SlotPlinth) {
+		return status.Error(codes.Unauthenticated, "plinth client identity required")
 	}
 	return nil
 }
@@ -56,9 +56,8 @@ func (service *artifactService) uploadRuntimeSlot(ctx context.Context, header *r
 	if header == nil || header.GetBootId() == "" || header.GetConnectionEpoch() == 0 {
 		return "", status.Error(codes.Unauthenticated, "live runtime stream fence required")
 	}
-	bearer := bearerFromContext(ctx)
 	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
-		if !service.Slots.ValidateBearer(ctx, bearer, slot) {
+		if !requireComponentIdentity(ctx, slot) {
 			continue
 		}
 		// A long-lived bearer alone does not authorize data-plane writes. The

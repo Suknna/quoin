@@ -38,7 +38,7 @@ func newService(t *testing.T) (*connections.Service, *sql.DB, string) {
 		RootKeyFile:               filepath.Join(root, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "tls.key"),
-		SteleServiceTokenFile:     filepath.Join(root, "stele"),
+		RuntimeClientCAFile:     filepath.Join(root, "stele"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -144,9 +144,6 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 	// Decrypt through the actual supervisor grant path: bind the probe to a
 	// live stream, then fulfill the frozen grant — the only audited operation
 	// by which a sealed secret leaves storage.
-	if err := registerPlinthSlot(db); err != nil {
-		t.Fatal(err)
-	}
 	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -197,9 +194,6 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 		NonSecretJSON: projection, Secret: secret, SecretPresent: true,
 	}, 1, "cmd-chat-only-provider")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registerPlinthSlot(database); err != nil {
 		t.Fatal(err)
 	}
 	attemptID, err := service.StartProbe(ctx, provider.Name, nil, nil)
@@ -325,17 +319,6 @@ func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 func passedMetricsProbe(t *testing.T, service *connections.Service, database *sql.DB, summary connections.Summary, boot string, epoch uint64) int64 {
 	t.Helper()
 	ctx := adminContext(t, nextCorrelation())
-	// The shared fixture registers Plinth once; repeated qualifying probes use
-	// the same slot and only advance their independent attempt bindings.
-	var registered int
-	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_slots WHERE slot='plinth' AND state='registered'`).Scan(&registered); err != nil {
-		t.Fatal(err)
-	}
-	if registered == 0 {
-		if err := registerPlinthSlot(database); err != nil {
-			t.Fatal(err)
-		}
-	}
 	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +380,7 @@ func TestRotationRequiresAndAcceptsFreshExactProbe(t *testing.T) {
 }
 
 func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {
-	service, database, _ := newService(t)
+	service, _, _ := newService(t)
 	ctx := adminContext(t, nextCorrelation())
 	projection, _ := json.Marshal(map[string]any{"type": "kubernetes", "defaultNamespace": "ops"})
 	// Missing kubeconfig: deterministic rejection.
@@ -414,9 +397,6 @@ func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {
 	secret, _ := json.Marshal(map[string]string{"type": "kubernetes", "kubeconfig": "apiVersion: v1\nkind: Config\n"})
 	created, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: projection, Secret: secret, SecretPresent: true}, 1, "cmd-"+fmt.Sprint(seq.Next()))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registerPlinthSlot(database); err != nil {
 		t.Fatal(err)
 	}
 	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)

@@ -25,7 +25,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 		RootKeyFile:               filepath.Join(root, "secrets", "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "secrets", "runtime.key"),
-		SteleServiceTokenFile:     filepath.Join(root, "secrets", "stele"),
+		RuntimeClientCAFile:     filepath.Join(root, "secrets", "stele"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -39,10 +39,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 	// Pure reads (slot View, alert snapshot and change log) fail closed until
 	// the bootstrap's real read-only pool is wired into both services; alerts
 	// has no post-construction setter, so it assembles with the pool directly.
-	slots := qruntime.NewService(database.SQL)
-	if err := slots.SetReader(database.Reader); err != nil {
-		t.Fatal(err)
-	}
+	slots := qruntime.NewService()
 	alertService, err := alerts.NewServiceWithReader(database.SQL, database.Reader, execution.NewRunner(database.SQL, execution.NewRegistry(), nil))
 	if err != nil {
 		t.Fatal(err)

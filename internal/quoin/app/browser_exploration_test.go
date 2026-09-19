@@ -296,10 +296,7 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 		sent = nil
 		sentMu.Unlock()
 	}
-	slots := qruntime.NewService(db)
-	if err := slots.SetReader(reader); err != nil {
-		t.Fatal(err)
-	}
+	slots := qruntime.NewService()
 	slots.AttachStream(qruntime.SlotPlinth, "plinth-boot", 1)
 	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 7)
 	analyses := analysis.NewService(db)
@@ -817,7 +814,6 @@ func runBrowserExplorationTerminalScenario(t *testing.T, scenario string) {
 			service.handleBrowserExplorationActionResult(ctx, &runtimev1.ControlEnvelope{BootId: "lintel-boot", ConnectionEpoch: 7}, closed)
 			crashDigest := sha256.Sum256([]byte("late crash completion"))
 			service.handleBrowserCompletion(ctx, &runtimev1.ControlEnvelope{BootId: "lintel-boot", ConnectionEpoch: 7}, &runtimev1.CompleteBrowserOperation{OperationId: 2, Outcome: runtimev1.BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_FAILED, TerminalReason: runtimev1.BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED, ResultDigest: crashDigest[:], TraceDigest: crashTrace[:], TraceArtifactId: crashTraceID, TraceIntegrity: runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_INCOMPLETE, EndedAt: timestamppb.Now()})
-			var state string
 			var traceID int64
 			if err := db.QueryRow(`SELECT state,trace_artifact_id FROM browser_operations WHERE id=2`).Scan(&state, &traceID); err != nil {
 				t.Fatalf("load terminal operation after late crash: %v", err)
@@ -1121,8 +1117,8 @@ func waitForBrowserAction(t *testing.T, db *sql.DB, childID int64) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		var state string
 		var count int
+		var state string
 		mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, childID)
 		mustQuery(t, db, `SELECT COUNT(*) FROM browser_exploration_actions WHERE child_attempt_id=?`, &count, childID)
 		if state == "Running" && count == 1 {
@@ -1204,20 +1200,6 @@ func seedQualifiedModelProvider(t *testing.T, ctx context.Context, db *sql.DB, r
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, db, `INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now)
-	result := mustExecResult(t, db, `INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), now, now)
-	credentialID, err := result.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustExec(t, db, `UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credentialID)
-	mustExec(t, db, `INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('lintel','unregistered',1,?)`, now)
-	lintelCredential := mustExecResult(t, db, `INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('lintel',1,?,?,?)`, make([]byte, 32), now, now)
-	lintelCredentialID, err := lintelCredential.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustExec(t, db, `UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='lintel'`, lintelCredentialID)
 	probeID, err := service.StartProbe(ctx, summary.Name, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1285,7 +1267,7 @@ func browserAdminContext(t *testing.T) context.Context {
 func newBrowserExplorationFixture(t *testing.T, ctx context.Context) (*sql.DB, audit.Reader, string) {
 	t.Helper()
 	root := t.TempDir()
-	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: root + "/data", BackupDirectory: root + "/backup", RootKeyFile: root + "/secrets/root-key", RuntimeTLSCertificateFile: root + "/secrets/runtime.crt", RuntimeTLSPrivateKeyFile: root + "/secrets/runtime.key", SteleServiceTokenFile: root + "/secrets/stele-token"}
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: root + "/data", BackupDirectory: root + "/backup", RootKeyFile: root + "/secrets/root-key", RuntimeTLSCertificateFile: root + "/secrets/runtime.crt", RuntimeTLSPrivateKeyFile: root + "/secrets/runtime.key", RuntimeClientCAFile: root + "/secrets/stele-token"}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}

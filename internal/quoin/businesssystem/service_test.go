@@ -110,9 +110,7 @@ func newHarness(t *testing.T) *harness {
 	if _, err := db.Exec(`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'businesssystem-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	seedPlinthRuntime(t, db, now)
 	seedThanosExecutionPath(t, db, now)
-	seedLintelRuntime(t, db, now)
 	systems := NewService(db)
 	// Verification history/evidence reads serve the trusted read-only pool.
 	reader := readOnlyFixturePool(t, db)
@@ -209,36 +207,6 @@ func businessSystemAdminContext(t *testing.T) context.Context {
 		t.Fatal(err)
 	}
 	return ctx
-}
-
-func seedLintelRuntime(t *testing.T, db *sql.DB, now string) {
-	t.Helper()
-	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('lintel','unregistered',1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('lintel',1,?,?,?,1)`, make([]byte, 32), now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := credential.LastInsertId()
-	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='lintel'`, credentialID); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func seedPlinthRuntime(t *testing.T, db *sql.DB, now string) {
-	t.Helper()
-	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES('plinth',1,?,?,?,1)`, make([]byte, 32), now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := credential.LastInsertId()
-	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot='plinth'`, credentialID); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // mustUpload recreates the retired upload's persisted historical state with

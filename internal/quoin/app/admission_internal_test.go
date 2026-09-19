@@ -56,7 +56,7 @@ func newAdmissionTestServer(t *testing.T) (*apiServer, *auth.Service, *stubSende
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:     filepath.Join(secrets, "stele-service-token"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)

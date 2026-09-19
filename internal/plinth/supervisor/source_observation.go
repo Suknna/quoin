@@ -22,10 +22,9 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
+	"github.com/Suknna/quoin/internal/plinth/worker"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/plugins/builtin"
-	"github.com/Suknna/quoin/internal/plinth/worker"
-	"google.golang.org/grpc/metadata"
 )
 
 // sourceObservationExecutionSchemaKind is the frozen input schema the Quoin
@@ -257,13 +256,8 @@ func (supervisor *Supervisor) runSourceObservation(parent context.Context, sink 
 		supervisor.proposeSourceObservation(sink, attemptID, binding, input, "error", nil, []string{"missing source observation grant"}, "query_failed")
 		return
 	}
-	bearer, err := supervisor.Channel.BearerToken()
-	if err != nil {
-		supervisor.proposeSourceObservation(sink, attemptID, binding, input, "error", nil, []string{"runtime credential unavailable"}, "query_failed")
-		return
-	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
 	grantCancel()
 	if err != nil || payload.GetThanos() == nil {
 		supervisor.proposeSourceObservation(sink, attemptID, binding, input, "error", nil, []string{"credential grant unavailable"}, "query_failed")

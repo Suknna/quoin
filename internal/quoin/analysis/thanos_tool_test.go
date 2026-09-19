@@ -79,23 +79,6 @@ func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) 
 	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO runtime_slots(slot,state,row_version,created_at) VALUES('plinth','unregistered',1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	var state string
-	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&state); err != nil {
-		t.Fatal(err)
-	}
-	if state == "unregistered" {
-		credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,confirmed_at,created_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), now, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		credentialID, _ := credential.LastInsertId()
-		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credentialID); err != nil {
-			t.Fatal(err)
-		}
-	}
 	connections.ProbeContractSource = func() string { return "analysis-test-probe-contract-v1" }
 	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
 		t.Fatal(err)

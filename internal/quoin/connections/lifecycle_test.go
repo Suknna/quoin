@@ -51,9 +51,6 @@ func runningProbeFixture(t *testing.T, name string) (*connections.Service, *sql.
 	service, database, _ := newService(t)
 	correlation := nextCorrelation()
 	ctx := adminContext(t, correlation)
-	if err := registerPlinthSlot(database); err != nil {
-		t.Fatal(err)
-	}
 	config, _ := json.Marshal(map[string]any{"type": "model_provider", "baseUrl": "https://api.example.com", "chatModelId": "lifecycle-chat", "contextBudgetTokens": 1024, "maxOutputTokens": 256})
 	secret, _ := json.Marshal(map[string]string{"type": "model_provider", "apiKey": "lifecycle-api-key"})
 	created, err := service.Create(ctx, connections.CreateInput{Name: name, Type: connections.TypeModelProvider, NonSecretJSON: config, Secret: secret, SecretPresent: true}, 1, "cmd-"+name)

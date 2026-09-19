@@ -171,6 +171,6 @@ func boundaryConfig(t *testing.T) contract.QuoinConfig {
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		SteleServiceTokenFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:     filepath.Join(secrets, "runtime-ca.pem"),
 	}
 }

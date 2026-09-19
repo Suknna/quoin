@@ -16,7 +16,7 @@ backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/secrets/root-key
 runtimeTlsCertificateFile: /run/secrets/runtime-tls.crt
 runtimeTlsPrivateKeyFile: /run/secrets/runtime-tls.key
-steleServiceTokenFile: /run/secrets/stele-token
+runtimeClientCaFile: /run/secrets/runtime-ca.pem
 stelePublicURL: https://quoin.example.com/stele/alerts
 `
 
@@ -140,6 +140,8 @@ stateDirectory: /var/lib/plinth/state
 workspaceDirectory: /var/lib/plinth/workspaces
 quoinRuntimeEndpoint: https://quoin.example.com:8443
 quoinRuntimeCaFile: /run/secrets/quoin-runtime-ca.crt
+quoinRuntimeClientCertificateFile: /run/secrets/plinth-client.crt
+quoinRuntimeClientPrivateKeyFile: /run/secrets/plinth-client.key
 enabledPlugins: [browser]
 `
 

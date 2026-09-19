@@ -145,7 +145,7 @@ backupDirectory: %s
 rootKeyFile: %s
 runtimeTlsCertificateFile: %s
 runtimeTlsPrivateKeyFile: %s
-steleServiceTokenFile: %s
+runtimeClientCaFile: %s
 `, dataDirectory, filepath.Join(root, "backups"), rootKeyFile, filepath.Join(secrets, "runtime.crt"), filepath.Join(secrets, "runtime.key"), filepath.Join(secrets, "stele"))
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)

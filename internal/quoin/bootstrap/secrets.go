@@ -62,24 +62,35 @@ func BootstrapSecrets(config contract.QuoinConfig) (bool, error) {
 
 func generateSecrets(config contract.QuoinConfig) error {
 	rootKey := make([]byte, 32)
-	steleToken := make([]byte, 32)
 	if _, err := randomRead(rootKey); err != nil {
 		return fmt.Errorf("generate root key: %w", err)
 	}
-	if _, err := randomRead(steleToken); err != nil {
-		return fmt.Errorf("generate Stele token: %w", err)
+	caCert, caKeyPEM, serverCert, serverKey, err := generateRuntimeTLS()
+	if err != nil {
+		return err
 	}
-	caCert, caKey, serverCert, serverKey, err := generateRuntimeTLS()
+	caKey, err := parsePrivateKey(caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("parse Runtime CA key: %w", err)
+	}
+	steleCert, steleKey, err := generateClientCertificate(caCert, caKey, "stele")
+	if err != nil {
+		return err
+	}
+	plinthCert, plinthKey, err := generateClientCertificate(caCert, caKey, "plinth")
 	if err != nil {
 		return err
 	}
 	files := map[string][]byte{
-		config.RootKeyFile:                                                rootKey,
-		config.SteleServiceTokenFile:                                      steleToken,
-		config.RuntimeTLSCertificateFile:                                  serverCert,
-		config.RuntimeTLSPrivateKeyFile:                                   serverKey,
-		filepath.Join(filepath.Dir(config.RootKeyFile), "runtime-ca.pem"): caCert,
-		filepath.Join(filepath.Dir(config.RootKeyFile), "runtime-ca.key"): caKey,
+		config.RootKeyFile:                                                   rootKey,
+		config.RuntimeTLSCertificateFile:                                     serverCert,
+		config.RuntimeTLSPrivateKeyFile:                                      serverKey,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "runtime-ca.pem"):    caCert,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "runtime-ca.key"):    caKeyPEM,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "stele-client.crt"):  steleCert,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "stele-client.key"):  steleKey,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "plinth-client.crt"): plinthCert,
+		filepath.Join(filepath.Dir(config.RootKeyFile), "plinth-client.key"): plinthKey,
 	}
 	created := make([]string, 0, len(files))
 	for path, content := range files {
@@ -102,18 +113,64 @@ func generateSecrets(config contract.QuoinConfig) error {
 	return validateSecrets(config)
 }
 
-func validateSecrets(config contract.QuoinConfig) error {
-	for _, item := range []struct {
-		path string
-		size int
-	}{{config.RootKeyFile, 32}, {config.SteleServiceTokenFile, 32}} {
-		info, err := os.Lstat(item.path)
+// IssueClientCertificates signs the Stele and Plinth client certificates from
+// the deployment's existing Runtime CA. It serves two operators: deployments
+// upgrading from the registration-era secret set (which lacks client
+// certificates) and deliberate credential rotation. Existing files are only
+// replaced with --force.
+func IssueClientCertificates(config contract.QuoinConfig, force bool) error {
+	dir := filepath.Dir(config.RootKeyFile)
+	caCert, err := os.ReadFile(filepath.Join(dir, "runtime-ca.pem"))
+	if err != nil {
+		return fmt.Errorf("read Runtime CA: %w", err)
+	}
+	caKeyPEM, err := os.ReadFile(filepath.Join(dir, "runtime-ca.key"))
+	if err != nil {
+		return fmt.Errorf("read Runtime CA key: %w", err)
+	}
+	caKey, err := parsePrivateKey(caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("parse Runtime CA key: %w", err)
+	}
+	if !force {
+		for _, name := range []string{"stele-client.crt", "plinth-client.crt"} {
+			if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+				return fmt.Errorf("client certificate %s already exists; pass --force to replace it", name)
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	files := map[string][]byte{}
+	for _, component := range []string{"stele", "plinth"} {
+		certPEM, keyPEM, err := generateClientCertificate(caCert, caKey, component)
 		if err != nil {
-			return fmt.Errorf("read existing secret state: %w", err)
+			return err
 		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != int64(item.size) {
-			return fmt.Errorf("secret file %s has invalid type, mode, or length", filepath.Base(item.path))
+		files[filepath.Join(dir, component+"-client.crt")] = certPEM
+		files[filepath.Join(dir, component+"-client.key")] = keyPEM
+	}
+	for path, content := range files {
+		if force {
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				return fmt.Errorf("replace client certificate %s: %w", filepath.Base(path), err)
+			}
+			continue
 		}
+		if err := writeExclusive(path, content); err != nil {
+			return err
+		}
+	}
+	return validateSecrets(config)
+}
+
+func validateSecrets(config contract.QuoinConfig) error {
+	info, err := os.Lstat(config.RootKeyFile)
+	if err != nil {
+		return fmt.Errorf("read existing secret state: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 32 {
+		return fmt.Errorf("secret file %s has invalid type, mode, or length", filepath.Base(config.RootKeyFile))
 	}
 	certPEM, err := os.ReadFile(config.RuntimeTLSCertificateFile)
 	if err != nil {
@@ -132,6 +189,27 @@ func validateSecrets(config contract.QuoinConfig) error {
 	}
 	if block, _ := pem.Decode(caPEM); block == nil || block.Type != "CERTIFICATE" {
 		return fmt.Errorf("Runtime CA is not a PEM certificate")
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("Runtime CA certificate cannot be parsed")
+	}
+	dir := filepath.Dir(config.RootKeyFile)
+	for _, component := range []string{"stele", "plinth"} {
+		clientCert, err := tls.LoadX509KeyPair(filepath.Join(dir, component+"-client.crt"), filepath.Join(dir, component+"-client.key"))
+		if err != nil {
+			return fmt.Errorf("validate %s client identity: %w", component, err)
+		}
+		leaf, err := x509.ParseCertificate(clientCert.Certificate[0])
+		if err != nil {
+			return err
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: caPool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+			return fmt.Errorf("%s client certificate is not signed by the Runtime CA: %w", component, err)
+		}
+		if leaf.Subject.CommonName != component {
+			return fmt.Errorf("%s client certificate has CN %q, want %q", component, leaf.Subject.CommonName, component)
+		}
 	}
 	return nil
 }
@@ -188,6 +266,61 @@ func generateRuntimeTLS() ([]byte, []byte, []byte, []byte, error) {
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: serverKeyDER}), nil
 }
 
+// generateClientCertificate signs one component client certificate (CN =
+// component) with the deployment Runtime CA. Client identity is long-lived
+// deployment material (ADR-0009): validity matches the CA and rotation is the
+// explicit `quoin secrets issue-client-certs --force` operation.
+func generateClientCertificate(caPEM []byte, caKey *ecdsa.PrivateKey, commonName string) ([]byte, []byte, error) {
+	caBlock, _ := pem.Decode(caPEM)
+	if caBlock == nil {
+		return nil, nil, fmt.Errorf("parse Runtime CA certificate")
+	}
+	caCertificate, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now().UTC()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate %s client key: %w", commonName, err)
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate %s client serial: %w", commonName, err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: commonName},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(10, 0, 0),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCertificate, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+func parsePrivateKey(pemBytes []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	ecdsaKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("key is %T, want ECDSA", key)
+	}
+	return ecdsaKey, nil
+}
+
 func writeExclusive(path string, content []byte) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -215,8 +348,12 @@ func writeExclusive(path string, content []byte) error {
 
 func secretPaths(config contract.QuoinConfig) []string {
 	dir := filepath.Dir(config.RootKeyFile)
-	return []string{config.RootKeyFile, config.SteleServiceTokenFile, config.RuntimeTLSCertificateFile,
-		config.RuntimeTLSPrivateKeyFile, filepath.Join(dir, "runtime-ca.pem"), filepath.Join(dir, "runtime-ca.key")}
+	return []string{
+		config.RootKeyFile, config.RuntimeTLSCertificateFile,
+		config.RuntimeTLSPrivateKeyFile, filepath.Join(dir, "runtime-ca.pem"), filepath.Join(dir, "runtime-ca.key"),
+		filepath.Join(dir, "stele-client.crt"), filepath.Join(dir, "stele-client.key"),
+		filepath.Join(dir, "plinth-client.crt"), filepath.Join(dir, "plinth-client.key"),
+	}
 }
 
 func regularNonempty(path string) bool {

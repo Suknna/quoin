@@ -89,23 +89,6 @@ func seedToolOwner(t *testing.T, db *sql.DB) (attemptID, toolCallID int64) {
 	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?, current_credential_generation_id=?, row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
 		t.Fatal(err)
 	}
-	var slotState string
-	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&slotState); err != nil {
-		if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,created_at) VALUES('plinth','unregistered',?)`, now); err != nil {
-			t.Fatal(err)
-		}
-		slotState = "unregistered"
-	}
-	if slotState == "unregistered" {
-		runtimeCredential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at) VALUES('plinth',1,?,?,?)`, []byte(strings.Repeat("0", 32)), now, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runtimeCredentialID, _ := runtimeCredential.LastInsertId()
-		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth' AND state='unregistered'`, runtimeCredentialID); err != nil {
-			t.Fatal(err)
-		}
-	}
 	attempt, err := db.Exec(`INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,created_at) VALUES('connection_probe','connection',?,'Queued','test',?)`, connectionID, now)
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +280,7 @@ func TestUploadReadGrepFences(t *testing.T) {
 func TestLintelBrowserArtifactOwnerClosure(t *testing.T) {
 	db, store := newTestStore(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TRIGGER trg_browser_operations_insert_closure; DROP TRIGGER trg_browser_exploration_actions_closure; DROP TRIGGER trg_browser_exploration_parent_tool; DROP TRIGGER trg_execution_attempts_insert_queued; DROP TRIGGER trg_execution_attempts_slot_registered`); err != nil {
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TRIGGER trg_browser_operations_insert_closure; DROP TRIGGER trg_browser_exploration_actions_closure; DROP TRIGGER trg_browser_exploration_parent_tool; DROP TRIGGER trg_execution_attempts_insert_queued`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO investigations(id,created_by,created_at) VALUES(1,1,?)`, now); err != nil {

@@ -26,18 +26,17 @@ func Run(ctx context.Context, configPath string) error {
 	if _, err := os.ReadFile(config.QuoinRuntimeCAFile); err != nil {
 		return fmt.Errorf("read Quoin Runtime CA: %w", err)
 	}
-	token, err := os.ReadFile(config.ServiceTokenFile)
-	if err != nil {
-		return fmt.Errorf("read Stele service token: %w", err)
+	if _, err := os.Stat(config.QuoinRuntimeClientCertificateFile); err != nil {
+		return fmt.Errorf("read Stele client certificate: %w", err)
 	}
-	if len(token) != 32 {
-		return fmt.Errorf("Stele service token must contain exactly 32 bytes")
+	if _, err := os.Stat(config.QuoinRuntimeClientPrivateKeyFile); err != nil {
+		return fmt.Errorf("read Stele client private key: %w", err)
 	}
 	server, err := sharedops.New("stele", ":9090", sharedops.DependencyUnavailable)
 	if err != nil {
 		return err
 	}
-	relay, err := stele.NewRelay(config.QuoinRuntimeEndpoint, config.QuoinRuntimeCAFile, config.ServiceTokenFile)
+	relay, err := stele.NewRelay(config.QuoinRuntimeEndpoint, config.QuoinRuntimeCAFile, config.QuoinRuntimeClientCertificateFile, config.QuoinRuntimeClientPrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("connect Quoin Runtime: %w", err)
 	}

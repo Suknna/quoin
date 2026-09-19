@@ -23,7 +23,6 @@ const (
 	Starting              Reason = "starting"
 	DependencyUnavailable Reason = "dependency_unavailable"
 	StorageUnavailable    Reason = "storage_unavailable"
-	RuntimeUnregistered   Reason = "runtime_unregistered"
 	Maintenance           Reason = "maintenance"
 	Draining              Reason = "draining"
 )
@@ -291,7 +290,7 @@ func (server *Server) SetMaintenanceReason(reason string, active bool) {
 	}
 	value := float64(boolValue(active))
 	if reason == "" {
-		for _, candidate := range []string{"restore", "root_key_rebind", "upgrade", "lintel_recovery"} {
+		for _, candidate := range []string{"restore", "root_key_rebind", "upgrade"} {
 			vec.WithLabelValues(candidate).Set(0)
 		}
 		return
@@ -305,8 +304,6 @@ func maintenanceReasonLabel(reason string) string {
 		return "restore"
 	case "RootKeyRebind":
 		return "root_key_rebind"
-	case "LintelRecovery":
-		return "lintel_recovery"
 	default:
 		return "upgrade"
 	}

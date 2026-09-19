@@ -1,4 +1,6 @@
 component: stele
 quoinRuntimeEndpoint: https://quoin:8443
 quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
-serviceTokenFile: /run/quoin-secrets/stele-service-token
+# mTLS client identity (CN=stele) signed by the deployment CA (ADR-0009).
+quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
+quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key

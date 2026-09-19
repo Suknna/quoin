@@ -10,18 +10,12 @@ import (
 	"github.com/Suknna/quoin/internal/plinth/worker"
 )
 
-// main dispatches the one-shot `register` subcommand (attached-stdin
-// one-time registration), the per-attempt `worker` subcommand (spawned by
-// the supervisor, ARCH-WORKER-001) and the long-lived serve path. The
-// subcommand may appear before flags, so parsing restarts after it.
+// main dispatches the per-attempt `worker` subcommand (spawned by the
+// supervisor, ARCH-WORKER-001) and the long-lived serve path. The subcommand
+// may appear before flags, so parsing restarts after it.
 func main() {
 	args := os.Args[1:]
-	register := false
 	workerMode := false
-	if len(args) > 0 && args[0] == "register" {
-		register = true
-		args = args[1:]
-	}
 	if len(args) > 0 && args[0] == "worker" {
 		workerMode = true
 		args = args[1:]
@@ -57,13 +51,7 @@ func main() {
 	}
 	ctx, cancel := sharedops.SignalContext()
 	defer cancel()
-	var err error
-	if register {
-		err = plinthops.RunRegister(ctx, *configPath)
-	} else {
-		err = plinthops.Run(ctx, *configPath)
-	}
-	if err != nil {
+	if err := plinthops.Run(ctx, *configPath); err != nil {
 		fmt.Fprintln(os.Stderr, "plinth:", err)
 		os.Exit(1)
 	}

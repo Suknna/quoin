@@ -43,7 +43,7 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	ctx := context.Background()
 	root := t.TempDir()
 	secrets := filepath.Join(root, "secrets")
-	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.com", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token")}
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.com", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestDownloadBackupContentLengthMakesTruncatedTransportObservable(t *testing
 	ctx := context.Background()
 	root := t.TempDir()
 	secrets := filepath.Join(root, "secrets")
-	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.com", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token")}
+	config := contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.example.com", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
 	}

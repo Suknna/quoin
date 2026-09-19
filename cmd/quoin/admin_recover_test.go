@@ -91,7 +91,7 @@ func recoverCLIFixture(t *testing.T, initialized bool, password string) (configP
 		Component: "quoin", PublicOrigin: "https://quoin.example.test",
 		DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"),
 		RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
-		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token"),
+		RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token"),
 	}
 	if created, err := bootstrap.BootstrapSecrets(config); err != nil || !created {
 		t.Fatalf("bootstrap secrets: created=%v err=%v", created, err)
@@ -105,8 +105,8 @@ func recoverCLIFixture(t *testing.T, initialized bool, password string) (configP
 		t.Fatal(err)
 	}
 	configPath = filepath.Join(root, "quoin.yaml")
-	body := fmt.Sprintf("component: quoin\npublicOrigin: %s\ndataDirectory: %s\nbackupDirectory: %s\nrootKeyFile: %s\nruntimeTlsCertificateFile: %s\nruntimeTlsPrivateKeyFile: %s\nsteleServiceTokenFile: %s\n",
-		config.PublicOrigin, config.DataDirectory, config.BackupDirectory, config.RootKeyFile, config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile, config.SteleServiceTokenFile)
+	body := fmt.Sprintf("component: quoin\npublicOrigin: %s\ndataDirectory: %s\nbackupDirectory: %s\nrootKeyFile: %s\nruntimeTlsCertificateFile: %s\nruntimeTlsPrivateKeyFile: %s\nruntimeClientCaFile: %s\n",
+		config.PublicOrigin, config.DataDirectory, config.BackupDirectory, config.RootKeyFile, config.RuntimeTLSCertificateFile, config.RuntimeTLSPrivateKeyFile, config.RuntimeClientCAFile)
 	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

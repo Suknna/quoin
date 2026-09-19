@@ -22,7 +22,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -31,21 +30,18 @@ const maxWebhookBody = 16 << 20 // 16 MiB (Alertmanager webhook payload cap)
 
 // Relay is the Stele→Quoin relay client with the cached credential snapshot.
 type Relay struct {
-	conn         *grpc.ClientConn
-	client       runtimev1.SteleRelayClient
-	serviceToken string
-	mu           sync.RWMutex
-	snapshot     *runtimev1.GetCredentialSnapshotResponse
-	ready        bool
-	lastError    error
+	conn      *grpc.ClientConn
+	client    runtimev1.SteleRelayClient
+	mu        sync.RWMutex
+	snapshot  *runtimev1.GetCredentialSnapshotResponse
+	ready     bool
+	lastError error
 }
 
-// NewRelay dials Quoin Runtime over TLS and verifies the deployment CA.
-func NewRelay(endpoint, caFile, serviceTokenFile string) (*Relay, error) {
-	token, err := os.ReadFile(serviceTokenFile)
-	if err != nil {
-		return nil, fmt.Errorf("read service token: %w", err)
-	}
+// NewRelay dials Quoin Runtime over mTLS: the deployment CA verifies the
+// server and the CA-signed client certificate (CN=stele) authenticates Stele
+// (ADR-0009). No service token exists.
+func NewRelay(endpoint, caFile, clientCertFile, clientKeyFile string) (*Relay, error) {
 	caPEM, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("read Quoin CA: %w", err)
@@ -54,7 +50,14 @@ func NewRelay(endpoint, caFile, serviceTokenFile string) (*Relay, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("Quoin CA is not valid PEM")
 	}
-	transport := credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13})
+	clientCert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Stele client identity: %w", err)
+	}
+	transport := credentials.NewTLS(&tls.Config{
+		RootCAs: pool, ServerName: "quoin", MinVersion: tls.VersionTLS13,
+		Certificates: []tls.Certificate{clientCert},
+	})
 	// The deployment config writes https:// endpoints (schema pattern);
 	// grpc.NewClient accepts bare host:port or dns:/// targets only.
 	target := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
@@ -62,11 +65,7 @@ func NewRelay(endpoint, caFile, serviceTokenFile string) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
-	relay := &Relay{
-		conn: conn, client: runtimev1.NewSteleRelayClient(conn),
-		// RUNTIME-AUTH-006: the wire text is base64url of the raw 32 bytes.
-		serviceToken: base64.RawURLEncoding.EncodeToString(token),
-	}
+	relay := &Relay{conn: conn, client: runtimev1.NewSteleRelayClient(conn)}
 	go relay.refreshLoop()
 	return relay, nil
 }
@@ -76,9 +75,7 @@ func (relay *Relay) Close() error {
 }
 
 func (relay *Relay) context() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken)
-	return metadata.NewOutgoingContext(ctx, md), cancel
+	return context.WithTimeout(context.Background(), 10*time.Second)
 }
 
 // refreshLoop pulls the credential snapshot on boot and then every 5s
@@ -175,9 +172,8 @@ func (relay *Relay) Deliver(ctx context.Context, relayID string, sourceID, crede
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		md := metadata.Pairs("authorization", "Bearer "+relay.serviceToken)
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		response, err := relay.client.Deliver(metadata.NewOutgoingContext(callCtx, md), request)
+		response, err := relay.client.Deliver(callCtx, request)
 		cancel()
 		if err != nil {
 			lastErr = err

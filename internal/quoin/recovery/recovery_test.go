@@ -306,17 +306,6 @@ func backupFixture(t *testing.T) (contract.QuoinConfig, backup.Summary) {
 	if _, err := database.SQL.ExecContext(ctx, `INSERT INTO alert_source_credentials(source_id,digest,state,supersedes_credential_id,created_at) VALUES(?,?,'Active',?,?)`, alertSourceID, bytes.Repeat([]byte{1}, 32), alertCredentialID, createdAt); err != nil {
 		t.Fatal(err)
 	}
-	result, err := database.SQL.ExecContext(ctx, `INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at) VALUES('plinth',1,?,?,?)`, make([]byte, 32), createdAt, createdAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, err := result.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.SQL.ExecContext(ctx, `UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth'`, credentialID); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(config.DataDirectory, "artifacts", "blobs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -337,89 +326,9 @@ func backupFixture(t *testing.T) (contract.QuoinConfig, backup.Summary) {
 	return config, run
 }
 
-func assertRestoreIsolation(t *testing.T, database *sql.DB) {
-	t.Helper()
-	var active int
-	var reason string
-	if err := database.QueryRow(`SELECT active,reason FROM maintenance_state WHERE id=1`).Scan(&active, &reason); err != nil {
-		t.Fatal(err)
-	}
-	if active != 1 || reason != "Restore" {
-		t.Fatalf("maintenance active=%d reason=%q", active, reason)
-	}
-	// The preserved administrator sits exactly at the unified initialization
-	// entry: enabled, uninitialized and holding only the printed temporary
-	// password (marked for the forced formal change).
-	var enabled, initialized, passwordChange int
-	if err := database.QueryRow(`SELECT enabled,initialized,password_change_required FROM users WHERE username='admin'`).Scan(&enabled, &initialized, &passwordChange); err != nil {
-		t.Fatal(err)
-	}
-	if enabled != 1 || initialized != 0 || passwordChange != 1 {
-		t.Fatalf("recovery admin isolation enabled=%d initialized=%d passwordChange=%d", enabled, initialized, passwordChange)
-	}
-	var pendingFlows int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_flows WHERE status='pending'`).Scan(&pendingFlows); err != nil {
-		t.Fatal(err)
-	}
-	if pendingFlows != 0 {
-		t.Fatalf("pending flows survived restore isolation: %d", pendingFlows)
-	}
-	var disabledUserEnabled, disabledUserRevision int
-	disabledUserErr := database.QueryRow(`SELECT enabled,auth_revision FROM users WHERE username='disabled-user'`).Scan(&disabledUserEnabled, &disabledUserRevision)
-	if disabledUserErr != nil && disabledUserErr != sql.ErrNoRows {
-		t.Fatal(disabledUserErr)
-	}
-	if disabledUserErr == nil && (disabledUserEnabled != 0 || disabledUserRevision != 1) {
-		t.Fatalf("disabled user enabled=%d auth_revision=%d", disabledUserEnabled, disabledUserRevision)
-	}
-	var restoredConnectionEnabled int
-	connectionErr := database.QueryRow(`SELECT enabled FROM connections WHERE name='restored-thanos'`).Scan(&restoredConnectionEnabled)
-	if connectionErr != nil && connectionErr != sql.ErrNoRows {
-		t.Fatal(connectionErr)
-	}
-	if connectionErr == nil && restoredConnectionEnabled != 0 {
-		t.Fatal("restored enabled connection was not disabled")
-	}
-	var acceptedAlertCredentials int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM alert_source_credentials WHERE state <> 'Retired'`).Scan(&acceptedAlertCredentials); err != nil {
-		t.Fatal(err)
-	}
-	if acceptedAlertCredentials != 0 {
-		t.Fatalf("accepted alert credentials=%d", acceptedAlertCredentials)
-	}
-	var sessions, registered, activeRuntimeCredentials, uncheckedConnections, blockingItems int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&sessions); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM runtime_slots WHERE state <> 'revoked'`).Scan(&registered); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM runtime_credentials WHERE retired_at IS NULL`).Scan(&activeRuntimeCredentials); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM connections WHERE revalidation_required = 0`).Scan(&uncheckedConnections); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM maintenance_items WHERE maintenance_revision=(SELECT row_version FROM maintenance_state WHERE id=1) AND safe_state = 'Blocking'`).Scan(&blockingItems); err != nil {
-		t.Fatal(err)
-	}
-	if sessions != 0 || registered != 0 || activeRuntimeCredentials != 0 || uncheckedConnections != 0 || blockingItems != 1 {
-		t.Fatalf("sessions=%d registered=%d activeRuntimeCredentials=%d uncheckedConnections=%d blockingItems=%d", sessions, registered, activeRuntimeCredentials, uncheckedConnections, blockingItems)
-	}
-	for _, kind := range []string{"RuntimeSlot", "AlertSource", "Connection", "BrowserIdentity"} {
-		var total, unsafe int
-		if err := database.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN safe_state='Blocking' THEN 1 ELSE 0 END),0) FROM maintenance_items WHERE maintenance_revision=(SELECT row_version FROM maintenance_state WHERE id=1) AND kind=?`, kind).Scan(&total, &unsafe); err != nil {
-			t.Fatal(err)
-		}
-		if total > 0 && unsafe != 0 {
-			t.Fatalf("restore containment %s remains blocking", kind)
-		}
-	}
-}
-
 func testConfig(root string) contract.QuoinConfig {
 	secrets := filepath.Join(root, "secrets")
-	return contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backup"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), SteleServiceTokenFile: filepath.Join(secrets, "stele-service-token")}
+	return contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backup"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
 }
 
 // recoveryRecordingSender captures the fixture delivery so the test can read
@@ -609,3 +518,78 @@ func TestRestoreEntersDirectRecoveryFlowAndReachesLogin(t *testing.T) {
 		t.Fatalf("restore must audit through the shared writer with explicit correlation: count=%d err=%v", restoreAudits, err)
 	}
 }
+
+func assertRestoreIsolation(t *testing.T, database *sql.DB) {
+	t.Helper()
+	var active int
+	var reason string
+	if err := database.QueryRow(`SELECT active,reason FROM maintenance_state WHERE id=1`).Scan(&active, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || reason != "Restore" {
+		t.Fatalf("maintenance active=%d reason=%q", active, reason)
+	}
+	// The preserved administrator sits exactly at the unified initialization
+	// entry: enabled, uninitialized and holding only the printed temporary
+	// password (marked for the forced formal change).
+	var enabled, initialized, passwordChange int
+	if err := database.QueryRow(`SELECT enabled,initialized,password_change_required FROM users WHERE username='admin'`).Scan(&enabled, &initialized, &passwordChange); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 || initialized != 0 || passwordChange != 1 {
+		t.Fatalf("recovery admin isolation enabled=%d initialized=%d passwordChange=%d", enabled, initialized, passwordChange)
+	}
+	var pendingFlows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_flows WHERE status='pending'`).Scan(&pendingFlows); err != nil {
+		t.Fatal(err)
+	}
+	if pendingFlows != 0 {
+		t.Fatalf("pending flows survived restore isolation: %d", pendingFlows)
+	}
+	var disabledUserEnabled, disabledUserRevision int
+	disabledUserErr := database.QueryRow(`SELECT enabled,auth_revision FROM users WHERE username='disabled-user'`).Scan(&disabledUserEnabled, &disabledUserRevision)
+	if disabledUserErr != nil && disabledUserErr != sql.ErrNoRows {
+		t.Fatal(disabledUserErr)
+	}
+	if disabledUserErr == nil && (disabledUserEnabled != 0 || disabledUserRevision != 1) {
+		t.Fatalf("disabled user enabled=%d auth_revision=%d", disabledUserEnabled, disabledUserRevision)
+	}
+	var restoredConnectionEnabled int
+	connectionErr := database.QueryRow(`SELECT enabled FROM connections WHERE name='restored-thanos'`).Scan(&restoredConnectionEnabled)
+	if connectionErr != nil && connectionErr != sql.ErrNoRows {
+		t.Fatal(connectionErr)
+	}
+	if connectionErr == nil && restoredConnectionEnabled != 0 {
+		t.Fatal("restored enabled connection was not disabled")
+	}
+	var acceptedAlertCredentials int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM alert_source_credentials WHERE state <> 'Retired'`).Scan(&acceptedAlertCredentials); err != nil {
+		t.Fatal(err)
+	}
+	if acceptedAlertCredentials != 0 {
+		t.Fatalf("accepted alert credentials=%d", acceptedAlertCredentials)
+	}
+	var sessions, uncheckedConnections, blockingItems int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM connections WHERE revalidation_required = 0`).Scan(&uncheckedConnections); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM maintenance_items WHERE maintenance_revision=(SELECT row_version FROM maintenance_state WHERE id=1) AND safe_state = 'Blocking'`).Scan(&blockingItems); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 || uncheckedConnections != 0 || blockingItems != 1 {
+		t.Fatalf("sessions=%d uncheckedConnections=%d blockingItems=%d", sessions, uncheckedConnections, blockingItems)
+	}
+	for _, kind := range []string{"AlertSource", "Connection", "BrowserIdentity"} {
+		var total, unsafe int
+		if err := database.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN safe_state='Blocking' THEN 1 ELSE 0 END),0) FROM maintenance_items WHERE maintenance_revision=(SELECT row_version FROM maintenance_state WHERE id=1) AND kind=?`, kind).Scan(&total, &unsafe); err != nil {
+			t.Fatal(err)
+		}
+		if total > 0 && unsafe != 0 {
+			t.Fatalf("restore containment %s remains blocking", kind)
+		}
+	}
+}
+

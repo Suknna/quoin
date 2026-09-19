@@ -193,53 +193,6 @@ BEGIN SELECT RAISE(ABORT, 'root key rebind requires RootKeyRebind maintenance an
 CREATE TRIGGER trg_root_key_state_no_delete BEFORE DELETE ON root_key_state
 BEGIN SELECT RAISE(ABORT, 'root key state is not deletable'); END;
 
-
--- Runtime 注册与长期服务 token 凭据（CONTEXT「服务身份」）：注册状态与 Admin 并发前提
--- （row_version）是持久权威；在线连接、boot/epoch、心跳 last_seen 是瞬时投影（内存），不落库
--- ——避免心跳改写 Admin row_version（DATA-RUNTIME-001）。当前 active 长期 token 的唯一权威是
--- runtime_slots.current_credential_id（单一 owner-side current authority，DATA-RUNTIME-001）；
--- 两阶段轮换的待确认 token 由 pending_credential_id 单行表达；已提升但等待 Admin 显式退休的旧
--- token 由 retiring_credential_id 表达。runtime_credentials 行只记录不可变 generation 生命周期历史
--- （confirmed_at/first_authenticated_at/retired_at 事实），不存在可独立写入的第二状态权威。
-CREATE TABLE runtime_slots (
-  slot                  TEXT PRIMARY KEY CHECK (slot IN ('plinth','lintel')),
-  state                 TEXT NOT NULL DEFAULT 'unregistered' CHECK (state IN ('unregistered','registered','revoked')),
-  current_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  pending_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  retiring_credential_id INTEGER REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 注册/替换/轮换命令并发前提（DATA-ROWVER-001）
-  created_at            TEXT NOT NULL,
-  CHECK (
-    (state IN ('unregistered','revoked') AND current_credential_id IS NULL AND pending_credential_id IS NULL AND retiring_credential_id IS NULL)
-    OR (state = 'registered' AND current_credential_id IS NOT NULL)
-  ),
-  CHECK (current_credential_id IS NULL OR pending_credential_id IS NULL OR current_credential_id <> pending_credential_id),
-  CHECK (current_credential_id IS NULL OR retiring_credential_id IS NULL OR current_credential_id <> retiring_credential_id),
-  CHECK (pending_credential_id IS NULL OR retiring_credential_id IS NULL OR pending_credential_id <> retiring_credential_id) -- 三个角色指针不得指向同一行
-) STRICT;
-
--- Runtime 长期服务 token 的不可变 credential generation 历史（两阶段轮换：下发新 token -> Runtime
--- 持久化确认 -> 原子切换 current/retiring -> 新 current 首次认证 -> Admin 显式退休旧 token，
--- CONTEXT「服务身份」）。本表只保存不可变来源字段（slot/generation/token_digest/created_at）与
--- 三个一次性生命周期事实：confirmed_at、first_authenticated_at、retired_at；时间均不可回退、
--- 不可改写。current/pending/retiring 选择完全由 runtime_slots 指针承载，本表不宣称任何
--- 状态（DATA-RUNTIME-002）。一次性注册令牌不落库（内存短生命周期、单次使用，HTTP-COMMAND-012）；
--- 本表只保存长期 token digest。
-CREATE TABLE runtime_credentials (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  slot         TEXT NOT NULL REFERENCES runtime_slots(slot) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  generation   INTEGER NOT NULL CHECK (generation >= 1),
-  token_digest BLOB NOT NULL CHECK (length(token_digest) = 32), -- 长期 token 只存 digest
-  created_at   TEXT NOT NULL,
-  confirmed_at          TEXT,   -- Runtime 持久化确认时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
-  first_authenticated_at TEXT,   -- 长期 token 第一次成功认证（NULL -> 时间戳一次；Pending Retirement 可见性）
-  retired_at            TEXT,   -- Admin/替换吊销时间（NULL -> 时间戳一次；DATA-RUNTIME-002）
-  row_version  INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- DATA-ROWVER-001
-  UNIQUE (slot, generation)
-) STRICT;
-CREATE INDEX idx_runtime_credentials_slot ON runtime_credentials (slot, generation);
-CREATE INDEX idx_runtime_credentials_confirmed ON runtime_credentials (slot, confirmed_at);
-
 -- ============================================================================
 -- 2. 领域写命令账本与审计
 -- ============================================================================
@@ -2321,7 +2274,6 @@ CREATE TABLE tool_call_execution_inputs (
   created_at        TEXT NOT NULL
 ) STRICT;
 
-
 CREATE TABLE tool_call_connection_grants (
   tool_call_id       INTEGER NOT NULL REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_grant_id INTEGER NOT NULL REFERENCES attempt_connection_grants(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -2805,18 +2757,17 @@ CREATE TABLE migration_ledger (
   applied_at   TEXT NOT NULL
 ) STRICT;
 
--- 恢复、协调升级、根密钥 rebind 与 Lintel offline recovery 共用的维护聚合；
--- LintelRecovery 只能由 deployment helper 进入并以 helper-only finalize 退出。
+-- 恢复、协调升级与根密钥 rebind 共用的维护聚合。
 CREATE TABLE maintenance_state (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
   active          INTEGER NOT NULL CHECK (active IN (0,1)),
-  reason          TEXT CHECK (reason IS NULL OR reason IN ('Restore','Upgrade','RootKeyRebind','LintelRecovery')),
+  reason          TEXT CHECK (reason IS NULL OR reason IN ('Restore','Upgrade','RootKeyRebind')),
   row_version     INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   entered_at      TEXT,
-  entered_by_type TEXT CHECK (entered_by_type IS NULL OR entered_by_type IN ('user','system','deployment_helper')),
+  entered_by_type TEXT CHECK (entered_by_type IS NULL OR entered_by_type IN ('user','system')),
   entered_by_id   INTEGER,
   exited_at       TEXT,
-  exited_by_type  TEXT CHECK (exited_by_type IS NULL OR exited_by_type IN ('user','system','deployment_helper')),
+  exited_by_type  TEXT CHECK (exited_by_type IS NULL OR exited_by_type IN ('user','system')),
   exited_by_id    INTEGER,
   CHECK ((active = 1 AND reason IS NOT NULL AND entered_at IS NOT NULL AND entered_by_type IS NOT NULL AND exited_at IS NULL AND exited_by_type IS NULL AND exited_by_id IS NULL)
       OR (active = 0 AND reason IS NULL AND entered_at IS NULL AND entered_by_type IS NULL AND entered_by_id IS NULL))
@@ -2825,7 +2776,7 @@ CREATE TABLE maintenance_state (
 CREATE TABLE maintenance_items (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   maintenance_revision INTEGER NOT NULL CHECK (maintenance_revision >= 1),
-  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','RuntimeSlot','AlertSource','BrowserIdentity','ActiveAttempt','ActiveBrowserOperation','BackupPreflight','SchemaMigration','ReleaseVersion','Integrity','SearchProjection','LintelRecoveryFence')),
+  kind                 TEXT NOT NULL CHECK (kind IN ('AdminPassword','User','Connection','AlertSource','BrowserIdentity','ActiveAttempt','ActiveBrowserOperation','BackupPreflight','SchemaMigration','ReleaseVersion','Integrity','SearchProjection')),
   object_key           TEXT NOT NULL CHECK (length(object_key) BETWEEN 1 AND 256),
   safe_state           TEXT NOT NULL CHECK (safe_state IN ('Safe','Blocking')),
   detail_code          TEXT NOT NULL CHECK (length(detail_code) BETWEEN 1 AND 128),
@@ -2833,25 +2784,6 @@ CREATE TABLE maintenance_items (
   UNIQUE (maintenance_revision, kind, object_key)
 ) STRICT;
 CREATE INDEX idx_maintenance_items_state ON maintenance_items (maintenance_revision, safe_state, kind);
-
-CREATE TABLE lintel_recovery_receipts (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  maintenance_revision       INTEGER NOT NULL UNIQUE CHECK (maintenance_revision >= 1),
-  old_slot_id                TEXT NOT NULL CHECK (old_slot_id = 'lintel'),
-  old_runtime_credential_id  INTEGER NOT NULL REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  old_token_generation       INTEGER NOT NULL CHECK (old_token_generation >= 1),
-  replacement_runtime_credential_id INTEGER NOT NULL REFERENCES runtime_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  replacement_token_generation INTEGER NOT NULL CHECK (replacement_token_generation >= 1),
-  storage_disposition        TEXT NOT NULL CHECK (storage_disposition IN ('exclusively_reattached','retired')),
-  disposition_digest         TEXT NOT NULL CHECK (length(disposition_digest) = 64 AND disposition_digest NOT GLOB '*[^0-9a-f]*'),
-  fence_report_digest        TEXT NOT NULL CHECK (length(fence_report_digest) = 64 AND fence_report_digest NOT GLOB '*[^0-9a-f]*'),
-  recovery_report_digest     TEXT NOT NULL CHECK (length(recovery_report_digest) = 64 AND recovery_report_digest NOT GLOB '*[^0-9a-f]*'),
-  post_verify_digest         TEXT NOT NULL CHECK (length(post_verify_digest) = 64 AND post_verify_digest NOT GLOB '*[^0-9a-f]*'),
-  created_at                 TEXT NOT NULL,
-  CHECK (old_runtime_credential_id <> replacement_runtime_credential_id),
-  CHECK (old_token_generation < replacement_token_generation),
-  UNIQUE (old_slot_id, old_token_generation, disposition_digest)
-) STRICT;
 
 -- ============================================================================
 -- 12. 触发器（机器可表达的不变量）
@@ -3840,9 +3772,7 @@ BEGIN SELECT RAISE(ABORT, 'observed_resource_identity_labels are immutable'); EN
 CREATE TRIGGER trg_users_row_version_increment BEFORE UPDATE ON users
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'users row_version must increase exactly by 1'); END;
-CREATE TRIGGER trg_runtime_slots_row_version_increment BEFORE UPDATE ON runtime_slots
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'runtime_slots row_version must increase exactly by 1'); END;
+
 CREATE TRIGGER trg_alert_sources_row_version_increment BEFORE UPDATE ON alert_sources
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'alert_sources row_version must increase exactly by 1'); END;
@@ -3884,9 +3814,7 @@ BEGIN SELECT RAISE(ABORT, 'artifact_retention_settings row_version must increase
 CREATE TRIGGER trg_backups_row_version_increment BEFORE UPDATE ON backups
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'backups row_version must increase exactly by 1'); END;
-CREATE TRIGGER trg_runtime_credentials_row_version_increment BEFORE UPDATE ON runtime_credentials
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'runtime_credentials row_version must increase exactly by 1'); END;
+
 CREATE TRIGGER trg_runtime_artifact_uploads_row_version_increment BEFORE UPDATE ON runtime_artifact_uploads
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_uploads row_version must increase exactly by 1'); END;
@@ -4035,8 +3963,7 @@ CREATE TRIGGER trg_embedding_generations_no_delete BEFORE DELETE ON embedding_ge
 BEGIN SELECT RAISE(ABORT, 'embedding_generations history is not deletable'); END;
 CREATE TRIGGER trg_backups_no_delete BEFORE DELETE ON backups
 BEGIN SELECT RAISE(ABORT, 'backups history is not deletable'); END;
-CREATE TRIGGER trg_runtime_slots_no_delete BEFORE DELETE ON runtime_slots
-BEGIN SELECT RAISE(ABORT, 'runtime_slots are fixed and not deletable'); END;
+
 CREATE TRIGGER trg_schema_state_no_delete BEFORE DELETE ON schema_state
 BEGIN SELECT RAISE(ABORT, 'schema_state is a single-row table'); END;
 CREATE TRIGGER trg_backup_settings_no_delete BEFORE DELETE ON backup_settings
@@ -4302,18 +4229,6 @@ WHEN NEW.active <> OLD.active AND NOT (
   OR (OLD.active = 1 AND NEW.active = 0 AND NEW.reason IS NULL AND NEW.entered_at IS NULL
     AND NEW.entered_by_type IS NULL AND NEW.entered_by_id IS NULL AND NEW.exited_at IS NOT NULL AND NEW.exited_by_type IS NOT NULL))
 BEGIN SELECT RAISE(ABORT, 'maintenance state transition must explicitly enter or exit'); END;
-CREATE TRIGGER trg_maintenance_state_lintel_recovery_actor BEFORE UPDATE OF active ON maintenance_state
-WHEN (OLD.active = 0 AND NEW.active = 1 AND (
-       (NEW.reason = 'LintelRecovery' AND NEW.entered_by_type <> 'deployment_helper')
-       OR (NEW.reason <> 'LintelRecovery' AND NEW.entered_by_type = 'deployment_helper')))
-   OR (OLD.active = 1 AND NEW.active = 0 AND (
-       (OLD.reason = 'LintelRecovery' AND NEW.exited_by_type <> 'deployment_helper')
-       OR (OLD.reason <> 'LintelRecovery' AND NEW.exited_by_type = 'deployment_helper')))
-BEGIN SELECT RAISE(ABORT, 'LintelRecovery is entered and exited only by the deployment helper'); END;
-CREATE TRIGGER trg_maintenance_state_lintel_recovery_receipt BEFORE UPDATE OF active ON maintenance_state
-WHEN OLD.active = 1 AND OLD.reason = 'LintelRecovery' AND NEW.active = 0
-  AND NOT EXISTS (SELECT 1 FROM lintel_recovery_receipts r WHERE r.maintenance_revision = OLD.row_version)
-BEGIN SELECT RAISE(ABORT, 'LintelRecovery exit requires its immutable recovery receipt'); END;
 CREATE TRIGGER trg_maintenance_state_active_identity_immutable BEFORE UPDATE OF reason, entered_at, entered_by_type, entered_by_id ON maintenance_state
 WHEN OLD.active = 1 AND NEW.active = 1 AND (
   NEW.reason IS NOT OLD.reason OR NEW.entered_at IS NOT OLD.entered_at
@@ -4339,9 +4254,7 @@ WHEN NOT EXISTS (SELECT 1 FROM maintenance_state m WHERE m.id = 1 AND m.active =
 BEGIN SELECT RAISE(ABORT, 'only items of the active maintenance revision may change'); END;
 CREATE TRIGGER trg_maintenance_items_no_delete BEFORE DELETE ON maintenance_items
 BEGIN SELECT RAISE(ABORT, 'maintenance checklist history is not deletable'); END;
--- Runtime slot 是固定键（CONTEXT「服务身份」）
-CREATE TRIGGER trg_runtime_slots_slot_immutable BEFORE UPDATE OF slot ON runtime_slots
-BEGIN SELECT RAISE(ABORT, 'runtime_slot key is fixed'); END;
+
 -- Browser Operation 显式前向状态机；终态不可复活，row_version 每次 UPDATE 精确 +1。
 CREATE TRIGGER trg_browser_operations_start_dispatch_once BEFORE UPDATE OF start_dispatched_at ON browser_operations
 WHEN NOT (OLD.start_dispatched_at IS NULL AND NEW.start_dispatched_at IS NOT NULL
@@ -4796,149 +4709,6 @@ BEGIN
   VALUES ('browser_operation', NEW.id, 'state_changed', NEW.row_version);
 END;
 
--- 12.30 Runtime 注册/凭据状态机与 Artifact 上传 ledger（DATA-RUNTIME-001/002、DATA-ARTIFACT-006）
--- runtime_slots 持久状态转换：unregistered -> registered（注册成功）、registered -> revoked（替换）、
--- revoked -> registered（替换后注册）。current 是首选 token，pending 是尚未提升的新 token，retiring 是
--- 已被新 current 替代但等待 Admin 显式退休的旧 token；认证只接受 current 或 retiring。
-CREATE TRIGGER trg_runtime_slots_state_transition BEFORE UPDATE OF state ON runtime_slots
-WHEN OLD.state <> NEW.state AND NOT (
-  (OLD.state = 'unregistered' AND NEW.state IN ('registered','revoked'))
-  OR (OLD.state = 'registered' AND NEW.state = 'revoked')
-  OR (OLD.state = 'revoked' AND NEW.state = 'registered')
-)
-BEGIN SELECT RAISE(ABORT, 'runtime_slot state transition only unregistered->registered/revoked, registered->revoked, revoked->registered'); END;
-
-CREATE TRIGGER trg_runtime_slots_current_owner_insert AFTER INSERT ON runtime_slots
-WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
-     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime current must reference a confirmed unretired credential of the same slot'); END;
-CREATE TRIGGER trg_runtime_slots_current_owner_update AFTER UPDATE OF current_credential_id ON runtime_slots
-WHEN NEW.current_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.slot = NEW.slot
-     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime current must reference a confirmed unretired credential of the same slot'); END;
-CREATE TRIGGER trg_runtime_slots_pending_owner_insert AFTER INSERT ON runtime_slots
-WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime pending must reference an unretired credential of the same slot'); END;
-CREATE TRIGGER trg_runtime_slots_pending_owner_update AFTER UPDATE OF pending_credential_id ON runtime_slots
-WHEN NEW.pending_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.pending_credential_id AND c.slot = NEW.slot AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime pending must reference an unretired credential of the same slot'); END;
-CREATE TRIGGER trg_runtime_slots_retiring_owner_insert AFTER INSERT ON runtime_slots
-WHEN NEW.retiring_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.retiring_credential_id AND c.slot = NEW.slot
-     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime retiring must reference a confirmed unretired credential of the same slot'); END;
-CREATE TRIGGER trg_runtime_slots_retiring_owner_update AFTER UPDATE OF retiring_credential_id ON runtime_slots
-WHEN NEW.retiring_credential_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.retiring_credential_id AND c.slot = NEW.slot
-     AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime retiring must reference a confirmed unretired credential of the same slot'); END;
-
--- 已有待确认或待退休 token 时不得开始另一轮；pending 中止先清空，AFTER 触发器退休孤儿。
-CREATE TRIGGER trg_runtime_slots_pending_no_direct_swap BEFORE UPDATE OF pending_credential_id ON runtime_slots
-WHEN OLD.pending_credential_id IS NOT NULL AND NEW.pending_credential_id IS NOT NULL
-  AND NEW.pending_credential_id IS NOT OLD.pending_credential_id
-BEGIN SELECT RAISE(ABORT, 'runtime pending must be cleared before another rotation'); END;
-CREATE TRIGGER trg_runtime_slots_no_new_pending_while_retiring BEFORE UPDATE OF pending_credential_id ON runtime_slots
-WHEN OLD.pending_credential_id IS NULL AND NEW.pending_credential_id IS NOT NULL AND OLD.retiring_credential_id IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'retiring runtime credential must be explicitly retired before another rotation'); END;
-CREATE TRIGGER trg_runtime_slots_retiring_no_direct_swap BEFORE UPDATE OF retiring_credential_id ON runtime_slots
-WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NOT NULL
-  AND NEW.retiring_credential_id IS NOT OLD.retiring_credential_id
-BEGIN SELECT RAISE(ABORT, 'runtime retiring credential must be cleared before another value'); END;
-CREATE TRIGGER trg_runtime_slots_retiring_only_from_promotion BEFORE UPDATE OF retiring_credential_id ON runtime_slots
-WHEN OLD.retiring_credential_id IS NULL AND NEW.retiring_credential_id IS NOT NULL AND NOT (
-  OLD.state = 'registered' AND NEW.state = 'registered'
-  AND OLD.pending_credential_id IS NOT NULL
-  AND NEW.retiring_credential_id IS OLD.current_credential_id
-  AND NEW.current_credential_id IS OLD.pending_credential_id
-  AND NEW.pending_credential_id IS NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime retiring credential can only be created by atomic pending promotion'); END;
-
--- registered slot 更换 current 只能在一条 UPDATE 中提升旧 pending，并把旧 current 移入 retiring；
--- 旧 token 不自动退休。已有 retiring 时禁止提升，从而最多一个显式退休窗口。
-CREATE TRIGGER trg_runtime_slots_promote_requires_pending AFTER UPDATE OF current_credential_id ON runtime_slots
-WHEN OLD.state = 'registered' AND NEW.state = 'registered'
-  AND NEW.current_credential_id IS NOT OLD.current_credential_id
-  AND (
-    OLD.pending_credential_id IS NULL
-    OR OLD.retiring_credential_id IS NOT NULL
-    OR NEW.current_credential_id IS NOT OLD.pending_credential_id
-    OR NEW.pending_credential_id IS NOT NULL
-    OR NEW.retiring_credential_id IS NOT OLD.current_credential_id
-  )
-BEGIN SELECT RAISE(ABORT, 'runtime promotion must atomically set current=old pending, pending=NULL, retiring=old current'); END;
-
--- pending 中止退休该孤儿；替换退休全部；retiring 只有 Admin 显式清指针后退休。
-CREATE TRIGGER trg_runtime_slots_abort_retire_pending AFTER UPDATE OF pending_credential_id ON runtime_slots
-WHEN OLD.pending_credential_id IS NOT NULL AND NEW.pending_credential_id IS NULL
-  AND NEW.current_credential_id IS OLD.current_credential_id
-  AND NEW.retiring_credential_id IS OLD.retiring_credential_id
-BEGIN
-  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
-  WHERE id = OLD.pending_credential_id AND retired_at IS NULL;
-END;
-CREATE TRIGGER trg_runtime_slots_retiring_requires_new_auth BEFORE UPDATE OF retiring_credential_id ON runtime_slots
-WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NULL
-  AND OLD.state = 'registered' AND NEW.state = 'registered'
-  AND NOT EXISTS (SELECT 1 FROM runtime_credentials c WHERE c.id = NEW.current_credential_id AND c.first_authenticated_at IS NOT NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime old credential cannot retire before the new current token authenticates successfully'); END;
-CREATE TRIGGER trg_runtime_slots_retire_old_explicit AFTER UPDATE OF retiring_credential_id ON runtime_slots
-WHEN OLD.retiring_credential_id IS NOT NULL AND NEW.retiring_credential_id IS NULL
-BEGIN
-  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
-  WHERE id = OLD.retiring_credential_id AND retired_at IS NULL;
-END;
-CREATE TRIGGER trg_runtime_slots_replace_retire_all AFTER UPDATE OF state ON runtime_slots
-WHEN NEW.state = 'revoked' AND OLD.state <> 'revoked'
-BEGIN
-  UPDATE runtime_credentials SET retired_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
-  WHERE slot = NEW.slot AND retired_at IS NULL;
-END;
-
--- Runtime credential 来源与历史不可改写；confirmed/first_authenticated/retired 是各自一次性事实。
-CREATE TRIGGER trg_runtime_credentials_origin_immutable BEFORE UPDATE OF
-  slot, generation, token_digest, created_at ON runtime_credentials
-BEGIN SELECT RAISE(ABORT, 'runtime credential origin is immutable'); END;
-CREATE TRIGGER trg_runtime_credentials_no_delete BEFORE DELETE ON runtime_credentials
-BEGIN SELECT RAISE(ABORT, 'runtime credentials history is not deletable'); END;
-CREATE TRIGGER trg_runtime_credentials_confirmed_once BEFORE UPDATE OF confirmed_at ON runtime_credentials
-WHEN OLD.confirmed_at IS NOT NULL OR NEW.confirmed_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'runtime confirmed_at may only advance once from NULL'); END;
-CREATE TRIGGER trg_runtime_credentials_first_auth_once BEFORE UPDATE OF first_authenticated_at ON runtime_credentials
-WHEN OLD.first_authenticated_at IS NOT NULL OR NEW.first_authenticated_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'runtime first_authenticated_at may only advance once from NULL'); END;
-CREATE TRIGGER trg_runtime_credentials_first_auth_current BEFORE UPDATE OF first_authenticated_at ON runtime_credentials
-WHEN OLD.first_authenticated_at IS NULL AND NEW.first_authenticated_at IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.current_credential_id = NEW.id AND s.state = 'registered')
-BEGIN SELECT RAISE(ABORT, 'only the registered current runtime credential may record first authentication'); END;
-CREATE TRIGGER trg_runtime_credentials_retired_once BEFORE UPDATE OF retired_at ON runtime_credentials
-WHEN OLD.retired_at IS NOT NULL OR NEW.retired_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'runtime retired_at may only advance once from NULL'); END;
-CREATE TRIGGER trg_runtime_credentials_no_retire_while_referenced BEFORE UPDATE OF retired_at ON runtime_credentials
-WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL AND EXISTS (
-  SELECT 1 FROM runtime_slots s WHERE s.slot = OLD.slot
-    AND (s.current_credential_id = OLD.id OR s.pending_credential_id = OLD.id OR s.retiring_credential_id = OLD.id))
-BEGIN SELECT RAISE(ABORT, 'runtime credential cannot retire while referenced by current, pending, or retiring'); END;
-CREATE TRIGGER trg_runtime_credentials_no_confirm_after_retire BEFORE UPDATE OF confirmed_at ON runtime_credentials
-WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND (OLD.retired_at IS NOT NULL OR NEW.retired_at IS NOT NULL)
-BEGIN SELECT RAISE(ABORT, 'runtime credential cannot be confirmed after retirement'); END;
-CREATE TRIGGER trg_runtime_credentials_insert_clean BEFORE INSERT ON runtime_credentials
-WHEN NEW.retired_at IS NOT NULL OR NEW.first_authenticated_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'runtime credential must be created unretired and not yet authenticated'); END;
-CREATE TRIGGER trg_runtime_credentials_confirm_requires_pending BEFORE UPDATE OF confirmed_at ON runtime_credentials
-WHEN NEW.confirmed_at IS NOT NULL AND OLD.confirmed_at IS NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot AND s.pending_credential_id = NEW.id)
-BEGIN SELECT RAISE(ABORT, 'runtime credential confirmation requires the slot pending pointer'); END;
-CREATE TRIGGER trg_runtime_credentials_insert_confirmed_registration_only BEFORE INSERT ON runtime_credentials
-WHEN NEW.confirmed_at IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s WHERE s.slot = NEW.slot
-    AND s.state IN ('unregistered','revoked')
-    AND s.current_credential_id IS NULL AND s.pending_credential_id IS NULL AND s.retiring_credential_id IS NULL)
-BEGIN SELECT RAISE(ABORT, 'confirmed runtime credential may only be inserted in an empty registration window'); END;
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
 -- 普通上传必须绑定 state='Running' Attempt 且 runtime_slot/boot_id/connection_epoch 精确一致；
@@ -5028,40 +4798,6 @@ BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are append-only'); END;
 CREATE TRIGGER trg_attempt_artifact_grants_no_delete BEFORE DELETE ON attempt_artifact_grants
 BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are retained as immutable access lineage'); END;
 
--- 替换 fence（Q237「有 active task 时必须先等待完成或明确取消才能替换」）：
--- Execution Attempt 可由 Plinth 或 Lintel 承载（browser_exploration 与巡检 Journey 的子 Attempt
--- 绑定 Lintel，CONTEXT「执行尝试」）；Browser Operation 全部由 Lintel 承载。任意 slot 置 revoked 前
--- 必须没有绑定该 slot 的 active Attempt（Assigned/Running/Cancelling）；此外 lintel 还必须没有
--- active Browser Operation（领域状态非终态，或虽已终态但尚无 stop_confirmed_at 物理停止事实；直接检查，
--- 不通过 Attempt 推断——manual_login、Queued/未派发 Attempt 或已终态 Attempt 上仍存活的浏览器进程同样拦截）。
--- 应用事务先检查并拒绝（409 active_conflict），本触发器是机械兑底；正常替换流程中不存在 active。
-CREATE TRIGGER trg_runtime_slots_no_replace_with_active BEFORE UPDATE OF state ON runtime_slots
-WHEN NEW.state = 'revoked' AND (
-  EXISTS (SELECT 1 FROM execution_attempts a WHERE a.runtime_slot = NEW.slot AND a.state IN ('Assigned','Running','Cancelling'))
-  OR (NEW.slot = 'lintel' AND EXISTS (
-    SELECT 1 FROM browser_operations bo
-    WHERE bo.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR bo.stop_confirmed_at IS NULL))
-)
-BEGIN SELECT RAISE(ABORT, 'runtime slot cannot be replaced while active attempts on the slot or active browser operations (lintel) exist'); END;
-
--- 派发 fence：Attempt 只能派发到 state='registered' 且 current 指针指向本 slot 已确认未退休凭据的 slot
--- （DATA-ATTEMPT-001/DATA-RUNTIME-001）。与 replace 事务按 SQLite 提交顺序裁决：replace 先提交则
--- 本触发器拒绝后续派发；派发先提交则 trg_runtime_slots_no_replace_with_active 拒绝替换。
--- INSERT（直接带绑定）与 UPDATE（Queued->Assigned 设置绑定）两条路径都覆盖。
-CREATE TRIGGER trg_execution_attempts_slot_registered BEFORE INSERT ON execution_attempts
-WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s JOIN runtime_credentials c ON c.id = s.current_credential_id
-  WHERE s.slot = NEW.runtime_slot AND s.state = 'registered' AND c.slot = s.slot
-    AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
-CREATE TRIGGER trg_execution_attempts_slot_registered_update BEFORE UPDATE OF runtime_slot ON execution_attempts
-WHEN NEW.runtime_slot IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM runtime_slots s JOIN runtime_credentials c ON c.id = s.current_credential_id
-  WHERE s.slot = NEW.runtime_slot AND s.state = 'registered' AND c.slot = s.slot
-    AND c.confirmed_at IS NOT NULL AND c.retired_at IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'attempt can only be dispatched to a registered slot with a confirmed current credential'); END;
 -- Config Verification 子 Attempt 的 slot 与 check kind 固定映射（CFG-VERIFYRUN-002、RUNTIME-TASK-003）：
 -- PromQL check 只派发 plinth supervisor，Browser check 只派发 lintel。表级 CHECK 仅允许
 -- inspection_collection 的合法 Runtime 集合；精确映射由各自 scope 的 trigger 闭合。
@@ -6379,7 +6115,6 @@ BEGIN
   VALUES ('resource_refresh_run', NEW.id, 'state_changed', NEW.row_version);
 END;
 
-
 -- 12.43 Deployment Acceptance 不可变闭包与 finalize receipt。
 CREATE TRIGGER trg_verification_manifest_admin_session BEFORE INSERT ON verification_invocation_manifests
 WHEN NOT EXISTS (
@@ -6650,23 +6385,6 @@ BEGIN SELECT RAISE(ABORT, 'browser deployment verification result is immutable')
 CREATE TRIGGER trg_browser_deployment_result_no_delete BEFORE DELETE ON browser_deployment_verification_results
 BEGIN SELECT RAISE(ABORT, 'browser deployment verification result is immutable'); END;
 
-CREATE TRIGGER trg_lintel_recovery_receipt_closure BEFORE INSERT ON lintel_recovery_receipts
-WHEN NOT EXISTS (
-  SELECT 1 FROM maintenance_state m
-  JOIN runtime_credentials oldc ON oldc.id = NEW.old_runtime_credential_id
-    AND oldc.slot = 'lintel' AND oldc.generation = NEW.old_token_generation AND oldc.retired_at IS NOT NULL
-  JOIN runtime_credentials newc ON newc.id = NEW.replacement_runtime_credential_id
-    AND newc.slot = 'lintel' AND newc.generation = NEW.replacement_token_generation
-    AND newc.confirmed_at IS NOT NULL AND newc.first_authenticated_at IS NOT NULL AND newc.retired_at IS NULL
-  JOIN runtime_slots s ON s.slot = 'lintel' AND s.state = 'registered'
-    AND s.current_credential_id = newc.id AND s.pending_credential_id IS NULL AND s.retiring_credential_id IS NULL
-  WHERE m.id = 1 AND m.active = 1 AND m.reason = 'LintelRecovery' AND m.row_version = NEW.maintenance_revision)
-BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt requires active maintenance, a retired old credential, and one authenticated replacement current credential'); END;
-CREATE TRIGGER trg_lintel_recovery_receipt_no_update BEFORE UPDATE ON lintel_recovery_receipts
-BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt is immutable'); END;
-CREATE TRIGGER trg_lintel_recovery_receipt_no_delete BEFORE DELETE ON lintel_recovery_receipts
-BEGIN SELECT RAISE(ABORT, 'Lintel recovery receipt is immutable'); END;
-
 -- Deployment Acceptance tables are append-only; only the receipt constitutes finalization.
 CREATE TRIGGER trg_verification_manifests_no_update BEFORE UPDATE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
 CREATE TRIGGER trg_verification_manifests_no_delete BEFORE DELETE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
@@ -6694,7 +6412,6 @@ CREATE TRIGGER trg_verification_subject_drifts_no_update BEFORE UPDATE ON verifi
 CREATE TRIGGER trg_verification_subject_drifts_no_delete BEFORE DELETE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
 CREATE TRIGGER trg_verification_receipts_no_update BEFORE UPDATE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
 CREATE TRIGGER trg_verification_receipts_no_delete BEFORE DELETE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
-
 
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger

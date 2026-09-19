@@ -15,7 +15,6 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
-	"google.golang.org/grpc/metadata"
 )
 
 type inspectionPromQLInput struct {
@@ -56,13 +55,8 @@ func (supervisor *Supervisor) runInspectionPromQL(parent context.Context, sink *
 		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
 		return
 	}
-	bearer, err := supervisor.Channel.BearerToken()
-	if err != nil {
-		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
-		return
-	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
 	grantCancel()
 	if err != nil || payload.GetThanos() == nil {
 		supervisor.proposeInspectionPromQL(sink, attemptID, binding, input, "error", nil, nil, "query_failed")

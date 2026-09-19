@@ -254,11 +254,10 @@ func (service *RuntimeService) FetchCredentialGrant(ctx context.Context, request
 	if service.Connections == nil {
 		return nil, status.Error(codes.Unavailable, "connections not wired")
 	}
-	// The calling runtime must present its current long-term token; grant
-	// fencing then re-checks the attempt binding (RUNTIME-GRANT-001).
-	bearer := bearerFromContext(ctx)
-	if !service.Slots.ValidateBearer(ctx, bearer, qruntime.SlotPlinth) {
-		return nil, status.Error(codes.Unauthenticated, "runtime bearer required")
+	// The calling runtime's mTLS client identity (CN=plinth) authorizes the
+	// call; grant fencing then re-checks the attempt binding (RUNTIME-GRANT-001).
+	if !requireComponentIdentity(ctx, qruntime.SlotPlinth) {
+		return nil, status.Error(codes.Unauthenticated, "plinth client identity required")
 	}
 	payload, err := service.Connections.FulfillGrant(ctx, request.GetGrantId(), request.GetAttemptId(), request.GetBootId(), request.GetConnectionEpoch())
 	if err != nil {

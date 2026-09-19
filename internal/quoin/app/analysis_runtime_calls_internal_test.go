@@ -24,7 +24,7 @@ func TestRuntimeKubernetesResultIngressRejectsUnspecifiedOutcome(t *testing.T) {
 	defer db.Close()
 	var ack *runtimev1.ControlEnvelope
 	service := &RuntimeService{
-		Slots: qruntime.NewService(db),
+		Slots: qruntime.NewService(),
 		sendEnvelopeForTest: func(slot string, envelope *runtimev1.ControlEnvelope) error {
 			if slot != qruntime.SlotPlinth {
 				t.Fatalf("slot=%q, want %q", slot, qruntime.SlotPlinth)

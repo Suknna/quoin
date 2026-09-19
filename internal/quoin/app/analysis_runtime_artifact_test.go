@@ -2,28 +2,105 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
-	"encoding/base64"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 	_ "modernc.org/sqlite"
 )
 
-func TestArtifactServiceLintelUploadScope(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/artifact.db?_pragma=foreign_keys(1)")
+// artifactMTLSFixture mirrors the production mTLS plane (ADR-0009): the
+// deployment CA from the real secrets bootstrap, one gRPC server terminating
+// TLS itself, and the plinth client identity.
+type artifactMTLSFixture struct {
+	address      string
+	caPEM        []byte
+	plinthClient tls.Certificate
+}
+
+func newArtifactFixture(t *testing.T, slots *qruntime.Service, store *artifact.Store) artifactMTLSFixture {
+	t.Helper()
+	root := t.TempDir()
+	secrets := root + "/secrets"
+	config := contract.QuoinConfig{
+		Component: "quoin", PublicOrigin: "https://quoin.test",
+		DataDirectory:             root + "/data",
+		BackupDirectory:           root + "/backup",
+		RootKeyFile:               secrets + "/root-key",
+		RuntimeTLSCertificateFile: secrets + "/runtime-tls.crt",
+		RuntimeTLSPrivateKeyFile:  secrets + "/runtime-tls.key",
+		RuntimeClientCAFile:       secrets + "/runtime-ca.pem",
+	}
+	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
+		t.Fatal(err)
+	}
+	fixture := artifactMTLSFixture{}
+	var err error
+	if fixture.caPEM, err = os.ReadFile(secrets + "/runtime-ca.pem"); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.plinthClient, err = tls.LoadX509KeyPair(secrets+"/plinth-client.crt", secrets+"/plinth-client.key"); err != nil {
+		t.Fatal(err)
+	}
+	serverCert, err := tls.LoadX509KeyPair(secrets+"/runtime-tls.crt", secrets+"/runtime-tls.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPool := x509.NewCertPool()
+	if !clientPool.AppendCertsFromPEM(fixture.caPEM) {
+		t.Fatal("bootstrap CA cannot be parsed")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{serverCert}, MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientPool,
+	})))
+	RegisterArtifactService(server, NewArtifactService(slots, store))
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	fixture.address = listener.Addr().String()
+	return fixture
+}
+
+func (fixture artifactMTLSFixture) client(t *testing.T, withIdentity bool) runtimev1.ArtifactServiceClient {
+	t.Helper()
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(fixture.caPEM) {
+		t.Fatal("bootstrap CA cannot be parsed")
+	}
+	tlsConfig := &tls.Config{RootCAs: rootPool, ServerName: "localhost", MinVersion: tls.VersionTLS13}
+	if withIdentity {
+		tlsConfig.Certificates = []tls.Certificate{fixture.plinthClient}
+	}
+	conn, err := grpc.NewClient(fixture.address, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return runtimev1.NewArtifactServiceClient(conn)
+}
+
+func artifactStoreFixture(t *testing.T) (*sql.DB, *artifact.Store) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "artifact.db")+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,11 +108,8 @@ func TestArtifactServiceLintelUploadScope(t *testing.T) {
 	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	lintelToken := installArtifactTestCredential(t, db, qruntime.SlotLintel, 0x11)
-	plinthToken := installArtifactTestCredential(t, db, qruntime.SlotPlinth, 0x22)
-	// Pure reads (bearer validation, artifact read fences) fail closed until
-	// the fixture's one real OpenReadOnly pool is wired; it lives exactly as
-	// long as the fixture.
+	// Pure reads (artifact read fences) fail closed until the fixture's one
+	// real OpenReadOnly pool is wired; it lives exactly as long as the fixture.
 	reader := fixtureReadOnlyPool(t, db)
 	store, err := artifact.NewStore(db, t.TempDir())
 	if err != nil {
@@ -44,92 +118,74 @@ func TestArtifactServiceLintelUploadScope(t *testing.T) {
 	if err := store.SetReader(reader); err != nil {
 		t.Fatal(err)
 	}
-	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	slots := qruntime.NewService(db)
-	if err := slots.SetReader(reader); err != nil {
-		t.Fatal(err)
+	return db, store
+}
+
+// TestArtifactServiceMTLSUploadIdentity drives the ArtifactService over the
+// real mTLS plane: the CN=plinth identity authorizes uploads bound to the
+// current control stream, a certificate-less dial cannot complete the
+// handshake, and text reads without identity stay unauthenticated (ADR-0009).
+func TestArtifactServiceMTLSUploadIdentity(t *testing.T) {
+	_, store := artifactStoreFixture(t)
+	slots := qruntime.NewService()
+	// Upload is a data-plane operation of the current control stream, not
+	// merely an identity-authenticated RPC: the header must name the slot's
+	// attached boot/epoch.
+	slots.AttachStream(qruntime.SlotPlinth, "plinth-boot", 2)
+	fixture := newArtifactFixture(t, slots, store)
+	identityClient := fixture.client(t, true)
+
+	empty := sha256Empty()
+	toolResult := func(owner string) *runtimev1.ArtifactUploadHeader {
+		return &runtimev1.ArtifactUploadHeader{UploadId: "up-tool-result-" + owner, AttemptId: 8, BootId: "plinth-boot", ConnectionEpoch: 2, OwnerType: owner, OwnerId: 9, Kind: runtimev1.ArtifactKind_ARTIFACT_KIND_TOOL_RESULT, RetentionKind: runtimev1.RetentionKind_RETENTION_KIND_GENERATED, Sha256: empty[:], MediaType: "application/json"}
 	}
-	// Upload is a data-plane operation of the current control stream, not merely
-	// a bearer-authenticated RPC. Both principals in this scope test are attached
-	// to the header's declared boot/epoch.
-	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 2)
-	slots.AttachStream(qruntime.SlotPlinth, "lintel-boot", 2)
-	RegisterArtifactService(server, NewArtifactService(slots, store))
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(server.Stop)
-	connection, err := grpc.DialContext(context.Background(), "bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
+	result, err := sendArtifactHeader(context.Background(), identityClient, toolResult("tool_call"))
+	if err != nil || result.GetRejectReason() != runtimev1.UploadRejectReason_UPLOAD_REJECT_REASON_ATTEMPT_NOT_RUNNING {
+		t.Fatalf("plinth upload did not reach ledger: result=%#v err=%v", result, err)
 	}
-	t.Cleanup(func() { _ = connection.Close() })
-	client := runtimev1.NewArtifactServiceClient(connection)
-	withBearer := func(token string) context.Context {
-		return metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+	// A header naming a boot/epoch this slot does not own is refused even
+	// with a valid identity.
+	stale := toolResult("tool_call")
+	stale.BootId = "another-boot"
+	if _, err := sendArtifactHeader(context.Background(), identityClient, stale); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("stale stream upload err=%v want Unauthenticated", err)
 	}
-	empty := sha256.Sum256(nil)
-	trace := func(kind runtimev1.ArtifactKind, owner string, sensitive bool) *runtimev1.ArtifactUploadHeader {
-		header := &runtimev1.ArtifactUploadHeader{UploadId: "up-" + kind.String() + "-" + owner, AttemptId: 8, BootId: "lintel-boot", ConnectionEpoch: 2, OwnerType: owner, OwnerId: 9, Kind: kind, RetentionKind: runtimev1.RetentionKind_RETENTION_KIND_GENERATED, Sensitive: sensitive, Sha256: empty[:], MediaType: "application/json"}
-		if kind == runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE {
-			header.TraceIntegrity = runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_COMPLETE
-		}
-		return header
+
+	// A dial without a client certificate fails the mandatory-client-cert
+	// handshake before any handler runs.
+	noIdentity := fixture.client(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := noIdentity.ReadText(ctx, &runtimev1.ArtifactReadTextRequest{}); err == nil {
+		t.Fatal("a dial without a client certificate must fail the mTLS handshake")
 	}
-	for _, header := range []*runtimev1.ArtifactUploadHeader{
-		trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE, "browser_operation", true),
-		trace(runtimev1.ArtifactKind_ARTIFACT_KIND_SCREENSHOT, "browser_operation", false),
-	} {
-		result, err := sendArtifactHeader(withBearer(lintelToken), client, header)
-		if err != nil || result.GetRejectReason() != runtimev1.UploadRejectReason_UPLOAD_REJECT_REASON_ATTEMPT_NOT_RUNNING {
-			t.Fatalf("valid Lintel scope did not reach ledger: result=%#v err=%v", result, err)
-		}
-	}
-	for _, header := range []*runtimev1.ArtifactUploadHeader{
-		trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TOOL_RESULT, "browser_operation", false),
-		trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE, "tool_call", true),
-		trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE, "browser_operation", false),
-	} {
-		if _, err := sendArtifactHeader(withBearer(lintelToken), client, header); status.Code(err) != codes.PermissionDenied {
-			t.Fatalf("out-of-scope Lintel header err=%v want PermissionDenied", err)
-		}
-	}
-	if result, err := sendArtifactHeader(withBearer(plinthToken), client, trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TOOL_RESULT, "tool_call", false)); err != nil || result.GetRejectReason() != runtimev1.UploadRejectReason_UPLOAD_REJECT_REASON_ATTEMPT_NOT_RUNNING {
-		t.Fatalf("Plinth upload compatibility result=%#v err=%v", result, err)
-	}
-	if _, err := sendArtifactHeader(context.Background(), client, trace(runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE, "browser_operation", true)); status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("unauthenticated upload err=%v", err)
-	}
-	if _, err := client.ReadText(withBearer(lintelToken), &runtimev1.ArtifactReadTextRequest{}); status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("Lintel text Artifact read err=%v", err)
+
+	// Text reads with the plinth identity pass the identity fence (the
+	// attempt-bound read fence then rejects the empty request).
+	if _, err := identityClient.ReadText(ctx, &runtimev1.ArtifactReadTextRequest{}); status.Code(err) == codes.Unauthenticated {
+		t.Fatalf("plinth text read must pass the identity fence, got %v", err)
 	}
 }
 
-func installArtifactTestCredential(t *testing.T, db *sql.DB, slot string, fill byte) string {
-	t.Helper()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	var exists int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM runtime_slots WHERE slot=?`, slot).Scan(&exists); err != nil {
-		t.Fatal(err)
+// TestArtifactServiceRejectsOversizedHeaderBeforeStaging pins the transport
+// bound: an oversized header is rejected with InvalidArgument before any
+// staging happens, identity notwithstanding.
+func TestArtifactServiceRejectsOversizedHeaderBeforeStaging(t *testing.T) {
+	_, store := artifactStoreFixture(t)
+	slots := qruntime.NewService()
+	slots.AttachStream(qruntime.SlotPlinth, "plinth-boot", 2)
+	fixture := newArtifactFixture(t, slots, store)
+	client := fixture.client(t, true)
+	empty := sha256Empty()
+	header := &runtimev1.ArtifactUploadHeader{UploadId: "oversized", AttemptId: 8, BootId: "plinth-boot", ConnectionEpoch: 2, OwnerType: "tool_call", OwnerId: 9, Kind: runtimev1.ArtifactKind_ARTIFACT_KIND_TOOL_RESULT, RetentionKind: runtimev1.RetentionKind_RETENTION_KIND_GENERATED, SizeBytes: maxRuntimeArtifactUploadBytes + 1, Sha256: empty[:], MediaType: "application/json"}
+	if _, err := sendArtifactHeader(context.Background(), client, header); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized header error=%v want InvalidArgument", err)
 	}
-	if exists == 0 {
-		if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,created_at) VALUES(?,'unregistered',?)`, slot, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw := make([]byte, 32)
-	for index := range raw {
-		raw[index] = fill
-	}
-	digest := sha256.Sum256(raw)
-	result, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at) VALUES(?,1,?,?,?)`, slot, digest[:], now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := result.LastInsertId()
-	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot=?`, credentialID, slot); err != nil {
-		t.Fatal(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func sha256Empty() [32]byte {
+	var empty [32]byte
+	return empty
 }
 
 func sendArtifactHeader(ctx context.Context, client runtimev1.ArtifactServiceClient, header *runtimev1.ArtifactUploadHeader) (*runtimev1.ArtifactUploadResult, error) {
@@ -155,47 +211,4 @@ func sendArtifactHeader(ctx context.Context, client runtimev1.ArtifactServiceCli
 		return result, nil
 	}
 	return stream.CloseAndRecv()
-}
-
-func TestArtifactServiceRejectsOversizedHeaderBeforeStaging(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/artifact.db?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(gencontracts.SchemaSQL); err != nil {
-		t.Fatal(err)
-	}
-	token := installArtifactTestCredential(t, db, qruntime.SlotLintel, 0x33)
-	// Same fail-closed wiring as the scope fixture: one real OpenReadOnly pool
-	// per fixture serves every pure read, closed with the fixture.
-	reader := fixtureReadOnlyPool(t, db)
-	store, err := artifact.NewStore(db, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetReader(reader); err != nil {
-		t.Fatal(err)
-	}
-	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	slots := qruntime.NewService(db)
-	if err := slots.SetReader(reader); err != nil {
-		t.Fatal(err)
-	}
-	slots.AttachStream(qruntime.SlotLintel, "lintel-boot", 2)
-	RegisterArtifactService(server, NewArtifactService(slots, store))
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(server.Stop)
-	connection, err := grpc.DialContext(context.Background(), "bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	digest := sha256.Sum256(nil)
-	header := &runtimev1.ArtifactUploadHeader{UploadId: "oversized", AttemptId: 8, BootId: "lintel-boot", ConnectionEpoch: 2, OwnerType: "browser_operation", OwnerId: 9, Kind: runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE, RetentionKind: runtimev1.RetentionKind_RETENTION_KIND_GENERATED, Sensitive: true, TraceIntegrity: runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_COMPLETE, SizeBytes: maxRuntimeArtifactUploadBytes + 1, Sha256: digest[:], MediaType: "application/json"}
-	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
-	if _, err := sendArtifactHeader(ctx, runtimev1.NewArtifactServiceClient(connection), header); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("oversized header error=%v want InvalidArgument", err)
-	}
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plinth/worker"
 	"github.com/Suknna/quoin/internal/plugins"
-	"google.golang.org/grpc/metadata"
 )
 
 // Supervisor executes dispatched attempts on the live channel: the
@@ -125,13 +124,8 @@ func (supervisor *Supervisor) runConfigVerification(parent context.Context, sink
 		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
 		return
 	}
-	bearer, err := supervisor.Channel.BearerToken()
-	if err != nil {
-		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
-		return
-	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch})
 	grantCancel()
 	if err != nil || payload.GetThanos() == nil {
 		supervisor.proposeConfigVerification(sink, attemptID, binding, input, "error", nil, nil, "query_failed")
@@ -269,13 +263,7 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		return
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	bearer, bearerErr := supervisor.Channel.BearerToken()
-	if bearerErr != nil {
-		grantCancel()
-		failPreAccept("读取状态卷 token 失败: " + bearerErr.Error())
-		return
-	}
-	payload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	payload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
 	})
 	grantCancel()
@@ -380,13 +368,7 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		}
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	bearer, bearerErr := supervisor.Channel.BearerToken()
-	if bearerErr != nil {
-		grantCancel()
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "读取状态卷 token 失败: "+bearerErr.Error())
-		return
-	}
-	grantPayload, err := client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	grantPayload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId:         grant.GetGrantId(),
 		AttemptId:       attemptID,
 		BootId:          binding.BootID,

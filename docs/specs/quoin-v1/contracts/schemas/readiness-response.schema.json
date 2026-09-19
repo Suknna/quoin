@@ -6,22 +6,41 @@
   "description": "四组件 /readyz 的封闭 JSON 契约；HTTP 200 表示 Ready，503 表示 not ready。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["component", "release", "mode", "acceptingWork", "reason"],
+  "required": [
+    "component",
+    "release",
+    "mode",
+    "acceptingWork",
+    "reason"
+  ],
   "properties": {
-    "component": { "enum": ["quoin", "plinth", "lintel", "stele"] },
+    "component": {
+      "enum": [
+        "quoin",
+        "plinth",
+        "lintel",
+        "stele"
+      ]
+    },
     "release": {
       "type": "string",
       "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
     },
-    "mode": { "enum": ["normal", "maintenance"] },
-    "acceptingWork": { "type": "boolean" },
+    "mode": {
+      "enum": [
+        "normal",
+        "maintenance"
+      ]
+    },
+    "acceptingWork": {
+      "type": "boolean"
+    },
     "reason": {
       "enum": [
         "ready",
         "starting",
         "dependency_unavailable",
         "storage_unavailable",
-        "runtime_unregistered",
         "maintenance",
         "draining"
       ]
@@ -29,29 +48,67 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "mode": { "const": "maintenance" } }, "required": ["mode"] },
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "maintenance"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
       "then": {
         "properties": {
-          "component": { "const": "quoin" },
-          "acceptingWork": { "const": false },
-          "reason": { "const": "maintenance" }
+          "component": {
+            "const": "quoin"
+          },
+          "acceptingWork": {
+            "const": false
+          },
+          "reason": {
+            "const": "maintenance"
+          }
         }
       },
-      "else": { "properties": { "reason": { "not": { "const": "maintenance" } } } }
+      "else": {
+        "properties": {
+          "reason": {
+            "not": {
+              "const": "maintenance"
+            }
+          }
+        }
+      }
     },
     {
-      "if": { "properties": { "reason": { "const": "ready" } }, "required": ["reason"] },
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "ready"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
       "then": {
         "properties": {
-          "mode": { "const": "normal" },
-          "acceptingWork": { "const": true }
+          "mode": {
+            "const": "normal"
+          },
+          "acceptingWork": {
+            "const": true
+          }
         }
       },
-      "else": { "properties": { "acceptingWork": { "const": false } } }
-    },
-    {
-      "if": { "properties": { "reason": { "const": "runtime_unregistered" } }, "required": ["reason"] },
-      "then": { "properties": { "component": { "enum": ["plinth", "lintel"] } } }
+      "else": {
+        "properties": {
+          "acceptingWork": {
+            "const": false
+          }
+        }
+      }
     }
   ]
 }

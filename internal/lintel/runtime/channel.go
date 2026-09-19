@@ -19,16 +19,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/lintel/browser"
 	"github.com/Suknna/quoin/internal/lintel/browser/exploration"
 	"github.com/Suknna/quoin/internal/lintel/profile"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 )
 
 type stateFile struct {
@@ -156,65 +153,6 @@ func NewChannel(config ChannelConfig) (*Channel, error) {
 
 func (channel *Channel) tokenPath() string {
 	return filepath.Join(channel.Config.StateDirectory, "runtime-token.json")
-}
-
-// RunRegister consumes the one-time token from attached stdin and persists
-// the long-term token atomically (mirror of the Plinth flow).
-func (channel *Channel) RunRegister(ctx context.Context) error {
-	buffer := make([]byte, 256)
-	total := 0
-	_ = os.Stdin.SetReadDeadline(time.Now().Add(2 * time.Minute))
-	for total < len(buffer) {
-		n, err := os.Stdin.Read(buffer[total:])
-		if err != nil {
-			return fmt.Errorf("读取注册令牌（attached stdin）失败: %w", err)
-		}
-		total += n
-		if buffer[total-1] == '\n' || buffer[total-1] == '\r' {
-			break
-		}
-	}
-	text := trimWhitespace(string(buffer[:total]))
-	var parsed struct {
-		Slot       string `json:"slot"`
-		Generation int64  `json:"generation"`
-		Token      string `json:"token"`
-	}
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return fmt.Errorf("注册令牌格式必须是 {slot,generation,token} JSON: %w", err)
-	}
-	connection, err := channel.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-	client := runtimev1.NewRuntimeControlClient(connection)
-	response, err := client.Register(metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+parsed.Token)), &runtimev1.RegisterRuntimeRequest{
-		Slot:                runtimev1.RuntimeSlot_RUNTIME_SLOT_LINTEL,
-		OneTimeToken:        parsed.Token,
-		Generation:          uint64(parsed.Generation),
-		BootId:              channel.bootID,
-		ContractFingerprint: contract.ProtoAuthorityFingerprint,
-	})
-	if err != nil {
-		return fmt.Errorf("注册失败: %w", err)
-	}
-	if err := channel.persist(response.GetLongTermToken(), int64(response.GetGeneration())); err != nil {
-		return err
-	}
-	fmt.Printf("注册成功：generation=%d。长期 token 已写入状态卷。\n", response.GetGeneration())
-	return nil
-}
-
-func trimWhitespace(value string) string {
-	start, end := 0, len(value)
-	for start < end && (value[start] == ' ' || value[start] == '\n' || value[start] == '\r' || value[start] == '\t') {
-		start++
-	}
-	for end > start && (value[end-1] == ' ' || value[end-1] == '\n' || value[end-1] == '\r' || value[end-1] == '\t') {
-		end--
-	}
-	return value[start:end]
 }
 
 func (channel *Channel) persist(token string, generation int64) error {

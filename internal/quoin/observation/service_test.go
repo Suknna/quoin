@@ -64,7 +64,6 @@ func newHarness(t *testing.T, connectionType string) *harness {
 		t.Fatal(err)
 	}
 	sessionID, _ := sessionResult.LastInsertId()
-	seedPlinthSlot(t, db, now, "plinth")
 	// The maintenance singleton exists in every real database; connection
 	// commands read it inside their transactions.
 	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
@@ -156,21 +155,6 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 		}
 	}
 	return registry, []string{"prometheus", "thanos"}
-}
-
-func seedPlinthSlot(t *testing.T, db *sql.DB, now, slot string) {
-	t.Helper()
-	if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,row_version,created_at) VALUES(?,'unregistered',1,?)`, slot, now); err != nil {
-		t.Fatal(err)
-	}
-	credential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at,row_version) VALUES(?,1,?,?,?,1)`, slot, make([]byte, 32), now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID, _ := credential.LastInsertId()
-	if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=2 WHERE slot=?`, credentialID, slot); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // seedEnabledMetricsConnection drives the real probe→enable path so the

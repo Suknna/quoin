@@ -125,13 +125,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("revealAlertSourceCredential", http.MethodPost, "/api/v1/alert-sources/credentials/reveal", operations.LevelAdmin, operations.KindSensitiveRead, "alert_source"),
 	)
 
-	// Runtime 凭据。
-	add(
-		declaration("prepareRuntimeRegistration", http.MethodPost, "/api/v1/runtime-slots/{slot}/registration/prepare", operations.LevelAdmin, operations.KindCommand, "runtime_slot"),
-		declaration("revealRuntimeRegistrationToken", http.MethodPost, "/api/v1/runtime-slots/registration-token/reveal", operations.LevelAdmin, operations.KindSensitiveRead, "runtime_slot"),
-		declaration("retireRuntimeCredential", http.MethodPost, "/api/v1/runtime-slots/{slot}/retiring-credential/retire", operations.LevelAdmin, operations.KindCommand, "runtime_slot"),
-	)
-
 	// 连接与模型（Admin）。
 	add(
 		declaration("listConnections", http.MethodGet, "/api/v1/connections", operations.LevelAdmin, operations.KindQuery, "connection"),
@@ -328,7 +321,6 @@ var maintenanceReasonAllowlists = map[string][]string{
 	"Restore": {
 		"getRuntimeStatus",
 		"listUsers", "createUser", "updateUser", "resetUserPassword", "revokeUserSessions",
-		"prepareRuntimeRegistration", "revealRuntimeRegistrationToken", "retireRuntimeCredential",
 		"listConnections", "getConnection", "rotateConnectionCredential", "disableConnection",
 		"getConnectionProbeAttempt", "listConnectionProbeResults", "listConnectionRevisions", "listCredentialGenerations",
 		"listAlertSources", "getAlertSource", "listAlertSourceCredentials", "rotateAlertSourceCredential",

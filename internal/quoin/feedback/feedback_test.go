@@ -227,25 +227,6 @@ func seedProviderChain(t *testing.T, db *sql.DB, actorID int64) (connectionID, r
 	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?, current_credential_generation_id=?, row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
 		t.Fatal(err)
 	}
-	// Register the plinth slot so chat attempts may dispatch (the analysis
-	// test precedent).
-	var slotState string
-	if err := db.QueryRow(`SELECT state FROM runtime_slots WHERE slot='plinth'`).Scan(&slotState); err != nil {
-		if _, err := db.Exec(`INSERT INTO runtime_slots(slot,state,created_at) VALUES('plinth','unregistered',?)`, now); err != nil {
-			t.Fatal(err)
-		}
-		slotState = "unregistered"
-	}
-	if slotState == "unregistered" {
-		runtimeCredential, err := db.Exec(`INSERT INTO runtime_credentials(slot,generation,token_digest,created_at,confirmed_at) VALUES('plinth',1,?,?,?)`, []byte(strings.Repeat("0", 32)), now, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runtimeCredentialID, _ := runtimeCredential.LastInsertId()
-		if _, err := db.Exec(`UPDATE runtime_slots SET state='registered',current_credential_id=?,row_version=row_version+1 WHERE slot='plinth' AND state='unregistered'`, runtimeCredentialID); err != nil {
-			t.Fatal(err)
-		}
-	}
 	probeAttempt, err := db.Exec(`INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,created_at) VALUES('connection_probe','connection',?,'Queued','test',?)`, connectionID, now)
 	if err != nil {
 		t.Fatal(err)

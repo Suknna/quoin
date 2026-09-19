@@ -19,7 +19,6 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
-	"google.golang.org/grpc/metadata"
 )
 
 // retiredExecutors are the retired implementations (受控退役) this host
@@ -50,17 +49,13 @@ func executeKubernetesReadTyped(execution *TypedToolContext) error {
 	if !ok || len(meta.grants) == 0 {
 		return execution.Fail("grant_missing", "该工具调用没有冻结的 Kubernetes 连接 grant")
 	}
-	bearer, err := runner.toolCallChannel().BearerToken()
-	if err != nil {
-		return execution.Fail("grant_missing", "读取状态卷 token 失败")
-	}
 
 	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	results := make([]json.RawMessage, 0, len(meta.grants))
 	failures := 0
 	var lastError string
 	for _, grant := range meta.grants {
-		item := executeKubernetesMapping(ctx, runner, attemptID, toolCallID, grant, operation, namespace, name, container, bearer)
+		item := executeKubernetesMapping(ctx, runner, attemptID, toolCallID, grant, operation, namespace, name, container)
 		if !item.success {
 			failures++
 			lastError = item.errorDetail
@@ -109,9 +104,9 @@ type kubernetesMappingResult struct {
 }
 
 // executeKubernetesMapping runs one frozen grant independently.
-func executeKubernetesMapping(ctx context.Context, runner *Runner, attemptID, toolCallID int64, grant *runtimev1.ConnectionGrant, operation, namespace, name, container, bearer string) kubernetesMappingResult {
+func executeKubernetesMapping(ctx context.Context, runner *Runner, attemptID, toolCallID int64, grant *runtimev1.ConnectionGrant, operation, namespace, name, container string) kubernetesMappingResult {
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	grantPayload, err := runner.Client.FetchCredentialGrant(metadata.NewOutgoingContext(grantCtx, metadata.Pairs("authorization", "Bearer "+bearer)), &runtimev1.FetchCredentialGrantRequest{
+	grantPayload, err := runner.Client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
 		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: runner.Binding.BootID, ConnectionEpoch: runner.Binding.Epoch,
 	})
 	grantCancel()
