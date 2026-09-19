@@ -30,7 +30,6 @@ for (const key of [
 	if (!values[key]) throw new Error(`generated credentials.yaml lacks ${key}`);
 }
 const repoRoot = new URL("../../", import.meta.url).pathname;
-const helper = `${repoRoot}scripts/e2e-real/register-plinth.sh`;
 
 const playwrightArgs = ["--dir", "web", "test:e2e:real"];
 // A focused issue suite is still run through the same private credential loader
@@ -55,7 +54,6 @@ const result = spawnSync("pnpm", playwrightArgs, {
 		QUOIN_E2E_DELIVERY_WEBHOOK_URL: values.webhookUrl,
 		QUOIN_E2E_OTP_CA_FILE: values.otpCaCertFile,
 		QUOIN_E2E_OTP_RECORD_FILE: values.otpRecordFile,
-		QUOIN_E2E_REGISTER_PLINTH_HELPER: helper,
 		QUOIN_E2E_RUNTIME: process.env.QUOIN_E2E_RUNTIME,
 		QUOIN_E2E_PORT: process.env.QUOIN_E2E_PORT,
 		QUOIN_E2E_PROJECT: process.env.QUOIN_E2E_PROJECT,

@@ -1,7 +1,7 @@
 # Quoin v1 development entry points. The ticket acceptance script is the
 # authoritative verification path; these targets are conveniences.
 
-.PHONY: test vet web-typecheck web-lint web-test web-build auth-audit-checks auth-audit-race images ticket-01 acceptance e2e-real-up e2e-real e2e-real-down clean
+.PHONY: test vet web-typecheck web-lint web-test web-build auth-audit-checks auth-audit-race images image ticket-01 acceptance e2e-real-up e2e-real e2e-real-down clean
 
 test:
 	go test ./... -count=1
@@ -29,6 +29,15 @@ auth-audit-race:
 
 images:
 	bash deploy/images/build.sh
+
+# 单组件热修镜像（docs/deployment.md「单组件热修升级」runbook）：
+#   make image COMPONENT=quoin VERSION=v1.0.2
+COMPONENT ?= quoin
+VERSION ?= v0.1.0-dev
+
+.PHONY: image
+image:
+	QUOIN_IMAGE_COMPONENTS=$(COMPONENT) QUOIN_IMAGE_TAG=$(VERSION) bash deploy/images/build.sh
 
 # #97 real acceptance starts a separate disposable topology. Defaults never
 # reuse the retained #96/#102/manual deployment; override all three selectors

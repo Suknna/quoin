@@ -48,6 +48,8 @@ services:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/plinth.yaml:/etc/quoin/component.yaml:ro
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/plinth-state:/var/lib/plinth
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/plinth-workspaces:/var/lib/plinth/workspaces
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/plinth-client.crt:/run/quoin-secrets/plinth-client.crt:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/plinth-client.key:/run/quoin-secrets/plinth-client.key:ro
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
     depends_on:
       quoin:
@@ -65,7 +67,8 @@ services:
     volumes:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/stele.yaml:/etc/quoin/component.yaml:ro
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
-      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-service-token:/run/quoin-secrets/stele-service-token:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-client.crt:/run/quoin-secrets/stele-client.crt:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-client.key:/run/quoin-secrets/stele-client.key:ro
     depends_on:
       quoin:
         condition: service_healthy

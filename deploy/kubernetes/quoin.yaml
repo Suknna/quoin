@@ -2,8 +2,9 @@
 # browser-free stack: gateway, frontend, quoin, plinth and stele. It
 # intentionally has no namespace field so the deployer, rather than this
 # repository, selects it. Before applying, create `gateway-tls` (tls.crt/tls.key)
-# and `quoin-secrets` (root-key, runtime-ca.pem, runtime-tls.crt, runtime-tls.key,
-# stele-service-token) in that namespace. See docs/deployment.md. The browser
+# and `quoin-secrets` (root-key, runtime-ca.pem, runtime-ca.key, runtime-tls.crt,
+# runtime-tls.key, stele-client.crt/key, plinth-client.crt/key) in that
+# namespace. See docs/deployment.md. The browser
 # plugin and its Lintel browser runtime are retired (historical reference in
 # deploy/retired/browser/); this stack neither depends on, probes, nor
 # provisions any Lintel resource.
@@ -71,7 +72,7 @@ data:
     rootKeyFile: /run/quoin-secrets/root-key
     runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
     runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
-    steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+    runtimeClientCaFile: /run/quoin-secrets/runtime-ca.pem
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -84,6 +85,8 @@ data:
     workspaceDirectory: /var/lib/plinth/workspaces
     quoinRuntimeEndpoint: https://quoin:8443
     quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+    quoinRuntimeClientCertificateFile: /run/quoin-secrets/plinth-client.crt
+    quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/plinth-client.key
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -94,7 +97,8 @@ data:
     component: stele
     quoinRuntimeEndpoint: https://quoin:8443
     quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
-    serviceTokenFile: /run/quoin-secrets/stele-service-token
+    quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
+    quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -255,11 +259,15 @@ spec:
             - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
             - {name: state, mountPath: /var/lib/plinth}
             - {name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true}
+            - {name: plinth-client-cert, mountPath: /run/quoin-secrets/plinth-client.crt, subPath: plinth-client.crt, readOnly: true}
+            - {name: plinth-client-key, mountPath: /run/quoin-secrets/plinth-client.key, subPath: plinth-client.key, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, configMap: {name: plinth-config}}
         - {name: state, persistentVolumeClaim: {claimName: plinth-state}}
         - {name: runtime-ca, secret: {secretName: quoin-secrets, items: [{key: runtime-ca.pem, path: runtime-ca.pem}]}}
+        - {name: plinth-client-cert, secret: {secretName: quoin-secrets, items: [{key: plinth-client.crt, path: plinth-client.crt}]}}
+        - {name: plinth-client-key, secret: {secretName: quoin-secrets, items: [{key: plinth-client.key, path: plinth-client.key}]}}
         - {name: tmp, emptyDir: {}}
 ---
 apiVersion: apps/v1
@@ -291,12 +299,14 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
             - {name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true}
-            - {name: stele-token, mountPath: /run/quoin-secrets/stele-service-token, subPath: stele-service-token, readOnly: true}
+            - {name: stele-client-cert, mountPath: /run/quoin-secrets/stele-client.crt, subPath: stele-client.crt, readOnly: true}
+            - {name: stele-client-key, mountPath: /run/quoin-secrets/stele-client.key, subPath: stele-client.key, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, configMap: {name: stele-config}}
         - {name: runtime-ca, secret: {secretName: quoin-secrets, items: [{key: runtime-ca.pem, path: runtime-ca.pem}]}}
-        - {name: stele-token, secret: {secretName: quoin-secrets, items: [{key: stele-service-token, path: stele-service-token}]}}
+        - {name: stele-client-cert, secret: {secretName: quoin-secrets, items: [{key: stele-client.crt, path: stele-client.crt}]}}
+        - {name: stele-client-key, secret: {secretName: quoin-secrets, items: [{key: stele-client.key, path: stele-client.key}]}}
         - {name: tmp, emptyDir: {}}
 ---
 apiVersion: v1

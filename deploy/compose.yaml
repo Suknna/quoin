@@ -219,6 +219,8 @@ services:
       - plinth-state:/var/lib/plinth
       - plinth-workspaces:/var/lib/plinth/workspaces
       - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
+      - ./secrets/quoin/plinth-client.crt:/run/quoin-secrets/plinth-client.crt:ro
+      - ./secrets/quoin/plinth-client.key:/run/quoin-secrets/plinth-client.key:ro
     tmpfs: [/tmp]
     read_only: true
     cap_drop: [ALL]
@@ -242,7 +244,8 @@ services:
     volumes:
       - ./config/stele.yaml:/etc/quoin/component.yaml:ro
       - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
-      - ./secrets/quoin/stele-service-token:/run/quoin-secrets/stele-service-token:ro
+      - ./secrets/quoin/stele-client.crt:/run/quoin-secrets/stele-client.crt:ro
+      - ./secrets/quoin/stele-client.key:/run/quoin-secrets/stele-client.key:ro
     tmpfs: [/tmp]
     read_only: true
     cap_drop: [ALL]

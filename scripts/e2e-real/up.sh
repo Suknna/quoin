@@ -114,13 +114,14 @@ backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/quoin-secrets/root-key
 runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
 runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
-steleServiceTokenFile: /run/quoin-secrets/stele-service-token
+runtimeClientCaFile: /run/quoin-secrets/runtime-ca.pem
 EOF
 cat >"${runtime_root}/config/stele.yaml" <<'EOF'
 component: stele
 quoinRuntimeEndpoint: https://quoin:8443
 quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
-serviceTokenFile: /run/quoin-secrets/stele-service-token
+quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
+quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key
 EOF
 cat >"${runtime_root}/config/plinth.yaml" <<'EOF'
 component: plinth
@@ -128,6 +129,8 @@ stateDirectory: /var/lib/plinth
 workspaceDirectory: /var/lib/plinth/workspaces
 quoinRuntimeEndpoint: https://quoin:8443
 quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+quoinRuntimeClientCertificateFile: /run/quoin-secrets/plinth-client.crt
+quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/plinth-client.key
 EOF
 cat >"${runtime_root}/gateway/Caddyfile" <<'EOF'
 :8443 {
