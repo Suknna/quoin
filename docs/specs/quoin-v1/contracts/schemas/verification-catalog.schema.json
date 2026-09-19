@@ -51,7 +51,7 @@
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/id" },
-        "kind": { "enum": ["environment", "deployment_backend", "architecture", "kubernetes_version", "docker_version", "compose_version", "browser_evidence", "fault_backend", "external_stack"] }
+        "kind": { "enum": ["environment", "deployment_backend", "architecture", "kubernetes_version", "docker_version", "compose_version", "fault_backend", "external_stack"] }
       }
     },
     "applicability": {
@@ -78,7 +78,7 @@
           "additionalProperties": false,
           "properties": {
             "mode": { "const": "for_each_current_object" },
-            "object_kind": { "enum": ["connection", "config", "browser_identity"] }
+            "object_kind": { "enum": ["connection", "config"] }
           }
         },
         {
@@ -87,7 +87,7 @@
           "additionalProperties": false,
           "properties": {
             "mode": { "const": "deployment_target_for_each_current_object" },
-            "object_kind": { "enum": ["connection", "config", "browser_identity"] },
+            "object_kind": { "enum": ["connection", "config"] },
             "backend": { "enum": ["compose", "kubernetes"] },
             "architecture": { "enum": ["linux/amd64", "linux/arm64"] }
           }
@@ -110,7 +110,7 @@
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/id" },
-        "kind": { "enum": ["contract_harness", "process_harness", "docker_compose", "kubernetes", "real_external_system", "human_browser"] },
+        "kind": { "enum": ["contract_harness", "process_harness", "docker_compose", "kubernetes", "real_external_system"] },
         "native": { "type": "boolean" },
         "requires_release_artifacts": { "type": "boolean" },
         "description": { "type": "string", "minLength": 1 }
@@ -134,7 +134,7 @@
           "required": ["kind", "entrypoint"],
           "additionalProperties": false,
           "properties": {
-            "kind": { "enum": ["ci", "quoin", "deployment_helper", "runtime", "admin_observation"] },
+            "kind": { "enum": ["ci", "quoin", "deployment_helper", "runtime"] },
             "entrypoint": { "type": "string", "minLength": 1 },
             "requires_admin_session": { "type": "boolean" },
             "requires_product_credentials": { "type": "boolean" }
@@ -159,7 +159,7 @@
           "required": ["kind", "selector"],
           "additionalProperties": false,
           "properties": {
-            "kind": { "enum": ["release", "deployment", "connection", "config", "browser_identity", "ui_surface"] },
+            "kind": { "enum": ["release", "deployment", "connection", "config"] },
             "selector": { "type": "string", "minLength": 1 },
             "drift_fields": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
           }
@@ -201,7 +201,7 @@
                   "additionalProperties": false,
                   "properties": {
                     "id": { "$ref": "#/$defs/id" },
-                    "kind": { "enum": ["exit_code", "schema_valid", "sql_rejected", "protocol_event", "http_response", "metric", "state", "digest_equal", "resource_absent", "human_observation"] },
+                    "kind": { "enum": ["exit_code", "schema_valid", "sql_rejected", "protocol_event", "http_response", "metric", "state", "digest_equal", "resource_absent"] },
                     "expected": {}
                   }
                 }
@@ -215,7 +215,7 @@
           "additionalProperties": false,
           "properties": {
             "test_names": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-            "attachments": { "type": "array", "uniqueItems": true, "items": { "enum": ["structured_result", "stdout", "stderr", "logs", "metrics", "trace", "screenshot", "video", "database", "manifest", "sigstore_bundle"] } },
+            "attachments": { "type": "array", "uniqueItems": true, "items": { "enum": ["structured_result", "stdout", "stderr", "logs", "metrics", "trace", "database", "manifest", "sigstore_bundle"] } },
             "redaction_profile": { "const": "verification-redaction-v1" }
           }
         },
@@ -271,43 +271,6 @@
                     }
                   }
                 }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "layer": { "const": "deployment_acceptance" },
-              "cells": {
-                "type": "array",
-                "contains": {
-                  "type": "object",
-                  "properties": {
-                    "applicability": {
-                      "type": "object",
-                      "properties": { "mode": { "const": "always" } },
-                      "required": ["mode"]
-                    }
-                  },
-                  "required": ["applicability"]
-                }
-              }
-            },
-            "required": ["layer", "cells"]
-          },
-          "then": {
-            "properties": {
-              "id": { "const": "ui.deployment-observation" },
-              "subject": {
-                "type": "object",
-                "properties": { "kind": { "const": "ui_surface" } },
-                "required": ["kind"]
-              },
-              "executor": {
-                "type": "object",
-                "properties": { "kind": { "const": "admin_observation" } },
-                "required": ["kind"]
               }
             }
           }

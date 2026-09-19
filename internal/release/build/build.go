@@ -76,7 +76,7 @@ func run(arguments []string) error {
 	case "images":
 		return buildImagePlatforms(options, lock)
 	case "assemble":
-		inventory, err := assembleInventory(options, lock)
+		inventory, err := assembleInventory(options)
 		if err != nil {
 			return err
 		}
@@ -85,7 +85,7 @@ func run(arguments []string) error {
 		if err := buildImagePlatforms(options, lock); err != nil {
 			return err
 		}
-		inventory, err := assembleInventory(options, lock)
+		inventory, err := assembleInventory(options)
 		if err != nil {
 			return err
 		}
@@ -113,7 +113,7 @@ func writeInventory(options *options, inventory *subjects.Inventory) error {
 
 // assembleInventory merges the per-platform build fragments into the full
 // subject inventory and completes the Kubernetes, Compose and helper subjects.
-func assembleInventory(options *options, lock inputs.Lock) (*subjects.Inventory, error) {
+func assembleInventory(options *options) (*subjects.Inventory, error) {
 	inventory := &subjects.Inventory{
 		Schema:         subjects.Schema,
 		ReleaseVersion: options.version,
@@ -121,22 +121,11 @@ func assembleInventory(options *options, lock inputs.Lock) (*subjects.Inventory,
 		Images:         map[string]subjects.ImageSubject{},
 		Helpers:        map[string]subjects.BlobSubject{},
 		Bundles:        bundleNameMap(),
-		Browser: subjects.BrowserSubjects{
-			PlaywrightVersion: lock.Playwright.Version,
-			ChromiumRevision:  lock.Playwright.ChromiumRevision,
-			Artifacts:         map[string]subjects.BlobSubject{},
-		},
 	}
 	var err error
 	inventory.SourceCommit, err = gitCommit()
 	if err != nil {
 		return nil, err
-	}
-	for platform, artifact := range lock.Playwright.Artifacts {
-		inventory.Browser.Artifacts[platform] = subjects.BlobSubject{
-			AssetName: filepath.Base(artifact.URL),
-			SHA256:    artifact.SHA256,
-		}
 	}
 	if err := mergeImageFragments(options, inventory); err != nil {
 		return nil, err
@@ -389,12 +378,6 @@ func buildImagePlatforms(options *options, lock inputs.Lock) error {
 				"-f", dockerfile,
 			}
 			lockArgs := append([]string{}, baseArgs...)
-			if component == "lintel" {
-				// The Chromium download pins come from the lock exactly like
-				// the base digests: the Dockerfile ARG defaults are the same
-				// authority and the mirror check proves text equality.
-				lockArgs = append(lockArgs, lock.ChromiumBuildArgs()...)
-			}
 			for _, argument := range lockArgs {
 				arguments = append(arguments, "--build-arg", argument)
 			}

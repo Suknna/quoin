@@ -57,8 +57,7 @@ func TestMetricsLabelProjection(t *testing.T) {
 	assertEqualSet(t, "model_call_status", sqlCheckValues(t, schema, "status", "model_calls"), ops.ProjectedLabelValues(t, "model_call_status"))
 	assertEqualSet(t, "tool_execution_mode", sqlCheckValues(t, schema, "execution_mode"), ops.ProjectedLabelValues(t, "tool_execution_mode"))
 	assertEqualSet(t, "tool_call_status", sqlCheckValues(t, schema, "status", "tool_calls"), ops.ProjectedLabelValues(t, "tool_call_status"))
-
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range []string{"quoin", "plinth", "stele"} {
 		if _, err := ops.CatalogFamiliesFor(component); err != nil {
 			t.Fatalf("catalog projection for %s: %v", component, err)
 		}

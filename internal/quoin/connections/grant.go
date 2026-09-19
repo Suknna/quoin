@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -41,7 +40,6 @@ type GrantPayload struct {
 	// Thanos remains a compatibility alias for existing internal callers. New
 	// code must use Metrics; both fields point at equivalent non-persisted data.
 	Thanos        *MetricsCredentialSecret
-	Kubernetes    *KubernetesCredentialSecret
 	ModelProvider *ModelProviderCredentialSecret
 }
 
@@ -174,11 +172,6 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
 		}
 	}
-	if purpose == kubernetes.ReadPurpose {
-		if err := kubernetes.ValidateGrantForFulfillment(ctx, conn, attemptID, grantID); err != nil {
-			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
-		}
-	}
 	// Decryption happens inside the same fenced transaction so a terminal
 	// commit racing this read is still ordered (SQLite single writer).
 	secret, err := service.openGenerationOn(ctx, conn, generationID)
@@ -191,8 +184,6 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 	case secret.Thanos != nil:
 		payload.Metrics = &MetricsCredentialSecret{Username: secret.Thanos.Username, Password: secret.Thanos.Password, BearerToken: secret.Thanos.BearerToken}
 		payload.Thanos = payload.Metrics
-	case secret.Kubernetes != nil:
-		payload.Kubernetes = &KubernetesCredentialSecret{Kubeconfig: secret.Kubernetes.Kubeconfig}
 	case secret.ModelProvider != nil:
 		payload.ModelProvider = &ModelProviderCredentialSecret{APIKey: secret.ModelProvider.APIKey}
 	case connectionType == TypePrometheus || connectionType == TypeThanos:
@@ -400,20 +391,6 @@ func writeTerminalProbeChild(ctx context.Context, tx execution.Executor, headerI
 	case TypePrometheus, TypeThanos:
 		_, err := tx.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
 			headerID, "vector(1)", "vector", 1, "1", fmt.Sprintf(`{"kind":%q,%q:true}`, connectionType, terminal))
-		return err
-	case TypeKubernetes:
-		effective := "default"
-		var configJSON string
-		if err := tx.QueryRowContext(ctx, `SELECT config_json FROM connection_revisions WHERE id=?`, revisionID).Scan(&configJSON); err == nil {
-			var config struct {
-				DefaultNamespace string `json:"defaultNamespace"`
-			}
-			if json.Unmarshal([]byte(configJSON), &config) == nil && config.DefaultNamespace != "" {
-				effective = config.DefaultNamespace
-			}
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			headerID, effective, 0, 0, 0, 0, 0, 0, 0, fmt.Sprintf(`{"kind":"kubernetes",%q:true}`, terminal))
 		return err
 	case TypeModelProvider:
 		var configJSON string

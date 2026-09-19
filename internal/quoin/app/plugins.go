@@ -14,7 +14,6 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
-	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -44,29 +43,8 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	application.investigations.Attempts().Catalogs = catalogs
 	application.inspections.Attempts().Catalogs = catalogs
 	application.knowledgeService.Attempts().Catalogs = catalogs
-	// A disabled plugin's component absence is not a fault: Lintel
-	// disconnections only open new faults while the browser plugin is
-	// enabled, and a plugin disabled mid-life converges the existing fault
-	// lifecycle instead of firing forever.
-	browserEnabled := plugins.IsEnabled(enabled, plugins.BrowserID)
-	application.platformFaults.FaultOriginEligible = func(component string) bool {
-		if component == qruntime.SlotLintel {
-			return browserEnabled
-		}
-		return true
-	}
 	application.enabledPlugins = enabled
 	return enabled, nil
-}
-
-// browserPluginEnabled reports the resolved browser-plugin enablement;
-// unknown (unwired maintenance surfaces) resolve to the defaults.
-func (application *apiServer) browserPluginEnabled() bool {
-	enabled, err := application.pluginRegistry.ResolveEnabled(application.enabledPlugins)
-	if err != nil {
-		return false
-	}
-	return plugins.IsEnabled(enabled, plugins.BrowserID)
 }
 
 type pluginCatalogItem struct {
@@ -109,12 +87,6 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 	output := &integrationsPluginsOutput{CacheControl: "no-store", Pragma: "no-cache"}
 	output.Body.Items = []pluginCatalogItem{}
 	for _, descriptor := range application.pluginRegistry.Descriptors() {
-		// Retired plugins stay registered as declaration authorities for
-		// their compiled implementations, but the management catalog never
-		// re-advertises them.
-		if descriptor.Retired {
-			continue
-		}
 		capabilities := make([]string, 0, len(descriptor.Capabilities))
 		for _, capability := range descriptor.Capabilities {
 			capabilities = append(capabilities, string(capability))

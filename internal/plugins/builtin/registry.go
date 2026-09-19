@@ -11,10 +11,8 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 )
 
-// Registry returns a new plugins.Registry with every built-in descriptor —
-// active and retired — registered. The retired descriptors stay registered
-// as the declaration authority of their compiled implementations; they can
-// never be enabled and never enter a newly frozen catalog.
+// Registry returns a new plugins.Registry with every built-in descriptor
+// registered.
 func Registry() *plugins.Registry {
 	registry := plugins.NewRegistry()
 	for _, descriptor := range Descriptors() {

@@ -31,8 +31,6 @@ func TestEmbeddedContractsMatchDocsAuthority(t *testing.T) {
 		{"ConfigVerificationDiscoveryExecutionSchema", gen.ConfigVerificationDiscoveryExecutionSchema, "schemas/config-verification-discovery-execution.schema.json"},
 		{"LabelContractSchema", gen.LabelContractSchema, "schemas/label-contract.schema.json"},
 		{"ReadinessResponseSchema", gen.ReadinessResponseSchema, "schemas/readiness-response.schema.json"},
-		{"BrowserExecutionSchema", gen.BrowserExecutionSchema, "schemas/browser-execution.schema.json"},
-		{"BrowserToolSchema", gen.BrowserToolSchema, "schemas/browser-tool.schema.json"},
 		{"ReleaseManifestSchema", gen.ReleaseManifestSchema, "schemas/release-manifest.schema.json"},
 		{"PlinthWorkerToolsSchema", gen.PlinthWorkerToolsSchema, "schemas/plinth-worker-tools.schema.json"},
 		{"ReleaseInputsYAML", gen.ReleaseInputsYAML, "release-inputs.yaml"},

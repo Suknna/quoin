@@ -95,8 +95,7 @@
         "connectionType": {
           "enum": [
             "model_provider",
-            "thanos",
-            "kubernetes"
+            "thanos"
           ]
         },
         "revisionId": {
@@ -138,95 +137,6 @@
         }
       }
     },
-    "browserIdentityLocator": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "browserIdentityId",
-        "identityRevisionId",
-        "currentGenerationId",
-        "currentInventoryDigest"
-      ],
-      "properties": {
-        "kind": {
-          "const": "browser_identity"
-        },
-        "browserIdentityId": {
-          "$ref": "#/$defs/positiveId"
-        },
-        "identityRevisionId": {
-          "$ref": "#/$defs/positiveId"
-        },
-        "currentGenerationId": {
-          "$ref": "#/$defs/positiveId"
-        },
-        "currentInventoryDigest": {
-          "$ref": "#/$defs/sha256"
-        }
-      }
-    },
-    "uiObservationLocator": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "browserArtifact",
-        "browserVersion",
-        "architecture",
-        "viewportCssPx",
-        "motion"
-      ],
-      "properties": {
-        "kind": {
-          "const": "ui_observation"
-        },
-        "browserArtifact": {
-          "enum": [
-            "playwright_chromium",
-            "branded_chrome"
-          ]
-        },
-        "browserVersion": {
-          "$ref": "#/$defs/nonEmpty"
-        },
-        "architecture": {
-          "enum": [
-            "linux/amd64",
-            "linux/arm64"
-          ]
-        },
-        "viewportCssPx": {
-          "enum": [
-            320,
-            768,
-            1024,
-            1440
-          ]
-        },
-        "motion": {
-          "enum": [
-            "normal",
-            "reduced"
-          ]
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "browserArtifact": { "const": "branded_chrome" }
-            },
-            "required": ["browserArtifact"]
-          },
-          "then": {
-            "properties": {
-              "architecture": { "const": "linux/amd64" }
-            }
-          }
-        }
-      ]
-    },
     "typedLocator": {
       "oneOf": [
         {
@@ -237,12 +147,6 @@
         },
         {
           "$ref": "#/$defs/configLocator"
-        },
-        {
-          "$ref": "#/$defs/browserIdentityLocator"
-        },
-        {
-          "$ref": "#/$defs/uiObservationLocator"
         }
       ]
     },

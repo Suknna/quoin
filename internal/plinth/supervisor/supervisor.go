@@ -414,27 +414,6 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		} else {
 			detailJSON = mustJSON(detail)
 		}
-	case "kubernetes":
-		var config plinthconnections.KubernetesConfig
-		var secret plinthconnections.KubernetesSecret
-		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
-		if grantPayload.GetKubernetes() != nil {
-			secret = plinthconnections.KubernetesSecret{Kubeconfig: grantPayload.GetKubernetes().GetKubeconfig()}
-		}
-		schemaKind = "connection_probe_kubernetes_v1"
-		if configErr != nil {
-			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": "kubernetes", "effectiveNamespace": "", "error": "revision 配置无法解析: " + configErr.Error()})
-			break
-		}
-		detail, runErr := plinthconnections.RunKubernetesProbe(ctx, config, secret)
-		outcome = "passed"
-		if runErr != nil {
-			outcome = "failed"
-			sharedops.LogEvent("plinth", "info", "probe.kubernetes_failed", runErr.Error())
-			detailJSON = mustJSON(withError(mustJSON(detail), runErr))
-		} else {
-			detailJSON = mustJSON(detail)
-		}
 	case "model_provider":
 		sharedops.LogEvent("plinth", "info", "probe.model_provider_start", fmt.Sprintf("attempt=%d type=%s", attemptID, grantPayload.GetConnectionType()))
 		var config plinthconnections.ModelProviderConfig

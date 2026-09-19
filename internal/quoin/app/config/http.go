@@ -21,15 +21,13 @@ type Handler struct {
 	Systems *businesssystem.Service
 	// Authenticate resolves any full (non-restricted) session to its
 	// principal id; every logged-in user may read the config surface (Q209).
-	Authenticate   func(ctx context.Context, cookie string) (int64, error)
-	BrowserEnabled func() bool
+	Authenticate func(ctx context.Context, cookie string) (int64, error)
 }
 
 // Register exposes retained declaration history; plugin plans own all new execution.
 func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems", OperationID: "listBusinessSystems"}, handler.listBusinessSystems)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}", OperationID: "getBusinessSystem"}, handler.getBusinessSystem)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/kubernetes-connections", OperationID: "listBusinessSystemKubernetesConnections"}, handler.listKubernetesConnections)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config", OperationID: "listBusinessSystemConfigs"}, handler.listBusinessSystemConfigs)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}", OperationID: "getBusinessSystemConfig"}, handler.getBusinessSystemConfig)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", OperationID: "listConfigVerificationRuns"}, handler.listConfigVerificationRuns)
@@ -39,9 +37,6 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", OperationID: "getResourceRefreshRun"}, handler.getResourceRefreshRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources", OperationID: "listObservedResources"}, handler.listObservedResources)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/business-systems/{systemKey}/resources/{resourceId}", OperationID: "getObservedResource"}, handler.getObservedResource)
-	// The journey-catalog view is retired with the browser business
-	// (受控浏览器退役): getJourneyCatalog stays as retained implementation but
-	// is deliberately not mounted, so the old URL 404s.
 }
 
 // problemError is the frozen ErrorModel envelope (HTTP-ERROR-002/004).
@@ -83,8 +78,6 @@ func mapDomainError(err error) error {
 		return conflict
 	case errors.Is(err, businesssystem.ErrNotFound):
 		return problem(http.StatusNotFound, "not_found", "目标对象不存在，可能刚被删除或路径不正确。")
-	case errors.Is(err, businesssystem.ErrBrowserIdentityMissing):
-		return problem(http.StatusConflict, "browser_identity_missing", "该配置包含浏览器检查，但业务系统尚未配置浏览器身份，请先完成浏览器身份配置。")
 	case errors.Is(err, thanos.ErrThanosUnavailable):
 		return problem(http.StatusServiceUnavailable, "external_dependency_unavailable", "尚未配置可用的 Thanos 连接，暂时无法执行配置验证或资源刷新。")
 	}

@@ -102,10 +102,6 @@ type UploadHeader struct {
 	SizeBytes       int64
 	SHA256          []byte
 	MediaType       string
-	// TraceIntegrity is a closed wire value (complete|incomplete) carried only
-	// by Lintel trace uploads. It is intentionally part of the commit fence,
-	// not inferred later from a mutable ActionResult.
-	TraceIntegrity string
 }
 
 // Store is the artifact authority.
@@ -363,9 +359,6 @@ func (store *Store) BeginUpload(ctx context.Context, header UploadHeader) (file 
 	if header.UploadID == "" || len(header.SHA256) != 32 || header.SizeBytes < 0 {
 		return nil, 0, &Rejection{RejectMetadataMismatch, "header fields incomplete"}
 	}
-	if header.Kind == "trace" && !header.Sensitive {
-		return nil, 0, &Rejection{RejectMetadataMismatch, "trace artifacts must be sensitive"}
-	}
 	if err := store.acquireUpload(ctx, header.UploadID); err != nil {
 		return nil, 0, err
 	}
@@ -408,14 +401,13 @@ func (store *Store) beginUploadLedgerOn(ctx context.Context, tx execution.Execut
 	var storedArtifact sql.NullInt64
 	var storedAttempt sql.NullInt64
 	var storedBoot, storedOwnerType, storedKind, storedMediaType, storedRetention, storedSHA string
-	var storedTraceIntegrity sql.NullString
 	var storedEpoch, storedOwnerID, storedSensitive, storedSize int64
 	err := tx.QueryRowContext(ctx, `
 		SELECT state, artifact_id, attempt_id, boot_id, connection_epoch, owner_type, owner_id,
-			kind, media_type, retention_kind, sensitive, size_bytes, sha256, trace_integrity
+			kind, media_type, retention_kind, sensitive, size_bytes, sha256
 		FROM runtime_artifact_uploads WHERE upload_id=?`, header.UploadID).Scan(
 		&state, &storedArtifact, &storedAttempt, &storedBoot, &storedEpoch, &storedOwnerType, &storedOwnerID,
-		&storedKind, &storedMediaType, &storedRetention, &storedSensitive, &storedSize, &storedSHA, &storedTraceIntegrity)
+		&storedKind, &storedMediaType, &storedRetention, &storedSensitive, &storedSize, &storedSHA)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// New upload: validate the attempt fence and the owner closure.
@@ -425,17 +417,17 @@ func (store *Store) beginUploadLedgerOn(ctx context.Context, tx execution.Execut
 		now := store.now().Format(time.RFC3339Nano)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO runtime_artifact_uploads(upload_id,attempt_id,boot_id,connection_epoch,
-				owner_type,owner_id,kind,media_type,retention_kind,sensitive,size_bytes,sha256,trace_integrity,state,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?)`,
+				owner_type,owner_id,kind,media_type,retention_kind,sensitive,size_bytes,sha256,state,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?)`,
 			header.UploadID, nullableUploadAttempt(header.AttemptID), header.BootID, header.ConnectionEpoch,
 			header.OwnerType, header.OwnerID, header.Kind, header.MediaType, header.RetentionKind,
-			boolInt(header.Sensitive), header.SizeBytes, hex.EncodeToString(header.SHA256), nullableTraceIntegrity(header), now); err != nil {
+			boolInt(header.Sensitive), header.SizeBytes, hex.EncodeToString(header.SHA256), now); err != nil {
 			return 0, &Rejection{RejectInternal, err.Error()}
 		}
 	case err != nil:
 		return 0, &Rejection{RejectInternal, err.Error()}
 	case state == "committed":
-		if !storedArtifact.Valid || !sameCommittedUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
+		if !storedArtifact.Valid || !sameUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, header) {
 			return 0, rejectOn(&Rejection{RejectMetadataMismatch, "committed upload metadata differs"})
 		}
 		return storedArtifact.Int64, nil
@@ -443,12 +435,9 @@ func (store *Store) beginUploadLedgerOn(ctx context.Context, tx execution.Execut
 		return 0, rejectOn(&Rejection{RejectMetadataMismatch, "upload id was rejected"})
 	default:
 		// A crashed upload retrying: the upload ID is a complete immutable
-		// capability, not merely a body digest. The browser-start fence and the
-		// live upload transport are intentionally distinct: a same-boot successor
-		// stream may retransmit an interrupted Lintel trace/screenshot without
-		// rewriting the ledger's original epoch. Reject every other metadata or
-		// epoch change before opening a new staging file.
-		if !sameRetryUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, storedTraceIntegrity, header) {
+		// capability, not merely a body digest. Reject every metadata or epoch
+		// change before opening a new staging file.
+		if !sameUploadMetadata(storedAttempt, storedBoot, storedEpoch, storedOwnerType, storedOwnerID, storedKind, storedMediaType, storedRetention, storedSensitive, storedSize, storedSHA, header) {
 			return 0, rejectOn(&Rejection{RejectMetadataMismatch, "retry metadata differs"})
 		}
 		if rejection, ok := store.validateUploadOn(ctx, tx, header); !ok {
@@ -468,46 +457,12 @@ func nullableUploadAttempt(attemptID int64) any {
 	return attemptID
 }
 
-func nullableTraceIntegrity(header UploadHeader) any {
-	if header.TraceIntegrity == "" {
-		return nil
-	}
-	return header.TraceIntegrity
-}
-
-func sameUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
-	return sameUploadMetadataIgnoringEpoch(attempt, boot, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header) && epoch == int64(header.ConnectionEpoch)
-}
-
-func sameUploadMetadataIgnoringEpoch(attempt sql.NullInt64, boot, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
+func sameUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, header UploadHeader) bool {
 	return attempt.Valid == (header.AttemptID != 0) && (!attempt.Valid || attempt.Int64 == header.AttemptID) &&
 		boot == header.BootID && ownerType == header.OwnerType && ownerID == header.OwnerID && kind == header.Kind &&
 		mediaType == header.MediaType && retention == header.RetentionKind &&
 		sensitive == int64(boolInt(header.Sensitive)) && size == header.SizeBytes && digest == hex.EncodeToString(header.SHA256) &&
-		traceIntegrity.Valid == (header.TraceIntegrity != "") && (!traceIntegrity.Valid || traceIntegrity.String == header.TraceIntegrity)
-}
-
-// sameCommittedUploadMetadata permits the one retry that can legitimately cross
-// a Runtime stream boundary: Lintel replaying an already committed browser
-// artifact over a later epoch of the same boot. A reply can be lost after either
-// a trace or screenshot commit; both must replay the existing Artifact ID rather
-// than turn an unknown outcome into a second logical upload. The capability
-// remains otherwise fully immutable, and no new body is accepted on this path.
-func sameCommittedUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
-	return sameRetryUploadMetadata(attempt, boot, epoch, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header)
-}
-
-// sameRetryUploadMetadata permits a same-boot Lintel successor transport for
-// both unknown (uploading) and committed trace/screenshot uploads. The ledger
-// itself remains immutable: this predicate never updates storedEpoch. Non-Lintel
-// uploads, a different boot, a lower epoch, or any capability mismatch remain
-// rejected.
-func sameRetryUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ownerType string, ownerID int64, kind, mediaType, retention string, sensitive, size int64, digest string, traceIntegrity sql.NullString, header UploadHeader) bool {
-	if sameUploadMetadata(attempt, boot, epoch, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header) {
-		return true
-	}
-	return header.RuntimeSlot == "lintel" && (kind == "trace" || kind == "screenshot") && epoch < int64(header.ConnectionEpoch) &&
-		sameUploadMetadataIgnoringEpoch(attempt, boot, ownerType, ownerID, kind, mediaType, retention, sensitive, size, digest, traceIntegrity, header)
+		epoch == int64(header.ConnectionEpoch)
 }
 
 // validateUploadOn checks the attempt fence and owner closure inside the
@@ -515,11 +470,6 @@ func sameRetryUploadMetadata(attempt sql.NullInt64, boot string, epoch int64, ow
 // surface so the identical check runs in the begin and the commit runner
 // transaction.
 func (store *Store) validateUploadOn(ctx context.Context, conn execution.Executor, header UploadHeader) (*Rejection, bool) {
-	// The operation and child fields record the epoch that started the physical
-	// browser and are immutable audit facts. A same-boot reconnect may transport
-	// a pending Lintel upload on a later epoch, but must never rewrite that start
-	// fence. The authenticated Runtime bearer establishes the live transport
-	// epoch; below we accept only a monotonic same-boot successor.
 	if header.AttemptID != 0 {
 		var state string
 		var boot sql.NullString
@@ -527,61 +477,17 @@ func (store *Store) validateUploadOn(ctx context.Context, conn execution.Executo
 		if err := conn.QueryRowContext(ctx, `SELECT state,boot_id,connection_epoch FROM execution_attempts WHERE id=?`, header.AttemptID).Scan(&state, &boot, &epoch); err != nil {
 			return &Rejection{RejectAttemptNotRunning, "attempt unknown"}, false
 		}
-		// A Lintel cancellation trace is the sole exception: SQLite has already
-		// fenced the child to Cancelling, but the continuous trace must be
-		// committed before its parent Tool Call trigger can terminalize it.
-		if state != "Running" && !(state == "Cancelling" && header.RuntimeSlot == "lintel" && header.Kind == "trace" && header.OwnerType == "browser_operation") {
+		if state != "Running" {
 			return &Rejection{RejectAttemptNotRunning, fmt.Sprintf("attempt is %s", state)}, false
 		}
 		if !boot.Valid || boot.String != header.BootID {
 			return &Rejection{RejectBootMismatch, "boot fence"}, false
 		}
-		if !epoch.Valid || (header.RuntimeSlot == "lintel" && epoch.Int64 > int64(header.ConnectionEpoch)) || (header.RuntimeSlot != "lintel" && epoch.Int64 != int64(header.ConnectionEpoch)) {
+		if !epoch.Valid || epoch.Int64 != int64(header.ConnectionEpoch) {
 			return &Rejection{RejectEpochMismatch, "epoch fence"}, false
 		}
 	}
 	switch header.Kind {
-	case "trace", "screenshot":
-		if header.RuntimeSlot != "lintel" {
-			break
-		}
-		if header.OwnerType != "browser_operation" || header.RetentionKind != "generated" || (header.AttemptID == 0 && header.Kind != "trace") {
-			return &Rejection{RejectMetadataMismatch, "Lintel browser artifacts require a generated browser operation owner and child attempt; only traces may use operation ownership"}, false
-		}
-		if header.Kind == "trace" && !header.Sensitive {
-			return &Rejection{RejectMetadataMismatch, "Lintel trace artifacts must be sensitive"}, false
-		}
-		if header.Kind == "trace" && header.TraceIntegrity != "complete" && header.TraceIntegrity != "incomplete" {
-			return &Rejection{RejectMetadataMismatch, "Lintel trace integrity must be complete or incomplete"}, false
-		}
-		if header.Kind != "trace" && header.TraceIntegrity != "" {
-			return &Rejection{RejectMetadataMismatch, "only Lintel traces carry trace integrity"}, false
-		}
-		var bound int
-		// A crash can happen after StartAck but before the first action row, or
-		// between two terminal child attempts. An attempt_id=0 trace is therefore
-		// authorized by the still-Running operation itself (a Journey's mandatory
-		// whole-run trace or an Exploration's operation-owned trace); a nonzero
-		// attempt keeps the stronger child/action fence used by ordinary action
-		// artifacts.
-		query := `SELECT EXISTS(SELECT 1 FROM browser_operations operation
-			WHERE operation.id=? AND operation.kind IN ('journey','exploration') AND operation.state='Running'
-				AND operation.lintel_boot_id=? AND operation.lintel_connection_epoch<=?)`
-		args := []any{header.OwnerID, header.BootID, header.ConnectionEpoch}
-		if header.AttemptID != 0 {
-			query = `SELECT EXISTS(SELECT 1 FROM execution_attempts child
-				JOIN browser_exploration_actions action ON action.child_attempt_id=child.id
-				JOIN browser_operations operation ON operation.id=action.operation_id
-				WHERE child.id=? AND child.attempt_type='browser_exploration'
-				  AND child.state IN ('Running','Cancelling')
-				  AND child.boot_id=? AND child.connection_epoch<=? AND action.operation_id=?
-				  AND operation.kind='exploration' AND operation.state='Running')`
-			args = []any{header.AttemptID, header.BootID, header.ConnectionEpoch, header.OwnerID}
-		}
-		err := conn.QueryRowContext(ctx, query, args...).Scan(&bound)
-		if err != nil || bound != 1 {
-			return &Rejection{RejectMetadataMismatch, "Lintel browser artifact is not bound to a running journey/exploration operation or exploration action"}, false
-		}
 	case "tool_result":
 		if header.OwnerType != "tool_call" {
 			return &Rejection{RejectMetadataMismatch, "tool_result must be owned by a tool_call"}, false
@@ -930,44 +836,6 @@ func (store *Store) commitReferencesOn(ctx context.Context, tx execution.Executo
 	artifactID, err := insert.LastInsertId()
 	if err != nil {
 		return 0, err
-	}
-	// The irreversible Artifact commit is the only point where a trace may make
-	// a normal terminal claim durable. Do not infer integrity from a later ActionResult:
-	// cancellation/crash can race that message. A complete trace must consume the
-	// one matching pre-upload claim; an incomplete trace can only downgrade it.
-	if header.RuntimeSlot == "lintel" && header.Kind == "trace" && header.AttemptID > 0 {
-		var update sql.Result
-		if header.TraceIntegrity == "complete" {
-			update, err = tx.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
-				SET state='artifact_committed_complete',trace_artifact_id=?,trace_digest=?,finalized_at=?
-				WHERE child_attempt_id=? AND operation_id=? AND state='claimed_complete'
-				  AND NOT EXISTS (
-					SELECT 1 FROM browser_exploration_child_bindings binding
-					JOIN execution_attempts parent ON parent.id=binding.parent_attempt_id
-					WHERE binding.child_attempt_id=browser_exploration_terminal_claims.child_attempt_id
-					  AND parent.state <> 'Running'
-				  )`,
-				artifactID, header.SHA256, store.now().Format(time.RFC3339Nano), header.AttemptID, header.OwnerID)
-		} else {
-			// An incomplete trace may follow an already committed complete artifact
-			// when parent cancellation wins before ActionResult. Do not transition or
-			// erase that claim here: the ActionResult transaction atomically moves the
-			// immutable complete binding into historical columns while attaching this
-			// distinct incomplete trace to the operation.
-			update, err = tx.ExecContext(ctx, `UPDATE browser_exploration_terminal_claims
-				SET finalized_at=finalized_at
-				WHERE child_attempt_id=? AND operation_id=? AND state IN ('claimed_complete','artifact_committed_complete')`,
-				header.AttemptID, header.OwnerID)
-		}
-		if err != nil {
-			return 0, err
-		}
-		if rows, rowsErr := update.RowsAffected(); rowsErr != nil || (header.TraceIntegrity == "complete" && rows != 1) {
-			if rowsErr != nil {
-				return 0, rowsErr
-			}
-			return 0, rejectOn(&Rejection{RejectAttemptNotRunning, "complete trace has no accepted terminal claim"})
-		}
 	}
 	updated, err := tx.ExecContext(ctx, `
 		UPDATE runtime_artifact_uploads SET state='committed', artifact_id=?, committed_at=?, row_version=row_version+1

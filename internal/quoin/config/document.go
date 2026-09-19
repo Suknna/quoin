@@ -74,24 +74,21 @@ type PlanProjection struct {
 	Checks      []CheckProjection `json:"checks"`
 }
 
-// CheckProjection is the closed promql|browser discrimination. For promql,
-// QueryMode is instant|range and RangeSeconds/StepSeconds are set only in
-// range mode (both zero for instant). For browser, JourneyParams is the
-// normalized (possibly empty) object.
+// CheckProjection is the closed promql discrimination. QueryMode is
+// instant|range and RangeSeconds/StepSeconds are set only in range mode
+// (both zero for instant).
 type CheckProjection struct {
 	Key              string `json:"key"`
 	DisplayName      string `json:"displayName"`
 	AnalysisQuestion string `json:"question"`
 	// ResourceRef links a frozen inspection check to the compiled resource
 	// policy that bounds every PromQL selector it executes.
-	ResourceRef   string         `json:"resourceRef,omitempty"`
-	Kind          string         `json:"kind"`                   // promql | browser
-	QueryMode     string         `json:"queryMode,omitempty"`    // instant | range (promql only)
-	Expression    string         `json:"expression,omitempty"`   // promql only
-	RangeSeconds  int64          `json:"rangeSeconds,omitempty"` // range mode only
-	StepSeconds   int64          `json:"stepSeconds,omitempty"`  // range mode only
-	JourneyID     string         `json:"journeyID,omitempty"`    // browser only
-	JourneyParams map[string]any `json:"journeyParams,omitempty"`
+	ResourceRef  string `json:"resourceRef,omitempty"`
+	Kind         string `json:"kind"`                // promql
+	QueryMode    string `json:"queryMode,omitempty"` // instant | range
+	Expression   string `json:"expression,omitempty"`
+	RangeSeconds int64  `json:"rangeSeconds,omitempty"` // range mode only
+	StepSeconds  int64  `json:"stepSeconds,omitempty"`  // range mode only
 }
 
 // Digest returns the SHA-256 over the canonical JSON encoding of the parsed
@@ -123,17 +120,13 @@ func (document BusinessSystemDocument) canonicalValue() map[string]any {
 				"key": check.Key, "display_name": check.DisplayName,
 				"analysis_question": check.AnalysisQuestion, "resource_ref": check.ResourceRef, "kind": check.Kind,
 			}
-			switch check.Kind {
-			case "promql":
+			if check.Kind == "promql" {
 				query := map[string]any{"mode": check.QueryMode, "expression": check.Expression}
 				if check.QueryMode == "range" {
 					query["range_seconds"] = check.RangeSeconds
 					query["step_seconds"] = check.StepSeconds
 				}
 				entry["query"] = query
-			case "browser":
-				entry["journey_id"] = check.JourneyID
-				entry["journey_params"] = check.JourneyParams
 			}
 			checks = append(checks, entry)
 		}

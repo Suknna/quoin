@@ -175,7 +175,7 @@ func seedInspectionRun(t *testing.T, db *sql.DB, _ int64) int64 {
 	}
 	systemID, _ := system.LastInsertId()
 	metricsConnectionID := seedConnection(t, db, "t36-metrics")
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?, '{}',?,'cat-v1',?,?)`, systemID, metricsConnectionID, contractID, digest64, digest64, now)
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?, '{}',?,?)`, systemID, metricsConnectionID, contractID, digest64, now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -47,7 +47,7 @@ type Server struct {
 }
 
 func New(component, address string, reason Reason) (*Server, error) {
-	if component != "quoin" && component != "plinth" && component != "lintel" && component != "stele" {
+	if component != "quoin" && component != "plinth" && component != "stele" {
 		return nil, fmt.Errorf("unsupported component %q", component)
 	}
 	ready := reason == Ready
@@ -377,8 +377,6 @@ func readinessHelp(component string) string {
 		return "Whether Quoin can serve its current ready-mode responsibilities."
 	case "plinth":
 		return "Whether Plinth can accept work from Quoin."
-	case "lintel":
-		return "Whether Lintel can accept browser work from Quoin."
 	default:
 		return "Whether Stele can authenticate and relay Alertmanager deliveries."
 	}

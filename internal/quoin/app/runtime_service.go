@@ -7,7 +7,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
-	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
@@ -43,9 +41,8 @@ type RuntimeService struct {
 	// fault projection. Each caller still reads SlotService's fenced authority,
 	// but serialization guarantees projectors commit in that observation order.
 	platformFaultProjectionMu sync.Mutex
-	// ReleaseVersion records Quoin's own build provenance when it creates
-	// browser-exploration attempts; peer releases come from the live Hello.
-	// It never participates in RPC admission.
+	// ReleaseVersion records Quoin's own build provenance; peer releases
+	// come from the live Hello. It never participates in RPC admission.
 	ReleaseVersion string
 	// Connections owns connection_probe attempts and credential grants
 	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
@@ -66,8 +63,6 @@ type RuntimeService struct {
 	InvestigationRuntime *appinvestigation.RuntimeSlice
 	// Artifacts is the Artifact store the ArtifactService adapts (T10).
 	Artifacts *artifact.Store
-	// Browsers owns durable Browser Identity/Operation authority (T20).
-	Browsers *browser.Service
 	// MaintenanceBlocking gates scheduling admission while any maintenance
 	// revision is active: due boundaries then record their durable
 	// runtime_unavailable outcome instead of creating dispatchable work
@@ -80,26 +75,17 @@ type RuntimeService struct {
 	// Observations owns source observation children (ADR-0004); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Observations *observation.Service
-	// CatalogDigest is the embedded Journey Catalog digest both Quoin and
-	// Lintel must agree on (RUNTIME-CTRL-010); empty means no catalog
-	// embedded yet, which keeps lintel handshake-rejected with CATALOG_
-	// MISMATCH until a release embeds one.
-	CatalogDigest string
 	// reconcile carries the pending same-boot ReconcileReport waiter
 	// (T12, RUNTIME-TASK-005).
 	reconcile reconcileState
 	// sendEnvelopeForTest captures outbound control replies in package tests.
 	// Production leaves it nil and always routes through the live slot.
 	sendEnvelopeForTest func(slot string, envelope *runtimev1.ControlEnvelope) error
-	// browserExplorationSlotView is a narrow test seam for exercising the
-	// frozen SQLite action triggers without opening a live gRPC stream.
-	browserExplorationSlotView func(context.Context) (qruntime.SlotView, error)
 }
 
-// slotName resolves the proto slot enum onto the runtime authority. The
-// browser business is retired (受控浏览器退役): LINTEL deliberately no longer
-// maps, so Register/Connect reject it as an unsupported slot before any
-// credential check — a long-lived Lintel token can never reconnect.
+// slotName resolves the proto slot enum onto the runtime authority. Only
+// PLINTH maps; anything else is rejected as an unsupported slot before any
+// further processing.
 func (service *RuntimeService) slotName(slot runtimev1.RuntimeSlot) string {
 	switch slot {
 	case runtimev1.RuntimeSlot_RUNTIME_SLOT_PLINTH:
@@ -135,10 +121,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if slot == "" {
 		return status.Error(codes.InvalidArgument, "unsupported slot")
 	}
-	if slot == qruntime.SlotLintel && hello.GetBrowserCapacitySlots() == 0 {
-		return status.Error(codes.InvalidArgument, "lintel browser capacity must be positive")
-	}
-	decision, err := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+	decision, err := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint)
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "runtime.hello_failed", err.Error())
 		return status.Error(codes.Internal, "handshake failed")
@@ -151,10 +134,9 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			BootId:          hello.GetBootId(),
 			Msg: &runtimev1.ControlEnvelope_HelloAck{
 				HelloAck: &runtimev1.HelloAck{
-					Accepted:                 false,
-					RejectReason:             reason,
-					LastConnectionEpoch:      decision.LastConnectionEpoch,
-					ProfileReconcileRequired: decision.ProfileReconcileRequired,
+					Accepted:            false,
+					RejectReason:        reason,
+					LastConnectionEpoch: decision.LastConnectionEpoch,
 				},
 			},
 		})
@@ -179,7 +161,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		// Attachment is the second, mutex-protected epoch admission point. Send
 		// the normal rejected HelloAck so a concurrently delayed reconnect keeps
 		// the established reconnect protocol rather than observing a bare EOF.
-		stale, staleErr := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint, service.CatalogDigest, hello.GetJourneyCatalogDigest())
+		stale, staleErr := service.Slots.Adjudicate(ctx, slot, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetContractFingerprint(), contract.ProtoAuthorityFingerprint)
 		if staleErr != nil {
 			return status.Error(codes.Internal, "handshake failed")
 		}
@@ -187,7 +169,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			MessageId: 1, ConnectionEpoch: hello.GetConnectionEpoch(), BootId: hello.GetBootId(),
 			Msg: &runtimev1.ControlEnvelope_HelloAck{HelloAck: &runtimev1.HelloAck{
 				Accepted: false, RejectReason: runtimev1.HelloRejectReason(runtimev1.HelloRejectReason_value[mapRejectReason(stale.Reason)]),
-				LastConnectionEpoch: stale.LastConnectionEpoch, ProfileReconcileRequired: stale.ProfileReconcileRequired,
+				LastConnectionEpoch: stale.LastConnectionEpoch,
 			}},
 		})
 		return status.Error(codes.Unauthenticated, "handshake rejected")
@@ -212,11 +194,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	if faultErr := service.projectRuntimeConnection(ctx, slot); faultErr != nil {
 		return status.Error(codes.Internal, "project runtime connection")
 	}
-	if slot == qruntime.SlotLintel {
-		if err := service.Slots.SetBrowserCapacity(slot, hello.GetBootId(), hello.GetConnectionEpoch(), uint64(hello.GetBrowserCapacitySlots())); err != nil {
-			return status.Error(codes.Internal, "bind lintel browser capacity")
-		}
-	}
 	// Reserve the HelloAck sequence number before concurrent dispatchers use this stream.
 	helloAckID, err := service.Slots.NextMessageID(slot)
 	if err != nil {
@@ -228,76 +205,15 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		BootId:          hello.GetBootId(),
 		Msg: &runtimev1.ControlEnvelope_HelloAck{
 			HelloAck: &runtimev1.HelloAck{
-				Accepted:                 true,
-				LastConnectionEpoch:      decision.LastConnectionEpoch,
-				ProfileReconcileRequired: decision.ProfileReconcileRequired,
+				Accepted:            true,
+				LastConnectionEpoch: decision.LastConnectionEpoch,
 			},
 		},
 	}
 	if err := stream.Send(ack); err != nil {
 		return err
 	}
-	if slot == qruntime.SlotLintel {
-		// Hello is a physical-operation snapshot, not merely a capacity hint. The
-		// handshake acknowledgement must be the first server frame, so reconcile
-		// only after it is on the stream.
-		service.reconcileLintelPhysicalOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetActiveBrowserOperations())
-	}
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
-	// Lintel browser work is admission-gated below. A new boot must first
-	// reconcile the complete profile inventory before any replayed action or
-	// cancellation can touch Chromium.
-	// A different Lintel boot cannot own processes started by its predecessor.
-	// Record terminal interruption first, but retain the cleanup fence; after
-	// inventory, dispatchPendingBrowserStops asks this new boot to remove its
-	// startup-cleaned staging and acknowledges that fence.
-	if slot == qruntime.SlotLintel && decision.ProfileReconcileRequired {
-		if service.Browsers == nil {
-			return status.Error(codes.Internal, "browser authority unavailable")
-		}
-		// Runtime.Service keeps epoch history only in Quoin memory. A reconnect
-		// from an already-running Lintel boot with epoch > 1 and no remembered
-		// predecessor therefore proves that Quoin restarted. Browser operations
-		// are not recoverable across that control-plane restart, even though the
-		// Lintel boot ID is unchanged.
-		if decision.LastConnectionEpoch == 0 && hello.GetConnectionEpoch() > 1 {
-			if _, interruptErr := service.Browsers.InterruptForQuoinRestart(ctx, hello.GetBootId()); interruptErr != nil {
-				return status.Error(codes.Internal, "interrupt browser operations after Quoin restart")
-			}
-		}
-		if _, interruptErr := service.Browsers.InterruptOldBootOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch()); interruptErr != nil {
-			return status.Error(codes.Internal, "interrupt prior browser boot")
-		}
-		// New-boot interruption commits terminal Tool Call rows while Plinth may
-		// remain connected. Replay from those durable rows immediately; otherwise
-		// the parent model loop can wait forever for a child result that was only
-		// written during Lintel's profile-reconcile path.
-		go service.replayUndeliveredBrowserToolResults(context.Background())
-	}
-	// Inventory establishes Lintel's reconciliation fence before any Browser
-	// Operation dispatch is allowed on this new stream.
-	inventoryID := ""
-	if slot == qruntime.SlotLintel && decision.ProfileReconcileRequired {
-		items, inventoryErr := service.Browsers.ExpectedInventory(ctx)
-		if inventoryErr != nil {
-			return status.Error(codes.Internal, "read browser profile inventory")
-		}
-		profiles := make([]*runtimev1.ExpectedBrowserProfile, 0, len(items))
-		for _, item := range items {
-			digest, decodeErr := hex.DecodeString(item.ManifestDigest)
-			if decodeErr != nil {
-				return status.Error(codes.Internal, "invalid stored browser manifest digest")
-			}
-			profiles = append(profiles, &runtimev1.ExpectedBrowserProfile{IdentityId: item.IdentityID, ProfileGenerationId: item.ProfileGenerationID, Generation: uint64(item.Generation), ChromiumRevision: item.ChromiumRevision, ProfileManifestDigest: digest})
-		}
-		inventoryID = "inv-" + hello.GetBootId() + "-" + fmt.Sprint(hello.GetConnectionEpoch())
-		if err := service.sendEnvelope(slot, &runtimev1.ControlEnvelope{
-			ConnectionEpoch: hello.GetConnectionEpoch(), BootId: hello.GetBootId(),
-			Msg: &runtimev1.ControlEnvelope_ProfileInventoryRequest{ProfileInventoryRequest: &runtimev1.ProfileInventoryRequest{InventoryId: inventoryID, Profiles: profiles}},
-		}); err != nil {
-			return err
-		}
-	}
 	if slot == qruntime.SlotPlinth {
 		// Reconnect adjudication first (new-boot interrupts, same-boot
 		// reconcile), then queued attempts created while the slot was
@@ -313,13 +229,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchQueuedEmbeddings(context.Background())
 		go service.dispatchQueuedInvestigations(context.Background())
 		go service.dispatchQueuedInspections(context.Background())
-	}
-	if slot == qruntime.SlotLintel && !decision.ProfileReconcileRequired {
-		go service.reconcileJourneyVerificationChildren(context.Background())
-		go service.dispatchAllCancellingBrowserExplorations(context.Background())
-		go service.replayRunningBrowserExplorationChildren(context.Background())
-		go service.dispatchPendingBrowserStops(context.Background())
-		go service.dispatchQueuedBrowserOperations(context.Background())
 	}
 	lastInboundMessageID := first.GetMessageId()
 	for {
@@ -364,12 +273,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		switch payload := envelope.Msg.(type) {
 		case *runtimev1.ControlEnvelope_Heartbeat:
 			service.Slots.Touch(slot)
-			if slot == qruntime.SlotLintel {
-				service.reconcileLintelPhysicalOperations(ctx, hello.GetBootId(), hello.GetConnectionEpoch(), payload.Heartbeat.GetActiveBrowserOperations())
-				// A post-commit cancellation send can fail while this stream stays
-				// alive; heartbeat is the durable replay cadence for its fence.
-				go service.reconcileJourneyVerificationChildren(context.Background())
-			}
 			if slot == qruntime.SlotPlinth {
 				// Heartbeats renew the live stream's attempt leases
 				// (RUNTIME-TASK-007; runtime_slots stays memory-only,
@@ -399,28 +302,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 			service.handleBeginToolCallRouted(ctx, envelope, payload.BeginToolCall)
 		case *runtimev1.ControlEnvelope_CompleteToolCall:
 			service.handleCompleteToolCallRouted(ctx, envelope, payload.CompleteToolCall)
-		case *runtimev1.ControlEnvelope_RequestBrowserSubExecution:
-			if slot == qruntime.SlotPlinth {
-				service.handleBrowserSubExecution(ctx, envelope, payload.RequestBrowserSubExecution)
-			}
-		case *runtimev1.ControlEnvelope_BrowserExplorationActionResult:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserExplorationActionResult(ctx, envelope, payload.BrowserExplorationActionResult)
-			}
-		case *runtimev1.ControlEnvelope_BrowserExplorationTerminalClaim:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserExplorationTerminalClaim(ctx, envelope, payload.BrowserExplorationTerminalClaim)
-			}
-		case *runtimev1.ControlEnvelope_CancelBrowserExplorationActionAck:
-			// The action result, not this receipt, is the durable cancellation
-			// outcome. Receiving the typed Ack only proves Lintel accepted the fence.
-			if slot == qruntime.SlotLintel {
-				sharedops.LogEvent("quoin", "info", "browser.cancel_accepted", fmt.Sprintf("child=%d", payload.CancelBrowserExplorationActionAck.GetChildAttemptId()))
-			}
-		case *runtimev1.ControlEnvelope_ToolResultDeliveryAck:
-			if slot == qruntime.SlotPlinth {
-				service.handleBrowserToolResultDeliveryAck(envelope, payload.ToolResultDeliveryAck)
-			}
 		case *runtimev1.ControlEnvelope_ModelTokenDelta:
 			// Transient visible deltas fan out to the investigation stream
 			// feeds only (RUNTIME-AGENT-004); the analysis slice has no
@@ -432,65 +313,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 					service.InvestigationRuntime.HandleDelta(delta.GetAttemptId(), delta.GetModelCallId(), delta.GetDeltaSeq(), delta.GetText())
 				}
 			}
-		case *runtimev1.ControlEnvelope_StartBrowserOperationAck:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserStartAck(ctx, envelope, payload.StartBrowserOperationAck)
-			}
-		case *runtimev1.ControlEnvelope_CompleteBrowserOperation:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserCompletion(ctx, envelope, payload.CompleteBrowserOperation)
-			}
-		case *runtimev1.ControlEnvelope_PublishBrowserProfileResult:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserPublishResult(ctx, envelope, payload.PublishBrowserProfileResult)
-			}
-		case *runtimev1.ControlEnvelope_StopBrowserOperationAck:
-			if slot == qruntime.SlotLintel {
-				service.handleBrowserStopAck(ctx, envelope, payload.StopBrowserOperationAck)
-			}
-		case *runtimev1.ControlEnvelope_ProfileInventoryReport:
-			if slot != qruntime.SlotLintel || inventoryID == "" || payload.ProfileInventoryReport.GetInventoryId() != inventoryID || !payload.ProfileInventoryReport.GetComplete() {
-				sharedops.LogEvent("quoin", "info", "runtime.inventory_incomplete", "slot="+slot)
-				continue
-			}
-			observations := make(map[int64]browser.InventoryObservation, len(payload.ProfileInventoryReport.GetProfiles()))
-			for _, observed := range payload.ProfileInventoryReport.GetProfiles() {
-				if observed.GetProfileGenerationId() < 1 || observed.GetIdentityId() < 1 {
-					observations[0] = browser.InventoryObservation{Status: "invalid"}
-					continue
-				}
-				if _, exists := observations[observed.GetProfileGenerationId()]; exists {
-					// A duplicate cannot be a complete set; retain it as an invalid
-					// entry so ReconcileInventory rejects the entire report.
-					observations[0] = browser.InventoryObservation{Status: "invalid"}
-					continue
-				}
-				statusName := "manifest_invalid"
-				switch observed.GetStatus() {
-				case runtimev1.ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_COMPATIBLE:
-					statusName = "compatible"
-				case runtimev1.ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_MISSING:
-					statusName = "missing"
-				case runtimev1.ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH:
-					statusName = "chromium_revision_mismatch"
-				}
-				observations[observed.GetProfileGenerationId()] = browser.InventoryObservation{IdentityID: observed.GetIdentityId(), Status: statusName, ChromiumRevision: observed.GetObservedChromiumRevision(), ManifestDigestHex: hex.EncodeToString(observed.GetObservedManifestDigest())}
-			}
-			if reconcileErr := service.Slots.WithCurrent(qruntime.SlotLintel, envelope.GetBootId(), envelope.GetConnectionEpoch(), func() error {
-				return service.Browsers.ReconcileInventory(ctx, envelope.GetBootId(), envelope.GetConnectionEpoch(), observations)
-			}); reconcileErr != nil {
-				sharedops.LogEvent("quoin", "info", "runtime.inventory_rejected", "slot="+slot)
-				continue
-			}
-			sharedops.LogEvent("quoin", "info", "runtime.inventory_complete", "slot="+slot)
-			// This is the sole readiness edge for a reconciled boot. Only after
-			// the complete inventory transaction has committed may replayed work
-			// reach Lintel.
-			go service.reconcileJourneyVerificationChildren(context.Background())
-			go service.dispatchAllCancellingBrowserExplorations(context.Background())
-			go service.replayRunningBrowserExplorationChildren(context.Background())
-			go service.dispatchPendingBrowserStops(context.Background())
-			go service.dispatchQueuedBrowserOperations(context.Background())
 		default:
 			// Task dispatch/results arrive with later tickets; unknown
 			// frames are ignored (fail-closed: no partial task authority).
@@ -505,8 +327,6 @@ func mapRejectReason(reason string) string {
 		return "HELLO_REJECT_REASON_CONTRACT_MISMATCH"
 	case "EPOCH_STALE":
 		return "HELLO_REJECT_REASON_EPOCH_STALE"
-	case "CATALOG_MISMATCH":
-		return "HELLO_REJECT_REASON_CATALOG_MISMATCH"
 	default:
 		return "HELLO_REJECT_REASON_UNSPECIFIED"
 	}
@@ -532,8 +352,8 @@ func (service *RuntimeService) projectRuntimeConnection(ctx context.Context, slo
 // the HTTP surface can reuse its task dispatcher. writer is the composition
 // writer the runtime families' not-yet-migrated runner compositions run on;
 // reads never go through it (they serve the injected read-only pools).
-func NewRuntimeControl(slots *qruntime.Service, releaseVersion, catalogDigest string, taskConnections *connections.Service, writer *sql.DB) *RuntimeService {
-	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, CatalogDigest: catalogDigest, Connections: taskConnections, writer: writer}
+func NewRuntimeControl(slots *qruntime.Service, releaseVersion string, taskConnections *connections.Service, writer *sql.DB) *RuntimeService {
+	return &RuntimeService{Slots: slots, ReleaseVersion: releaseVersion, Connections: taskConnections, writer: writer}
 }
 
 // dispatchQueuedInvestigations binds and dispatches every Queued

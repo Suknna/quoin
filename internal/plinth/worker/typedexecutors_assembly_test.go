@@ -15,18 +15,16 @@ import (
 )
 
 // TestAssembledDispatchTableDerivesFromRegistry pins the assembled table's
-// exact shape: platform artifact tools, the metrics query tool through the
-// plugin bundle, and the retired kubernetes binding. The retired browser
-// tool never enters this process's dispatch (it executes in the Quoin
-// control plane), and nothing else is registered.
+// exact shape: platform artifact tools and the metrics query tool through
+// the plugin bundle; nothing else is registered or dispatchable here.
 func TestAssembledDispatchTableDerivesFromRegistry(t *testing.T) {
 	assembleTestTypedExecutors(t)
-	for _, toolName := range []string{"artifact_read", "artifact_grep", "thanos_query", "kubernetes_read"} {
+	for _, toolName := range []string{"artifact_read", "artifact_grep", "thanos_query"} {
 		if _, ok := lookupTypedExecutor(toolName); !ok {
 			t.Fatalf("tool %s missing from the assembled dispatch table", toolName)
 		}
 	}
-	for _, toolName := range []string{"quoin_browser", "bash", "read", "write", "grep"} {
+	for _, toolName := range []string{"bash", "read", "write", "grep"} {
 		if _, ok := lookupTypedExecutor(toolName); ok {
 			t.Fatalf("tool %s must not be dispatchable on the supervisor", toolName)
 		}

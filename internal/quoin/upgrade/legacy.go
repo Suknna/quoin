@@ -440,13 +440,6 @@ func cutoverCurrentLegacyConfigurations(ctx context.Context, conn *sql.Conn) err
 }
 
 func cutoverCurrentLegacyConfiguration(ctx context.Context, conn *sql.Conn, systemID, legacyID int64) error {
-	var browser int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id WHERE p.config_version_id=? AND c.kind='browser'`, legacyID).Scan(&browser); err != nil {
-		return err
-	}
-	if browser != 0 {
-		return fmt.Errorf("%w: current config version %d contains browser checks; preview and convert it explicitly", ErrLegacyMigrationBlocked, legacyID)
-	}
 	var discoveries int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM config_discoveries WHERE config_version_id=?`, legacyID).Scan(&discoveries); err != nil {
 		return err
@@ -515,15 +508,11 @@ func cutoverCurrentLegacyConfiguration(ctx context.Context, conn *sql.Conn, syst
 		return err
 	}
 	digest := document.Digest()
-	catalogVersion, catalogDigest, err := legacyCatalog()
-	if err != nil {
-		return err
-	}
 	var next int64
 	if err := conn.QueryRowContext(ctx, `SELECT MAX(version_seq)+1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&next); err != nil {
 		return err
 	}
-	result, err := conn.ExecContext(ctx, `INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, systemID, next, "draft", string(yamlBody), config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, catalogDigest, catalogVersion, digest, nil, migrationNow(), document.SystemKey, document.DisplayName, connectionID, enabled, document.Timezone)
+	result, err := conn.ExecContext(ctx, `INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, systemID, next, "draft", string(yamlBody), config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, digest, nil, migrationNow(), document.SystemKey, document.DisplayName, connectionID, enabled, document.Timezone)
 	if err != nil {
 		return err
 	}
@@ -542,8 +531,6 @@ func cutoverCurrentLegacyConfiguration(ctx context.Context, conn *sql.Conn, syst
 	}
 	return nil
 }
-
-func legacyCatalog() (string, string, error) { _, v, d, e := config.JourneyCatalog(); return v, d, e }
 
 func legacyAlertScope(ctx context.Context, conn *sql.Conn, versionID int64, key string) ([]string, map[string]string, error) {
 	rows, err := conn.QueryContext(ctx, `SELECT s.source_key FROM config_alert_source_refs r JOIN alert_sources s ON s.id=r.alert_source_id WHERE r.config_version_id=? ORDER BY s.source_key`, versionID)

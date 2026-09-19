@@ -9,10 +9,7 @@
 // The metrics plugins (prometheus/thanos) share one PromQL query tool
 // contract: the catalog keeps a single entry and provenance lists every
 // enabled contributing provider; authorization resolves the actual source
-// connection. The browser and kubernetes plugins are retired (受控退役):
-// their descriptors stay registered under Retired so the compiled
-// implementations remain resolvable for frozen historical attempts, while
-// enablement and every new-attempt catalog exclude them.
+// connection.
 package builtin
 
 import (
@@ -80,11 +77,8 @@ func mustDescriptorTool(def plugins.ToolDef) plugins.Tool {
 
 // Descriptors returns the built-in plugin descriptors in stable ID order.
 // Enablement defaults: the metrics/alerting mainline is enabled when the
-// deployment YAML is silent. The retired browser/kubernetes descriptors
-// carry Retired so they stay registered as declaration authorities for
-// their compiled implementations without ever being advertised or enabled.
-// Descriptors claim only capabilities with real bindings in this
-// architecture.
+// deployment YAML is silent. Descriptors claim only capabilities with real
+// bindings in this architecture.
 func Descriptors() []plugins.Descriptor {
 	queryDeclaration := mustDescriptorTool(QueryTool)
 	return []plugins.Descriptor{
@@ -127,7 +121,11 @@ func Descriptors() []plugins.Descriptor {
 			DefaultEnabled: true,
 			ConnectionKind: "alertmanager",
 		},
-		browserDescriptor(),
-		kubernetesDescriptor(),
 	}
+}
+
+// PluginTools returns the compiled tool implementations the built-in
+// plugins contribute (dedup shared contracts).
+func PluginTools() []plugins.ToolDef {
+	return []plugins.ToolDef{QueryTool}
 }

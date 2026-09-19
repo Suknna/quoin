@@ -74,15 +74,6 @@ func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret
 		default:
 			return nil, nil, false, errors.New("metrics authType must be none, basic or bearer")
 		}
-	case connections.TypeKubernetes:
-		if input.Kubeconfig == "" {
-			return nil, nil, false, errors.New("kubernetes requires a kubeconfig secret")
-		}
-		projection, _ := json.Marshal(map[string]any{
-			"type": connections.TypeKubernetes, "contextName": input.ContextName, "defaultNamespace": input.DefaultNamespace,
-		})
-		secret, _ := json.Marshal(map[string]string{"type": connections.TypeKubernetes, "kubeconfig": input.Kubeconfig})
-		return projection, secret, true, nil
 	case connections.TypeModelProvider:
 		if input.APIKey == "" {
 			return nil, nil, false, errors.New("model provider requires an apiKey secret")

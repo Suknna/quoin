@@ -262,7 +262,7 @@ func TestRegisterBundleToolLocationMustMatch(t *testing.T) {
 	descriptor := plugins.Descriptor{
 		ID: "p", Version: "1", DisplayName: "P", Description: "p",
 		Capabilities: []plugins.Capability{plugins.CapabilityTools, plugins.CapabilityExecuteTool},
-		Tools:        []plugins.Tool{{Name: "p_tool", Version: "1", ExecutionLocation: plugins.LocationLintel, FailureMode: "return_to_model", Description: "t"}},
+		Tools:        []plugins.Tool{{Name: "p_tool", Version: "1", ExecutionLocation: plugins.LocationWorkerLocal, FailureMode: "return_to_model", Description: "t"}},
 	}
 	registry := plugins.NewRegistry()
 	if err := registry.RegisterDescriptor(descriptor); err != nil {

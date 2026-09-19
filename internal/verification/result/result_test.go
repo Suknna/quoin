@@ -191,7 +191,7 @@ func TestSchemaRejectsDeploymentAcceptanceWithoutClosure(t *testing.T) {
 
 func TestMatrixDigestCoversEveryCell(t *testing.T) {
 	items := []evidence.Item{
-		{ScenarioID: "fault.time", CellID: "reconnect-grace", Environment: evidence.Environment{Backend: "process", Architecture: "not_applicable", ToolchainDigest: "a", CapabilityIDs: []string{"environment.process-harness"}}},
+		{ScenarioID: "fault.time", CellID: "reveal-handle-expiry", Environment: evidence.Environment{Backend: "process", Architecture: "not_applicable", ToolchainDigest: "a", CapabilityIDs: []string{"environment.process-harness"}}},
 		{ScenarioID: "contracts.machine", CellID: "default", Environment: evidence.Environment{Backend: "contract", Architecture: "not_applicable", ToolchainDigest: "a", CapabilityIDs: []string{"environment.contract-harness"}}},
 	}
 	matrix := result.EnvironmentMatrixDigest(items)

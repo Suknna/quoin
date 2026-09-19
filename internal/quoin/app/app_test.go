@@ -1,11 +1,11 @@
 package app_test
 
 import (
-	"github.com/Suknna/quoin/internal/quoin/execution"
 	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +34,7 @@ func TestPublicHandlerOnlyServesBackendRoutes(t *testing.T) {
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		RuntimeClientCAFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		RuntimeClientCAFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)

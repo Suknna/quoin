@@ -7,7 +7,6 @@
 // Checklist item contract (this package is the authority):
 //
 //   - ActiveAttempt items use object_key `attempt/<attempt_id>`.
-//   - ActiveBrowserOperation items use object_key `operation/<operation_id>`.
 //   - BackupPreflight uses object_key `pre_upgrade_backup`.
 //   - Blocking detail_code is `<state>|<directive>`; Safe detail_code is
 //     `drained` (work items) or `backup_verified` (BackupPreflight).
@@ -38,7 +37,6 @@ const (
 	commandPrepare = "upgrade.prepare"
 
 	kindActiveAttempt = "ActiveAttempt"
-	kindActiveBrowser = "ActiveBrowserOperation"
 	kindBackup        = "BackupPreflight"
 
 	backupObjectKey = "pre_upgrade_backup"
@@ -180,23 +178,20 @@ func (service *Service) prepareOn(ctx context.Context, tx *execution.Tx, request
 	return state, execution.Unchanged, nil
 }
 
-// The active-work state sets are frozen by the SQL predicates below:
+// The active-work state set is frozen by the SQL predicate below:
 // execution_attempts in Queued/Assigned/Running/Cancelling can still accept
-// runtime work or produce durable writes; browser_operations in
-// Queued/WaitingForCapacity/Starting/Running/AwaitingReconnect can still
-// produce work. The stop/cleanup fence columns belong to the terminal-state
-// Lintel closure and cannot un-terminalize an operation.
+// runtime work or produce durable writes.
 
 // projectChecklist freezes the deterministic entry snapshot: one item per
-// active attempt, one per active browser operation, plus the always-present
-// pre-upgrade backup preflight. Existing rows are never downgraded from Safe
-// (attempt and operation lifecycles are forward-only).
+// active attempt plus the always-present pre-upgrade backup preflight.
+// Existing rows are never downgraded from Safe (attempt lifecycles are
+// forward-only).
 func projectChecklist(ctx context.Context, conn projectionExecutor, revision int64, now string) error {
 	if _, err := conn.ExecContext(ctx, `INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(maintenance_revision,kind,object_key) DO NOTHING`, revision, kindBackup, backupObjectKey, "Blocking", detailBackupPending, now); err != nil {
 		return err
 	}
 	rows, err := conn.QueryContext(ctx, `
-	SELECT a.id, a.scope_type, a.scope_id, a.state, a.requested_by_tool_call_id
+	SELECT a.id, a.scope_type, a.scope_id, a.state
 	FROM execution_attempts a
 	WHERE a.state IN ('Queued','Assigned','Running','Cancelling')
 	  AND NOT (a.scope_type='run_check' AND EXISTS (SELECT 1 FROM inspection_check_results x WHERE x.attempt_id=a.id))
@@ -208,12 +203,11 @@ func projectChecklist(ctx context.Context, conn projectionExecutor, revision int
 		id               int64
 		scopeType, state string
 		scopeID          int64
-		parent           sql.NullInt64
 	}
 	attempts := []activeAttempt{}
 	for rows.Next() {
 		var item activeAttempt
-		if err := rows.Scan(&item.id, &item.scopeType, &item.scopeID, &item.state, &item.parent); err != nil {
+		if err := rows.Scan(&item.id, &item.scopeType, &item.scopeID, &item.state); err != nil {
 			rows.Close()
 			return err
 		}
@@ -223,44 +217,11 @@ func projectChecklist(ctx context.Context, conn projectionExecutor, revision int
 		return err
 	}
 	for _, item := range attempts {
-		directive, err := attemptDirective(ctx, conn, item.id, item.scopeType, item.scopeID, item.state, item.parent)
+		directive, err := attemptDirective(ctx, conn, item.id, item.scopeType, item.scopeID, item.state)
 		if err != nil {
 			return err
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(maintenance_revision,kind,object_key) DO NOTHING`, revision, kindActiveAttempt, fmt.Sprintf("attempt/%d", item.id), "Blocking", strings.ToLower(item.state)+"|"+directive, now); err != nil {
-			return err
-		}
-	}
-	operationRows, err := conn.QueryContext(ctx, `
-		SELECT o.id, o.kind, o.state, o.owner_attempt_id FROM browser_operations o
-		WHERE o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
-		ORDER BY o.id`)
-	if err != nil {
-		return err
-	}
-	type activeOperation struct {
-		id          int64
-		kind, state string
-		owner       sql.NullInt64
-	}
-	operations := []activeOperation{}
-	for operationRows.Next() {
-		var item activeOperation
-		if err := operationRows.Scan(&item.id, &item.kind, &item.state, &item.owner); err != nil {
-			operationRows.Close()
-			return err
-		}
-		operations = append(operations, item)
-	}
-	if err := operationRows.Close(); err != nil {
-		return err
-	}
-	for _, item := range operations {
-		directive, err := operationDirective(ctx, conn, item.id, item.kind, item.state, item.owner)
-		if err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO maintenance_items(maintenance_revision,kind,object_key,safe_state,detail_code,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(maintenance_revision,kind,object_key) DO NOTHING`, revision, kindActiveBrowser, fmt.Sprintf("operation/%d", item.id), "Blocking", strings.ToLower(item.state)+"|"+directive, now); err != nil {
 			return err
 		}
 	}

@@ -15,7 +15,7 @@ func TestLoadDecodesFrozenLock(t *testing.T) {
 	if lock.ContractVersion != 1 {
 		t.Fatalf("contract version %d", lock.ContractVersion)
 	}
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range []string{"quoin", "plinth", "stele"} {
 		base, err := lock.Base(component)
 		if err != nil {
 			t.Fatalf("%s: %v", component, err)
@@ -29,12 +29,6 @@ func TestLoadDecodesFrozenLock(t *testing.T) {
 			}
 		}
 	}
-	if len(lock.Playwright.Artifacts) != 2 {
-		t.Fatalf("playwright artifacts %v", lock.Playwright.Artifacts)
-	}
-	if lock.Playwright.ChromiumRevision == "" || lock.Playwright.BrowsersJSON.SHA256 == "" {
-		t.Fatalf("playwright source locks incomplete: %+v", lock.Playwright)
-	}
 }
 
 func TestAPTSpeDerivePerArchitecture(t *testing.T) {
@@ -43,18 +37,6 @@ func TestAPTSpeDerivePerArchitecture(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
-		lintel, err := lock.LintelAPTSpecs(arch)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(lintel) != len(lock.LintelRuntime.Packages) {
-			t.Fatalf("lintel %s spec %v misses packages", arch, lintel)
-		}
-		for _, spec := range lintel {
-			if !strings.Contains(spec, "=") {
-				t.Fatalf("unpinned lintel package %q", spec)
-			}
-		}
 		plinth, err := lock.PlinthAPTSpecs(arch)
 		if err != nil {
 			t.Fatal(err)
@@ -62,8 +44,13 @@ func TestAPTSpeDerivePerArchitecture(t *testing.T) {
 		if len(plinth) != len(lock.PlinthTools.Packages) {
 			t.Fatalf("plinth %s spec %v misses tools", arch, plinth)
 		}
+		for _, spec := range plinth {
+			if !strings.Contains(spec, "=") {
+				t.Fatalf("unpinned plinth package %q", spec)
+			}
+		}
 	}
-	if _, err := lock.LintelAPTSpecs("riscv64"); err == nil {
+	if _, err := lock.PlinthAPTSpecs("riscv64"); err == nil {
 		t.Fatal("unknown architecture must fail")
 	}
 }
@@ -73,7 +60,7 @@ func TestBuildArgsPinLockedDigests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+	for _, component := range []string{"quoin", "plinth", "stele"} {
 		args, err := lock.BuildArgs(component)
 		if err != nil {
 			t.Fatalf("%s: %v", component, err)

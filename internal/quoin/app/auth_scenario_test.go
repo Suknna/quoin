@@ -11,11 +11,11 @@ package app_test
 // OTP codes. No direct-login bypass exists here.
 
 import (
-	"github.com/Suknna/quoin/internal/quoin/execution"
 	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -99,7 +99,7 @@ func newAuthScenarioWith(t *testing.T, build func(scenario *authScenario) http.H
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		RuntimeClientCAFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)

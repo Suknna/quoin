@@ -188,11 +188,10 @@ type Swept struct {
 	ScopeType string
 	ScopeID   int64
 	Final     string // Interrupted | Cancelled
-	// DeferredLoss means this row owns browser cleanup (or is the investigation
-	// parent itself). Runtime must first create the durable recovery-loss work
-	// item; a generic lease update may never bypass that trace closure.
-	DeferredLoss           bool
-	BrowserParentAttemptID int64
+	// DeferredLoss means this row is an investigation parent. Runtime must
+	// first create the durable recovery-loss work item; a generic lease
+	// update may never bypass that closure.
+	DeferredLoss bool
 }
 
 // SweepExpired converges every active attempt whose lease has burned down
@@ -221,16 +220,7 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 	}
 	rows, err := service.Reader().QueryContext(ctx, `
 		SELECT a.id, a.attempt_type, a.scope_type, a.scope_id, a.state,
-		       CASE WHEN a.attempt_type='investigation' OR EXISTS (
-		         SELECT 1 FROM browser_exploration_child_bindings b
-		         JOIN browser_operations o ON o.id=b.operation_id
-		         WHERE b.child_attempt_id=a.id AND o.kind='exploration'
-		           AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect') OR o.stop_confirmed_at IS NULL)
-		       ) THEN 1 ELSE 0 END,
-		       COALESCE((SELECT b.parent_attempt_id FROM browser_exploration_child_bindings b
-		         JOIN browser_operations o ON o.id=b.operation_id
-		         WHERE b.child_attempt_id=a.id AND o.kind='exploration'
-		         ORDER BY b.operation_id DESC LIMIT 1),0)
+		       CASE WHEN a.attempt_type='investigation' THEN 1 ELSE 0 END
 		FROM execution_attempts a
 		WHERE a.state IN ('Assigned','Running','Cancelling') AND a.lease_until <= ? ORDER BY a.id`, now)
 	if err != nil {
@@ -241,14 +231,10 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 		var item Swept
 		var state string
 		var deferred int
-		if err := rows.Scan(&item.AttemptID, &item.Type, &item.ScopeType, &item.ScopeID, &state, &deferred, &item.BrowserParentAttemptID); err != nil {
+		if err := rows.Scan(&item.AttemptID, &item.Type, &item.ScopeType, &item.ScopeID, &state, &deferred); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		// A cancellation fence does not waive the mandatory exploration trace.
-		// Route every browser obligation, including Cancelling children/parents,
-		// through the parent closure state machine; only its trace action may
-		// eventually acknowledge the terminal attempt.
 		item.DeferredLoss = deferred != 0
 		swept = append(swept, item)
 	}
@@ -259,9 +245,8 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 	for index := 0; index < len(swept); index++ {
 		if swept[index].DeferredLoss {
 			// This is deliberately a typed candidate, not a terminal transition.
-			// The caller creates recovery_loss before it observes/dispatches browser
-			// cleanup, eliminating the lease-sweep trace-loss race. Nothing
-			// transitioned here, so nothing records.
+			// The caller creates recovery_loss first, eliminating the lease-sweep
+			// race. Nothing transitioned here, so nothing records.
 			continue
 		}
 		final, err := service.sweepOne(ctx, swept[index].AttemptID, now, trigger)

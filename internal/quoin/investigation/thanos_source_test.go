@@ -21,7 +21,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -93,7 +92,7 @@ func seedThanosIntegration(t *testing.T, db *sql.DB, name string) (connectionID,
 
 func enabledSourceNames(t *testing.T, db *sql.DB) []string {
 	t.Helper()
-	rows, err := db.Query(`SELECT name FROM connections WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0 ORDER BY name`)
+	rows, err := db.Query(`SELECT name FROM connections WHERE type IN ('thanos','prometheus') AND enabled=1 AND revalidation_required=0 ORDER BY name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,168 +339,5 @@ func TestSourceInvestigationAmbiguousSourcesPreflight(t *testing.T) {
 	var grants int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_connection_grants WHERE attempt_id=? AND purpose='thanos_query'`, created.AttemptID).Scan(&grants); err != nil || grants != 0 {
 		t.Fatalf("ambiguous routing created %d grants (err=%v)", grants, err)
-	}
-}
-
-// seedKubernetesIntegration drives the production create+enable path for one
-// Kubernetes connection (enable needs no probe; credentials are mandatory).
-func seedKubernetesIntegration(t *testing.T, db *sql.DB, name string) int64 {
-	t.Helper()
-	now := testNow()
-	if _, err := db.Exec(`INSERT OR IGNORE INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, make([]byte, 12), make([]byte, 16), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO users(id,username,display_name,role,enabled,initialized,password_phc,auth_revision,created_at,updated_at) VALUES(1,'test-admin','Test Admin','admin',1,1,'x',1,?,?)`, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,randomblob(32),1,'investigation-source-test',?,?,?,?)`, now, now, "2036-09-15T00:00:00Z", "2036-09-22T00:00:00Z"); err != nil {
-		t.Fatal(err)
-	}
-	service := newTestConnectionsService(t, db)
-	summary, err := service.Create(investigationAdminContext(t), connections.CreateInput{
-		Name: name, Type: connections.TypeKubernetes,
-		NonSecretJSON: []byte(`{"type":"kubernetes"}`),
-		Secret:        []byte(`{"type":"kubernetes","kubernetes":{"kubeconfig":"apiVersion: v1\nkind: Config"}}`), SecretPresent: true,
-	}, 1, "investigation-k8s-create-"+name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	enabled, err := service.Enable(investigationAdminContext(t), summary.Name, summary.RowVersion, 0, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return enabled.ID
-}
-
-// TestKubernetesSourceGrantResolvesBySourceRef proves source-level
-// kubernetes_read authorization: the frozen kubernetes_source item is the
-// authority, the grant carries no business system, and the exact frozen
-// revision is reused.
-func TestKubernetesSourceGrantResolvesBySourceRef(t *testing.T) {
-	db, dbPath := newTestDB(t)
-	service := newTestService(t, db, dbPath)
-	principalID := seedUser(t, db)
-	ctx := userContext(t, principalID)
-	seedProviderChain(t, db)
-	seedKubernetesIntegration(t, db, "k8s-source-a")
-	created, err := service.Create(ctx, principalID, "cmd-k8s-source", "看下集群状态", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	callID := driveFirstCall(t, db, service, created.AttemptID)
-	now := testNow()
-	response, err := json.Marshal(map[string]any{
-		"assistantText": "", "finishReason": "tool_calls",
-		"tool_calls": []any{map[string]any{
-			"id": "raw-source-k8s", "name": kubernetes.ReadToolName,
-			"arguments": map[string]any{"sourceRef": "k8s-source-a", "operation": "discovery"},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
-		t.Fatal(err)
-	}
-	arguments := `{"sourceRef":"k8s-source-a","operation":"discovery"}`
-	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
-		created.AttemptID, callID, 1, 0, "raw-source-k8s", kubernetes.ReadToolName, "1", arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "supervisor_typed", "return_to_model", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolCallID, _ := insert.LastInsertId()
-
-	// The resolver is exercised directly: the offered catalog gains
-	// kubernetes_read in b084's versioned schema bump, while this slice owns
-	// the authorization resolution underneath it. The single connection is
-	// released before the pool-bound verification reads below.
-	resolution := resolveKubernetesSourceCall(t, service, db, created.AttemptID, toolCallID)
-	if resolution.PreflightCode != "" || len(resolution.Grants) != 1 {
-		t.Fatalf("resolution=%+v, want one grant", resolution)
-	}
-	var purpose string
-	var grantedConnection, grantedBusiness sql.NullInt64
-	var grantedRevision int64
-	if err := db.QueryRow(`SELECT purpose,connection_id,business_system_id,connection_revision_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection, &grantedBusiness, &grantedRevision); err != nil {
-		t.Fatal(err)
-	}
-	if purpose != kubernetes.ReadPurpose || grantedConnection.Int64 != connectionIDFixture(t, db, "k8s-source-a") || grantedBusiness.Valid {
-		t.Fatalf("grant purpose=%s connection=%v business=%v", purpose, grantedConnection, grantedBusiness)
-	}
-	_ = grantedRevision
-}
-
-// resolveKubernetesSourceCall drives the production kubernetes_read resolver
-// on its own connection and releases that connection before returning, so the
-// single-writer pool stays available to the verification reads.
-func resolveKubernetesSourceCall(t *testing.T, service *Service, db *sql.DB, attemptID, toolCallID int64) attempt.ToolResolution {
-	t.Helper()
-	resolution, err := resolveToolGrantOnRunner(t, service, "test.tool_grant.kubernetes."+strconv.FormatInt(toolCallID, 10),
-		func(ctx context.Context, tx *execution.Tx) (attempt.ToolResolution, error) {
-			return kubernetes.ResolveRead(ctx, tx, attemptID, toolCallID)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resolution
-}
-
-func connectionIDFixture(t *testing.T, db *sql.DB, name string) int64 {
-	t.Helper()
-	var id int64
-	if err := db.QueryRow(`SELECT id FROM connections WHERE name=?`, name).Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-// TestKubernetesSourceAmbiguityPreflight proves multiple frozen kubernetes
-// sources without an explicit name stay a recoverable preflight result.
-func TestKubernetesSourceAmbiguityPreflight(t *testing.T) {
-	db, dbPath := newTestDB(t)
-	service := newTestService(t, db, dbPath)
-	principalID := seedUser(t, db)
-	ctx := userContext(t, principalID)
-	seedProviderChain(t, db)
-	seedKubernetesIntegration(t, db, "k8s-source-a")
-	seedKubernetesIntegration(t, db, "k8s-source-b")
-	created, err := service.Create(ctx, principalID, "cmd-k8s-ambiguous", "看下集群状态", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	callID := driveFirstCall(t, db, service, created.AttemptID)
-	now := testNow()
-	response, err := json.Marshal(map[string]any{
-		"assistantText": "", "finishReason": "tool_calls",
-		"tool_calls": []any{map[string]any{
-			"id": "raw-source-k8s", "name": kubernetes.ReadToolName,
-			"arguments": map[string]any{"operation": "discovery"},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(?,1,?,?,?,?)`, callID, string(response), fmt.Sprintf("%x", sha256.Sum256(response)), "tool_calls", now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=? AND status='running'`, now, callID); err != nil {
-		t.Fatal(err)
-	}
-	arguments := `{"operation":"discovery"}`
-	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
-		created.AttemptID, callID, 1, 0, "raw-source-k8s", kubernetes.ReadToolName, "1", arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "supervisor_typed", "return_to_model", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolCallID, _ := insert.LastInsertId()
-
-	resolution := resolveKubernetesSourceCall(t, service, db, created.AttemptID, toolCallID)
-	if resolution.PreflightCode != "target_ambiguous" || !strings.Contains(resolution.PreflightDetail, "k8s-source-a") || !strings.Contains(resolution.PreflightDetail, "k8s-source-b") {
-		t.Fatalf("preflight=%+v, want target_ambiguous listing both sources", resolution)
 	}
 }

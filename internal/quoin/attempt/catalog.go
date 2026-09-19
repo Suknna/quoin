@@ -14,18 +14,16 @@ package attempt
 // silently reinterpreted.
 //
 // Catalog ASSEMBLY is registry-driven (ADR-0004): one plugins.Registry
-// holds every plugin descriptor — active and retired — and BuildCatalogs
-// derives from that registry plus the compiled implementation table BOTH
-// the per-generation frozen catalogs AND the implementation lookup every
-// host shares. Platform tools come from this package's compiled table;
-// every plugin-contributed tool enters a generation's catalog exactly when
-// its owning plugin is enabled and the generation accepts the tool's
-// execution location; retired plugins can never be enabled, so their
-// implementations stay resolvable for frozen historical attempts only. A
-// new plugin therefore never changes a core map or switch here; the
-// registry descriptors are the single ownership authority (duplicate tool
-// names are rejected at registration, so a shared tool has exactly one
-// owning plugin).
+// holds every plugin descriptor, and BuildCatalogs derives from that
+// registry plus the compiled implementation table BOTH the per-generation
+// frozen catalogs AND the implementation lookup every host shares. Platform
+// tools come from this package's compiled table; every plugin-contributed
+// tool enters a generation's catalog exactly when its owning plugin is
+// enabled and the generation accepts the tool's execution location. A new
+// plugin therefore never changes a core map or switch here; the registry
+// descriptors are the single ownership authority (duplicate tool names are
+// rejected at registration, so a shared tool has exactly one owning
+// plugin).
 
 import (
 	"bytes"
@@ -36,7 +34,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/plugins"
 )
 
@@ -64,19 +61,14 @@ type FrozenPlugin struct {
 
 // FrozenTool is one tool's complete frozen contract.
 type FrozenTool struct {
-	Name             string `json:"name"`
-	Version          string `json:"version"`
-	ExecutionMode    string `json:"executionMode"`
-	FailureMode      string `json:"failureMode"`
-	ResultSchemaKind string `json:"resultSchemaKind,omitempty"`
-	// ResultSchemaDigest, when set, freezes the exact generated result
-	// contract document the installed validator enforces; a drifted schema
-	// fails the installed-executor compatibility check instead of silently
-	// sealing differently-shaped results.
-	ResultSchemaDigest string         `json:"resultSchemaDigest,omitempty"`
-	Description        string         `json:"description"`
-	ProducesEvidence   bool           `json:"producesEvidence,omitempty"`
-	Parameters         map[string]any `json:"parameters"`
+	Name             string         `json:"name"`
+	Version          string         `json:"version"`
+	ExecutionMode    string         `json:"executionMode"`
+	FailureMode      string         `json:"failureMode"`
+	ResultSchemaKind string         `json:"resultSchemaKind,omitempty"`
+	Description      string         `json:"description"`
+	ProducesEvidence bool           `json:"producesEvidence,omitempty"`
+	Parameters       map[string]any `json:"parameters"`
 }
 
 // generationAccepts is the per-agent-generation execution-location strategy.
@@ -97,17 +89,14 @@ var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
 	"investigation-v1": {
 		plugins.LocationWorkerLocal:      true,
 		plugins.LocationPlinthSupervisor: true,
-		plugins.LocationLintel:           true,
 	},
 	"investigation-v2": {
 		plugins.LocationWorkerLocal:      true,
 		plugins.LocationPlinthSupervisor: true,
-		plugins.LocationLintel:           true,
 	},
 	"investigation-v3": {
 		plugins.LocationWorkerLocal:      true,
 		plugins.LocationPlinthSupervisor: true,
-		plugins.LocationLintel:           true,
 	},
 }
 
@@ -116,16 +105,6 @@ var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
 var platformToolNames = map[string]bool{
 	"bash": true, "read": true, "write": true, "grep": true,
 	"artifact_read": true, "artifact_grep": true,
-}
-
-// knownResultSchemaReferences pins the generated result contract documents
-// by result schema kind. Kinds without a generated document are enforced by
-// compiled validators alone and carry no frozen reference.
-func knownResultSchemaReferences() map[string]string {
-	browserSum := sha256.Sum256(gencontracts.BrowserToolSchema)
-	return map[string]string{
-		"browser_tool_result_v1": hex.EncodeToString(browserSum[:]),
-	}
 }
 
 // ImplementationTable is the frozen by-name index of one assembly's
@@ -254,9 +233,9 @@ func (catalogs *Catalogs) InstalledDefinition(frozen FrozenTool) (ToolDef, error
 // compiled order); enabled plugins contribute their declared tools in
 // stable descriptor order, each verified against the compiled
 // implementation so a declaration can never advertise a tool nobody
-// executes. Every registered descriptor — active or retired, enabled or
-// not — is verified against the implementation table, and every
-// non-platform implementation must be owned by a registered descriptor.
+// executes. Every registered descriptor is verified against the
+// implementation table, and every non-platform implementation must be owned
+// by a registered descriptor.
 func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enabledPluginIDs []string) (*Catalogs, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("plugin registry is not wired")
@@ -265,10 +244,10 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 	if err != nil {
 		return nil, err
 	}
-	// Every registered descriptor — enabled or not, active or retired —
-	// owns its declared tool names; ownership is a declaration fact, not an
-	// enablement fact, and declaration/implementation agreement is verified
-	// here for ALL of them (声明不能伪装不存在的实现).
+	// Every registered descriptor owns its declared tool names; ownership is
+	// a declaration fact, not an enablement fact, and
+	// declaration/implementation agreement is verified here for ALL of them
+	// (声明不能伪装不存在的实现).
 	pluginOwned := map[string]bool{}
 	for _, descriptor := range registry.Descriptors() {
 		for _, declared := range descriptor.Tools {
@@ -285,7 +264,6 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 			return nil, fmt.Errorf("compiled tool %s has no registered plugin declaration", def.Name)
 		}
 	}
-	resultSchemaReferences := knownResultSchemaReferences()
 	catalogs := &Catalogs{generations: map[string]*FrozenCatalog{}, Implementations: table}
 	for agentVersion, accepts := range generationAccepts {
 		catalog := &FrozenCatalog{
@@ -294,14 +272,12 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 		}
 		for _, def := range implementations {
 			if platformToolNames[def.Name] {
-				catalog.Tools = append(catalog.Tools, frozenToolWithReference(def, resultSchemaReferences))
+				catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
 			}
 		}
 		addedTools := map[string]bool{}
 		for _, descriptor := range registry.Descriptors() {
-			// Retired plugins are declaration authorities only: their tools
-			// serve frozen historical attempts, never a newly frozen catalog.
-			if descriptor.Retired || !plugins.IsEnabled(enabledPluginIDs, descriptor.ID) {
+			if !plugins.IsEnabled(enabledPluginIDs, descriptor.ID) {
 				continue
 			}
 			contributed := false
@@ -314,7 +290,7 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 					// provenance lists every enabled contributing provider;
 					// authorization resolves the actual source connection.
 					if !addedTools[declared.Name] {
-						catalog.Tools = append(catalog.Tools, frozenToolWithReference(implementation, resultSchemaReferences))
+						catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(implementation))
 						addedTools[declared.Name] = true
 					}
 					contributed = true
@@ -331,9 +307,8 @@ func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enable
 
 func catalogSchemaVersionFor(agentVersion string) string {
 	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" || agentVersion == "investigation-v3" {
-		// v3 carries quoin_browser v2: the breaking identityKey locator
-		// (ADR-0004). The label keeps model-call provenance distinguishable
-		// from catalogs frozen with the retired businessSystemKey locator.
+		// The investigation catalog generation keeps its own provenance label
+		// distinct from the initial-analysis one.
 		return "investigation-tools-v3"
 	}
 	return ToolSchemaVersion
@@ -387,14 +362,6 @@ func frozenToolFromDefinition(def ToolDef) FrozenTool {
 		Description: def.Description, ProducesEvidence: def.ProducesEvidence,
 		Parameters: def.ProviderParameters(),
 	}
-}
-
-func frozenToolWithReference(def ToolDef, references map[string]string) FrozenTool {
-	frozen := frozenToolFromDefinition(def)
-	if reference, ok := references[def.ResultSchemaKind]; ok {
-		frozen.ResultSchemaDigest = reference
-	}
-	return frozen
 }
 
 // ProviderToolsJSON renders the frozen catalog into the canonical
@@ -459,29 +426,6 @@ func providerParametersEqual(def ToolDef, stored map[string]any) bool {
 	return bytes.Equal(installed, frozen)
 }
 
-// legacyGenerationCatalog loads the FROZEN legacy catalog document of one
-// agent generation (legacy_catalog.go): the exact historical bytes its
-// dispatch originally rendered. It is the authorization fallback for a NULL
-// tool_catalog_json only — never a creation path, never derived from the
-// current enablement or implementations, so a drifted or retired tool is
-// denied explicitly at InstalledDefinition instead of being reinterpreted.
-func legacyGenerationCatalog(agentVersion string) *FrozenCatalog {
-	var document string
-	// NULL-catalog attempts only exist from before per-attempt freezing, but
-	// every investigation generation must resolve the investigation document,
-	// never the initial-analysis one.
-	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" || agentVersion == "investigation-v3" {
-		document = legacyInvestigationCatalogJSON
-	} else {
-		document = legacyInitialAnalysisCatalogJSON
-	}
-	var catalog FrozenCatalog
-	if err := json.Unmarshal([]byte(document), &catalog); err != nil {
-		panic("frozen legacy catalog document is invalid: " + err.Error())
-	}
-	return &catalog
-}
-
 // FrozenToolCatalog loads the attempt's frozen catalog document
 // (attempt_input_snapshots.tool_catalog_json, ADR-0004).
 func (service *Service) FrozenToolCatalog(ctx context.Context, attemptID int64) (*FrozenCatalog, error) {
@@ -491,20 +435,15 @@ func (service *Service) FrozenToolCatalog(ctx context.Context, attemptID int64) 
 // frozenToolCatalogOn is the transaction-composable form: callers inside a
 // BEGIN IMMEDIATE ledger transaction must pass their own connection (the
 // production pool is single-connection and a pool fetch would self-deadlock).
-// A NULL document is the legacy shape: the attempt predates per-attempt
-// freezing, and its catalog is the fixed historical generation document —
-// the exact bytes its dispatch originally rendered.
+// A NULL document is the legacy shape from before per-attempt freezing;
+// those attempts are no longer resolvable and fail explicitly.
 func frozenToolCatalogOn(ctx context.Context, queries rowQuerier, attemptID int64) (*FrozenCatalog, error) {
 	var document sql.NullString
 	if err := queries.QueryRowContext(ctx, `SELECT tool_catalog_json FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&document); err != nil {
 		return nil, err
 	}
 	if !document.Valid || document.String == "" {
-		var agentVersion string
-		if err := queries.QueryRowContext(ctx, `SELECT agent_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&agentVersion); err != nil {
-			return nil, err
-		}
-		return legacyGenerationCatalog(agentVersion), nil
+		return nil, fmt.Errorf("attempt %d predates per-attempt catalog freezing and has no resolvable tool catalog", attemptID)
 	}
 	var catalog FrozenCatalog
 	if err := json.Unmarshal([]byte(document.String), &catalog); err != nil {
@@ -514,9 +453,9 @@ func frozenToolCatalogOn(ctx context.Context, queries rowQuerier, attemptID int6
 }
 
 // FrozenToolCatalogDoc is the raw stored-catalog read for input REBUILDING:
-// it returns nil (no document) instead of deriving a legacy catalog, because
-// the rebuilt input bytes must reproduce the attempt's creation exactly —
-// only attempts created with freezing carry the document.
+// it returns nil (no document), because the rebuilt input bytes must
+// reproduce the attempt's creation exactly — only attempts created with
+// freezing carry the document.
 func FrozenToolCatalogDoc(ctx context.Context, queries rowQuerier, attemptID int64) (*FrozenCatalog, error) {
 	var document sql.NullString
 	if err := queries.QueryRowContext(ctx, `SELECT tool_catalog_json FROM attempt_input_snapshots WHERE attempt_id=?`, attemptID).Scan(&document); err != nil {
@@ -534,8 +473,7 @@ func FrozenToolCatalogDoc(ctx context.Context, queries rowQuerier, attemptID int
 
 // CatalogFromInputDocument extracts the frozen catalog embedded in a
 // canonical attempt input document. ok is false for legacy inputs created
-// before per-attempt freezing; their consumers fall back to the frozen
-// historical generation rendering.
+// before per-attempt freezing.
 func CatalogFromInputDocument(canonical []byte) (catalog *FrozenCatalog, ok bool) {
 	var document struct {
 		ToolCatalog *FrozenCatalog `json:"toolCatalog"`

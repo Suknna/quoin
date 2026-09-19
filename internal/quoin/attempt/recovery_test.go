@@ -238,10 +238,7 @@ func TestBeginModelCallReplayReturnsOriginalRow(t *testing.T) {
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	items := []ModelInputItem{
 		{Sequence: 1, ItemKind: "system_contract", ContentDigest: strings.Repeat("d", 64), Role: "system"},
 		{Sequence: 2, ItemKind: "snapshot", ContentDigest: testDigest, Role: "system"},
@@ -290,10 +287,7 @@ func TestCompleteModelCallReplayRebuildsOriginalAck(t *testing.T) {
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	items := []ModelInputItem{
 		{Sequence: 1, ItemKind: "system_contract", ContentDigest: strings.Repeat("d", 64), Role: "system"},
 		{Sequence: 2, ItemKind: "tool_schema", ContentDigest: strings.Repeat("e", 64), Role: "system"},
@@ -309,11 +303,6 @@ func TestCompleteModelCallReplayRebuildsOriginalAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolsJSON, err := CanonicalToolsJSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = toolsJSON
 	assistantText := "最终诊断"
 	arguments := []byte(`{"command":"echo ok"}`)
 	proposed := []ProposedTool{{
@@ -376,10 +365,7 @@ func TestPartialFailurePersistsIncompleteOutputRow(t *testing.T) {
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	callID, err := service.BeginModelCall(ctx, BeginCall{
 		AttemptID: attemptID, CallSeq: 1, RetrySeq: 0, ModelID: "fixture-chat-1",
 		PromptDigest: strings.Repeat("1", 64), ToolSchemaDigest: toolsDigest,
@@ -423,10 +409,7 @@ func TestBeginModelCallLostAckRetryAliasesRunningPredecessor(t *testing.T) {
 	ctx := context.Background()
 	attemptID, _ := seedAttempt(t, db)
 	bindAndAccept(t, service, attemptID, "boot-a", 1)
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	items := []ModelInputItem{
 		{Sequence: 1, ItemKind: "system_contract", ContentDigest: strings.Repeat("d", 64), Role: "system"},
 		{Sequence: 2, ItemKind: "tool_schema", ContentDigest: strings.Repeat("e", 64), Role: "system"},

@@ -11,7 +11,7 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
-// The browser business is retired (受控浏览器退役): the Lintel slot is no
+// The runtime slot authority projects only Plinth: there is no
 // longer part of any deployment, so the public projection exposes only the
 // Plinth slot. The upgrade drain reads slots through the upgrade reconciler,
 // not through this projection.

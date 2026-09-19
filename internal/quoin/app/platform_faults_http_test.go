@@ -40,7 +40,7 @@ func TestAdminAboutBoundaryAndSanitization(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &about); err != nil {
 		t.Fatal(err)
 	}
-	// ADR-0004: the browser plugin is default-disabled, so the Lintel slot is
+	// Only the plinth slot is a fault-eligible component, so an unknown slot is
 	// not part of the default deployment projection and must not read as a
 	// perpetually degraded component.
 	if about.Components == nil || len(about.Components) != 1 || about.Components[0].Slot != "plinth" {

@@ -226,10 +226,6 @@ func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) Config
 	if err != nil {
 		t.Fatalf("historical fixture declaration must compile: %v", err)
 	}
-	_, catalogVersion, catalogDigest, err := config.JourneyCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Resolve stable reference names into immutable locators, exactly as the
 	// retired upload did inside its serialized transaction.
 	if err := h.db.QueryRow(`SELECT id,type FROM connections WHERE name=?`, document.MetricsConnectionRef).Scan(&document.MetricsConnectionID, new(string)); err != nil {
@@ -262,8 +258,8 @@ func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) Config
 	if err := h.db.QueryRow(`SELECT COALESCE(MAX(version_seq),0)+1 FROM business_system_config_versions WHERE business_system_id=?`, systemID).Scan(&versionSeq); err != nil {
 		t.Fatal(err)
 	}
-	result, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,journey_catalog_digest,journey_catalog_version,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		systemID, versionSeq, "draft", body, config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, catalogDigest, catalogVersion, digest, h.principal, now, document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
+	result, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,description,discovery_refresh_seconds,digest,created_by,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		systemID, versionSeq, "draft", body, config.ParserVersion, config.SchemaVersion(config.SchemaBusinessSystem), nil, string(declarationJSON), document.Description, document.DiscoveryRefreshIntervalSeconds, digest, h.principal, now, document.SystemKey, document.DisplayName, document.MetricsConnectionID, boolToInt(document.Enabled), document.Timezone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,22 +328,11 @@ func seedFixtureProjections(t *testing.T, db *sql.DB, versionID int64, document 
 			return err
 		}
 		for _, check := range plan.Checks {
-			var queryMode, expression, journeyID, journeyParams any
 			var rangeSeconds, stepSeconds any
-			if check.Kind == "promql" {
-				queryMode, expression = check.QueryMode, check.Expression
-				if check.QueryMode == "range" {
-					rangeSeconds, stepSeconds = check.RangeSeconds, check.StepSeconds
-				}
-			} else {
-				journeyID = check.JourneyID
-				params, err := json.Marshal(check.JourneyParams)
-				if err != nil {
-					return err
-				}
-				journeyParams = string(params)
+			if check.QueryMode == "range" {
+				rangeSeconds, stepSeconds = check.RangeSeconds, check.StepSeconds
 			}
-			if _, err := db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds,journey_id,journey_params_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, planID, check.Key, check.DisplayName, check.AnalysisQuestion, check.Kind, queryMode, expression, rangeSeconds, stepSeconds, journeyID, journeyParams); err != nil {
+			if _, err := db.Exec(`INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds) VALUES(?,?,?,?,?,?,?,?,?)`, planID, check.Key, check.DisplayName, check.AnalysisQuestion, check.Kind, check.QueryMode, check.Expression, rangeSeconds, stepSeconds); err != nil {
 				return err
 			}
 		}
@@ -389,7 +374,7 @@ func TestListAndGetProjections(t *testing.T) {
 		t.Fatalf("enabled filter wrong: %v %#v", err, items)
 	}
 	detail, err := h.systems.GetSystem(context.Background(), "payments")
-	if err != nil || detail.BrowserIdentityState != "none" || len(detail.Discoveries) != 0 {
+	if err != nil || len(detail.Discoveries) != 0 {
 		t.Fatalf("unpublished system detail wrong: %v %#v", err, detail)
 	}
 	versions, _, err := h.systems.ListVersions(context.Background(), "payments", "", 50)

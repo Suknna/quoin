@@ -20,7 +20,7 @@ import (
 // copy-safe by construction。
 const (
 	unifiedMTLSPredecessorSchemaDigest = "f83c2a718ff52eb004bae521ec35adaa82b87be9b5200dbbd088f23268db14ec"
-	unifiedMTLSMigrationID            = "20260919_unified_mtls_component_auth_v1"
+	unifiedMTLSMigrationID             = "20260919_unified_mtls_component_auth_v1"
 )
 
 // migrateUnifiedMTLSOn drops the retired registration/token authority and the

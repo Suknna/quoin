@@ -53,7 +53,6 @@ const bindingQuoin = validQuoin + `deploymentBinding:
   deploymentConfigDigest: ` + bindingDigest + `
   backend: compose
   architecture: linux/amd64
-  browserChromiumRevision: '1200.0.6099.109'
 `
 
 const bindingDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

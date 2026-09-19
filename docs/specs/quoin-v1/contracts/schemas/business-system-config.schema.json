@@ -129,7 +129,7 @@
       }
     },
     "inspectionCheck": {
-      "description": "巡检项按 kind 封闭判别；promql 与 browser 字段互相排斥（DATA-CONFIG-003）。key 在所属 inspection plan 内唯一；不同 plan 可合法复用同一 check key（上传时校验，CFG-YAML-003）。",
+      "description": "巡检项按 kind 封闭判别；字段互相排斥（DATA-CONFIG-003）。key 在所属 inspection plan 内唯一；不同 plan 可合法复用同一 check key（上传时校验，CFG-YAML-003）。",
       "oneOf": [
         {
           "type": "object",
@@ -152,37 +152,6 @@
             },
             "kind": { "const": "promql" },
             "query": { "$ref": "#/$defs/promqlQuery" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["key", "display_name", "analysis_question", "kind", "journey_id"],
-          "properties": {
-            "key": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "display_name": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200
-            },
-            "analysis_question": {
-              "type": "string",
-              "minLength": 1
-            },
-            "kind": { "const": "browser" },
-            "journey_id": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Journey Catalog 中的稳定 ID；上传时校验存在于嵌入 catalog（CFG-JOURNEY-003）。"
-            },
-            "journey_params": {
-              "type": "object",
-              "description": "Journey 参数；上传时按嵌入 catalog 中该 journey 的封闭 params_schema 校验（封闭性由 catalog 生成持有，CFG-JOURNEY-003）。缺省时规范化为空对象后保存类型化投影。"
-            }
           }
         }
       ]

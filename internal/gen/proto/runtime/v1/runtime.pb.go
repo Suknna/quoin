@@ -41,14 +41,13 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// 固定两个逻辑 Runtime slot（CONTEXT「服务身份」）。对应 SQL runtime_slots.slot
-// 与 OpenAPI RuntimeSlot 枚举的字符串 'plinth' / 'lintel'。
+// 唯一逻辑 Runtime slot（CONTEXT「服务身份」）。对应 SQL runtime_slot
+// 与 OpenAPI RuntimeSlot 枚举的字符串 'plinth'。
 type RuntimeSlot int32
 
 const (
 	RuntimeSlot_RUNTIME_SLOT_UNSPECIFIED RuntimeSlot = 0
 	RuntimeSlot_RUNTIME_SLOT_PLINTH      RuntimeSlot = 1
-	RuntimeSlot_RUNTIME_SLOT_LINTEL      RuntimeSlot = 2
 )
 
 // Enum value maps for RuntimeSlot.
@@ -56,12 +55,10 @@ var (
 	RuntimeSlot_name = map[int32]string{
 		0: "RUNTIME_SLOT_UNSPECIFIED",
 		1: "RUNTIME_SLOT_PLINTH",
-		2: "RUNTIME_SLOT_LINTEL",
 	}
 	RuntimeSlot_value = map[string]int32{
 		"RUNTIME_SLOT_UNSPECIFIED": 0,
 		"RUNTIME_SLOT_PLINTH":      1,
-		"RUNTIME_SLOT_LINTEL":      2,
 	}
 )
 
@@ -101,7 +98,6 @@ const (
 	AttemptType_ATTEMPT_TYPE_INVESTIGATION         AttemptType = 2
 	AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS   AttemptType = 3
 	AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION AttemptType = 4
-	AttemptType_ATTEMPT_TYPE_BROWSER_EXPLORATION   AttemptType = 5
 	AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION  AttemptType = 6
 	AttemptType_ATTEMPT_TYPE_EMBEDDING             AttemptType = 7
 	AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE      AttemptType = 8
@@ -115,7 +111,6 @@ var (
 		2: "ATTEMPT_TYPE_INVESTIGATION",
 		3: "ATTEMPT_TYPE_INSPECTION_ANALYSIS",
 		4: "ATTEMPT_TYPE_INSPECTION_COLLECTION",
-		5: "ATTEMPT_TYPE_BROWSER_EXPLORATION",
 		6: "ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION",
 		7: "ATTEMPT_TYPE_EMBEDDING",
 		8: "ATTEMPT_TYPE_CONNECTION_PROBE",
@@ -126,7 +121,6 @@ var (
 		"ATTEMPT_TYPE_INVESTIGATION":         2,
 		"ATTEMPT_TYPE_INSPECTION_ANALYSIS":   3,
 		"ATTEMPT_TYPE_INSPECTION_COLLECTION": 4,
-		"ATTEMPT_TYPE_BROWSER_EXPLORATION":   5,
 		"ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION":  6,
 		"ATTEMPT_TYPE_EMBEDDING":             7,
 		"ATTEMPT_TYPE_CONNECTION_PROBE":      8,
@@ -384,7 +378,6 @@ const (
 	HelloRejectReason_HELLO_REJECT_REASON_UNSPECIFIED       HelloRejectReason = 0
 	HelloRejectReason_HELLO_REJECT_REASON_CONTRACT_MISMATCH HelloRejectReason = 3
 	HelloRejectReason_HELLO_REJECT_REASON_EPOCH_STALE       HelloRejectReason = 4
-	HelloRejectReason_HELLO_REJECT_REASON_CATALOG_MISMATCH  HelloRejectReason = 5 // Lintel journey_catalog_digest 与 Quoin 嵌入 Catalog 不一致（RUNTIME-CTRL-010）
 )
 
 // Enum value maps for HelloRejectReason.
@@ -393,13 +386,11 @@ var (
 		0: "HELLO_REJECT_REASON_UNSPECIFIED",
 		3: "HELLO_REJECT_REASON_CONTRACT_MISMATCH",
 		4: "HELLO_REJECT_REASON_EPOCH_STALE",
-		5: "HELLO_REJECT_REASON_CATALOG_MISMATCH",
 	}
 	HelloRejectReason_value = map[string]int32{
 		"HELLO_REJECT_REASON_UNSPECIFIED":       0,
 		"HELLO_REJECT_REASON_CONTRACT_MISMATCH": 3,
 		"HELLO_REJECT_REASON_EPOCH_STALE":       4,
-		"HELLO_REJECT_REASON_CATALOG_MISMATCH":  5,
 	}
 )
 
@@ -489,8 +480,6 @@ type ArtifactKind int32
 const (
 	ArtifactKind_ARTIFACT_KIND_UNSPECIFIED ArtifactKind = 0
 	ArtifactKind_ARTIFACT_KIND_ATTACHMENT  ArtifactKind = 1
-	ArtifactKind_ARTIFACT_KIND_SCREENSHOT  ArtifactKind = 2
-	ArtifactKind_ARTIFACT_KIND_TRACE       ArtifactKind = 3
 	ArtifactKind_ARTIFACT_KIND_TOOL_RESULT ArtifactKind = 4
 	ArtifactKind_ARTIFACT_KIND_REPORT_FILE ArtifactKind = 5
 )
@@ -500,16 +489,12 @@ var (
 	ArtifactKind_name = map[int32]string{
 		0: "ARTIFACT_KIND_UNSPECIFIED",
 		1: "ARTIFACT_KIND_ATTACHMENT",
-		2: "ARTIFACT_KIND_SCREENSHOT",
-		3: "ARTIFACT_KIND_TRACE",
 		4: "ARTIFACT_KIND_TOOL_RESULT",
 		5: "ARTIFACT_KIND_REPORT_FILE",
 	}
 	ArtifactKind_value = map[string]int32{
 		"ARTIFACT_KIND_UNSPECIFIED": 0,
 		"ARTIFACT_KIND_ATTACHMENT":  1,
-		"ARTIFACT_KIND_SCREENSHOT":  2,
-		"ARTIFACT_KIND_TRACE":       3,
 		"ARTIFACT_KIND_TOOL_RESULT": 4,
 		"ARTIFACT_KIND_REPORT_FILE": 5,
 	}
@@ -707,133 +692,6 @@ func (GoAwayReason) EnumDescriptor() ([]byte, []int) {
 	return file_runtime_proto_rawDescGZIP(), []int{10}
 }
 
-// BrowserSession 关闭原因（RUNTIME-BROWSER-004/005/007）。
-type BrowserCloseReason int32
-
-const (
-	BrowserCloseReason_BROWSER_CLOSE_REASON_UNSPECIFIED        BrowserCloseReason = 0
-	BrowserCloseReason_BROWSER_CLOSE_REASON_CLIENT_CLOSED      BrowserCloseReason = 1 // 浏览器侧关闭（WebSocket 关闭）
-	BrowserCloseReason_BROWSER_CLOSE_REASON_SESSION_REVOKED    BrowserCloseReason = 2 // 会话/操作被吊销
-	BrowserCloseReason_BROWSER_CLOSE_REASON_GRACE_EXPIRED      BrowserCloseReason = 3 // 重附着宽限期到期（同 boot 瞬时断线）
-	BrowserCloseReason_BROWSER_CLOSE_REASON_SLOT_REVOKED       BrowserCloseReason = 4 // Lintel slot 凭据吊销
-	BrowserCloseReason_BROWSER_CLOSE_REASON_SLOT_REPLACED      BrowserCloseReason = 5 // Lintel slot 被替换
-	BrowserCloseReason_BROWSER_CLOSE_REASON_SHUTDOWN           BrowserCloseReason = 6 // 有序停机
-	BrowserCloseReason_BROWSER_CLOSE_REASON_NEW_BOOT           BrowserCloseReason = 7 // Lintel 新 boot 被接受：旧 operation 进入 Interrupted；身份锁按 kind 的停止确认 basis 释放，deployment_verification 仍须 clone sweep
-	BrowserCloseReason_BROWSER_CLOSE_REASON_PROFILE_PUBLISHED  BrowserCloseReason = 8 // profile generation 已原子发布，立即关闭 tunnel/Chromium
-	BrowserCloseReason_BROWSER_CLOSE_REASON_OPERATION_TERMINAL BrowserCloseReason = 9 // Browser Operation 已进入其它终态
-)
-
-// Enum value maps for BrowserCloseReason.
-var (
-	BrowserCloseReason_name = map[int32]string{
-		0: "BROWSER_CLOSE_REASON_UNSPECIFIED",
-		1: "BROWSER_CLOSE_REASON_CLIENT_CLOSED",
-		2: "BROWSER_CLOSE_REASON_SESSION_REVOKED",
-		3: "BROWSER_CLOSE_REASON_GRACE_EXPIRED",
-		4: "BROWSER_CLOSE_REASON_SLOT_REVOKED",
-		5: "BROWSER_CLOSE_REASON_SLOT_REPLACED",
-		6: "BROWSER_CLOSE_REASON_SHUTDOWN",
-		7: "BROWSER_CLOSE_REASON_NEW_BOOT",
-		8: "BROWSER_CLOSE_REASON_PROFILE_PUBLISHED",
-		9: "BROWSER_CLOSE_REASON_OPERATION_TERMINAL",
-	}
-	BrowserCloseReason_value = map[string]int32{
-		"BROWSER_CLOSE_REASON_UNSPECIFIED":        0,
-		"BROWSER_CLOSE_REASON_CLIENT_CLOSED":      1,
-		"BROWSER_CLOSE_REASON_SESSION_REVOKED":    2,
-		"BROWSER_CLOSE_REASON_GRACE_EXPIRED":      3,
-		"BROWSER_CLOSE_REASON_SLOT_REVOKED":       4,
-		"BROWSER_CLOSE_REASON_SLOT_REPLACED":      5,
-		"BROWSER_CLOSE_REASON_SHUTDOWN":           6,
-		"BROWSER_CLOSE_REASON_NEW_BOOT":           7,
-		"BROWSER_CLOSE_REASON_PROFILE_PUBLISHED":  8,
-		"BROWSER_CLOSE_REASON_OPERATION_TERMINAL": 9,
-	}
-)
-
-func (x BrowserCloseReason) Enum() *BrowserCloseReason {
-	p := new(BrowserCloseReason)
-	*p = x
-	return p
-}
-
-func (x BrowserCloseReason) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserCloseReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[11].Descriptor()
-}
-
-func (BrowserCloseReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[11]
-}
-
-func (x BrowserCloseReason) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserCloseReason.Descriptor instead.
-func (BrowserCloseReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{11}
-}
-
-// 跨 Runtime 浏览器子执行请求的封闭拒绝原因（RUNTIME-CROSS-002）。
-type BrowserSubExecutionRejectReason int32
-
-const (
-	BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED        BrowserSubExecutionRejectReason = 0
-	BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_PARENT_NOT_RUNNING BrowserSubExecutionRejectReason = 1 // 父 Attempt 不属于 Plinth、非 Running 或已取消
-	BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED  BrowserSubExecutionRejectReason = 2 // 参数 schema/digest/引用无效
-	BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_STALE_STREAM       BrowserSubExecutionRejectReason = 3 // 请求来自已被替换的 boot/epoch
-	BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL           BrowserSubExecutionRejectReason = 4 // 持久化或派发内部错误
-)
-
-// Enum value maps for BrowserSubExecutionRejectReason.
-var (
-	BrowserSubExecutionRejectReason_name = map[int32]string{
-		0: "BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED",
-		1: "BROWSER_SUB_EXECUTION_REJECT_REASON_PARENT_NOT_RUNNING",
-		2: "BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED",
-		3: "BROWSER_SUB_EXECUTION_REJECT_REASON_STALE_STREAM",
-		4: "BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL",
-	}
-	BrowserSubExecutionRejectReason_value = map[string]int32{
-		"BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED":        0,
-		"BROWSER_SUB_EXECUTION_REJECT_REASON_PARENT_NOT_RUNNING": 1,
-		"BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED":  2,
-		"BROWSER_SUB_EXECUTION_REJECT_REASON_STALE_STREAM":       3,
-		"BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL":           4,
-	}
-)
-
-func (x BrowserSubExecutionRejectReason) Enum() *BrowserSubExecutionRejectReason {
-	p := new(BrowserSubExecutionRejectReason)
-	*p = x
-	return p
-}
-
-func (x BrowserSubExecutionRejectReason) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserSubExecutionRejectReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[12].Descriptor()
-}
-
-func (BrowserSubExecutionRejectReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[12]
-}
-
-func (x BrowserSubExecutionRejectReason) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserSubExecutionRejectReason.Descriptor instead.
-func (BrowserSubExecutionRejectReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{12}
-}
-
 // Stele Delivery 结果分类（RUNTIME-STELE-004；对应 HTTP 语义：ACCEPTED=204，
 // REJECTED=4xx 不重试，UNAVAILABLE=5xx 由 Alertmanager 重试）。
 type DeliveryStatus int32
@@ -872,11 +730,11 @@ func (x DeliveryStatus) String() string {
 }
 
 func (DeliveryStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[13].Descriptor()
+	return file_runtime_proto_enumTypes[11].Descriptor()
 }
 
 func (DeliveryStatus) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[13]
+	return &file_runtime_proto_enumTypes[11]
 }
 
 func (x DeliveryStatus) Number() protoreflect.EnumNumber {
@@ -885,7 +743,7 @@ func (x DeliveryStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeliveryStatus.Descriptor instead.
 func (DeliveryStatus) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{13}
+	return file_runtime_proto_rawDescGZIP(), []int{11}
 }
 
 // 物理 Model Call 必须先落库再发 provider 请求。call_seq 是 Attempt 内逻辑模型步序；
@@ -923,11 +781,11 @@ func (x ModelOperation) String() string {
 }
 
 func (ModelOperation) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[14].Descriptor()
+	return file_runtime_proto_enumTypes[12].Descriptor()
 }
 
 func (ModelOperation) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[14]
+	return &file_runtime_proto_enumTypes[12]
 }
 
 func (x ModelOperation) Number() protoreflect.EnumNumber {
@@ -936,7 +794,7 @@ func (x ModelOperation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelOperation.Descriptor instead.
 func (ModelOperation) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{14}
+	return file_runtime_proto_rawDescGZIP(), []int{12}
 }
 
 type ModelInputItemKind int32
@@ -993,11 +851,11 @@ func (x ModelInputItemKind) String() string {
 }
 
 func (ModelInputItemKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[15].Descriptor()
+	return file_runtime_proto_enumTypes[13].Descriptor()
 }
 
 func (ModelInputItemKind) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[15]
+	return &file_runtime_proto_enumTypes[13]
 }
 
 func (x ModelInputItemKind) Number() protoreflect.EnumNumber {
@@ -1006,7 +864,7 @@ func (x ModelInputItemKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelInputItemKind.Descriptor instead.
 func (ModelInputItemKind) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{15}
+	return file_runtime_proto_rawDescGZIP(), []int{13}
 }
 
 type ModelInputRole int32
@@ -1048,11 +906,11 @@ func (x ModelInputRole) String() string {
 }
 
 func (ModelInputRole) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[16].Descriptor()
+	return file_runtime_proto_enumTypes[14].Descriptor()
 }
 
 func (ModelInputRole) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[16]
+	return &file_runtime_proto_enumTypes[14]
 }
 
 func (x ModelInputRole) Number() protoreflect.EnumNumber {
@@ -1061,7 +919,7 @@ func (x ModelInputRole) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelInputRole.Descriptor instead.
 func (ModelInputRole) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{16}
+	return file_runtime_proto_rawDescGZIP(), []int{14}
 }
 
 type ModelCallCompletionRejectReason int32
@@ -1103,11 +961,11 @@ func (x ModelCallCompletionRejectReason) String() string {
 }
 
 func (ModelCallCompletionRejectReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[17].Descriptor()
+	return file_runtime_proto_enumTypes[15].Descriptor()
 }
 
 func (ModelCallCompletionRejectReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[17]
+	return &file_runtime_proto_enumTypes[15]
 }
 
 func (x ModelCallCompletionRejectReason) Number() protoreflect.EnumNumber {
@@ -1116,7 +974,7 @@ func (x ModelCallCompletionRejectReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallCompletionRejectReason.Descriptor instead.
 func (ModelCallCompletionRejectReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{17}
+	return file_runtime_proto_rawDescGZIP(), []int{15}
 }
 
 type ModelCallOutcome int32
@@ -1155,11 +1013,11 @@ func (x ModelCallOutcome) String() string {
 }
 
 func (ModelCallOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[18].Descriptor()
+	return file_runtime_proto_enumTypes[16].Descriptor()
 }
 
 func (ModelCallOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[18]
+	return &file_runtime_proto_enumTypes[16]
 }
 
 func (x ModelCallOutcome) Number() protoreflect.EnumNumber {
@@ -1168,7 +1026,7 @@ func (x ModelCallOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallOutcome.Descriptor instead.
 func (ModelCallOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{18}
+	return file_runtime_proto_rawDescGZIP(), []int{16}
 }
 
 type ModelCallFailureReason int32
@@ -1222,11 +1080,11 @@ func (x ModelCallFailureReason) String() string {
 }
 
 func (ModelCallFailureReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[19].Descriptor()
+	return file_runtime_proto_enumTypes[17].Descriptor()
 }
 
 func (ModelCallFailureReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[19]
+	return &file_runtime_proto_enumTypes[17]
 }
 
 func (x ModelCallFailureReason) Number() protoreflect.EnumNumber {
@@ -1235,7 +1093,7 @@ func (x ModelCallFailureReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallFailureReason.Descriptor instead.
 func (ModelCallFailureReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{19}
+	return file_runtime_proto_rawDescGZIP(), []int{17}
 }
 
 type ToolExecutionMode int32
@@ -1244,7 +1102,6 @@ const (
 	ToolExecutionMode_TOOL_EXECUTION_MODE_UNSPECIFIED      ToolExecutionMode = 0
 	ToolExecutionMode_TOOL_EXECUTION_MODE_WORKER_LOCAL     ToolExecutionMode = 1
 	ToolExecutionMode_TOOL_EXECUTION_MODE_SUPERVISOR_TYPED ToolExecutionMode = 2
-	ToolExecutionMode_TOOL_EXECUTION_MODE_QUOIN_BROWSER    ToolExecutionMode = 3
 )
 
 // Enum value maps for ToolExecutionMode.
@@ -1253,13 +1110,11 @@ var (
 		0: "TOOL_EXECUTION_MODE_UNSPECIFIED",
 		1: "TOOL_EXECUTION_MODE_WORKER_LOCAL",
 		2: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED",
-		3: "TOOL_EXECUTION_MODE_QUOIN_BROWSER",
 	}
 	ToolExecutionMode_value = map[string]int32{
 		"TOOL_EXECUTION_MODE_UNSPECIFIED":      0,
 		"TOOL_EXECUTION_MODE_WORKER_LOCAL":     1,
 		"TOOL_EXECUTION_MODE_SUPERVISOR_TYPED": 2,
-		"TOOL_EXECUTION_MODE_QUOIN_BROWSER":    3,
 	}
 )
 
@@ -1274,11 +1129,11 @@ func (x ToolExecutionMode) String() string {
 }
 
 func (ToolExecutionMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[20].Descriptor()
+	return file_runtime_proto_enumTypes[18].Descriptor()
 }
 
 func (ToolExecutionMode) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[20]
+	return &file_runtime_proto_enumTypes[18]
 }
 
 func (x ToolExecutionMode) Number() protoreflect.EnumNumber {
@@ -1287,7 +1142,7 @@ func (x ToolExecutionMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolExecutionMode.Descriptor instead.
 func (ToolExecutionMode) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{20}
+	return file_runtime_proto_rawDescGZIP(), []int{18}
 }
 
 type ToolFailureMode int32
@@ -1323,11 +1178,11 @@ func (x ToolFailureMode) String() string {
 }
 
 func (ToolFailureMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[21].Descriptor()
+	return file_runtime_proto_enumTypes[19].Descriptor()
 }
 
 func (ToolFailureMode) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[21]
+	return &file_runtime_proto_enumTypes[19]
 }
 
 func (x ToolFailureMode) Number() protoreflect.EnumNumber {
@@ -1336,7 +1191,7 @@ func (x ToolFailureMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolFailureMode.Descriptor instead.
 func (ToolFailureMode) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{21}
+	return file_runtime_proto_rawDescGZIP(), []int{19}
 }
 
 type ToolCallOutcome int32
@@ -1375,11 +1230,11 @@ func (x ToolCallOutcome) String() string {
 }
 
 func (ToolCallOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[22].Descriptor()
+	return file_runtime_proto_enumTypes[20].Descriptor()
 }
 
 func (ToolCallOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[22]
+	return &file_runtime_proto_enumTypes[20]
 }
 
 func (x ToolCallOutcome) Number() protoreflect.EnumNumber {
@@ -1388,638 +1243,7 @@ func (x ToolCallOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolCallOutcome.Descriptor instead.
 func (ToolCallOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{22}
-}
-
-type BrowserOperationKind int32
-
-const (
-	BrowserOperationKind_BROWSER_OPERATION_KIND_UNSPECIFIED             BrowserOperationKind = 0
-	BrowserOperationKind_BROWSER_OPERATION_KIND_MANUAL_LOGIN            BrowserOperationKind = 1
-	BrowserOperationKind_BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE    BrowserOperationKind = 2
-	BrowserOperationKind_BROWSER_OPERATION_KIND_JOURNEY                 BrowserOperationKind = 3
-	BrowserOperationKind_BROWSER_OPERATION_KIND_EXPLORATION             BrowserOperationKind = 4
-	BrowserOperationKind_BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION BrowserOperationKind = 5
-)
-
-// Enum value maps for BrowserOperationKind.
-var (
-	BrowserOperationKind_name = map[int32]string{
-		0: "BROWSER_OPERATION_KIND_UNSPECIFIED",
-		1: "BROWSER_OPERATION_KIND_MANUAL_LOGIN",
-		2: "BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE",
-		3: "BROWSER_OPERATION_KIND_JOURNEY",
-		4: "BROWSER_OPERATION_KIND_EXPLORATION",
-		5: "BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION",
-	}
-	BrowserOperationKind_value = map[string]int32{
-		"BROWSER_OPERATION_KIND_UNSPECIFIED":             0,
-		"BROWSER_OPERATION_KIND_MANUAL_LOGIN":            1,
-		"BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE":    2,
-		"BROWSER_OPERATION_KIND_JOURNEY":                 3,
-		"BROWSER_OPERATION_KIND_EXPLORATION":             4,
-		"BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION": 5,
-	}
-)
-
-func (x BrowserOperationKind) Enum() *BrowserOperationKind {
-	p := new(BrowserOperationKind)
-	*p = x
-	return p
-}
-
-func (x BrowserOperationKind) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserOperationKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[23].Descriptor()
-}
-
-func (BrowserOperationKind) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[23]
-}
-
-func (x BrowserOperationKind) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserOperationKind.Descriptor instead.
-func (BrowserOperationKind) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{23}
-}
-
-type BrowserOperationStartRejectReason int32
-
-const (
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED             BrowserOperationStartRejectReason = 0
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_IDENTITY_BUSY           BrowserOperationStartRejectReason = 1
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY             BrowserOperationStartRejectReason = 2
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE     BrowserOperationStartRejectReason = 3
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_AUTHENTICATION_REQUIRED BrowserOperationStartRejectReason = 4
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED       BrowserOperationStartRejectReason = 5
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED      BrowserOperationStartRejectReason = 6
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM            BrowserOperationStartRejectReason = 7
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_INTERNAL                BrowserOperationStartRejectReason = 8
-	// The immutable initial navigation attempted a download. Lintel stops the
-	// Chromium process and Quoin closes the rejected Exploration as a typed
-	// model-visible result rather than treating it as a generic start failure.
-	BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED BrowserOperationStartRejectReason = 9
-)
-
-// Enum value maps for BrowserOperationStartRejectReason.
-var (
-	BrowserOperationStartRejectReason_name = map[int32]string{
-		0: "BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED",
-		1: "BROWSER_OPERATION_START_REJECT_REASON_IDENTITY_BUSY",
-		2: "BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY",
-		3: "BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE",
-		4: "BROWSER_OPERATION_START_REJECT_REASON_AUTHENTICATION_REQUIRED",
-		5: "BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED",
-		6: "BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED",
-		7: "BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM",
-		8: "BROWSER_OPERATION_START_REJECT_REASON_INTERNAL",
-		9: "BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED",
-	}
-	BrowserOperationStartRejectReason_value = map[string]int32{
-		"BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED":             0,
-		"BROWSER_OPERATION_START_REJECT_REASON_IDENTITY_BUSY":           1,
-		"BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY":             2,
-		"BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE":     3,
-		"BROWSER_OPERATION_START_REJECT_REASON_AUTHENTICATION_REQUIRED": 4,
-		"BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED":       5,
-		"BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED":      6,
-		"BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM":            7,
-		"BROWSER_OPERATION_START_REJECT_REASON_INTERNAL":                8,
-		"BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED":        9,
-	}
-)
-
-func (x BrowserOperationStartRejectReason) Enum() *BrowserOperationStartRejectReason {
-	p := new(BrowserOperationStartRejectReason)
-	*p = x
-	return p
-}
-
-func (x BrowserOperationStartRejectReason) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserOperationStartRejectReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[24].Descriptor()
-}
-
-func (BrowserOperationStartRejectReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[24]
-}
-
-func (x BrowserOperationStartRejectReason) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserOperationStartRejectReason.Descriptor instead.
-func (BrowserOperationStartRejectReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{24}
-}
-
-type BrowserOperationOutcome int32
-
-const (
-	BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_UNSPECIFIED BrowserOperationOutcome = 0
-	BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_SUCCEEDED   BrowserOperationOutcome = 1
-	BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_FAILED      BrowserOperationOutcome = 2
-	BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_CANCELLED   BrowserOperationOutcome = 3
-	BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_INTERRUPTED BrowserOperationOutcome = 4
-)
-
-// Enum value maps for BrowserOperationOutcome.
-var (
-	BrowserOperationOutcome_name = map[int32]string{
-		0: "BROWSER_OPERATION_OUTCOME_UNSPECIFIED",
-		1: "BROWSER_OPERATION_OUTCOME_SUCCEEDED",
-		2: "BROWSER_OPERATION_OUTCOME_FAILED",
-		3: "BROWSER_OPERATION_OUTCOME_CANCELLED",
-		4: "BROWSER_OPERATION_OUTCOME_INTERRUPTED",
-	}
-	BrowserOperationOutcome_value = map[string]int32{
-		"BROWSER_OPERATION_OUTCOME_UNSPECIFIED": 0,
-		"BROWSER_OPERATION_OUTCOME_SUCCEEDED":   1,
-		"BROWSER_OPERATION_OUTCOME_FAILED":      2,
-		"BROWSER_OPERATION_OUTCOME_CANCELLED":   3,
-		"BROWSER_OPERATION_OUTCOME_INTERRUPTED": 4,
-	}
-)
-
-func (x BrowserOperationOutcome) Enum() *BrowserOperationOutcome {
-	p := new(BrowserOperationOutcome)
-	*p = x
-	return p
-}
-
-func (x BrowserOperationOutcome) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserOperationOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[25].Descriptor()
-}
-
-func (BrowserOperationOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[25]
-}
-
-func (x BrowserOperationOutcome) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserOperationOutcome.Descriptor instead.
-func (BrowserOperationOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{25}
-}
-
-type BrowserOperationTerminalReason int32
-
-const (
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED                      BrowserOperationTerminalReason = 0
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_CLIENT_CLOSED_WITHOUT_PUBLISH    BrowserOperationTerminalReason = 1
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_GRACE_EXPIRED                    BrowserOperationTerminalReason = 2
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_SESSION_REVOKED                  BrowserOperationTerminalReason = 3
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_NEW_BOOT                         BrowserOperationTerminalReason = 4
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_SHUTDOWN                         BrowserOperationTerminalReason = 5
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_SLOT_REVOKED                     BrowserOperationTerminalReason = 6
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_SLOT_REPLACED                    BrowserOperationTerminalReason = 7
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MISSING                  BrowserOperationTerminalReason = 8
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MANIFEST_INVALID         BrowserOperationTerminalReason = 9
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_CHROMIUM_REVISION_MISMATCH       BrowserOperationTerminalReason = 10
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED          BrowserOperationTerminalReason = 11
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE BrowserOperationTerminalReason = 12
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_ARTIFACT_COMMIT_FAILED           BrowserOperationTerminalReason = 13
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_JOURNEY_FAILED                   BrowserOperationTerminalReason = 14
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_CANCELLED                        BrowserOperationTerminalReason = 15
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PARENT_TERMINAL                  BrowserOperationTerminalReason = 16
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_LEASE_EXPIRED                    BrowserOperationTerminalReason = 17
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_RUNTIME_UNAVAILABLE              BrowserOperationTerminalReason = 18
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED                  BrowserOperationTerminalReason = 19
-	BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR                   BrowserOperationTerminalReason = 20
-)
-
-// Enum value maps for BrowserOperationTerminalReason.
-var (
-	BrowserOperationTerminalReason_name = map[int32]string{
-		0:  "BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED",
-		1:  "BROWSER_OPERATION_TERMINAL_REASON_CLIENT_CLOSED_WITHOUT_PUBLISH",
-		2:  "BROWSER_OPERATION_TERMINAL_REASON_GRACE_EXPIRED",
-		3:  "BROWSER_OPERATION_TERMINAL_REASON_SESSION_REVOKED",
-		4:  "BROWSER_OPERATION_TERMINAL_REASON_NEW_BOOT",
-		5:  "BROWSER_OPERATION_TERMINAL_REASON_SHUTDOWN",
-		6:  "BROWSER_OPERATION_TERMINAL_REASON_SLOT_REVOKED",
-		7:  "BROWSER_OPERATION_TERMINAL_REASON_SLOT_REPLACED",
-		8:  "BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MISSING",
-		9:  "BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MANIFEST_INVALID",
-		10: "BROWSER_OPERATION_TERMINAL_REASON_CHROMIUM_REVISION_MISMATCH",
-		11: "BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED",
-		12: "BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE",
-		13: "BROWSER_OPERATION_TERMINAL_REASON_ARTIFACT_COMMIT_FAILED",
-		14: "BROWSER_OPERATION_TERMINAL_REASON_JOURNEY_FAILED",
-		15: "BROWSER_OPERATION_TERMINAL_REASON_CANCELLED",
-		16: "BROWSER_OPERATION_TERMINAL_REASON_PARENT_TERMINAL",
-		17: "BROWSER_OPERATION_TERMINAL_REASON_LEASE_EXPIRED",
-		18: "BROWSER_OPERATION_TERMINAL_REASON_RUNTIME_UNAVAILABLE",
-		19: "BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED",
-		20: "BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR",
-	}
-	BrowserOperationTerminalReason_value = map[string]int32{
-		"BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED":                      0,
-		"BROWSER_OPERATION_TERMINAL_REASON_CLIENT_CLOSED_WITHOUT_PUBLISH":    1,
-		"BROWSER_OPERATION_TERMINAL_REASON_GRACE_EXPIRED":                    2,
-		"BROWSER_OPERATION_TERMINAL_REASON_SESSION_REVOKED":                  3,
-		"BROWSER_OPERATION_TERMINAL_REASON_NEW_BOOT":                         4,
-		"BROWSER_OPERATION_TERMINAL_REASON_SHUTDOWN":                         5,
-		"BROWSER_OPERATION_TERMINAL_REASON_SLOT_REVOKED":                     6,
-		"BROWSER_OPERATION_TERMINAL_REASON_SLOT_REPLACED":                    7,
-		"BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MISSING":                  8,
-		"BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MANIFEST_INVALID":         9,
-		"BROWSER_OPERATION_TERMINAL_REASON_CHROMIUM_REVISION_MISMATCH":       10,
-		"BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED":          11,
-		"BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE": 12,
-		"BROWSER_OPERATION_TERMINAL_REASON_ARTIFACT_COMMIT_FAILED":           13,
-		"BROWSER_OPERATION_TERMINAL_REASON_JOURNEY_FAILED":                   14,
-		"BROWSER_OPERATION_TERMINAL_REASON_CANCELLED":                        15,
-		"BROWSER_OPERATION_TERMINAL_REASON_PARENT_TERMINAL":                  16,
-		"BROWSER_OPERATION_TERMINAL_REASON_LEASE_EXPIRED":                    17,
-		"BROWSER_OPERATION_TERMINAL_REASON_RUNTIME_UNAVAILABLE":              18,
-		"BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED":                  19,
-		"BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR":                   20,
-	}
-)
-
-func (x BrowserOperationTerminalReason) Enum() *BrowserOperationTerminalReason {
-	p := new(BrowserOperationTerminalReason)
-	*p = x
-	return p
-}
-
-func (x BrowserOperationTerminalReason) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserOperationTerminalReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[26].Descriptor()
-}
-
-func (BrowserOperationTerminalReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[26]
-}
-
-func (x BrowserOperationTerminalReason) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserOperationTerminalReason.Descriptor instead.
-func (BrowserOperationTerminalReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{26}
-}
-
-type AuthenticationProbeResult int32
-
-const (
-	AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_UNSPECIFIED     AuthenticationProbeResult = 0
-	AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_AUTHENTICATED   AuthenticationProbeResult = 1
-	AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED AuthenticationProbeResult = 2
-	AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_INDETERMINATE   AuthenticationProbeResult = 3
-)
-
-// Enum value maps for AuthenticationProbeResult.
-var (
-	AuthenticationProbeResult_name = map[int32]string{
-		0: "AUTHENTICATION_PROBE_RESULT_UNSPECIFIED",
-		1: "AUTHENTICATION_PROBE_RESULT_AUTHENTICATED",
-		2: "AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED",
-		3: "AUTHENTICATION_PROBE_RESULT_INDETERMINATE",
-	}
-	AuthenticationProbeResult_value = map[string]int32{
-		"AUTHENTICATION_PROBE_RESULT_UNSPECIFIED":     0,
-		"AUTHENTICATION_PROBE_RESULT_AUTHENTICATED":   1,
-		"AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED": 2,
-		"AUTHENTICATION_PROBE_RESULT_INDETERMINATE":   3,
-	}
-)
-
-func (x AuthenticationProbeResult) Enum() *AuthenticationProbeResult {
-	p := new(AuthenticationProbeResult)
-	*p = x
-	return p
-}
-
-func (x AuthenticationProbeResult) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (AuthenticationProbeResult) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[27].Descriptor()
-}
-
-func (AuthenticationProbeResult) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[27]
-}
-
-func (x AuthenticationProbeResult) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use AuthenticationProbeResult.Descriptor instead.
-func (AuthenticationProbeResult) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{27}
-}
-
-type AuthenticationProbePhase int32
-
-const (
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_UNSPECIFIED     AuthenticationProbePhase = 0
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_REVISION_CHANGE AuthenticationProbePhase = 1
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_ADMISSION       AuthenticationProbePhase = 2
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_COMPLETION      AuthenticationProbePhase = 3
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_PUBLISH         AuthenticationProbePhase = 4
-	AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_MID_OPERATION   AuthenticationProbePhase = 5
-)
-
-// Enum value maps for AuthenticationProbePhase.
-var (
-	AuthenticationProbePhase_name = map[int32]string{
-		0: "AUTHENTICATION_PROBE_PHASE_UNSPECIFIED",
-		1: "AUTHENTICATION_PROBE_PHASE_REVISION_CHANGE",
-		2: "AUTHENTICATION_PROBE_PHASE_ADMISSION",
-		3: "AUTHENTICATION_PROBE_PHASE_COMPLETION",
-		4: "AUTHENTICATION_PROBE_PHASE_PUBLISH",
-		5: "AUTHENTICATION_PROBE_PHASE_MID_OPERATION",
-	}
-	AuthenticationProbePhase_value = map[string]int32{
-		"AUTHENTICATION_PROBE_PHASE_UNSPECIFIED":     0,
-		"AUTHENTICATION_PROBE_PHASE_REVISION_CHANGE": 1,
-		"AUTHENTICATION_PROBE_PHASE_ADMISSION":       2,
-		"AUTHENTICATION_PROBE_PHASE_COMPLETION":      3,
-		"AUTHENTICATION_PROBE_PHASE_PUBLISH":         4,
-		"AUTHENTICATION_PROBE_PHASE_MID_OPERATION":   5,
-	}
-)
-
-func (x AuthenticationProbePhase) Enum() *AuthenticationProbePhase {
-	p := new(AuthenticationProbePhase)
-	*p = x
-	return p
-}
-
-func (x AuthenticationProbePhase) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (AuthenticationProbePhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[28].Descriptor()
-}
-
-func (AuthenticationProbePhase) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[28]
-}
-
-func (x AuthenticationProbePhase) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use AuthenticationProbePhase.Descriptor instead.
-func (AuthenticationProbePhase) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{28}
-}
-
-type BrowserTraceIntegrity int32
-
-const (
-	BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_UNSPECIFIED BrowserTraceIntegrity = 0
-	BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_COMPLETE    BrowserTraceIntegrity = 1
-	BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_INCOMPLETE  BrowserTraceIntegrity = 2
-)
-
-// Enum value maps for BrowserTraceIntegrity.
-var (
-	BrowserTraceIntegrity_name = map[int32]string{
-		0: "BROWSER_TRACE_INTEGRITY_UNSPECIFIED",
-		1: "BROWSER_TRACE_INTEGRITY_COMPLETE",
-		2: "BROWSER_TRACE_INTEGRITY_INCOMPLETE",
-	}
-	BrowserTraceIntegrity_value = map[string]int32{
-		"BROWSER_TRACE_INTEGRITY_UNSPECIFIED": 0,
-		"BROWSER_TRACE_INTEGRITY_COMPLETE":    1,
-		"BROWSER_TRACE_INTEGRITY_INCOMPLETE":  2,
-	}
-)
-
-func (x BrowserTraceIntegrity) Enum() *BrowserTraceIntegrity {
-	p := new(BrowserTraceIntegrity)
-	*p = x
-	return p
-}
-
-func (x BrowserTraceIntegrity) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserTraceIntegrity) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[29].Descriptor()
-}
-
-func (BrowserTraceIntegrity) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[29]
-}
-
-func (x BrowserTraceIntegrity) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserTraceIntegrity.Descriptor instead.
-func (BrowserTraceIntegrity) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{29}
-}
-
-type ProfileInventoryStatus int32
-
-const (
-	ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_UNSPECIFIED                ProfileInventoryStatus = 0
-	ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_COMPATIBLE                 ProfileInventoryStatus = 1
-	ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_MISSING                    ProfileInventoryStatus = 2
-	ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_MANIFEST_INVALID           ProfileInventoryStatus = 3
-	ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH ProfileInventoryStatus = 4
-)
-
-// Enum value maps for ProfileInventoryStatus.
-var (
-	ProfileInventoryStatus_name = map[int32]string{
-		0: "PROFILE_INVENTORY_STATUS_UNSPECIFIED",
-		1: "PROFILE_INVENTORY_STATUS_COMPATIBLE",
-		2: "PROFILE_INVENTORY_STATUS_MISSING",
-		3: "PROFILE_INVENTORY_STATUS_MANIFEST_INVALID",
-		4: "PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH",
-	}
-	ProfileInventoryStatus_value = map[string]int32{
-		"PROFILE_INVENTORY_STATUS_UNSPECIFIED":                0,
-		"PROFILE_INVENTORY_STATUS_COMPATIBLE":                 1,
-		"PROFILE_INVENTORY_STATUS_MISSING":                    2,
-		"PROFILE_INVENTORY_STATUS_MANIFEST_INVALID":           3,
-		"PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH": 4,
-	}
-)
-
-func (x ProfileInventoryStatus) Enum() *ProfileInventoryStatus {
-	p := new(ProfileInventoryStatus)
-	*p = x
-	return p
-}
-
-func (x ProfileInventoryStatus) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (ProfileInventoryStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[30].Descriptor()
-}
-
-func (ProfileInventoryStatus) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[30]
-}
-
-func (x ProfileInventoryStatus) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use ProfileInventoryStatus.Descriptor instead.
-func (ProfileInventoryStatus) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{30}
-}
-
-type BrowserCleanupOutcome int32
-
-const (
-	BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_UNSPECIFIED BrowserCleanupOutcome = 0
-	BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_SUCCEEDED   BrowserCleanupOutcome = 1
-	BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_FAILED      BrowserCleanupOutcome = 2
-)
-
-// Enum value maps for BrowserCleanupOutcome.
-var (
-	BrowserCleanupOutcome_name = map[int32]string{
-		0: "BROWSER_CLEANUP_OUTCOME_UNSPECIFIED",
-		1: "BROWSER_CLEANUP_OUTCOME_SUCCEEDED",
-		2: "BROWSER_CLEANUP_OUTCOME_FAILED",
-	}
-	BrowserCleanupOutcome_value = map[string]int32{
-		"BROWSER_CLEANUP_OUTCOME_UNSPECIFIED": 0,
-		"BROWSER_CLEANUP_OUTCOME_SUCCEEDED":   1,
-		"BROWSER_CLEANUP_OUTCOME_FAILED":      2,
-	}
-)
-
-func (x BrowserCleanupOutcome) Enum() *BrowserCleanupOutcome {
-	p := new(BrowserCleanupOutcome)
-	*p = x
-	return p
-}
-
-func (x BrowserCleanupOutcome) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserCleanupOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[31].Descriptor()
-}
-
-func (BrowserCleanupOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[31]
-}
-
-func (x BrowserCleanupOutcome) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserCleanupOutcome.Descriptor instead.
-func (BrowserCleanupOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{31}
-}
-
-type BrowserCleanupFailureCode int32
-
-const (
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED               BrowserCleanupFailureCode = 0
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_PROCESS_STILL_RUNNING     BrowserCleanupFailureCode = 1
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_TUNNEL_STILL_OPEN         BrowserCleanupFailureCode = 2
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_TRACE_STAGING_REMAINS     BrowserCleanupFailureCode = 3
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_TEMPORARY_PROFILE_REMAINS BrowserCleanupFailureCode = 4
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_STATE_INSPECTION_FAILED   BrowserCleanupFailureCode = 5
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_INTERNAL                  BrowserCleanupFailureCode = 6
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_CGROUP_NOT_EMPTY          BrowserCleanupFailureCode = 7
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_CHROMIUM_STILL_RUNNING    BrowserCleanupFailureCode = 8
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_X0VNC_STILL_RUNNING       BrowserCleanupFailureCode = 9
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_CLONE_NAMESPACE_REMAINS   BrowserCleanupFailureCode = 10
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_RUNTIME_HANDLE_REMAINS    BrowserCleanupFailureCode = 11
-	BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_SLOT_LEASE_REMAINS        BrowserCleanupFailureCode = 12
-)
-
-// Enum value maps for BrowserCleanupFailureCode.
-var (
-	BrowserCleanupFailureCode_name = map[int32]string{
-		0:  "BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED",
-		1:  "BROWSER_CLEANUP_FAILURE_CODE_PROCESS_STILL_RUNNING",
-		2:  "BROWSER_CLEANUP_FAILURE_CODE_TUNNEL_STILL_OPEN",
-		3:  "BROWSER_CLEANUP_FAILURE_CODE_TRACE_STAGING_REMAINS",
-		4:  "BROWSER_CLEANUP_FAILURE_CODE_TEMPORARY_PROFILE_REMAINS",
-		5:  "BROWSER_CLEANUP_FAILURE_CODE_STATE_INSPECTION_FAILED",
-		6:  "BROWSER_CLEANUP_FAILURE_CODE_INTERNAL",
-		7:  "BROWSER_CLEANUP_FAILURE_CODE_CGROUP_NOT_EMPTY",
-		8:  "BROWSER_CLEANUP_FAILURE_CODE_CHROMIUM_STILL_RUNNING",
-		9:  "BROWSER_CLEANUP_FAILURE_CODE_X0VNC_STILL_RUNNING",
-		10: "BROWSER_CLEANUP_FAILURE_CODE_CLONE_NAMESPACE_REMAINS",
-		11: "BROWSER_CLEANUP_FAILURE_CODE_RUNTIME_HANDLE_REMAINS",
-		12: "BROWSER_CLEANUP_FAILURE_CODE_SLOT_LEASE_REMAINS",
-	}
-	BrowserCleanupFailureCode_value = map[string]int32{
-		"BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED":               0,
-		"BROWSER_CLEANUP_FAILURE_CODE_PROCESS_STILL_RUNNING":     1,
-		"BROWSER_CLEANUP_FAILURE_CODE_TUNNEL_STILL_OPEN":         2,
-		"BROWSER_CLEANUP_FAILURE_CODE_TRACE_STAGING_REMAINS":     3,
-		"BROWSER_CLEANUP_FAILURE_CODE_TEMPORARY_PROFILE_REMAINS": 4,
-		"BROWSER_CLEANUP_FAILURE_CODE_STATE_INSPECTION_FAILED":   5,
-		"BROWSER_CLEANUP_FAILURE_CODE_INTERNAL":                  6,
-		"BROWSER_CLEANUP_FAILURE_CODE_CGROUP_NOT_EMPTY":          7,
-		"BROWSER_CLEANUP_FAILURE_CODE_CHROMIUM_STILL_RUNNING":    8,
-		"BROWSER_CLEANUP_FAILURE_CODE_X0VNC_STILL_RUNNING":       9,
-		"BROWSER_CLEANUP_FAILURE_CODE_CLONE_NAMESPACE_REMAINS":   10,
-		"BROWSER_CLEANUP_FAILURE_CODE_RUNTIME_HANDLE_REMAINS":    11,
-		"BROWSER_CLEANUP_FAILURE_CODE_SLOT_LEASE_REMAINS":        12,
-	}
-)
-
-func (x BrowserCleanupFailureCode) Enum() *BrowserCleanupFailureCode {
-	p := new(BrowserCleanupFailureCode)
-	*p = x
-	return p
-}
-
-func (x BrowserCleanupFailureCode) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (BrowserCleanupFailureCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[32].Descriptor()
-}
-
-func (BrowserCleanupFailureCode) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[32]
-}
-
-func (x BrowserCleanupFailureCode) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use BrowserCleanupFailureCode.Descriptor instead.
-func (BrowserCleanupFailureCode) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{32}
+	return file_runtime_proto_rawDescGZIP(), []int{20}
 }
 
 // 双向控制信封：所有消息（含 Hello）都携带 envelope 字段；领域载荷在 msg oneof。
@@ -2047,10 +1271,6 @@ type ControlEnvelope struct {
 	//	*ControlEnvelope_ResultAck
 	//	*ControlEnvelope_CancelAttempt
 	//	*ControlEnvelope_CancelAck
-	//	*ControlEnvelope_RequestBrowserSubExecution
-	//	*ControlEnvelope_BrowserSubExecutionAck
-	//	*ControlEnvelope_ToolResultDelivery
-	//	*ControlEnvelope_ToolResultDeliveryAck
 	//	*ControlEnvelope_GoAway
 	//	*ControlEnvelope_BeginModelCall
 	//	*ControlEnvelope_BeginModelCallAck
@@ -2061,23 +1281,6 @@ type ControlEnvelope struct {
 	//	*ControlEnvelope_BeginToolCallAck
 	//	*ControlEnvelope_CompleteToolCall
 	//	*ControlEnvelope_CompleteToolCallAck
-	//	*ControlEnvelope_StartBrowserOperation
-	//	*ControlEnvelope_StartBrowserOperationAck
-	//	*ControlEnvelope_CompleteBrowserOperation
-	//	*ControlEnvelope_PublishBrowserProfile
-	//	*ControlEnvelope_PublishBrowserProfileResult
-	//	*ControlEnvelope_ProfileInventoryRequest
-	//	*ControlEnvelope_ProfileInventoryReport
-	//	*ControlEnvelope_StopBrowserOperation
-	//	*ControlEnvelope_StopBrowserOperationAck
-	//	*ControlEnvelope_CompleteBrowserOperationAck
-	//	*ControlEnvelope_ExecuteBrowserExplorationAction
-	//	*ControlEnvelope_BrowserExplorationActionResult
-	//	*ControlEnvelope_BrowserExplorationActionResultAck
-	//	*ControlEnvelope_CancelBrowserExplorationAction
-	//	*ControlEnvelope_CancelBrowserExplorationActionAck
-	//	*ControlEnvelope_BrowserExplorationTerminalClaim
-	//	*ControlEnvelope_BrowserExplorationTerminalClaimAck
 	Msg           isControlEnvelope_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2265,42 +1468,6 @@ func (x *ControlEnvelope) GetCancelAck() *CancelAck {
 	return nil
 }
 
-func (x *ControlEnvelope) GetRequestBrowserSubExecution() *RequestBrowserSubExecution {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_RequestBrowserSubExecution); ok {
-			return x.RequestBrowserSubExecution
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetBrowserSubExecutionAck() *BrowserSubExecutionAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_BrowserSubExecutionAck); ok {
-			return x.BrowserSubExecutionAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetToolResultDelivery() *ToolResultDelivery {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_ToolResultDelivery); ok {
-			return x.ToolResultDelivery
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetToolResultDeliveryAck() *ToolResultDeliveryAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_ToolResultDeliveryAck); ok {
-			return x.ToolResultDeliveryAck
-		}
-	}
-	return nil
-}
-
 func (x *ControlEnvelope) GetGoAway() *GoAway {
 	if x != nil {
 		if x, ok := x.Msg.(*ControlEnvelope_GoAway); ok {
@@ -2391,159 +1558,6 @@ func (x *ControlEnvelope) GetCompleteToolCallAck() *CompleteToolCallAck {
 	return nil
 }
 
-func (x *ControlEnvelope) GetStartBrowserOperation() *StartBrowserOperation {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_StartBrowserOperation); ok {
-			return x.StartBrowserOperation
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetStartBrowserOperationAck() *StartBrowserOperationAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_StartBrowserOperationAck); ok {
-			return x.StartBrowserOperationAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetCompleteBrowserOperation() *CompleteBrowserOperation {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_CompleteBrowserOperation); ok {
-			return x.CompleteBrowserOperation
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetPublishBrowserProfile() *PublishBrowserProfile {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_PublishBrowserProfile); ok {
-			return x.PublishBrowserProfile
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetPublishBrowserProfileResult() *PublishBrowserProfileResult {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_PublishBrowserProfileResult); ok {
-			return x.PublishBrowserProfileResult
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetProfileInventoryRequest() *ProfileInventoryRequest {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_ProfileInventoryRequest); ok {
-			return x.ProfileInventoryRequest
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetProfileInventoryReport() *ProfileInventoryReport {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_ProfileInventoryReport); ok {
-			return x.ProfileInventoryReport
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetStopBrowserOperation() *StopBrowserOperation {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_StopBrowserOperation); ok {
-			return x.StopBrowserOperation
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetStopBrowserOperationAck() *StopBrowserOperationAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_StopBrowserOperationAck); ok {
-			return x.StopBrowserOperationAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetCompleteBrowserOperationAck() *CompleteBrowserOperationAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_CompleteBrowserOperationAck); ok {
-			return x.CompleteBrowserOperationAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetExecuteBrowserExplorationAction() *ExecuteBrowserExplorationAction {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_ExecuteBrowserExplorationAction); ok {
-			return x.ExecuteBrowserExplorationAction
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetBrowserExplorationActionResult() *BrowserExplorationActionResult {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_BrowserExplorationActionResult); ok {
-			return x.BrowserExplorationActionResult
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetBrowserExplorationActionResultAck() *BrowserExplorationActionResultAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_BrowserExplorationActionResultAck); ok {
-			return x.BrowserExplorationActionResultAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetCancelBrowserExplorationAction() *CancelBrowserExplorationAction {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_CancelBrowserExplorationAction); ok {
-			return x.CancelBrowserExplorationAction
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetCancelBrowserExplorationActionAck() *CancelBrowserExplorationActionAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_CancelBrowserExplorationActionAck); ok {
-			return x.CancelBrowserExplorationActionAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetBrowserExplorationTerminalClaim() *BrowserExplorationTerminalClaim {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_BrowserExplorationTerminalClaim); ok {
-			return x.BrowserExplorationTerminalClaim
-		}
-	}
-	return nil
-}
-
-func (x *ControlEnvelope) GetBrowserExplorationTerminalClaimAck() *BrowserExplorationTerminalClaimAck {
-	if x != nil {
-		if x, ok := x.Msg.(*ControlEnvelope_BrowserExplorationTerminalClaimAck); ok {
-			return x.BrowserExplorationTerminalClaimAck
-		}
-	}
-	return nil
-}
-
 type isControlEnvelope_Msg interface {
 	isControlEnvelope_Msg()
 }
@@ -2604,23 +1618,6 @@ type ControlEnvelope_CancelAck struct {
 	CancelAck *CancelAck `protobuf:"bytes,22,opt,name=cancel_ack,json=cancelAck,proto3,oneof"` // Runtime -> Quoin；已停止
 }
 
-type ControlEnvelope_RequestBrowserSubExecution struct {
-	// --- 跨 Runtime 子执行（RUNTIME-CROSS-001..004）---
-	RequestBrowserSubExecution *RequestBrowserSubExecution `protobuf:"bytes,25,opt,name=request_browser_sub_execution,json=requestBrowserSubExecution,proto3,oneof"` // Plinth -> Quoin
-}
-
-type ControlEnvelope_BrowserSubExecutionAck struct {
-	BrowserSubExecutionAck *BrowserSubExecutionAck `protobuf:"bytes,26,opt,name=browser_sub_execution_ack,json=browserSubExecutionAck,proto3,oneof"` // Quoin -> Plinth
-}
-
-type ControlEnvelope_ToolResultDelivery struct {
-	ToolResultDelivery *ToolResultDelivery `protobuf:"bytes,27,opt,name=tool_result_delivery,json=toolResultDelivery,proto3,oneof"` // Quoin -> Plinth；子执行结果
-}
-
-type ControlEnvelope_ToolResultDeliveryAck struct {
-	ToolResultDeliveryAck *ToolResultDeliveryAck `protobuf:"bytes,38,opt,name=tool_result_delivery_ack,json=toolResultDeliveryAck,proto3,oneof"` // Plinth -> Quoin；幂等接收确认
-}
-
 type ControlEnvelope_GoAway struct {
 	// --- 连接终结（RUNTIME-CTRL-007 / RUNTIME-REVOKE-001）---
 	GoAway *GoAway `protobuf:"bytes,28,opt,name=go_away,json=goAway,proto3,oneof"` // Quoin -> Runtime；尽力而为的通知，关闭是权威
@@ -2663,75 +1660,6 @@ type ControlEnvelope_CompleteToolCallAck struct {
 	CompleteToolCallAck *CompleteToolCallAck `protobuf:"bytes,37,opt,name=complete_tool_call_ack,json=completeToolCallAck,proto3,oneof"` // Quoin -> Plinth；提交裁决
 }
 
-type ControlEnvelope_StartBrowserOperation struct {
-	// --- Lintel Browser Operation / profile 调和（RUNTIME-BROWSER-009..016）---
-	StartBrowserOperation *StartBrowserOperation `protobuf:"bytes,39,opt,name=start_browser_operation,json=startBrowserOperation,proto3,oneof"` // Quoin -> Lintel
-}
-
-type ControlEnvelope_StartBrowserOperationAck struct {
-	StartBrowserOperationAck *StartBrowserOperationAck `protobuf:"bytes,40,opt,name=start_browser_operation_ack,json=startBrowserOperationAck,proto3,oneof"` // Lintel -> Quoin
-}
-
-type ControlEnvelope_CompleteBrowserOperation struct {
-	CompleteBrowserOperation *CompleteBrowserOperation `protobuf:"bytes,41,opt,name=complete_browser_operation,json=completeBrowserOperation,proto3,oneof"` // Lintel -> Quoin
-}
-
-type ControlEnvelope_PublishBrowserProfile struct {
-	PublishBrowserProfile *PublishBrowserProfile `protobuf:"bytes,42,opt,name=publish_browser_profile,json=publishBrowserProfile,proto3,oneof"` // Quoin -> Lintel
-}
-
-type ControlEnvelope_PublishBrowserProfileResult struct {
-	PublishBrowserProfileResult *PublishBrowserProfileResult `protobuf:"bytes,43,opt,name=publish_browser_profile_result,json=publishBrowserProfileResult,proto3,oneof"` // Lintel -> Quoin
-}
-
-type ControlEnvelope_ProfileInventoryRequest struct {
-	ProfileInventoryRequest *ProfileInventoryRequest `protobuf:"bytes,44,opt,name=profile_inventory_request,json=profileInventoryRequest,proto3,oneof"` // Quoin -> Lintel；每个新 boot
-}
-
-type ControlEnvelope_ProfileInventoryReport struct {
-	ProfileInventoryReport *ProfileInventoryReport `protobuf:"bytes,45,opt,name=profile_inventory_report,json=profileInventoryReport,proto3,oneof"` // Lintel -> Quoin；readiness fence
-}
-
-type ControlEnvelope_StopBrowserOperation struct {
-	StopBrowserOperation *StopBrowserOperation `protobuf:"bytes,46,opt,name=stop_browser_operation,json=stopBrowserOperation,proto3,oneof"` // Quoin -> Lintel；已提交终态后的幂等进程停止 fence
-}
-
-type ControlEnvelope_StopBrowserOperationAck struct {
-	StopBrowserOperationAck *StopBrowserOperationAck `protobuf:"bytes,47,opt,name=stop_browser_operation_ack,json=stopBrowserOperationAck,proto3,oneof"` // Lintel -> Quoin；物理进程/隧道已停止
-}
-
-type ControlEnvelope_CompleteBrowserOperationAck struct {
-	CompleteBrowserOperationAck *CompleteBrowserOperationAck `protobuf:"bytes,48,opt,name=complete_browser_operation_ack,json=completeBrowserOperationAck,proto3,oneof"` // Quoin -> Lintel；终态提交/重放裁决
-}
-
-type ControlEnvelope_ExecuteBrowserExplorationAction struct {
-	ExecuteBrowserExplorationAction *ExecuteBrowserExplorationAction `protobuf:"bytes,49,opt,name=execute_browser_exploration_action,json=executeBrowserExplorationAction,proto3,oneof"` // Quoin -> Lintel；一个已持久化 Exploration 子动作
-}
-
-type ControlEnvelope_BrowserExplorationActionResult struct {
-	BrowserExplorationActionResult *BrowserExplorationActionResult `protobuf:"bytes,50,opt,name=browser_exploration_action_result,json=browserExplorationActionResult,proto3,oneof"` // Lintel -> Quoin；一个子动作的规范结果
-}
-
-type ControlEnvelope_BrowserExplorationActionResultAck struct {
-	BrowserExplorationActionResultAck *BrowserExplorationActionResultAck `protobuf:"bytes,51,opt,name=browser_exploration_action_result_ack,json=browserExplorationActionResultAck,proto3,oneof"` // Quoin -> Lintel；durable result acknowledgement
-}
-
-type ControlEnvelope_CancelBrowserExplorationAction struct {
-	CancelBrowserExplorationAction *CancelBrowserExplorationAction `protobuf:"bytes,52,opt,name=cancel_browser_exploration_action,json=cancelBrowserExplorationAction,proto3,oneof"` // Quoin -> Lintel；父取消的 fenced action cancellation
-}
-
-type ControlEnvelope_CancelBrowserExplorationActionAck struct {
-	CancelBrowserExplorationActionAck *CancelBrowserExplorationActionAck `protobuf:"bytes,53,opt,name=cancel_browser_exploration_action_ack,json=cancelBrowserExplorationActionAck,proto3,oneof"` // Lintel -> Quoin；取消请求已被持久接受/重放
-}
-
-type ControlEnvelope_BrowserExplorationTerminalClaim struct {
-	BrowserExplorationTerminalClaim *BrowserExplorationTerminalClaim `protobuf:"bytes,54,opt,name=browser_exploration_terminal_claim,json=browserExplorationTerminalClaim,proto3,oneof"` // Lintel -> Quoin；trace 上传前的终态仲裁
-}
-
-type ControlEnvelope_BrowserExplorationTerminalClaimAck struct {
-	BrowserExplorationTerminalClaimAck *BrowserExplorationTerminalClaimAck `protobuf:"bytes,55,opt,name=browser_exploration_terminal_claim_ack,json=browserExplorationTerminalClaimAck,proto3,oneof"` // Quoin -> Lintel；持久 claim 裁决
-}
-
 func (*ControlEnvelope_Hello) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_HelloAck) isControlEnvelope_Msg() {}
@@ -2758,14 +1686,6 @@ func (*ControlEnvelope_CancelAttempt) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_CancelAck) isControlEnvelope_Msg() {}
 
-func (*ControlEnvelope_RequestBrowserSubExecution) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_BrowserSubExecutionAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_ToolResultDelivery) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_ToolResultDeliveryAck) isControlEnvelope_Msg() {}
-
 func (*ControlEnvelope_GoAway) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_BeginModelCall) isControlEnvelope_Msg() {}
@@ -2786,42 +1706,8 @@ func (*ControlEnvelope_CompleteToolCall) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_CompleteToolCallAck) isControlEnvelope_Msg() {}
 
-func (*ControlEnvelope_StartBrowserOperation) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_StartBrowserOperationAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_CompleteBrowserOperation) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_PublishBrowserProfile) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_PublishBrowserProfileResult) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_ProfileInventoryRequest) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_ProfileInventoryReport) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_StopBrowserOperation) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_StopBrowserOperationAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_CompleteBrowserOperationAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_ExecuteBrowserExplorationAction) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_BrowserExplorationActionResult) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_BrowserExplorationActionResultAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_CancelBrowserExplorationAction) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_CancelBrowserExplorationActionAck) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_BrowserExplorationTerminalClaim) isControlEnvelope_Msg() {}
-
-func (*ControlEnvelope_BrowserExplorationTerminalClaimAck) isControlEnvelope_Msg() {}
-
-// 握手首帧：客户端证书已在 mTLS 握手中认证；本帧声明 slot/连接身份、完整 Proto
-// 权威契约指纹与 Journey Catalog digest。
+// 握手首帧：客户端证书已在 mTLS 握手中认证；本帧声明 slot/连接身份与完整 Proto
+// 权威契约指纹。
 type Hello struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Slot                RuntimeSlot            `protobuf:"varint,1,opt,name=slot,proto3,enum=quoin.runtime.v1.RuntimeSlot" json:"slot,omitempty"`
@@ -2830,14 +1716,9 @@ type Hello struct {
 	ContractFingerprint string                 `protobuf:"bytes,4,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"` // 完整权威集合 SHA-256，小写 hex
 	ActiveAttempts      []int64                `protobuf:"varint,5,rep,packed,name=active_attempts,json=activeAttempts,proto3" json:"active_attempts,omitempty"`
 	// Informational build provenance only. It does not participate in admission.
-	ReleaseVersion          string  `protobuf:"bytes,11,opt,name=release_version,json=releaseVersion,proto3" json:"release_version,omitempty"`                                      // 上次连接仍在执行的 attempt（调和输入，可空）
-	JourneyCatalogDigest    string  `protobuf:"bytes,6,opt,name=journey_catalog_digest,json=journeyCatalogDigest,proto3" json:"journey_catalog_digest,omitempty"`                   // 仅 Lintel：嵌入 Journey Catalog 原始 JCS 字节 SHA-256（hex，64 字符）
-	BrowserCapacitySlots    uint32  `protobuf:"varint,7,opt,name=browser_capacity_slots,json=browserCapacitySlots,proto3" json:"browser_capacity_slots,omitempty"`                  // 仅 Lintel：该 boot 固定浏览器 slot 总数，必须 >=1；Quoin 是唯一 FIFO 队列
-	ChromiumRevision        string  `protobuf:"bytes,8,opt,name=chromium_revision,json=chromiumRevision,proto3" json:"chromium_revision,omitempty"`                                 // 仅 Lintel：精确 Chromium revision；profile 只允许 revision 完全相等
-	JourneyCatalogVersion   string  `protobuf:"bytes,9,opt,name=journey_catalog_version,json=journeyCatalogVersion,proto3" json:"journey_catalog_version,omitempty"`                // 仅 Lintel：与 digest 对应；Plinth 的 6..10 必须为空/0
-	ActiveBrowserOperations []int64 `protobuf:"varint,10,rep,packed,name=active_browser_operations,json=activeBrowserOperations,proto3" json:"active_browser_operations,omitempty"` // 仅 Lintel：本 boot 当前仍有物理进程/trace staging 的 operation IDs
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	ReleaseVersion string `protobuf:"bytes,11,opt,name=release_version,json=releaseVersion,proto3" json:"release_version,omitempty"` // 上次连接仍在执行的 attempt（调和输入，可空）
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -2912,51 +1793,15 @@ func (x *Hello) GetReleaseVersion() string {
 	return ""
 }
 
-func (x *Hello) GetJourneyCatalogDigest() string {
-	if x != nil {
-		return x.JourneyCatalogDigest
-	}
-	return ""
-}
-
-func (x *Hello) GetBrowserCapacitySlots() uint32 {
-	if x != nil {
-		return x.BrowserCapacitySlots
-	}
-	return 0
-}
-
-func (x *Hello) GetChromiumRevision() string {
-	if x != nil {
-		return x.ChromiumRevision
-	}
-	return ""
-}
-
-func (x *Hello) GetJourneyCatalogVersion() string {
-	if x != nil {
-		return x.JourneyCatalogVersion
-	}
-	return ""
-}
-
-func (x *Hello) GetActiveBrowserOperations() []int64 {
-	if x != nil {
-		return x.ActiveBrowserOperations
-	}
-	return nil
-}
-
 // 握手裁决：accepted=true 后连接成为该 slot 当前活动控制流；
 // accepted=false 携带拒绝原因（RUNTIME-CTRL-002/003）。
 type HelloAck struct {
-	state                    protoimpl.MessageState `protogen:"open.v1"`
-	Accepted                 bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	RejectReason             HelloRejectReason      `protobuf:"varint,2,opt,name=reject_reason,json=rejectReason,proto3,enum=quoin.runtime.v1.HelloRejectReason" json:"reject_reason,omitempty"`
-	LastConnectionEpoch      uint64                 `protobuf:"varint,3,opt,name=last_connection_epoch,json=lastConnectionEpoch,proto3" json:"last_connection_epoch,omitempty"`                // accepted 时携带该 slot 当前 boot 最近一次连接 epoch（调和参考）
-	ProfileReconcileRequired bool                   `protobuf:"varint,4,opt,name=profile_reconcile_required,json=profileReconcileRequired,proto3" json:"profile_reconcile_required,omitempty"` // Lintel 每个新 boot 必须 true；报告完整前不得接受 Browser Operation
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Accepted            bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	RejectReason        HelloRejectReason      `protobuf:"varint,2,opt,name=reject_reason,json=rejectReason,proto3,enum=quoin.runtime.v1.HelloRejectReason" json:"reject_reason,omitempty"`
+	LastConnectionEpoch uint64                 `protobuf:"varint,3,opt,name=last_connection_epoch,json=lastConnectionEpoch,proto3" json:"last_connection_epoch,omitempty"` // accepted 时携带该 slot 当前 boot 最近一次连接 epoch（调和参考）
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *HelloAck) Reset() {
@@ -3010,23 +1855,15 @@ func (x *HelloAck) GetLastConnectionEpoch() uint64 {
 	return 0
 }
 
-func (x *HelloAck) GetProfileReconcileRequired() bool {
-	if x != nil {
-		return x.ProfileReconcileRequired
-	}
-	return false
-}
-
 // 心跳：更新瞬时连接投影（connected/lastSeenAt），纯内存不落库
 // （DATA-RUNTIME-001）；周期为同一 Release 的内部常量，不在协议冻结数值（RUNTIME-SCOPE-004、RUNTIME-CTRL-005）。
 type Heartbeat struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	Seq                     uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`                                                                                 // 当前连接内单调递增
-	ActiveAttempts          []int64                `protobuf:"varint,2,rep,packed,name=active_attempts,json=activeAttempts,proto3" json:"active_attempts,omitempty"`                              // Runtime 当前正在执行的 attempt（调和输入）
-	Capacity                *Capacity              `protobuf:"bytes,3,opt,name=capacity,proto3" json:"capacity,omitempty"`                                                                        // 剩余容量上报（部署内部）
-	ActiveBrowserOperations []int64                `protobuf:"varint,4,rep,packed,name=active_browser_operations,json=activeBrowserOperations,proto3" json:"active_browser_operations,omitempty"` // 仅 Lintel：实际物理 operation 集合；必须与本 boot 调和
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Seq            uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`                                                    // 当前连接内单调递增
+	ActiveAttempts []int64                `protobuf:"varint,2,rep,packed,name=active_attempts,json=activeAttempts,proto3" json:"active_attempts,omitempty"` // Runtime 当前正在执行的 attempt（调和输入）
+	Capacity       *Capacity              `protobuf:"bytes,3,opt,name=capacity,proto3" json:"capacity,omitempty"`                                           // 剩余容量上报（部署内部）
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -3080,18 +1917,11 @@ func (x *Heartbeat) GetCapacity() *Capacity {
 	return nil
 }
 
-func (x *Heartbeat) GetActiveBrowserOperations() []int64 {
-	if x != nil {
-		return x.ActiveBrowserOperations
-	}
-	return nil
-}
-
 // 容量投影（部署内部）：只用于派发决策提示，不是权威事实（RUNTIME-CTRL-005）。
 type Capacity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Running       uint32                 `protobuf:"varint,1,opt,name=running,proto3" json:"running,omitempty"`
-	Max           uint32                 `protobuf:"varint,2,opt,name=max,proto3" json:"max,omitempty"` // 当前 boot 固定容量；Plinth 来自 Release 常量，Lintel 来自 browserSlots
+	Max           uint32                 `protobuf:"varint,2,opt,name=max,proto3" json:"max,omitempty"` // 当前 boot 固定容量；来自 Release 常量
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3154,13 +1984,12 @@ type DispatchAttempt struct {
 	AttemptType            AttemptType            `protobuf:"varint,2,opt,name=attempt_type,json=attemptType,proto3,enum=quoin.runtime.v1.AttemptType" json:"attempt_type,omitempty"`
 	ScopeType              ScopeType              `protobuf:"varint,3,opt,name=scope_type,json=scopeType,proto3,enum=quoin.runtime.v1.ScopeType" json:"scope_type,omitempty"`
 	ScopeId                int64                  `protobuf:"varint,4,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
-	CheckKey               string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                               // run_check/config_verification_run 子 Attempt 时非空；否则空
-	LeaseDeadline          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=lease_deadline,json=leaseDeadline,proto3" json:"lease_deadline,omitempty"`                                // 有限 lease 截止；时长数值为部署配置
-	Input                  *AttemptInputSnapshot  `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`                                                                     // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
-	RequestedByToolCallId  int64                  `protobuf:"varint,8,opt,name=requested_by_tool_call_id,json=requestedByToolCallId,proto3" json:"requested_by_tool_call_id,omitempty"` // 跨 Runtime 子执行（DATA-ATTEMPT-007）；其余为 0
-	PlanKey                string                 `protobuf:"bytes,9,opt,name=plan_key,json=planKey,proto3" json:"plan_key,omitempty"`                                                  // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
-	DiscoveryKey           string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                  // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
-	OperationCorrelationId string                 `protobuf:"bytes,11,opt,name=operation_correlation_id,json=operationCorrelationId,proto3" json:"operation_correlation_id,omitempty"`  // 业务操作关联标识（ADR-0006）；不透明文本，无关联为空
+	CheckKey               string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                              // run_check/config_verification_run 子 Attempt 时非空；否则空
+	LeaseDeadline          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=lease_deadline,json=leaseDeadline,proto3" json:"lease_deadline,omitempty"`                               // 有限 lease 截止；时长数值为部署配置
+	Input                  *AttemptInputSnapshot  `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`                                                                    // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
+	PlanKey                string                 `protobuf:"bytes,9,opt,name=plan_key,json=planKey,proto3" json:"plan_key,omitempty"`                                                 // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
+	DiscoveryKey           string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                 // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
+	OperationCorrelationId string                 `protobuf:"bytes,11,opt,name=operation_correlation_id,json=operationCorrelationId,proto3" json:"operation_correlation_id,omitempty"` // 业务操作关联标识（ADR-0006）；不透明文本，无关联为空
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -3242,13 +2071,6 @@ func (x *DispatchAttempt) GetInput() *AttemptInputSnapshot {
 		return x.Input
 	}
 	return nil
-}
-
-func (x *DispatchAttempt) GetRequestedByToolCallId() int64 {
-	if x != nil {
-		return x.RequestedByToolCallId
-	}
-	return 0
 }
 
 func (x *DispatchAttempt) GetPlanKey() string {
@@ -3447,14 +2269,14 @@ func (x *ArtifactRef) GetBodyExpired() bool {
 }
 
 // 任务级连接凭据 grant 引用（非秘密；RUNTIME-GRANT-001）。grant 可在 Attempt 派发时
-// （模型供应商）或 Quoin 接受具体 Tool Call 时（Thanos/Kubernetes）创建；绑定当时实际的
+// （模型供应商）或 Quoin 接受具体 Tool Call 时（Thanos）创建；绑定当时实际的
 // connection revision/credential generation，并在 Attempt 终态后不可再获取（DATA-CONN-002）。
 type ConnectionGrant struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	GrantId                 int64                  `protobuf:"varint,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`                                                     // attempt_connection_grants.id（不可变、Attempt-scoped）
 	ConnectionRevisionId    int64                  `protobuf:"varint,2,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`            // connections.current_revision_id 绑定
 	CredentialGenerationId  int64                  `protobuf:"varint,3,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"`      // credential_generations.id 绑定
-	Purpose                 string                 `protobuf:"bytes,4,opt,name=purpose,proto3" json:"purpose,omitempty"`                                                                     // chat_model|embedding|thanos_query|kubernetes_read|model_probe_chat|model_probe_embedding|prometheus_probe|thanos_probe|kubernetes_probe
+	Purpose                 string                 `protobuf:"bytes,4,opt,name=purpose,proto3" json:"purpose,omitempty"`                                                                     // chat_model|embedding|thanos_query|model_probe_chat|model_probe_embedding|prometheus_probe|thanos_probe
 	ConnectionProbeResultId int64                  `protobuf:"varint,5,opt,name=connection_probe_result_id,json=connectionProbeResultId,proto3" json:"connection_probe_result_id,omitempty"` // model_provider 必须绑定通过的不可变 qualification；其它类型为 0
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
@@ -3629,7 +2451,7 @@ func (x *AttemptReject) GetReason() AttemptRejectReason {
 type AttemptProgress struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	AttemptId     int64                  `protobuf:"varint,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
-	Stage         string                 `protobuf:"bytes,2,opt,name=stage,proto3" json:"stage,omitempty"`                                // 显示性阶段名；不得成为 Browser Operation/Action 状态权威
+	Stage         string                 `protobuf:"bytes,2,opt,name=stage,proto3" json:"stage,omitempty"`                                // 显示性阶段名；不得成为任何领域状态权威
 	ToolCallId    int64                  `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"` // 相关 tool_call（可 0）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3866,14 +2688,14 @@ func (x *ResultProposal) GetPayload() *ResultPayload {
 }
 
 // 结果载荷：与 attempt_type 对应的规范结构化输出（assistant message / report content /
-// analysis output / browser 操作结果），由 Quoin 校验 schema_kind 与 content_digest 后
+// analysis output 等），由 Quoin 校验 schema_kind 与 content_digest 后
 // 原子持久化到对应领域记录（RUNTIME-TASK-012）。不依赖未定义实现层的补通道。
 type ResultPayload struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	SchemaKind          string                 `protobuf:"bytes,1,opt,name=schema_kind,json=schemaKind,proto3" json:"schema_kind,omitempty"`            // 输出 schema 标识（如 "assistant_message_v1"、"inspection_report_v1"）；非空
 	CanonicalJson       []byte                 `protobuf:"bytes,2,opt,name=canonical_json,json=canonicalJson,proto3" json:"canonical_json,omitempty"`   // 非秘密规范结构化输出
 	ContentDigest       []byte                 `protobuf:"bytes,3,opt,name=content_digest,json=contentDigest,proto3" json:"content_digest,omitempty"`   // SHA-256(canonical_json)（32 字节）
-	EvidenceIds         []int64                `protobuf:"varint,4,rep,packed,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"` // 已存在且本 Attempt 获授权的引用；browser_journey_result_v1 必须为空，Evidence 由 canonical_json proposals 经 Quoin 事务创建
+	EvidenceIds         []int64                `protobuf:"varint,4,rep,packed,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"` // 已存在且本 Attempt 获授权的引用；Evidence 由 canonical_json proposals 经 Quoin 事务创建
 	ArtifactIds         []int64                `protobuf:"varint,5,rep,packed,name=artifact_ids,json=artifactIds,proto3" json:"artifact_ids,omitempty"`
 	KnowledgeVersionIds []int64                `protobuf:"varint,6,rep,packed,name=knowledge_version_ids,json=knowledgeVersionIds,proto3" json:"knowledge_version_ids,omitempty"`
 	unknownFields       protoimpl.UnknownFields
@@ -4819,7 +3641,7 @@ type ToolCallAuthorization struct {
 	ProviderIndex      uint32                 `protobuf:"varint,2,opt,name=provider_index,json=providerIndex,proto3" json:"provider_index,omitempty"`
 	ProviderToolCallId string                 `protobuf:"bytes,3,opt,name=provider_tool_call_id,json=providerToolCallId,proto3" json:"provider_tool_call_id,omitempty"`
 	FailureMode        ToolFailureMode        `protobuf:"varint,4,opt,name=failure_mode,json=failureMode,proto3,enum=quoin.runtime.v1.ToolFailureMode" json:"failure_mode,omitempty"` // 由固定 Tool 定义决定，模型不得覆盖
-	ConnectionGrants   []*ConnectionGrant     `protobuf:"bytes,5,rep,name=connection_grants,json=connectionGrants,proto3" json:"connection_grants,omitempty"`                         // Kubernetes 可绑定多个；无外部连接的 Tool 为空
+	ConnectionGrants   []*ConnectionGrant     `protobuf:"bytes,5,rep,name=connection_grants,json=connectionGrants,proto3" json:"connection_grants,omitempty"`                         // 可绑定多个；无外部连接的 Tool 为空
 	// Deterministic Business System routing preflight. When non-empty it is
 	// mutually exclusive with grants; Plinth closes the existing Tool Call as a
 	// return_to_model result and must not fetch a credential or contact a target.
@@ -5316,2311 +4138,6 @@ func (x *CompleteToolCallAck) GetDetail() string {
 	return ""
 }
 
-// Plinth -> Quoin：请求浏览器工具子执行（RUNTIME-CROSS-001/004）。父 Tool Call 已由
-// CompleteModelCallAck 持久化；Quoin 在同一事务创建 browser_exploration 子 Attempt
-// （requested_by_tool_call_id = 既有 tool_call_id），随后派发 lintel 并以
-// BrowserSubExecutionAck 应答。幂等键就是已持久化且唯一的 tool_call_id；重放返回原
-// tool_call_id 与 child_attempt_id，不再生造 request_id。旧 epoch/boot 的请求按 RUNTIME-CTRL-009 丢弃。
-type RequestBrowserSubExecution struct {
-	state           protoimpl.MessageState    `protogen:"open.v1"`
-	ParentAttemptId int64                     `protobuf:"varint,1,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"` // 父 Plinth Attempt（execution_attempts.id）
-	Input           *BrowserSubExecutionInput `protobuf:"bytes,2,opt,name=input,proto3" json:"input,omitempty"`                                               // 冻结的非秘密浏览器工具参数快照
-	ToolCallId      int64                     `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`                // CompleteModelCallAck 已返回的 quoin_browser tool_calls.id
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *RequestBrowserSubExecution) Reset() {
-	*x = RequestBrowserSubExecution{}
-	mi := &file_runtime_proto_msgTypes[33]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RequestBrowserSubExecution) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RequestBrowserSubExecution) ProtoMessage() {}
-
-func (x *RequestBrowserSubExecution) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[33]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RequestBrowserSubExecution.ProtoReflect.Descriptor instead.
-func (*RequestBrowserSubExecution) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{33}
-}
-
-func (x *RequestBrowserSubExecution) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *RequestBrowserSubExecution) GetInput() *BrowserSubExecutionInput {
-	if x != nil {
-		return x.Input
-	}
-	return nil
-}
-
-func (x *RequestBrowserSubExecution) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-// 浏览器工具参数快照（非秘密）；canonical_json 必须逐字等于既有 tool_calls.arguments_json 的
-// canonical bytes，content_digest 必须等于既有 tool_calls.arguments_digest 与 SHA-256(canonical_json)。
-type BrowserSubExecutionInput struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SchemaKind    string                 `protobuf:"bytes,1,opt,name=schema_kind,json=schemaKind,proto3" json:"schema_kind,omitempty"`          // "browser_tool_v1"；非空
-	CanonicalJson []byte                 `protobuf:"bytes,2,opt,name=canonical_json,json=canonicalJson,proto3" json:"canonical_json,omitempty"` // 冻结的模型 Tool arguments；只含人类领域 locator
-	ContentDigest []byte                 `protobuf:"bytes,3,opt,name=content_digest,json=contentDigest,proto3" json:"content_digest,omitempty"` // SHA-256(canonical_json)（32 字节）
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserSubExecutionInput) Reset() {
-	*x = BrowserSubExecutionInput{}
-	mi := &file_runtime_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserSubExecutionInput) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserSubExecutionInput) ProtoMessage() {}
-
-func (x *BrowserSubExecutionInput) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserSubExecutionInput.ProtoReflect.Descriptor instead.
-func (*BrowserSubExecutionInput) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{34}
-}
-
-func (x *BrowserSubExecutionInput) GetSchemaKind() string {
-	if x != nil {
-		return x.SchemaKind
-	}
-	return ""
-}
-
-func (x *BrowserSubExecutionInput) GetCanonicalJson() []byte {
-	if x != nil {
-		return x.CanonicalJson
-	}
-	return nil
-}
-
-func (x *BrowserSubExecutionInput) GetContentDigest() []byte {
-	if x != nil {
-		return x.ContentDigest
-	}
-	return nil
-}
-
-// Quoin -> Plinth：子执行请求裁决。accepted=true 时回显既有 tool_call_id 并携带新建
-// child_attempt_id；reject_reason 为拒绝原因（旧流 fence、父 Attempt 非 plinth/非
-// Running、输入不支持、父已取消等）。
-type BrowserSubExecutionAck struct {
-	state           protoimpl.MessageState          `protogen:"open.v1"`
-	ParentAttemptId int64                           `protobuf:"varint,1,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"`
-	Accepted        bool                            `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	ToolCallId      int64                           `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`                                                           // accepted 时：回显既有 quoin_browser tool_calls.id（status=running）
-	ChildAttemptId  int64                           `protobuf:"varint,4,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`                                               // accepted 时：browser_exploration 子 Attempt id
-	RejectReason    BrowserSubExecutionRejectReason `protobuf:"varint,5,opt,name=reject_reason,json=rejectReason,proto3,enum=quoin.runtime.v1.BrowserSubExecutionRejectReason" json:"reject_reason,omitempty"` // accepted=false 时必填；封闭原因，UNSPECIFIED 拒绝
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *BrowserSubExecutionAck) Reset() {
-	*x = BrowserSubExecutionAck{}
-	mi := &file_runtime_proto_msgTypes[35]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserSubExecutionAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserSubExecutionAck) ProtoMessage() {}
-
-func (x *BrowserSubExecutionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[35]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserSubExecutionAck.ProtoReflect.Descriptor instead.
-func (*BrowserSubExecutionAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{35}
-}
-
-func (x *BrowserSubExecutionAck) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserSubExecutionAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *BrowserSubExecutionAck) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *BrowserSubExecutionAck) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserSubExecutionAck) GetRejectReason() BrowserSubExecutionRejectReason {
-	if x != nil {
-		return x.RejectReason
-	}
-	return BrowserSubExecutionRejectReason_BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED
-}
-
-// Quoin -> Plinth：子执行完成后的工具结果交付（RUNTIME-CROSS-004）。Quoin 在子 Attempt
-// 结果提交事务内更新 tool_calls 状态并持久化浏览器操作结果后发送；父 Attempt 据此继续
-// 模型循环。correlation_id 关联原 RequestBrowserSubExecution；tool_call_id 是幂等交付键。
-type ToolResultDelivery struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	ToolCallId     int64                  `protobuf:"varint,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"` // 父 Attempt 的 tool_calls.id
-	Success        bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
-	ErrorDetail    string                 `protobuf:"bytes,3,opt,name=error_detail,json=errorDetail,proto3" json:"error_detail,omitempty"`             // 失败时的非秘密错误说明
-	ChildAttemptId int64                  `protobuf:"varint,4,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"` // 对应子 Attempt
-	EvidenceIds    []int64                `protobuf:"varint,5,rep,packed,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"`     // 子 Attempt 提交的证据引用（可空）
-	Payload        *ResultPayload         `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`                                        // 浏览器工具结构化结果（可空）
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *ToolResultDelivery) Reset() {
-	*x = ToolResultDelivery{}
-	mi := &file_runtime_proto_msgTypes[36]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ToolResultDelivery) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ToolResultDelivery) ProtoMessage() {}
-
-func (x *ToolResultDelivery) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[36]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ToolResultDelivery.ProtoReflect.Descriptor instead.
-func (*ToolResultDelivery) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{36}
-}
-
-func (x *ToolResultDelivery) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *ToolResultDelivery) GetSuccess() bool {
-	if x != nil {
-		return x.Success
-	}
-	return false
-}
-
-func (x *ToolResultDelivery) GetErrorDetail() string {
-	if x != nil {
-		return x.ErrorDetail
-	}
-	return ""
-}
-
-func (x *ToolResultDelivery) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *ToolResultDelivery) GetEvidenceIds() []int64 {
-	if x != nil {
-		return x.EvidenceIds
-	}
-	return nil
-}
-
-func (x *ToolResultDelivery) GetPayload() *ResultPayload {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-// Quoin -> Lintel：在同一 Exploration Browser Operation 内执行一个已持久化子动作。
-// 每个请求精确对应一个 browser_exploration child Attempt 和其 action 行；重复请求按
-// child_attempt_id 幂等，Lintel 必须回相同的规范结果。input 逐字绑定父 tool_calls
-// 的 canonical arguments，不暴露任意 JS、CDP、Playwright 或 HTTP 能力。
-type ExecuteBrowserExplorationAction struct {
-	state           protoimpl.MessageState    `protogen:"open.v1"`
-	OperationId     int64                     `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`               // 持续存活的 browser_operations.id
-	ChildAttemptId  int64                     `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`    // 该 Tool Call 专属的 browser_exploration Attempt
-	ParentAttemptId int64                     `protobuf:"varint,3,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"` // 父 Plinth Attempt
-	ToolCallId      int64                     `protobuf:"varint,4,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`                // 父 tool_calls.id；结果交付幂等键
-	Input           *BrowserSubExecutionInput `protobuf:"bytes,5,opt,name=input,proto3" json:"input,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *ExecuteBrowserExplorationAction) Reset() {
-	*x = ExecuteBrowserExplorationAction{}
-	mi := &file_runtime_proto_msgTypes[37]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExecuteBrowserExplorationAction) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExecuteBrowserExplorationAction) ProtoMessage() {}
-
-func (x *ExecuteBrowserExplorationAction) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[37]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExecuteBrowserExplorationAction.ProtoReflect.Descriptor instead.
-func (*ExecuteBrowserExplorationAction) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{37}
-}
-
-func (x *ExecuteBrowserExplorationAction) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *ExecuteBrowserExplorationAction) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *ExecuteBrowserExplorationAction) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *ExecuteBrowserExplorationAction) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *ExecuteBrowserExplorationAction) GetInput() *BrowserSubExecutionInput {
-	if x != nil {
-		return x.Input
-	}
-	return nil
-}
-
-// Lintel -> Quoin：一个封闭 Browser Tool action 的最终裁决。success 时 payload 的
-// schema_kind 固定为 browser_tool_result_v1；错误时 payload 为空且 error_code 是
-// browser-tool.schema.json error.code 的稳定映射。session_terminal 只在 close_session
-// 或不可恢复边界故障时为 true；可恢复错误绝不关闭连续 Exploration session。
-type BrowserExplorationActionResult struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	OperationId     int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId  int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ParentAttemptId int64                  `protobuf:"varint,3,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"`
-	ToolCallId      int64                  `protobuf:"varint,4,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	Success         bool                   `protobuf:"varint,5,opt,name=success,proto3" json:"success,omitempty"`
-	Payload         *ResultPayload         `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
-	ErrorCode       string                 `protobuf:"bytes,7,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	ErrorDetail     string                 `protobuf:"bytes,8,opt,name=error_detail,json=errorDetail,proto3" json:"error_detail,omitempty"`
-	SessionTerminal bool                   `protobuf:"varint,9,opt,name=session_terminal,json=sessionTerminal,proto3" json:"session_terminal,omitempty"`
-	// The first successful open carries the admission probe that authorizes
-	// browser_exploration_actions.action_seq=1. It is otherwise absent.
-	AdmissionProbe *AuthenticationProbeObservation `protobuf:"bytes,10,opt,name=admission_probe,json=admissionProbe,proto3" json:"admission_probe,omitempty"`
-	// The close_session success path also carries the fixed URL-prefix
-	// completion probe. Quoin persists it before it may transition the operation
-	// to Succeeded; an Indeterminate result must instead terminate Failed.
-	CompletionProbe *AuthenticationProbeObservation `protobuf:"bytes,16,opt,name=completion_probe,json=completionProbe,proto3" json:"completion_probe,omitempty"`
-	// A terminal result (close_session or fatal boundary failure) carries the
-	// operation facts needed for Quoin to close the Exploration only after the
-	// trace commit has succeeded. Trace bytes are uploaded separately.
-	TerminalOutcome BrowserOperationOutcome        `protobuf:"varint,11,opt,name=terminal_outcome,json=terminalOutcome,proto3,enum=quoin.runtime.v1.BrowserOperationOutcome" json:"terminal_outcome,omitempty"`
-	TerminalReason  BrowserOperationTerminalReason `protobuf:"varint,12,opt,name=terminal_reason,json=terminalReason,proto3,enum=quoin.runtime.v1.BrowserOperationTerminalReason" json:"terminal_reason,omitempty"`
-	TraceArtifactId int64                          `protobuf:"varint,13,opt,name=trace_artifact_id,json=traceArtifactId,proto3" json:"trace_artifact_id,omitempty"`
-	TraceIntegrity  BrowserTraceIntegrity          `protobuf:"varint,14,opt,name=trace_integrity,json=traceIntegrity,proto3,enum=quoin.runtime.v1.BrowserTraceIntegrity" json:"trace_integrity,omitempty"`
-	TraceDigest     []byte                         `protobuf:"bytes,15,opt,name=trace_digest,json=traceDigest,proto3" json:"trace_digest,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *BrowserExplorationActionResult) Reset() {
-	*x = BrowserExplorationActionResult{}
-	mi := &file_runtime_proto_msgTypes[38]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserExplorationActionResult) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserExplorationActionResult) ProtoMessage() {}
-
-func (x *BrowserExplorationActionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[38]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserExplorationActionResult.ProtoReflect.Descriptor instead.
-func (*BrowserExplorationActionResult) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{38}
-}
-
-func (x *BrowserExplorationActionResult) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResult) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResult) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResult) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResult) GetSuccess() bool {
-	if x != nil {
-		return x.Success
-	}
-	return false
-}
-
-func (x *BrowserExplorationActionResult) GetPayload() *ResultPayload {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-func (x *BrowserExplorationActionResult) GetErrorCode() string {
-	if x != nil {
-		return x.ErrorCode
-	}
-	return ""
-}
-
-func (x *BrowserExplorationActionResult) GetErrorDetail() string {
-	if x != nil {
-		return x.ErrorDetail
-	}
-	return ""
-}
-
-func (x *BrowserExplorationActionResult) GetSessionTerminal() bool {
-	if x != nil {
-		return x.SessionTerminal
-	}
-	return false
-}
-
-func (x *BrowserExplorationActionResult) GetAdmissionProbe() *AuthenticationProbeObservation {
-	if x != nil {
-		return x.AdmissionProbe
-	}
-	return nil
-}
-
-func (x *BrowserExplorationActionResult) GetCompletionProbe() *AuthenticationProbeObservation {
-	if x != nil {
-		return x.CompletionProbe
-	}
-	return nil
-}
-
-func (x *BrowserExplorationActionResult) GetTerminalOutcome() BrowserOperationOutcome {
-	if x != nil {
-		return x.TerminalOutcome
-	}
-	return BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_UNSPECIFIED
-}
-
-func (x *BrowserExplorationActionResult) GetTerminalReason() BrowserOperationTerminalReason {
-	if x != nil {
-		return x.TerminalReason
-	}
-	return BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED
-}
-
-func (x *BrowserExplorationActionResult) GetTraceArtifactId() int64 {
-	if x != nil {
-		return x.TraceArtifactId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResult) GetTraceIntegrity() BrowserTraceIntegrity {
-	if x != nil {
-		return x.TraceIntegrity
-	}
-	return BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_UNSPECIFIED
-}
-
-func (x *BrowserExplorationActionResult) GetTraceDigest() []byte {
-	if x != nil {
-		return x.TraceDigest
-	}
-	return nil
-}
-
-// Quoin returns this only after the exact action result was durably committed
-// (or recognized as an idempotent replay). Lintel retains unacknowledged results
-// across same-boot reconnects and removes only the acknowledged child entry.
-// Quoin -> Lintel：父 Tool Call/child Attempt 已进入 Cancelling 时的类型化取消。
-// Lintel 必须终止该 child 的动作，生成 error_code=Cancelled、session_terminal=true 的
-// BrowserExplorationActionResult，并在物理停止后重放该结果直到 Quoin Ack。
-type CancelBrowserExplorationAction struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	OperationId     int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId  int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ParentAttemptId int64                  `protobuf:"varint,3,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"`
-	ToolCallId      int64                  `protobuf:"varint,4,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *CancelBrowserExplorationAction) Reset() {
-	*x = CancelBrowserExplorationAction{}
-	mi := &file_runtime_proto_msgTypes[39]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CancelBrowserExplorationAction) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CancelBrowserExplorationAction) ProtoMessage() {}
-
-func (x *CancelBrowserExplorationAction) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[39]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CancelBrowserExplorationAction.ProtoReflect.Descriptor instead.
-func (*CancelBrowserExplorationAction) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{39}
-}
-
-func (x *CancelBrowserExplorationAction) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationAction) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationAction) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationAction) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-// Lintel -> Quoin：相同 cancellation identity 的 at-least-once acceptance acknowledgement。
-type CancelBrowserExplorationActionAck struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	OperationId    int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ToolCallId     int64                  `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	Accepted       bool                   `protobuf:"varint,4,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Detail         string                 `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *CancelBrowserExplorationActionAck) Reset() {
-	*x = CancelBrowserExplorationActionAck{}
-	mi := &file_runtime_proto_msgTypes[40]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CancelBrowserExplorationActionAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CancelBrowserExplorationActionAck) ProtoMessage() {}
-
-func (x *CancelBrowserExplorationActionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[40]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CancelBrowserExplorationActionAck.ProtoReflect.Descriptor instead.
-func (*CancelBrowserExplorationActionAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{40}
-}
-
-func (x *CancelBrowserExplorationActionAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationActionAck) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationActionAck) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *CancelBrowserExplorationActionAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *CancelBrowserExplorationActionAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-// Lintel must obtain this durable arbitration before uploading a normal complete
-// Exploration trace. Quoin serializes it with parent cancellation: an accepted
-// claim wins a later cancellation; a cancellation committed first rejects it.
-type BrowserExplorationTerminalClaim struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	OperationId     int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId  int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ParentAttemptId int64                  `protobuf:"varint,3,opt,name=parent_attempt_id,json=parentAttemptId,proto3" json:"parent_attempt_id,omitempty"`
-	ToolCallId      int64                  `protobuf:"varint,4,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *BrowserExplorationTerminalClaim) Reset() {
-	*x = BrowserExplorationTerminalClaim{}
-	mi := &file_runtime_proto_msgTypes[41]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserExplorationTerminalClaim) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserExplorationTerminalClaim) ProtoMessage() {}
-
-func (x *BrowserExplorationTerminalClaim) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[41]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserExplorationTerminalClaim.ProtoReflect.Descriptor instead.
-func (*BrowserExplorationTerminalClaim) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{41}
-}
-
-func (x *BrowserExplorationTerminalClaim) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaim) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaim) GetParentAttemptId() int64 {
-	if x != nil {
-		return x.ParentAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaim) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-type BrowserExplorationTerminalClaimAck struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	OperationId    int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ToolCallId     int64                  `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	Accepted       bool                   `protobuf:"varint,4,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Detail         string                 `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *BrowserExplorationTerminalClaimAck) Reset() {
-	*x = BrowserExplorationTerminalClaimAck{}
-	mi := &file_runtime_proto_msgTypes[42]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserExplorationTerminalClaimAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserExplorationTerminalClaimAck) ProtoMessage() {}
-
-func (x *BrowserExplorationTerminalClaimAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[42]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserExplorationTerminalClaimAck.ProtoReflect.Descriptor instead.
-func (*BrowserExplorationTerminalClaimAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{42}
-}
-
-func (x *BrowserExplorationTerminalClaimAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaimAck) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaimAck) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationTerminalClaimAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *BrowserExplorationTerminalClaimAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-type BrowserExplorationActionResultAck struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	OperationId    int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ChildAttemptId int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	ToolCallId     int64                  `protobuf:"varint,3,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	Accepted       bool                   `protobuf:"varint,4,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Detail         string                 `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`
-	// SHA-256 over deterministic BrowserExplorationActionResult wire bytes. This
-	// binds an acknowledgement to the exact replayed result, not merely its IDs.
-	ResultDigest  []byte `protobuf:"bytes,6,opt,name=result_digest,json=resultDigest,proto3" json:"result_digest,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserExplorationActionResultAck) Reset() {
-	*x = BrowserExplorationActionResultAck{}
-	mi := &file_runtime_proto_msgTypes[43]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserExplorationActionResultAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserExplorationActionResultAck) ProtoMessage() {}
-
-func (x *BrowserExplorationActionResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[43]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserExplorationActionResultAck.ProtoReflect.Descriptor instead.
-func (*BrowserExplorationActionResultAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{43}
-}
-
-func (x *BrowserExplorationActionResultAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResultAck) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResultAck) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *BrowserExplorationActionResultAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *BrowserExplorationActionResultAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-func (x *BrowserExplorationActionResultAck) GetResultDigest() []byte {
-	if x != nil {
-		return x.ResultDigest
-	}
-	return nil
-}
-
-type ToolResultDeliveryAck struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	ToolCallId     int64                  `protobuf:"varint,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	ChildAttemptId int64                  `protobuf:"varint,2,opt,name=child_attempt_id,json=childAttemptId,proto3" json:"child_attempt_id,omitempty"`
-	Accepted       bool                   `protobuf:"varint,3,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Detail         string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *ToolResultDeliveryAck) Reset() {
-	*x = ToolResultDeliveryAck{}
-	mi := &file_runtime_proto_msgTypes[44]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ToolResultDeliveryAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ToolResultDeliveryAck) ProtoMessage() {}
-
-func (x *ToolResultDeliveryAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[44]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ToolResultDeliveryAck.ProtoReflect.Descriptor instead.
-func (*ToolResultDeliveryAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{44}
-}
-
-func (x *ToolResultDeliveryAck) GetToolCallId() int64 {
-	if x != nil {
-		return x.ToolCallId
-	}
-	return 0
-}
-
-func (x *ToolResultDeliveryAck) GetChildAttemptId() int64 {
-	if x != nil {
-		return x.ChildAttemptId
-	}
-	return 0
-}
-
-func (x *ToolResultDeliveryAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *ToolResultDeliveryAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-type BrowserOperationInput struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SchemaKind    string                 `protobuf:"bytes,1,opt,name=schema_kind,json=schemaKind,proto3" json:"schema_kind,omitempty"`          // manual_login_v1|authentication_probe_v1|deployment_verification_v1；Attempt 输入另走 InputSnapshot
-	CanonicalJson []byte                 `protobuf:"bytes,2,opt,name=canonical_json,json=canonicalJson,proto3" json:"canonical_json,omitempty"` // browser-execution.schema.json 对应 $defs 的 JCS bytes
-	ContentDigest []byte                 `protobuf:"bytes,3,opt,name=content_digest,json=contentDigest,proto3" json:"content_digest,omitempty"` // SHA-256(canonical_json)，32 字节
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserOperationInput) Reset() {
-	*x = BrowserOperationInput{}
-	mi := &file_runtime_proto_msgTypes[45]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserOperationInput) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserOperationInput) ProtoMessage() {}
-
-func (x *BrowserOperationInput) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[45]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserOperationInput.ProtoReflect.Descriptor instead.
-func (*BrowserOperationInput) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{45}
-}
-
-func (x *BrowserOperationInput) GetSchemaKind() string {
-	if x != nil {
-		return x.SchemaKind
-	}
-	return ""
-}
-
-func (x *BrowserOperationInput) GetCanonicalJson() []byte {
-	if x != nil {
-		return x.CanonicalJson
-	}
-	return nil
-}
-
-func (x *BrowserOperationInput) GetContentDigest() []byte {
-	if x != nil {
-		return x.ContentDigest
-	}
-	return nil
-}
-
-type StartBrowserOperation struct {
-	state                        protoimpl.MessageState `protogen:"open.v1"`
-	OperationId                  int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // 已持久化 browser_operations.id；重复发送按本 ID 幂等
-	Kind                         BrowserOperationKind   `protobuf:"varint,2,opt,name=kind,proto3,enum=quoin.runtime.v1.BrowserOperationKind" json:"kind,omitempty"`
-	IdentityId                   int64                  `protobuf:"varint,3,opt,name=identity_id,json=identityId,proto3" json:"identity_id,omitempty"`
-	IdentityRevisionId           int64                  `protobuf:"varint,4,opt,name=identity_revision_id,json=identityRevisionId,proto3" json:"identity_revision_id,omitempty"`
-	ProfileGenerationId          int64                  `protobuf:"varint,5,opt,name=profile_generation_id,json=profileGenerationId,proto3" json:"profile_generation_id,omitempty"` // fresh manual login 可为 0；其它 kind 必填
-	Input                        *BrowserOperationInput `protobuf:"bytes,6,opt,name=input,proto3" json:"input,omitempty"`
-	RequestedAt                  *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=requested_at,json=requestedAt,proto3" json:"requested_at,omitempty"`
-	JourneyCatalogDigest         string                 `protobuf:"bytes,8,opt,name=journey_catalog_digest,json=journeyCatalogDigest,proto3" json:"journey_catalog_digest,omitempty"` // 必须等于 Hello 与冻结 Browser Operation；64 位 hex
-	JourneyCatalogVersion        string                 `protobuf:"bytes,9,opt,name=journey_catalog_version,json=journeyCatalogVersion,proto3" json:"journey_catalog_version,omitempty"`
-	VerificationInvocationItemId int64                  `protobuf:"varint,10,opt,name=verification_invocation_item_id,json=verificationInvocationItemId,proto3" json:"verification_invocation_item_id,omitempty"` // deployment_verification 必填；其它 kind 为 0
-	CloneIdentity                string                 `protobuf:"bytes,11,opt,name=clone_identity,json=cloneIdentity,proto3" json:"clone_identity,omitempty"`                                                   // deployment_verification 必填且等于 SQL 冻结值；其它 kind 为空
-	unknownFields                protoimpl.UnknownFields
-	sizeCache                    protoimpl.SizeCache
-}
-
-func (x *StartBrowserOperation) Reset() {
-	*x = StartBrowserOperation{}
-	mi := &file_runtime_proto_msgTypes[46]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StartBrowserOperation) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StartBrowserOperation) ProtoMessage() {}
-
-func (x *StartBrowserOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[46]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StartBrowserOperation.ProtoReflect.Descriptor instead.
-func (*StartBrowserOperation) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{46}
-}
-
-func (x *StartBrowserOperation) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperation) GetKind() BrowserOperationKind {
-	if x != nil {
-		return x.Kind
-	}
-	return BrowserOperationKind_BROWSER_OPERATION_KIND_UNSPECIFIED
-}
-
-func (x *StartBrowserOperation) GetIdentityId() int64 {
-	if x != nil {
-		return x.IdentityId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperation) GetIdentityRevisionId() int64 {
-	if x != nil {
-		return x.IdentityRevisionId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperation) GetProfileGenerationId() int64 {
-	if x != nil {
-		return x.ProfileGenerationId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperation) GetInput() *BrowserOperationInput {
-	if x != nil {
-		return x.Input
-	}
-	return nil
-}
-
-func (x *StartBrowserOperation) GetRequestedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.RequestedAt
-	}
-	return nil
-}
-
-func (x *StartBrowserOperation) GetJourneyCatalogDigest() string {
-	if x != nil {
-		return x.JourneyCatalogDigest
-	}
-	return ""
-}
-
-func (x *StartBrowserOperation) GetJourneyCatalogVersion() string {
-	if x != nil {
-		return x.JourneyCatalogVersion
-	}
-	return ""
-}
-
-func (x *StartBrowserOperation) GetVerificationInvocationItemId() int64 {
-	if x != nil {
-		return x.VerificationInvocationItemId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperation) GetCloneIdentity() string {
-	if x != nil {
-		return x.CloneIdentity
-	}
-	return ""
-}
-
-type StartBrowserOperationAck struct {
-	state         protoimpl.MessageState            `protogen:"open.v1"`
-	OperationId   int64                             `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Accepted      bool                              `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	RejectReason  BrowserOperationStartRejectReason `protobuf:"varint,3,opt,name=reject_reason,json=rejectReason,proto3,enum=quoin.runtime.v1.BrowserOperationStartRejectReason" json:"reject_reason,omitempty"`
-	StartedAt     *timestamppb.Timestamp            `protobuf:"bytes,4,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"` // accepted 时必填
-	Detail        string                            `protobuf:"bytes,5,opt,name=detail,proto3" json:"detail,omitempty"`                        // 非秘密诊断
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *StartBrowserOperationAck) Reset() {
-	*x = StartBrowserOperationAck{}
-	mi := &file_runtime_proto_msgTypes[47]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StartBrowserOperationAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StartBrowserOperationAck) ProtoMessage() {}
-
-func (x *StartBrowserOperationAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[47]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StartBrowserOperationAck.ProtoReflect.Descriptor instead.
-func (*StartBrowserOperationAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{47}
-}
-
-func (x *StartBrowserOperationAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *StartBrowserOperationAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *StartBrowserOperationAck) GetRejectReason() BrowserOperationStartRejectReason {
-	if x != nil {
-		return x.RejectReason
-	}
-	return BrowserOperationStartRejectReason_BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED
-}
-
-func (x *StartBrowserOperationAck) GetStartedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.StartedAt
-	}
-	return nil
-}
-
-func (x *StartBrowserOperationAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-type AuthenticationProbeObservation struct {
-	state                 protoimpl.MessageState    `protogen:"open.v1"`
-	Phase                 AuthenticationProbePhase  `protobuf:"varint,1,opt,name=phase,proto3,enum=quoin.runtime.v1.AuthenticationProbePhase" json:"phase,omitempty"`
-	Result                AuthenticationProbeResult `protobuf:"varint,2,opt,name=result,proto3,enum=quoin.runtime.v1.AuthenticationProbeResult" json:"result,omitempty"`
-	JourneyId             string                    `protobuf:"bytes,3,opt,name=journey_id,json=journeyId,proto3" json:"journey_id,omitempty"`
-	JourneyVersion        uint64                    `protobuf:"varint,4,opt,name=journey_version,json=journeyVersion,proto3" json:"journey_version,omitempty"`
-	JourneyCatalogDigest  string                    `protobuf:"bytes,5,opt,name=journey_catalog_digest,json=journeyCatalogDigest,proto3" json:"journey_catalog_digest,omitempty"`
-	JourneyCatalogVersion string                    `protobuf:"bytes,6,opt,name=journey_catalog_version,json=journeyCatalogVersion,proto3" json:"journey_catalog_version,omitempty"`
-	ReasonCode            string                    `protobuf:"bytes,7,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"` // 仅 INDETERMINATE 非空；技术错误不得映射成 UNAUTHENTICATED
-	ObservedAt            *timestamppb.Timestamp    `protobuf:"bytes,8,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *AuthenticationProbeObservation) Reset() {
-	*x = AuthenticationProbeObservation{}
-	mi := &file_runtime_proto_msgTypes[48]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AuthenticationProbeObservation) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AuthenticationProbeObservation) ProtoMessage() {}
-
-func (x *AuthenticationProbeObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[48]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AuthenticationProbeObservation.ProtoReflect.Descriptor instead.
-func (*AuthenticationProbeObservation) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{48}
-}
-
-func (x *AuthenticationProbeObservation) GetPhase() AuthenticationProbePhase {
-	if x != nil {
-		return x.Phase
-	}
-	return AuthenticationProbePhase_AUTHENTICATION_PROBE_PHASE_UNSPECIFIED
-}
-
-func (x *AuthenticationProbeObservation) GetResult() AuthenticationProbeResult {
-	if x != nil {
-		return x.Result
-	}
-	return AuthenticationProbeResult_AUTHENTICATION_PROBE_RESULT_UNSPECIFIED
-}
-
-func (x *AuthenticationProbeObservation) GetJourneyId() string {
-	if x != nil {
-		return x.JourneyId
-	}
-	return ""
-}
-
-func (x *AuthenticationProbeObservation) GetJourneyVersion() uint64 {
-	if x != nil {
-		return x.JourneyVersion
-	}
-	return 0
-}
-
-func (x *AuthenticationProbeObservation) GetJourneyCatalogDigest() string {
-	if x != nil {
-		return x.JourneyCatalogDigest
-	}
-	return ""
-}
-
-func (x *AuthenticationProbeObservation) GetJourneyCatalogVersion() string {
-	if x != nil {
-		return x.JourneyCatalogVersion
-	}
-	return ""
-}
-
-func (x *AuthenticationProbeObservation) GetReasonCode() string {
-	if x != nil {
-		return x.ReasonCode
-	}
-	return ""
-}
-
-func (x *AuthenticationProbeObservation) GetObservedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.ObservedAt
-	}
-	return nil
-}
-
-type CompleteBrowserOperation struct {
-	state           protoimpl.MessageState            `protogen:"open.v1"`
-	OperationId     int64                             `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Outcome         BrowserOperationOutcome           `protobuf:"varint,2,opt,name=outcome,proto3,enum=quoin.runtime.v1.BrowserOperationOutcome" json:"outcome,omitempty"`
-	TerminalReason  BrowserOperationTerminalReason    `protobuf:"varint,3,opt,name=terminal_reason,json=terminalReason,proto3,enum=quoin.runtime.v1.BrowserOperationTerminalReason" json:"terminal_reason,omitempty"` // 非 SUCCEEDED 必填
-	ProbeResults    []*AuthenticationProbeObservation `protobuf:"bytes,4,rep,name=probe_results,json=probeResults,proto3" json:"probe_results,omitempty"`
-	TraceArtifactId int64                             `protobuf:"varint,5,opt,name=trace_artifact_id,json=traceArtifactId,proto3" json:"trace_artifact_id,omitempty"` // 无 trace 为 0；已由 ArtifactService 提交
-	TraceIntegrity  BrowserTraceIntegrity             `protobuf:"varint,6,opt,name=trace_integrity,json=traceIntegrity,proto3,enum=quoin.runtime.v1.BrowserTraceIntegrity" json:"trace_integrity,omitempty"`
-	EndedAt         *timestamppb.Timestamp            `protobuf:"bytes,7,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
-	ResultDigest    []byte                            `protobuf:"bytes,8,opt,name=result_digest,json=resultDigest,proto3" json:"result_digest,omitempty"` // 规范 completion payload SHA-256，32 字节；重连重发必须稳定
-	// SHA-256 of the exact uploaded trace bytes. Required whenever trace_artifact_id
-	// is present, so Quoin can bind the completion to the immutable Artifact blob.
-	TraceDigest   []byte `protobuf:"bytes,9,opt,name=trace_digest,json=traceDigest,proto3" json:"trace_digest,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CompleteBrowserOperation) Reset() {
-	*x = CompleteBrowserOperation{}
-	mi := &file_runtime_proto_msgTypes[49]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CompleteBrowserOperation) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CompleteBrowserOperation) ProtoMessage() {}
-
-func (x *CompleteBrowserOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[49]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CompleteBrowserOperation.ProtoReflect.Descriptor instead.
-func (*CompleteBrowserOperation) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{49}
-}
-
-func (x *CompleteBrowserOperation) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *CompleteBrowserOperation) GetOutcome() BrowserOperationOutcome {
-	if x != nil {
-		return x.Outcome
-	}
-	return BrowserOperationOutcome_BROWSER_OPERATION_OUTCOME_UNSPECIFIED
-}
-
-func (x *CompleteBrowserOperation) GetTerminalReason() BrowserOperationTerminalReason {
-	if x != nil {
-		return x.TerminalReason
-	}
-	return BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED
-}
-
-func (x *CompleteBrowserOperation) GetProbeResults() []*AuthenticationProbeObservation {
-	if x != nil {
-		return x.ProbeResults
-	}
-	return nil
-}
-
-func (x *CompleteBrowserOperation) GetTraceArtifactId() int64 {
-	if x != nil {
-		return x.TraceArtifactId
-	}
-	return 0
-}
-
-func (x *CompleteBrowserOperation) GetTraceIntegrity() BrowserTraceIntegrity {
-	if x != nil {
-		return x.TraceIntegrity
-	}
-	return BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_UNSPECIFIED
-}
-
-func (x *CompleteBrowserOperation) GetEndedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.EndedAt
-	}
-	return nil
-}
-
-func (x *CompleteBrowserOperation) GetResultDigest() []byte {
-	if x != nil {
-		return x.ResultDigest
-	}
-	return nil
-}
-
-func (x *CompleteBrowserOperation) GetTraceDigest() []byte {
-	if x != nil {
-		return x.TraceDigest
-	}
-	return nil
-}
-
-type CompleteBrowserOperationAck struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	ResultDigest  []byte                 `protobuf:"bytes,2,opt,name=result_digest,json=resultDigest,proto3" json:"result_digest,omitempty"` // 回显已裁决 digest
-	Accepted      bool                   `protobuf:"varint,3,opt,name=accepted,proto3" json:"accepted,omitempty"`                            // 首次提交或同 digest 重放为 true；冲突/迟到为 false
-	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                                 // 非秘密诊断
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CompleteBrowserOperationAck) Reset() {
-	*x = CompleteBrowserOperationAck{}
-	mi := &file_runtime_proto_msgTypes[50]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CompleteBrowserOperationAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CompleteBrowserOperationAck) ProtoMessage() {}
-
-func (x *CompleteBrowserOperationAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[50]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CompleteBrowserOperationAck.ProtoReflect.Descriptor instead.
-func (*CompleteBrowserOperationAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{50}
-}
-
-func (x *CompleteBrowserOperationAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *CompleteBrowserOperationAck) GetResultDigest() []byte {
-	if x != nil {
-		return x.ResultDigest
-	}
-	return nil
-}
-
-func (x *CompleteBrowserOperationAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *CompleteBrowserOperationAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-type PublishBrowserProfile struct {
-	state                       protoimpl.MessageState `protogen:"open.v1"`
-	OperationId                 int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // 必须是同一 actor 的 active manual-login operation
-	IdentityId                  int64                  `protobuf:"varint,2,opt,name=identity_id,json=identityId,proto3" json:"identity_id,omitempty"`
-	IdentityRevisionId          int64                  `protobuf:"varint,3,opt,name=identity_revision_id,json=identityRevisionId,proto3" json:"identity_revision_id,omitempty"`
-	ExpectedCurrentGenerationId int64                  `protobuf:"varint,4,opt,name=expected_current_generation_id,json=expectedCurrentGenerationId,proto3" json:"expected_current_generation_id,omitempty"` // 尚无 generation 为 0
-	NewGeneration               uint64                 `protobuf:"varint,5,opt,name=new_generation,json=newGeneration,proto3" json:"new_generation,omitempty"`                                               // Quoin 分配的下一单调 generation
-	CommandId                   string                 `protobuf:"bytes,6,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`                                                            // HTTP clientCommandId；同 operation/generation 重试必须稳定
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
-}
-
-func (x *PublishBrowserProfile) Reset() {
-	*x = PublishBrowserProfile{}
-	mi := &file_runtime_proto_msgTypes[51]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PublishBrowserProfile) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PublishBrowserProfile) ProtoMessage() {}
-
-func (x *PublishBrowserProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[51]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PublishBrowserProfile.ProtoReflect.Descriptor instead.
-func (*PublishBrowserProfile) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{51}
-}
-
-func (x *PublishBrowserProfile) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfile) GetIdentityId() int64 {
-	if x != nil {
-		return x.IdentityId
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfile) GetIdentityRevisionId() int64 {
-	if x != nil {
-		return x.IdentityRevisionId
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfile) GetExpectedCurrentGenerationId() int64 {
-	if x != nil {
-		return x.ExpectedCurrentGenerationId
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfile) GetNewGeneration() uint64 {
-	if x != nil {
-		return x.NewGeneration
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfile) GetCommandId() string {
-	if x != nil {
-		return x.CommandId
-	}
-	return ""
-}
-
-type PublishBrowserProfileResult struct {
-	state                 protoimpl.MessageState          `protogen:"open.v1"`
-	OperationId           int64                           `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Accepted              bool                            `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	Generation            uint64                          `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	ChromiumRevision      string                          `protobuf:"bytes,4,opt,name=chromium_revision,json=chromiumRevision,proto3" json:"chromium_revision,omitempty"`                  // 必须等于当前 Hello.chromium_revision
-	ProfileManifestDigest []byte                          `protobuf:"bytes,5,opt,name=profile_manifest_digest,json=profileManifestDigest,proto3" json:"profile_manifest_digest,omitempty"` // 原子 manifest SHA-256，32 字节
-	ProbeResult           *AuthenticationProbeObservation `protobuf:"bytes,6,opt,name=probe_result,json=probeResult,proto3" json:"probe_result,omitempty"`                                 // accepted 必须是 PUBLISH+AUTHENTICATED
-	RejectReason          BrowserOperationTerminalReason  `protobuf:"varint,7,opt,name=reject_reason,json=rejectReason,proto3,enum=quoin.runtime.v1.BrowserOperationTerminalReason" json:"reject_reason,omitempty"`
-	Detail                string                          `protobuf:"bytes,8,opt,name=detail,proto3" json:"detail,omitempty"`
-	CommandId             string                          `protobuf:"bytes,9,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"` // 回显请求 command_id
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *PublishBrowserProfileResult) Reset() {
-	*x = PublishBrowserProfileResult{}
-	mi := &file_runtime_proto_msgTypes[52]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PublishBrowserProfileResult) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PublishBrowserProfileResult) ProtoMessage() {}
-
-func (x *PublishBrowserProfileResult) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[52]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PublishBrowserProfileResult.ProtoReflect.Descriptor instead.
-func (*PublishBrowserProfileResult) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{52}
-}
-
-func (x *PublishBrowserProfileResult) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfileResult) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
-func (x *PublishBrowserProfileResult) GetGeneration() uint64 {
-	if x != nil {
-		return x.Generation
-	}
-	return 0
-}
-
-func (x *PublishBrowserProfileResult) GetChromiumRevision() string {
-	if x != nil {
-		return x.ChromiumRevision
-	}
-	return ""
-}
-
-func (x *PublishBrowserProfileResult) GetProfileManifestDigest() []byte {
-	if x != nil {
-		return x.ProfileManifestDigest
-	}
-	return nil
-}
-
-func (x *PublishBrowserProfileResult) GetProbeResult() *AuthenticationProbeObservation {
-	if x != nil {
-		return x.ProbeResult
-	}
-	return nil
-}
-
-func (x *PublishBrowserProfileResult) GetRejectReason() BrowserOperationTerminalReason {
-	if x != nil {
-		return x.RejectReason
-	}
-	return BrowserOperationTerminalReason_BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED
-}
-
-func (x *PublishBrowserProfileResult) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-func (x *PublishBrowserProfileResult) GetCommandId() string {
-	if x != nil {
-		return x.CommandId
-	}
-	return ""
-}
-
-// Quoin 已提交 operation 终态后发送的幂等进程停止 fence。Lintel 不得据此改写领域终态；
-// 只停止 operation_id 对应的进程/隧道并清理 trace staging/临时 profile，不得按 identity 杀死后续 operation。
-// 重复消息必须回同一规范 cleanup observation；同 boot 无成功 typed Ack 不得声称已清理。Quoin 收到
-// SUCCEEDED Ack 前保留身份/容量 fence。正常新 boot 可在 Browser Ready 前完成全量清扫：普通 operation
-// 以 new_boot 确认，deployment_verification 以 typed Ack + new_boot_cleanup_confirmed 确认；只有 Token/状态损坏
-// 使正常清扫链路无法建立时才进入 indeterminate 并要求 LintelRecovery。
-type StopBrowserOperation struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	OperationId         int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Reason              BrowserCloseReason     `protobuf:"varint,2,opt,name=reason,proto3,enum=quoin.runtime.v1.BrowserCloseReason" json:"reason,omitempty"`
-	CommittedAt         *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=committed_at,json=committedAt,proto3" json:"committed_at,omitempty"`
-	OriginalStartBootId string                 `protobuf:"bytes,4,opt,name=original_start_boot_id,json=originalStartBootId,proto3" json:"original_start_boot_id,omitempty"` // deployment_verification 必填；允许新 boot 在完整 sweep 后确认旧 operation
-	CloneIdentity       string                 `protobuf:"bytes,5,opt,name=clone_identity,json=cloneIdentity,proto3" json:"clone_identity,omitempty"`                       // deployment_verification 必填；必须等于 Start 与 SQL 冻结值
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
-}
-
-func (x *StopBrowserOperation) Reset() {
-	*x = StopBrowserOperation{}
-	mi := &file_runtime_proto_msgTypes[53]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StopBrowserOperation) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StopBrowserOperation) ProtoMessage() {}
-
-func (x *StopBrowserOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[53]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StopBrowserOperation.ProtoReflect.Descriptor instead.
-func (*StopBrowserOperation) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{53}
-}
-
-func (x *StopBrowserOperation) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *StopBrowserOperation) GetReason() BrowserCloseReason {
-	if x != nil {
-		return x.Reason
-	}
-	return BrowserCloseReason_BROWSER_CLOSE_REASON_UNSPECIFIED
-}
-
-func (x *StopBrowserOperation) GetCommittedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.CommittedAt
-	}
-	return nil
-}
-
-func (x *StopBrowserOperation) GetOriginalStartBootId() string {
-	if x != nil {
-		return x.OriginalStartBootId
-	}
-	return ""
-}
-
-func (x *StopBrowserOperation) GetCloneIdentity() string {
-	if x != nil {
-		return x.CloneIdentity
-	}
-	return ""
-}
-
-type StopBrowserOperationAck struct {
-	state                   protoimpl.MessageState    `protogen:"open.v1"`
-	OperationId             int64                     `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	StoppedAt               *timestamppb.Timestamp    `protobuf:"bytes,3,opt,name=stopped_at,json=stoppedAt,proto3" json:"stopped_at,omitempty"`
-	Detail                  string                    `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"` // 非秘密诊断；不得代替 typed cleanup 字段
-	CleanupOutcome          BrowserCleanupOutcome     `protobuf:"varint,5,opt,name=cleanup_outcome,json=cleanupOutcome,proto3,enum=quoin.runtime.v1.BrowserCleanupOutcome" json:"cleanup_outcome,omitempty"`
-	ProcessStopped          bool                      `protobuf:"varint,6,opt,name=process_stopped,json=processStopped,proto3" json:"process_stopped,omitempty"`
-	TunnelClosed            bool                      `protobuf:"varint,7,opt,name=tunnel_closed,json=tunnelClosed,proto3" json:"tunnel_closed,omitempty"`
-	TraceStagingDeleted     bool                      `protobuf:"varint,8,opt,name=trace_staging_deleted,json=traceStagingDeleted,proto3" json:"trace_staging_deleted,omitempty"`
-	TemporaryProfileDeleted bool                      `protobuf:"varint,9,opt,name=temporary_profile_deleted,json=temporaryProfileDeleted,proto3" json:"temporary_profile_deleted,omitempty"`
-	CleanupStateHash        []byte                    `protobuf:"bytes,10,opt,name=cleanup_state_hash,json=cleanupStateHash,proto3" json:"cleanup_state_hash,omitempty"`                                 // 规范 cleanup observation SHA-256，32 字节
-	FailureCode             BrowserCleanupFailureCode `protobuf:"varint,11,opt,name=failure_code,json=failureCode,proto3,enum=quoin.runtime.v1.BrowserCleanupFailureCode" json:"failure_code,omitempty"` // FAILED 必填；SUCCEEDED 必须 UNSPECIFIED
-	OriginalStartBootId     string                    `protobuf:"bytes,12,opt,name=original_start_boot_id,json=originalStartBootId,proto3" json:"original_start_boot_id,omitempty"`                      // deployment_verification 必填并回显 Stop 的冻结值
-	CleanupBootId           string                    `protobuf:"bytes,13,opt,name=cleanup_boot_id,json=cleanupBootId,proto3" json:"cleanup_boot_id,omitempty"`                                          // deployment_verification 必填；same/new boot 清理依据
-	CleanupConnectionEpoch  uint64                    `protobuf:"varint,14,opt,name=cleanup_connection_epoch,json=cleanupConnectionEpoch,proto3" json:"cleanup_connection_epoch,omitempty"`              // deployment_verification 必须 > 0
-	StopFenceDigest         []byte                    `protobuf:"bytes,15,opt,name=stop_fence_digest,json=stopFenceDigest,proto3" json:"stop_fence_digest,omitempty"`                                    // SHA-256(规范 StopBrowserOperation)，32 字节
-	CloneIdentity           string                    `protobuf:"bytes,16,opt,name=clone_identity,json=cloneIdentity,proto3" json:"clone_identity,omitempty"`                                            // deployment_verification 必填并回显冻结值
-	OperationProcessCount   uint64                    `protobuf:"varint,17,opt,name=operation_process_count,json=operationProcessCount,proto3" json:"operation_process_count,omitempty"`                 // clean 必须为 0
-	CgroupProcessCount      uint64                    `protobuf:"varint,18,opt,name=cgroup_process_count,json=cgroupProcessCount,proto3" json:"cgroup_process_count,omitempty"`                          // clean 必须为 0
-	ChromiumProcessCount    uint64                    `protobuf:"varint,19,opt,name=chromium_process_count,json=chromiumProcessCount,proto3" json:"chromium_process_count,omitempty"`                    // clean 必须为 0
-	X0VncProcessCount       uint64                    `protobuf:"varint,20,opt,name=x0vnc_process_count,json=x0vncProcessCount,proto3" json:"x0vnc_process_count,omitempty"`                             // clean 必须为 0
-	NovncTunnelCount        uint64                    `protobuf:"varint,21,opt,name=novnc_tunnel_count,json=novncTunnelCount,proto3" json:"novnc_tunnel_count,omitempty"`                                // clean 必须为 0
-	CloneNamespaceCount     uint64                    `protobuf:"varint,22,opt,name=clone_namespace_count,json=cloneNamespaceCount,proto3" json:"clone_namespace_count,omitempty"`                       // clean 必须为 0
-	TemporaryFileCount      uint64                    `protobuf:"varint,23,opt,name=temporary_file_count,json=temporaryFileCount,proto3" json:"temporary_file_count,omitempty"`                          // clean 必须为 0
-	RuntimeHandleCount      uint64                    `protobuf:"varint,24,opt,name=runtime_handle_count,json=runtimeHandleCount,proto3" json:"runtime_handle_count,omitempty"`                          // clean 必须为 0
-	SlotLeaseCount          uint64                    `protobuf:"varint,25,opt,name=slot_lease_count,json=slotLeaseCount,proto3" json:"slot_lease_count,omitempty"`                                      // clean 必须为 0
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
-}
-
-func (x *StopBrowserOperationAck) Reset() {
-	*x = StopBrowserOperationAck{}
-	mi := &file_runtime_proto_msgTypes[54]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *StopBrowserOperationAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*StopBrowserOperationAck) ProtoMessage() {}
-
-func (x *StopBrowserOperationAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[54]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use StopBrowserOperationAck.ProtoReflect.Descriptor instead.
-func (*StopBrowserOperationAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{54}
-}
-
-func (x *StopBrowserOperationAck) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetStoppedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.StoppedAt
-	}
-	return nil
-}
-
-func (x *StopBrowserOperationAck) GetDetail() string {
-	if x != nil {
-		return x.Detail
-	}
-	return ""
-}
-
-func (x *StopBrowserOperationAck) GetCleanupOutcome() BrowserCleanupOutcome {
-	if x != nil {
-		return x.CleanupOutcome
-	}
-	return BrowserCleanupOutcome_BROWSER_CLEANUP_OUTCOME_UNSPECIFIED
-}
-
-func (x *StopBrowserOperationAck) GetProcessStopped() bool {
-	if x != nil {
-		return x.ProcessStopped
-	}
-	return false
-}
-
-func (x *StopBrowserOperationAck) GetTunnelClosed() bool {
-	if x != nil {
-		return x.TunnelClosed
-	}
-	return false
-}
-
-func (x *StopBrowserOperationAck) GetTraceStagingDeleted() bool {
-	if x != nil {
-		return x.TraceStagingDeleted
-	}
-	return false
-}
-
-func (x *StopBrowserOperationAck) GetTemporaryProfileDeleted() bool {
-	if x != nil {
-		return x.TemporaryProfileDeleted
-	}
-	return false
-}
-
-func (x *StopBrowserOperationAck) GetCleanupStateHash() []byte {
-	if x != nil {
-		return x.CleanupStateHash
-	}
-	return nil
-}
-
-func (x *StopBrowserOperationAck) GetFailureCode() BrowserCleanupFailureCode {
-	if x != nil {
-		return x.FailureCode
-	}
-	return BrowserCleanupFailureCode_BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED
-}
-
-func (x *StopBrowserOperationAck) GetOriginalStartBootId() string {
-	if x != nil {
-		return x.OriginalStartBootId
-	}
-	return ""
-}
-
-func (x *StopBrowserOperationAck) GetCleanupBootId() string {
-	if x != nil {
-		return x.CleanupBootId
-	}
-	return ""
-}
-
-func (x *StopBrowserOperationAck) GetCleanupConnectionEpoch() uint64 {
-	if x != nil {
-		return x.CleanupConnectionEpoch
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetStopFenceDigest() []byte {
-	if x != nil {
-		return x.StopFenceDigest
-	}
-	return nil
-}
-
-func (x *StopBrowserOperationAck) GetCloneIdentity() string {
-	if x != nil {
-		return x.CloneIdentity
-	}
-	return ""
-}
-
-func (x *StopBrowserOperationAck) GetOperationProcessCount() uint64 {
-	if x != nil {
-		return x.OperationProcessCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetCgroupProcessCount() uint64 {
-	if x != nil {
-		return x.CgroupProcessCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetChromiumProcessCount() uint64 {
-	if x != nil {
-		return x.ChromiumProcessCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetX0VncProcessCount() uint64 {
-	if x != nil {
-		return x.X0VncProcessCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetNovncTunnelCount() uint64 {
-	if x != nil {
-		return x.NovncTunnelCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetCloneNamespaceCount() uint64 {
-	if x != nil {
-		return x.CloneNamespaceCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetTemporaryFileCount() uint64 {
-	if x != nil {
-		return x.TemporaryFileCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetRuntimeHandleCount() uint64 {
-	if x != nil {
-		return x.RuntimeHandleCount
-	}
-	return 0
-}
-
-func (x *StopBrowserOperationAck) GetSlotLeaseCount() uint64 {
-	if x != nil {
-		return x.SlotLeaseCount
-	}
-	return 0
-}
-
-type ExpectedBrowserProfile struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	IdentityId            int64                  `protobuf:"varint,1,opt,name=identity_id,json=identityId,proto3" json:"identity_id,omitempty"`
-	ProfileGenerationId   int64                  `protobuf:"varint,2,opt,name=profile_generation_id,json=profileGenerationId,proto3" json:"profile_generation_id,omitempty"` // current generation locator，必须 > 0
-	Generation            uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	ChromiumRevision      string                 `protobuf:"bytes,4,opt,name=chromium_revision,json=chromiumRevision,proto3" json:"chromium_revision,omitempty"`
-	ProfileManifestDigest []byte                 `protobuf:"bytes,5,opt,name=profile_manifest_digest,json=profileManifestDigest,proto3" json:"profile_manifest_digest,omitempty"` // current generation 的 32-byte SHA-256
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *ExpectedBrowserProfile) Reset() {
-	*x = ExpectedBrowserProfile{}
-	mi := &file_runtime_proto_msgTypes[55]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExpectedBrowserProfile) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExpectedBrowserProfile) ProtoMessage() {}
-
-func (x *ExpectedBrowserProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[55]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExpectedBrowserProfile.ProtoReflect.Descriptor instead.
-func (*ExpectedBrowserProfile) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{55}
-}
-
-func (x *ExpectedBrowserProfile) GetIdentityId() int64 {
-	if x != nil {
-		return x.IdentityId
-	}
-	return 0
-}
-
-func (x *ExpectedBrowserProfile) GetProfileGenerationId() int64 {
-	if x != nil {
-		return x.ProfileGenerationId
-	}
-	return 0
-}
-
-func (x *ExpectedBrowserProfile) GetGeneration() uint64 {
-	if x != nil {
-		return x.Generation
-	}
-	return 0
-}
-
-func (x *ExpectedBrowserProfile) GetChromiumRevision() string {
-	if x != nil {
-		return x.ChromiumRevision
-	}
-	return ""
-}
-
-func (x *ExpectedBrowserProfile) GetProfileManifestDigest() []byte {
-	if x != nil {
-		return x.ProfileManifestDigest
-	}
-	return nil
-}
-
-type ProfileInventoryRequest struct {
-	state         protoimpl.MessageState    `protogen:"open.v1"`
-	InventoryId   string                    `protobuf:"bytes,1,opt,name=inventory_id,json=inventoryId,proto3" json:"inventory_id,omitempty"` // 同 boot 内唯一；重发必须稳定，报告必须回显
-	Profiles      []*ExpectedBrowserProfile `protobuf:"bytes,2,rep,name=profiles,proto3" json:"profiles,omitempty"`                          // 当前全部 profile generation；identity_id 严格递增且恰好一次
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ProfileInventoryRequest) Reset() {
-	*x = ProfileInventoryRequest{}
-	mi := &file_runtime_proto_msgTypes[56]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ProfileInventoryRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ProfileInventoryRequest) ProtoMessage() {}
-
-func (x *ProfileInventoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[56]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ProfileInventoryRequest.ProtoReflect.Descriptor instead.
-func (*ProfileInventoryRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{56}
-}
-
-func (x *ProfileInventoryRequest) GetInventoryId() string {
-	if x != nil {
-		return x.InventoryId
-	}
-	return ""
-}
-
-func (x *ProfileInventoryRequest) GetProfiles() []*ExpectedBrowserProfile {
-	if x != nil {
-		return x.Profiles
-	}
-	return nil
-}
-
-type ObservedBrowserProfile struct {
-	state                    protoimpl.MessageState `protogen:"open.v1"`
-	IdentityId               int64                  `protobuf:"varint,1,opt,name=identity_id,json=identityId,proto3" json:"identity_id,omitempty"`
-	ProfileGenerationId      int64                  `protobuf:"varint,2,opt,name=profile_generation_id,json=profileGenerationId,proto3" json:"profile_generation_id,omitempty"`
-	Status                   ProfileInventoryStatus `protobuf:"varint,3,opt,name=status,proto3,enum=quoin.runtime.v1.ProfileInventoryStatus" json:"status,omitempty"`
-	ObservedChromiumRevision string                 `protobuf:"bytes,4,opt,name=observed_chromium_revision,json=observedChromiumRevision,proto3" json:"observed_chromium_revision,omitempty"` // missing 为空；manifest_invalid 只回可靠解析值
-	ObservedManifestDigest   []byte                 `protobuf:"bytes,5,opt,name=observed_manifest_digest,json=observedManifestDigest,proto3" json:"observed_manifest_digest,omitempty"`       // missing 为空；manifest_invalid 可为空；revision mismatch 必须等于 expected
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
-}
-
-func (x *ObservedBrowserProfile) Reset() {
-	*x = ObservedBrowserProfile{}
-	mi := &file_runtime_proto_msgTypes[57]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ObservedBrowserProfile) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ObservedBrowserProfile) ProtoMessage() {}
-
-func (x *ObservedBrowserProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[57]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ObservedBrowserProfile.ProtoReflect.Descriptor instead.
-func (*ObservedBrowserProfile) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{57}
-}
-
-func (x *ObservedBrowserProfile) GetIdentityId() int64 {
-	if x != nil {
-		return x.IdentityId
-	}
-	return 0
-}
-
-func (x *ObservedBrowserProfile) GetProfileGenerationId() int64 {
-	if x != nil {
-		return x.ProfileGenerationId
-	}
-	return 0
-}
-
-func (x *ObservedBrowserProfile) GetStatus() ProfileInventoryStatus {
-	if x != nil {
-		return x.Status
-	}
-	return ProfileInventoryStatus_PROFILE_INVENTORY_STATUS_UNSPECIFIED
-}
-
-func (x *ObservedBrowserProfile) GetObservedChromiumRevision() string {
-	if x != nil {
-		return x.ObservedChromiumRevision
-	}
-	return ""
-}
-
-func (x *ObservedBrowserProfile) GetObservedManifestDigest() []byte {
-	if x != nil {
-		return x.ObservedManifestDigest
-	}
-	return nil
-}
-
-type ProfileInventoryReport struct {
-	state         protoimpl.MessageState    `protogen:"open.v1"`
-	InventoryId   string                    `protobuf:"bytes,1,opt,name=inventory_id,json=inventoryId,proto3" json:"inventory_id,omitempty"` // 必须匹配当前尚未完成的 request；旧 ID 只审计不解除 fence
-	Profiles      []*ObservedBrowserProfile `protobuf:"bytes,2,rep,name=profiles,proto3" json:"profiles,omitempty"`                          // 单份完整报告；必须与 request identity 集合完全相等且无重复
-	Complete      bool                      `protobuf:"varint,3,opt,name=complete,proto3" json:"complete,omitempty"`                         // 必须为 true；false/缺失不得写任何 reconciliation 或解除 readiness fence
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ProfileInventoryReport) Reset() {
-	*x = ProfileInventoryReport{}
-	mi := &file_runtime_proto_msgTypes[58]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ProfileInventoryReport) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ProfileInventoryReport) ProtoMessage() {}
-
-func (x *ProfileInventoryReport) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[58]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ProfileInventoryReport.ProtoReflect.Descriptor instead.
-func (*ProfileInventoryReport) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{58}
-}
-
-func (x *ProfileInventoryReport) GetInventoryId() string {
-	if x != nil {
-		return x.InventoryId
-	}
-	return ""
-}
-
-func (x *ProfileInventoryReport) GetProfiles() []*ObservedBrowserProfile {
-	if x != nil {
-		return x.Profiles
-	}
-	return nil
-}
-
-func (x *ProfileInventoryReport) GetComplete() bool {
-	if x != nil {
-		return x.Complete
-	}
-	return false
-}
-
 // grant 获取请求（supervisor-only，RUNTIME-GRANT-001..003）：必须携带派发时下发的
 // grant_id 与 Attempt/boot/epoch 上下文；Quoin 校验 Attempt Running 且绑定一致。
 type FetchCredentialGrantRequest struct {
@@ -7635,7 +4152,7 @@ type FetchCredentialGrantRequest struct {
 
 func (x *FetchCredentialGrantRequest) Reset() {
 	*x = FetchCredentialGrantRequest{}
-	mi := &file_runtime_proto_msgTypes[59]
+	mi := &file_runtime_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7647,7 +4164,7 @@ func (x *FetchCredentialGrantRequest) String() string {
 func (*FetchCredentialGrantRequest) ProtoMessage() {}
 
 func (x *FetchCredentialGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[59]
+	mi := &file_runtime_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7660,7 +4177,7 @@ func (x *FetchCredentialGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCredentialGrantRequest.ProtoReflect.Descriptor instead.
 func (*FetchCredentialGrantRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{59}
+	return file_runtime_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *FetchCredentialGrantRequest) GetGrantId() int64 {
@@ -7700,12 +4217,11 @@ type FetchCredentialGrantResponse struct {
 	AttemptId              int64                  `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
 	ConnectionRevisionId   int64                  `protobuf:"varint,3,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`       // connections.current_revision_id 绑定
 	CredentialGenerationId int64                  `protobuf:"varint,4,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"` // credential_generations.id 绑定
-	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "prometheus" | "thanos" | "kubernetes" | "model_provider"（connections.type）
+	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "prometheus" | "thanos" | "model_provider"（connections.type）
 	RevisionConfigJson     []byte                 `protobuf:"bytes,6,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"`              // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
 	// Types that are valid to be assigned to Secret:
 	//
 	//	*FetchCredentialGrantResponse_Thanos
-	//	*FetchCredentialGrantResponse_Kubernetes
 	//	*FetchCredentialGrantResponse_ModelProvider
 	Secret        isFetchCredentialGrantResponse_Secret `protobuf_oneof:"secret"`
 	unknownFields protoimpl.UnknownFields
@@ -7714,7 +4230,7 @@ type FetchCredentialGrantResponse struct {
 
 func (x *FetchCredentialGrantResponse) Reset() {
 	*x = FetchCredentialGrantResponse{}
-	mi := &file_runtime_proto_msgTypes[60]
+	mi := &file_runtime_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7726,7 +4242,7 @@ func (x *FetchCredentialGrantResponse) String() string {
 func (*FetchCredentialGrantResponse) ProtoMessage() {}
 
 func (x *FetchCredentialGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[60]
+	mi := &file_runtime_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7739,7 +4255,7 @@ func (x *FetchCredentialGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCredentialGrantResponse.ProtoReflect.Descriptor instead.
 func (*FetchCredentialGrantResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{60}
+	return file_runtime_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *FetchCredentialGrantResponse) GetGrantId() int64 {
@@ -7800,15 +4316,6 @@ func (x *FetchCredentialGrantResponse) GetThanos() *ThanosCredentialSecret {
 	return nil
 }
 
-func (x *FetchCredentialGrantResponse) GetKubernetes() *KubernetesCredentialSecret {
-	if x != nil {
-		if x, ok := x.Secret.(*FetchCredentialGrantResponse_Kubernetes); ok {
-			return x.Kubernetes
-		}
-	}
-	return nil
-}
-
 func (x *FetchCredentialGrantResponse) GetModelProvider() *ModelProviderCredentialSecret {
 	if x != nil {
 		if x, ok := x.Secret.(*FetchCredentialGrantResponse_ModelProvider); ok {
@@ -7826,17 +4333,11 @@ type FetchCredentialGrantResponse_Thanos struct {
 	Thanos *ThanosCredentialSecret `protobuf:"bytes,7,opt,name=thanos,proto3,oneof"`
 }
 
-type FetchCredentialGrantResponse_Kubernetes struct {
-	Kubernetes *KubernetesCredentialSecret `protobuf:"bytes,8,opt,name=kubernetes,proto3,oneof"`
-}
-
 type FetchCredentialGrantResponse_ModelProvider struct {
 	ModelProvider *ModelProviderCredentialSecret `protobuf:"bytes,9,opt,name=model_provider,json=modelProvider,proto3,oneof"`
 }
 
 func (*FetchCredentialGrantResponse_Thanos) isFetchCredentialGrantResponse_Secret() {}
-
-func (*FetchCredentialGrantResponse_Kubernetes) isFetchCredentialGrantResponse_Secret() {}
 
 func (*FetchCredentialGrantResponse_ModelProvider) isFetchCredentialGrantResponse_Secret() {}
 
@@ -7855,7 +4356,7 @@ type ThanosCredentialSecret struct {
 
 func (x *ThanosCredentialSecret) Reset() {
 	*x = ThanosCredentialSecret{}
-	mi := &file_runtime_proto_msgTypes[61]
+	mi := &file_runtime_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7867,7 +4368,7 @@ func (x *ThanosCredentialSecret) String() string {
 func (*ThanosCredentialSecret) ProtoMessage() {}
 
 func (x *ThanosCredentialSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[61]
+	mi := &file_runtime_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7880,7 +4381,7 @@ func (x *ThanosCredentialSecret) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThanosCredentialSecret.ProtoReflect.Descriptor instead.
 func (*ThanosCredentialSecret) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{61}
+	return file_runtime_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ThanosCredentialSecret) GetUsername() string {
@@ -7904,51 +4405,6 @@ func (x *ThanosCredentialSecret) GetBearerToken() string {
 	return ""
 }
 
-// kubernetes 连接秘密：kubeconfig 正文（仅 supervisor 内存）。
-type KubernetesCredentialSecret struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kubeconfig    string                 `protobuf:"bytes,1,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *KubernetesCredentialSecret) Reset() {
-	*x = KubernetesCredentialSecret{}
-	mi := &file_runtime_proto_msgTypes[62]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *KubernetesCredentialSecret) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*KubernetesCredentialSecret) ProtoMessage() {}
-
-func (x *KubernetesCredentialSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[62]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use KubernetesCredentialSecret.ProtoReflect.Descriptor instead.
-func (*KubernetesCredentialSecret) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{62}
-}
-
-func (x *KubernetesCredentialSecret) GetKubeconfig() string {
-	if x != nil {
-		return x.Kubeconfig
-	}
-	return ""
-}
-
 // model_provider 连接秘密：API key（仅 supervisor 内存）。
 type ModelProviderCredentialSecret struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -7959,7 +4415,7 @@ type ModelProviderCredentialSecret struct {
 
 func (x *ModelProviderCredentialSecret) Reset() {
 	*x = ModelProviderCredentialSecret{}
-	mi := &file_runtime_proto_msgTypes[63]
+	mi := &file_runtime_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7971,7 +4427,7 @@ func (x *ModelProviderCredentialSecret) String() string {
 func (*ModelProviderCredentialSecret) ProtoMessage() {}
 
 func (x *ModelProviderCredentialSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[63]
+	mi := &file_runtime_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7984,467 +4440,12 @@ func (x *ModelProviderCredentialSecret) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelProviderCredentialSecret.ProtoReflect.Descriptor instead.
 func (*ModelProviderCredentialSecret) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{63}
+	return file_runtime_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ModelProviderCredentialSecret) GetApiKey() string {
 	if x != nil {
 		return x.ApiKey
-	}
-	return ""
-}
-
-// 双向浏览器信封：open/open_ack 只各出现一次且必须为首两帧；其余为 data/heartbeat/
-// close。noVNC/RFB 字节在 data.payload 中透明中继（RUNTIME-BROWSER-003）。
-type BrowserEnvelope struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Msg:
-	//
-	//	*BrowserEnvelope_Open
-	//	*BrowserEnvelope_OpenAck
-	//	*BrowserEnvelope_Data
-	//	*BrowserEnvelope_Heartbeat
-	//	*BrowserEnvelope_Close
-	Msg           isBrowserEnvelope_Msg `protobuf_oneof:"msg"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserEnvelope) Reset() {
-	*x = BrowserEnvelope{}
-	mi := &file_runtime_proto_msgTypes[64]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserEnvelope) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserEnvelope) ProtoMessage() {}
-
-func (x *BrowserEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[64]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserEnvelope.ProtoReflect.Descriptor instead.
-func (*BrowserEnvelope) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{64}
-}
-
-func (x *BrowserEnvelope) GetMsg() isBrowserEnvelope_Msg {
-	if x != nil {
-		return x.Msg
-	}
-	return nil
-}
-
-func (x *BrowserEnvelope) GetOpen() *BrowserSessionOpen {
-	if x != nil {
-		if x, ok := x.Msg.(*BrowserEnvelope_Open); ok {
-			return x.Open
-		}
-	}
-	return nil
-}
-
-func (x *BrowserEnvelope) GetOpenAck() *BrowserSessionOpenAck {
-	if x != nil {
-		if x, ok := x.Msg.(*BrowserEnvelope_OpenAck); ok {
-			return x.OpenAck
-		}
-	}
-	return nil
-}
-
-func (x *BrowserEnvelope) GetData() *BrowserFrameData {
-	if x != nil {
-		if x, ok := x.Msg.(*BrowserEnvelope_Data); ok {
-			return x.Data
-		}
-	}
-	return nil
-}
-
-func (x *BrowserEnvelope) GetHeartbeat() *BrowserHeartbeat {
-	if x != nil {
-		if x, ok := x.Msg.(*BrowserEnvelope_Heartbeat); ok {
-			return x.Heartbeat
-		}
-	}
-	return nil
-}
-
-func (x *BrowserEnvelope) GetClose() *BrowserSessionClose {
-	if x != nil {
-		if x, ok := x.Msg.(*BrowserEnvelope_Close); ok {
-			return x.Close
-		}
-	}
-	return nil
-}
-
-type isBrowserEnvelope_Msg interface {
-	isBrowserEnvelope_Msg()
-}
-
-type BrowserEnvelope_Open struct {
-	Open *BrowserSessionOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"` // Lintel -> Quoin；首帧
-}
-
-type BrowserEnvelope_OpenAck struct {
-	OpenAck *BrowserSessionOpenAck `protobuf:"bytes,2,opt,name=open_ack,json=openAck,proto3,oneof"` // Quoin -> Lintel
-}
-
-type BrowserEnvelope_Data struct {
-	Data *BrowserFrameData `protobuf:"bytes,3,opt,name=data,proto3,oneof"` // 双向
-}
-
-type BrowserEnvelope_Heartbeat struct {
-	Heartbeat *BrowserHeartbeat `protobuf:"bytes,4,opt,name=heartbeat,proto3,oneof"` // 双向
-}
-
-type BrowserEnvelope_Close struct {
-	Close *BrowserSessionClose `protobuf:"bytes,5,opt,name=close,proto3,oneof"` // 双向；随后关闭流
-}
-
-func (*BrowserEnvelope_Open) isBrowserEnvelope_Msg() {}
-
-func (*BrowserEnvelope_OpenAck) isBrowserEnvelope_Msg() {}
-
-func (*BrowserEnvelope_Data) isBrowserEnvelope_Msg() {}
-
-func (*BrowserEnvelope_Heartbeat) isBrowserEnvelope_Msg() {}
-
-func (*BrowserEnvelope_Close) isBrowserEnvelope_Msg() {}
-
-// 会话打开：声明对应的持久 Browser Operation（browser_operations.id）、kind、身份、冻结参与者 Session、slot
-// 与连接身份（RUNTIME-BROWSER-010/011）。slot 必须为 LINTEL（DATA-RUNTIME-001b）。
-type BrowserSessionOpen struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	OperationId        int64                  `protobuf:"varint,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // browser_operations.id（持久审计权威）
-	IdentityId         int64                  `protobuf:"varint,2,opt,name=identity_id,json=identityId,proto3" json:"identity_id,omitempty"`    // browser_identities.id
-	Slot               RuntimeSlot            `protobuf:"varint,3,opt,name=slot,proto3,enum=quoin.runtime.v1.RuntimeSlot" json:"slot,omitempty"`
-	BootId             string                 `protobuf:"bytes,4,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
-	ConnectionEpoch    uint64                 `protobuf:"varint,5,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`
-	ReconnectSessionId string                 `protobuf:"bytes,6,opt,name=reconnect_session_id,json=reconnectSessionId,proto3" json:"reconnect_session_id,omitempty"`                            // 同 boot 宽限期内重附着时携带；新建时为空
-	ActorUserId        int64                  `protobuf:"varint,7,opt,name=actor_user_id,json=actorUserId,proto3" json:"actor_user_id,omitempty"`                                                // 必须等于 operation.actor_user_id
-	OperationKind      BrowserOperationKind   `protobuf:"varint,8,opt,name=operation_kind,json=operationKind,proto3,enum=quoin.runtime.v1.BrowserOperationKind" json:"operation_kind,omitempty"` // 只允许 MANUAL_LOGIN 或 DEPLOYMENT_VERIFICATION
-	ActorSessionId     int64                  `protobuf:"varint,9,opt,name=actor_session_id,json=actorSessionId,proto3" json:"actor_session_id,omitempty"`                                       // 必须等于 operation.actor_session_id；manual login 与部署观察都不可换 Session
-	AttachmentSeq      uint64                 `protobuf:"varint,10,opt,name=attachment_seq,json=attachmentSeq,proto3" json:"attachment_seq,omitempty"`                                           // operation 内从 1 严格递增；重附着不得重放旧序号
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
-}
-
-func (x *BrowserSessionOpen) Reset() {
-	*x = BrowserSessionOpen{}
-	mi := &file_runtime_proto_msgTypes[65]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserSessionOpen) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserSessionOpen) ProtoMessage() {}
-
-func (x *BrowserSessionOpen) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[65]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserSessionOpen.ProtoReflect.Descriptor instead.
-func (*BrowserSessionOpen) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{65}
-}
-
-func (x *BrowserSessionOpen) GetOperationId() int64 {
-	if x != nil {
-		return x.OperationId
-	}
-	return 0
-}
-
-func (x *BrowserSessionOpen) GetIdentityId() int64 {
-	if x != nil {
-		return x.IdentityId
-	}
-	return 0
-}
-
-func (x *BrowserSessionOpen) GetSlot() RuntimeSlot {
-	if x != nil {
-		return x.Slot
-	}
-	return RuntimeSlot_RUNTIME_SLOT_UNSPECIFIED
-}
-
-func (x *BrowserSessionOpen) GetBootId() string {
-	if x != nil {
-		return x.BootId
-	}
-	return ""
-}
-
-func (x *BrowserSessionOpen) GetConnectionEpoch() uint64 {
-	if x != nil {
-		return x.ConnectionEpoch
-	}
-	return 0
-}
-
-func (x *BrowserSessionOpen) GetReconnectSessionId() string {
-	if x != nil {
-		return x.ReconnectSessionId
-	}
-	return ""
-}
-
-func (x *BrowserSessionOpen) GetActorUserId() int64 {
-	if x != nil {
-		return x.ActorUserId
-	}
-	return 0
-}
-
-func (x *BrowserSessionOpen) GetOperationKind() BrowserOperationKind {
-	if x != nil {
-		return x.OperationKind
-	}
-	return BrowserOperationKind_BROWSER_OPERATION_KIND_UNSPECIFIED
-}
-
-func (x *BrowserSessionOpen) GetActorSessionId() int64 {
-	if x != nil {
-		return x.ActorSessionId
-	}
-	return 0
-}
-
-func (x *BrowserSessionOpen) GetAttachmentSeq() uint64 {
-	if x != nil {
-		return x.AttachmentSeq
-	}
-	return 0
-}
-
-// 会话打开确认：返回瞬时 session_id 与重附着宽限期截止（数值为部署配置）。
-// 宽限期只适用于同 boot 瞬时断线（RUNTIME-BROWSER-004/007）。
-type BrowserSessionOpenAck struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	SessionId         string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`                         // 瞬时 BrowserSession ID（内存投影）
-	ReconnectDeadline *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=reconnect_deadline,json=reconnectDeadline,proto3" json:"reconnect_deadline,omitempty"` // 宽限期截止；到期释放身份锁
-	AttachmentSeq     uint64                 `protobuf:"varint,3,opt,name=attachment_seq,json=attachmentSeq,proto3" json:"attachment_seq,omitempty"`            // 精确回显已接受的递增序号
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
-}
-
-func (x *BrowserSessionOpenAck) Reset() {
-	*x = BrowserSessionOpenAck{}
-	mi := &file_runtime_proto_msgTypes[66]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserSessionOpenAck) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserSessionOpenAck) ProtoMessage() {}
-
-func (x *BrowserSessionOpenAck) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[66]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserSessionOpenAck.ProtoReflect.Descriptor instead.
-func (*BrowserSessionOpenAck) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{66}
-}
-
-func (x *BrowserSessionOpenAck) GetSessionId() string {
-	if x != nil {
-		return x.SessionId
-	}
-	return ""
-}
-
-func (x *BrowserSessionOpenAck) GetReconnectDeadline() *timestamppb.Timestamp {
-	if x != nil {
-		return x.ReconnectDeadline
-	}
-	return nil
-}
-
-func (x *BrowserSessionOpenAck) GetAttachmentSeq() uint64 {
-	if x != nil {
-		return x.AttachmentSeq
-	}
-	return 0
-}
-
-// noVNC/RFB 原始字节：Quoin 透明中继，不解析、不校验内容（RUNTIME-BROWSER-003）。
-type BrowserFrameData struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserFrameData) Reset() {
-	*x = BrowserFrameData{}
-	mi := &file_runtime_proto_msgTypes[67]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserFrameData) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserFrameData) ProtoMessage() {}
-
-func (x *BrowserFrameData) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[67]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserFrameData.ProtoReflect.Descriptor instead.
-func (*BrowserFrameData) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{67}
-}
-
-func (x *BrowserFrameData) GetPayload() []byte {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-// 会话心跳：维持隧道活性；只更新瞬时投影（RUNTIME-BROWSER-004）。
-type BrowserHeartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserHeartbeat) Reset() {
-	*x = BrowserHeartbeat{}
-	mi := &file_runtime_proto_msgTypes[68]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserHeartbeat) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserHeartbeat) ProtoMessage() {}
-
-func (x *BrowserHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[68]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserHeartbeat.ProtoReflect.Descriptor instead.
-func (*BrowserHeartbeat) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{68}
-}
-
-func (x *BrowserHeartbeat) GetSeq() uint64 {
-	if x != nil {
-		return x.Seq
-	}
-	return 0
-}
-
-// 会话关闭：任一方可发起；关闭后必须结束流（RUNTIME-BROWSER-004/005/007）。
-type BrowserSessionClose struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Reason        BrowserCloseReason     `protobuf:"varint,1,opt,name=reason,proto3,enum=quoin.runtime.v1.BrowserCloseReason" json:"reason,omitempty"`
-	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BrowserSessionClose) Reset() {
-	*x = BrowserSessionClose{}
-	mi := &file_runtime_proto_msgTypes[69]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BrowserSessionClose) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BrowserSessionClose) ProtoMessage() {}
-
-func (x *BrowserSessionClose) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[69]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BrowserSessionClose.ProtoReflect.Descriptor instead.
-func (*BrowserSessionClose) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{69}
-}
-
-func (x *BrowserSessionClose) GetReason() BrowserCloseReason {
-	if x != nil {
-		return x.Reason
-	}
-	return BrowserCloseReason_BROWSER_CLOSE_REASON_UNSPECIFIED
-}
-
-func (x *BrowserSessionClose) GetDetail() string {
-	if x != nil {
-		return x.Detail
 	}
 	return ""
 }
@@ -8465,7 +4466,7 @@ type ArtifactUploadFrame struct {
 
 func (x *ArtifactUploadFrame) Reset() {
 	*x = ArtifactUploadFrame{}
-	mi := &file_runtime_proto_msgTypes[70]
+	mi := &file_runtime_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8477,7 +4478,7 @@ func (x *ArtifactUploadFrame) String() string {
 func (*ArtifactUploadFrame) ProtoMessage() {}
 
 func (x *ArtifactUploadFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[70]
+	mi := &file_runtime_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8490,7 +4491,7 @@ func (x *ArtifactUploadFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadFrame.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadFrame) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{70}
+	return file_runtime_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ArtifactUploadFrame) GetFrame() isArtifactUploadFrame_Frame {
@@ -8554,27 +4555,24 @@ func (*ArtifactUploadFrame_End) isArtifactUploadFrame_Frame() {}
 type ArtifactUploadHeader struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	UploadId        string                 `protobuf:"bytes,1,opt,name=upload_id,json=uploadId,proto3" json:"upload_id,omitempty"`     // Runtime 生成；重试生命周期内稳定
-	AttemptId       int64                  `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"` // execution_attempts.id；Journey/Exploration 连续 trace 以 operation 自身授权时为 0
+	AttemptId       int64                  `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"` // execution_attempts.id
 	BootId          string                 `protobuf:"bytes,3,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
 	ConnectionEpoch uint64                 `protobuf:"varint,4,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"` // >= 1
 	OwnerType       string                 `protobuf:"bytes,5,opt,name=owner_type,json=ownerType,proto3" json:"owner_type,omitempty"`                    // artifacts.owner_type 封闭值（OpenAPI ArtifactSummary.ownerType / DATA-ARTIFACT-003）
 	OwnerId         int64                  `protobuf:"varint,6,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`                         // artifacts.owner_id
 	Kind            ArtifactKind           `protobuf:"varint,7,opt,name=kind,proto3,enum=quoin.runtime.v1.ArtifactKind" json:"kind,omitempty"`
 	RetentionKind   RetentionKind          `protobuf:"varint,8,opt,name=retention_kind,json=retentionKind,proto3,enum=quoin.runtime.v1.RetentionKind" json:"retention_kind,omitempty"`
-	Sensitive       bool                   `protobuf:"varint,9,opt,name=sensitive,proto3" json:"sensitive,omitempty"` // trace 必须 true（DATA-ARTIFACT-003）
+	Sensitive       bool                   `protobuf:"varint,9,opt,name=sensitive,proto3" json:"sensitive,omitempty"` // 敏感正文标记（DATA-ARTIFACT-003）
 	SizeBytes       uint64                 `protobuf:"varint,10,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	Sha256          []byte                 `protobuf:"bytes,11,opt,name=sha256,proto3" json:"sha256,omitempty"`                        // 完整内容 SHA-256（32 字节）
 	MediaType       string                 `protobuf:"bytes,12,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"` // IANA media type；与 artifacts.media_type 严格一致
-	// Browser trace uploads carry their terminal integrity at the irreversible
-	// Artifact commit boundary. Non-trace uploads MUST leave this unspecified.
-	TraceIntegrity BrowserTraceIntegrity `protobuf:"varint,13,opt,name=trace_integrity,json=traceIntegrity,proto3,enum=quoin.runtime.v1.BrowserTraceIntegrity" json:"trace_integrity,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ArtifactUploadHeader) Reset() {
 	*x = ArtifactUploadHeader{}
-	mi := &file_runtime_proto_msgTypes[71]
+	mi := &file_runtime_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8586,7 +4584,7 @@ func (x *ArtifactUploadHeader) String() string {
 func (*ArtifactUploadHeader) ProtoMessage() {}
 
 func (x *ArtifactUploadHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[71]
+	mi := &file_runtime_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8599,7 +4597,7 @@ func (x *ArtifactUploadHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadHeader.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadHeader) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{71}
+	return file_runtime_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ArtifactUploadHeader) GetUploadId() string {
@@ -8686,13 +4684,6 @@ func (x *ArtifactUploadHeader) GetMediaType() string {
 	return ""
 }
 
-func (x *ArtifactUploadHeader) GetTraceIntegrity() BrowserTraceIntegrity {
-	if x != nil {
-		return x.TraceIntegrity
-	}
-	return BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_UNSPECIFIED
-}
-
 // 数据块：offset 必须连续（从 0 开始按序到达）；payload 长度部署受限（RUNTIME-UPLOAD-006）。
 type ArtifactUploadChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -8704,7 +4695,7 @@ type ArtifactUploadChunk struct {
 
 func (x *ArtifactUploadChunk) Reset() {
 	*x = ArtifactUploadChunk{}
-	mi := &file_runtime_proto_msgTypes[72]
+	mi := &file_runtime_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8716,7 +4707,7 @@ func (x *ArtifactUploadChunk) String() string {
 func (*ArtifactUploadChunk) ProtoMessage() {}
 
 func (x *ArtifactUploadChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[72]
+	mi := &file_runtime_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8729,7 +4720,7 @@ func (x *ArtifactUploadChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadChunk) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{72}
+	return file_runtime_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ArtifactUploadChunk) GetOffset() uint64 {
@@ -8756,7 +4747,7 @@ type ArtifactUploadEnd struct {
 
 func (x *ArtifactUploadEnd) Reset() {
 	*x = ArtifactUploadEnd{}
-	mi := &file_runtime_proto_msgTypes[73]
+	mi := &file_runtime_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8768,7 +4759,7 @@ func (x *ArtifactUploadEnd) String() string {
 func (*ArtifactUploadEnd) ProtoMessage() {}
 
 func (x *ArtifactUploadEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[73]
+	mi := &file_runtime_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8781,7 +4772,7 @@ func (x *ArtifactUploadEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadEnd.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadEnd) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{73}
+	return file_runtime_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ArtifactUploadEnd) GetUploadedSizeBytes() uint64 {
@@ -8804,7 +4795,7 @@ type ArtifactUploadResult struct {
 
 func (x *ArtifactUploadResult) Reset() {
 	*x = ArtifactUploadResult{}
-	mi := &file_runtime_proto_msgTypes[74]
+	mi := &file_runtime_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8816,7 +4807,7 @@ func (x *ArtifactUploadResult) String() string {
 func (*ArtifactUploadResult) ProtoMessage() {}
 
 func (x *ArtifactUploadResult) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[74]
+	mi := &file_runtime_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8829,7 +4820,7 @@ func (x *ArtifactUploadResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadResult.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadResult) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{74}
+	return file_runtime_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ArtifactUploadResult) GetUploadId() string {
@@ -8877,7 +4868,7 @@ type ArtifactReadTextRequest struct {
 
 func (x *ArtifactReadTextRequest) Reset() {
 	*x = ArtifactReadTextRequest{}
-	mi := &file_runtime_proto_msgTypes[75]
+	mi := &file_runtime_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8889,7 +4880,7 @@ func (x *ArtifactReadTextRequest) String() string {
 func (*ArtifactReadTextRequest) ProtoMessage() {}
 
 func (x *ArtifactReadTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[75]
+	mi := &file_runtime_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8902,7 +4893,7 @@ func (x *ArtifactReadTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactReadTextRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactReadTextRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{75}
+	return file_runtime_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ArtifactReadTextRequest) GetAttemptId() int64 {
@@ -8964,7 +4955,7 @@ type ArtifactReadTextResponse struct {
 
 func (x *ArtifactReadTextResponse) Reset() {
 	*x = ArtifactReadTextResponse{}
-	mi := &file_runtime_proto_msgTypes[76]
+	mi := &file_runtime_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8976,7 +4967,7 @@ func (x *ArtifactReadTextResponse) String() string {
 func (*ArtifactReadTextResponse) ProtoMessage() {}
 
 func (x *ArtifactReadTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[76]
+	mi := &file_runtime_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8989,7 +4980,7 @@ func (x *ArtifactReadTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactReadTextResponse.ProtoReflect.Descriptor instead.
 func (*ArtifactReadTextResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{76}
+	return file_runtime_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ArtifactReadTextResponse) GetArtifactId() int64 {
@@ -9070,7 +5061,7 @@ type ArtifactGrepTextRequest struct {
 
 func (x *ArtifactGrepTextRequest) Reset() {
 	*x = ArtifactGrepTextRequest{}
-	mi := &file_runtime_proto_msgTypes[77]
+	mi := &file_runtime_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9082,7 +5073,7 @@ func (x *ArtifactGrepTextRequest) String() string {
 func (*ArtifactGrepTextRequest) ProtoMessage() {}
 
 func (x *ArtifactGrepTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[77]
+	mi := &file_runtime_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9095,7 +5086,7 @@ func (x *ArtifactGrepTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactGrepTextRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactGrepTextRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{77}
+	return file_runtime_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ArtifactGrepTextRequest) GetAttemptId() int64 {
@@ -9157,7 +5148,7 @@ type ArtifactTextMatch struct {
 
 func (x *ArtifactTextMatch) Reset() {
 	*x = ArtifactTextMatch{}
-	mi := &file_runtime_proto_msgTypes[78]
+	mi := &file_runtime_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9169,7 +5160,7 @@ func (x *ArtifactTextMatch) String() string {
 func (*ArtifactTextMatch) ProtoMessage() {}
 
 func (x *ArtifactTextMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[78]
+	mi := &file_runtime_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9182,7 +5173,7 @@ func (x *ArtifactTextMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactTextMatch.ProtoReflect.Descriptor instead.
 func (*ArtifactTextMatch) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{78}
+	return file_runtime_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ArtifactTextMatch) GetLine() uint64 {
@@ -9214,7 +5205,7 @@ type ArtifactGrepTextResponse struct {
 
 func (x *ArtifactGrepTextResponse) Reset() {
 	*x = ArtifactGrepTextResponse{}
-	mi := &file_runtime_proto_msgTypes[79]
+	mi := &file_runtime_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9226,7 +5217,7 @@ func (x *ArtifactGrepTextResponse) String() string {
 func (*ArtifactGrepTextResponse) ProtoMessage() {}
 
 func (x *ArtifactGrepTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[79]
+	mi := &file_runtime_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9239,7 +5230,7 @@ func (x *ArtifactGrepTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactGrepTextResponse.ProtoReflect.Descriptor instead.
 func (*ArtifactGrepTextResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{79}
+	return file_runtime_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ArtifactGrepTextResponse) GetArtifactId() int64 {
@@ -9301,7 +5292,7 @@ type GetCredentialSnapshotRequest struct {
 
 func (x *GetCredentialSnapshotRequest) Reset() {
 	*x = GetCredentialSnapshotRequest{}
-	mi := &file_runtime_proto_msgTypes[80]
+	mi := &file_runtime_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9313,7 +5304,7 @@ func (x *GetCredentialSnapshotRequest) String() string {
 func (*GetCredentialSnapshotRequest) ProtoMessage() {}
 
 func (x *GetCredentialSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[80]
+	mi := &file_runtime_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9326,7 +5317,7 @@ func (x *GetCredentialSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*GetCredentialSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{80}
+	return file_runtime_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *GetCredentialSnapshotRequest) GetContractFingerprint() string {
@@ -9349,7 +5340,7 @@ type GetCredentialSnapshotResponse struct {
 
 func (x *GetCredentialSnapshotResponse) Reset() {
 	*x = GetCredentialSnapshotResponse{}
-	mi := &file_runtime_proto_msgTypes[81]
+	mi := &file_runtime_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9361,7 +5352,7 @@ func (x *GetCredentialSnapshotResponse) String() string {
 func (*GetCredentialSnapshotResponse) ProtoMessage() {}
 
 func (x *GetCredentialSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[81]
+	mi := &file_runtime_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9374,7 +5365,7 @@ func (x *GetCredentialSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*GetCredentialSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{81}
+	return file_runtime_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GetCredentialSnapshotResponse) GetSnapshotVersion() uint64 {
@@ -9412,7 +5403,7 @@ type AlertSourceSnapshot struct {
 
 func (x *AlertSourceSnapshot) Reset() {
 	*x = AlertSourceSnapshot{}
-	mi := &file_runtime_proto_msgTypes[82]
+	mi := &file_runtime_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9424,7 +5415,7 @@ func (x *AlertSourceSnapshot) String() string {
 func (*AlertSourceSnapshot) ProtoMessage() {}
 
 func (x *AlertSourceSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[82]
+	mi := &file_runtime_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9437,7 +5428,7 @@ func (x *AlertSourceSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlertSourceSnapshot.ProtoReflect.Descriptor instead.
 func (*AlertSourceSnapshot) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{82}
+	return file_runtime_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *AlertSourceSnapshot) GetSourceId() int64 {
@@ -9486,7 +5477,7 @@ type CredentialDigestEntry struct {
 
 func (x *CredentialDigestEntry) Reset() {
 	*x = CredentialDigestEntry{}
-	mi := &file_runtime_proto_msgTypes[83]
+	mi := &file_runtime_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9498,7 +5489,7 @@ func (x *CredentialDigestEntry) String() string {
 func (*CredentialDigestEntry) ProtoMessage() {}
 
 func (x *CredentialDigestEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[83]
+	mi := &file_runtime_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9511,7 +5502,7 @@ func (x *CredentialDigestEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CredentialDigestEntry.ProtoReflect.Descriptor instead.
 func (*CredentialDigestEntry) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{83}
+	return file_runtime_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *CredentialDigestEntry) GetCredentialId() int64 {
@@ -9546,7 +5537,7 @@ type DeliveryRelayRequest struct {
 
 func (x *DeliveryRelayRequest) Reset() {
 	*x = DeliveryRelayRequest{}
-	mi := &file_runtime_proto_msgTypes[84]
+	mi := &file_runtime_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9558,7 +5549,7 @@ func (x *DeliveryRelayRequest) String() string {
 func (*DeliveryRelayRequest) ProtoMessage() {}
 
 func (x *DeliveryRelayRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[84]
+	mi := &file_runtime_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9571,7 +5562,7 @@ func (x *DeliveryRelayRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliveryRelayRequest.ProtoReflect.Descriptor instead.
 func (*DeliveryRelayRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{84}
+	return file_runtime_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *DeliveryRelayRequest) GetRelayId() string {
@@ -9642,7 +5633,7 @@ type DeliveryRelayResponse struct {
 
 func (x *DeliveryRelayResponse) Reset() {
 	*x = DeliveryRelayResponse{}
-	mi := &file_runtime_proto_msgTypes[85]
+	mi := &file_runtime_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9654,7 +5645,7 @@ func (x *DeliveryRelayResponse) String() string {
 func (*DeliveryRelayResponse) ProtoMessage() {}
 
 func (x *DeliveryRelayResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[85]
+	mi := &file_runtime_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9667,7 +5658,7 @@ func (x *DeliveryRelayResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliveryRelayResponse.ProtoReflect.Descriptor instead.
 func (*DeliveryRelayResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{85}
+	return file_runtime_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *DeliveryRelayResponse) GetStatus() DeliveryStatus {
@@ -9688,7 +5679,7 @@ var File_runtime_proto protoreflect.FileDescriptor
 
 const file_runtime_proto_rawDesc = "" +
 	"\n" +
-	"\rruntime.proto\x12\x10quoin.runtime.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd8!\n" +
+	"\rruntime.proto\x12\x10quoin.runtime.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x89\x0f\n" +
 	"\x0fControlEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\x04R\tmessageId\x12)\n" +
@@ -9710,11 +5701,7 @@ const file_runtime_proto_rawDesc = "" +
 	"result_ack\x18\x14 \x01(\v2\x1b.quoin.runtime.v1.ResultAckH\x00R\tresultAck\x12H\n" +
 	"\x0ecancel_attempt\x18\x15 \x01(\v2\x1f.quoin.runtime.v1.CancelAttemptH\x00R\rcancelAttempt\x12<\n" +
 	"\n" +
-	"cancel_ack\x18\x16 \x01(\v2\x1b.quoin.runtime.v1.CancelAckH\x00R\tcancelAck\x12q\n" +
-	"\x1drequest_browser_sub_execution\x18\x19 \x01(\v2,.quoin.runtime.v1.RequestBrowserSubExecutionH\x00R\x1arequestBrowserSubExecution\x12e\n" +
-	"\x19browser_sub_execution_ack\x18\x1a \x01(\v2(.quoin.runtime.v1.BrowserSubExecutionAckH\x00R\x16browserSubExecutionAck\x12X\n" +
-	"\x14tool_result_delivery\x18\x1b \x01(\v2$.quoin.runtime.v1.ToolResultDeliveryH\x00R\x12toolResultDelivery\x12b\n" +
-	"\x18tool_result_delivery_ack\x18& \x01(\v2'.quoin.runtime.v1.ToolResultDeliveryAckH\x00R\x15toolResultDeliveryAck\x123\n" +
+	"cancel_ack\x18\x16 \x01(\v2\x1b.quoin.runtime.v1.CancelAckH\x00R\tcancelAck\x123\n" +
 	"\ago_away\x18\x1c \x01(\v2\x18.quoin.runtime.v1.GoAwayH\x00R\x06goAway\x12L\n" +
 	"\x10begin_model_call\x18\x1d \x01(\v2 .quoin.runtime.v1.BeginModelCallH\x00R\x0ebeginModelCall\x12V\n" +
 	"\x14begin_model_call_ack\x18\x1e \x01(\v2#.quoin.runtime.v1.BeginModelCallAckH\x00R\x11beginModelCallAck\x12O\n" +
@@ -9724,51 +5711,28 @@ const file_runtime_proto_rawDesc = "" +
 	"\x0fbegin_tool_call\x18\" \x01(\v2\x1f.quoin.runtime.v1.BeginToolCallH\x00R\rbeginToolCall\x12S\n" +
 	"\x13begin_tool_call_ack\x18# \x01(\v2\".quoin.runtime.v1.BeginToolCallAckH\x00R\x10beginToolCallAck\x12R\n" +
 	"\x12complete_tool_call\x18$ \x01(\v2\".quoin.runtime.v1.CompleteToolCallH\x00R\x10completeToolCall\x12\\\n" +
-	"\x16complete_tool_call_ack\x18% \x01(\v2%.quoin.runtime.v1.CompleteToolCallAckH\x00R\x13completeToolCallAck\x12a\n" +
-	"\x17start_browser_operation\x18' \x01(\v2'.quoin.runtime.v1.StartBrowserOperationH\x00R\x15startBrowserOperation\x12k\n" +
-	"\x1bstart_browser_operation_ack\x18( \x01(\v2*.quoin.runtime.v1.StartBrowserOperationAckH\x00R\x18startBrowserOperationAck\x12j\n" +
-	"\x1acomplete_browser_operation\x18) \x01(\v2*.quoin.runtime.v1.CompleteBrowserOperationH\x00R\x18completeBrowserOperation\x12a\n" +
-	"\x17publish_browser_profile\x18* \x01(\v2'.quoin.runtime.v1.PublishBrowserProfileH\x00R\x15publishBrowserProfile\x12t\n" +
-	"\x1epublish_browser_profile_result\x18+ \x01(\v2-.quoin.runtime.v1.PublishBrowserProfileResultH\x00R\x1bpublishBrowserProfileResult\x12g\n" +
-	"\x19profile_inventory_request\x18, \x01(\v2).quoin.runtime.v1.ProfileInventoryRequestH\x00R\x17profileInventoryRequest\x12d\n" +
-	"\x18profile_inventory_report\x18- \x01(\v2(.quoin.runtime.v1.ProfileInventoryReportH\x00R\x16profileInventoryReport\x12^\n" +
-	"\x16stop_browser_operation\x18. \x01(\v2&.quoin.runtime.v1.StopBrowserOperationH\x00R\x14stopBrowserOperation\x12h\n" +
-	"\x1astop_browser_operation_ack\x18/ \x01(\v2).quoin.runtime.v1.StopBrowserOperationAckH\x00R\x17stopBrowserOperationAck\x12t\n" +
-	"\x1ecomplete_browser_operation_ack\x180 \x01(\v2-.quoin.runtime.v1.CompleteBrowserOperationAckH\x00R\x1bcompleteBrowserOperationAck\x12\x80\x01\n" +
-	"\"execute_browser_exploration_action\x181 \x01(\v21.quoin.runtime.v1.ExecuteBrowserExplorationActionH\x00R\x1fexecuteBrowserExplorationAction\x12}\n" +
-	"!browser_exploration_action_result\x182 \x01(\v20.quoin.runtime.v1.BrowserExplorationActionResultH\x00R\x1ebrowserExplorationActionResult\x12\x87\x01\n" +
-	"%browser_exploration_action_result_ack\x183 \x01(\v23.quoin.runtime.v1.BrowserExplorationActionResultAckH\x00R!browserExplorationActionResultAck\x12}\n" +
-	"!cancel_browser_exploration_action\x184 \x01(\v20.quoin.runtime.v1.CancelBrowserExplorationActionH\x00R\x1ecancelBrowserExplorationAction\x12\x87\x01\n" +
-	"%cancel_browser_exploration_action_ack\x185 \x01(\v23.quoin.runtime.v1.CancelBrowserExplorationActionAckH\x00R!cancelBrowserExplorationActionAck\x12\x80\x01\n" +
-	"\"browser_exploration_terminal_claim\x186 \x01(\v21.quoin.runtime.v1.BrowserExplorationTerminalClaimH\x00R\x1fbrowserExplorationTerminalClaim\x12\x8a\x01\n" +
-	"&browser_exploration_terminal_claim_ack\x187 \x01(\v24.quoin.runtime.v1.BrowserExplorationTerminalClaimAckH\x00R\"browserExplorationTerminalClaimAckB\x05\n" +
-	"\x03msgJ\x04\b\x17\x10\x18J\x04\b\x18\x10\x19\"\x90\x04\n" +
+	"\x16complete_tool_call_ack\x18% \x01(\v2%.quoin.runtime.v1.CompleteToolCallAckH\x00R\x13completeToolCallAckB\x05\n" +
+	"\x03msgJ\x04\b\x17\x10\x18J\x04\b\x18\x10\x19J\x04\b\x19\x10\x1cJ\x04\b&\x10'J\x04\b'\x108\"\xa1\x02\n" +
 	"\x05Hello\x121\n" +
 	"\x04slot\x18\x01 \x01(\x0e2\x1d.quoin.runtime.v1.RuntimeSlotR\x04slot\x12\x17\n" +
 	"\aboot_id\x18\x02 \x01(\tR\x06bootId\x12)\n" +
 	"\x10connection_epoch\x18\x03 \x01(\x04R\x0fconnectionEpoch\x121\n" +
 	"\x14contract_fingerprint\x18\x04 \x01(\tR\x13contractFingerprint\x12'\n" +
 	"\x0factive_attempts\x18\x05 \x03(\x03R\x0eactiveAttempts\x12'\n" +
-	"\x0frelease_version\x18\v \x01(\tR\x0ereleaseVersion\x124\n" +
-	"\x16journey_catalog_digest\x18\x06 \x01(\tR\x14journeyCatalogDigest\x124\n" +
-	"\x16browser_capacity_slots\x18\a \x01(\rR\x14browserCapacitySlots\x12+\n" +
-	"\x11chromium_revision\x18\b \x01(\tR\x10chromiumRevision\x126\n" +
-	"\x17journey_catalog_version\x18\t \x01(\tR\x15journeyCatalogVersion\x12:\n" +
-	"\x19active_browser_operations\x18\n" +
-	" \x03(\x03R\x17activeBrowserOperations\"\xe2\x01\n" +
+	"\x0frelease_version\x18\v \x01(\tR\x0ereleaseVersionJ\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"J\x04\b\n" +
+	"\x10\v\"\xaa\x01\n" +
 	"\bHelloAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12H\n" +
 	"\rreject_reason\x18\x02 \x01(\x0e2#.quoin.runtime.v1.HelloRejectReasonR\frejectReason\x122\n" +
-	"\x15last_connection_epoch\x18\x03 \x01(\x04R\x13lastConnectionEpoch\x12<\n" +
-	"\x1aprofile_reconcile_required\x18\x04 \x01(\bR\x18profileReconcileRequired\"\xba\x01\n" +
+	"\x15last_connection_epoch\x18\x03 \x01(\x04R\x13lastConnectionEpochJ\x04\b\x04\x10\x05\"\x84\x01\n" +
 	"\tHeartbeat\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12'\n" +
 	"\x0factive_attempts\x18\x02 \x03(\x03R\x0eactiveAttempts\x126\n" +
-	"\bcapacity\x18\x03 \x01(\v2\x1a.quoin.runtime.v1.CapacityR\bcapacity\x12:\n" +
-	"\x19active_browser_operations\x18\x04 \x03(\x03R\x17activeBrowserOperations\"6\n" +
+	"\bcapacity\x18\x03 \x01(\v2\x1a.quoin.runtime.v1.CapacityR\bcapacityJ\x04\b\x04\x10\x05\"6\n" +
 	"\bCapacity\x12\x18\n" +
 	"\arunning\x18\x01 \x01(\rR\arunning\x12\x10\n" +
-	"\x03max\x18\x02 \x01(\rR\x03max\"\x9b\x04\n" +
+	"\x03max\x18\x02 \x01(\rR\x03max\"\xe7\x03\n" +
 	"\x0fDispatchAttempt\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\x03R\tattemptId\x12@\n" +
@@ -9778,12 +5742,11 @@ const file_runtime_proto_rawDesc = "" +
 	"\bscope_id\x18\x04 \x01(\x03R\ascopeId\x12\x1b\n" +
 	"\tcheck_key\x18\x05 \x01(\tR\bcheckKey\x12A\n" +
 	"\x0elease_deadline\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\rleaseDeadline\x12<\n" +
-	"\x05input\x18\a \x01(\v2&.quoin.runtime.v1.AttemptInputSnapshotR\x05input\x128\n" +
-	"\x19requested_by_tool_call_id\x18\b \x01(\x03R\x15requestedByToolCallId\x12\x19\n" +
+	"\x05input\x18\a \x01(\v2&.quoin.runtime.v1.AttemptInputSnapshotR\x05input\x12\x19\n" +
 	"\bplan_key\x18\t \x01(\tR\aplanKey\x12#\n" +
 	"\rdiscovery_key\x18\n" +
 	" \x01(\tR\fdiscoveryKey\x128\n" +
-	"\x18operation_correlation_id\x18\v \x01(\tR\x16operationCorrelationId\"\xc4\x02\n" +
+	"\x18operation_correlation_id\x18\v \x01(\tR\x16operationCorrelationIdJ\x04\b\b\x10\t\"\xc4\x02\n" +
 	"\x14AttemptInputSnapshot\x12\x1f\n" +
 	"\vschema_kind\x18\x01 \x01(\tR\n" +
 	"schemaKind\x12%\n" +
@@ -9975,236 +5938,13 @@ const file_runtime_proto_rawDesc = "" +
 	"\fevidence_ids\x18\x04 \x03(\x03R\vevidenceIds\x12L\n" +
 	"\x11committed_payload\x18\x05 \x01(\v2\x1f.quoin.runtime.v1.ResultPayloadR\x10committedPayload\x12@\n" +
 	"\fartifact_ref\x18\x06 \x01(\v2\x1d.quoin.runtime.v1.ArtifactRefR\vartifactRef\x12\x16\n" +
-	"\x06detail\x18\a \x01(\tR\x06detail\"\xac\x01\n" +
-	"\x1aRequestBrowserSubExecution\x12*\n" +
-	"\x11parent_attempt_id\x18\x01 \x01(\x03R\x0fparentAttemptId\x12@\n" +
-	"\x05input\x18\x02 \x01(\v2*.quoin.runtime.v1.BrowserSubExecutionInputR\x05input\x12 \n" +
-	"\ftool_call_id\x18\x03 \x01(\x03R\n" +
-	"toolCallId\"\x9c\x01\n" +
-	"\x18BrowserSubExecutionInput\x12\x1f\n" +
-	"\vschema_kind\x18\x01 \x01(\tR\n" +
-	"schemaKind\x12%\n" +
-	"\x0ecanonical_json\x18\x02 \x01(\fR\rcanonicalJson\x12%\n" +
-	"\x0econtent_digest\x18\x03 \x01(\fR\rcontentDigestJ\x04\b\x04\x10\x05R\videntity_id\"\x84\x02\n" +
-	"\x16BrowserSubExecutionAck\x12*\n" +
-	"\x11parent_attempt_id\x18\x01 \x01(\x03R\x0fparentAttemptId\x12\x1a\n" +
-	"\baccepted\x18\x02 \x01(\bR\baccepted\x12 \n" +
-	"\ftool_call_id\x18\x03 \x01(\x03R\n" +
-	"toolCallId\x12(\n" +
-	"\x10child_attempt_id\x18\x04 \x01(\x03R\x0echildAttemptId\x12V\n" +
-	"\rreject_reason\x18\x05 \x01(\x0e21.quoin.runtime.v1.BrowserSubExecutionRejectReasonR\frejectReason\"\xfb\x01\n" +
-	"\x12ToolResultDelivery\x12 \n" +
-	"\ftool_call_id\x18\x01 \x01(\x03R\n" +
-	"toolCallId\x12\x18\n" +
-	"\asuccess\x18\x02 \x01(\bR\asuccess\x12!\n" +
-	"\ferror_detail\x18\x03 \x01(\tR\verrorDetail\x12(\n" +
-	"\x10child_attempt_id\x18\x04 \x01(\x03R\x0echildAttemptId\x12!\n" +
-	"\fevidence_ids\x18\x05 \x03(\x03R\vevidenceIds\x129\n" +
-	"\apayload\x18\x06 \x01(\v2\x1f.quoin.runtime.v1.ResultPayloadR\apayload\"\xfe\x01\n" +
-	"\x1fExecuteBrowserExplorationAction\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12*\n" +
-	"\x11parent_attempt_id\x18\x03 \x01(\x03R\x0fparentAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x04 \x01(\x03R\n" +
-	"toolCallId\x12@\n" +
-	"\x05input\x18\x05 \x01(\v2*.quoin.runtime.v1.BrowserSubExecutionInputR\x05input\"\x87\a\n" +
-	"\x1eBrowserExplorationActionResult\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12*\n" +
-	"\x11parent_attempt_id\x18\x03 \x01(\x03R\x0fparentAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x04 \x01(\x03R\n" +
-	"toolCallId\x12\x18\n" +
-	"\asuccess\x18\x05 \x01(\bR\asuccess\x129\n" +
-	"\apayload\x18\x06 \x01(\v2\x1f.quoin.runtime.v1.ResultPayloadR\apayload\x12\x1d\n" +
-	"\n" +
-	"error_code\x18\a \x01(\tR\terrorCode\x12!\n" +
-	"\ferror_detail\x18\b \x01(\tR\verrorDetail\x12)\n" +
-	"\x10session_terminal\x18\t \x01(\bR\x0fsessionTerminal\x12Y\n" +
-	"\x0fadmission_probe\x18\n" +
-	" \x01(\v20.quoin.runtime.v1.AuthenticationProbeObservationR\x0eadmissionProbe\x12[\n" +
-	"\x10completion_probe\x18\x10 \x01(\v20.quoin.runtime.v1.AuthenticationProbeObservationR\x0fcompletionProbe\x12T\n" +
-	"\x10terminal_outcome\x18\v \x01(\x0e2).quoin.runtime.v1.BrowserOperationOutcomeR\x0fterminalOutcome\x12Y\n" +
-	"\x0fterminal_reason\x18\f \x01(\x0e20.quoin.runtime.v1.BrowserOperationTerminalReasonR\x0eterminalReason\x12*\n" +
-	"\x11trace_artifact_id\x18\r \x01(\x03R\x0ftraceArtifactId\x12P\n" +
-	"\x0ftrace_integrity\x18\x0e \x01(\x0e2'.quoin.runtime.v1.BrowserTraceIntegrityR\x0etraceIntegrity\x12!\n" +
-	"\ftrace_digest\x18\x0f \x01(\fR\vtraceDigest\"\xbb\x01\n" +
-	"\x1eCancelBrowserExplorationAction\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12*\n" +
-	"\x11parent_attempt_id\x18\x03 \x01(\x03R\x0fparentAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x04 \x01(\x03R\n" +
-	"toolCallId\"\xc6\x01\n" +
-	"!CancelBrowserExplorationActionAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x03 \x01(\x03R\n" +
-	"toolCallId\x12\x1a\n" +
-	"\baccepted\x18\x04 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\"\xbc\x01\n" +
-	"\x1fBrowserExplorationTerminalClaim\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12*\n" +
-	"\x11parent_attempt_id\x18\x03 \x01(\x03R\x0fparentAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x04 \x01(\x03R\n" +
-	"toolCallId\"\xc7\x01\n" +
-	"\"BrowserExplorationTerminalClaimAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x03 \x01(\x03R\n" +
-	"toolCallId\x12\x1a\n" +
-	"\baccepted\x18\x04 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\"\xeb\x01\n" +
-	"!BrowserExplorationActionResultAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12 \n" +
-	"\ftool_call_id\x18\x03 \x01(\x03R\n" +
-	"toolCallId\x12\x1a\n" +
-	"\baccepted\x18\x04 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\x12#\n" +
-	"\rresult_digest\x18\x06 \x01(\fR\fresultDigest\"\x97\x01\n" +
-	"\x15ToolResultDeliveryAck\x12 \n" +
-	"\ftool_call_id\x18\x01 \x01(\x03R\n" +
-	"toolCallId\x12(\n" +
-	"\x10child_attempt_id\x18\x02 \x01(\x03R\x0echildAttemptId\x12\x1a\n" +
-	"\baccepted\x18\x03 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06detail\x18\x04 \x01(\tR\x06detail\"\x86\x01\n" +
-	"\x15BrowserOperationInput\x12\x1f\n" +
-	"\vschema_kind\x18\x01 \x01(\tR\n" +
-	"schemaKind\x12%\n" +
-	"\x0ecanonical_json\x18\x02 \x01(\fR\rcanonicalJson\x12%\n" +
-	"\x0econtent_digest\x18\x03 \x01(\fR\rcontentDigest\"\xd7\x04\n" +
-	"\x15StartBrowserOperation\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12:\n" +
-	"\x04kind\x18\x02 \x01(\x0e2&.quoin.runtime.v1.BrowserOperationKindR\x04kind\x12\x1f\n" +
-	"\videntity_id\x18\x03 \x01(\x03R\n" +
-	"identityId\x120\n" +
-	"\x14identity_revision_id\x18\x04 \x01(\x03R\x12identityRevisionId\x122\n" +
-	"\x15profile_generation_id\x18\x05 \x01(\x03R\x13profileGenerationId\x12=\n" +
-	"\x05input\x18\x06 \x01(\v2'.quoin.runtime.v1.BrowserOperationInputR\x05input\x12=\n" +
-	"\frequested_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\vrequestedAt\x124\n" +
-	"\x16journey_catalog_digest\x18\b \x01(\tR\x14journeyCatalogDigest\x126\n" +
-	"\x17journey_catalog_version\x18\t \x01(\tR\x15journeyCatalogVersion\x12E\n" +
-	"\x1fverification_invocation_item_id\x18\n" +
-	" \x01(\x03R\x1cverificationInvocationItemId\x12%\n" +
-	"\x0eclone_identity\x18\v \x01(\tR\rcloneIdentity\"\x86\x02\n" +
-	"\x18StartBrowserOperationAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12\x1a\n" +
-	"\baccepted\x18\x02 \x01(\bR\baccepted\x12X\n" +
-	"\rreject_reason\x18\x03 \x01(\x0e23.quoin.runtime.v1.BrowserOperationStartRejectReasonR\frejectReason\x129\n" +
-	"\n" +
-	"started_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x16\n" +
-	"\x06detail\x18\x05 \x01(\tR\x06detail\"\xbb\x03\n" +
-	"\x1eAuthenticationProbeObservation\x12@\n" +
-	"\x05phase\x18\x01 \x01(\x0e2*.quoin.runtime.v1.AuthenticationProbePhaseR\x05phase\x12C\n" +
-	"\x06result\x18\x02 \x01(\x0e2+.quoin.runtime.v1.AuthenticationProbeResultR\x06result\x12\x1d\n" +
-	"\n" +
-	"journey_id\x18\x03 \x01(\tR\tjourneyId\x12'\n" +
-	"\x0fjourney_version\x18\x04 \x01(\x04R\x0ejourneyVersion\x124\n" +
-	"\x16journey_catalog_digest\x18\x05 \x01(\tR\x14journeyCatalogDigest\x126\n" +
-	"\x17journey_catalog_version\x18\x06 \x01(\tR\x15journeyCatalogVersion\x12\x1f\n" +
-	"\vreason_code\x18\a \x01(\tR\n" +
-	"reasonCode\x12;\n" +
-	"\vobserved_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"observedAt\"\xb1\x04\n" +
-	"\x18CompleteBrowserOperation\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12C\n" +
-	"\aoutcome\x18\x02 \x01(\x0e2).quoin.runtime.v1.BrowserOperationOutcomeR\aoutcome\x12Y\n" +
-	"\x0fterminal_reason\x18\x03 \x01(\x0e20.quoin.runtime.v1.BrowserOperationTerminalReasonR\x0eterminalReason\x12U\n" +
-	"\rprobe_results\x18\x04 \x03(\v20.quoin.runtime.v1.AuthenticationProbeObservationR\fprobeResults\x12*\n" +
-	"\x11trace_artifact_id\x18\x05 \x01(\x03R\x0ftraceArtifactId\x12P\n" +
-	"\x0ftrace_integrity\x18\x06 \x01(\x0e2'.quoin.runtime.v1.BrowserTraceIntegrityR\x0etraceIntegrity\x125\n" +
-	"\bended_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12#\n" +
-	"\rresult_digest\x18\b \x01(\fR\fresultDigest\x12!\n" +
-	"\ftrace_digest\x18\t \x01(\fR\vtraceDigest\"\x99\x01\n" +
-	"\x1bCompleteBrowserOperationAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12#\n" +
-	"\rresult_digest\x18\x02 \x01(\fR\fresultDigest\x12\x1a\n" +
-	"\baccepted\x18\x03 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06detail\x18\x04 \x01(\tR\x06detail\"\x98\x02\n" +
-	"\x15PublishBrowserProfile\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12\x1f\n" +
-	"\videntity_id\x18\x02 \x01(\x03R\n" +
-	"identityId\x120\n" +
-	"\x14identity_revision_id\x18\x03 \x01(\x03R\x12identityRevisionId\x12C\n" +
-	"\x1eexpected_current_generation_id\x18\x04 \x01(\x03R\x1bexpectedCurrentGenerationId\x12%\n" +
-	"\x0enew_generation\x18\x05 \x01(\x04R\rnewGeneration\x12\x1d\n" +
-	"\n" +
-	"command_id\x18\x06 \x01(\tR\tcommandId\"\xc4\x03\n" +
-	"\x1bPublishBrowserProfileResult\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12\x1a\n" +
-	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x1e\n" +
-	"\n" +
-	"generation\x18\x03 \x01(\x04R\n" +
-	"generation\x12+\n" +
-	"\x11chromium_revision\x18\x04 \x01(\tR\x10chromiumRevision\x126\n" +
-	"\x17profile_manifest_digest\x18\x05 \x01(\fR\x15profileManifestDigest\x12S\n" +
-	"\fprobe_result\x18\x06 \x01(\v20.quoin.runtime.v1.AuthenticationProbeObservationR\vprobeResult\x12U\n" +
-	"\rreject_reason\x18\a \x01(\x0e20.quoin.runtime.v1.BrowserOperationTerminalReasonR\frejectReason\x12\x16\n" +
-	"\x06detail\x18\b \x01(\tR\x06detail\x12\x1d\n" +
-	"\n" +
-	"command_id\x18\t \x01(\tR\tcommandId\"\x92\x02\n" +
-	"\x14StopBrowserOperation\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12<\n" +
-	"\x06reason\x18\x02 \x01(\x0e2$.quoin.runtime.v1.BrowserCloseReasonR\x06reason\x12=\n" +
-	"\fcommitted_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\vcommittedAt\x123\n" +
-	"\x16original_start_boot_id\x18\x04 \x01(\tR\x13originalStartBootId\x12%\n" +
-	"\x0eclone_identity\x18\x05 \x01(\tR\rcloneIdentity\"\xcd\t\n" +
-	"\x17StopBrowserOperationAck\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x129\n" +
-	"\n" +
-	"stopped_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstoppedAt\x12\x16\n" +
-	"\x06detail\x18\x04 \x01(\tR\x06detail\x12P\n" +
-	"\x0fcleanup_outcome\x18\x05 \x01(\x0e2'.quoin.runtime.v1.BrowserCleanupOutcomeR\x0ecleanupOutcome\x12'\n" +
-	"\x0fprocess_stopped\x18\x06 \x01(\bR\x0eprocessStopped\x12#\n" +
-	"\rtunnel_closed\x18\a \x01(\bR\ftunnelClosed\x122\n" +
-	"\x15trace_staging_deleted\x18\b \x01(\bR\x13traceStagingDeleted\x12:\n" +
-	"\x19temporary_profile_deleted\x18\t \x01(\bR\x17temporaryProfileDeleted\x12,\n" +
-	"\x12cleanup_state_hash\x18\n" +
-	" \x01(\fR\x10cleanupStateHash\x12N\n" +
-	"\ffailure_code\x18\v \x01(\x0e2+.quoin.runtime.v1.BrowserCleanupFailureCodeR\vfailureCode\x123\n" +
-	"\x16original_start_boot_id\x18\f \x01(\tR\x13originalStartBootId\x12&\n" +
-	"\x0fcleanup_boot_id\x18\r \x01(\tR\rcleanupBootId\x128\n" +
-	"\x18cleanup_connection_epoch\x18\x0e \x01(\x04R\x16cleanupConnectionEpoch\x12*\n" +
-	"\x11stop_fence_digest\x18\x0f \x01(\fR\x0fstopFenceDigest\x12%\n" +
-	"\x0eclone_identity\x18\x10 \x01(\tR\rcloneIdentity\x126\n" +
-	"\x17operation_process_count\x18\x11 \x01(\x04R\x15operationProcessCount\x120\n" +
-	"\x14cgroup_process_count\x18\x12 \x01(\x04R\x12cgroupProcessCount\x124\n" +
-	"\x16chromium_process_count\x18\x13 \x01(\x04R\x14chromiumProcessCount\x12.\n" +
-	"\x13x0vnc_process_count\x18\x14 \x01(\x04R\x11x0vncProcessCount\x12,\n" +
-	"\x12novnc_tunnel_count\x18\x15 \x01(\x04R\x10novncTunnelCount\x122\n" +
-	"\x15clone_namespace_count\x18\x16 \x01(\x04R\x13cloneNamespaceCount\x120\n" +
-	"\x14temporary_file_count\x18\x17 \x01(\x04R\x12temporaryFileCount\x120\n" +
-	"\x14runtime_handle_count\x18\x18 \x01(\x04R\x12runtimeHandleCount\x12(\n" +
-	"\x10slot_lease_count\x18\x19 \x01(\x04R\x0eslotLeaseCountJ\x04\b\x02\x10\x03\"\xf2\x01\n" +
-	"\x16ExpectedBrowserProfile\x12\x1f\n" +
-	"\videntity_id\x18\x01 \x01(\x03R\n" +
-	"identityId\x122\n" +
-	"\x15profile_generation_id\x18\x02 \x01(\x03R\x13profileGenerationId\x12\x1e\n" +
-	"\n" +
-	"generation\x18\x03 \x01(\x04R\n" +
-	"generation\x12+\n" +
-	"\x11chromium_revision\x18\x04 \x01(\tR\x10chromiumRevision\x126\n" +
-	"\x17profile_manifest_digest\x18\x05 \x01(\fR\x15profileManifestDigest\"\x82\x01\n" +
-	"\x17ProfileInventoryRequest\x12!\n" +
-	"\finventory_id\x18\x01 \x01(\tR\vinventoryId\x12D\n" +
-	"\bprofiles\x18\x02 \x03(\v2(.quoin.runtime.v1.ExpectedBrowserProfileR\bprofiles\"\xa7\x02\n" +
-	"\x16ObservedBrowserProfile\x12\x1f\n" +
-	"\videntity_id\x18\x01 \x01(\x03R\n" +
-	"identityId\x122\n" +
-	"\x15profile_generation_id\x18\x02 \x01(\x03R\x13profileGenerationId\x12@\n" +
-	"\x06status\x18\x03 \x01(\x0e2(.quoin.runtime.v1.ProfileInventoryStatusR\x06status\x12<\n" +
-	"\x1aobserved_chromium_revision\x18\x04 \x01(\tR\x18observedChromiumRevision\x128\n" +
-	"\x18observed_manifest_digest\x18\x05 \x01(\fR\x16observedManifestDigest\"\x9d\x01\n" +
-	"\x16ProfileInventoryReport\x12!\n" +
-	"\finventory_id\x18\x01 \x01(\tR\vinventoryId\x12D\n" +
-	"\bprofiles\x18\x02 \x03(\v2(.quoin.runtime.v1.ObservedBrowserProfileR\bprofiles\x12\x1a\n" +
-	"\bcomplete\x18\x03 \x01(\bR\bcomplete\"\x9b\x01\n" +
+	"\x06detail\x18\a \x01(\tR\x06detail\"\x9b\x01\n" +
 	"\x1bFetchCredentialGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\x03R\agrantId\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x02 \x01(\x03R\tattemptId\x12\x17\n" +
 	"\aboot_id\x18\x03 \x01(\tR\x06bootId\x12)\n" +
-	"\x10connection_epoch\x18\x04 \x01(\x04R\x0fconnectionEpoch\"\x9b\x04\n" +
+	"\x10connection_epoch\x18\x04 \x01(\x04R\x0fconnectionEpoch\"\xd1\x03\n" +
 	"\x1cFetchCredentialGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\x03R\agrantId\x12\x1d\n" +
 	"\n" +
@@ -10213,59 +5953,20 @@ const file_runtime_proto_rawDesc = "" +
 	"\x18credential_generation_id\x18\x04 \x01(\x03R\x16credentialGenerationId\x12'\n" +
 	"\x0fconnection_type\x18\x05 \x01(\tR\x0econnectionType\x120\n" +
 	"\x14revision_config_json\x18\x06 \x01(\fR\x12revisionConfigJson\x12B\n" +
-	"\x06thanos\x18\a \x01(\v2(.quoin.runtime.v1.ThanosCredentialSecretH\x00R\x06thanos\x12N\n" +
-	"\n" +
-	"kubernetes\x18\b \x01(\v2,.quoin.runtime.v1.KubernetesCredentialSecretH\x00R\n" +
-	"kubernetes\x12X\n" +
+	"\x06thanos\x18\a \x01(\v2(.quoin.runtime.v1.ThanosCredentialSecretH\x00R\x06thanos\x12X\n" +
 	"\x0emodel_provider\x18\t \x01(\v2/.quoin.runtime.v1.ModelProviderCredentialSecretH\x00R\rmodelProviderB\b\n" +
-	"\x06secret\"s\n" +
+	"\x06secretJ\x04\b\b\x10\t\"s\n" +
 	"\x16ThanosCredentialSecret\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12!\n" +
-	"\fbearer_token\x18\x03 \x01(\tR\vbearerToken\"<\n" +
-	"\x1aKubernetesCredentialSecret\x12\x1e\n" +
-	"\n" +
-	"kubeconfig\x18\x01 \x01(\tR\n" +
-	"kubeconfig\"8\n" +
+	"\fbearer_token\x18\x03 \x01(\tR\vbearerToken\"8\n" +
 	"\x1dModelProviderCredentialSecret\x12\x17\n" +
-	"\aapi_key\x18\x01 \x01(\tR\x06apiKey\"\xd7\x02\n" +
-	"\x0fBrowserEnvelope\x12:\n" +
-	"\x04open\x18\x01 \x01(\v2$.quoin.runtime.v1.BrowserSessionOpenH\x00R\x04open\x12D\n" +
-	"\bopen_ack\x18\x02 \x01(\v2'.quoin.runtime.v1.BrowserSessionOpenAckH\x00R\aopenAck\x128\n" +
-	"\x04data\x18\x03 \x01(\v2\".quoin.runtime.v1.BrowserFrameDataH\x00R\x04data\x12B\n" +
-	"\theartbeat\x18\x04 \x01(\v2\".quoin.runtime.v1.BrowserHeartbeatH\x00R\theartbeat\x12=\n" +
-	"\x05close\x18\x05 \x01(\v2%.quoin.runtime.v1.BrowserSessionCloseH\x00R\x05closeB\x05\n" +
-	"\x03msg\"\xc5\x03\n" +
-	"\x12BrowserSessionOpen\x12!\n" +
-	"\foperation_id\x18\x01 \x01(\x03R\voperationId\x12\x1f\n" +
-	"\videntity_id\x18\x02 \x01(\x03R\n" +
-	"identityId\x121\n" +
-	"\x04slot\x18\x03 \x01(\x0e2\x1d.quoin.runtime.v1.RuntimeSlotR\x04slot\x12\x17\n" +
-	"\aboot_id\x18\x04 \x01(\tR\x06bootId\x12)\n" +
-	"\x10connection_epoch\x18\x05 \x01(\x04R\x0fconnectionEpoch\x120\n" +
-	"\x14reconnect_session_id\x18\x06 \x01(\tR\x12reconnectSessionId\x12\"\n" +
-	"\ractor_user_id\x18\a \x01(\x03R\vactorUserId\x12M\n" +
-	"\x0eoperation_kind\x18\b \x01(\x0e2&.quoin.runtime.v1.BrowserOperationKindR\roperationKind\x12(\n" +
-	"\x10actor_session_id\x18\t \x01(\x03R\x0eactorSessionId\x12%\n" +
-	"\x0eattachment_seq\x18\n" +
-	" \x01(\x04R\rattachmentSeq\"\xa8\x01\n" +
-	"\x15BrowserSessionOpenAck\x12\x1d\n" +
-	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\x12I\n" +
-	"\x12reconnect_deadline\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x11reconnectDeadline\x12%\n" +
-	"\x0eattachment_seq\x18\x03 \x01(\x04R\rattachmentSeq\",\n" +
-	"\x10BrowserFrameData\x12\x18\n" +
-	"\apayload\x18\x01 \x01(\fR\apayload\"$\n" +
-	"\x10BrowserHeartbeat\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\"k\n" +
-	"\x13BrowserSessionClose\x12<\n" +
-	"\x06reason\x18\x01 \x01(\x0e2$.quoin.runtime.v1.BrowserCloseReasonR\x06reason\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\"\xd8\x01\n" +
+	"\aapi_key\x18\x01 \x01(\tR\x06apiKey\"\xd8\x01\n" +
 	"\x13ArtifactUploadFrame\x12@\n" +
 	"\x06header\x18\x01 \x01(\v2&.quoin.runtime.v1.ArtifactUploadHeaderH\x00R\x06header\x12=\n" +
 	"\x05chunk\x18\x02 \x01(\v2%.quoin.runtime.v1.ArtifactUploadChunkH\x00R\x05chunk\x127\n" +
 	"\x03end\x18\x03 \x01(\v2#.quoin.runtime.v1.ArtifactUploadEndH\x00R\x03endB\a\n" +
-	"\x05frame\"\x92\x04\n" +
+	"\x05frame\"\xc6\x03\n" +
 	"\x14ArtifactUploadHeader\x12\x1b\n" +
 	"\tupload_id\x18\x01 \x01(\tR\buploadId\x12\x1d\n" +
 	"\n" +
@@ -10283,8 +5984,7 @@ const file_runtime_proto_rawDesc = "" +
 	" \x01(\x04R\tsizeBytes\x12\x16\n" +
 	"\x06sha256\x18\v \x01(\fR\x06sha256\x12\x1d\n" +
 	"\n" +
-	"media_type\x18\f \x01(\tR\tmediaType\x12P\n" +
-	"\x0ftrace_integrity\x18\r \x01(\x0e2'.quoin.runtime.v1.BrowserTraceIntegrityR\x0etraceIntegrity\"G\n" +
+	"media_type\x18\f \x01(\tR\tmediaTypeJ\x04\b\r\x10\x0e\"G\n" +
 	"\x13ArtifactUploadChunk\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x04R\x06offset\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\"C\n" +
@@ -10374,21 +6074,19 @@ const file_runtime_proto_rawDesc = "" +
 	"\x14contract_fingerprint\x18\b \x01(\tR\x13contractFingerprint\"i\n" +
 	"\x15DeliveryRelayResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\x0e2 .quoin.runtime.v1.DeliveryStatusR\x06status\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail*]\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail*J\n" +
 	"\vRuntimeSlot\x12\x1c\n" +
 	"\x18RUNTIME_SLOT_UNSPECIFIED\x10\x00\x12\x17\n" +
-	"\x13RUNTIME_SLOT_PLINTH\x10\x01\x12\x17\n" +
-	"\x13RUNTIME_SLOT_LINTEL\x10\x02*\xc8\x02\n" +
+	"\x13RUNTIME_SLOT_PLINTH\x10\x01\"\x04\b\x02\x10\x02*\xa8\x02\n" +
 	"\vAttemptType\x12\x1c\n" +
 	"\x18ATTEMPT_TYPE_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dATTEMPT_TYPE_INITIAL_ANALYSIS\x10\x01\x12\x1e\n" +
 	"\x1aATTEMPT_TYPE_INVESTIGATION\x10\x02\x12$\n" +
 	" ATTEMPT_TYPE_INSPECTION_ANALYSIS\x10\x03\x12&\n" +
-	"\"ATTEMPT_TYPE_INSPECTION_COLLECTION\x10\x04\x12$\n" +
-	" ATTEMPT_TYPE_BROWSER_EXPLORATION\x10\x05\x12%\n" +
+	"\"ATTEMPT_TYPE_INSPECTION_COLLECTION\x10\x04\x12%\n" +
 	"!ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION\x10\x06\x12\x1a\n" +
 	"\x16ATTEMPT_TYPE_EMBEDDING\x10\a\x12!\n" +
-	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b*\xe0\x02\n" +
+	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b\"\x04\b\x05\x10\x05*\xe0\x02\n" +
 	"\tScopeType\x12\x1a\n" +
 	"\x16SCOPE_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SCOPE_TYPE_ANALYSIS\x10\x01\x12\x1c\n" +
@@ -10424,24 +6122,21 @@ const file_runtime_proto_rawDesc = "" +
 	"\x0eAttemptOutcome\x12\x1f\n" +
 	"\x1bATTEMPT_OUTCOME_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ATTEMPT_OUTCOME_SUCCEEDED\x10\x01\x12\x1a\n" +
-	"\x16ATTEMPT_OUTCOME_FAILED\x10\x02*\xbe\x01\n" +
+	"\x16ATTEMPT_OUTCOME_FAILED\x10\x02*\x9a\x01\n" +
 	"\x11HelloRejectReason\x12#\n" +
 	"\x1fHELLO_REJECT_REASON_UNSPECIFIED\x10\x00\x12)\n" +
 	"%HELLO_REJECT_REASON_CONTRACT_MISMATCH\x10\x03\x12#\n" +
-	"\x1fHELLO_REJECT_REASON_EPOCH_STALE\x10\x04\x12(\n" +
-	"$HELLO_REJECT_REASON_CATALOG_MISMATCH\x10\x05\"\x04\b\x01\x10\x01\"\x04\b\x02\x10\x02*\xb4\x01\n" +
+	"\x1fHELLO_REJECT_REASON_EPOCH_STALE\x10\x04\"\x04\b\x01\x10\x01\"\x04\b\x02\x10\x02\"\x04\b\x05\x10\x05*\xb4\x01\n" +
 	"\x13AttemptRejectReason\x12%\n" +
 	"!ATTEMPT_REJECT_REASON_UNSPECIFIED\x10\x00\x12%\n" +
 	"!ATTEMPT_REJECT_REASON_NO_CAPACITY\x10\x01\x12+\n" +
 	"'ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED\x10\x02\x12\"\n" +
-	"\x1eATTEMPT_REJECT_REASON_INTERNAL\x10\x03*\xc0\x01\n" +
+	"\x1eATTEMPT_REJECT_REASON_INTERNAL\x10\x03*\x95\x01\n" +
 	"\fArtifactKind\x12\x1d\n" +
 	"\x19ARTIFACT_KIND_UNSPECIFIED\x10\x00\x12\x1c\n" +
-	"\x18ARTIFACT_KIND_ATTACHMENT\x10\x01\x12\x1c\n" +
-	"\x18ARTIFACT_KIND_SCREENSHOT\x10\x02\x12\x17\n" +
-	"\x13ARTIFACT_KIND_TRACE\x10\x03\x12\x1d\n" +
+	"\x18ARTIFACT_KIND_ATTACHMENT\x10\x01\x12\x1d\n" +
 	"\x19ARTIFACT_KIND_TOOL_RESULT\x10\x04\x12\x1d\n" +
-	"\x19ARTIFACT_KIND_REPORT_FILE\x10\x05*k\n" +
+	"\x19ARTIFACT_KIND_REPORT_FILE\x10\x05\"\x04\b\x02\x10\x02\"\x04\b\x03\x10\x03*k\n" +
 	"\rRetentionKind\x12\x1e\n" +
 	"\x1aRETENTION_KIND_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18RETENTION_KIND_LONG_TERM\x10\x01\x12\x1c\n" +
@@ -10458,24 +6153,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\fGoAwayReason\x12\x1e\n" +
 	"\x1aGO_AWAY_REASON_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cGO_AWAY_REASON_SHUTTING_DOWN\x10\x01\x12$\n" +
-	" GO_AWAY_REASON_CONTRACT_MISMATCH\x10\x02\"\x04\b\x03\x10\x03\"\x04\b\x04\x10\x04\"\x04\b\x05\x10\x05*\xa2\x03\n" +
-	"\x12BrowserCloseReason\x12$\n" +
-	" BROWSER_CLOSE_REASON_UNSPECIFIED\x10\x00\x12&\n" +
-	"\"BROWSER_CLOSE_REASON_CLIENT_CLOSED\x10\x01\x12(\n" +
-	"$BROWSER_CLOSE_REASON_SESSION_REVOKED\x10\x02\x12&\n" +
-	"\"BROWSER_CLOSE_REASON_GRACE_EXPIRED\x10\x03\x12%\n" +
-	"!BROWSER_CLOSE_REASON_SLOT_REVOKED\x10\x04\x12&\n" +
-	"\"BROWSER_CLOSE_REASON_SLOT_REPLACED\x10\x05\x12!\n" +
-	"\x1dBROWSER_CLOSE_REASON_SHUTDOWN\x10\x06\x12!\n" +
-	"\x1dBROWSER_CLOSE_REASON_NEW_BOOT\x10\a\x12*\n" +
-	"&BROWSER_CLOSE_REASON_PROFILE_PUBLISHED\x10\b\x12+\n" +
-	"'BROWSER_CLOSE_REASON_OPERATION_TERMINAL\x10\t*\xb5\x02\n" +
-	"\x1fBrowserSubExecutionRejectReason\x123\n" +
-	"/BROWSER_SUB_EXECUTION_REJECT_REASON_UNSPECIFIED\x10\x00\x12:\n" +
-	"6BROWSER_SUB_EXECUTION_REJECT_REASON_PARENT_NOT_RUNNING\x10\x01\x129\n" +
-	"5BROWSER_SUB_EXECUTION_REJECT_REASON_INPUT_UNSUPPORTED\x10\x02\x124\n" +
-	"0BROWSER_SUB_EXECUTION_REJECT_REASON_STALE_STREAM\x10\x03\x120\n" +
-	",BROWSER_SUB_EXECUTION_REJECT_REASON_INTERNAL\x10\x04*\x8e\x01\n" +
+	" GO_AWAY_REASON_CONTRACT_MISMATCH\x10\x02\"\x04\b\x03\x10\x03\"\x04\b\x04\x10\x04\"\x04\b\x05\x10\x05*\x8e\x01\n" +
 	"\x0eDeliveryStatus\x12\x1f\n" +
 	"\x1bDELIVERY_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18DELIVERY_STATUS_ACCEPTED\x10\x01\x12\x1c\n" +
@@ -10522,12 +6200,11 @@ const file_runtime_proto_rawDesc = "" +
 	"*MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE\x10\x05\x12'\n" +
 	"#MODEL_CALL_FAILURE_REASON_CANCELLED\x10\x06\x124\n" +
 	"0MODEL_CALL_FAILURE_REASON_ARTIFACT_COMMIT_FAILED\x10\a\x12-\n" +
-	")MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR\x10\b*\xaf\x01\n" +
+	")MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR\x10\b*\x8e\x01\n" +
 	"\x11ToolExecutionMode\x12#\n" +
 	"\x1fTOOL_EXECUTION_MODE_UNSPECIFIED\x10\x00\x12$\n" +
 	" TOOL_EXECUTION_MODE_WORKER_LOCAL\x10\x01\x12(\n" +
-	"$TOOL_EXECUTION_MODE_SUPERVISOR_TYPED\x10\x02\x12%\n" +
-	"!TOOL_EXECUTION_MODE_QUOIN_BROWSER\x10\x03*\x7f\n" +
+	"$TOOL_EXECUTION_MODE_SUPERVISOR_TYPED\x10\x02\"\x04\b\x03\x10\x03*\x7f\n" +
 	"\x0fToolFailureMode\x12!\n" +
 	"\x1dTOOL_FAILURE_MODE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!TOOL_FAILURE_MODE_RETURN_TO_MODEL\x10\x01\x12\"\n" +
@@ -10536,100 +6213,10 @@ const file_runtime_proto_rawDesc = "" +
 	"\x1dTOOL_CALL_OUTCOME_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bTOOL_CALL_OUTCOME_SUCCEEDED\x10\x01\x12\x1c\n" +
 	"\x18TOOL_CALL_OUTCOME_FAILED\x10\x02\x12\x1f\n" +
-	"\x1bTOOL_CALL_OUTCOME_CANCELLED\x10\x03*\x98\x02\n" +
-	"\x14BrowserOperationKind\x12&\n" +
-	"\"BROWSER_OPERATION_KIND_UNSPECIFIED\x10\x00\x12'\n" +
-	"#BROWSER_OPERATION_KIND_MANUAL_LOGIN\x10\x01\x12/\n" +
-	"+BROWSER_OPERATION_KIND_AUTHENTICATION_PROBE\x10\x02\x12\"\n" +
-	"\x1eBROWSER_OPERATION_KIND_JOURNEY\x10\x03\x12&\n" +
-	"\"BROWSER_OPERATION_KIND_EXPLORATION\x10\x04\x122\n" +
-	".BROWSER_OPERATION_KIND_DEPLOYMENT_VERIFICATION\x10\x05*\xef\x04\n" +
-	"!BrowserOperationStartRejectReason\x125\n" +
-	"1BROWSER_OPERATION_START_REJECT_REASON_UNSPECIFIED\x10\x00\x127\n" +
-	"3BROWSER_OPERATION_START_REJECT_REASON_IDENTITY_BUSY\x10\x01\x125\n" +
-	"1BROWSER_OPERATION_START_REJECT_REASON_NO_CAPACITY\x10\x02\x12=\n" +
-	"9BROWSER_OPERATION_START_REJECT_REASON_PROFILE_UNAVAILABLE\x10\x03\x12A\n" +
-	"=BROWSER_OPERATION_START_REJECT_REASON_AUTHENTICATION_REQUIRED\x10\x04\x12;\n" +
-	"7BROWSER_OPERATION_START_REJECT_REASON_INPUT_UNSUPPORTED\x10\x05\x12<\n" +
-	"8BROWSER_OPERATION_START_REJECT_REASON_RECONCILE_REQUIRED\x10\x06\x126\n" +
-	"2BROWSER_OPERATION_START_REJECT_REASON_STALE_STREAM\x10\a\x122\n" +
-	".BROWSER_OPERATION_START_REJECT_REASON_INTERNAL\x10\b\x12:\n" +
-	"6BROWSER_OPERATION_START_REJECT_REASON_DOWNLOAD_BLOCKED\x10\t*\xe7\x01\n" +
-	"\x17BrowserOperationOutcome\x12)\n" +
-	"%BROWSER_OPERATION_OUTCOME_UNSPECIFIED\x10\x00\x12'\n" +
-	"#BROWSER_OPERATION_OUTCOME_SUCCEEDED\x10\x01\x12$\n" +
-	" BROWSER_OPERATION_OUTCOME_FAILED\x10\x02\x12'\n" +
-	"#BROWSER_OPERATION_OUTCOME_CANCELLED\x10\x03\x12)\n" +
-	"%BROWSER_OPERATION_OUTCOME_INTERRUPTED\x10\x04*\xc6\t\n" +
-	"\x1eBrowserOperationTerminalReason\x121\n" +
-	"-BROWSER_OPERATION_TERMINAL_REASON_UNSPECIFIED\x10\x00\x12C\n" +
-	"?BROWSER_OPERATION_TERMINAL_REASON_CLIENT_CLOSED_WITHOUT_PUBLISH\x10\x01\x123\n" +
-	"/BROWSER_OPERATION_TERMINAL_REASON_GRACE_EXPIRED\x10\x02\x125\n" +
-	"1BROWSER_OPERATION_TERMINAL_REASON_SESSION_REVOKED\x10\x03\x12.\n" +
-	"*BROWSER_OPERATION_TERMINAL_REASON_NEW_BOOT\x10\x04\x12.\n" +
-	"*BROWSER_OPERATION_TERMINAL_REASON_SHUTDOWN\x10\x05\x122\n" +
-	".BROWSER_OPERATION_TERMINAL_REASON_SLOT_REVOKED\x10\x06\x123\n" +
-	"/BROWSER_OPERATION_TERMINAL_REASON_SLOT_REPLACED\x10\a\x125\n" +
-	"1BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MISSING\x10\b\x12>\n" +
-	":BROWSER_OPERATION_TERMINAL_REASON_PROFILE_MANIFEST_INVALID\x10\t\x12@\n" +
-	"<BROWSER_OPERATION_TERMINAL_REASON_CHROMIUM_REVISION_MISMATCH\x10\n" +
-	"\x12=\n" +
-	"9BROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_REQUIRED\x10\v\x12F\n" +
-	"BBROWSER_OPERATION_TERMINAL_REASON_AUTHENTICATION_PROBE_UNAVAILABLE\x10\f\x12<\n" +
-	"8BROWSER_OPERATION_TERMINAL_REASON_ARTIFACT_COMMIT_FAILED\x10\r\x124\n" +
-	"0BROWSER_OPERATION_TERMINAL_REASON_JOURNEY_FAILED\x10\x0e\x12/\n" +
-	"+BROWSER_OPERATION_TERMINAL_REASON_CANCELLED\x10\x0f\x125\n" +
-	"1BROWSER_OPERATION_TERMINAL_REASON_PARENT_TERMINAL\x10\x10\x123\n" +
-	"/BROWSER_OPERATION_TERMINAL_REASON_LEASE_EXPIRED\x10\x11\x129\n" +
-	"5BROWSER_OPERATION_TERMINAL_REASON_RUNTIME_UNAVAILABLE\x10\x12\x125\n" +
-	"1BROWSER_OPERATION_TERMINAL_REASON_BROWSER_CRASHED\x10\x13\x124\n" +
-	"0BROWSER_OPERATION_TERMINAL_REASON_PROTOCOL_ERROR\x10\x14*\xd7\x01\n" +
-	"\x19AuthenticationProbeResult\x12+\n" +
-	"'AUTHENTICATION_PROBE_RESULT_UNSPECIFIED\x10\x00\x12-\n" +
-	")AUTHENTICATION_PROBE_RESULT_AUTHENTICATED\x10\x01\x12/\n" +
-	"+AUTHENTICATION_PROBE_RESULT_UNAUTHENTICATED\x10\x02\x12-\n" +
-	")AUTHENTICATION_PROBE_RESULT_INDETERMINATE\x10\x03*\xa1\x02\n" +
-	"\x18AuthenticationProbePhase\x12*\n" +
-	"&AUTHENTICATION_PROBE_PHASE_UNSPECIFIED\x10\x00\x12.\n" +
-	"*AUTHENTICATION_PROBE_PHASE_REVISION_CHANGE\x10\x01\x12(\n" +
-	"$AUTHENTICATION_PROBE_PHASE_ADMISSION\x10\x02\x12)\n" +
-	"%AUTHENTICATION_PROBE_PHASE_COMPLETION\x10\x03\x12&\n" +
-	"\"AUTHENTICATION_PROBE_PHASE_PUBLISH\x10\x04\x12,\n" +
-	"(AUTHENTICATION_PROBE_PHASE_MID_OPERATION\x10\x05*\x8e\x01\n" +
-	"\x15BrowserTraceIntegrity\x12'\n" +
-	"#BROWSER_TRACE_INTEGRITY_UNSPECIFIED\x10\x00\x12$\n" +
-	" BROWSER_TRACE_INTEGRITY_COMPLETE\x10\x01\x12&\n" +
-	"\"BROWSER_TRACE_INTEGRITY_INCOMPLETE\x10\x02*\xf9\x01\n" +
-	"\x16ProfileInventoryStatus\x12(\n" +
-	"$PROFILE_INVENTORY_STATUS_UNSPECIFIED\x10\x00\x12'\n" +
-	"#PROFILE_INVENTORY_STATUS_COMPATIBLE\x10\x01\x12$\n" +
-	" PROFILE_INVENTORY_STATUS_MISSING\x10\x02\x12-\n" +
-	")PROFILE_INVENTORY_STATUS_MANIFEST_INVALID\x10\x03\x127\n" +
-	"3PROFILE_INVENTORY_STATUS_CHROMIUM_REVISION_MISMATCH\x10\x04*\x8b\x01\n" +
-	"\x15BrowserCleanupOutcome\x12'\n" +
-	"#BROWSER_CLEANUP_OUTCOME_UNSPECIFIED\x10\x00\x12%\n" +
-	"!BROWSER_CLEANUP_OUTCOME_SUCCEEDED\x10\x01\x12\"\n" +
-	"\x1eBROWSER_CLEANUP_OUTCOME_FAILED\x10\x02*\xd8\x05\n" +
-	"\x19BrowserCleanupFailureCode\x12,\n" +
-	"(BROWSER_CLEANUP_FAILURE_CODE_UNSPECIFIED\x10\x00\x126\n" +
-	"2BROWSER_CLEANUP_FAILURE_CODE_PROCESS_STILL_RUNNING\x10\x01\x122\n" +
-	".BROWSER_CLEANUP_FAILURE_CODE_TUNNEL_STILL_OPEN\x10\x02\x126\n" +
-	"2BROWSER_CLEANUP_FAILURE_CODE_TRACE_STAGING_REMAINS\x10\x03\x12:\n" +
-	"6BROWSER_CLEANUP_FAILURE_CODE_TEMPORARY_PROFILE_REMAINS\x10\x04\x128\n" +
-	"4BROWSER_CLEANUP_FAILURE_CODE_STATE_INSPECTION_FAILED\x10\x05\x12)\n" +
-	"%BROWSER_CLEANUP_FAILURE_CODE_INTERNAL\x10\x06\x121\n" +
-	"-BROWSER_CLEANUP_FAILURE_CODE_CGROUP_NOT_EMPTY\x10\a\x127\n" +
-	"3BROWSER_CLEANUP_FAILURE_CODE_CHROMIUM_STILL_RUNNING\x10\b\x124\n" +
-	"0BROWSER_CLEANUP_FAILURE_CODE_X0VNC_STILL_RUNNING\x10\t\x128\n" +
-	"4BROWSER_CLEANUP_FAILURE_CODE_CLONE_NAMESPACE_REMAINS\x10\n" +
-	"\x127\n" +
-	"3BROWSER_CLEANUP_FAILURE_CODE_RUNTIME_HANDLE_REMAINS\x10\v\x123\n" +
-	"/BROWSER_CLEANUP_FAILURE_CODE_SLOT_LEASE_REMAINS\x10\f2\xdc\x01\n" +
+	"\x1bTOOL_CALL_OUTCOME_CANCELLED\x10\x032\xdc\x01\n" +
 	"\x0eRuntimeControl\x12S\n" +
 	"\aConnect\x12!.quoin.runtime.v1.ControlEnvelope\x1a!.quoin.runtime.v1.ControlEnvelope(\x010\x01\x12u\n" +
-	"\x14FetchCredentialGrant\x12-.quoin.runtime.v1.FetchCredentialGrantRequest\x1a..quoin.runtime.v1.FetchCredentialGrantResponse2a\n" +
-	"\rBrowserTunnel\x12P\n" +
-	"\x04Open\x12!.quoin.runtime.v1.BrowserEnvelope\x1a!.quoin.runtime.v1.BrowserEnvelope(\x010\x012\xb2\x02\n" +
+	"\x14FetchCredentialGrant\x12-.quoin.runtime.v1.FetchCredentialGrantRequest\x1a..quoin.runtime.v1.FetchCredentialGrantResponse2\xb2\x02\n" +
 	"\x0fArtifactService\x12Y\n" +
 	"\x06Upload\x12%.quoin.runtime.v1.ArtifactUploadFrame\x1a&.quoin.runtime.v1.ArtifactUploadResult(\x01\x12a\n" +
 	"\bReadText\x12).quoin.runtime.v1.ArtifactReadTextRequest\x1a*.quoin.runtime.v1.ArtifactReadTextResponse\x12a\n" +
@@ -10651,284 +6238,172 @@ func file_runtime_proto_rawDescGZIP() []byte {
 	return file_runtime_proto_rawDescData
 }
 
-var file_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 33)
-var file_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 86)
+var file_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 21)
+var file_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 53)
 var file_runtime_proto_goTypes = []any{
-	(RuntimeSlot)(0),                           // 0: quoin.runtime.v1.RuntimeSlot
-	(AttemptType)(0),                           // 1: quoin.runtime.v1.AttemptType
-	(ScopeType)(0),                             // 2: quoin.runtime.v1.ScopeType
-	(TerminationReason)(0),                     // 3: quoin.runtime.v1.TerminationReason
-	(AttemptOutcome)(0),                        // 4: quoin.runtime.v1.AttemptOutcome
-	(HelloRejectReason)(0),                     // 5: quoin.runtime.v1.HelloRejectReason
-	(AttemptRejectReason)(0),                   // 6: quoin.runtime.v1.AttemptRejectReason
-	(ArtifactKind)(0),                          // 7: quoin.runtime.v1.ArtifactKind
-	(RetentionKind)(0),                         // 8: quoin.runtime.v1.RetentionKind
-	(UploadRejectReason)(0),                    // 9: quoin.runtime.v1.UploadRejectReason
-	(GoAwayReason)(0),                          // 10: quoin.runtime.v1.GoAwayReason
-	(BrowserCloseReason)(0),                    // 11: quoin.runtime.v1.BrowserCloseReason
-	(BrowserSubExecutionRejectReason)(0),       // 12: quoin.runtime.v1.BrowserSubExecutionRejectReason
-	(DeliveryStatus)(0),                        // 13: quoin.runtime.v1.DeliveryStatus
-	(ModelOperation)(0),                        // 14: quoin.runtime.v1.ModelOperation
-	(ModelInputItemKind)(0),                    // 15: quoin.runtime.v1.ModelInputItemKind
-	(ModelInputRole)(0),                        // 16: quoin.runtime.v1.ModelInputRole
-	(ModelCallCompletionRejectReason)(0),       // 17: quoin.runtime.v1.ModelCallCompletionRejectReason
-	(ModelCallOutcome)(0),                      // 18: quoin.runtime.v1.ModelCallOutcome
-	(ModelCallFailureReason)(0),                // 19: quoin.runtime.v1.ModelCallFailureReason
-	(ToolExecutionMode)(0),                     // 20: quoin.runtime.v1.ToolExecutionMode
-	(ToolFailureMode)(0),                       // 21: quoin.runtime.v1.ToolFailureMode
-	(ToolCallOutcome)(0),                       // 22: quoin.runtime.v1.ToolCallOutcome
-	(BrowserOperationKind)(0),                  // 23: quoin.runtime.v1.BrowserOperationKind
-	(BrowserOperationStartRejectReason)(0),     // 24: quoin.runtime.v1.BrowserOperationStartRejectReason
-	(BrowserOperationOutcome)(0),               // 25: quoin.runtime.v1.BrowserOperationOutcome
-	(BrowserOperationTerminalReason)(0),        // 26: quoin.runtime.v1.BrowserOperationTerminalReason
-	(AuthenticationProbeResult)(0),             // 27: quoin.runtime.v1.AuthenticationProbeResult
-	(AuthenticationProbePhase)(0),              // 28: quoin.runtime.v1.AuthenticationProbePhase
-	(BrowserTraceIntegrity)(0),                 // 29: quoin.runtime.v1.BrowserTraceIntegrity
-	(ProfileInventoryStatus)(0),                // 30: quoin.runtime.v1.ProfileInventoryStatus
-	(BrowserCleanupOutcome)(0),                 // 31: quoin.runtime.v1.BrowserCleanupOutcome
-	(BrowserCleanupFailureCode)(0),             // 32: quoin.runtime.v1.BrowserCleanupFailureCode
-	(*ControlEnvelope)(nil),                    // 33: quoin.runtime.v1.ControlEnvelope
-	(*Hello)(nil),                              // 34: quoin.runtime.v1.Hello
-	(*HelloAck)(nil),                           // 35: quoin.runtime.v1.HelloAck
-	(*Heartbeat)(nil),                          // 36: quoin.runtime.v1.Heartbeat
-	(*Capacity)(nil),                           // 37: quoin.runtime.v1.Capacity
-	(*DispatchAttempt)(nil),                    // 38: quoin.runtime.v1.DispatchAttempt
-	(*AttemptInputSnapshot)(nil),               // 39: quoin.runtime.v1.AttemptInputSnapshot
-	(*ArtifactRef)(nil),                        // 40: quoin.runtime.v1.ArtifactRef
-	(*ConnectionGrant)(nil),                    // 41: quoin.runtime.v1.ConnectionGrant
-	(*AttemptAccept)(nil),                      // 42: quoin.runtime.v1.AttemptAccept
-	(*AttemptReject)(nil),                      // 43: quoin.runtime.v1.AttemptReject
-	(*AttemptProgress)(nil),                    // 44: quoin.runtime.v1.AttemptProgress
-	(*ReconcileRequest)(nil),                   // 45: quoin.runtime.v1.ReconcileRequest
-	(*ReconcileReport)(nil),                    // 46: quoin.runtime.v1.ReconcileReport
-	(*ResultProposal)(nil),                     // 47: quoin.runtime.v1.ResultProposal
-	(*ResultPayload)(nil),                      // 48: quoin.runtime.v1.ResultPayload
-	(*ResultAck)(nil),                          // 49: quoin.runtime.v1.ResultAck
-	(*CancelAttempt)(nil),                      // 50: quoin.runtime.v1.CancelAttempt
-	(*CancelAck)(nil),                          // 51: quoin.runtime.v1.CancelAck
-	(*GoAway)(nil),                             // 52: quoin.runtime.v1.GoAway
-	(*BeginModelCall)(nil),                     // 53: quoin.runtime.v1.BeginModelCall
-	(*ModelInputItem)(nil),                     // 54: quoin.runtime.v1.ModelInputItem
-	(*BeginModelCallAck)(nil),                  // 55: quoin.runtime.v1.BeginModelCallAck
-	(*ModelTokenDelta)(nil),                    // 56: quoin.runtime.v1.ModelTokenDelta
-	(*CompleteModelCall)(nil),                  // 57: quoin.runtime.v1.CompleteModelCall
-	(*EmbeddingVector)(nil),                    // 58: quoin.runtime.v1.EmbeddingVector
-	(*ProposedToolCall)(nil),                   // 59: quoin.runtime.v1.ProposedToolCall
-	(*ToolCallAuthorization)(nil),              // 60: quoin.runtime.v1.ToolCallAuthorization
-	(*CompleteModelCallAck)(nil),               // 61: quoin.runtime.v1.CompleteModelCallAck
-	(*BeginToolCall)(nil),                      // 62: quoin.runtime.v1.BeginToolCall
-	(*BeginToolCallAck)(nil),                   // 63: quoin.runtime.v1.BeginToolCallAck
-	(*CompleteToolCall)(nil),                   // 64: quoin.runtime.v1.CompleteToolCall
-	(*CompleteToolCallAck)(nil),                // 65: quoin.runtime.v1.CompleteToolCallAck
-	(*RequestBrowserSubExecution)(nil),         // 66: quoin.runtime.v1.RequestBrowserSubExecution
-	(*BrowserSubExecutionInput)(nil),           // 67: quoin.runtime.v1.BrowserSubExecutionInput
-	(*BrowserSubExecutionAck)(nil),             // 68: quoin.runtime.v1.BrowserSubExecutionAck
-	(*ToolResultDelivery)(nil),                 // 69: quoin.runtime.v1.ToolResultDelivery
-	(*ExecuteBrowserExplorationAction)(nil),    // 70: quoin.runtime.v1.ExecuteBrowserExplorationAction
-	(*BrowserExplorationActionResult)(nil),     // 71: quoin.runtime.v1.BrowserExplorationActionResult
-	(*CancelBrowserExplorationAction)(nil),     // 72: quoin.runtime.v1.CancelBrowserExplorationAction
-	(*CancelBrowserExplorationActionAck)(nil),  // 73: quoin.runtime.v1.CancelBrowserExplorationActionAck
-	(*BrowserExplorationTerminalClaim)(nil),    // 74: quoin.runtime.v1.BrowserExplorationTerminalClaim
-	(*BrowserExplorationTerminalClaimAck)(nil), // 75: quoin.runtime.v1.BrowserExplorationTerminalClaimAck
-	(*BrowserExplorationActionResultAck)(nil),  // 76: quoin.runtime.v1.BrowserExplorationActionResultAck
-	(*ToolResultDeliveryAck)(nil),              // 77: quoin.runtime.v1.ToolResultDeliveryAck
-	(*BrowserOperationInput)(nil),              // 78: quoin.runtime.v1.BrowserOperationInput
-	(*StartBrowserOperation)(nil),              // 79: quoin.runtime.v1.StartBrowserOperation
-	(*StartBrowserOperationAck)(nil),           // 80: quoin.runtime.v1.StartBrowserOperationAck
-	(*AuthenticationProbeObservation)(nil),     // 81: quoin.runtime.v1.AuthenticationProbeObservation
-	(*CompleteBrowserOperation)(nil),           // 82: quoin.runtime.v1.CompleteBrowserOperation
-	(*CompleteBrowserOperationAck)(nil),        // 83: quoin.runtime.v1.CompleteBrowserOperationAck
-	(*PublishBrowserProfile)(nil),              // 84: quoin.runtime.v1.PublishBrowserProfile
-	(*PublishBrowserProfileResult)(nil),        // 85: quoin.runtime.v1.PublishBrowserProfileResult
-	(*StopBrowserOperation)(nil),               // 86: quoin.runtime.v1.StopBrowserOperation
-	(*StopBrowserOperationAck)(nil),            // 87: quoin.runtime.v1.StopBrowserOperationAck
-	(*ExpectedBrowserProfile)(nil),             // 88: quoin.runtime.v1.ExpectedBrowserProfile
-	(*ProfileInventoryRequest)(nil),            // 89: quoin.runtime.v1.ProfileInventoryRequest
-	(*ObservedBrowserProfile)(nil),             // 90: quoin.runtime.v1.ObservedBrowserProfile
-	(*ProfileInventoryReport)(nil),             // 91: quoin.runtime.v1.ProfileInventoryReport
-	(*FetchCredentialGrantRequest)(nil),        // 92: quoin.runtime.v1.FetchCredentialGrantRequest
-	(*FetchCredentialGrantResponse)(nil),       // 93: quoin.runtime.v1.FetchCredentialGrantResponse
-	(*ThanosCredentialSecret)(nil),             // 94: quoin.runtime.v1.ThanosCredentialSecret
-	(*KubernetesCredentialSecret)(nil),         // 95: quoin.runtime.v1.KubernetesCredentialSecret
-	(*ModelProviderCredentialSecret)(nil),      // 96: quoin.runtime.v1.ModelProviderCredentialSecret
-	(*BrowserEnvelope)(nil),                    // 97: quoin.runtime.v1.BrowserEnvelope
-	(*BrowserSessionOpen)(nil),                 // 98: quoin.runtime.v1.BrowserSessionOpen
-	(*BrowserSessionOpenAck)(nil),              // 99: quoin.runtime.v1.BrowserSessionOpenAck
-	(*BrowserFrameData)(nil),                   // 100: quoin.runtime.v1.BrowserFrameData
-	(*BrowserHeartbeat)(nil),                   // 101: quoin.runtime.v1.BrowserHeartbeat
-	(*BrowserSessionClose)(nil),                // 102: quoin.runtime.v1.BrowserSessionClose
-	(*ArtifactUploadFrame)(nil),                // 103: quoin.runtime.v1.ArtifactUploadFrame
-	(*ArtifactUploadHeader)(nil),               // 104: quoin.runtime.v1.ArtifactUploadHeader
-	(*ArtifactUploadChunk)(nil),                // 105: quoin.runtime.v1.ArtifactUploadChunk
-	(*ArtifactUploadEnd)(nil),                  // 106: quoin.runtime.v1.ArtifactUploadEnd
-	(*ArtifactUploadResult)(nil),               // 107: quoin.runtime.v1.ArtifactUploadResult
-	(*ArtifactReadTextRequest)(nil),            // 108: quoin.runtime.v1.ArtifactReadTextRequest
-	(*ArtifactReadTextResponse)(nil),           // 109: quoin.runtime.v1.ArtifactReadTextResponse
-	(*ArtifactGrepTextRequest)(nil),            // 110: quoin.runtime.v1.ArtifactGrepTextRequest
-	(*ArtifactTextMatch)(nil),                  // 111: quoin.runtime.v1.ArtifactTextMatch
-	(*ArtifactGrepTextResponse)(nil),           // 112: quoin.runtime.v1.ArtifactGrepTextResponse
-	(*GetCredentialSnapshotRequest)(nil),       // 113: quoin.runtime.v1.GetCredentialSnapshotRequest
-	(*GetCredentialSnapshotResponse)(nil),      // 114: quoin.runtime.v1.GetCredentialSnapshotResponse
-	(*AlertSourceSnapshot)(nil),                // 115: quoin.runtime.v1.AlertSourceSnapshot
-	(*CredentialDigestEntry)(nil),              // 116: quoin.runtime.v1.CredentialDigestEntry
-	(*DeliveryRelayRequest)(nil),               // 117: quoin.runtime.v1.DeliveryRelayRequest
-	(*DeliveryRelayResponse)(nil),              // 118: quoin.runtime.v1.DeliveryRelayResponse
-	(*timestamppb.Timestamp)(nil),              // 119: google.protobuf.Timestamp
+	(RuntimeSlot)(0),                      // 0: quoin.runtime.v1.RuntimeSlot
+	(AttemptType)(0),                      // 1: quoin.runtime.v1.AttemptType
+	(ScopeType)(0),                        // 2: quoin.runtime.v1.ScopeType
+	(TerminationReason)(0),                // 3: quoin.runtime.v1.TerminationReason
+	(AttemptOutcome)(0),                   // 4: quoin.runtime.v1.AttemptOutcome
+	(HelloRejectReason)(0),                // 5: quoin.runtime.v1.HelloRejectReason
+	(AttemptRejectReason)(0),              // 6: quoin.runtime.v1.AttemptRejectReason
+	(ArtifactKind)(0),                     // 7: quoin.runtime.v1.ArtifactKind
+	(RetentionKind)(0),                    // 8: quoin.runtime.v1.RetentionKind
+	(UploadRejectReason)(0),               // 9: quoin.runtime.v1.UploadRejectReason
+	(GoAwayReason)(0),                     // 10: quoin.runtime.v1.GoAwayReason
+	(DeliveryStatus)(0),                   // 11: quoin.runtime.v1.DeliveryStatus
+	(ModelOperation)(0),                   // 12: quoin.runtime.v1.ModelOperation
+	(ModelInputItemKind)(0),               // 13: quoin.runtime.v1.ModelInputItemKind
+	(ModelInputRole)(0),                   // 14: quoin.runtime.v1.ModelInputRole
+	(ModelCallCompletionRejectReason)(0),  // 15: quoin.runtime.v1.ModelCallCompletionRejectReason
+	(ModelCallOutcome)(0),                 // 16: quoin.runtime.v1.ModelCallOutcome
+	(ModelCallFailureReason)(0),           // 17: quoin.runtime.v1.ModelCallFailureReason
+	(ToolExecutionMode)(0),                // 18: quoin.runtime.v1.ToolExecutionMode
+	(ToolFailureMode)(0),                  // 19: quoin.runtime.v1.ToolFailureMode
+	(ToolCallOutcome)(0),                  // 20: quoin.runtime.v1.ToolCallOutcome
+	(*ControlEnvelope)(nil),               // 21: quoin.runtime.v1.ControlEnvelope
+	(*Hello)(nil),                         // 22: quoin.runtime.v1.Hello
+	(*HelloAck)(nil),                      // 23: quoin.runtime.v1.HelloAck
+	(*Heartbeat)(nil),                     // 24: quoin.runtime.v1.Heartbeat
+	(*Capacity)(nil),                      // 25: quoin.runtime.v1.Capacity
+	(*DispatchAttempt)(nil),               // 26: quoin.runtime.v1.DispatchAttempt
+	(*AttemptInputSnapshot)(nil),          // 27: quoin.runtime.v1.AttemptInputSnapshot
+	(*ArtifactRef)(nil),                   // 28: quoin.runtime.v1.ArtifactRef
+	(*ConnectionGrant)(nil),               // 29: quoin.runtime.v1.ConnectionGrant
+	(*AttemptAccept)(nil),                 // 30: quoin.runtime.v1.AttemptAccept
+	(*AttemptReject)(nil),                 // 31: quoin.runtime.v1.AttemptReject
+	(*AttemptProgress)(nil),               // 32: quoin.runtime.v1.AttemptProgress
+	(*ReconcileRequest)(nil),              // 33: quoin.runtime.v1.ReconcileRequest
+	(*ReconcileReport)(nil),               // 34: quoin.runtime.v1.ReconcileReport
+	(*ResultProposal)(nil),                // 35: quoin.runtime.v1.ResultProposal
+	(*ResultPayload)(nil),                 // 36: quoin.runtime.v1.ResultPayload
+	(*ResultAck)(nil),                     // 37: quoin.runtime.v1.ResultAck
+	(*CancelAttempt)(nil),                 // 38: quoin.runtime.v1.CancelAttempt
+	(*CancelAck)(nil),                     // 39: quoin.runtime.v1.CancelAck
+	(*GoAway)(nil),                        // 40: quoin.runtime.v1.GoAway
+	(*BeginModelCall)(nil),                // 41: quoin.runtime.v1.BeginModelCall
+	(*ModelInputItem)(nil),                // 42: quoin.runtime.v1.ModelInputItem
+	(*BeginModelCallAck)(nil),             // 43: quoin.runtime.v1.BeginModelCallAck
+	(*ModelTokenDelta)(nil),               // 44: quoin.runtime.v1.ModelTokenDelta
+	(*CompleteModelCall)(nil),             // 45: quoin.runtime.v1.CompleteModelCall
+	(*EmbeddingVector)(nil),               // 46: quoin.runtime.v1.EmbeddingVector
+	(*ProposedToolCall)(nil),              // 47: quoin.runtime.v1.ProposedToolCall
+	(*ToolCallAuthorization)(nil),         // 48: quoin.runtime.v1.ToolCallAuthorization
+	(*CompleteModelCallAck)(nil),          // 49: quoin.runtime.v1.CompleteModelCallAck
+	(*BeginToolCall)(nil),                 // 50: quoin.runtime.v1.BeginToolCall
+	(*BeginToolCallAck)(nil),              // 51: quoin.runtime.v1.BeginToolCallAck
+	(*CompleteToolCall)(nil),              // 52: quoin.runtime.v1.CompleteToolCall
+	(*CompleteToolCallAck)(nil),           // 53: quoin.runtime.v1.CompleteToolCallAck
+	(*FetchCredentialGrantRequest)(nil),   // 54: quoin.runtime.v1.FetchCredentialGrantRequest
+	(*FetchCredentialGrantResponse)(nil),  // 55: quoin.runtime.v1.FetchCredentialGrantResponse
+	(*ThanosCredentialSecret)(nil),        // 56: quoin.runtime.v1.ThanosCredentialSecret
+	(*ModelProviderCredentialSecret)(nil), // 57: quoin.runtime.v1.ModelProviderCredentialSecret
+	(*ArtifactUploadFrame)(nil),           // 58: quoin.runtime.v1.ArtifactUploadFrame
+	(*ArtifactUploadHeader)(nil),          // 59: quoin.runtime.v1.ArtifactUploadHeader
+	(*ArtifactUploadChunk)(nil),           // 60: quoin.runtime.v1.ArtifactUploadChunk
+	(*ArtifactUploadEnd)(nil),             // 61: quoin.runtime.v1.ArtifactUploadEnd
+	(*ArtifactUploadResult)(nil),          // 62: quoin.runtime.v1.ArtifactUploadResult
+	(*ArtifactReadTextRequest)(nil),       // 63: quoin.runtime.v1.ArtifactReadTextRequest
+	(*ArtifactReadTextResponse)(nil),      // 64: quoin.runtime.v1.ArtifactReadTextResponse
+	(*ArtifactGrepTextRequest)(nil),       // 65: quoin.runtime.v1.ArtifactGrepTextRequest
+	(*ArtifactTextMatch)(nil),             // 66: quoin.runtime.v1.ArtifactTextMatch
+	(*ArtifactGrepTextResponse)(nil),      // 67: quoin.runtime.v1.ArtifactGrepTextResponse
+	(*GetCredentialSnapshotRequest)(nil),  // 68: quoin.runtime.v1.GetCredentialSnapshotRequest
+	(*GetCredentialSnapshotResponse)(nil), // 69: quoin.runtime.v1.GetCredentialSnapshotResponse
+	(*AlertSourceSnapshot)(nil),           // 70: quoin.runtime.v1.AlertSourceSnapshot
+	(*CredentialDigestEntry)(nil),         // 71: quoin.runtime.v1.CredentialDigestEntry
+	(*DeliveryRelayRequest)(nil),          // 72: quoin.runtime.v1.DeliveryRelayRequest
+	(*DeliveryRelayResponse)(nil),         // 73: quoin.runtime.v1.DeliveryRelayResponse
+	(*timestamppb.Timestamp)(nil),         // 74: google.protobuf.Timestamp
 }
 var file_runtime_proto_depIdxs = []int32{
-	34,  // 0: quoin.runtime.v1.ControlEnvelope.hello:type_name -> quoin.runtime.v1.Hello
-	35,  // 1: quoin.runtime.v1.ControlEnvelope.hello_ack:type_name -> quoin.runtime.v1.HelloAck
-	36,  // 2: quoin.runtime.v1.ControlEnvelope.heartbeat:type_name -> quoin.runtime.v1.Heartbeat
-	38,  // 3: quoin.runtime.v1.ControlEnvelope.dispatch_attempt:type_name -> quoin.runtime.v1.DispatchAttempt
-	42,  // 4: quoin.runtime.v1.ControlEnvelope.attempt_accept:type_name -> quoin.runtime.v1.AttemptAccept
-	43,  // 5: quoin.runtime.v1.ControlEnvelope.attempt_reject:type_name -> quoin.runtime.v1.AttemptReject
-	44,  // 6: quoin.runtime.v1.ControlEnvelope.attempt_progress:type_name -> quoin.runtime.v1.AttemptProgress
-	45,  // 7: quoin.runtime.v1.ControlEnvelope.reconcile_request:type_name -> quoin.runtime.v1.ReconcileRequest
-	46,  // 8: quoin.runtime.v1.ControlEnvelope.reconcile_report:type_name -> quoin.runtime.v1.ReconcileReport
-	47,  // 9: quoin.runtime.v1.ControlEnvelope.result_proposal:type_name -> quoin.runtime.v1.ResultProposal
-	49,  // 10: quoin.runtime.v1.ControlEnvelope.result_ack:type_name -> quoin.runtime.v1.ResultAck
-	50,  // 11: quoin.runtime.v1.ControlEnvelope.cancel_attempt:type_name -> quoin.runtime.v1.CancelAttempt
-	51,  // 12: quoin.runtime.v1.ControlEnvelope.cancel_ack:type_name -> quoin.runtime.v1.CancelAck
-	66,  // 13: quoin.runtime.v1.ControlEnvelope.request_browser_sub_execution:type_name -> quoin.runtime.v1.RequestBrowserSubExecution
-	68,  // 14: quoin.runtime.v1.ControlEnvelope.browser_sub_execution_ack:type_name -> quoin.runtime.v1.BrowserSubExecutionAck
-	69,  // 15: quoin.runtime.v1.ControlEnvelope.tool_result_delivery:type_name -> quoin.runtime.v1.ToolResultDelivery
-	77,  // 16: quoin.runtime.v1.ControlEnvelope.tool_result_delivery_ack:type_name -> quoin.runtime.v1.ToolResultDeliveryAck
-	52,  // 17: quoin.runtime.v1.ControlEnvelope.go_away:type_name -> quoin.runtime.v1.GoAway
-	53,  // 18: quoin.runtime.v1.ControlEnvelope.begin_model_call:type_name -> quoin.runtime.v1.BeginModelCall
-	55,  // 19: quoin.runtime.v1.ControlEnvelope.begin_model_call_ack:type_name -> quoin.runtime.v1.BeginModelCallAck
-	56,  // 20: quoin.runtime.v1.ControlEnvelope.model_token_delta:type_name -> quoin.runtime.v1.ModelTokenDelta
-	57,  // 21: quoin.runtime.v1.ControlEnvelope.complete_model_call:type_name -> quoin.runtime.v1.CompleteModelCall
-	61,  // 22: quoin.runtime.v1.ControlEnvelope.complete_model_call_ack:type_name -> quoin.runtime.v1.CompleteModelCallAck
-	62,  // 23: quoin.runtime.v1.ControlEnvelope.begin_tool_call:type_name -> quoin.runtime.v1.BeginToolCall
-	63,  // 24: quoin.runtime.v1.ControlEnvelope.begin_tool_call_ack:type_name -> quoin.runtime.v1.BeginToolCallAck
-	64,  // 25: quoin.runtime.v1.ControlEnvelope.complete_tool_call:type_name -> quoin.runtime.v1.CompleteToolCall
-	65,  // 26: quoin.runtime.v1.ControlEnvelope.complete_tool_call_ack:type_name -> quoin.runtime.v1.CompleteToolCallAck
-	79,  // 27: quoin.runtime.v1.ControlEnvelope.start_browser_operation:type_name -> quoin.runtime.v1.StartBrowserOperation
-	80,  // 28: quoin.runtime.v1.ControlEnvelope.start_browser_operation_ack:type_name -> quoin.runtime.v1.StartBrowserOperationAck
-	82,  // 29: quoin.runtime.v1.ControlEnvelope.complete_browser_operation:type_name -> quoin.runtime.v1.CompleteBrowserOperation
-	84,  // 30: quoin.runtime.v1.ControlEnvelope.publish_browser_profile:type_name -> quoin.runtime.v1.PublishBrowserProfile
-	85,  // 31: quoin.runtime.v1.ControlEnvelope.publish_browser_profile_result:type_name -> quoin.runtime.v1.PublishBrowserProfileResult
-	89,  // 32: quoin.runtime.v1.ControlEnvelope.profile_inventory_request:type_name -> quoin.runtime.v1.ProfileInventoryRequest
-	91,  // 33: quoin.runtime.v1.ControlEnvelope.profile_inventory_report:type_name -> quoin.runtime.v1.ProfileInventoryReport
-	86,  // 34: quoin.runtime.v1.ControlEnvelope.stop_browser_operation:type_name -> quoin.runtime.v1.StopBrowserOperation
-	87,  // 35: quoin.runtime.v1.ControlEnvelope.stop_browser_operation_ack:type_name -> quoin.runtime.v1.StopBrowserOperationAck
-	83,  // 36: quoin.runtime.v1.ControlEnvelope.complete_browser_operation_ack:type_name -> quoin.runtime.v1.CompleteBrowserOperationAck
-	70,  // 37: quoin.runtime.v1.ControlEnvelope.execute_browser_exploration_action:type_name -> quoin.runtime.v1.ExecuteBrowserExplorationAction
-	71,  // 38: quoin.runtime.v1.ControlEnvelope.browser_exploration_action_result:type_name -> quoin.runtime.v1.BrowserExplorationActionResult
-	76,  // 39: quoin.runtime.v1.ControlEnvelope.browser_exploration_action_result_ack:type_name -> quoin.runtime.v1.BrowserExplorationActionResultAck
-	72,  // 40: quoin.runtime.v1.ControlEnvelope.cancel_browser_exploration_action:type_name -> quoin.runtime.v1.CancelBrowserExplorationAction
-	73,  // 41: quoin.runtime.v1.ControlEnvelope.cancel_browser_exploration_action_ack:type_name -> quoin.runtime.v1.CancelBrowserExplorationActionAck
-	74,  // 42: quoin.runtime.v1.ControlEnvelope.browser_exploration_terminal_claim:type_name -> quoin.runtime.v1.BrowserExplorationTerminalClaim
-	75,  // 43: quoin.runtime.v1.ControlEnvelope.browser_exploration_terminal_claim_ack:type_name -> quoin.runtime.v1.BrowserExplorationTerminalClaimAck
-	0,   // 44: quoin.runtime.v1.Hello.slot:type_name -> quoin.runtime.v1.RuntimeSlot
-	5,   // 45: quoin.runtime.v1.HelloAck.reject_reason:type_name -> quoin.runtime.v1.HelloRejectReason
-	37,  // 46: quoin.runtime.v1.Heartbeat.capacity:type_name -> quoin.runtime.v1.Capacity
-	1,   // 47: quoin.runtime.v1.DispatchAttempt.attempt_type:type_name -> quoin.runtime.v1.AttemptType
-	2,   // 48: quoin.runtime.v1.DispatchAttempt.scope_type:type_name -> quoin.runtime.v1.ScopeType
-	119, // 49: quoin.runtime.v1.DispatchAttempt.lease_deadline:type_name -> google.protobuf.Timestamp
-	39,  // 50: quoin.runtime.v1.DispatchAttempt.input:type_name -> quoin.runtime.v1.AttemptInputSnapshot
-	40,  // 51: quoin.runtime.v1.AttemptInputSnapshot.artifact_refs:type_name -> quoin.runtime.v1.ArtifactRef
-	41,  // 52: quoin.runtime.v1.AttemptInputSnapshot.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
-	6,   // 53: quoin.runtime.v1.AttemptReject.reason:type_name -> quoin.runtime.v1.AttemptRejectReason
-	4,   // 54: quoin.runtime.v1.ResultProposal.outcome:type_name -> quoin.runtime.v1.AttemptOutcome
-	3,   // 55: quoin.runtime.v1.ResultProposal.termination_reason:type_name -> quoin.runtime.v1.TerminationReason
-	48,  // 56: quoin.runtime.v1.ResultProposal.payload:type_name -> quoin.runtime.v1.ResultPayload
-	10,  // 57: quoin.runtime.v1.GoAway.reason:type_name -> quoin.runtime.v1.GoAwayReason
-	54,  // 58: quoin.runtime.v1.BeginModelCall.input_items:type_name -> quoin.runtime.v1.ModelInputItem
-	14,  // 59: quoin.runtime.v1.BeginModelCall.operation:type_name -> quoin.runtime.v1.ModelOperation
-	15,  // 60: quoin.runtime.v1.ModelInputItem.item_kind:type_name -> quoin.runtime.v1.ModelInputItemKind
-	16,  // 61: quoin.runtime.v1.ModelInputItem.role:type_name -> quoin.runtime.v1.ModelInputRole
-	41,  // 62: quoin.runtime.v1.BeginModelCallAck.model_provider_grant:type_name -> quoin.runtime.v1.ConnectionGrant
-	18,  // 63: quoin.runtime.v1.CompleteModelCall.outcome:type_name -> quoin.runtime.v1.ModelCallOutcome
-	19,  // 64: quoin.runtime.v1.CompleteModelCall.failure_reason:type_name -> quoin.runtime.v1.ModelCallFailureReason
-	59,  // 65: quoin.runtime.v1.CompleteModelCall.tool_calls:type_name -> quoin.runtime.v1.ProposedToolCall
-	58,  // 66: quoin.runtime.v1.CompleteModelCall.embedding_vectors:type_name -> quoin.runtime.v1.EmbeddingVector
-	21,  // 67: quoin.runtime.v1.ToolCallAuthorization.failure_mode:type_name -> quoin.runtime.v1.ToolFailureMode
-	41,  // 68: quoin.runtime.v1.ToolCallAuthorization.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
-	60,  // 69: quoin.runtime.v1.CompleteModelCallAck.tool_calls:type_name -> quoin.runtime.v1.ToolCallAuthorization
-	17,  // 70: quoin.runtime.v1.CompleteModelCallAck.reject_reason:type_name -> quoin.runtime.v1.ModelCallCompletionRejectReason
-	22,  // 71: quoin.runtime.v1.CompleteToolCall.outcome:type_name -> quoin.runtime.v1.ToolCallOutcome
-	48,  // 72: quoin.runtime.v1.CompleteToolCall.payload:type_name -> quoin.runtime.v1.ResultPayload
-	48,  // 73: quoin.runtime.v1.CompleteToolCallAck.committed_payload:type_name -> quoin.runtime.v1.ResultPayload
-	40,  // 74: quoin.runtime.v1.CompleteToolCallAck.artifact_ref:type_name -> quoin.runtime.v1.ArtifactRef
-	67,  // 75: quoin.runtime.v1.RequestBrowserSubExecution.input:type_name -> quoin.runtime.v1.BrowserSubExecutionInput
-	12,  // 76: quoin.runtime.v1.BrowserSubExecutionAck.reject_reason:type_name -> quoin.runtime.v1.BrowserSubExecutionRejectReason
-	48,  // 77: quoin.runtime.v1.ToolResultDelivery.payload:type_name -> quoin.runtime.v1.ResultPayload
-	67,  // 78: quoin.runtime.v1.ExecuteBrowserExplorationAction.input:type_name -> quoin.runtime.v1.BrowserSubExecutionInput
-	48,  // 79: quoin.runtime.v1.BrowserExplorationActionResult.payload:type_name -> quoin.runtime.v1.ResultPayload
-	81,  // 80: quoin.runtime.v1.BrowserExplorationActionResult.admission_probe:type_name -> quoin.runtime.v1.AuthenticationProbeObservation
-	81,  // 81: quoin.runtime.v1.BrowserExplorationActionResult.completion_probe:type_name -> quoin.runtime.v1.AuthenticationProbeObservation
-	25,  // 82: quoin.runtime.v1.BrowserExplorationActionResult.terminal_outcome:type_name -> quoin.runtime.v1.BrowserOperationOutcome
-	26,  // 83: quoin.runtime.v1.BrowserExplorationActionResult.terminal_reason:type_name -> quoin.runtime.v1.BrowserOperationTerminalReason
-	29,  // 84: quoin.runtime.v1.BrowserExplorationActionResult.trace_integrity:type_name -> quoin.runtime.v1.BrowserTraceIntegrity
-	23,  // 85: quoin.runtime.v1.StartBrowserOperation.kind:type_name -> quoin.runtime.v1.BrowserOperationKind
-	78,  // 86: quoin.runtime.v1.StartBrowserOperation.input:type_name -> quoin.runtime.v1.BrowserOperationInput
-	119, // 87: quoin.runtime.v1.StartBrowserOperation.requested_at:type_name -> google.protobuf.Timestamp
-	24,  // 88: quoin.runtime.v1.StartBrowserOperationAck.reject_reason:type_name -> quoin.runtime.v1.BrowserOperationStartRejectReason
-	119, // 89: quoin.runtime.v1.StartBrowserOperationAck.started_at:type_name -> google.protobuf.Timestamp
-	28,  // 90: quoin.runtime.v1.AuthenticationProbeObservation.phase:type_name -> quoin.runtime.v1.AuthenticationProbePhase
-	27,  // 91: quoin.runtime.v1.AuthenticationProbeObservation.result:type_name -> quoin.runtime.v1.AuthenticationProbeResult
-	119, // 92: quoin.runtime.v1.AuthenticationProbeObservation.observed_at:type_name -> google.protobuf.Timestamp
-	25,  // 93: quoin.runtime.v1.CompleteBrowserOperation.outcome:type_name -> quoin.runtime.v1.BrowserOperationOutcome
-	26,  // 94: quoin.runtime.v1.CompleteBrowserOperation.terminal_reason:type_name -> quoin.runtime.v1.BrowserOperationTerminalReason
-	81,  // 95: quoin.runtime.v1.CompleteBrowserOperation.probe_results:type_name -> quoin.runtime.v1.AuthenticationProbeObservation
-	29,  // 96: quoin.runtime.v1.CompleteBrowserOperation.trace_integrity:type_name -> quoin.runtime.v1.BrowserTraceIntegrity
-	119, // 97: quoin.runtime.v1.CompleteBrowserOperation.ended_at:type_name -> google.protobuf.Timestamp
-	81,  // 98: quoin.runtime.v1.PublishBrowserProfileResult.probe_result:type_name -> quoin.runtime.v1.AuthenticationProbeObservation
-	26,  // 99: quoin.runtime.v1.PublishBrowserProfileResult.reject_reason:type_name -> quoin.runtime.v1.BrowserOperationTerminalReason
-	11,  // 100: quoin.runtime.v1.StopBrowserOperation.reason:type_name -> quoin.runtime.v1.BrowserCloseReason
-	119, // 101: quoin.runtime.v1.StopBrowserOperation.committed_at:type_name -> google.protobuf.Timestamp
-	119, // 102: quoin.runtime.v1.StopBrowserOperationAck.stopped_at:type_name -> google.protobuf.Timestamp
-	31,  // 103: quoin.runtime.v1.StopBrowserOperationAck.cleanup_outcome:type_name -> quoin.runtime.v1.BrowserCleanupOutcome
-	32,  // 104: quoin.runtime.v1.StopBrowserOperationAck.failure_code:type_name -> quoin.runtime.v1.BrowserCleanupFailureCode
-	88,  // 105: quoin.runtime.v1.ProfileInventoryRequest.profiles:type_name -> quoin.runtime.v1.ExpectedBrowserProfile
-	30,  // 106: quoin.runtime.v1.ObservedBrowserProfile.status:type_name -> quoin.runtime.v1.ProfileInventoryStatus
-	90,  // 107: quoin.runtime.v1.ProfileInventoryReport.profiles:type_name -> quoin.runtime.v1.ObservedBrowserProfile
-	94,  // 108: quoin.runtime.v1.FetchCredentialGrantResponse.thanos:type_name -> quoin.runtime.v1.ThanosCredentialSecret
-	95,  // 109: quoin.runtime.v1.FetchCredentialGrantResponse.kubernetes:type_name -> quoin.runtime.v1.KubernetesCredentialSecret
-	96,  // 110: quoin.runtime.v1.FetchCredentialGrantResponse.model_provider:type_name -> quoin.runtime.v1.ModelProviderCredentialSecret
-	98,  // 111: quoin.runtime.v1.BrowserEnvelope.open:type_name -> quoin.runtime.v1.BrowserSessionOpen
-	99,  // 112: quoin.runtime.v1.BrowserEnvelope.open_ack:type_name -> quoin.runtime.v1.BrowserSessionOpenAck
-	100, // 113: quoin.runtime.v1.BrowserEnvelope.data:type_name -> quoin.runtime.v1.BrowserFrameData
-	101, // 114: quoin.runtime.v1.BrowserEnvelope.heartbeat:type_name -> quoin.runtime.v1.BrowserHeartbeat
-	102, // 115: quoin.runtime.v1.BrowserEnvelope.close:type_name -> quoin.runtime.v1.BrowserSessionClose
-	0,   // 116: quoin.runtime.v1.BrowserSessionOpen.slot:type_name -> quoin.runtime.v1.RuntimeSlot
-	23,  // 117: quoin.runtime.v1.BrowserSessionOpen.operation_kind:type_name -> quoin.runtime.v1.BrowserOperationKind
-	119, // 118: quoin.runtime.v1.BrowserSessionOpenAck.reconnect_deadline:type_name -> google.protobuf.Timestamp
-	11,  // 119: quoin.runtime.v1.BrowserSessionClose.reason:type_name -> quoin.runtime.v1.BrowserCloseReason
-	104, // 120: quoin.runtime.v1.ArtifactUploadFrame.header:type_name -> quoin.runtime.v1.ArtifactUploadHeader
-	105, // 121: quoin.runtime.v1.ArtifactUploadFrame.chunk:type_name -> quoin.runtime.v1.ArtifactUploadChunk
-	106, // 122: quoin.runtime.v1.ArtifactUploadFrame.end:type_name -> quoin.runtime.v1.ArtifactUploadEnd
-	7,   // 123: quoin.runtime.v1.ArtifactUploadHeader.kind:type_name -> quoin.runtime.v1.ArtifactKind
-	8,   // 124: quoin.runtime.v1.ArtifactUploadHeader.retention_kind:type_name -> quoin.runtime.v1.RetentionKind
-	29,  // 125: quoin.runtime.v1.ArtifactUploadHeader.trace_integrity:type_name -> quoin.runtime.v1.BrowserTraceIntegrity
-	9,   // 126: quoin.runtime.v1.ArtifactUploadResult.reject_reason:type_name -> quoin.runtime.v1.UploadRejectReason
-	111, // 127: quoin.runtime.v1.ArtifactGrepTextResponse.matches:type_name -> quoin.runtime.v1.ArtifactTextMatch
-	115, // 128: quoin.runtime.v1.GetCredentialSnapshotResponse.sources:type_name -> quoin.runtime.v1.AlertSourceSnapshot
-	116, // 129: quoin.runtime.v1.AlertSourceSnapshot.credentials:type_name -> quoin.runtime.v1.CredentialDigestEntry
-	119, // 130: quoin.runtime.v1.DeliveryRelayRequest.received_at:type_name -> google.protobuf.Timestamp
-	13,  // 131: quoin.runtime.v1.DeliveryRelayResponse.status:type_name -> quoin.runtime.v1.DeliveryStatus
-	33,  // 132: quoin.runtime.v1.RuntimeControl.Connect:input_type -> quoin.runtime.v1.ControlEnvelope
-	92,  // 133: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:input_type -> quoin.runtime.v1.FetchCredentialGrantRequest
-	97,  // 134: quoin.runtime.v1.BrowserTunnel.Open:input_type -> quoin.runtime.v1.BrowserEnvelope
-	103, // 135: quoin.runtime.v1.ArtifactService.Upload:input_type -> quoin.runtime.v1.ArtifactUploadFrame
-	108, // 136: quoin.runtime.v1.ArtifactService.ReadText:input_type -> quoin.runtime.v1.ArtifactReadTextRequest
-	110, // 137: quoin.runtime.v1.ArtifactService.GrepText:input_type -> quoin.runtime.v1.ArtifactGrepTextRequest
-	113, // 138: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:input_type -> quoin.runtime.v1.GetCredentialSnapshotRequest
-	117, // 139: quoin.runtime.v1.SteleRelay.Deliver:input_type -> quoin.runtime.v1.DeliveryRelayRequest
-	33,  // 140: quoin.runtime.v1.RuntimeControl.Connect:output_type -> quoin.runtime.v1.ControlEnvelope
-	93,  // 141: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:output_type -> quoin.runtime.v1.FetchCredentialGrantResponse
-	97,  // 142: quoin.runtime.v1.BrowserTunnel.Open:output_type -> quoin.runtime.v1.BrowserEnvelope
-	107, // 143: quoin.runtime.v1.ArtifactService.Upload:output_type -> quoin.runtime.v1.ArtifactUploadResult
-	109, // 144: quoin.runtime.v1.ArtifactService.ReadText:output_type -> quoin.runtime.v1.ArtifactReadTextResponse
-	112, // 145: quoin.runtime.v1.ArtifactService.GrepText:output_type -> quoin.runtime.v1.ArtifactGrepTextResponse
-	114, // 146: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:output_type -> quoin.runtime.v1.GetCredentialSnapshotResponse
-	118, // 147: quoin.runtime.v1.SteleRelay.Deliver:output_type -> quoin.runtime.v1.DeliveryRelayResponse
-	140, // [140:148] is the sub-list for method output_type
-	132, // [132:140] is the sub-list for method input_type
-	132, // [132:132] is the sub-list for extension type_name
-	132, // [132:132] is the sub-list for extension extendee
-	0,   // [0:132] is the sub-list for field type_name
+	22, // 0: quoin.runtime.v1.ControlEnvelope.hello:type_name -> quoin.runtime.v1.Hello
+	23, // 1: quoin.runtime.v1.ControlEnvelope.hello_ack:type_name -> quoin.runtime.v1.HelloAck
+	24, // 2: quoin.runtime.v1.ControlEnvelope.heartbeat:type_name -> quoin.runtime.v1.Heartbeat
+	26, // 3: quoin.runtime.v1.ControlEnvelope.dispatch_attempt:type_name -> quoin.runtime.v1.DispatchAttempt
+	30, // 4: quoin.runtime.v1.ControlEnvelope.attempt_accept:type_name -> quoin.runtime.v1.AttemptAccept
+	31, // 5: quoin.runtime.v1.ControlEnvelope.attempt_reject:type_name -> quoin.runtime.v1.AttemptReject
+	32, // 6: quoin.runtime.v1.ControlEnvelope.attempt_progress:type_name -> quoin.runtime.v1.AttemptProgress
+	33, // 7: quoin.runtime.v1.ControlEnvelope.reconcile_request:type_name -> quoin.runtime.v1.ReconcileRequest
+	34, // 8: quoin.runtime.v1.ControlEnvelope.reconcile_report:type_name -> quoin.runtime.v1.ReconcileReport
+	35, // 9: quoin.runtime.v1.ControlEnvelope.result_proposal:type_name -> quoin.runtime.v1.ResultProposal
+	37, // 10: quoin.runtime.v1.ControlEnvelope.result_ack:type_name -> quoin.runtime.v1.ResultAck
+	38, // 11: quoin.runtime.v1.ControlEnvelope.cancel_attempt:type_name -> quoin.runtime.v1.CancelAttempt
+	39, // 12: quoin.runtime.v1.ControlEnvelope.cancel_ack:type_name -> quoin.runtime.v1.CancelAck
+	40, // 13: quoin.runtime.v1.ControlEnvelope.go_away:type_name -> quoin.runtime.v1.GoAway
+	41, // 14: quoin.runtime.v1.ControlEnvelope.begin_model_call:type_name -> quoin.runtime.v1.BeginModelCall
+	43, // 15: quoin.runtime.v1.ControlEnvelope.begin_model_call_ack:type_name -> quoin.runtime.v1.BeginModelCallAck
+	44, // 16: quoin.runtime.v1.ControlEnvelope.model_token_delta:type_name -> quoin.runtime.v1.ModelTokenDelta
+	45, // 17: quoin.runtime.v1.ControlEnvelope.complete_model_call:type_name -> quoin.runtime.v1.CompleteModelCall
+	49, // 18: quoin.runtime.v1.ControlEnvelope.complete_model_call_ack:type_name -> quoin.runtime.v1.CompleteModelCallAck
+	50, // 19: quoin.runtime.v1.ControlEnvelope.begin_tool_call:type_name -> quoin.runtime.v1.BeginToolCall
+	51, // 20: quoin.runtime.v1.ControlEnvelope.begin_tool_call_ack:type_name -> quoin.runtime.v1.BeginToolCallAck
+	52, // 21: quoin.runtime.v1.ControlEnvelope.complete_tool_call:type_name -> quoin.runtime.v1.CompleteToolCall
+	53, // 22: quoin.runtime.v1.ControlEnvelope.complete_tool_call_ack:type_name -> quoin.runtime.v1.CompleteToolCallAck
+	0,  // 23: quoin.runtime.v1.Hello.slot:type_name -> quoin.runtime.v1.RuntimeSlot
+	5,  // 24: quoin.runtime.v1.HelloAck.reject_reason:type_name -> quoin.runtime.v1.HelloRejectReason
+	25, // 25: quoin.runtime.v1.Heartbeat.capacity:type_name -> quoin.runtime.v1.Capacity
+	1,  // 26: quoin.runtime.v1.DispatchAttempt.attempt_type:type_name -> quoin.runtime.v1.AttemptType
+	2,  // 27: quoin.runtime.v1.DispatchAttempt.scope_type:type_name -> quoin.runtime.v1.ScopeType
+	74, // 28: quoin.runtime.v1.DispatchAttempt.lease_deadline:type_name -> google.protobuf.Timestamp
+	27, // 29: quoin.runtime.v1.DispatchAttempt.input:type_name -> quoin.runtime.v1.AttemptInputSnapshot
+	28, // 30: quoin.runtime.v1.AttemptInputSnapshot.artifact_refs:type_name -> quoin.runtime.v1.ArtifactRef
+	29, // 31: quoin.runtime.v1.AttemptInputSnapshot.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
+	6,  // 32: quoin.runtime.v1.AttemptReject.reason:type_name -> quoin.runtime.v1.AttemptRejectReason
+	4,  // 33: quoin.runtime.v1.ResultProposal.outcome:type_name -> quoin.runtime.v1.AttemptOutcome
+	3,  // 34: quoin.runtime.v1.ResultProposal.termination_reason:type_name -> quoin.runtime.v1.TerminationReason
+	36, // 35: quoin.runtime.v1.ResultProposal.payload:type_name -> quoin.runtime.v1.ResultPayload
+	10, // 36: quoin.runtime.v1.GoAway.reason:type_name -> quoin.runtime.v1.GoAwayReason
+	42, // 37: quoin.runtime.v1.BeginModelCall.input_items:type_name -> quoin.runtime.v1.ModelInputItem
+	12, // 38: quoin.runtime.v1.BeginModelCall.operation:type_name -> quoin.runtime.v1.ModelOperation
+	13, // 39: quoin.runtime.v1.ModelInputItem.item_kind:type_name -> quoin.runtime.v1.ModelInputItemKind
+	14, // 40: quoin.runtime.v1.ModelInputItem.role:type_name -> quoin.runtime.v1.ModelInputRole
+	29, // 41: quoin.runtime.v1.BeginModelCallAck.model_provider_grant:type_name -> quoin.runtime.v1.ConnectionGrant
+	16, // 42: quoin.runtime.v1.CompleteModelCall.outcome:type_name -> quoin.runtime.v1.ModelCallOutcome
+	17, // 43: quoin.runtime.v1.CompleteModelCall.failure_reason:type_name -> quoin.runtime.v1.ModelCallFailureReason
+	47, // 44: quoin.runtime.v1.CompleteModelCall.tool_calls:type_name -> quoin.runtime.v1.ProposedToolCall
+	46, // 45: quoin.runtime.v1.CompleteModelCall.embedding_vectors:type_name -> quoin.runtime.v1.EmbeddingVector
+	19, // 46: quoin.runtime.v1.ToolCallAuthorization.failure_mode:type_name -> quoin.runtime.v1.ToolFailureMode
+	29, // 47: quoin.runtime.v1.ToolCallAuthorization.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
+	48, // 48: quoin.runtime.v1.CompleteModelCallAck.tool_calls:type_name -> quoin.runtime.v1.ToolCallAuthorization
+	15, // 49: quoin.runtime.v1.CompleteModelCallAck.reject_reason:type_name -> quoin.runtime.v1.ModelCallCompletionRejectReason
+	20, // 50: quoin.runtime.v1.CompleteToolCall.outcome:type_name -> quoin.runtime.v1.ToolCallOutcome
+	36, // 51: quoin.runtime.v1.CompleteToolCall.payload:type_name -> quoin.runtime.v1.ResultPayload
+	36, // 52: quoin.runtime.v1.CompleteToolCallAck.committed_payload:type_name -> quoin.runtime.v1.ResultPayload
+	28, // 53: quoin.runtime.v1.CompleteToolCallAck.artifact_ref:type_name -> quoin.runtime.v1.ArtifactRef
+	56, // 54: quoin.runtime.v1.FetchCredentialGrantResponse.thanos:type_name -> quoin.runtime.v1.ThanosCredentialSecret
+	57, // 55: quoin.runtime.v1.FetchCredentialGrantResponse.model_provider:type_name -> quoin.runtime.v1.ModelProviderCredentialSecret
+	59, // 56: quoin.runtime.v1.ArtifactUploadFrame.header:type_name -> quoin.runtime.v1.ArtifactUploadHeader
+	60, // 57: quoin.runtime.v1.ArtifactUploadFrame.chunk:type_name -> quoin.runtime.v1.ArtifactUploadChunk
+	61, // 58: quoin.runtime.v1.ArtifactUploadFrame.end:type_name -> quoin.runtime.v1.ArtifactUploadEnd
+	7,  // 59: quoin.runtime.v1.ArtifactUploadHeader.kind:type_name -> quoin.runtime.v1.ArtifactKind
+	8,  // 60: quoin.runtime.v1.ArtifactUploadHeader.retention_kind:type_name -> quoin.runtime.v1.RetentionKind
+	9,  // 61: quoin.runtime.v1.ArtifactUploadResult.reject_reason:type_name -> quoin.runtime.v1.UploadRejectReason
+	66, // 62: quoin.runtime.v1.ArtifactGrepTextResponse.matches:type_name -> quoin.runtime.v1.ArtifactTextMatch
+	70, // 63: quoin.runtime.v1.GetCredentialSnapshotResponse.sources:type_name -> quoin.runtime.v1.AlertSourceSnapshot
+	71, // 64: quoin.runtime.v1.AlertSourceSnapshot.credentials:type_name -> quoin.runtime.v1.CredentialDigestEntry
+	74, // 65: quoin.runtime.v1.DeliveryRelayRequest.received_at:type_name -> google.protobuf.Timestamp
+	11, // 66: quoin.runtime.v1.DeliveryRelayResponse.status:type_name -> quoin.runtime.v1.DeliveryStatus
+	21, // 67: quoin.runtime.v1.RuntimeControl.Connect:input_type -> quoin.runtime.v1.ControlEnvelope
+	54, // 68: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:input_type -> quoin.runtime.v1.FetchCredentialGrantRequest
+	58, // 69: quoin.runtime.v1.ArtifactService.Upload:input_type -> quoin.runtime.v1.ArtifactUploadFrame
+	63, // 70: quoin.runtime.v1.ArtifactService.ReadText:input_type -> quoin.runtime.v1.ArtifactReadTextRequest
+	65, // 71: quoin.runtime.v1.ArtifactService.GrepText:input_type -> quoin.runtime.v1.ArtifactGrepTextRequest
+	68, // 72: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:input_type -> quoin.runtime.v1.GetCredentialSnapshotRequest
+	72, // 73: quoin.runtime.v1.SteleRelay.Deliver:input_type -> quoin.runtime.v1.DeliveryRelayRequest
+	21, // 74: quoin.runtime.v1.RuntimeControl.Connect:output_type -> quoin.runtime.v1.ControlEnvelope
+	55, // 75: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:output_type -> quoin.runtime.v1.FetchCredentialGrantResponse
+	62, // 76: quoin.runtime.v1.ArtifactService.Upload:output_type -> quoin.runtime.v1.ArtifactUploadResult
+	64, // 77: quoin.runtime.v1.ArtifactService.ReadText:output_type -> quoin.runtime.v1.ArtifactReadTextResponse
+	67, // 78: quoin.runtime.v1.ArtifactService.GrepText:output_type -> quoin.runtime.v1.ArtifactGrepTextResponse
+	69, // 79: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:output_type -> quoin.runtime.v1.GetCredentialSnapshotResponse
+	73, // 80: quoin.runtime.v1.SteleRelay.Deliver:output_type -> quoin.runtime.v1.DeliveryRelayResponse
+	74, // [74:81] is the sub-list for method output_type
+	67, // [67:74] is the sub-list for method input_type
+	67, // [67:67] is the sub-list for extension type_name
+	67, // [67:67] is the sub-list for extension extendee
+	0,  // [0:67] is the sub-list for field type_name
 }
 
 func init() { file_runtime_proto_init() }
@@ -10950,10 +6425,6 @@ func file_runtime_proto_init() {
 		(*ControlEnvelope_ResultAck)(nil),
 		(*ControlEnvelope_CancelAttempt)(nil),
 		(*ControlEnvelope_CancelAck)(nil),
-		(*ControlEnvelope_RequestBrowserSubExecution)(nil),
-		(*ControlEnvelope_BrowserSubExecutionAck)(nil),
-		(*ControlEnvelope_ToolResultDelivery)(nil),
-		(*ControlEnvelope_ToolResultDeliveryAck)(nil),
 		(*ControlEnvelope_GoAway)(nil),
 		(*ControlEnvelope_BeginModelCall)(nil),
 		(*ControlEnvelope_BeginModelCallAck)(nil),
@@ -10964,37 +6435,12 @@ func file_runtime_proto_init() {
 		(*ControlEnvelope_BeginToolCallAck)(nil),
 		(*ControlEnvelope_CompleteToolCall)(nil),
 		(*ControlEnvelope_CompleteToolCallAck)(nil),
-		(*ControlEnvelope_StartBrowserOperation)(nil),
-		(*ControlEnvelope_StartBrowserOperationAck)(nil),
-		(*ControlEnvelope_CompleteBrowserOperation)(nil),
-		(*ControlEnvelope_PublishBrowserProfile)(nil),
-		(*ControlEnvelope_PublishBrowserProfileResult)(nil),
-		(*ControlEnvelope_ProfileInventoryRequest)(nil),
-		(*ControlEnvelope_ProfileInventoryReport)(nil),
-		(*ControlEnvelope_StopBrowserOperation)(nil),
-		(*ControlEnvelope_StopBrowserOperationAck)(nil),
-		(*ControlEnvelope_CompleteBrowserOperationAck)(nil),
-		(*ControlEnvelope_ExecuteBrowserExplorationAction)(nil),
-		(*ControlEnvelope_BrowserExplorationActionResult)(nil),
-		(*ControlEnvelope_BrowserExplorationActionResultAck)(nil),
-		(*ControlEnvelope_CancelBrowserExplorationAction)(nil),
-		(*ControlEnvelope_CancelBrowserExplorationActionAck)(nil),
-		(*ControlEnvelope_BrowserExplorationTerminalClaim)(nil),
-		(*ControlEnvelope_BrowserExplorationTerminalClaimAck)(nil),
 	}
-	file_runtime_proto_msgTypes[60].OneofWrappers = []any{
+	file_runtime_proto_msgTypes[34].OneofWrappers = []any{
 		(*FetchCredentialGrantResponse_Thanos)(nil),
-		(*FetchCredentialGrantResponse_Kubernetes)(nil),
 		(*FetchCredentialGrantResponse_ModelProvider)(nil),
 	}
-	file_runtime_proto_msgTypes[64].OneofWrappers = []any{
-		(*BrowserEnvelope_Open)(nil),
-		(*BrowserEnvelope_OpenAck)(nil),
-		(*BrowserEnvelope_Data)(nil),
-		(*BrowserEnvelope_Heartbeat)(nil),
-		(*BrowserEnvelope_Close)(nil),
-	}
-	file_runtime_proto_msgTypes[70].OneofWrappers = []any{
+	file_runtime_proto_msgTypes[37].OneofWrappers = []any{
 		(*ArtifactUploadFrame_Header)(nil),
 		(*ArtifactUploadFrame_Chunk)(nil),
 		(*ArtifactUploadFrame_End)(nil),
@@ -11004,10 +6450,10 @@ func file_runtime_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runtime_proto_rawDesc), len(file_runtime_proto_rawDesc)),
-			NumEnums:      33,
-			NumMessages:   86,
+			NumEnums:      21,
+			NumMessages:   53,
 			NumExtensions: 0,
-			NumServices:   4,
+			NumServices:   3,
 		},
 		GoTypes:           file_runtime_proto_goTypes,
 		DependencyIndexes: file_runtime_proto_depIdxs,

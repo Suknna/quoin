@@ -136,9 +136,6 @@ label_sets:
   plinth_storage:
     values: [state, workspace]
     authority: metrics
-  lintel_storage:
-    values: [state, shm]
-    authority: metrics
   stream:
     values: [alert_changes, task_changes, investigation_messages]
     authority: metrics
@@ -371,37 +368,6 @@ families:
     help: Duration from cancellation fence observation to worker termination.
     labels: []
     buckets: interactive_seconds
-    preinitialize: true
-
-  - name: lintel_ready
-    type: gauge
-    help: Whether Lintel can accept browser work from Quoin.
-    labels: []
-    preinitialize: true
-  - name: lintel_quoin_connected
-    type: gauge
-    help: Whether Lintel has an accepted current Quoin control stream.
-    labels: []
-    preinitialize: true
-  - name: lintel_storage_writable
-    type: gauge
-    help: Whether each Lintel state or shared-memory target passed its probe.
-    labels: [lintel_storage]
-    preinitialize: true
-  - name: lintel_browser_slots
-    type: gauge
-    help: Configured browser slots in this Lintel boot.
-    labels: []
-    preinitialize: true
-  - name: lintel_browser_slots_used
-    type: gauge
-    help: Browser slots currently occupied by physical browser work.
-    labels: []
-    preinitialize: true
-  - name: lintel_grpc_client_requests_total
-    type: counter
-    help: Lintel gRPC client requests grouped by service and canonical status.
-    labels: [rpc_group, grpc_status]
     preinitialize: true
 
   - name: stele_ready

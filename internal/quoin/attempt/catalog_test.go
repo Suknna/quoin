@@ -40,30 +40,15 @@ func catalogToolNames(t *testing.T, catalogs *Catalogs, agentVersion string) map
 	return names
 }
 
-// The default mainline offers the metrics observation tool but never the
-// retired browser or kubernetes tools (受控退役): they must not enter any
-// newly frozen catalog, no matter the agent generation, while their
-// compiled implementations stay resolvable for frozen historical attempts.
-func TestDefaultCatalogsExcludeRetiredTools(t *testing.T) {
-	registry, catalogs := buildTestCatalogs(t, nil)
+// The default mainline offers the metrics observation tool and the platform
+// tools in every agent generation's newly frozen catalog.
+func TestDefaultCatalogsOfferMainlineTools(t *testing.T) {
+	_, catalogs := buildTestCatalogs(t, nil)
 	for _, agentVersion := range []string{AgentVersion, "investigation-v1"} {
 		names := catalogToolNames(t, catalogs, agentVersion)
-		if names["quoin_browser"] || names["kubernetes_read"] {
-			t.Fatalf("agent %s offers a retired tool: %v", agentVersion, names)
-		}
 		if !names["thanos_query"] || !names["bash"] || !names["artifact_read"] {
 			t.Fatalf("agent %s lost platform or enabled-plugin tools: %v", agentVersion, names)
 		}
-	}
-	// The compiled implementations stay resolvable through the SAME
-	// assembly — retired declarations are authorities, not dead entries.
-	for _, name := range []string{"quoin_browser", "kubernetes_read"} {
-		if _, ok := catalogs.Implementation(name); !ok {
-			t.Fatalf("retired implementation %s left the assembled table", name)
-		}
-	}
-	if _, err := registry.ResolveEnabled([]string{plugins.BrowserID, plugins.KubernetesID}); err == nil {
-		t.Fatal("retired plugin ids must fail enablement resolution like unknown ids")
 	}
 }
 
@@ -207,47 +192,5 @@ func TestKeepGenerationCatalogsAssemble(t *testing.T) {
 		if catalog.SchemaVersion != "investigation-tools-v3" {
 			t.Fatalf("investigation generation %s schema version = %q", agentVersion, catalog.SchemaVersion)
 		}
-	}
-	for _, agentVersion := range []string{"investigation-v1", "investigation-v2", "investigation-v3"} {
-		fallback := legacyGenerationCatalog(agentVersion)
-		if fallback.SchemaVersion == ToolSchemaVersion {
-			t.Fatalf("investigation generation %s legacy fallback resolved the initial-analysis document", agentVersion)
-		}
-	}
-}
-
-// TestFrozenBrowserToolV1RejectsExplicitly pins the breaking quoin_browser
-// locator change (ADR-0004): a catalog frozen with v1 semantics (the retired
-// businessSystemKey locator) must drift-reject against the installed v2
-// implementation instead of being reinterpreted under the same tool name.
-// The v2 implementation stays compiled under the retired declaration for
-// ingress validation of frozen historical executions (受控浏览器退役) even
-// though no catalog serves it.
-func TestFrozenBrowserToolV1RejectsExplicitly(t *testing.T) {
-	legacy := FrozenTool{
-		Name: "quoin_browser", Version: "1", ExecutionMode: "quoin_browser",
-		FailureMode: "return_to_model", ResultSchemaKind: "browser_tool_result_v1",
-		Description: "在已授权的浏览器身份中执行一个封闭的探索动作。只接受 open、页面导航、元素交互、受限读取、截图和会话关闭；不接受 JavaScript、HTTP、CDP 或 Playwright 指令。",
-		Parameters:  map[string]any{"type": "object", "required": []string{"action", "businessSystemKey"}},
-	}
-	table, err := NewImplementationTable(Implementations())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := table.InstalledDefinition(legacy); err == nil {
-		t.Fatal("frozen quoin_browser v1 must not resolve against the installed v2 implementation")
-	}
-	def, known := table.Lookup("quoin_browser")
-	if !known {
-		t.Fatal("installed quoin_browser implementation must stay compiled")
-	}
-	if def.Version != "2" {
-		t.Fatalf("installed quoin_browser version = %q, want 2", def.Version)
-	}
-	if err := ValidateToolArguments(def, []byte(`{"action":"open","identityKey":"ops-console"}`)); err != nil {
-		t.Fatalf("v2 open with identityKey must validate: %v", err)
-	}
-	if err := ValidateToolArguments(def, []byte(`{"action":"open","businessSystemKey":"payments"}`)); err == nil {
-		t.Fatal("v2 open must explicitly reject the retired businessSystemKey locator")
 	}
 }

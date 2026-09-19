@@ -12,7 +12,6 @@
     "source_commit",
     "generated_at",
     "images",
-    "browser",
     "kubernetes",
     "compose",
     "deployment_helper",
@@ -43,7 +42,6 @@
         "frontend",
         "quoin",
         "plinth",
-        "lintel",
         "stele"
       ],
       "properties": {
@@ -53,51 +51,11 @@
         "plinth": {
           "$ref": "#/$defs/multiPlatformImage"
         },
-        "lintel": {
-          "$ref": "#/$defs/multiPlatformImage"
-        },
         "stele": {
           "$ref": "#/$defs/multiPlatformImage"
         },
         "frontend": {
           "$ref": "#/$defs/multiPlatformImage"
-        }
-      }
-    },
-    "browser": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "playwright_version",
-        "chromium_revision",
-        "artifacts"
-      ],
-      "properties": {
-        "playwright_version": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "chromium_revision": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "artifacts": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "linux/amd64",
-            "linux/arm64"
-          ],
-          "properties": {
-            "linux/amd64": {
-              "$ref": "#/$defs/browserArtifact"
-            },
-            "linux/arm64": {
-              "$ref": "#/$defs/browserArtifact"
-            }
-          }
         }
       }
     },
@@ -205,17 +163,13 @@
             "frontend",
             "quoin",
             "plinth",
-            "lintel",
-            "stele"
+                "stele"
           ],
           "properties": {
             "quoin": {
               "$ref": "#/$defs/platformBundleNames"
             },
             "plinth": {
-              "$ref": "#/$defs/platformBundleNames"
-            },
-            "lintel": {
               "$ref": "#/$defs/platformBundleNames"
             },
             "stele": {
@@ -263,9 +217,7 @@
         "release_inputs_version",
         "release_inputs_sha256",
         "readiness_response_version",
-        "readiness_response_sha256",
-        "journey_catalog_version",
-        "journey_catalog_sha256"
+        "readiness_response_sha256"
       ],
       "properties": {
         "deployment_config_version": {
@@ -325,14 +277,6 @@
           "minimum": 1
         },
         "readiness_response_sha256": {
-          "$ref": "#/$defs/bareSha256"
-        },
-        "journey_catalog_version": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "journey_catalog_sha256": {
           "$ref": "#/$defs/bareSha256"
         }
       }
@@ -448,23 +392,6 @@
         }
       }
     },
-    "browserArtifact": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "sha256",
-        "bytes"
-      ],
-      "properties": {
-        "sha256": {
-          "$ref": "#/$defs/bareSha256"
-        },
-        "bytes": {
-          "type": "integer",
-          "minimum": 1
-        }
-      }
-    },
     "bundleAssetName": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._+-]+\\.sigstore\\.json$"
@@ -492,7 +419,6 @@
         "frontend",
         "quoin",
         "plinth",
-        "lintel",
         "stele"
       ],
       "properties": {
@@ -500,9 +426,6 @@
           "$ref": "#/$defs/bundleAssetName"
         },
         "plinth": {
-          "$ref": "#/$defs/bundleAssetName"
-        },
-        "lintel": {
           "$ref": "#/$defs/bundleAssetName"
         },
         "stele": {

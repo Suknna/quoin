@@ -54,7 +54,7 @@ func TestReaderFailClosedRawRejectedAndTrustedWired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := NewPlatformFaultReporter(wired).ObserveRuntimeConnection(ctx, "lintel", false); err != nil {
+	if err := NewPlatformFaultReporter(wired).ObserveRuntimeConnection(ctx, "plinth", false); err != nil {
 		t.Fatal(err)
 	}
 	highWater, oldest, err := wired.Watermarks(ctx)
@@ -66,7 +66,7 @@ func TestReaderFailClosedRawRejectedAndTrustedWired(t *testing.T) {
 		t.Fatalf("trusted ChangesAfter = %+v %v, want one platform fault event", events, err)
 	}
 	snapshot, err := wired.AlertSnapshot(ctx, "Firing", "", "")
-	if err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].Component != "lintel" || snapshot.SnapshotSeq != 1 {
-		t.Fatalf("trusted AlertSnapshot = %+v %v, want the lintel fault at seq 1", snapshot, err)
+	if err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].Component != "plinth" || snapshot.SnapshotSeq != 1 {
+		t.Fatalf("trusted AlertSnapshot = %+v %v, want the plinth fault at seq 1", snapshot, err)
 	}
 }

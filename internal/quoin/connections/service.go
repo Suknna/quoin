@@ -1,6 +1,6 @@
 // Package connections owns the typed connection domain on the Quoin side
 // (T07): connection/revision/generation persistence, enable/disable fences
-// and the connection-probe attempt/grant closure. Thanos/Kubernetes probes
+// and the connection-probe attempt/grant closure. Metrics probes
 // are executed by the Plinth supervisor over the control stream; model
 // provider probes arrive with T08.
 //
@@ -32,7 +32,6 @@ const (
 	// exists.
 	TypePrometheus    = "prometheus"
 	TypeThanos        = "thanos"
-	TypeKubernetes    = "kubernetes"
 	TypeModelProvider = "model_provider"
 )
 
@@ -188,15 +187,6 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 		} else if authTypePresent && usernamePresent && username != "" {
 			return nil, fmt.Errorf("%w: username only applies to basic auth", ErrValidation)
 		}
-	case TypeKubernetes:
-		// contextName/defaultNamespace are optional bounded strings.
-		for _, field := range []string{"contextName", "defaultNamespace"} {
-			if value, ok := document[field].(string); ok && len(value) > 253 {
-				return nil, fmt.Errorf("%w: %s too long", ErrValidation, field)
-			} else if !ok && document[field] != nil {
-				return nil, fmt.Errorf("%w: %s must be a string", ErrValidation, field)
-			}
-		}
 	case TypeModelProvider:
 		baseURL, _ := document["baseUrl"].(string)
 		chat, _ := document["chatModelId"].(string)
@@ -215,9 +205,9 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 		return nil, fmt.Errorf("%w: unknown connection type", ErrValidation)
 	}
 	// Reject credential material in the revision projection. Auth mode and
-	// basic username are safe to retain; the password or bearer token exists
-	// solely in the encrypted credential generation.
-	for _, forbidden := range []string{"password", "bearerToken", "kubeconfig", "apiKey"} {
+	// basic username are safe to retain; the password, bearer token or API
+	// key exists solely in the encrypted credential generation.
+	for _, forbidden := range []string{"password", "bearerToken", "apiKey"} {
 		if _, exists := document[forbidden]; exists {
 			return nil, fmt.Errorf("%w: %s must not appear in the non-secret projection", ErrValidation, forbidden)
 		}
@@ -248,7 +238,6 @@ type typedSecretJSON struct {
 	Type          string                   `json:"type"`
 	Prometheus    *metricsSecretJSON       `json:"prometheus,omitempty"`
 	Thanos        *metricsSecretJSON       `json:"thanos,omitempty"`
-	Kubernetes    *kubernetesSecretJSON    `json:"kubernetes,omitempty"`
 	ModelProvider *modelProviderSecretJSON `json:"model_provider,omitempty"`
 }
 
@@ -313,10 +302,6 @@ func validateMetricsCredential(connectionType string, config, secret []byte) err
 		return fmt.Errorf("%w: unsupported metrics auth type", ErrValidation)
 	}
 	return nil
-}
-
-type kubernetesSecretJSON struct {
-	Kubeconfig string `json:"kubeconfig"`
 }
 
 type modelProviderSecretJSON struct {
@@ -405,10 +390,9 @@ func (service *Service) insertGeneration(ctx context.Context, tx execution.Execu
 	}
 	var envelope *envelopeWire
 	if len(secret) == 0 {
-		// Kubernetes requires a kubeconfig and a model provider requires an
-		// API key. Prometheus-compatible connections may use no auth, but
-		// still seal an explicit empty carrier to preserve independent,
-		// auditable credential generations.
+		// A model provider requires an API key. Prometheus-compatible
+		// connections may use no auth, but still seal an explicit empty
+		// carrier to preserve independent, auditable credential generations.
 		if connectionType != TypePrometheus && connectionType != TypeThanos {
 			return 0, fmt.Errorf("%w: %s requires a secret", ErrValidation, connectionType)
 		}
@@ -442,8 +426,6 @@ func typedSecretFromRaw(connectionType string, secret []byte) *typedSecretJSON {
 		payload.Prometheus = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
 	case TypeThanos:
 		payload.Thanos = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
-	case TypeKubernetes:
-		payload.Kubernetes = &kubernetesSecretJSON{Kubeconfig: carrier["kubeconfig"]}
 	case TypeModelProvider:
 		payload.ModelProvider = &modelProviderSecretJSON{APIKey: carrier["apiKey"]}
 	}

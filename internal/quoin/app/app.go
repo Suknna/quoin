@@ -19,7 +19,6 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"github.com/Suknna/quoin/internal/lintel/catalog"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
@@ -33,7 +32,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
-	"github.com/Suknna/quoin/internal/quoin/browser"
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/businessview"
 	"github.com/Suknna/quoin/internal/quoin/connections"
@@ -81,7 +79,6 @@ type apiServer struct {
 	observations                 *observation.Service
 	feedbackService              *feedback.Service
 	knowledgeService             *knowledge.Service
-	browsers                     *browser.Service
 	investigationUpload          *appinvestigation.Handler
 	configHandler                *appconfig.Handler
 	artifacts                    *artifact.Store
@@ -100,14 +97,8 @@ type apiServer struct {
 	resourceRefreshDispatchFunc  func(ctx context.Context)
 	observationDispatchFunc      func(ctx context.Context)
 	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
-	// Browser publish/stop dispatch stay declared for the retained recovery
-	// implementations (standalone/reconnect/session convergence); the retired
-	// browser business never assigns them, so those paths fail closed.
-	browserPublishDispatchFunc func(ctx context.Context, request browser.PublishRequest) error
-	browserStopDispatchFunc    func(ctx context.Context, operationID int64) error
-	browserTunnels             *browserTunnelHub
-	pluginRegistry             *plugins.Registry
-	enabledPlugins             []string
+	pluginRegistry               *plugins.Registry
+	enabledPlugins               []string
 	// Upgrade maintenance authorities (T36): the prepare command, the drain
 	// reconciler, and the live HTTP surface swap hooks.
 	upgradeService    *upgrade.Service
@@ -181,10 +172,8 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		views:            businessview.NewService(db),
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
-		browsers:         browser.NewService(db),
 		maintenance:      maintenance.NewService(db),
 		upgradeService:   upgrade.NewService(db),
-		browserTunnels:   newBrowserTunnelHub(),
 	}
 	application.initPluginRegistry()
 	application.rootKey = func() ([]byte, error) {
@@ -467,7 +456,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// the grant write into CompleteToolCall's transaction.
 	application.analyses.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
 	application.investigations.Attempts().ToolResultGrants = artifactStore.InsertToolResultGrant
-	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, catalog.Digest(), application.connections, application.db)
+	controlService := NewRuntimeControl(application.runtime, buildinfo.Release, application.connections, application.db)
 	controlService.PlatformFaults = application.platformFaults
 	// The initial-analysis terminal transaction is the only current reachable
 	// worker-launch failure authority. Project its fault inside the runner's
@@ -513,11 +502,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 			return controlService.sendEnvelope(qruntime.SlotPlinth, envelope)
 		},
 		TerminationReason: terminationReasonOf,
-		AfterCommit:       controlService.closeTerminalParentExplorations,
 	}
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
-	application.inspections.JourneyCore = application.systems.CommitJourneyProposalScoped
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
 	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
 	controlService.Observations = application.observations
@@ -803,9 +790,6 @@ func (application *apiServer) changePassword(ctx context.Context, input *passwor
 		// faults and must not surface raw internal error text to clients.
 		return nil, huma.Error500InternalServerError("暂时无法保存新密码，请重试。", err)
 	}
-	// Changing a password revokes every other Session. Converge their attached
-	// browser transports before returning so revoked RFB input cannot continue.
-	application.closeBrowserSessions(ctx)
 	return &noContentOutput{CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
@@ -822,19 +806,8 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*lo
 		return nil, authFailure(err, "完成登出")
 	}
 	application.reveals.InvalidateSession(secrets.SessionDigest(input.Session))
-	// Commit session revocation before converging Browser Operations. The Start
-	// transaction rechecks this row under BEGIN IMMEDIATE, so the SQLite commit
-	// order now decides the race without a window that can launch Chromium.
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
-	}
-	if operationIDs, revokeErr := application.browsers.RevokeSession(ctx, session.ID); revokeErr == nil {
-		for _, operationID := range operationIDs {
-			application.browserTunnels.closeOperation(operationID)
-			if application.browserStopDispatchFunc != nil {
-				_ = application.browserStopDispatchFunc(ctx, operationID)
-			}
-		}
 	}
 	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour), flowCookie("", time.Unix(1, 0))}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }

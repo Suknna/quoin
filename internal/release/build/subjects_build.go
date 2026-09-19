@@ -204,10 +204,7 @@ func yamlMapValue(node *yaml.Node, key string) string {
 // buildComposeBundle assembles the digest-pinned Compose bundle: the
 // canonical compose projection with the measured image digests, the minimal
 // input template, the deployment-config schema and the quoin-deploy wizard
-// entry (OPS-RELEASE-003). The bundle never contains a release manifest. The
-// browser plugin and its Lintel runtime are retired, so no browser override
-// ships beside the default compose file (historical reference lives in
-// deploy/retired/browser/).
+// entry (OPS-RELEASE-003). The bundle never contains a release manifest.
 func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 	names, err := subjects.Names(options.version)
 	if err != nil {
@@ -256,7 +253,7 @@ func buildComposeBundle(options *options, inventory *subjects.Inventory) error {
 // pinComposeImages projects the canonical direct Compose file into a release
 // artifact by replacing every declared application service's image scalar
 // with its immutable measured index. Relative config and secrets paths are
-// preserved. The retired Lintel component intentionally has no service in the
+// preserved.
 // default compose file; a declared application service without a measured
 // subject remains a hard error.
 func pinComposeImages(source []byte, images map[string]subjects.ImageSubject) ([]byte, error) {

@@ -9,17 +9,15 @@ import (
 
 // HelloDecision is the adjudication result of a Connect handshake.
 type HelloDecision struct {
-	Accepted                 bool
-	Reason                   string // empty when accepted; else CONTRACT_MISMATCH | EPOCH_STALE | CATALOG_MISMATCH
-	LastConnectionEpoch      uint64
-	ProfileReconcileRequired bool
+	Accepted            bool
+	Reason              string // empty when accepted; else CONTRACT_MISMATCH | EPOCH_STALE
+	LastConnectionEpoch uint64
 }
 
-// Adjudicate validates the Hello fields (RUNTIME-CTRL-002..004/010). The
+// Adjudicate validates the Hello fields (RUNTIME-CTRL-002..004). The
 // client identity itself was already proven by the mTLS handshake (ADR-0009):
-// the caller verified the peer certificate's CN names this slot. catalogDigest
-// is only required for lintel (empty expectation for plinth).
-func (service *Service) Adjudicate(_ context.Context, slotName, bootID string, epoch uint64, contractFingerprint, currentFingerprint, expectedCatalogDigest, journeyCatalogDigest string) (HelloDecision, error) {
+// the caller verified the peer certificate's CN names this slot.
+func (service *Service) Adjudicate(_ context.Context, slotName, bootID string, epoch uint64, contractFingerprint, currentFingerprint string) (HelloDecision, error) {
 	decision := HelloDecision{}
 	if !validContractFingerprint(contractFingerprint) || contractFingerprint != currentFingerprint {
 		decision.Reason = "CONTRACT_MISMATCH"
@@ -34,14 +32,7 @@ func (service *Service) Adjudicate(_ context.Context, slotName, bootID string, e
 		decision.Reason = "EPOCH_STALE"
 		return decision, nil
 	}
-	if slotName == SlotLintel && journeyCatalogDigest != expectedCatalogDigest {
-		decision.Reason = "CATALOG_MISMATCH"
-		return decision, nil
-	}
 	decision.Accepted = true
-	if slotName == SlotLintel {
-		decision.ProfileReconcileRequired = true
-	}
 	return decision, nil
 }
 

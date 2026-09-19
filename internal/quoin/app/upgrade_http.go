@@ -103,7 +103,6 @@ func (application *apiServer) enterUpgradeMaintenance(publicOrigin string) {
 	if application.setMaintenanceReason != nil {
 		application.setMaintenanceReason("Upgrade", true)
 	}
-	application.closeBrowserSessions(context.Background())
 	if application.upgradeReconciler != nil {
 		application.upgradeReconciler.Notify()
 	}
@@ -136,6 +135,5 @@ func (application *apiServer) registerUpgradeDrainRoutes(api huma.API) {
 	application.upgradeDrainInvestigations().RegisterUpgradeDrain(api)
 	application.upgradeDrainInspections().RegisterUpgradeDrain(api)
 	application.upgradeDrainKnowledge().RegisterUpgradeDrain(api)
-	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/browser-identities/{identityKey}/operations/{operationId}/cancel", OperationID: "cancelStandaloneBrowserOperation"}, application.cancelBrowserStandaloneOperation)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/connections/{connectionName}/probe-attempts/{attemptId}/cancel", OperationID: "cancelConnectionProbeAttempt"}, application.cancelConnectionProbeAttempt)
 }

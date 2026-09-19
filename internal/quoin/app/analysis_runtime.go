@@ -220,8 +220,6 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 			service.handleVerificationDiscoveryResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "source_observation_result_v1" {
 			service.handleSourceObservationResultProposal(ctx, envelope, proposal)
-		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "browser_journey_result_v1" {
-			service.handleJourneyResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_promql_result_v1" {
 			service.handleInspectionPromQLResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_plugin_result_v1" {
@@ -342,11 +340,7 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 			}
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "inspection.cancel_ack", err.Error())
-				return
 			}
-			// A cancelled journey child must release its operation and persist its
-			// cancellation gap; a PromQL child has no Browser Operation to close.
-			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
 			return
 		}
 		if scopeType != "config_verification_run" && scopeType != "resource_refresh_run" {
@@ -362,9 +356,6 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 			if err := service.BusinessSystems.ConvergeResourceRefreshCancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", err.Error())
 			}
-			// A cancelled Lintel journey child settles its technical gap and its
-			// operation through the shared convergence sweep.
-			service.convergeCancelledJourneyChild(ctx, ack.GetAttemptId())
 		}
 	case "inspection_analysis":
 		if service.Inspections != nil {

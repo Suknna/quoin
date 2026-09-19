@@ -78,7 +78,7 @@ func TestTickSchedulesCurrentBoundaryInPlanTimezone(t *testing.T) {
 	}}}
 	at := time.Date(2026, time.August, 28, 0, 30, 0, 0, time.UTC)
 	scheduler := newScheduler(service, fixedClock{now: at}, func(context.Context) inspection.RuntimeAvailability {
-		return inspection.RuntimeAvailability{Plinth: true, Lintel: true}
+		return inspection.RuntimeAvailability{Plinth: true}
 	})
 
 	if err := scheduler.tick(context.Background()); err != nil {

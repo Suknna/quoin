@@ -31,7 +31,7 @@ var (
 	// - _。身份被启用配置、授权来源与审计永久引用，永不复用。
 	pluginIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 	// toolNamePattern：模型工具名是全局命名空间，与既有固定目录
-	// （bash/read/write/grep/artifact_read/thanos_query/quoin_browser）同构。
+	// （bash/read/write/grep/artifact_read/thanos_query）同构。
 	toolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
@@ -71,9 +71,6 @@ func validateDescriptor(descriptor Descriptor) error {
 	}
 	if descriptor.ConnectionKind != "" && (len(descriptor.ConnectionKind) > maxIDLength || !pluginIDPattern.MatchString(descriptor.ConnectionKind)) {
 		return fmt.Errorf("%w: plugin %s connectionKind %q must match [a-z][a-z0-9_-]*", ErrInvalidDescriptor, descriptor.ID, descriptor.ConnectionKind)
-	}
-	if descriptor.Retired && descriptor.DefaultEnabled {
-		return fmt.Errorf("%w: retired plugin %s must not default to enabled", ErrInvalidDescriptor, descriptor.ID)
 	}
 	if err := validateCapabilities(descriptor); err != nil {
 		return err

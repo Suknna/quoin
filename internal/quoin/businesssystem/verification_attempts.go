@@ -12,8 +12,8 @@ import (
 )
 
 // VerificationAttempts exposes the generic Attempt authority configured to
-// reconstruct Config Verification's frozen inputs (PromQL or Journey) from
-// their immutable projections. It never reads a connection secret.
+// reconstruct Config Verification's frozen inputs (PromQL) from their
+// immutable projections. It never reads a connection secret.
 func (service *Service) VerificationAttempts() *attempt.Service {
 	attempts := attempt.NewService(service.db)
 	attempts.SnapshotRebuilder = service.rebuildVerificationAttempt
@@ -21,8 +21,7 @@ func (service *Service) VerificationAttempts() *attempt.Service {
 }
 
 // rebuildVerificationAttempt dispatches to the check-kind rebuilder: PromQL
-// children rebuild config_verification_execution_v1, browser children
-// rebuild the frozen inspection_collection_v1 journey input.
+// children rebuild config_verification_execution_v1.
 func (service *Service) rebuildVerificationAttempt(ctx context.Context, attemptID int64) ([]byte, error) {
 	var discoveryKey sql.NullString
 	if err := service.db.QueryRowContext(ctx, `SELECT discovery_key FROM execution_attempts WHERE id=?`, attemptID).Scan(&discoveryKey); err != nil {
@@ -40,15 +39,11 @@ func (service *Service) rebuildVerificationAttempt(ctx context.Context, attemptI
 		WHERE a.id=?`, attemptID).Scan(&kind); err != nil {
 		return nil, err
 	}
-	if kind == "browser" {
-		return service.rebuildJourneyVerificationInput(ctx, attemptID)
-	}
 	return service.rebuildVerificationAttemptInput(ctx, attemptID)
 }
 
 // QueuedVerificationAttempts returns all supervisor-only PromQL and declared
-// discovery work created by RunVerification. Browser children dispatch to
-// Lintel through their journey operation, never through Plinth.
+// discovery work created by RunVerification.
 func (service *Service) QueuedVerificationAttempts(ctx context.Context) ([]int64, error) {
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a

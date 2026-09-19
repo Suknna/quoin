@@ -19,7 +19,7 @@ import "sort"
 type ToolDef struct {
 	Name             string
 	Version          string
-	ExecutionMode    string // worker_local | supervisor_typed | quoin_browser
+	ExecutionMode    string // worker_local | supervisor_typed
 	FailureMode      string // return_to_model | fail_attempt
 	ResultSchemaKind string // exact ResultPayload.schema_kind accepted at runtime ingress
 	Description      string
@@ -60,7 +60,6 @@ const (
 var executionModeLocation = map[string]ExecutionLocation{
 	"worker_local":     LocationWorkerLocal,
 	"supervisor_typed": LocationPlinthSupervisor,
-	"quoin_browser":    LocationLintel,
 }
 
 // LocationExecutionModes maps the descriptor execution-location vocabulary
@@ -72,8 +71,6 @@ func LocationExecutionModes(location ExecutionLocation) string {
 		return "worker_local"
 	case LocationPlinthSupervisor:
 		return "supervisor_typed"
-	case LocationLintel:
-		return "quoin_browser"
 	default:
 		return ""
 	}

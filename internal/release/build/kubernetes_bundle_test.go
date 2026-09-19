@@ -45,11 +45,8 @@ func TestBuildKubernetesBundlePinsEveryApplicationImage(t *testing.T) {
 			t.Fatalf("default manifest misses %s image %q", component, pinned(component))
 		}
 	}
-	if strings.Contains(string(body), pinned("lintel")) {
-		t.Fatal("default manifest must not deploy the browser runtime; it is retired")
-	}
 	rendered := string(readBundleEntry(t, bundlePath, "quoin.yaml"))
-	for _, forbidden := range []string{"quoin/web:v0.1.0-dev", "quoin/quoin:v0.1.0-dev", "quoin/plinth:v0.1.0-dev", "quoin/lintel:v0.1.0-dev", "quoin/stele:v0.1.0-dev"} {
+	for _, forbidden := range []string{"quoin/web:v0.1.0-dev", "quoin/quoin:v0.1.0-dev", "quoin/plinth:v0.1.0-dev", "quoin/stele:v0.1.0-dev"} {
 		if strings.Contains(rendered, forbidden) {
 			t.Fatalf("quoin.yaml retains development image %q", forbidden)
 		}

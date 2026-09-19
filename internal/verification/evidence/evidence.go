@@ -77,8 +77,6 @@ type Environment struct {
 	KubernetesVersion   string   `json:"kubernetes_version,omitempty"`
 	DockerEngineVersion string   `json:"docker_engine_version,omitempty"`
 	ComposeVersion      string   `json:"compose_version,omitempty"`
-	BrowserArtifact     string   `json:"browser_artifact,omitempty"`
-	BrowserVersion      string   `json:"browser_version,omitempty"`
 	ToolchainDigest     string   `json:"toolchain_digest"`
 	ExternalStackDigest string   `json:"external_stack_digest,omitempty"`
 	FaultBackendDigest  string   `json:"fault_backend_digest,omitempty"`
@@ -123,7 +121,7 @@ const (
 // (VERIFY-DA-RETENTION-001).
 func RetentionClassFor(kind string) string {
 	switch kind {
-	case AttachmentStdout, AttachmentStderr, "logs", "metrics", "trace", "screenshot", "video", "database":
+	case AttachmentStdout, AttachmentStderr, "logs", "metrics", "trace", "database":
 		return RetentionGenerated
 	default:
 		return RetentionLongTerm

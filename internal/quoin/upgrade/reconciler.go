@@ -175,7 +175,7 @@ func (reconciler *Reconciler) projectGated(ctx context.Context) (int64, bool, bo
 // and the caller learns the window is fully prepared.
 type quietPass struct{}
 
-func (q *quietPass) Error() string { return "upgrade: reconcile window is quiet; nothing to project" }
+func (q *quietPass) Error() string        { return "upgrade: reconcile window is quiet; nothing to project" }
 func (q *quietPass) Is(target error) bool { return target == execution.ErrNoTransition }
 
 // backgroundContext restores the loop's execution scope. When the persisted
@@ -319,15 +319,12 @@ func reconcileChecklist(ctx context.Context, conn projectionExecutor, revision i
 	if _, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET safe_state='Safe',detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='ActiveAttempt' AND safe_state='Blocking' AND object_key IN (SELECT 'attempt/'||a.id FROM execution_attempts a WHERE a.state IN ('Succeeded','Failed','Cancelled','Interrupted') OR EXISTS (SELECT 1 FROM inspection_check_results x WHERE x.attempt_id=a.id))`, detailDrained, now, revision); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET safe_state='Safe',detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='ActiveBrowserOperation' AND safe_state='Blocking' AND object_key IN (SELECT 'operation/'||o.id FROM browser_operations o WHERE o.state IN ('Succeeded','Failed','Cancelled','Interrupted'))`, detailDrained, now, revision); err != nil {
-		return err
-	}
 	if err := projectChecklist(ctx, conn, revision, now); err != nil {
 		return err
 	}
 	// projectChecklist only inserts; a still-Blocking row may need its cancel
 	// row version refreshed after a concurrent domain change.
-	rows, err := conn.QueryContext(ctx, `SELECT a.id,a.scope_type,a.scope_id,a.state,a.requested_by_tool_call_id FROM execution_attempts a JOIN maintenance_items m ON m.object_key='attempt/'||a.id AND m.maintenance_revision=? WHERE m.kind='ActiveAttempt' AND m.safe_state='Blocking' AND a.state IN ('Queued','Assigned','Running','Cancelling')`, revision)
+	rows, err := conn.QueryContext(ctx, `SELECT a.id,a.scope_type,a.scope_id,a.state FROM execution_attempts a JOIN maintenance_items m ON m.object_key='attempt/'||a.id AND m.maintenance_revision=? WHERE m.kind='ActiveAttempt' AND m.safe_state='Blocking' AND a.state IN ('Queued','Assigned','Running','Cancelling')`, revision)
 	if err != nil {
 		return err
 	}
@@ -335,12 +332,11 @@ func reconcileChecklist(ctx context.Context, conn projectionExecutor, revision i
 		id               int64
 		scopeType, state string
 		scopeID          int64
-		parent           sql.NullInt64
 	}
 	attempts := []activeAttempt{}
 	for rows.Next() {
 		var item activeAttempt
-		if err := rows.Scan(&item.id, &item.scopeType, &item.scopeID, &item.state, &item.parent); err != nil {
+		if err := rows.Scan(&item.id, &item.scopeType, &item.scopeID, &item.state); err != nil {
 			rows.Close()
 			return err
 		}
@@ -350,41 +346,11 @@ func reconcileChecklist(ctx context.Context, conn projectionExecutor, revision i
 		return err
 	}
 	for _, item := range attempts {
-		directive, err := attemptDirective(ctx, conn, item.id, item.scopeType, item.scopeID, item.state, item.parent)
+		directive, err := attemptDirective(ctx, conn, item.id, item.scopeType, item.scopeID, item.state)
 		if err != nil {
 			return err
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='ActiveAttempt' AND object_key=? AND safe_state='Blocking'`, lowercase(item.state)+"|"+directive, now, revision, fmt.Sprintf("attempt/%d", item.id)); err != nil {
-			return err
-		}
-	}
-	operationRows, err := conn.QueryContext(ctx, `SELECT o.id,o.kind,o.state,o.owner_attempt_id FROM browser_operations o JOIN maintenance_items m ON m.object_key='operation/'||o.id AND m.maintenance_revision=? WHERE m.kind='ActiveBrowserOperation' AND m.safe_state='Blocking' AND o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')`, revision)
-	if err != nil {
-		return err
-	}
-	type activeOperation struct {
-		id          int64
-		kind, state string
-		owner       sql.NullInt64
-	}
-	operations := []activeOperation{}
-	for operationRows.Next() {
-		var item activeOperation
-		if err := operationRows.Scan(&item.id, &item.kind, &item.state, &item.owner); err != nil {
-			operationRows.Close()
-			return err
-		}
-		operations = append(operations, item)
-	}
-	if err := operationRows.Close(); err != nil {
-		return err
-	}
-	for _, item := range operations {
-		directive, err := operationDirective(ctx, conn, item.id, item.kind, item.state, item.owner)
-		if err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `UPDATE maintenance_items SET detail_code=?,updated_at=? WHERE maintenance_revision=? AND kind='ActiveBrowserOperation' AND object_key=? AND safe_state='Blocking'`, lowercase(item.state)+"|"+directive, now, revision, fmt.Sprintf("operation/%d", item.id)); err != nil {
 			return err
 		}
 	}
@@ -415,7 +381,7 @@ func planUpgradeBackup(ctx context.Context, conn projectionExecutor, revision in
 		return 0, false, nil
 	}
 	var blocking int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_items WHERE maintenance_revision=? AND kind IN ('ActiveAttempt','ActiveBrowserOperation') AND safe_state='Blocking'`, revision).Scan(&blocking); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM maintenance_items WHERE maintenance_revision=? AND kind='ActiveAttempt' AND safe_state='Blocking'`, revision).Scan(&blocking); err != nil {
 		return 0, false, err
 	}
 	if blocking != 0 {

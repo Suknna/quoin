@@ -1,8 +1,8 @@
 // Package manifest builds and verifies the final Quoin Release manifest
 // (OPS-RELEASE-001/002). Every field is read mechanically from its machine
 // authority — the validated subject inventory, the frozen contract
-// documents, the locked browser artifacts and the categorized signed
-// qualification evidence — and nothing is hand-filled. The manifest binds
+// documents and the categorized signed qualification evidence — and
+// nothing is hand-filled. The manifest binds
 // qualification evidence one-way through validation.<category>.evidence_sha256
 // and never becomes a qualification subject itself (VERIFY-EVIDENCE-002/004).
 package manifest
@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Suknna/quoin/internal/release/inputs"
 	"github.com/Suknna/quoin/internal/release/signing"
 	"github.com/Suknna/quoin/internal/release/subjects"
 	"github.com/Suknna/quoin/internal/release/supplychain"
@@ -87,7 +86,6 @@ type Document struct {
 	SourceCommit     string                `json:"source_commit"`
 	GeneratedAt      string                `json:"generated_at"`
 	Images           map[string]ImageEntry `json:"images"`
-	Browser          BrowserEntry          `json:"browser"`
 	Kubernetes       ComposeEntry          `json:"kubernetes"`
 	Compose          ComposeEntry          `json:"compose"`
 	DeploymentHelper struct {
@@ -114,17 +112,6 @@ type ImageEntry struct {
 	Repository  string            `json:"repository"`
 	IndexDigest string            `json:"index_digest"`
 	Platforms   map[string]string `json:"platforms"`
-}
-
-type BrowserArtifact struct {
-	SHA256 string `json:"sha256"`
-	Bytes  int64  `json:"bytes"`
-}
-
-type BrowserEntry struct {
-	PlaywrightVersion string                     `json:"playwright_version"`
-	ChromiumRevision  string                     `json:"chromium_revision"`
-	Artifacts         map[string]BrowserArtifact `json:"artifacts"`
 }
 
 type ComposeEntry struct {
@@ -181,8 +168,7 @@ type Inputs struct {
 // Build derives the complete Release manifest. It fails closed on any
 // evidence bundle that does not verify, does not bind the subject
 // inventory, is not PASSED, or does not cover its category's frozen
-// cells; and on any drift between the locked browser artifacts and the
-// inventory.
+// cells.
 func Build(inputs Inputs) (*Document, error) {
 	if inputs.Inventory == nil || len(inputs.InventoryBytes) == 0 {
 		return nil, fmt.Errorf("manifest build needs the parsed inventory and its exact bytes")
@@ -208,11 +194,6 @@ func Build(inputs Inputs) (*Document, error) {
 			Platforms:   image.Platforms,
 		}
 	}
-	browser, err := browserEntry(inputs.Inventory)
-	if err != nil {
-		return nil, err
-	}
-	document.Browser = browser
 	document.Kubernetes = ComposeEntry{AssetName: inputs.Inventory.Kubernetes.AssetName, BundleSHA256: inputs.Inventory.Kubernetes.SHA256}
 	document.Compose = ComposeEntry{AssetName: inputs.Inventory.Compose.AssetName, BundleSHA256: inputs.Inventory.Compose.SHA256}
 	for _, platform := range subjects.Platforms {
@@ -296,42 +277,6 @@ func gitOutput(root string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(body)), nil
-}
-
-// browserEntry projects the release-locked browser artifacts: the frozen
-// release-inputs lock owns revision, per-architecture SHA-256 and byte
-// size; the inventory must carry the identical digests (OPS-RELEASE-001).
-func browserEntry(inventory *subjects.Inventory) (BrowserEntry, error) {
-	lock, err := inputs.Load()
-	if err != nil {
-		return BrowserEntry{}, fmt.Errorf("release inputs lock: %w", err)
-	}
-	entry := BrowserEntry{
-		PlaywrightVersion: lock.Playwright.Version,
-		ChromiumRevision:  lock.Playwright.ChromiumRevision,
-		Artifacts:         map[string]BrowserArtifact{},
-	}
-	if entry.PlaywrightVersion != inventory.Browser.PlaywrightVersion ||
-		entry.ChromiumRevision != inventory.Browser.ChromiumRevision {
-		return BrowserEntry{}, fmt.Errorf("browser lock drift: lock %s/%s inventory %s/%s",
-			entry.PlaywrightVersion, entry.ChromiumRevision,
-			inventory.Browser.PlaywrightVersion, inventory.Browser.ChromiumRevision)
-	}
-	for _, platform := range subjects.Platforms {
-		locked, ok := lock.Playwright.Artifacts[platform]
-		if !ok {
-			return BrowserEntry{}, fmt.Errorf("browser lock has no %s artifact", platform)
-		}
-		inventoried, ok := inventory.Browser.Artifacts[platform]
-		if !ok {
-			return BrowserEntry{}, fmt.Errorf("inventory has no %s browser artifact", platform)
-		}
-		if locked.SHA256 != inventoried.SHA256 {
-			return BrowserEntry{}, fmt.Errorf("browser %s digest drift: lock %s inventory %s", platform, locked.SHA256, inventoried.SHA256)
-		}
-		entry.Artifacts[platform] = BrowserArtifact{SHA256: locked.SHA256, Bytes: locked.Bytes}
-	}
-	return entry, nil
 }
 
 // Marshal renders the manifest JSON deterministically.

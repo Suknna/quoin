@@ -85,23 +85,6 @@ func TestDiscoverySelectorMatrix(t *testing.T) {
 	}
 }
 
-func TestJourneyCatalogValidation(t *testing.T) {
-	document, version, digest, err := JourneyCatalog()
-	if err != nil || document == nil || version == "" || len(digest) != 64 {
-		t.Fatalf("catalog unavailable: %v", err)
-	}
-	if _, exists := document["journeys"].(map[string]any)["anything"]; exists {
-		t.Fatal("empty catalog must have no journeys")
-	}
-	fields := ValidateJourneyReference("login-journey", map[string]any{}, "checks[0]")
-	if len(fields) == 0 || !strings.Contains(fields[0].Reason, "不在嵌入 Journey Catalog") {
-		t.Fatalf("unknown journey must be rejected: %v", fields)
-	}
-	if fields := ValidateJourneyReference("login-journey", nil, "checks[0]"); len(fields) == 0 {
-		t.Fatal("any journey reference in the empty catalog must be rejected")
-	}
-}
-
 // The public declaration parser is intentionally the only normal YAML path.
 // Retired names must not cause their archived schemas to be compiled on demand.
 func TestValidateSchemaRejectsRetiredSchemaNames(t *testing.T) {

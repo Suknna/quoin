@@ -362,8 +362,6 @@ func backendOf(kind string) string {
 		return "kubernetes"
 	case "real_external_system":
 		return "real_external"
-	case "human_browser":
-		return "human_browser"
 	}
 	return "contract"
 }

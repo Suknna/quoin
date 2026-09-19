@@ -91,7 +91,6 @@ func (application *apiServer) startUpgradeMaintenanceRuntime(ctx context.Context
 		Slots: application.runtime, Analyses: application.analyses,
 		Investigations: application.investigations, Knowledge: application.knowledgeService,
 		BusinessSystems: application.systems, Inspections: application.inspections,
-		Browsers: application.browsers,
 	}
 	go sweeper.RunLeaseSweeper(ctx)
 	sharedops.LogEvent("quoin", "info", "upgrade.maintenance_boot", "durable upgrade reconciliation started")

@@ -36,7 +36,7 @@ func seedDirectChatBusinessContext(t *testing.T, db *sql.DB, key string, metrics
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','{}','test','test',?,?,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',1,?,?,?,?,?,1,'UTC')`, systemID, contractID, string(declaration), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", now, key, "Mall live Prometheus", metricsConnectionID)
+	config, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','{}','test','test',?,?,?,?,?,?,?,1,'UTC')`, systemID, contractID, string(declaration), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", now, key, "Mall live Prometheus", metricsConnectionID)
 	if err != nil {
 		t.Fatal(err)
 	}

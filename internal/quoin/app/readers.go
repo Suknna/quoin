@@ -89,7 +89,6 @@ func (application *apiServer) configureReadOnly(reader execution.Reader) error {
 		return err
 	}
 	application.systems.SetReader(reader)
-	application.browsers.SetReader(reader)
 	if application.backups != nil {
 		if err := application.backups.SetReader(reader); err != nil {
 			return err

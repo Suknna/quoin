@@ -440,7 +440,6 @@ func isolate(ctx context.Context, database *sql.DB, username string) (int64, aut
 			// Disabled is the safe terminal state, so exitMaintenance stays reachable
 			// without exposing ordinary connection writes during maintenance.
 			{`UPDATE connections SET enabled=0,revalidation_required=1,row_version=row_version+1 WHERE enabled=1 OR revalidation_required=0`, nil},
-			{`UPDATE browser_identities SET state='AuthenticationRequired',row_version=row_version+1 WHERE state='Ready'`, nil},
 			{`UPDATE maintenance_state SET active=1,reason='Restore',entered_at=?,entered_by_type='system',entered_by_id=0,row_version=row_version+1 WHERE id=1 AND active=0`, []any{now}},
 		}
 		for _, statement := range statements {
@@ -526,7 +525,6 @@ func insertChecklist(ctx context.Context, conn execution.Executor, revision, adm
 	}
 	for _, table := range []struct{ kind, query, code string }{
 		{"AlertSource", `SELECT source_key FROM alert_sources ORDER BY source_key`, "disabled"},
-		{"BrowserIdentity", `SELECT id FROM browser_identities ORDER BY id`, "authentication_required"},
 	} {
 		rows, err := conn.QueryContext(ctx, table.query)
 		if err != nil {

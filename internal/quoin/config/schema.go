@@ -162,8 +162,8 @@ func describe(fields []FieldError) []FieldError {
 			fields[index].Reason = "缺少必填字段: " + stripLocation(message)
 			fields[index].Remediation = "参照模板补齐必填字段"
 		case strings.Contains(message, "oneOf"):
-			fields[index].Reason = "巡检项必须且只能匹配 promql 或 browser 的一种封闭形态"
-			fields[index].Remediation = "检查 kind 与对应字段，删除另一种形态的字段"
+			fields[index].Reason = "巡检项必须匹配 promql 的封闭形态"
+			fields[index].Remediation = "检查 kind 与对应字段，删除不属于该形态的字段"
 		case strings.Contains(message, "expected integer"):
 			fields[index].Reason = "字段必须是整数: " + stripLocation(message)
 			fields[index].Remediation = "使用整数值"

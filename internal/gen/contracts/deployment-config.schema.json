@@ -15,9 +15,6 @@
       "$ref": "#/$defs/plinthConfig"
     },
     {
-      "$ref": "#/$defs/lintelConfig"
-    },
-    {
       "$ref": "#/$defs/steleConfig"
     }
   ],
@@ -70,8 +67,7 @@
         "document",
         "publicOrigin",
         "publishMode",
-        "secretDirectory",
-        "lintelBrowserSlots"
+        "secretDirectory"
       ],
       "properties": {
         "document": {
@@ -99,15 +95,6 @@
         },
         "secretDirectory": {
           "$ref": "#/$defs/absolutePath"
-        },
-        "lintelBrowserSlots": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "lintelShmSizeBytes": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 1073741824
         }
       },
       "allOf": [
@@ -160,8 +147,7 @@
         "releaseSubjectDigest",
         "deploymentConfigDigest",
         "backend",
-        "architecture",
-        "browserChromiumRevision"
+        "architecture"
       ],
       "properties": {
         "releaseVersion": {
@@ -188,11 +174,6 @@
             "linux/amd64",
             "linux/arm64"
           ]
-        },
-        "browserChromiumRevision": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
         }
       }
     },
@@ -240,7 +221,7 @@
         },
         "enabledPlugins": {
           "$ref": "#/$defs/enabledPlugins",
-          "description": "显式插件启用白名单（ADR-0004）。字段省略=启用全部 DefaultEnabled 插件（prometheus/thanos/alertmanager）；显式空数组=全部停用——省略与空数组是不同的部署事实。未知插件 ID 使组件启动失败。browser 与 kubernetes 插件已退役，显式列出同样启动失败。"
+          "description": "显式插件启用白名单（ADR-0004）。字段省略=启用全部 DefaultEnabled 插件（prometheus/thanos/alertmanager）；显式空数组=全部停用——省略与空数组是不同的部署事实。未知插件 ID 使组件启动失败。"
         },
         "authentication": {
           "$ref": "#/$defs/quoinAuthentication"
@@ -580,43 +561,6 @@
         "quoinRuntimeClientPrivateKeyFile": {
           "$ref": "#/$defs/absolutePath",
           "description": "Plinth 客户端证书私钥；只读挂载的部署 Secret。"
-        }
-      }
-    },
-    "lintelConfig": {
-      "$anchor": "lintelConfig",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "component",
-        "stateDirectory",
-        "quoinRuntimeEndpoint",
-        "quoinRuntimeCaFile",
-        "browserSlots",
-        "minimumShmBytes"
-      ],
-      "properties": {
-        "component": {
-          "const": "lintel"
-        },
-        "stateDirectory": {
-          "$ref": "#/$defs/absolutePath"
-        },
-        "quoinRuntimeEndpoint": {
-          "$ref": "#/$defs/quoinRuntimeEndpoint"
-        },
-        "quoinRuntimeCaFile": {
-          "$ref": "#/$defs/absolutePath"
-        },
-        "browserSlots": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "固定浏览器容量；同一 boot 不得变化。"
-        },
-        "minimumShmBytes": {
-          "type": "integer",
-          "minimum": 67108864,
-          "description": "与 Kubernetes emptyDir 或 Compose shm_size 的配置容量一致；Lintel 启动时据此验证 /dev/shm。"
         }
       }
     },

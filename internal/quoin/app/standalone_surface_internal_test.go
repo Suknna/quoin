@@ -1,10 +1,8 @@
 package app
 
-// The standalone browser identity surface is retired with the browser
-// business (受控浏览器退役): its implementation stays in browser_standalone.go
-// but no route mounts it, so its former HTTP coverage is gone. This file now
-// only owns the surface boot helper shared by tests that exercise the
-// remaining public routes (e.g. the runtime slot gate).
+// This file owns the surface boot helper shared by tests that exercise the
+// remaining public routes (e.g. the runtime slot gate): the real handler
+// graph, real admin initialization and the real two-step login.
 
 import (
 	"encoding/json"
@@ -44,7 +42,7 @@ func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface 
 		RootKeyFile:               filepath.Join(secrets, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(secrets, "runtime-tls.key"),
-		RuntimeClientCAFile:     filepath.Join(secrets, "stele-service-token"),
+		RuntimeClientCAFile:       filepath.Join(secrets, "stele-service-token"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -115,9 +113,9 @@ func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, passwor
 	if response, body := do(http.MethodPost, "/api/v1/auth/flow/challenge", `{"contactId":"`+flow.Contacts[0].ID+`"}`, sessionHeaders); response.StatusCode != http.StatusOK {
 		t.Fatalf("challenge: %d %s", response.StatusCode, body)
 	}
-	verifyResponse, verifyBody := do(http.MethodPost, "/api/v1/auth/flow/verify", `{"code":"`+sender.lastCode()+`"}`, sessionHeaders)
+	verifyResponse, _ := do(http.MethodPost, "/api/v1/auth/flow/verify", `{"code":"`+sender.lastCode()+`"}`, sessionHeaders)
 	if verifyResponse.StatusCode != http.StatusOK {
-		t.Fatalf("verify: %d %s", verifyResponse.StatusCode, verifyBody)
+		t.Fatalf("verify: %d %s", verifyResponse.StatusCode, body)
 	}
 	sessionCookie := scenarioSetCookie(verifyResponse.Cookies(), scenarioSessionCookieName)
 	if sessionCookie == nil {

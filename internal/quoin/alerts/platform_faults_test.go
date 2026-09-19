@@ -87,7 +87,7 @@ func TestPlatformFaultObservationsAuditAutomatically(t *testing.T) {
 	reporter := NewPlatformFaultReporter(service)
 	ctx := context.Background()
 
-	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", false); err != nil {
+	if err := reporter.ObserveRuntimeConnection(ctx, "plinth", false); err != nil {
 		t.Fatal(err)
 	}
 	row := scanAuditRow(t, database.SQL, `SELECT actor_type,actor_id,action,outcome,phase,correlation_id,domain_ref_type,domain_ref_id,initiator_type,initiator_id FROM audit_events WHERE action=?`, opFaultRuntime)
@@ -97,10 +97,10 @@ func TestPlatformFaultObservationsAuditAutomatically(t *testing.T) {
 	}
 	// A repeated observation advances only diagnostics and records its own
 	// bounded success fact.
-	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", false); err != nil {
+	if err := reporter.ObserveRuntimeConnection(ctx, "plinth", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := reporter.ObserveRuntimeConnection(ctx, "lintel", true); err != nil {
+	if err := reporter.ObserveRuntimeConnection(ctx, "plinth", true); err != nil {
 		t.Fatal(err)
 	}
 	if got := countRows(t, database.SQL, `SELECT COUNT(*) FROM audit_events WHERE action=? AND outcome='success'`, opFaultRuntime); got != 3 {

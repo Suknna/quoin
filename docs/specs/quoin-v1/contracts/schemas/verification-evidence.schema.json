@@ -132,8 +132,7 @@
             "metric",
             "state",
             "digest_equal",
-            "resource_absent",
-            "human_observation"
+            "resource_absent"
           ]
         },
         "expected": {},
@@ -169,8 +168,6 @@
             "logs",
             "metrics",
             "trace",
-            "screenshot",
-            "video",
             "database",
             "manifest",
             "sigstore_bundle"
@@ -206,7 +203,7 @@
           "if": {
             "properties": {
               "kind": {
-                "enum": ["stdout", "stderr", "logs", "metrics", "trace", "screenshot", "video", "database"]
+                "enum": ["stdout", "stderr", "logs", "metrics", "trace", "database"]
               }
             },
             "required": ["kind"]
@@ -229,13 +226,11 @@
       "additionalProperties": false,
       "required": ["backend", "architecture", "toolchain_digest", "capability_ids"],
       "properties": {
-        "backend": { "enum": ["contract", "process", "compose", "kubernetes", "deployment_site", "real_external", "human_browser"] },
+        "backend": { "enum": ["contract", "process", "compose", "kubernetes", "real_external"] },
         "architecture": { "enum": ["not_applicable", "linux/amd64", "linux/arm64"] },
         "kubernetes_version": { "type": "string", "minLength": 1 },
         "docker_engine_version": { "type": "string", "minLength": 1 },
         "compose_version": { "type": "string", "minLength": 1 },
-        "browser_artifact": { "enum": ["playwright_chromium", "branded_chrome"] },
-        "browser_version": { "type": "string", "minLength": 1 },
         "toolchain_digest": { "$ref": "#/$defs/digest" },
         "external_stack_digest": { "$ref": "#/$defs/digest" },
         "fault_backend_digest": { "$ref": "#/$defs/digest" },
@@ -251,11 +246,6 @@
           "if": { "properties": { "backend": { "const": "compose" } }, "required": ["backend"] },
           "then": { "required": ["docker_engine_version", "compose_version"], "properties": { "docker_engine_version": {}, "compose_version": {} } },
           "else": { "properties": { "docker_engine_version": false, "compose_version": false } }
-        },
-        {
-          "if": { "properties": { "backend": { "const": "human_browser" } }, "required": ["backend"] },
-          "then": { "required": ["browser_artifact", "browser_version"], "properties": { "browser_artifact": {}, "browser_version": {} } },
-          "else": { "properties": { "browser_artifact": false, "browser_version": false } }
         }
       ]
     },

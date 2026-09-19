@@ -25,7 +25,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 		RootKeyFile:               filepath.Join(root, "secrets", "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "secrets", "runtime.key"),
-		RuntimeClientCAFile:     filepath.Join(root, "secrets", "stele"),
+		RuntimeClientCAFile:       filepath.Join(root, "secrets", "stele"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestRuntimeConnectionProjectionFencesSupersededDetach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewRuntimeControl(slots, "test", "catalog", nil, nil)
+	service := NewRuntimeControl(slots, "test", nil, nil)
 	service.PlatformFaults = alerts.NewPlatformFaultReporter(alertService)
 	ctx := context.Background()
 

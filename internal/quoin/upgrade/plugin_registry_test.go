@@ -114,7 +114,7 @@ func TestPluginRegistryMigrationPreservesHistoryAndAddsCapacity(t *testing.T) {
 	if report.MigrationID != pluginRegistryMigrationID || report.LegacySchemaDigest != pluginRegistrySchemaDigest {
 		t.Fatalf("migration report = %+v", report)
 	}
-	// 历史事实逐列保留：业务系统、声明版本、历史 Run、观测资源、浏览器身份。
+	// 历史事实逐列保留：业务系统、声明版本、历史 Run、观测资源。
 	var enabled int
 	if err := conn.QueryRowContext(context.Background(), `SELECT enabled FROM business_systems WHERE id=1`).Scan(&enabled); err != nil || enabled != 1 {
 		t.Fatalf("business system history lost: %v %v", enabled, err)
@@ -127,9 +127,10 @@ func TestPluginRegistryMigrationPreservesHistoryAndAddsCapacity(t *testing.T) {
 	if err := conn.QueryRowContext(context.Background(), `SELECT current FROM observed_resources WHERE id=1`).Scan(&identityCurrent); err != nil || identityCurrent != 1 {
 		t.Fatalf("observed resource history lost: %v %v", identityCurrent, err)
 	}
-	var identityKey sql.NullString
-	if err := conn.QueryRowContext(context.Background(), `SELECT identity_key FROM browser_identities WHERE id=1`).Scan(&identityKey); err != nil || identityKey.Valid {
-		t.Fatalf("bound identity must keep NULL identity_key: %v %v", identityKey, err)
+	// 浏览器业务已退役：前置版本中的 browser_* 表在重塑后整体消失。
+	var browserObjects int
+	if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'browser_%'`).Scan(&browserObjects); err != nil || browserObjects != 0 {
+		t.Fatalf("retired browser objects must be dropped, found %d: %v", browserObjects, err)
 	}
 	// 新容量为空表：独立计划、来源观测、业务视图。
 	var plans, observationRuns, views int

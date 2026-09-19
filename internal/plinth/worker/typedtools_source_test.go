@@ -30,6 +30,32 @@ type thanosGrantRuntimeClient struct {
 	denyGrantID int64
 }
 
+// fakeToolCallChannel exercises the same BeginToolCall -> CompleteToolCall
+// control request sequence used by a live Runner, while retaining every
+// request for the assertions below.
+type fakeToolCallChannel struct {
+	begins    []*runtimev1.BeginToolCall
+	completes []*runtimev1.CompleteToolCall
+}
+
+func (channel *fakeToolCallChannel) Request(_ context.Context, envelope *runtimev1.ControlEnvelope) (*runtimev1.ControlEnvelope, error) {
+	if begin := envelope.GetBeginToolCall(); begin != nil {
+		channel.begins = append(channel.begins, begin)
+		return &runtimev1.ControlEnvelope{Msg: &runtimev1.ControlEnvelope_BeginToolCallAck{
+			BeginToolCallAck: &runtimev1.BeginToolCallAck{Accepted: true},
+		}}, nil
+	}
+	if complete := envelope.GetCompleteToolCall(); complete != nil {
+		channel.completes = append(channel.completes, complete)
+		return &runtimev1.ControlEnvelope{Msg: &runtimev1.ControlEnvelope_CompleteToolCallAck{
+			CompleteToolCallAck: &runtimev1.CompleteToolCallAck{Accepted: true, CommittedPayload: complete.GetPayload()},
+		}}, nil
+	}
+	return nil, fmt.Errorf("unexpected control request %T", envelope.Msg)
+}
+
+func (*fakeToolCallChannel) BearerToken() (string, error) { return "test-runtime-token", nil }
+
 func (*thanosGrantRuntimeClient) Connect(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[runtimev1.ControlEnvelope, runtimev1.ControlEnvelope], error) {
 	return nil, fmt.Errorf("Connect is not expected in typed tool execution")
 }

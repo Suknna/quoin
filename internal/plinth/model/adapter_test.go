@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
@@ -37,25 +38,22 @@ func sseChunk(t *testing.T, writer http.ResponseWriter, payload string) {
 func TestAdapterSendsCanonicalOpenAITools(t *testing.T) {
 	for _, agentVersion := range []string{"initial-analysis-v1", "investigation-v1"} {
 		t.Run(agentVersion, func(t *testing.T) {
-			toolsJSON, err := attempt.CanonicalToolsJSON(agentVersion)
+			registry := builtin.Registry()
+			enabled, err := registry.ResolveEnabled(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if agentVersion == "investigation-v1" {
-				var canonical []struct {
-					Function struct {
-						Name       string         `json:"name"`
-						Parameters map[string]any `json:"parameters"`
-					} `json:"function"`
-				}
-				if err := json.Unmarshal(toolsJSON, &canonical); err != nil {
-					t.Fatal(err)
-				}
-				for _, tool := range canonical {
-					if tool.Function.Name == "quoin_browser" && tool.Function.Parameters["type"] != nil {
-						t.Fatalf("canonical quoin_browser schema unexpectedly changed: %#v", tool.Function.Parameters)
-					}
-				}
+			catalogs, err := attempt.BuildCatalogs(registry, attempt.Implementations(), enabled)
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalog, err := catalogs.CatalogFor(agentVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			toolsJSON, err := catalog.ProviderToolsJSON()
+			if err != nil {
+				t.Fatal(err)
 			}
 			provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				defer request.Body.Close()
@@ -83,16 +81,9 @@ func TestAdapterSendsCanonicalOpenAITools(t *testing.T) {
 						continue
 					}
 					// OpenAI-compatible providers, including DeepSeek, require every
-					// function parameter root to declare object. The investigation
-					// browser tool is a closed oneOf union, so it exercises the
-					// adapter's non-trivial JSON Schema path rather than a flat tool.
+					// function parameter root to declare object.
 					if tool.Function.Parameters["type"] != "object" {
 						t.Errorf("tools[%d] %q parameters root type=%#v, want object: %#v", index, tool.Function.Name, tool.Function.Parameters["type"], tool.Function.Parameters)
-					}
-					if agentVersion == "investigation-v1" && tool.Function.Name == "quoin_browser" {
-						if _, ok := tool.Function.Parameters["oneOf"]; !ok {
-							t.Errorf("quoin_browser lost its closed oneOf validation on the provider wire: %#v", tool.Function.Parameters)
-						}
 					}
 				}
 				writer.Header().Set("Content-Type", "application/json")

@@ -2,8 +2,8 @@
 // model-tool contract, the optional execution interfaces and the explicit
 // registry (ADR-0004).
 //
-// The contract is free of Quoin business dependencies so Plinth, Lintel,
-// Quoin and future hosts can link it without pulling in the control plane.
+// The contract is free of Quoin business dependencies so Plinth, Quoin and
+// future hosts can link it without pulling in the control plane.
 // It splits cleanly along the control-plane / runtime boundary:
 //
 //   - Descriptors are pure data (identity, capabilities, tools, templates,
@@ -67,8 +67,7 @@ var executionCapabilities = map[Capability]bool{
 // capability call. The vocabulary is aligned with the existing attempt
 // catalog: worker_local tools run inside the disposable Plinth worker
 // sandbox, plinth_supervisor tools run in the Plinth supervisor process,
-// quoin tools run in the Quoin control plane, and lintel marks a browser
-// action executed by a Lintel child attempt.
+// and quoin tools run in the Quoin control plane.
 type ExecutionLocation string
 
 const (
@@ -79,8 +78,6 @@ const (
 	LocationPlinthSupervisor ExecutionLocation = "plinth_supervisor"
 	// LocationQuoin: Quoin control plane process.
 	LocationQuoin ExecutionLocation = "quoin"
-	// LocationLintel: Lintel browser runtime child execution.
-	LocationLintel ExecutionLocation = "lintel"
 )
 
 // locationSet is the closed execution-location vocabulary.
@@ -88,21 +85,15 @@ var locationSet = map[ExecutionLocation]bool{
 	LocationWorkerLocal:      true,
 	LocationPlinthSupervisor: true,
 	LocationQuoin:            true,
-	LocationLintel:           true,
 }
 
 // Well-known plugin IDs. They are naming authorities only: this package
 // registers no descriptors and no bindings, and an ID becomes usable only
-// when a host process actually registers the plugin. The browser and
-// kubernetes plugins are retired: their descriptors stay registered as the
-// declaration authority of their compiled implementations (frozen-history
-// compatibility), flagged Retired so they are never advertised or enabled.
+// when a host process actually registers the plugin.
 const (
-	BrowserID      = "browser"
 	PrometheusID   = "prometheus"
 	ThanosID       = "thanos"
 	AlertmanagerID = "alertmanager"
-	KubernetesID   = "kubernetes"
 )
 
 // Descriptor is the static, declarative description of one plugin: stable
@@ -127,17 +118,8 @@ type Descriptor struct {
 	// tools, CapabilityCollect only with templates.
 	Capabilities []Capability
 	// DefaultEnabled is the enablement default when deployment config is
-	// silent. Retired plugins must set false (registration enforces it);
-	// plugins backing the default mainline set true.
+	// silent; plugins backing the default mainline set true.
 	DefaultEnabled bool
-	// Retired marks a plugin whose business is retired (受控退役): the
-	// descriptor stays REGISTERED — it remains the declaration authority
-	// that pins its compiled tool implementations and lets executing hosts
-	// serve frozen historical attempts — but it is never advertised or
-	// enabled again. ResolveEnabled rejects a retired ID exactly like an
-	// unknown one, and no newly frozen catalog ever carries a retired
-	// plugin's tools. Registration enforces Retired => !DefaultEnabled.
-	Retired bool
 	// ConfigSchema, when non-nil, is the closed JSON Schema (draft
 	// 2020-12, top-level object with additionalProperties disabled) every
 	// instance settings document must satisfy. A nil schema is legal only
@@ -149,8 +131,8 @@ type Descriptor struct {
 	// resolved at call time (see Call).
 	ConfigSchema map[string]any
 	// ConnectionKind names the external platform kind every instance binds
-	// to (e.g. "prometheus", "kubernetes", "alertmanager", "browser").
-	// Empty means the plugin needs no platform connection.
+	// to (e.g. "prometheus", "alertmanager"). Empty means the plugin needs
+	// no platform connection.
 	ConnectionKind string
 	// Tools is the versioned model tool catalog (description only; tools
 	// execute wherever their ExecutionLocation says, via a bound

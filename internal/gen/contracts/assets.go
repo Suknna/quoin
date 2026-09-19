@@ -26,12 +26,6 @@ var (
 	//go:embed readiness-response.schema.json
 	ReadinessResponseSchema []byte
 
-	//go:embed browser-execution.schema.json
-	BrowserExecutionSchema []byte
-
-	//go:embed browser-tool.schema.json
-	BrowserToolSchema []byte
-
 	//go:embed release-manifest.schema.json
 	ReleaseManifestSchema []byte
 

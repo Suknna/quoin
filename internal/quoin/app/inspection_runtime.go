@@ -130,8 +130,7 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 }
 
 // dispatchInspectionCancellation routes an already-committed inspection fence.
-// PromQL collection and report analysis run on Plinth; journey collection is
-// owned by Lintel and therefore flows through the shared journey reconciler.
+// PromQL collection and report analysis both run on Plinth.
 func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Context, attemptID int64) error {
 	if service.Inspections == nil {
 		return fmt.Errorf("inspections are not wired")
@@ -146,19 +145,6 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 		// after its producer/scheduler are removed so migration fences reach the
 		// physical worker instead of becoming stranded database state.
 		scopeType = "legacy_resource_refresh_run"
-	}
-	if attemptType == "inspection_collection" && scopeType == "run_check" {
-		var journeyCount int
-		if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_operations WHERE owner_attempt_id=? AND kind='journey'`, attemptID).Scan(&journeyCount); err != nil {
-			return err
-		}
-		if journeyCount != 0 {
-			// The shared reconciler sends CancelAttempt to Lintel or closes an
-			// undispatched journey locally. It owns the Browser Operation stop
-			// fence and must not be bypassed by a generic Plinth frame.
-			service.reconcileJourneyVerificationChildren(ctx)
-			return nil
-		}
 	}
 	if attemptType != "inspection_collection" && attemptType != "inspection_analysis" {
 		return fmt.Errorf("attempt %d is not an inspection cancellation target", attemptID)
@@ -180,9 +166,7 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 	})
 }
 
-// dispatchQueuedInspections sweeps the independent Plinth and Lintel paths.
-// A Plinth outage must not prevent a scheduled browser check from entering the
-// existing Lintel capacity queue.
+// dispatchQueuedInspections sweeps the queued Plinth paths.
 func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 	if service.Inspections == nil {
 		return
@@ -210,22 +194,6 @@ func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 			}
 		}
 	}
-	// A freshly created Run has no browser runtime event to react to yet:
-	// drive its identity-serial admission here (the same sweep the browser
-	// event flow re-runs), then dispatch any operation-ready journey child.
-	for admitted := 0; admitted < journeyConvergenceBatchSize; admitted++ {
-		ok, admitErr := service.Inspections.AdmitNextJourneyChild(ctx)
-		if admitErr != nil {
-			sharedops.LogEvent("quoin", "error", "inspection.journey_admit", admitErr.Error())
-			break
-		}
-		if !ok {
-			break
-		}
-	}
-	// Ready-dispatch is idempotent; false only means no child was dispatched
-	// in this pass (their operations may still be starting).
-	service.dispatchReadyJourneyAttempts(ctx)
 }
 
 // RunInspectionScheduler starts the durable minute scheduler after every
@@ -237,10 +205,8 @@ func (service *RuntimeService) RunInspectionScheduler(ctx context.Context) {
 	}
 	availability := func(ctx context.Context) inspection.RuntimeAvailability {
 		plinth, plinthErr := service.Slots.View(ctx, qruntime.SlotPlinth)
-		lintel, lintelErr := service.Slots.View(ctx, qruntime.SlotLintel)
 		return inspection.RuntimeAvailability{
 			Plinth: plinthErr == nil && plinth.Connected && plinth.ConnectionEpoch != nil,
-			Lintel: lintelErr == nil && lintel.Connected && lintel.ConnectionEpoch != nil,
 		}
 	}
 	if blocking := service.MaintenanceBlocking; blocking != nil {

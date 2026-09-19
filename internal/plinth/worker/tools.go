@@ -77,36 +77,17 @@ const (
 	spillLines = 2000
 )
 
-// ProviderToolsJSON delegates to Quoin's frozen catalog renderer. This keeps
-// provider schema/digest pinning byte-identical while the worker still owns
-// execution-mode dispatch.
-func ProviderToolsJSON(agentVersions ...string) ([]byte, error) {
-	agentVersion := WorkerAgentVersion
-	if len(agentVersions) == 1 {
-		agentVersion = agentVersions[0]
-	}
-	return attempt.CanonicalToolsJSON(agentVersion)
-}
-
-// ProviderToolsDigest is the SHA-256 of ProviderToolsJSON as hex text.
-func ProviderToolsDigest(agentVersions ...string) (string, error) {
-	body, err := ProviderToolsJSON(agentVersions...)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
-}
-
 // ProviderToolsJSONForInput renders the provider tool schema of ONE attempt:
 // attempts created with per-attempt freezing carry their frozen catalog
 // inside the canonical input document (ADR-0004) and render exactly those
-// bytes; legacy inputs fall back to the historical generation rendering.
+// bytes; legacy inputs created before per-attempt freezing are no longer
+// resolvable and fail explicitly.
 func ProviderToolsJSONForInput(canonicalInput []byte, agentVersion string) ([]byte, error) {
+	_ = agentVersion
 	if catalog, ok := attempt.CatalogFromInputDocument(canonicalInput); ok {
 		return catalog.ProviderToolsJSON()
 	}
-	return ProviderToolsJSON(agentVersion)
+	return nil, fmt.Errorf("attempt input predates per-attempt catalog freezing and has no resolvable tool catalog")
 }
 
 // ProviderToolsDigestForInput is the SHA-256 hex of
@@ -154,8 +135,6 @@ func ExecutionModeFor(name string) string {
 	switch name {
 	case "artifact_read", "artifact_grep", "thanos_query":
 		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
-	case "quoin_browser":
-		return "TOOL_EXECUTION_MODE_QUOIN_BROWSER"
 	default:
 		return "TOOL_EXECUTION_MODE_WORKER_LOCAL"
 	}

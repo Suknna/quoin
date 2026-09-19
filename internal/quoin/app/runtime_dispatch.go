@@ -31,7 +31,7 @@ import (
 
 // sendEnvelope stamps per-direction ids and forwards only through the exact
 // boot/epoch stream embedded in the message. A stale dispatch must fail rather
-// than reach a successor Lintel stream.
+// than a successor stream.
 func (service *RuntimeService) sendEnvelope(slot string, envelope *runtimev1.ControlEnvelope) error {
 	if service.sendEnvelopeForTest != nil {
 		return service.sendEnvelopeForTest(slot, envelope)
@@ -278,8 +278,6 @@ func (service *RuntimeService) FetchCredentialGrant(ctx context.Context, request
 		// either Prometheus or Thanos credentials, while ConnectionType remains
 		// the authoritative discriminator.
 		response.Secret = &runtimev1.FetchCredentialGrantResponse_Thanos{Thanos: &runtimev1.ThanosCredentialSecret{Username: payload.Metrics.Username, Password: payload.Metrics.Password, BearerToken: payload.Metrics.BearerToken}}
-	case payload.Kubernetes != nil:
-		response.Secret = &runtimev1.FetchCredentialGrantResponse_Kubernetes{Kubernetes: &runtimev1.KubernetesCredentialSecret{Kubeconfig: payload.Kubernetes.Kubeconfig}}
 	case payload.ModelProvider != nil:
 		response.Secret = &runtimev1.FetchCredentialGrantResponse_ModelProvider{ModelProvider: &runtimev1.ModelProviderCredentialSecret{ApiKey: payload.ModelProvider.APIKey}}
 	default:
@@ -295,19 +293,6 @@ type thanosDetail struct {
 	ResponseType string `json:"responseType"`
 	SampleCount  int    `json:"sampleCount"`
 	SampleValue  string `json:"sampleValue"`
-}
-
-// kubernetesDetail is the supervisor's canonical kubernetes detail JSON.
-type kubernetesDetail struct {
-	Kind               string `json:"kind"`
-	EffectiveNamespace string `json:"effectiveNamespace"`
-	VersionOK          bool   `json:"versionOk"`
-	CoreDiscoveryOK    bool   `json:"coreDiscoveryOk"`
-	GroupedDiscoveryOK bool   `json:"groupedDiscoveryOk"`
-	PodsGetAllowed     bool   `json:"podsGetAllowed"`
-	PodsListAllowed    bool   `json:"podsListAllowed"`
-	EventsListAllowed  bool   `json:"eventsListAllowed"`
-	PodsLogGetAllowed  bool   `json:"podsLogGetAllowed"`
 }
 
 // parseTypedChild validates the schema kind and canonical detail against the
@@ -337,26 +322,6 @@ func parseTypedChild(schemaKind string, detail json.RawMessage) (*connections.Ty
 			Query: "vector(1)", ResponseType: "vector",
 			SampleCount: 1, SampleValue: sample,
 			DetailJSON: string(detail),
-		}}, nil
-	case "connection_probe_kubernetes_v1":
-		var parsed kubernetesDetail
-		if err := json.Unmarshal(detail, &parsed); err != nil {
-			return nil, fmt.Errorf("kubernetes detail unparseable: %w", err)
-		}
-		if parsed.Kind != "kubernetes" {
-			return nil, fmt.Errorf("kubernetes detail kind mismatch")
-		}
-		if parsed.EffectiveNamespace == "" {
-			// Failed probes may not have resolved a namespace; the typed
-			// child still requires a non-empty value (frozen default).
-			parsed.EffectiveNamespace = "default"
-		}
-		return &connections.TypedChild{Kubernetes: &connections.KubernetesProbeChild{
-			EffectiveNamespace: parsed.EffectiveNamespace,
-			VersionOK:          parsed.VersionOK, CoreDiscoveryOK: parsed.CoreDiscoveryOK,
-			GroupedDiscoveryOK: parsed.GroupedDiscoveryOK, PodsGetAllowed: parsed.PodsGetAllowed,
-			PodsListAllowed: parsed.PodsListAllowed, EventsListAllowed: parsed.EventsListAllowed,
-			PodsLogGetAllowed: parsed.PodsLogGetAllowed, DetailJSON: string(detail),
 		}}, nil
 	case "connection_probe_model_provider_v1":
 		var parsed modelProviderDetailJSON

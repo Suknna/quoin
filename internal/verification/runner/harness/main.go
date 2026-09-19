@@ -71,7 +71,7 @@ var plans = map[string]plan{
 					{Name: "dispatch-closure", Pkg: "./internal/quoin/analysis ./internal/quoin/attempt ./internal/quoin/connections"},
 					{Name: "persistence-adversarial", Pkg: "./internal/quoin/alerts ./internal/quoin/feedback ./internal/quoin/investigation ./internal/quoin/knowledge ./internal/quoin/artifact"},
 					{Name: "security-adversarial", Pkg: "./internal/quoin/auth ./internal/quoin/maintenance ./internal/quoin/recovery"},
-					{Name: "runtime-protocol", Pkg: "./internal/quoin/runtime ./internal/quoin/browser"},
+					{Name: "runtime-protocol", Pkg: "./internal/quoin/runtime"},
 				},
 			},
 		},
@@ -106,7 +106,7 @@ var plans = map[string]plan{
 			"duplicate": {
 				Groups: []group{
 					{Name: "relay-replay-idempotency", Pkg: "./internal/quoin/alerts", Run: "^TestDeliverRelayReplayIsIdempotent$|^TestResolvedClosesOccurrenceWithoutReopen$|^TestResolvedFirstCreatesClosedOccurrence$"},
-					{Name: "command-replay-over-http", Pkg: "./internal/quoin/app", Run: "^TestAdminUserCommandReplayOverHTTP$|^TestSSEFramingReplayAndCursorMatrix$|^TestBrowserExplorationRejectsConflictingActionResultReplay$"},
+					{Name: "command-replay-over-http", Pkg: "./internal/quoin/app", Run: "^TestAdminUserCommandReplayOverHTTP$|^TestSSEFramingReplayAndCursorMatrix$"},
 				},
 				Assertions: map[string][]string{
 					"fault-deterministic":       {"relay-replay-idempotency"},
@@ -139,17 +139,6 @@ var plans = map[string]plan{
 					"before-boundary": {"lease-renewal"},
 					"at-boundary":     {"lease-sweep", "lease-renewal"},
 					"after-boundary":  {"lease-sweep"},
-				},
-			},
-			"reconnect-grace": {
-				Groups: []group{
-					{Name: "grace-transitions", Pkg: "./internal/quoin/browser", Run: "^TestManualLoginReconnectGraceTransitionsAndExpires$"},
-					{Name: "grace-completion", Pkg: "./internal/quoin/browser", Run: "^TestPublishResultCompletesAnAwaitingReconnectManualLogin$"},
-				},
-				Assertions: map[string][]string{
-					"before-boundary": {"grace-transitions"},
-					"at-boundary":     {"grace-transitions", "grace-completion"},
-					"after-boundary":  {"grace-transitions"},
 				},
 			},
 			"reveal-handle-expiry": {

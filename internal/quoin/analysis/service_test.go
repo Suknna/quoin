@@ -128,7 +128,7 @@ func seedOccurrence(t *testing.T, db *sql.DB) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("c", 64), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
+	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
 	if err != nil {
 		t.Fatal(err)
 	}

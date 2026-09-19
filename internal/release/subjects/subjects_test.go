@@ -53,14 +53,6 @@ func testInventory() *Inventory {
 			"linux/arm64": {AssetName: names.Helper["linux/arm64"], SHA256: strings.TrimPrefix(digestAt(54), "sha256:")},
 		},
 		Bundles: bundleMap,
-		Browser: BrowserSubjects{
-			PlaywrightVersion: "1.62.1",
-			ChromiumRevision:  "1234",
-			Artifacts: map[string]BlobSubject{
-				"linux/amd64": {AssetName: "chromium-linux-amd64.zip", SHA256: strings.TrimPrefix(digestAt(60), "sha256:")},
-				"linux/arm64": {AssetName: "chromium-linux-arm64.zip", SHA256: strings.TrimPrefix(digestAt(61), "sha256:")},
-			},
-		},
 	}
 }
 

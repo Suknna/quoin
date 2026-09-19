@@ -5,6 +5,8 @@ package attempt
 // ordering and the model-call ledger fencing.
 
 import (
+	"sync"
+
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
@@ -87,7 +90,7 @@ func seedAttempt(t *testing.T, db *sql.DB) (int64, int64) {
 		t.Fatal(err)
 	}
 	attemptID, _ := attempt.LastInsertId()
-	snapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(?,'initial_analysis_v1','initial-analysis-renderer-v1',?,?)`, attemptID, testDigest, now)
+	snapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at) VALUES(?,'initial_analysis_v1','initial-analysis-renderer-v1',?,?,?)`, attemptID, testDigest, string(testCatalogJSON(t)), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,4 +389,51 @@ func TestQueuedAgentAttemptsAndDispatchInput(t *testing.T) {
 	if input.SchemaKind != "initial_analysis_v1" || len(input.ContentDigest) != 32 {
 		t.Fatalf("input=%+v", input)
 	}
+}
+
+// testCatalogJSON freezes the current initial-analysis catalog exactly as the
+// creation flows do, so seeded attempts resolve their frozen tool catalog.
+func testCatalogJSON(t *testing.T) []byte {
+	t.Helper()
+	catalogs := defaultTestCatalogs(t)
+	document, _, err := FrozenCatalogJSONForCreation(catalogs, "initial-analysis-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+// testCatalogDigest is the ToolSchemaDigest BeginModelCall must offer for a
+// seeded attempt: the digest of the same frozen catalog seedAttempt stored.
+func testCatalogDigest(t *testing.T) string {
+	t.Helper()
+	catalog := defaultTestCatalogs(t)
+	frozen, err := catalog.CatalogFor("initial-analysis-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := frozen.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+var defaultTestCatalogsOnce sync.Once
+var defaultTestCatalogsCache *Catalogs
+
+func defaultTestCatalogs(t *testing.T) *Catalogs {
+	t.Helper()
+	defaultTestCatalogsOnce.Do(func() {
+		registry := builtin.Registry()
+		enabled, err := registry.ResolveEnabled(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defaultTestCatalogsCache, err = BuildCatalogs(registry, Implementations(), enabled)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	return defaultTestCatalogsCache
 }

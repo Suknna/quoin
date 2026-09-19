@@ -28,8 +28,10 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
-var ErrNotFound = errors.New("inspection run source not found")
-var ErrCommandReused = errors.New("client command id reused with a different request")
+var (
+	ErrNotFound      = errors.New("inspection run source not found")
+	ErrCommandReused = errors.New("client command id reused with a different request")
+)
 
 // errResultReplayed marks an identical redelivery of an already-committed
 // Runtime result. The durable fact stands from the first commit; the replay
@@ -51,11 +53,7 @@ const (
 	commandPluginResult = "inspection_run.result.plugin"
 	commandPromqlResult = "inspection_run.result.promql"
 	commandReportResult = "inspection_run.result.report"
-	// Journey machinery identities (identity-serial admission and terminal
-	// gap settlement of run_check browser children).
 	commandDefaultPlan  = "inspection_plan.default.ensure"
-	commandJourneyAdmit = "inspection_run.journey.admit"
-	commandJourneyGap   = "inspection_run.gap.journey"
 	commandPromqlGap    = "inspection_run.gap.promql"
 )
 
@@ -90,25 +88,19 @@ type Service struct {
 	// 事务（台账+审计同事务提交），业务代码拿不到提交权。
 	runner *execution.Runner
 	// audit 是 runner 的审计写入器（时钟与本族一致）；模块自身不再直接写审计。
-	audit *audit.Writer
-	// JourneyCore commits run_check browser results through the shared frozen
-	// journey closure; wired by the app package.
-	JourneyCore    JourneyCore
+	audit          *audit.Writer
 	artifactWriter func(context.Context, execution.Executor, int64, []byte) (int64, error)
 
-	createPlan   *execution.Operation
-	updatePlan   *execution.Operation
-	createRun    *execution.Operation
-	scheduleRun  *execution.Operation
-	cancelRun    *execution.Operation
-	rerunRun     *execution.Operation
-	reanalyzeRun *execution.Operation
-	promqlResult *execution.Operation
-	pluginResult *execution.Operation
-	reportResult *execution.Operation
-	// Journey machinery operations.
-	journeyAdmit  *execution.Operation
-	journeyGap    *execution.Operation
+	createPlan    *execution.Operation
+	updatePlan    *execution.Operation
+	createRun     *execution.Operation
+	scheduleRun   *execution.Operation
+	cancelRun     *execution.Operation
+	rerunRun      *execution.Operation
+	reanalyzeRun  *execution.Operation
+	promqlResult  *execution.Operation
+	pluginResult  *execution.Operation
+	reportResult  *execution.Operation
 	promqlGap     *execution.Operation
 	opDefaultPlan *execution.Operation
 }
@@ -166,8 +158,6 @@ func (s *Service) registerOperations() {
 	s.promqlResult = register(execution.Operation{Name: commandPromqlResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.pluginResult = register(execution.Operation{Name: commandPluginResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.reportResult = register(execution.Operation{Name: commandReportResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
-	s.journeyAdmit = register(execution.Operation{Name: commandJourneyAdmit, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
-	s.journeyGap = register(execution.Operation{Name: commandJourneyGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.promqlGap = register(execution.Operation{Name: commandPromqlGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.opDefaultPlan = register(execution.Operation{Name: commandDefaultPlan, Class: execution.ClassWrite, ObjectType: ObjectInspectionPlan, Authorize: authorizeInspectionAdmin})
 }
@@ -495,7 +485,6 @@ type RunSummary struct {
 // queued execution that would silently run later.
 type RuntimeAvailability struct {
 	Plinth bool
-	Lintel bool
 }
 
 // runtimeUnavailableChild records a boundary-time Runtime outage as a terminal

@@ -23,7 +23,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/kubernetes"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
@@ -138,14 +137,11 @@ func NewService(db *sql.DB) *Service {
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
 	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
-	service.evidence.RegisterProjector(kubernetes.ReadToolName, kubernetes.EvidenceFor)
 	service.attempts.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
 		switch tool.Name {
 		case thanos.QueryToolName:
 			// ResolveQueryGrant returns the full resolution (grants + preflight).
 			return thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-		case kubernetes.ReadToolName:
-			return kubernetes.ResolveRead(ctx, conn, attemptID, toolCallID)
 		default:
 			return attempt.ToolResolution{}, fmt.Errorf("tool %s has no grant resolver", tool.Name)
 		}
@@ -154,16 +150,6 @@ func NewService(db *sql.DB) *Service {
 		switch tool.Name {
 		case thanos.QueryToolName:
 			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
-		case kubernetes.ReadToolName:
-			// The TOCTOU fence lives at fulfillment, not here: every
-			// FetchCredentialGrant for purpose kubernetes_read re-validates
-			// enabled/revision/generation/root binding per grant inside
-			// FulfillGrant's IMMEDIATE transaction (connections/grant.go ->
-			// kubernetes.ValidateGrantForFulfillment, pinned by
-			// TestValidateGrantForFulfillment*). Checking every mapping here
-			// would let one invalid connection reject valid siblings before
-			// partial results reach the model.
-			return nil
 		default:
 			return fmt.Errorf("tool %s has no grant validator", tool.Name)
 		}
@@ -338,7 +324,7 @@ type Input struct {
 
 // RenderedIntegration is one admin-enabled integration frozen into the
 // attempt input as its source-level read-only authority. Kind is
-// "metrics" (Prometheus/Thanos) or "kubernetes"; credentials never appear.
+// "metrics" (Prometheus/Thanos); credentials never appear.
 type RenderedIntegration struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
@@ -620,7 +606,7 @@ func resolveBusinessContext(ctx context.Context, tx audit.Reader, occurrenceID i
 func enabledIntegrations(ctx context.Context, tx audit.Reader) ([]RenderedIntegration, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT name, type FROM connections
-		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
+		WHERE type IN ('thanos','prometheus') AND enabled=1 AND revalidation_required=0
 		ORDER BY name, type`)
 	if err != nil {
 		return nil, err
@@ -632,11 +618,7 @@ func enabledIntegrations(ctx context.Context, tx audit.Reader) ([]RenderedIntegr
 		if err := rows.Scan(&name, &connectionType); err != nil {
 			return nil, err
 		}
-		kind := "metrics"
-		if connectionType == "kubernetes" {
-			kind = "kubernetes"
-		}
-		integrations = append(integrations, RenderedIntegration{Kind: kind, Name: name})
+		integrations = append(integrations, RenderedIntegration{Kind: "metrics", Name: name})
 	}
 	return integrations, rows.Err()
 }

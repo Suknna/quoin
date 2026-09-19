@@ -17,12 +17,12 @@ func TestSelectBuildSubjects(t *testing.T) {
 		{
 			name:    "any authoritative proto rebuilds every application",
 			changed: []string{"docs/specs/quoin-v1/contracts/runtime.proto"},
-			want:    []string{"frontend", "lintel", "plinth", "quoin", "stele"},
+			want:    []string{"frontend", "plinth", "quoin", "stele"},
 		},
 		{
 			name:    "worker proto rebuilds every application",
 			changed: []string{"docs/specs/quoin-v1/contracts/quoin/plinth/worker/v1/agent_worker.proto"},
-			want:    []string{"frontend", "lintel", "plinth", "quoin", "stele"},
+			want:    []string{"frontend", "plinth", "quoin", "stele"},
 		},
 		{
 			name:    "openapi rebuilds API producer and consumer",
@@ -50,34 +50,24 @@ func TestSelectBuildSubjects(t *testing.T) {
 			want:    []string{"frontend"},
 		},
 		{
-			name:    "backend Dockerfile rebuilds its component",
-			changed: []string{"deploy/images/lintel/Dockerfile"},
-			want:    []string{"lintel"},
-		},
-		{
 			name:    "shared image build script rebuilds every application",
 			changed: []string{"deploy/images/build.sh"},
-			want:    []string{"frontend", "lintel", "plinth", "quoin", "stele"},
+			want:    []string{"frontend", "plinth", "quoin", "stele"},
 		},
 		{
-			name:    "workspace metadata rebuilds frontend and lintel",
+			name:    "workspace metadata rebuilds the frontend",
 			changed: []string{"pnpm-lock.yaml"},
-			want:    []string{"frontend", "lintel"},
-		},
-		{
-			name:    "lintel catalog rebuilds its Quoin consumer",
-			changed: []string{"internal/lintel/catalog/catalog.go"},
-			want:    []string{"lintel", "quoin"},
+			want:    []string{"frontend"},
 		},
 		{
 			name:    "unclassified internal source conservatively rebuilds backends",
 			changed: []string{"internal/example/shared.go"},
-			want:    []string{"lintel", "plinth", "quoin", "stele"},
+			want:    []string{"plinth", "quoin", "stele"},
 		},
 		{
 			name:    "shared generated contracts rebuild every backend",
 			changed: []string{"internal/gen/contracts/release-inputs.yaml"},
-			want:    []string{"lintel", "plinth", "quoin", "stele"},
+			want:    []string{"plinth", "quoin", "stele"},
 		},
 		{
 			name:    "stock Caddy is never a build subject",
@@ -101,9 +91,9 @@ func TestSelectModeOutputsPolicySelection(t *testing.T) {
 	}{
 		{"deploy/caddy/Caddyfile", []byte(`"components":[]`)},
 		{"deploy/images/frontend/web-caddy.yaml", []byte(`"components":["frontend"]`)},
-		{"deploy/images/build.sh", []byte(`"components":["frontend","lintel","plinth","quoin","stele"]`)},
-		{"pnpm-lock.yaml", []byte(`"components":["frontend","lintel"]`)},
-		{"internal/lintel/catalog/catalog.go", []byte(`"components":["lintel","quoin"]`)},
+		{"deploy/images/build.sh", []byte(`"components":["frontend","plinth","quoin","stele"]`)},
+		{"pnpm-lock.yaml", []byte(`"components":["frontend"]`)},
+		{"cmd/stele/main.go", []byte(`"components":["stele"]`)},
 	} {
 		t.Run(test.changed, func(t *testing.T) {
 			original := os.Stdout

@@ -153,16 +153,6 @@ func (service *Service) runVerificationOn(ctx context.Context, conn execution.Ex
 		}
 		return VerificationRunDetail{}, err
 	}
-	// Browser checks execute through the Lintel journey executor: every check
-	// freezes a lintel-dispatched child Attempt and its journey operation, or
-	// settles deterministically as a local gap inside this transaction
-	// (CFG-VERIFYRUN-002, DATA-BROWSER-003/006).
-	var browserCount int
-	if err := conn.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
-		WHERE p.config_version_id=? AND c.kind='browser'`, versionID).Scan(&browserCount); err != nil {
-		return VerificationRunDetail{}, err
-	}
 	now := service.nowText()
 	insert, err := conn.ExecContext(ctx, `
 		INSERT INTO config_verification_runs(purpose,business_system_id,config_version_id,label_contract_version_id,state,row_version,created_by,created_at)
@@ -206,7 +196,7 @@ func (service *Service) runVerificationOn(ctx context.Context, conn execution.Ex
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM config_discoveries WHERE config_version_id=?`, versionID).Scan(&discoveryCount); err != nil {
 		return VerificationRunDetail{}, err
 	}
-	if promQLCount > 0 || browserCount > 0 || discoveryCount > 0 {
+	if promQLCount > 0 || discoveryCount > 0 {
 		// The scope trigger only permits child work beneath an active Run.
 		// This parent transition and every child/grant insert still share the
 		// creation transaction, so an unavailable connection rolls all of it back.
@@ -220,17 +210,6 @@ func (service *Service) runVerificationOn(ctx context.Context, conn execution.Ex
 		}
 		if err := createDiscoveryVerificationAttempts(ctx, conn, runID, versionID, contractID, now); err != nil {
 			return VerificationRunDetail{}, err
-		}
-		if browserCount > 0 {
-			if _, err := createBrowserVerificationAttempts(ctx, conn, runID, versionID, contractID, systemID, now); err != nil {
-				return VerificationRunDetail{}, err
-			}
-			// The run's browser checks share one Browser Identity and execute
-			// serially; admit the first child (and freeze its snapshot) inside
-			// the creation transaction, later children follow on Stop fences.
-			if _, err := admitNextJourneyChildOn(ctx, conn, now); err != nil {
-				return VerificationRunDetail{}, err
-			}
 		}
 	} else if checkCount == 0 {
 		// The deterministic completion path: with no check to execute, the
@@ -615,9 +594,8 @@ func verificationDetailOn(ctx context.Context, conn audit.Reader, systemID, vers
 	}
 	detail.CheckResults = []VerificationCheckResult{}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT r.plan_key,r.check_key,r.status,r.evidence_id,r.gap_reason,j.error_detail
+		SELECT r.plan_key,r.check_key,r.status,r.evidence_id,r.gap_reason,NULL
 		FROM config_verification_run_check_results r
-		LEFT JOIN browser_journey_results j ON j.attempt_id=r.attempt_id
 		WHERE r.verification_run_id=? ORDER BY r.plan_key,r.check_key`, runID)
 	if err != nil {
 		return VerificationRunDetail{}, err

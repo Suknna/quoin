@@ -28,10 +28,7 @@ func TestAgentModelCallWithToolClosure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	callID, err := service.BeginModelCall(ctx, BeginCall{
 		AttemptID: attemptID, CallSeq: 1, RetrySeq: 0,
 		ModelID:          "fixture-chat-1",
@@ -162,10 +159,7 @@ func TestToolCallPreflightOutcomeIsSingleAssignmentAndImmutable(t *testing.T) {
 	if _, err := db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=?`, now, now, attemptID); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := testCatalogDigest(t)
 	callID, err := service.BeginModelCall(ctx, BeginCall{AttemptID: attemptID, CallSeq: 1, ModelID: "fixture-chat-1", PromptDigest: strings.Repeat("a", 64), ToolSchemaDigest: digest, InputDigest: strings.Repeat("b", 64), RenderedDigest: strings.Repeat("c", 64), InputItems: []ModelInputItem{{Sequence: 1, ItemKind: "system_contract", ContentDigest: strings.Repeat("d", 64), Role: "system"}, {Sequence: 2, ItemKind: "tool_schema", ContentDigest: strings.Repeat("e", 64), Role: "system"}, {Sequence: 3, ItemKind: "snapshot", ContentDigest: testDigest, Role: "system"}}, ContextBudget: 4096, MaxOutput: 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -204,29 +198,17 @@ func TestToolCallPreflightOutcomeIsSingleAssignmentAndImmutable(t *testing.T) {
 // contract and then bypasses Go catalog validation deliberately. This proves
 // legacy Kubernetes verbs cannot be resurrected by a direct ledger insert.
 func TestFrozenSchemaRejectsLegacyKubernetesToolNames(t *testing.T) {
-	legacy := []string{"kubernetes_get", "kubernetes_list", "kubernetes_logs", "kubernetes_events"}
+	legacy := []string{"kubernetes_get", "kubernetes_list", "kubernetes_logs", "kubernetes_events", "kubernetes_read"}
 	for _, name := range legacy {
 		t.Run(name, func(t *testing.T) {
 			db := newTestDB(t)
 			defer db.Close()
 			attemptID, callID := sealedRawToolProposal(t, db, name)
 			if _, err := insertRawToolCall(db, attemptID, callID, name); err == nil {
-				t.Fatalf("legacy tool %q was accepted by frozen SQL", name)
+				t.Fatalf("retired tool %q was accepted by frozen SQL", name)
 			}
 		})
 	}
-	t.Run("kubernetes_read remains legal", func(t *testing.T) {
-		db := newTestDB(t)
-		defer db.Close()
-		attemptID, callID := sealedRawToolProposal(t, db, "kubernetes_read")
-		if _, err := insertRawToolCall(db, attemptID, callID, "kubernetes_read"); err != nil {
-			t.Fatalf("current Kubernetes tool rejected by frozen SQL: %v", err)
-		}
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE attempt_id=? AND tool_name='kubernetes_read' AND status='pending'`, attemptID).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("accepted kubernetes_read row count=%d err=%v", count, err)
-		}
-	})
 }
 
 // sealedRawToolProposal creates a correctly closed physical model call whose
@@ -243,10 +225,7 @@ func sealedRawToolProposal(t *testing.T, db *sql.DB, toolName string) (int64, in
 	if _, err := db.Exec(`UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=?`, now, now, attemptID); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := testCatalogDigest(t)
 	callID, err := service.BeginModelCall(context.Background(), BeginCall{
 		AttemptID: attemptID, CallSeq: 1, ModelID: "fixture-chat-1",
 		PromptDigest: strings.Repeat("a", 64), ToolSchemaDigest: digest,

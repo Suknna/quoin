@@ -106,32 +106,3 @@ type StreamView struct {
 	Epoch          uint64
 	ReleaseVersion string
 }
-
-// SetBrowserCapacity binds the Lintel Hello capacity to the exact live stream.
-// A replacement must explicitly provide a new Hello value; capacity never leaks
-// from an old boot or epoch into a successor.
-func (service *Service) SetBrowserCapacity(slotName, bootID string, epoch, capacity uint64) error {
-	if slotName != SlotLintel || capacity == 0 || capacity > uint64(^uint32(0)) {
-		return ErrNotConnected
-	}
-	service.mu.Lock()
-	defer service.mu.Unlock()
-	conn, live := service.conns[slotName]
-	if !live || conn.bootID != bootID || conn.epoch != epoch {
-		return ErrNotConnected
-	}
-	conn.browserCapacitySlots = uint32(capacity)
-	return nil
-}
-
-// BrowserCapacity returns the Hello-frozen capacity only while this exact
-// Lintel stream still owns the control plane.
-func (service *Service) BrowserCapacity(slotName, bootID string, epoch uint64) (uint32, error) {
-	service.mu.Lock()
-	defer service.mu.Unlock()
-	conn, live := service.conns[slotName]
-	if !live || conn.bootID != bootID || conn.epoch != epoch || conn.browserCapacitySlots == 0 {
-		return 0, ErrNotConnected
-	}
-	return conn.browserCapacitySlots, nil
-}

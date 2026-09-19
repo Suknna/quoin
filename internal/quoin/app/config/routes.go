@@ -10,7 +10,6 @@ import (
 	"net/http"
 
 	"github.com/Suknna/quoin/internal/quoin/businesssystem"
-	"github.com/Suknna/quoin/internal/quoin/config"
 )
 
 func base64Encode(value []byte) string { return base64.RawURLEncoding.EncodeToString(value) }
@@ -137,50 +136,4 @@ func (handler *Handler) getBusinessSystemConfig(ctx context.Context, input *stru
 type publishBody struct {
 	ClientCommandID                   string  `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	ExpectedCurrentPublishedVersionID *string `json:"expectedCurrentPublishedVersionId" pattern:"^[1-9][0-9]*$"`
-}
-
-func (handler *Handler) listKubernetesConnections(ctx context.Context, input *struct {
-	Session   string `cookie:"__Host-quoin-session"`
-	SystemKey string `path:"systemKey"`
-}) (*struct {
-	CacheControl string                                       `header:"Cache-Control"`
-	Body         []businesssystem.KubernetesConnectionMapping `json:"body"`
-}, error) {
-	if _, err := handler.reader(ctx, input.Session); err != nil {
-		return nil, err
-	}
-	mappings, err := handler.Systems.ListKubernetesConnectionMappings(ctx, input.SystemKey)
-	if err != nil {
-		return nil, mapDomainError(err)
-	}
-	return &struct {
-		CacheControl string                                       `header:"Cache-Control"`
-		Body         []businesssystem.KubernetesConnectionMapping `json:"body"`
-	}{CacheControl: noStore(), Body: mappings}, nil
-}
-
-func (handler *Handler) getJourneyCatalog(ctx context.Context, input *struct {
-	Session string `cookie:"__Host-quoin-session"`
-}) (*struct {
-	CacheControl string         `header:"Cache-Control"`
-	Body         map[string]any `json:"body"`
-}, error) {
-	// The catalog authenticates authentication-probe journeys: pure browser
-	// plugin capability, so a deployment without the plugin reads nothing.
-	if handler.BrowserEnabled != nil && !handler.BrowserEnabled() {
-		return nil, problem(http.StatusNotFound, "not_found", "当前部署未启用受控浏览器插件。")
-	}
-	if _, err := handler.reader(ctx, input.Session); err != nil {
-		return nil, err
-	}
-	document, version, digest, err := config.JourneyCatalog()
-	if err != nil {
-		return nil, problem(http.StatusInternalServerError, "unavailable", "暂时无法读取 Journey Catalog。")
-	}
-	return &struct {
-		CacheControl string         `header:"Cache-Control"`
-		Body         map[string]any `json:"body"`
-	}{CacheControl: noStore(), Body: map[string]any{
-		"version": version, "digest": digest, "catalogJson": document,
-	}}, nil
 }

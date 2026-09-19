@@ -3,10 +3,8 @@ package connections
 // Typed connection probe executors for the Plinth supervisor (T07). The
 // executors implement exactly the closed action sets frozen in
 // contracts/connection-probes.yaml: thanos vector(1) against the configured
-// Prometheus-compatible query endpoint, and the kubernetes read-capability
-// set (server version, core/grouped discovery, four SelfSubjectAccess
-// Reviews). Every outcome is a typed observation; nothing here infers
-// capabilities beyond the frozen sets.
+// Prometheus-compatible query endpoint. Every outcome is a typed
+// observation; nothing here infers capabilities beyond the frozen sets.
 
 import (
 	"context"
@@ -54,18 +52,6 @@ type ThanosSecret = MetricsSecret
 type PrometheusConfig = MetricsConfig
 type PrometheusSecret = MetricsSecret
 
-// KubernetesConfig is the non-secret kubernetes revision projection.
-type KubernetesConfig struct {
-	Type             string `json:"type"`
-	ContextName      string `json:"contextName,omitempty"`
-	DefaultNamespace string `json:"defaultNamespace,omitempty"`
-}
-
-// KubernetesSecret is the decrypted kubeconfig credential.
-type KubernetesSecret struct {
-	Kubeconfig string `json:"kubeconfig"`
-}
-
 // ThanosProbeDetail is the canonical thanos result detail.
 type ThanosProbeDetail struct {
 	Kind         string `json:"kind"`
@@ -73,19 +59,6 @@ type ThanosProbeDetail struct {
 	ResponseType string `json:"responseType"`
 	SampleCount  int    `json:"sampleCount"`
 	SampleValue  string `json:"sampleValue"`
-}
-
-// KubernetesProbeDetail is the canonical kubernetes result detail.
-type KubernetesProbeDetail struct {
-	Kind               string `json:"kind"`
-	EffectiveNamespace string `json:"effectiveNamespace"`
-	VersionOK          bool   `json:"versionOk"`
-	CoreDiscoveryOK    bool   `json:"coreDiscoveryOk"`
-	GroupedDiscoveryOK bool   `json:"groupedDiscoveryOk"`
-	PodsGetAllowed     bool   `json:"podsGetAllowed"`
-	PodsListAllowed    bool   `json:"podsListAllowed"`
-	EventsListAllowed  bool   `json:"eventsListAllowed"`
-	PodsLogGetAllowed  bool   `json:"podsLogGetAllowed"`
 }
 
 // RunThanosProbe executes the frozen thanos-query-v1 action set.

@@ -22,18 +22,16 @@ type DiscoveryView struct {
 	IdentityLabels []string `json:"identityLabels"`
 }
 
-// CheckView is the closed promql|browser check discrimination.
+// CheckView is the closed promql check discrimination.
 type CheckView struct {
-	CheckKey         string         `json:"checkKey"`
-	DisplayName      string         `json:"displayName"`
-	AnalysisQuestion string         `json:"analysisQuestion"`
-	Kind             string         `json:"kind"`
-	QueryMode        string         `json:"queryMode,omitempty"`
-	Expression       string         `json:"expression,omitempty"`
-	RangeSeconds     *int64         `json:"rangeSeconds,omitempty"`
-	StepSeconds      *int64         `json:"stepSeconds,omitempty"`
-	JourneyID        string         `json:"journeyId,omitempty"`
-	JourneyParams    map[string]any `json:"journeyParams,omitempty"`
+	CheckKey         string `json:"checkKey"`
+	DisplayName      string `json:"displayName"`
+	AnalysisQuestion string `json:"analysisQuestion"`
+	Kind             string `json:"kind"`
+	QueryMode        string `json:"queryMode,omitempty"`
+	Expression       string `json:"expression,omitempty"`
+	RangeSeconds     *int64 `json:"rangeSeconds,omitempty"`
+	StepSeconds      *int64 `json:"stepSeconds,omitempty"`
 }
 
 // PlanView is PlanSummary with its checks.
@@ -44,8 +42,7 @@ type PlanView struct {
 	Checks      []CheckView `json:"checks"`
 }
 
-// BusinessSystemDetail is BusinessSystemDetail (browser identity arrives with the
-// Lintel stage and projects the frozen `none` state until then).
+// BusinessSystemDetail is BusinessSystemDetail.
 type BusinessSystemDetail struct {
 	Key                    string  `json:"key"`
 	DisplayName            string  `json:"displayName"`
@@ -56,7 +53,6 @@ type BusinessSystemDetail struct {
 	// ResourceRefreshIntervalSeconds is frozen on the current declaration; 300
 	// remains the read fallback for an unconfigured or archived system.
 	ResourceRefreshIntervalSeconds int64           `json:"resourceRefreshIntervalSeconds"`
-	BrowserIdentityState           string          `json:"browserIdentityState"`
 	ConfigVersionCount             int64           `json:"configVersionCount"`
 	Discoveries                    []DiscoveryView `json:"discoveries"`
 	Plans                          []PlanView      `json:"plans"`
@@ -76,8 +72,6 @@ type ConfigVersionDetail struct {
 	DisplayName            string          `json:"displayName"`
 	Enabled                bool            `json:"enabled"`
 	LabelContractVersionID string          `json:"labelContractVersionId"`
-	JourneyCatalogDigest   string          `json:"journeyCatalogDigest"`
-	JourneyCatalogVersion  string          `json:"journeyCatalogVersion"`
 	YAMLBody               string          `json:"yamlBody"`
 	Timezone               string          `json:"timezone"`
 	MetricsConnectionID    string          `json:"metricsConnectionId"`
@@ -141,8 +135,7 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 	}
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
-		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300),
-		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
+		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300)
 		FROM business_systems AS systems WHERE `+joinAnd(conditions)+` ORDER BY systems.id DESC LIMIT ?`,
 		append(args, limit+1)...)
 	if err != nil {
@@ -153,19 +146,17 @@ func (service *Service) ListSystems(ctx context.Context, enabled *bool, query st
 	systems := []BusinessSystemDetail{}
 	for rows.Next() {
 		var (
-			id           int64
-			current      sql.NullInt64
-			timezone     sql.NullString
-			browserState string
-			detail       BusinessSystemDetail
-			enabledFlag  int64
+			id          int64
+			current     sql.NullInt64
+			timezone    sql.NullString
+			detail      BusinessSystemDetail
+			enabledFlag int64
 		)
-		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState); err != nil {
+		if err := rows.Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds); err != nil {
 
 			return nil, "", err
 		}
 		detail.Enabled = enabledFlag == 1
-		detail.BrowserIdentityState = browserState
 		if current.Valid {
 			value := strconv.FormatInt(current.Int64, 10)
 			detail.CurrentConfigVersionID = &value
@@ -223,7 +214,7 @@ func (service *Service) ListVersions(ctx context.Context, systemKey string, curs
 	}
 	rows, err := service.db.QueryContext(ctx, `
 		SELECT v.id,v.version_seq,v.state,v.created_at,v.published_at,v.digest,v.parser_version,v.schema_version,
-			v.system_key,v.display_name,v.enabled,v.label_contract_version_id,v.journey_catalog_digest,v.journey_catalog_version
+			v.system_key,v.display_name,v.enabled,v.label_contract_version_id
 		FROM business_system_config_versions v JOIN business_systems bs ON bs.id=v.business_system_id
 		WHERE `+joinAnd(conditions)+` ORDER BY v.id DESC LIMIT ?`,
 		append(args, limit+1)...)
@@ -277,28 +268,25 @@ func (service *Service) countVersions(ctx context.Context, systemID int64) (int6
 func (service *Service) systemDetailOn(ctx context.Context, conn execution.Executor, systemID int64) (BusinessSystemDetail, error) {
 	query := `
 		SELECT systems.id,systems.key,systems.display_name,systems.enabled,systems.row_version,systems.current_config_version_id,systems.timezone,
-		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300),
-		       COALESCE((SELECT identity.state FROM browser_identities AS identity WHERE identity.business_system_id=systems.id), 'none')
+		       COALESCE((SELECT version.discovery_refresh_seconds FROM business_system_config_versions AS version WHERE version.id=systems.current_config_version_id),300)
 		FROM business_systems AS systems WHERE systems.id=?`
 	var (
-		id           int64
-		current      sql.NullInt64
-		timezone     sql.NullString
-		browserState string
-		enabledFlag  int64
-		detail       BusinessSystemDetail
+		id          int64
+		current     sql.NullInt64
+		timezone    sql.NullString
+		enabledFlag int64
+		detail      BusinessSystemDetail
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState)
+		err = conn.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds, &browserState)
+		err = service.db.QueryRowContext(ctx, query, systemID).Scan(&id, &detail.Key, &detail.DisplayName, &enabledFlag, &detail.RowVersion, &current, &timezone, &detail.ResourceRefreshIntervalSeconds)
 	}
 	if err != nil {
 		return BusinessSystemDetail{}, err
 	}
 	detail.Enabled = enabledFlag == 1
-	detail.BrowserIdentityState = browserState
 	if current.Valid {
 		value := strconv.FormatInt(current.Int64, 10)
 		detail.CurrentConfigVersionID = &value
@@ -333,7 +321,7 @@ func (service *Service) systemDetailOn(ctx context.Context, conn execution.Execu
 func (service *Service) versionDetailOn(ctx context.Context, conn execution.Executor, systemID, versionID int64) (ConfigVersionDetail, error) {
 	query := `
 		SELECT id,version_seq,state,created_at,published_at,digest,parser_version,schema_version,
-			system_key,display_name,enabled,label_contract_version_id,journey_catalog_digest,journey_catalog_version,
+			system_key,display_name,enabled,label_contract_version_id,
 			yaml_body,timezone,metrics_connection_id
 		FROM business_system_config_versions WHERE id=? AND business_system_id=?`
 	var (
@@ -345,9 +333,9 @@ func (service *Service) versionDetailOn(ctx context.Context, conn execution.Exec
 	)
 	var err error
 	if conn != nil {
-		err = conn.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
+		err = conn.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
 	} else {
-		err = service.db.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.JourneyCatalogDigest, &detail.JourneyCatalogVersion, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
+		err = service.db.QueryRowContext(ctx, query, versionID, systemID).Scan(&id, &detail.VersionSeq, &detail.State, &detail.CreatedAt, &publishedAt, &detail.Digest, &detail.ParserVersion, &detail.SchemaVersion, &detail.SystemKey, &detail.DisplayName, &enabledFlag, &contractID, &detail.YAMLBody, &detail.Timezone, &detail.MetricsConnectionID)
 	}
 	if err != nil {
 		return ConfigVersionDetail{}, err
@@ -435,24 +423,22 @@ func (service *Service) projectionsOn(ctx context.Context, conn execution.Execut
 	for index, planID := range planIDs {
 		var checkRows *sql.Rows
 		if conn != nil {
-			checkRows, err = conn.QueryContext(ctx, `SELECT check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds,journey_id,journey_params_json FROM config_checks WHERE plan_id=? ORDER BY id`, planID)
+			checkRows, err = conn.QueryContext(ctx, `SELECT check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds FROM config_checks WHERE plan_id=? ORDER BY id`, planID)
 		} else {
-			checkRows, err = service.db.QueryContext(ctx, `SELECT check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds,journey_id,journey_params_json FROM config_checks WHERE plan_id=? ORDER BY id`, planID)
+			checkRows, err = service.db.QueryContext(ctx, `SELECT check_key,display_name,analysis_question,kind,query_mode,expression,range_seconds,step_seconds FROM config_checks WHERE plan_id=? ORDER BY id`, planID)
 		}
 		if err != nil {
 			return nil, nil, err
 		}
 		for checkRows.Next() {
 			var (
-				view          CheckView
-				queryMode     sql.NullString
-				expression    sql.NullString
-				rangeSeconds  sql.NullInt64
-				stepSeconds   sql.NullInt64
-				journeyID     sql.NullString
-				journeyParams sql.NullString
+				view         CheckView
+				queryMode    sql.NullString
+				expression   sql.NullString
+				rangeSeconds sql.NullInt64
+				stepSeconds  sql.NullInt64
 			)
-			if err := checkRows.Scan(&view.CheckKey, &view.DisplayName, &view.AnalysisQuestion, &view.Kind, &queryMode, &expression, &rangeSeconds, &stepSeconds, &journeyID, &journeyParams); err != nil {
+			if err := checkRows.Scan(&view.CheckKey, &view.DisplayName, &view.AnalysisQuestion, &view.Kind, &queryMode, &expression, &rangeSeconds, &stepSeconds); err != nil {
 				checkRows.Close()
 				return nil, nil, err
 			}
@@ -469,13 +455,6 @@ func (service *Service) projectionsOn(ctx context.Context, conn execution.Execut
 			if stepSeconds.Valid {
 				value := stepSeconds.Int64
 				view.StepSeconds = &value
-			}
-			if journeyID.Valid {
-				view.JourneyID = journeyID.String
-			}
-			if journeyParams.Valid {
-				view.JourneyParams = map[string]any{}
-				_ = decodeStored(journeyParams.String, &view.JourneyParams)
 			}
 			plans[index].Checks = append(plans[index].Checks, view)
 		}
@@ -495,7 +474,7 @@ func scanVersionSummary(rows *sql.Rows) (ConfigVersionSummary, error) {
 		publishedAt sql.NullString
 		enabledFlag int64
 	)
-	if err := rows.Scan(&id, &summary.VersionSeq, &summary.State, &summary.CreatedAt, &publishedAt, &summary.Digest, &summary.ParserVersion, &summary.SchemaVersion, &summary.SystemKey, &summary.DisplayName, &enabledFlag, &contractID, &summary.JourneyCatalogDigest, &summary.JourneyCatalogVersion); err != nil {
+	if err := rows.Scan(&id, &summary.VersionSeq, &summary.State, &summary.CreatedAt, &publishedAt, &summary.Digest, &summary.ParserVersion, &summary.SchemaVersion, &summary.SystemKey, &summary.DisplayName, &enabledFlag, &contractID); err != nil {
 		return ConfigVersionSummary{}, err
 	}
 	summary.ID = strconv.FormatInt(id, 10)

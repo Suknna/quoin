@@ -349,7 +349,7 @@ func TestThanosQueryUsesAnalysisSnapshotAfterNewPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,?,'fixture',?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("c", 64), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
+	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
 	if err != nil {
 		t.Fatal(err)
 	}

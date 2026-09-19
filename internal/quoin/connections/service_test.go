@@ -38,7 +38,7 @@ func newService(t *testing.T) (*connections.Service, *sql.DB, string) {
 		RootKeyFile:               filepath.Join(root, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "tls.key"),
-		RuntimeClientCAFile:     filepath.Join(root, "stele"),
+		RuntimeClientCAFile:       filepath.Join(root, "stele"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)
@@ -376,43 +376,6 @@ func TestRotationRequiresAndAcceptsFreshExactProbe(t *testing.T) {
 	revalidated, err := service.Enable(ctx, rotated.Name, rotated.RowVersion, freshProbe, 1)
 	if err != nil || !revalidated.Enabled || revalidated.RevalidationRequired {
 		t.Fatalf("fresh exact passed probe must restore the rotated connection: %v %+v", err, revalidated)
-	}
-}
-
-func TestKubernetesRequiresSecretAndValidatesInput(t *testing.T) {
-	service, _, _ := newService(t)
-	ctx := adminContext(t, nextCorrelation())
-	projection, _ := json.Marshal(map[string]any{"type": "kubernetes", "defaultNamespace": "ops"})
-	// Missing kubeconfig: deterministic rejection.
-	if _, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: projection}, 1, "cmd-"+fmt.Sprint(seq.Next())); !errors.Is(err, connections.ErrValidation) {
-		t.Fatalf("kubernetes without kubeconfig must be rejected, got %v", err)
-	}
-	// Secret field smuggled into the non-secret projection: rejected.
-	dirty, _ := json.Marshal(map[string]any{"type": "kubernetes", "defaultNamespace": "ops", "kubeconfig": "leak"})
-	if _, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: dirty}, 1, "cmd-"+fmt.Sprint(seq.Next())); !errors.Is(err, connections.ErrValidation) {
-		t.Fatalf("secret in projection must be rejected, got %v", err)
-	}
-	// Valid creation decrypts the kubeconfig through the actual audited grant
-	// fulfillment path.
-	secret, _ := json.Marshal(map[string]string{"type": "kubernetes", "kubeconfig": "apiVersion: v1\nkind: Config\n"})
-	created, err := service.Create(ctx, connections.CreateInput{Name: "prod-k8s", Type: connections.TypeKubernetes, NonSecretJSON: projection, Secret: secret, SecretPresent: true}, 1, "cmd-"+fmt.Sprint(seq.Next()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, grantID, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-k8s", 1, 5*time.Minute)
-	if err != nil || !ok {
-		t.Fatalf("bind kubernetes probe: %v ok=%v", err, ok)
-	}
-	payload, err := service.FulfillGrant(context.Background(), grantID, attemptID, "boot-k8s", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if payload.Kubernetes == nil || payload.Kubernetes.Kubeconfig == "" {
-		t.Fatalf("kubeconfig not decrypted: %+v", payload)
 	}
 }
 

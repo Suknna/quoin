@@ -49,32 +49,22 @@ func (service *artifactService) plinthArtifactFence(ctx context.Context) error {
 }
 
 // uploadRuntimeSlot authenticates the upload and returns the only principal
-// whose identity may be passed to the Artifact ledger. Lintel is deliberately
-// constrained to browser-owned trace and screenshot uploads; it never gains
-// Artifact text read/search access or generic Artifact write authority.
+// whose identity may be passed to the Artifact ledger.
 func (service *artifactService) uploadRuntimeSlot(ctx context.Context, header *runtimev1.ArtifactUploadHeader) (string, error) {
 	if header == nil || header.GetBootId() == "" || header.GetConnectionEpoch() == 0 {
 		return "", status.Error(codes.Unauthenticated, "live runtime stream fence required")
 	}
-	for _, slot := range []string{qruntime.SlotPlinth, qruntime.SlotLintel} {
-		if !requireComponentIdentity(ctx, slot) {
-			continue
-		}
-		// A long-lived bearer alone does not authorize data-plane writes. The
-		// header must name the slot's currently attached control stream, so a
-		// revoked/replaced stream cannot commit an upload using an old token.
-		if service.Slots.WithCurrent(slot, header.GetBootId(), header.GetConnectionEpoch(), func() error { return nil }) != nil {
-			return "", status.Error(codes.Unauthenticated, "runtime stream is no longer current")
-		}
-		if slot == qruntime.SlotLintel && (header.GetOwnerType() != "browser_operation" || header.GetRetentionKind() != runtimev1.RetentionKind_RETENTION_KIND_GENERATED ||
-			(header.GetKind() != runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE && header.GetKind() != runtimev1.ArtifactKind_ARTIFACT_KIND_SCREENSHOT) ||
-			(header.GetKind() == runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE && (!header.GetSensitive() || (header.GetTraceIntegrity() != runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_COMPLETE && header.GetTraceIntegrity() != runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_INCOMPLETE))) ||
-			(header.GetKind() != runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE && header.GetTraceIntegrity() != runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_UNSPECIFIED)) {
-			return "", status.Error(codes.PermissionDenied, "lintel may upload only generated browser trace or screenshot artifacts")
-		}
-		return slot, nil
+	slot := qruntime.SlotPlinth
+	if !requireComponentIdentity(ctx, slot) {
+		return "", status.Error(codes.Unauthenticated, "runtime bearer required")
 	}
-	return "", status.Error(codes.Unauthenticated, "runtime bearer required")
+	// A long-lived bearer alone does not authorize data-plane writes. The
+	// header must name the slot's currently attached control stream, so a
+	// revoked/replaced stream cannot commit an upload using an old token.
+	if service.Slots.WithCurrent(slot, header.GetBootId(), header.GetConnectionEpoch(), func() error { return nil }) != nil {
+		return "", status.Error(codes.Unauthenticated, "runtime stream is no longer current")
+	}
+	return slot, nil
 }
 
 // Upload consumes one client-stream upload (RUNTIME-UPLOAD-001..006).
@@ -103,7 +93,6 @@ func (service *artifactService) Upload(stream runtimev1.ArtifactService_UploadSe
 		Kind: artifactKindOf(headerFrame.GetKind()), RetentionKind: retentionKindOf(headerFrame.GetRetentionKind()),
 		Sensitive: headerFrame.GetSensitive(), SizeBytes: int64(headerFrame.GetSizeBytes()),
 		SHA256: headerFrame.GetSha256(), MediaType: headerFrame.GetMediaType(),
-		TraceIntegrity: traceIntegrityOf(headerFrame.GetTraceIntegrity()),
 	}
 	file, replayID, err := service.Artifacts.BeginUpload(ctx, header)
 	if err != nil {
@@ -250,10 +239,6 @@ func artifactKindOf(kind runtimev1.ArtifactKind) string {
 	switch kind {
 	case runtimev1.ArtifactKind_ARTIFACT_KIND_ATTACHMENT:
 		return "attachment"
-	case runtimev1.ArtifactKind_ARTIFACT_KIND_SCREENSHOT:
-		return "screenshot"
-	case runtimev1.ArtifactKind_ARTIFACT_KIND_TRACE:
-		return "trace"
 	case runtimev1.ArtifactKind_ARTIFACT_KIND_TOOL_RESULT:
 		return "tool_result"
 	case runtimev1.ArtifactKind_ARTIFACT_KIND_REPORT_FILE:
@@ -286,16 +271,5 @@ func uploadRejectValue(reason artifact.RejectReason) int32 {
 		return int32(runtimev1.UploadRejectReason_UPLOAD_REJECT_REASON_METADATA_MISMATCH)
 	default:
 		return int32(runtimev1.UploadRejectReason_UPLOAD_REJECT_REASON_INTERNAL)
-	}
-}
-
-func traceIntegrityOf(integrity runtimev1.BrowserTraceIntegrity) string {
-	switch integrity {
-	case runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_COMPLETE:
-		return "complete"
-	case runtimev1.BrowserTraceIntegrity_BROWSER_TRACE_INTEGRITY_INCOMPLETE:
-		return "incomplete"
-	default:
-		return ""
 	}
 }

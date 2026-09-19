@@ -53,9 +53,9 @@ type catalogDocument struct {
 var enumLabelValues = map[string][]string{
 	"openapi_route_group": {"admin", "adminops", "alerts", "auth", "config", "files", "inspections", "investigations", "knowledge", "maintenance", "realtime", "setup", "verification"},
 	"openapi_method":      {"get", "patch", "post", "put"},
-	"runtime_slot":        {"lintel", "plinth"},
+	"runtime_slot":        {"plinth"},
 	"attempt_type": {
-		"browser_exploration", "connection_probe", "embedding", "initial_analysis",
+		"connection_probe", "embedding", "initial_analysis",
 		"inspection_analysis", "inspection_collection", "investigation", "knowledge_extraction",
 	},
 	"maintenance_reason": {"restore", "root_key_rebind", "upgrade"},
@@ -67,9 +67,9 @@ var enumLabelValues = map[string][]string{
 	},
 	"model_operation":     {"chat", "embedding"},
 	"model_call_status":   {"cancelled", "failed", "running", "succeeded"},
-	"tool_execution_mode": {"quoin_browser", "supervisor_typed", "worker_local"},
+	"tool_execution_mode": {"supervisor_typed", "worker_local"},
 	"tool_call_status":    {"cancelled", "failed", "pending", "running", "succeeded"},
-	"rpc_group":           {"artifact_service", "browser_tunnel", "runtime_control", "stele_relay"},
+	"rpc_group":           {"artifact_service", "runtime_control", "stele_relay"},
 	"delivery_status":     {"accepted", "rejected", "unavailable"},
 }
 
@@ -203,7 +203,7 @@ func newFamilyCollector(catalog *metricsCatalog, family catalogFamily) (promethe
 // gauges assert the startup durability probe passed (1); every other family
 // starts at the catalog default of zero.
 func initialFamilyValue(family catalogFamily) int {
-	if family.Name == "quoin_storage_writable" || family.Name == "plinth_storage_writable" || family.Name == "lintel_storage_writable" {
+	if family.Name == "quoin_storage_writable" || family.Name == "plinth_storage_writable" {
 		return 1
 	}
 	return 0

@@ -114,9 +114,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("listAlertSources", http.MethodGet, "/api/v1/alert-sources", operations.LevelAdmin, operations.KindQuery, "alert_source"),
 		declaration("getAlertSource", http.MethodGet, "/api/v1/alert-sources/{sourceKey}", operations.LevelAdmin, operations.KindQuery, "alert_source"),
 		declaration("getAlertmanagerReceiverConfig", http.MethodGet, "/api/v1/alert-sources/receiver-config", operations.LevelAdmin, operations.KindQuery, "alert_source"),
-		// cancelStandaloneBrowserOperation survives only on the maintenance
-		// Upgrade drain allowlist; the retired normal surface never re-registers it.
-		declaration("cancelStandaloneBrowserOperation", http.MethodPost, "/api/v1/browser-identities/{identityKey}/operations/{operationId}/cancel", operations.LevelAdmin, operations.KindCommand, "browser_operation"),
 		declaration("createAlertSource", http.MethodPost, "/api/v1/alert-sources", operations.LevelAdmin, operations.KindCommand, "alert_source"),
 		declaration("listAlertSourceCredentials", http.MethodGet, "/api/v1/alert-sources/{sourceKey}/credentials", operations.LevelAdmin, operations.KindQuery, "alert_source"),
 		declaration("rotateAlertSourceCredential", http.MethodPost, "/api/v1/alert-sources/{sourceKey}/rotate", operations.LevelAdmin, operations.KindCommand, "alert_source"),
@@ -205,7 +202,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	add(
 		declaration("listBusinessSystems", http.MethodGet, "/api/v1/business-systems", operations.LevelAdmin, operations.KindQuery, "business_system"),
 		declaration("getBusinessSystem", http.MethodGet, "/api/v1/business-systems/{systemKey}", operations.LevelAdmin, operations.KindQuery, "business_system"),
-		declaration("listBusinessSystemKubernetesConnections", http.MethodGet, "/api/v1/business-systems/{systemKey}/kubernetes-connections", operations.LevelAdmin, operations.KindQuery, "business_system"),
 		declaration("listBusinessSystemConfigs", http.MethodGet, "/api/v1/business-systems/{systemKey}/config", operations.LevelAdmin, operations.KindQuery, "business_system"),
 		declaration("getBusinessSystemConfig", http.MethodGet, "/api/v1/business-systems/{systemKey}/config/{versionId}", operations.LevelAdmin, operations.KindQuery, "business_system"),
 		declaration("listConfigVerificationRuns", http.MethodGet, "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", operations.LevelAdmin, operations.KindQuery, "config_verification_run"),
@@ -281,8 +277,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 // maintenanceOnly lists declarations registered exclusively on maintenance
 // surfaces; the normal surface never serves them.
 var maintenanceOnly = map[string]bool{
-	"exitMaintenance":                  true,
-	"cancelStandaloneBrowserOperation": true,
+	"exitMaintenance": true,
 }
 
 func buildNormalAccessRegistry() (*operations.AccessRegistry, error) {
@@ -328,7 +323,7 @@ var maintenanceReasonAllowlists = map[string][]string{
 	},
 	"Upgrade": {
 		"prepareUpgrade",
-		"cancelInitialAnalysis", "cancelStandaloneBrowserOperation", "cancelConnectionProbeAttempt",
+		"cancelInitialAnalysis", "cancelConnectionProbeAttempt",
 		"cancelInspectionRun", "cancelInvestigationAttempt", "cancelKnowledgeImportBatch",
 	},
 }

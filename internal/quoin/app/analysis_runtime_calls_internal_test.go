@@ -15,7 +15,6 @@ import (
 // The outcome fence is deliberately first, so this adversarial frame reaches no
 // database-backed attempt or Evidence path.
 
-
 func TestRuntimeKubernetesResultIngressRejectsUnspecifiedOutcome(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

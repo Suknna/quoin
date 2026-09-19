@@ -21,7 +21,7 @@ var Platforms = []string{"linux/amd64", "linux/arm64"}
 
 // Components is the closed set of independently published application images.
 // Caddy is a pinned upstream image, so it deliberately is not a build subject.
-var Components = []string{"frontend", "lintel", "plinth", "quoin", "stele"}
+var Components = []string{"frontend", "plinth", "quoin", "stele"}
 
 // ImageSubject records one component's measured index and per-platform
 // manifest digests.
@@ -60,15 +60,6 @@ type Inventory struct {
 	Compose    BlobSubject            `json:"compose"`
 	Helpers    map[string]BlobSubject `json:"deployment_helper"`
 	Bundles    map[string]string      `json:"sigstore_bundles"`
-	Browser    BrowserSubjects        `json:"browser"`
-}
-
-// BrowserSubjects records the measured locked browser artifacts baked into
-// the lintel image (OPS-IMAGE-002).
-type BrowserSubjects struct {
-	PlaywrightVersion string                 `json:"playwright_version"`
-	ChromiumRevision  string                 `json:"chromium_revision"`
-	Artifacts         map[string]BlobSubject `json:"artifacts"`
 }
 
 // ValidateReleaseVersion accepts the v-prefixed SemVer used to name a signed

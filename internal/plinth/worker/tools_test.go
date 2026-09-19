@@ -9,33 +9,52 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 
+	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 )
 
 func TestToolSchemaMatchesQuoinCatalog(t *testing.T) {
+	registry := builtin.Registry()
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogs, err := attempt.BuildCatalogs(registry, attempt.Implementations(), enabled)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, agentVersion := range []string{WorkerAgentVersion, WorkerInvestigationAgentVersion} {
-		workerJSON, err := ProviderToolsJSON(agentVersion)
+		// The canonical input document freezes the per-attempt catalog
+		// (ADR-0004); the worker must render exactly those frozen bytes.
+		quoinJSON, catalog, err := attempt.FrozenCatalogJSONForCreation(catalogs, agentVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
-		quoinJSON, err := attempt.CanonicalToolsJSON(agentVersion)
+		inputJSON, err := json.Marshal(map[string]json.RawMessage{"toolCatalog": quoinJSON})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(workerJSON, quoinJSON) {
-			t.Fatalf("%s tool schema drift:\nworker=%s\nquoin =%s", agentVersion, workerJSON, quoinJSON)
-		}
-		workerDigest, err := ProviderToolsDigest(agentVersion)
+		workerJSON, err := ProviderToolsJSONForInput(inputJSON, agentVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
-		quoinDigest, err := attempt.CanonicalToolsDigest(agentVersion)
+		providerJSON, err := catalog.ProviderToolsJSON()
 		if err != nil {
 			t.Fatal(err)
 		}
+		if !bytes.Equal(workerJSON, providerJSON) {
+			t.Fatalf("%s tool schema drift:\nworker=%s\nquoin =%s", agentVersion, workerJSON, providerJSON)
+		}
+		workerDigest, err := ProviderToolsDigestForInput(inputJSON, agentVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		providerSum := sha256.Sum256(providerJSON)
+		quoinDigest := hex.EncodeToString(providerSum[:])
 		if workerDigest != quoinDigest {
 			t.Fatalf("%s tool schema digest drift: worker=%s quoin=%s", agentVersion, workerDigest, quoinDigest)
 		}

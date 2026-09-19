@@ -51,8 +51,6 @@ func ActionSet(connectionType string) (string, int, error) {
 		return "prometheus-query-v1", 1, nil
 	case TypeThanos:
 		return "thanos-query-v1", 1, nil
-	case TypeKubernetes:
-		return "kubernetes-read-capabilities-v1", 1, nil
 	case TypeModelProvider:
 		return "model-provider-capabilities-v1", 1, nil
 	default:
@@ -235,23 +233,9 @@ type ModelProviderProbeChild struct {
 	DetailJSON                 string
 }
 
-// KubernetesProbeChild carries the kubernetes typed-child columns.
-type KubernetesProbeChild struct {
-	EffectiveNamespace string
-	VersionOK          bool
-	CoreDiscoveryOK    bool
-	GroupedDiscoveryOK bool
-	PodsGetAllowed     bool
-	PodsListAllowed    bool
-	EventsListAllowed  bool
-	PodsLogGetAllowed  bool
-	DetailJSON         string
-}
-
 // TypedChild selects the connection-type closed child row variant.
 type TypedChild struct {
 	Thanos        *ThanosProbeChild
-	Kubernetes    *KubernetesProbeChild
 	ModelProvider *ModelProviderProbeChild
 }
 
@@ -329,14 +313,6 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
 				headerID, child.Thanos.Query, child.Thanos.ResponseType, child.Thanos.SampleCount, child.Thanos.SampleValue, child.Thanos.DetailJSON); err != nil {
-				return 0, err
-			}
-		case TypeKubernetes:
-			if child.Kubernetes == nil {
-				return 0, fmt.Errorf("kubernetes probe result requires the kubernetes typed child")
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO kubernetes_connection_probe_results(probe_result_id,effective_namespace,version_ok,core_discovery_ok,grouped_discovery_ok,pods_get_allowed,pods_list_allowed,events_list_allowed,pods_log_get_allowed,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				headerID, child.Kubernetes.EffectiveNamespace, boolInt(child.Kubernetes.VersionOK), boolInt(child.Kubernetes.CoreDiscoveryOK), boolInt(child.Kubernetes.GroupedDiscoveryOK), boolInt(child.Kubernetes.PodsGetAllowed), boolInt(child.Kubernetes.PodsListAllowed), boolInt(child.Kubernetes.EventsListAllowed), boolInt(child.Kubernetes.PodsLogGetAllowed), child.Kubernetes.DetailJSON); err != nil {
 				return 0, err
 			}
 		case TypeModelProvider:
@@ -476,7 +452,7 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := service.read().QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT k.detail_json FROM kubernetes_connection_probe_results k WHERE k.probe_result_id=r.id),''),COALESCE((SELECT m.detail_json FROM model_provider_connection_probe_results m WHERE m.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
+	rows, err := service.read().QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT m.detail_json FROM model_provider_connection_probe_results m WHERE m.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -484,14 +460,11 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	var results []ProbeResultView
 	for rows.Next() {
 		var view ProbeResultView
-		var thanosDetail, k8sDetail, mpDetail string
-		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &k8sDetail, &mpDetail); err != nil {
+		var thanosDetail, mpDetail string
+		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &mpDetail); err != nil {
 			return nil, false, err
 		}
 		view.DetailJSON = thanosDetail
-		if view.DetailJSON == "" {
-			view.DetailJSON = k8sDetail
-		}
 		if view.DetailJSON == "" {
 			view.DetailJSON = mpDetail
 		}

@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-
-	"github.com/Suknna/quoin/internal/lintel/catalog"
 )
 
 // DatabaseSchemaVersion mirrors the frozen schema gate in
@@ -38,8 +36,6 @@ type ContractsEntry struct {
 	ReleaseInputsSHA256      string `json:"release_inputs_sha256"`
 	ReadinessVersion         int    `json:"readiness_response_version"`
 	ReadinessSHA256          string `json:"readiness_response_sha256"`
-	JourneyCatalogVersion    string `json:"journey_catalog_version"`
-	JourneyCatalogSHA256     string `json:"journey_catalog_sha256"`
 }
 
 // Contracts reads every contract version and digest from the frozen
@@ -137,12 +133,6 @@ func Contracts(contractsDir string) (*ContractsEntry, error) {
 	if entry.ReadinessSHA256, err = digest("schemas/readiness-response.schema.json"); err != nil {
 		return nil, err
 	}
-
-	// The Journey Catalog is the build-time JCS artifact both Lintel and
-	// Quoin embed byte-for-byte (RUNTIME-CTRL-010); its version constant
-	// and bytes are that package's authority.
-	entry.JourneyCatalogVersion = catalog.Version
-	entry.JourneyCatalogSHA256 = sha256Hex([]byte(catalog.JCS))
 	return entry, nil
 }
 

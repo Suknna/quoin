@@ -25,12 +25,6 @@ import (
 type PlatformFaultReporter struct {
 	service *Service
 	now     func() time.Time
-	// FaultOriginEligible gates whether a component's disconnect may open a
-	// NEW fault (ADR-0004: a disabled plugin's absent component is not a
-	// fault). Nil means every component is eligible. An ineligible
-	// component's existing lifecycle still converges to Resolved so a
-	// plugin disabled mid-life does not fire forever; history stays readable.
-	FaultOriginEligible func(component string) bool
 }
 
 func NewPlatformFaultReporter(service *Service) *PlatformFaultReporter {
@@ -41,7 +35,7 @@ func NewPlatformFaultReporter(service *Service) *PlatformFaultReporter {
 // disconnect opens or repeats one durable fault; a later reconnect resolves the
 // current lifecycle. SQLite's open identity index prevents duplicate faults.
 func (reporter *PlatformFaultReporter) ObserveRuntimeConnection(ctx context.Context, component string, connected bool) error {
-	if component != "plinth" && component != "lintel" {
+	if component != "plinth" {
 		return nil
 	}
 	ctx, err := reporter.service.machineScope(ctx)
@@ -62,9 +56,8 @@ func (reporter *PlatformFaultReporter) ObserveRuntimeConnection(ctx context.Cont
 func (reporter *PlatformFaultReporter) observeRuntimeConnectionOn(ctx context.Context, tx execution.Executor, component string, connected bool) (int64, error) {
 	const reason = "runtime_control_stream_disconnected"
 	now := reporter.now().UTC().Format(time.RFC3339Nano)
-	if connected || (reporter.FaultOriginEligible != nil && !reporter.FaultOriginEligible(component)) {
-		// A reconnect — or a component that is not part of the enabled
-		// deployment — converges any current lifecycle to Resolved and never
+	if connected {
+		// A reconnect converges any current lifecycle to Resolved and never
 		// originates a new fault.
 		return resolveRuntimeFaultOn(ctx, tx, component, reason, now)
 	}

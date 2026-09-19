@@ -199,8 +199,8 @@ func TestRerunRejectsLegacyDeclarationRun(t *testing.T) {
 	if _, err := h.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES('legacy-bs','历史系统',0,1,?)`, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,journey_catalog_digest,journey_catalog_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
-		VALUES(1,1,'draft','legacy','legacy','legacy','0000000000000000000000000000000000000000000000000000000000000000','legacy','0000000000000000000000000000000000000000000000000000000000000000',?,'legacy-bs','历史系统',1,1,'UTC')`, now); err != nil {
+	if _, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
+		VALUES(1,1,'draft','legacy','legacy','legacy','0000000000000000000000000000000000000000000000000000000000000000',?,'legacy-bs','历史系统',1,1,'UTC')`, now); err != nil {
 		t.Fatal(err)
 	}
 	// 历史行构造：临时卸载活动写闭合触发器，只为写入一条不再能产生的声明 Run

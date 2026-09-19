@@ -242,38 +242,6 @@ func (service *Service) commitResult(ctx context.Context, result Result, allowPe
 				return committed{}, fmt.Errorf("evidence/artifact references do not close: %w", err)
 			}
 		}
-		{
-			var outstanding int
-			if err := tx.QueryRowContext(lifecycleCtx, `SELECT EXISTS(
-				SELECT 1 FROM browser_operations o
-				WHERE o.owner_attempt_id=? AND o.kind='exploration'
-				  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
-				       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
-			)`, result.AttemptID).Scan(&outstanding); err != nil {
-				return committed{}, err
-			}
-			if outstanding != 0 {
-				if !allowPending {
-					return committed{}, ErrPendingBrowserCleanup
-				}
-				proposal, proposalDigest, err := pendingProposalFor(result, modelCallID)
-				if err != nil {
-					return committed{}, err
-				}
-				if _, err := tx.ExecContext(lifecycleCtx, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,model_call_id,proposal_json,proposal_digest,created_at)
-					VALUES(?,'model_result','Succeeded',?,?,?,?) ON CONFLICT(attempt_id) DO NOTHING`, result.AttemptID, modelCallID, string(proposal), proposalDigest, service.nowText()); err != nil {
-					return committed{}, err
-				}
-				var existingDigest []byte
-				if err := tx.QueryRowContext(lifecycleCtx, `SELECT proposal_digest FROM pending_attempt_terminals WHERE attempt_id=?`, result.AttemptID).Scan(&existingDigest); err != nil {
-					return committed{}, err
-				}
-				if !bytes.Equal(existingDigest, proposalDigest) {
-					return committed{}, ErrLateResult
-				}
-				return committed{InvestigationID: investigationID}, nil
-			}
-		}
 		now := service.nowText()
 		nextSeq, err := nextMessageSeq(lifecycleCtx, tx, investigationID)
 		if err != nil {
@@ -418,21 +386,6 @@ func (service *Service) commitRecoveryLossPending(ctx context.Context, attemptID
 	}
 	notify := false
 	_, err = execution.Execute(lifecycleCtx, service.runner, service.opRecoveryLoss, func(tx *execution.Tx) (drained, error) {
-		// Recheck under the same writer transaction that consumes the pending row.
-		// Browser admission uses the same transaction boundary, so a late child
-		// cannot be admitted between this check and the Interrupted transition.
-		var outstanding int
-		if err := tx.QueryRowContext(lifecycleCtx, `SELECT EXISTS(
-			SELECT 1 FROM browser_operations o
-			WHERE o.owner_attempt_id=? AND o.kind='exploration'
-			  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
-			       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
-		)`, attemptID).Scan(&outstanding); err != nil {
-			return drained{}, err
-		}
-		if outstanding != 0 {
-			return drained{}, nil
-		}
 		result, err := tx.ExecContext(lifecycleCtx, `UPDATE execution_attempts
 			SET state='Interrupted', ended_at=?, termination_reason=?, row_version=row_version+1
 			WHERE id=? AND state='Running'`, service.nowText(), reason, attemptID)
@@ -486,40 +439,6 @@ func (service *Service) commitFailure(ctx context.Context, result Result) error 
 		}
 		if err := verifyLease(lifecycleCtx, tx, service.now(), result); err != nil {
 			return failed{}, err
-		}
-		// A natural failure is no less capable of stranding an active Exploration
-		// than a successful ResultProposal. Freeze the exact failed terminal before
-		// touching the parent state; reconciliation will close the browser first and
-		// replay this immutable failure only afterwards.
-		var outstanding int
-		if err := tx.QueryRowContext(lifecycleCtx, `SELECT EXISTS(
-			SELECT 1 FROM browser_operations o WHERE o.owner_attempt_id=? AND o.kind='exploration'
-			  AND (o.state IN ('Queued','WaitingForCapacity','Starting','Running','AwaitingReconnect')
-			       OR (o.start_dispatched_at IS NOT NULL AND o.stop_confirmed_at IS NULL))
-		)`, result.AttemptID).Scan(&outstanding); err != nil {
-			return failed{}, err
-		}
-		if outstanding != 0 {
-			var modelCallID int64
-			if err := tx.QueryRowContext(lifecycleCtx, `SELECT id FROM model_calls WHERE attempt_id=? ORDER BY id DESC LIMIT 1`, result.AttemptID).Scan(&modelCallID); err != nil {
-				return failed{}, fmt.Errorf("failed terminal without model call: %w", err)
-			}
-			proposal, proposalDigest, err := pendingProposalFor(result, modelCallID)
-			if err != nil {
-				return failed{}, err
-			}
-			if _, err := tx.ExecContext(lifecycleCtx, `INSERT INTO pending_attempt_terminals(attempt_id,source,target_state,model_call_id,proposal_json,proposal_digest,created_at)
-				VALUES(?,'model_result','Failed',?,?,?,?) ON CONFLICT(attempt_id) DO NOTHING`, result.AttemptID, modelCallID, string(proposal), proposalDigest, service.nowText()); err != nil {
-				return failed{}, err
-			}
-			var existingDigest []byte
-			if err := tx.QueryRowContext(lifecycleCtx, `SELECT proposal_digest FROM pending_attempt_terminals WHERE attempt_id=?`, result.AttemptID).Scan(&existingDigest); err != nil {
-				return failed{}, err
-			}
-			if !bytes.Equal(existingDigest, proposalDigest) {
-				return failed{}, ErrLateResult
-			}
-			return failed{InvestigationID: investigationID}, nil
 		}
 		now := service.nowText()
 		reason := result.Termination

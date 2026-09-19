@@ -91,10 +91,7 @@ func correlatedRunningAttempt(t *testing.T, db *sql.DB, service *Service) int64 
 // beginChatCall opens one valid chat model call on the running attempt.
 func beginChatCall(t *testing.T, service *Service, attemptID int64, callSeq int) int64 {
 	t.Helper()
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	callID, err := service.BeginModelCall(context.Background(), BeginCall{
 		AttemptID: attemptID, CallSeq: callSeq, ModelID: "fixture-chat-1",
 		PromptDigest: strings.Repeat("a", 64), ToolSchemaDigest: toolsDigest,
@@ -240,10 +237,7 @@ func TestNaturalIdempotentReplaysRecordNothing(t *testing.T) {
 	attemptID := correlatedRunningAttempt(t, db, service)
 	ctx := context.Background()
 
-	toolsDigest, err := CanonicalToolsDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	toolsDigest := testCatalogDigest(t)
 	request := BeginCall{
 		AttemptID: attemptID, CallSeq: 1, RetrySeq: 0, ModelID: "fixture-chat-1",
 		PromptDigest: strings.Repeat("1", 64), ToolSchemaDigest: toolsDigest,

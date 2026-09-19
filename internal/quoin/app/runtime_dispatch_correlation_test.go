@@ -89,7 +89,7 @@ func newDispatchTestService(t *testing.T) (*RuntimeService, *[]*runtimev1.Contro
 	t.Cleanup(func() { _ = reader.Close() })
 	connectionService := connections.NewService(db, nil)
 	connectionService.SetReader(reader)
-	service := NewRuntimeControl(qruntime.NewService(), "test", "catalog", connectionService, db)
+	service := NewRuntimeControl(qruntime.NewService(), "test", connectionService, db)
 	service.sendEnvelopeForTest = func(slot string, envelope *runtimev1.ControlEnvelope) error {
 		captured = append(captured, envelope)
 		return nil

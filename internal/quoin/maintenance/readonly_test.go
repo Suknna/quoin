@@ -26,7 +26,7 @@ func readonlyGateFixture(t *testing.T) string {
 		RootKeyFile:               filepath.Join(root, "root-key"),
 		RuntimeTLSCertificateFile: filepath.Join(root, "tls.crt"),
 		RuntimeTLSPrivateKeyFile:  filepath.Join(root, "tls.key"),
-		RuntimeClientCAFile:     filepath.Join(root, "stele"),
+		RuntimeClientCAFile:       filepath.Join(root, "stele"),
 	}
 	if _, err := bootstrap.BootstrapSecrets(config); err != nil {
 		t.Fatal(err)

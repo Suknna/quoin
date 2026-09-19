@@ -121,16 +121,6 @@ func (document *Document) EqualToInventory(inventory *subjects.Inventory) error 
 		document.SigstoreBundles.Offline != offlineBundle {
 		return fmt.Errorf("bundle vocabulary drift in the closure names")
 	}
-	// The browser block equals the inventory's lock-true facts.
-	if document.Browser.PlaywrightVersion != inventory.Browser.PlaywrightVersion ||
-		document.Browser.ChromiumRevision != inventory.Browser.ChromiumRevision {
-		return fmt.Errorf("browser revision drift against the inventory")
-	}
-	for _, platform := range subjects.Platforms {
-		if document.Browser.Artifacts[platform].SHA256 != inventory.Browser.Artifacts[platform].SHA256 {
-			return fmt.Errorf("browser %s digest drift against the inventory", platform)
-		}
-	}
 	return nil
 }
 

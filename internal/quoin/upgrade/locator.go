@@ -2,7 +2,6 @@ package upgrade
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 )
 
@@ -16,14 +15,13 @@ const (
 	endpointKnowledgeBatch     = "knowledge_batch"
 	endpointConnectionProbe    = "connection_probe"
 	endpointConfigVerification = "config_verification"
-	endpointBrowserOperation   = "browser_operation"
 	directiveConverge          = "converge"
 )
 
 // attemptDirective resolves the deterministic drain directive for one active
 // attempt. All reads run on the caller's open projection transaction so the
 // item's row version is snapshot-consistent with the checklist itself.
-func attemptDirective(ctx context.Context, conn projectionExecutor, attemptID int64, scopeType string, scopeID int64, state string, parent sql.NullInt64) (string, error) {
+func attemptDirective(ctx context.Context, conn projectionExecutor, attemptID int64, scopeType string, scopeID int64, state string) (string, error) {
 	switch scopeType {
 	case "analysis":
 		var occurrenceID, rowVersion int64
@@ -85,51 +83,11 @@ func attemptDirective(ctx context.Context, conn projectionExecutor, attemptID in
 			return "", err
 		}
 		return cancelDirective(endpointConfigVerification, fmt.Sprintf("%s/%d/%d", systemKey, versionID, scopeID), rowVersion), nil
-	case "browser_exploration":
-		if !parent.Valid {
-			return directiveConverge, nil
-		}
-		var parentScope string
-		var parentScopeID int64
-		var parentState string
-		var grandparent sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT a.scope_type,a.scope_id,a.state,a.requested_by_tool_call_id FROM execution_attempts a JOIN tool_calls t ON t.attempt_id=a.id WHERE t.id=?`, parent.Int64).Scan(&parentScope, &parentScopeID, &parentState, &grandparent); err != nil {
-			return "", err
-		}
-		return attemptDirective(ctx, conn, attemptID, parentScope, parentScopeID, parentState, grandparent)
 	default:
 		// embedding_generation and resource_refresh_run have no user cancel
 		// command; their queued rows converge through the in-process sweeps
 		// or a Runtime reconnect and must not fabricate a drain button.
 		return directiveConverge, nil
-	}
-}
-
-// operationDirective resolves the drain directive for one active browser
-// operation. Manual-login-family operations cancel through their own
-// endpoint; owned operations (journey, exploration, deployment verification)
-// cancel through the owning domain command.
-func operationDirective(ctx context.Context, conn projectionExecutor, operationID int64, kind, state string, owner sql.NullInt64) (string, error) {
-	switch kind {
-	case "manual_login", "authentication_probe":
-		var systemKey string
-		var rowVersion int64
-		if err := conn.QueryRowContext(ctx, `SELECT b.key,o.row_version FROM browser_operations o JOIN browser_identities i ON i.id=o.identity_id JOIN business_systems b ON b.id=i.business_system_id WHERE o.id=?`, operationID).Scan(&systemKey, &rowVersion); err != nil {
-			return "", err
-		}
-		return cancelDirective(endpointBrowserOperation, fmt.Sprintf("%s/%d", systemKey, operationID), rowVersion), nil
-	default:
-		if !owner.Valid {
-			return directiveConverge, nil
-		}
-		var scopeType string
-		var scopeID int64
-		var ownerState string
-		var parent sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT a.scope_type,a.scope_id,a.state,a.requested_by_tool_call_id FROM execution_attempts a WHERE a.id=?`, owner.Int64).Scan(&scopeType, &scopeID, &ownerState, &parent); err != nil {
-			return "", err
-		}
-		return attemptDirective(ctx, conn, owner.Int64, scopeType, scopeID, ownerState, parent)
 	}
 }
 

@@ -13,11 +13,9 @@ import (
 // 集合：
 //
 //   - configured 为 nil（部署配置缺省该字段）时，返回全部 DefaultEnabled
-//     的已注册插件——默认主线为 prometheus/thanos/alertmanager，退役
-//     描述符（browser/kubernetes）永不入选；
-//   - configured 非 nil 时是显式白名单：每个 ID 必须是已注册且未退役的
-//     插件；未知 ID 与已退役 ID 都返回 ErrUnknownPlugin（启动失败，绝不
-//     静默忽略）；重复 ID 去重。
+//     的已注册插件——默认主线为 prometheus/thanos/alertmanager；
+//   - configured 非 nil 时是显式白名单：每个 ID 必须是已注册插件，未知
+//     ID 返回 ErrUnknownPlugin（启动失败，绝不静默忽略）；重复 ID 去重。
 //
 // 返回值按 ID 稳定排序，供目录、冻结目录与审计共用。
 func (r *Registry) ResolveEnabled(configured []string) ([]string, error) {
@@ -26,18 +24,14 @@ func (r *Registry) ResolveEnabled(configured []string) ([]string, error) {
 	enabled := map[string]bool{}
 	if configured == nil {
 		for id, descriptor := range state.descriptors {
-			if descriptor.DefaultEnabled && !descriptor.Retired {
+			if descriptor.DefaultEnabled {
 				enabled[id] = true
 			}
 		}
 	} else {
 		for _, id := range configured {
-			descriptor, exists := state.descriptors[id]
-			if !exists {
+			if _, exists := state.descriptors[id]; !exists {
 				return nil, fmt.Errorf("%w: %s", ErrUnknownPlugin, id)
-			}
-			if descriptor.Retired {
-				return nil, fmt.Errorf("%w: %s is retired and cannot be enabled", ErrUnknownPlugin, id)
 			}
 			enabled[id] = true
 		}

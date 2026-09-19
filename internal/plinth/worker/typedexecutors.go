@@ -181,7 +181,6 @@ func AssembleTypedExecutors(registry *plugins.Registry, table *attempt.Implement
 			return err
 		}
 	}
-	retired := retiredExecutors()
 	for _, def := range table.Definitions() {
 		if def.ExecutionMode != "supervisor_typed" {
 			continue
@@ -195,20 +194,10 @@ func AssembleTypedExecutors(registry *plugins.Registry, table *attempt.Implement
 		}
 		descriptor, _ := registry.Descriptor(owner)
 		bundle, bound := registry.Bundle(owner)
-		if bound && bundle.ToolExecutor != nil {
-			if err := RegisterPluginExecutor(descriptor, bundle, table); err != nil {
-				return err
-			}
-			continue
-		}
-		// Retired plugin: no host binds a live executor for it anymore. The
-		// retired adapter keeps serving attempts whose frozen catalog
-		// predates the retirement; new catalogs can never offer the tool.
-		executor, isRetired := retired[def.Name]
-		if !isRetired {
+		if !bound || bundle.ToolExecutor == nil {
 			return fmt.Errorf("plugin %s tool %s has no bound executor in this process", owner, def.Name)
 		}
-		if err := registerTypedExecutor(def.Name, executor); err != nil {
+		if err := RegisterPluginExecutor(descriptor, bundle, table); err != nil {
 			return err
 		}
 	}

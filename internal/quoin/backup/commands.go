@@ -30,9 +30,9 @@ const (
 
 	// Download access facts (sensitive reads): the transfer authorization
 	// fact before bytes move and the terminal completion/failure fact.
-	commandDownloadStart      = "backup.download_started"
-	commandDownloadCompleted  = "backup.download_completed"
-	commandDownloadFailed     = "backup.download_failed"
+	commandDownloadStart     = "backup.download_started"
+	commandDownloadCompleted = "backup.download_completed"
+	commandDownloadFailed    = "backup.download_failed"
 )
 
 // Plain skip sentinels for lifecycle steps whose target state was already

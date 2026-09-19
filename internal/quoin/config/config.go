@@ -2,8 +2,8 @@
 // human-edited YAML documents (Business System configuration and Label
 // Contract, CFG-YAML-001): the strict single-document YAML lexical parse, the
 // frozen JSON Schema structural validation, the official PromQL AST ownership
-// rules, the cron/timezone/unique-key semantics and the embedded Journey
-// Catalog static validation. The field inventory itself is owned only by
+// rules and the cron/timezone/unique-key semantics. The field inventory
+// itself is owned only by
 // contracts/schemas/*.schema.json; this package never re-declares it in Go
 // struct tags (CFG-YAML-001).
 package config

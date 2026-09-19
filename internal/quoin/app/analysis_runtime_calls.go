@@ -410,13 +410,8 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		return finalizeUnbound()
 	}
 	targetSlot := qruntime.SlotPlinth
-	if runtimeSlot.Valid {
-		switch runtimeSlot.String {
-		case qruntime.SlotPlinth, qruntime.SlotLintel:
-			targetSlot = runtimeSlot.String
-		default:
-			return fmt.Errorf("attempt %d has unknown runtime slot %q", attemptID, runtimeSlot.String)
-		}
+	if runtimeSlot.Valid && runtimeSlot.String != qruntime.SlotPlinth {
+		return fmt.Errorf("attempt %d has unknown runtime slot %q", attemptID, runtimeSlot.String)
 	}
 	view, err := service.Slots.View(ctx, targetSlot)
 	if err != nil {

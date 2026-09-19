@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var applicationSubjects = []string{"frontend", "lintel", "plinth", "quoin", "stele"}
+var applicationSubjects = []string{"frontend", "plinth", "quoin", "stele"}
 
 // selectBuildSubjects maps changed source paths to independently publishable
 // application images. The two Proto authorities deliberately override every
@@ -32,19 +32,12 @@ func selectBuildSubjects(changed []string) []string {
 			selected["frontend"] = true
 			continue
 		}
-		if isFrontendAndLintelBuildInput(file) {
+		if isFrontendBuildInput(file) {
 			selected["frontend"] = true
-			selected["lintel"] = true
 			continue
 		}
 		if strings.HasPrefix(file, "web/") {
 			selected["frontend"] = true
-			continue
-		}
-		if strings.HasPrefix(file, "internal/lintel/catalog/") {
-			// The Quoin scheduler consumes Lintel's catalog contract too.
-			selected["quoin"] = true
-			selected["lintel"] = true
 			continue
 		}
 		if strings.HasPrefix(file, "deploy/images/frontend/") {
@@ -55,7 +48,7 @@ func selectBuildSubjects(changed []string) []string {
 			selectAll(selected)
 			continue
 		}
-		for _, component := range []string{"quoin", "plinth", "lintel", "stele"} {
+		for _, component := range []string{"quoin", "plinth", "stele"} {
 			if strings.HasPrefix(file, "cmd/"+component+"/") || strings.HasPrefix(file, "internal/"+component+"/") ||
 				strings.HasPrefix(file, "deploy/images/"+component+"/") {
 				selected[component] = true
@@ -88,7 +81,7 @@ func selectAll(selected map[string]bool) {
 }
 
 func selectBackends(selected map[string]bool) {
-	for _, component := range []string{"lintel", "plinth", "quoin", "stele"} {
+	for _, component := range []string{"plinth", "quoin", "stele"} {
 		selected[component] = true
 	}
 }
@@ -110,10 +103,9 @@ func isAllBackendBuildInput(file string) bool {
 		strings.HasPrefix(file, "internal/contract/")
 }
 
-// isFrontendAndLintelBuildInput covers Node workspace metadata and packages:
-// frontend builds install the web workspace, while the Lintel journey runner
-// installs the same workspace's production dependencies.
-func isFrontendAndLintelBuildInput(file string) bool {
+// isFrontendBuildInput covers Node workspace metadata and packages: frontend
+// builds install the web workspace.
+func isFrontendBuildInput(file string) bool {
 	return file == "package.json" || file == "pnpm-lock.yaml" || file == "pnpm-workspace.yaml" ||
 		file == "web/package.json"
 }

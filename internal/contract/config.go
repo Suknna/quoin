@@ -22,8 +22,6 @@ type ComposeInstall struct {
 	SteleWebhookHostPort int    `json:"steleWebhookHostPort,omitempty" yaml:"steleWebhookHostPort,omitempty"`
 	ExternalProxyNetwork string `json:"externalProxyNetwork,omitempty" yaml:"externalProxyNetwork,omitempty"`
 	SecretDirectory      string `json:"secretDirectory" yaml:"secretDirectory"`
-	LintelBrowserSlots   int    `json:"lintelBrowserSlots" yaml:"lintelBrowserSlots"`
-	LintelShmSizeBytes   int64  `json:"lintelShmSizeBytes,omitempty" yaml:"lintelShmSizeBytes,omitempty"`
 }
 
 type QuoinConfig struct {
@@ -120,12 +118,11 @@ type QuoinAuditConfig struct {
 // was deployed from: the release manifest bytes (site acceptance subject), the
 // deployment input bytes, and the deployment platform. Quoin only reads it.
 type DeploymentBinding struct {
-	ReleaseVersion          string `json:"releaseVersion" yaml:"releaseVersion"`
-	ReleaseSubjectDigest    string `json:"releaseSubjectDigest" yaml:"releaseSubjectDigest"`
-	DeploymentConfigDigest  string `json:"deploymentConfigDigest" yaml:"deploymentConfigDigest"`
-	Backend                 string `json:"backend" yaml:"backend"`
-	Architecture            string `json:"architecture" yaml:"architecture"`
-	BrowserChromiumRevision string `json:"browserChromiumRevision" yaml:"browserChromiumRevision"`
+	ReleaseVersion         string `json:"releaseVersion" yaml:"releaseVersion"`
+	ReleaseSubjectDigest   string `json:"releaseSubjectDigest" yaml:"releaseSubjectDigest"`
+	DeploymentConfigDigest string `json:"deploymentConfigDigest" yaml:"deploymentConfigDigest"`
+	Backend                string `json:"backend" yaml:"backend"`
+	Architecture           string `json:"architecture" yaml:"architecture"`
 }
 
 type PlinthConfig struct {
@@ -146,15 +143,6 @@ type PlinthConfig struct {
 	// digest drift, so a split deployment fails loudly instead of offering
 	// divergent tools.
 	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
-}
-
-type LintelConfig struct {
-	Component            string `json:"component" yaml:"component"`
-	StateDirectory       string `json:"stateDirectory" yaml:"stateDirectory"`
-	QuoinRuntimeEndpoint string `json:"quoinRuntimeEndpoint" yaml:"quoinRuntimeEndpoint"`
-	QuoinRuntimeCAFile   string `json:"quoinRuntimeCaFile" yaml:"quoinRuntimeCaFile"`
-	BrowserSlots         int    `json:"browserSlots" yaml:"browserSlots"`
-	MinimumShmBytes      int64  `json:"minimumShmBytes" yaml:"minimumShmBytes"`
 }
 
 type SteleConfig struct {

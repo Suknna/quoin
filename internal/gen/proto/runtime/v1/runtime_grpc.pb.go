@@ -50,12 +50,12 @@ const (
 // supervisor-only）。Connect 是 Runtime 侧出站发起的 bidi stream；客户端证书已在 mTLS
 // 握手中认证（CN=plinth），首帧必须是 Hello。
 type RuntimeControlClient interface {
-	// 长期控制流：双向 ControlEnvelope，承载任务派发/接受/进度/结果/取消/调和、跨 Runtime
-	// 子执行请求/结果（RUNTIME-CTRL-001/009）。同 slot 同时至多一条活动控制流。
+	// 长期控制流：双向 ControlEnvelope，承载任务派发/接受/进度/结果/取消与调和
+	// （RUNTIME-CTRL-001/009）。同 slot 同时至多一条活动控制流。
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ControlEnvelope, ControlEnvelope], error)
 	// 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
 	// 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
-	// 可用，终态即清除。worker 进程不得调用本 RPC；Lintel 无连接凭据，请求一律 PERMISSION_DENIED。
+	// 可用，终态即清除。worker 进程不得调用本 RPC。
 	FetchCredentialGrant(ctx context.Context, in *FetchCredentialGrantRequest, opts ...grpc.CallOption) (*FetchCredentialGrantResponse, error)
 }
 
@@ -98,12 +98,12 @@ func (c *runtimeControlClient) FetchCredentialGrant(ctx context.Context, in *Fet
 // supervisor-only）。Connect 是 Runtime 侧出站发起的 bidi stream；客户端证书已在 mTLS
 // 握手中认证（CN=plinth），首帧必须是 Hello。
 type RuntimeControlServer interface {
-	// 长期控制流：双向 ControlEnvelope，承载任务派发/接受/进度/结果/取消/调和、跨 Runtime
-	// 子执行请求/结果（RUNTIME-CTRL-001/009）。同 slot 同时至多一条活动控制流。
+	// 长期控制流：双向 ControlEnvelope，承载任务派发/接受/进度/结果/取消与调和
+	// （RUNTIME-CTRL-001/009）。同 slot 同时至多一条活动控制流。
 	Connect(grpc.BidiStreamingServer[ControlEnvelope, ControlEnvelope]) error
 	// 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
 	// 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
-	// 可用，终态即清除。worker 进程不得调用本 RPC；Lintel 无连接凭据，请求一律 PERMISSION_DENIED。
+	// 可用，终态即清除。worker 进程不得调用本 RPC。
 	FetchCredentialGrant(context.Context, *FetchCredentialGrantRequest) (*FetchCredentialGrantResponse, error)
 	mustEmbedUnimplementedRuntimeControlServer()
 }
@@ -183,108 +183,6 @@ var RuntimeControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Connect",
 			Handler:       _RuntimeControl_Connect_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
-		},
-	},
-	Metadata: "runtime.proto",
-}
-
-const (
-	BrowserTunnel_Open_FullMethodName = "/quoin.runtime.v1.BrowserTunnel/Open"
-)
-
-// BrowserTunnelClient is the client API for BrowserTunnel service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// 浏览器隧道：每个活动 BrowserSession 一条独立 bidi stream；noVNC/RFB 字节透明中继，
-// Quoin 不解析内容（RUNTIME-BROWSER-001/003）。首帧必须是 open。
-type BrowserTunnelClient interface {
-	Open(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BrowserEnvelope, BrowserEnvelope], error)
-}
-
-type browserTunnelClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewBrowserTunnelClient(cc grpc.ClientConnInterface) BrowserTunnelClient {
-	return &browserTunnelClient{cc}
-}
-
-func (c *browserTunnelClient) Open(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[BrowserEnvelope, BrowserEnvelope], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &BrowserTunnel_ServiceDesc.Streams[0], BrowserTunnel_Open_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[BrowserEnvelope, BrowserEnvelope]{ClientStream: stream}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BrowserTunnel_OpenClient = grpc.BidiStreamingClient[BrowserEnvelope, BrowserEnvelope]
-
-// BrowserTunnelServer is the server API for BrowserTunnel service.
-// All implementations must embed UnimplementedBrowserTunnelServer
-// for forward compatibility.
-//
-// 浏览器隧道：每个活动 BrowserSession 一条独立 bidi stream；noVNC/RFB 字节透明中继，
-// Quoin 不解析内容（RUNTIME-BROWSER-001/003）。首帧必须是 open。
-type BrowserTunnelServer interface {
-	Open(grpc.BidiStreamingServer[BrowserEnvelope, BrowserEnvelope]) error
-	mustEmbedUnimplementedBrowserTunnelServer()
-}
-
-// UnimplementedBrowserTunnelServer must be embedded to have
-// forward compatible implementations.
-//
-// NOTE: this should be embedded by value instead of pointer to avoid a nil
-// pointer dereference when methods are called.
-type UnimplementedBrowserTunnelServer struct{}
-
-func (UnimplementedBrowserTunnelServer) Open(grpc.BidiStreamingServer[BrowserEnvelope, BrowserEnvelope]) error {
-	return status.Errorf(codes.Unimplemented, "method Open not implemented")
-}
-func (UnimplementedBrowserTunnelServer) mustEmbedUnimplementedBrowserTunnelServer() {}
-func (UnimplementedBrowserTunnelServer) testEmbeddedByValue()                       {}
-
-// UnsafeBrowserTunnelServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to BrowserTunnelServer will
-// result in compilation errors.
-type UnsafeBrowserTunnelServer interface {
-	mustEmbedUnimplementedBrowserTunnelServer()
-}
-
-func RegisterBrowserTunnelServer(s grpc.ServiceRegistrar, srv BrowserTunnelServer) {
-	// If the following call pancis, it indicates UnimplementedBrowserTunnelServer was
-	// embedded by pointer and is nil.  This will cause panics if an
-	// unimplemented method is ever invoked, so we test this at initialization
-	// time to prevent it from happening at runtime later due to I/O.
-	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
-		t.testEmbeddedByValue()
-	}
-	s.RegisterService(&BrowserTunnel_ServiceDesc, srv)
-}
-
-func _BrowserTunnel_Open_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(BrowserTunnelServer).Open(&grpc.GenericServerStream[BrowserEnvelope, BrowserEnvelope]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BrowserTunnel_OpenServer = grpc.BidiStreamingServer[BrowserEnvelope, BrowserEnvelope]
-
-// BrowserTunnel_ServiceDesc is the grpc.ServiceDesc for BrowserTunnel service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var BrowserTunnel_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "quoin.runtime.v1.BrowserTunnel",
-	HandlerType: (*BrowserTunnelServer)(nil),
-	Methods:     []grpc.MethodDesc{},
-	Streams: []grpc.StreamDesc{
-		{
-			StreamName:    "Open",
-			Handler:       _BrowserTunnel_Open_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

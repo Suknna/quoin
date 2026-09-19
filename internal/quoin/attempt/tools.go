@@ -10,8 +10,6 @@ package attempt
 // only other tool source, and it is fixed data, never a registration path.
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -55,8 +53,7 @@ const PreviousInspectionAgentVersion = "inspection-analysis-v1"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen
-// catalog document or the fixed legacy fallback — never against this
-// package's live tables.
+// catalog document — never against this package's live tables.
 const ToolSchemaVersion = "initial-analysis-tools-v5"
 
 // Aliases keep the attempt-side vocabulary on the shared plugin contract:
@@ -118,14 +115,13 @@ var platformTools = []ToolDef{
 
 // Implementations assembles this binary's complete compiled implementation
 // table: platform tools first (stable order), then every plugin-owned
-// implementation (active and retired) from the shared builtin declarations.
-// It is the single input both catalog assembly and dispatch assembly
-// consume; there is no other tool table.
+// implementation from the shared builtin declarations. It is the single
+// input both catalog assembly and dispatch assembly consume; there is no
+// other tool table.
 func Implementations() []ToolDef {
-	all := make([]ToolDef, 0, len(platformTools)+len(builtin.PluginTools())+len(builtin.RetiredTools()))
+	all := make([]ToolDef, 0, len(platformTools)+len(builtin.PluginTools()))
 	all = append(all, platformTools...)
 	all = append(all, builtin.PluginTools()...)
-	all = append(all, builtin.RetiredTools()...)
 	return all
 }
 
@@ -184,31 +180,4 @@ func ValidateToolResultPayload(table *ImplementationTable, schemaKind string, ca
 		}
 	}
 	return nil
-}
-
-// CanonicalToolsJSON renders the FROZEN legacy generation catalog into the
-// provider-facing tool schema bytes (OpenAI function tools shape). It serves
-// only attempts created before per-attempt freezing: current attempts render
-// their stored catalog document, so these bytes can never drift with the
-// installed implementation.
-func CanonicalToolsJSON(agentVersions ...string) ([]byte, error) {
-	catalog := legacyGenerationCatalog(legacyAgentVersion(agentVersions))
-	return catalog.ProviderToolsJSON()
-}
-
-// CanonicalToolsDigest is the SHA-256 of CanonicalToolsJSON as hex text.
-func CanonicalToolsDigest(agentVersions ...string) (string, error) {
-	body, err := CanonicalToolsJSON(agentVersions...)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func legacyAgentVersion(agentVersions []string) string {
-	if len(agentVersions) == 1 {
-		return agentVersions[0]
-	}
-	return AgentVersion
 }

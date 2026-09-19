@@ -17,7 +17,6 @@ func sealEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionT
 		Type:          typed.Type,
 		Prometheus:    metricsOf(typed.Prometheus),
 		Thanos:        metricsOf(typed.Thanos),
-		Kubernetes:    kubernetesOf(typed.Kubernetes),
 		ModelProvider: modelProviderOf(typed.ModelProvider),
 	})
 }
@@ -31,7 +30,6 @@ func openEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionT
 		Type:          secret.Type,
 		Prometheus:    metricsFrom(secret.Prometheus),
 		Thanos:        metricsFrom(secret.Thanos),
-		Kubernetes:    kubernetesFrom(secret.Kubernetes),
 		ModelProvider: modelProviderFrom(secret.ModelProvider),
 	}, nil
 }
@@ -48,20 +46,6 @@ func metricsFrom(source *secrets.MetricsSecret) *metricsSecretJSON {
 		return nil
 	}
 	return &metricsSecretJSON{Username: source.Username, Password: source.Password, BearerToken: source.BearerToken}
-}
-
-func kubernetesOf(source *kubernetesSecretJSON) *secrets.KubernetesSecret {
-	if source == nil {
-		return nil
-	}
-	return &secrets.KubernetesSecret{Kubeconfig: source.Kubeconfig}
-}
-
-func kubernetesFrom(source *secrets.KubernetesSecret) *kubernetesSecretJSON {
-	if source == nil {
-		return nil
-	}
-	return &kubernetesSecretJSON{Kubeconfig: source.Kubeconfig}
 }
 
 func modelProviderOf(source *modelProviderSecretJSON) *secrets.ModelProviderSecret {

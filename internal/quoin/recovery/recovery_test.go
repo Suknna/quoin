@@ -582,7 +582,7 @@ func assertRestoreIsolation(t *testing.T, database *sql.DB) {
 	if sessions != 0 || uncheckedConnections != 0 || blockingItems != 1 {
 		t.Fatalf("sessions=%d uncheckedConnections=%d blockingItems=%d", sessions, uncheckedConnections, blockingItems)
 	}
-	for _, kind := range []string{"AlertSource", "Connection", "BrowserIdentity"} {
+	for _, kind := range []string{"AlertSource", "Connection"} {
 		var total, unsafe int
 		if err := database.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN safe_state='Blocking' THEN 1 ELSE 0 END),0) FROM maintenance_items WHERE maintenance_revision=(SELECT row_version FROM maintenance_state WHERE id=1) AND kind=?`, kind).Scan(&total, &unsafe); err != nil {
 			t.Fatal(err)
@@ -592,4 +592,3 @@ func assertRestoreIsolation(t *testing.T, database *sql.DB) {
 		}
 	}
 }
-

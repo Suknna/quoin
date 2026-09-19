@@ -220,8 +220,8 @@ type Conn struct {
 
 // inspectionProducer resolves the frozen run-check declaration for Evidence
 // committed without a Tool Call. PromQL collection is executed by Plinth with
-// an Attempt-level metrics grant, while Journey collection is executed by
-// Lintel; their shared evidence table intentionally does not duplicate kind.
+// an Attempt-level metrics grant; their shared evidence table intentionally
+// does not duplicate kind.
 func (service *Service) inspectionProducer(ctx context.Context, attemptID int64) (map[string]any, []Conn, error) {
 	// 独立计划 Run（ADR-0004）：插件采集由 Plinth supervisor 执行，连接来自
 	// Run 冻结的接入授权；插件身份随 producer 事实一并冻结。
@@ -268,7 +268,7 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
 		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&checkKind)
 	if errors.Is(err, sql.ErrNoRows) || checkKind != "promql" {
-		return map[string]any{"kind": "lintel_browser", "attemptId": strconv.FormatInt(attemptID, 10)}, []Conn{}, nil
+		return map[string]any{"kind": "inspection_collection", "attemptId": strconv.FormatInt(attemptID, 10)}, []Conn{}, nil
 	}
 	if err != nil {
 		return nil, nil, err

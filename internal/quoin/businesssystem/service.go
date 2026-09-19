@@ -29,10 +29,6 @@ var ErrNotFound = errors.New("business system or config version not found")
 // request digest (HTTP-COMMAND-003).
 var ErrCommandReused = errors.New("client command id reused with a different request")
 
-// ErrBrowserIdentityMissing reports a draft whose browser checks cannot run
-// because the business system has no Browser Identity configured yet.
-var ErrBrowserIdentityMissing = errors.New("business system has no browser identity")
-
 // ConflictError carries the frozen publish conflict codes.
 type ConflictError struct {
 	Code           string // row_version_conflict | current_pointer_conflict | active_conflict
@@ -44,10 +40,9 @@ type ConflictError struct {
 
 func (err *ConflictError) Error() string { return err.Detail }
 
-// UploadInput carries the raw declaration and optional embedded catalog digest.
+// UploadInput carries the raw declaration.
 type UploadInput struct {
-	YAMLBody             []byte
-	JourneyCatalogDigest string
+	YAMLBody []byte
 }
 
 // Service owns the Business System state changes. Every mutation runs through
@@ -68,8 +63,6 @@ type Service struct {
 	opVerificationCancel *execution.Operation
 	// Runtime/system machine stages (non-ledger executions).
 	opDiscoveryResult *execution.Operation
-	opJourneyAdmit    *execution.Operation
-	opJourneyResult   *execution.Operation
 	opRunResult       *execution.Operation
 	opRunGap          *execution.Operation
 	opRefreshGap      *execution.Operation
@@ -80,8 +73,6 @@ const (
 	opVerificationRunName    = "config_verification.run"
 	opVerificationCancelName = "config_verification.cancel"
 	opDiscoveryResultName    = "config_verification.result.discovery"
-	opJourneyAdmitName       = "config_verification.journey.admit"
-	opJourneyResultName      = "config_verification.journey.result"
 	opRunResultName          = "config_verification.result.commit"
 	opRunGapName             = "config_verification.gap.settle"
 	opRefreshGapName         = "resource_refresh.gap.settle"
@@ -114,8 +105,6 @@ func (service *Service) registerOperations() {
 	service.opVerificationCancel = register(execution.Operation{Name: opVerificationCancelName, Class: admin.Class, ObjectType: admin.ObjectType, Authorize: admin.Authorize})
 	machine := execution.Operation{Class: execution.ClassWrite, ObjectType: objectVerificationRun, Authorize: requireSystemResultWork}
 	service.opDiscoveryResult = register(execution.Operation{Name: opDiscoveryResultName, Class: machine.Class, ObjectType: machine.ObjectType, Authorize: machine.Authorize})
-	service.opJourneyAdmit = register(execution.Operation{Name: opJourneyAdmitName, Class: machine.Class, ObjectType: machine.ObjectType, Authorize: machine.Authorize})
-	service.opJourneyResult = register(execution.Operation{Name: opJourneyResultName, Class: machine.Class, ObjectType: machine.ObjectType, Authorize: machine.Authorize})
 	service.opRunResult = register(execution.Operation{Name: opRunResultName, Class: machine.Class, ObjectType: machine.ObjectType, Authorize: machine.Authorize})
 	service.opRunGap = register(execution.Operation{Name: opRunGapName, Class: machine.Class, ObjectType: machine.ObjectType, Authorize: machine.Authorize})
 	service.opRefreshGap = register(execution.Operation{Name: opRefreshGapName, Class: execution.ClassWrite, ObjectType: objectRefreshRun, Authorize: requireSystemResultWork})

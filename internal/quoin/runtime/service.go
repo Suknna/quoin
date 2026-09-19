@@ -13,10 +13,7 @@ import (
 	"time"
 )
 
-const (
-	SlotPlinth = "plinth"
-	SlotLintel = "lintel"
-)
+const SlotPlinth = "plinth"
 
 // SlotView is the RuntimeSlot HTTP projection — a pure transient view of the
 // in-memory connection state (no persistent slot fields remain).
@@ -35,15 +32,14 @@ var ErrNotFound = errors.New("runtime slot not found")
 // closing carries the stop signal for the handler loop: cancelling the
 // stream context makes gRPC terminate the RPC on both ends.
 type connection struct {
-	bootID               string
-	epoch                uint64
-	releaseVersion       string // Informational peer build provenance, never admission.
-	updated              time.Time
-	closing              chan struct{}
-	once                 sync.Once
-	sender               StreamSender
-	outbound             uint64
-	browserCapacitySlots uint32
+	bootID         string
+	epoch          uint64
+	releaseVersion string // Informational peer build provenance, never admission.
+	updated        time.Time
+	closing        chan struct{}
+	once           sync.Once
+	sender         StreamSender
+	outbound       uint64
 }
 
 func (connection *connection) close() {
@@ -77,7 +73,7 @@ func (service *Service) SetClock(now func() time.Time) {
 	}
 }
 
-func ValidSlot(slot string) bool { return slot == SlotPlinth || slot == SlotLintel }
+func ValidSlot(slot string) bool { return slot == SlotPlinth }
 
 // View projects the slot's transient connection state.
 func (service *Service) View(_ context.Context, slot string) (SlotView, error) {

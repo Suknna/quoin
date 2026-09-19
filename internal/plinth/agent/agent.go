@@ -306,8 +306,8 @@ func buildInvestigationMessages(input InvestigationInput, prompt string, include
 }
 
 // integrationPromptScope is one authorized integration as rendered into the
-// prompt: kind ("metrics" | "kubernetes") plus the stable connection name the
-// model passes as sourceRef. No endpoint, credential or secret is included.
+// prompt: kind ("metrics") plus the stable connection name the model passes
+// as sourceRef. No endpoint, credential or secret is included.
 type integrationPromptScope struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
@@ -317,22 +317,15 @@ type integrationPromptScope struct {
 // a business declaration (ADR-0004): the frozen integrations are the entire
 // read-only scope, ambiguity must be resolved by asking, never by guessing.
 func sourceScopeGuidance(integrations []integrationPromptScope) string {
-	var metrics, kubernetes []string
+	var metrics []string
 	for _, integration := range integrations {
-		if integration.Kind == "kubernetes" {
-			kubernetes = append(kubernetes, integration.Name)
-		} else {
-			metrics = append(metrics, integration.Name)
-		}
+		metrics = append(metrics, integration.Name)
 	}
 	builder := strings.Builder{}
 	builder.WriteString("本次执行未绑定业务声明；下列已启用来源就是全部只读授权范围。")
 	builder.WriteString("调用 thanos_query 时用 sourceRef 指明指标来源，resourceRef 在此模式不可用；仅当只有一个来源时才可省略 sourceRef，多个来源未指明将被拒绝。")
 	if len(metrics) > 0 {
 		builder.WriteString("可用指标来源：" + strings.Join(metrics, "、") + "。")
-	}
-	if len(kubernetes) > 0 {
-		builder.WriteString("可用 Kubernetes 来源：" + strings.Join(kubernetes, "、") + "（kubernetes_read 同样用 sourceRef 选择）。")
 	}
 	if len(metrics) > 0 {
 		builder.WriteString(fmt.Sprintf("示例：thanos_query({sourceRef: %q, query: %q})。", metrics[0], "up"))
