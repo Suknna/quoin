@@ -24,9 +24,7 @@ ARG RELEASE_VERSION=v0.1.0-dev
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin ./cmd/quoin && \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin-healthcheck ./cmd/quoin-healthcheck
 FROM ${DISTROLESS_REPO}@${DISTROLESS_INDEX_DIGEST}
 USER 65532:65532
 COPY --from=build /out/quoin /quoin
-COPY --from=build /out/quoin-healthcheck /quoin-healthcheck
 ENTRYPOINT ["/quoin"]

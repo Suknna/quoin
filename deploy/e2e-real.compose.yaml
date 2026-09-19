@@ -12,9 +12,9 @@ services:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/gateway/tls:/etc/caddy/tls:ro
     depends_on:
       quoin:
-        condition: service_healthy
+        condition: service_started
       stele:
-        condition: service_healthy
+        condition: service_started
       frontend:
         condition: service_started
 
@@ -31,13 +31,6 @@ services:
       # Long-lived Quoin only reads its deployment identity. The bootstrap
       # one-shot explicitly overrides this mount while creating fresh secrets.
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets:/run/quoin-secrets:ro
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-      start_period: 2s
-
   # #102 uses the unmodified production Plinth adapter. The e2e driver
   # provisions its component credential files before the first boot.
   plinth:
@@ -52,14 +45,7 @@ services:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
     depends_on:
       quoin:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-      start_period: 2s
-
+        condition: service_started
   stele:
     image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0-dev}
     command: ["--config", "/etc/quoin/component.yaml"]
@@ -70,14 +56,7 @@ services:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-client.key:/run/quoin-secrets/stele-client.key:ro
     depends_on:
       quoin:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-      start_period: 2s
-
+        condition: service_started
   # Test-only OTP delivery receiver (see deploy/images/otp-test/Dockerfile):
   # one process answering the administrator's configured email (implicit-TLS
   # SMTP) and SMS (HTTPS webhook) channels and recording every accepted

@@ -96,8 +96,7 @@ func isAllApplicationBuildInput(file string) bool {
 // isAllBackendBuildInput names source inputs available to all Go binaries but
 // not copied into the standalone static frontend image.
 func isAllBackendBuildInput(file string) bool {
-	return strings.HasPrefix(file, "cmd/quoin-healthcheck/") ||
-		strings.HasPrefix(file, "internal/buildinfo/") ||
+	return strings.HasPrefix(file, "internal/buildinfo/") ||
 		strings.HasPrefix(file, "internal/ops/") ||
 		strings.HasPrefix(file, "internal/gen/contracts/") ||
 		strings.HasPrefix(file, "internal/contract/")

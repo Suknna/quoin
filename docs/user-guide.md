@@ -123,7 +123,6 @@ mall-shop 的 mall-tiny（JVM）、MySQL、Redis 以 lab Prometheus 已抓取的
 - 当前可用插件为 Prometheus、Thanos、Alertmanager；浏览器与 Kubernetes 插件已移除。
 - 无 SSH、无 MySQL/Redis 直连连接类型：数据库类对象经 Prometheus exporter 指标 + Alertmanager 告警观测。
 - 故障复盘入口与知识库"整理为知识候选"按钮尚未开放（界面明确标注"开发中"）。
-- `quoin-faultfs` 等故障工具是**验证专用**（存储故障路径验证容器内使用），不是面向巡检演练的产品功能；巡检演练依靠 lab 侧真实故障或 Alertmanager 规则触发。
 - 巡检报告是模型生成的分析文本：事实以 Evidence 为准，`Completed` 采证状态与健康结论是两回事。
 
 ## 常见问题

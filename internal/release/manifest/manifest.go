@@ -57,7 +57,7 @@ const (
 )
 
 // requiredCells freezes the catalog test names each qualification category
-// must cover (scenario.cell identifiers of verification-catalog.yaml).
+// must cover.
 var requiredCells = map[string][]string{
 	"compose_linux_amd64": {
 		"release.native-matrix.compose-linux-amd64",
@@ -234,7 +234,7 @@ func Build(inputs Inputs) (*Document, error) {
 
 // SourceSubject is the source-revision binding the contract-gate
 // statement carries: the exact git commit plus the working-tree status
-// digest, mirroring quoin-verify's subject resolution. A clean tree and a
+// digest. A clean tree and a
 // dirty tree never share a subject digest.
 type SourceSubject struct {
 	Name   string
@@ -242,7 +242,7 @@ type SourceSubject struct {
 }
 
 // ResolveSourceSubject recomputes the source-revision subject of one
-// checkout (same formula as the quoin-verify contract gate).
+// checkout.
 func ResolveSourceSubject(root string) (*SourceSubject, error) {
 	commit, err := gitOutput(root, "rev-parse", "HEAD")
 	if err != nil {

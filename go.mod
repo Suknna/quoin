@@ -3,14 +3,11 @@ module github.com/Suknna/quoin
 go 1.25.8
 
 require (
-	github.com/bufbuild/protocompile v0.14.1
 	github.com/cloudwego/eino v0.9.13
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/creack/pty v1.1.24
 	github.com/danielgtaylor/huma/v2 v2.39.1
-	github.com/dlclark/regexp2 v1.11.0
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/hanwen/go-fuse/v2 v2.9.0
+	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/prometheus v0.314.0
 	github.com/robfig/cron/v3 v3.0.1
@@ -32,7 +29,6 @@ require (
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
 	github.com/dennwc/varint v1.0.0 // indirect
-	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/grafana/regexp v0.0.0-20250905093917-f7b3be9d1853 // indirect
@@ -65,11 +61,10 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.70.1 // indirect
+	github.com/prometheus/common v0.70.1
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/net v0.57.0
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260720155508-bb71a54f79dc // indirect
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12

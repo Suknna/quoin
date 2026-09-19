@@ -46,13 +46,4 @@ var (
 
 	//go:embed deployment-verification.schema.json
 	DeploymentVerificationSchema []byte
-
-	//go:embed verification-result.schema.json
-	VerificationResultSchema []byte
-
-	//go:embed verification-catalog.yaml
-	VerificationCatalogYAML []byte
-
-	//go:embed verification-result-profile.yaml
-	VerificationResultProfileYAML []byte
 )

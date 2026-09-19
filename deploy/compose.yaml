@@ -170,8 +170,8 @@ services:
     security_opt: [no-new-privileges:true]
     depends_on:
       frontend: {condition: service_started}
-      quoin: {condition: service_healthy}
-      stele: {condition: service_healthy}
+      quoin: {condition: service_started}
+      stele: {condition: service_started}
     stop_grace_period: 60s
     restart: unless-stopped
 
@@ -198,12 +198,6 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 20s
     stop_grace_period: 60s
     restart: unless-stopped
 
@@ -224,13 +218,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     depends_on:
-      quoin: {condition: service_healthy}
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
+      quoin: {condition: service_started}
     stop_grace_period: 60s
     restart: unless-stopped
 
@@ -249,13 +237,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     depends_on:
-      quoin: {condition: service_healthy}
-    healthcheck:
-      test: ["CMD", "/quoin-healthcheck", "http://127.0.0.1:9090/livez"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 10s
+      quoin: {condition: service_started}
     stop_grace_period: 60s
     restart: unless-stopped
 

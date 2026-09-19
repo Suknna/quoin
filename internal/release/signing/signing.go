@@ -137,8 +137,7 @@ func BundlePayload(bundleJSON, companion []byte) ([]byte, string, error) {
 
 // TestResultStatement is the closure's minimal projection of an in-toto
 // Test Result statement: the verdict, the passed test names and the subject
-// digest it binds. The frozen verification-result schema stays the sole
-// authority; nothing here re-derives outcomes.
+// digest it binds; nothing here re-derives outcomes.
 type TestResultStatement struct {
 	PredicateType string
 	Result        string

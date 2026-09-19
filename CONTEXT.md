@@ -405,7 +405,7 @@ Suite 状态为 `PASSED | WARNED | FAILED`，发布门只接受 PASSED：本 inv
 Release Qualification 只使用合成数据、短期测试凭据与唯一 sentinel，禁止生产凭据和生产数据进入流水线；公开 evidence 必须通过 sentinel/秘密扫描，敏感 trace 只留受限存储并在公开报告记录 digest、分类和受限 locator。纯状态机、SQL 约束与 HTTP/Proto framing 可以由确定性 harness 证明；调度、Pod/PV/NetworkPolicy/Ingress/Compose 生命周期必须真实运行；双架构声明必须来自原生 amd64/arm64，QEMU 只能作为构建或辅助诊断证据。确定性程序收集事实、校验契约、计算 scenario/suite verdict 并生成签名报告；Agent/模型只做失败分析、汇总和建议，不得改写结果、降低 required 门或把 WARNED/FAILED 改成 PASSED。
 
 **验证触发与支持矩阵**：
-验证分层保留为设计目标，但其 CI 执行链（原 release.yml / release-qualification.yml 及 quoin-deploy/qualify/aggregate 驱动）已随部署编排退役一并移除；当前由 Contract Gate（go test / quoin-verify / 发布物签名验证）承担可执行验证，Release Qualification 矩阵在驱动重建前不再由 CI 执行。
+验证分层保留为设计目标，但其 CI 执行链（原 release.yml / release-qualification.yml 及 quoin-deploy/qualify/aggregate 驱动）已随部署编排退役一并移除；当前可执行验证收敛为 `go test`/`go vet` 与发布物签名验证；验证驱动（quoin-verify/quoin-faultfs 及其 catalog）已随本决定移除，Release Qualification 矩阵在驱动重建前不再执行。站点级 Deployment Acceptance（`/api/v1/deployment-verifications`）保留为产品能力。
 
 **外部系统与故障执行**：
 Release Qualification 使用官方 digest-pinned Prometheus、Alertmanager、Thanos 镜像验证真实协议 happy path、查询语义和 webhook；错误码、半响应、畸形响应及应用层响应超时由 deterministic protocol fixture 拥有，传输层 TCP timeout/reset 由网络故障原语拥有；Model Provider 继续只使用 deterministic fixture，真实客户系统、生产凭据和真实模型供应商只属于 Deployment Acceptance。catalog 只声明工具无关的封闭故障原语：已有执行路径的进程、资源与网络原语映射到 Docker/Kubernetes 原生 stop/kill/pod delete/NetworkPolicy/重建操作，TCP 原语映射到 digest-pinned Toxiproxy 的 latency/timeout/reset_peer/bandwidth/limit_data；v1 不引入通用 Chaos 平台。ENOSPC、EDQUOT、EROFS、指定 fsync 失败和指定 rename 失败是互不替代的精确 required 原语；冻结 catalog 前必须通过一次性 Compose+Kubernetes 原型逐项证明 operation、注入点、所需 privilege、expected errno 与清理路径，未证明项不得以聚合“原子写失败”或 mock 冒充。
