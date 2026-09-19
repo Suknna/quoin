@@ -63,16 +63,14 @@ test.describe('T28 原文导入、人工确认和版本检索 @ticket-28', () =>
     expect(batch.candidates).toHaveLength(1)
     const candidate = batch.candidates[0]
     const detail = await api<{ originalSuggestion: { body: string }; sourceType: string; sourceId: string }>(page, `/api/v1/knowledge/candidates/${candidate.id}`)
-    // The frozen Source Material endpoints are the import's provenance:
-    // metadata plus the verbatim UTF-8 body the operator submitted, unchanged
-    // by every later edit, confirm and revision.
-    const sourceMeta = await api<{ id: string; kind: string; digest: string; sizeBytes: number }>(page, `/api/v1/source-materials/${detail.sourceId}`)
-    expect(sourceMeta.kind).toBe('knowledge_import')
-    const sourceContent = await call(page, `/api/v1/source-materials/${detail.sourceId}/content`)
-    expect(sourceContent.status).toBe(200)
+    // The frozen source material row is the import's provenance: the verbatim
+    // UTF-8 body the operator submitted, unchanged by every later edit,
+    // confirm and revision (the retired HTTP read projected this same row).
     const submittedText = 'T28 导入原文：连接池请求超时，先检查连接池上限与等待超时。'
-    expect(sourceContent.body).toBe(submittedText)
-    expect(sourceMeta.sizeBytes).toBe(Buffer.byteLength(submittedText, 'utf8'))
+    const [sourceRow] = rows(`SELECT kind,digest,size_bytes,content FROM source_materials WHERE id=${Number(detail.sourceId)}`)
+    expect(sourceRow.kind).toBe('knowledge_import')
+    expect(sourceRow.content).toBe(submittedText)
+    expect(sourceRow.size_bytes).toBe(Buffer.byteLength(submittedText, 'utf8'))
     const edited = await call(page, `/api/v1/knowledge/candidates/${candidate.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: command(), expectedRevision: 0, title: 'T28 已审阅连接池处置' }) })
     expect(edited.status).toBe(200)
     const stale = await call(page, `/api/v1/knowledge/candidates/${candidate.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientCommandId: command(), expectedRevision: 0, title: '过期草稿' }) })
@@ -117,10 +115,8 @@ test.describe('T28 原文导入、人工确认和版本检索 @ticket-28', () =>
     const observed = rows(`SELECT b.id,b.state,a.state AS attempt_state,(SELECT COUNT(*) FROM knowledge_versions v WHERE v.knowledge_id=${Number(knowledgeID)}) AS versions,(SELECT COUNT(*) FROM knowledge_search_docs d JOIN knowledge_versions v ON v.id=d.knowledge_version_id WHERE v.knowledge_id=${Number(knowledgeID)}) AS search_docs FROM knowledge_import_batches b JOIN execution_attempts a ON a.scope_id=b.id AND a.attempt_type='knowledge_extraction' WHERE b.id IN (${Number(batch.id)},${Number(slow.id)}) ORDER BY b.id`)
     // The model's own suggestion stays distinct from the frozen source text
     // (it is the extraction output, not the submitted material).
-    const frozenSource = await call(page, `/api/v1/source-materials/${detail.sourceId}/content`)
-    expect(frozenSource.status).toBe(200)
-    expect(frozenSource.body).toBe(submittedText)
-    evidence.flow = { batchId: batch.id, modelSuggestionBody: detail.originalSuggestion.body, sourceMaterialId: detail.sourceId, sourceMaterialDigest: sourceMeta.digest, confirmedKnowledgeId: knowledgeID, cancelledBatchId: slow.id, rows: observed }
+    expect(rows(`SELECT content FROM source_materials WHERE id=${Number(detail.sourceId)}`)[0].content).toBe(submittedText)
+    evidence.flow = { batchId: batch.id, modelSuggestionBody: detail.originalSuggestion.body, sourceMaterialId: detail.sourceId, sourceMaterialDigest: String(sourceRow.digest), confirmedKnowledgeId: knowledgeID, cancelledBatchId: slow.id, rows: observed }
     expect(observed).toHaveLength(2)
     expect(observed.find((row) => String(row.id) === slow.id)?.state).toBe('Cancelled')
     expect(observed.find((row) => String(row.id) === slow.id)?.attempt_state).toBe('Cancelled')

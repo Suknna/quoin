@@ -42,7 +42,6 @@ test("secondary and detail routes render their declared projections without fall
 		["/settings/platform/backups", "备份与保留"],
 		["/settings/platform/audit", "审计"],
 		["/settings/platform/about", "关于平台"],
-		["/settings/platform/runtime", "运行时"],
 		["/settings/platform/model-providers", "模型提供方"],
 		["/settings/platform/integrations", "接入管理"],
 	] as const;

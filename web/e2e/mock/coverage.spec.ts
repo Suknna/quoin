@@ -59,7 +59,6 @@ test("route matrix renders actual data without unhandled APIs or external transp
 		["/alerts/list", "当前告警", "CheckoutLatencyHigh"],
 		["/investigations", "调查", "结算延迟调查"],
 		["/inspections", "巡检", "计划绑定接入与模板"],
-		["/business-systems", "结算系统", "结算健康检查"],
 		["/knowledge", "知识库", "结算延迟排查"],
 		["/admin", "管理", "关于"],
 	] as const;

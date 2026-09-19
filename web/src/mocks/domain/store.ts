@@ -4,82 +4,6 @@ import type {
 	UserSummary,
 } from "../../api/generated/types";
 
-// Business-system payload shapes used by the mock domain state. The former
-// features/admin/business-systems API client was retired with its plugin
-// surface; these local DTOs keep the mock state typed without it.
-interface CheckView {
-	checkKey: string;
-	displayName: string;
-	analysisQuestion: string;
-	kind: "promql";
-	queryMode?: "instant" | "range";
-	expression?: string;
-	rangeSeconds?: number;
-	stepSeconds?: number;
-}
-interface PlanView {
-	planKey: string;
-	displayName: string;
-	cron?: string;
-	checks: CheckView[];
-}
-interface DiscoveryView {
-	discoveryKey: string;
-	displayName: string;
-	selector: string;
-	identityLabels: string[];
-}
-interface BusinessSystemDetail {
-	key: string;
-	displayName: string;
-	enabled: boolean;
-	rowVersion: number;
-	currentConfigVersionId?: string;
-	timezone?: string | null;
-	resourceRefreshIntervalSeconds?: number | null;
-	configVersionCount: number;
-	discoveries: DiscoveryView[];
-	plans: PlanView[];
-}
-type ResourceRefreshState =
-	| "Queued"
-	| "Running"
-	| "Completed"
-	| "CompletedWithWarnings"
-	| "Failed"
-	| "Cancelled"
-	| "Interrupted";
-interface ResourceRefreshRunDetail {
-	id: string;
-	businessSystemId: string;
-	configVersionId: string;
-	labelContractVersionId: string;
-	triggerKind: "manual" | "schedule";
-	state: ResourceRefreshState;
-	rowVersion: number;
-	evidenceAt?: string;
-	resultDetail?: string;
-	createdAt: string;
-}
-interface ConfigVersionDetail {
-	id: string;
-	versionSeq: number;
-	state: "draft" | "published" | "superseded";
-	createdAt: string;
-	publishedAt?: string;
-	digest: string;
-	parserVersion: string;
-	schemaVersion: string;
-	systemKey: string;
-	displayName: string;
-	enabled: boolean;
-	labelContractVersionId: string;
-	yamlBody: string;
-	timezone: string;
-	resourceRefreshIntervalSeconds?: number;
-	discoveries: DiscoveryView[];
-	plans: PlanView[];
-}
 interface LabelContractSummary {
 	id: string;
 	version: number;
@@ -89,31 +13,6 @@ interface LabelContractSummary {
 	schemaVersion: string;
 	createdAt: string;
 	activatedAt?: string;
-}
-interface VerificationCheckResultView {
-	planKey: string;
-	checkKey: string;
-	status: "ok" | "error" | "gap";
-	evidenceId?: string;
-	gapReason?: string;
-}
-interface VerificationRunDetail {
-	id: string;
-	purpose: "prepublish" | "deployment_acceptance";
-	configVersionId: string;
-	labelContractVersionId: string;
-	state:
-		| "Queued"
-		| "Running"
-		| "Passed"
-		| "Failed"
-		| "Cancelled"
-		| "Interrupted";
-	rowVersion: number;
-	evidenceAt?: string;
-	createdAt: string;
-	checkResults: VerificationCheckResultView[];
-	resultDetail?: string;
 }
 
 import type {
@@ -171,7 +70,6 @@ export type MockScenario =
 	| "platform-boundary"
 	| "metrics-one"
 	| "metrics-boundary"
-	| "business-boundary"
 	| "empty"
 	| "slow"
 	| "conflict";
@@ -300,11 +198,8 @@ export interface MockState {
 	connections: ConnectionDetailView[];
 	probes: Record<string, ProbeAttemptView[]>;
 	probeResults: Record<string, ProbeResultView[]>;
-	systems: BusinessSystemDetail[];
-	configVersions: Record<string, ConfigVersionDetail[]>;
-	refreshRuns: Record<string, ResourceRefreshRunDetail[]>;
-	verifications: Record<string, VerificationRunDetail[]>;
 	labels: LabelContractSummary[];
+	businessContext: { key: string; displayName: string }[];
 	businessViews: BusinessView[];
 	inspectionPlans: PluginInspectionPlan[];
 	inspectionRuns: InspectionRunDetail[];
@@ -448,63 +343,6 @@ function baseState(scenario: MockScenario): MockState {
 		},
 		revisionCount: 1,
 		generationCount: 1,
-	};
-	const checkout: BusinessSystemDetail = {
-		key: "checkout",
-		displayName: "结算系统",
-		enabled: true,
-		rowVersion: 3,
-		currentConfigVersionId: "config-checkout-1",
-		timezone: "Asia/Shanghai",
-		resourceRefreshIntervalSeconds: 300,
-		configVersionCount: 1,
-		discoveries: [
-			{
-				discoveryKey: "checkout-pods",
-				displayName: "结算工作负载",
-				selector: "app=checkout",
-				identityLabels: ["namespace", "pod"],
-			},
-		],
-		plans: [
-			{
-				planKey: "checkout-health",
-				displayName: "结算健康检查",
-				cron: "*/5 * * * *",
-				checks: [
-					{
-						checkKey: "latency",
-						displayName: "请求延迟",
-						analysisQuestion: "延迟是否异常？",
-						kind: "promql",
-						queryMode: "range",
-						expression: "histogram_quantile(0.95, checkout_latency)",
-						rangeSeconds: 300,
-						stepSeconds: 30,
-					},
-				],
-			},
-		],
-	};
-	const config: ConfigVersionDetail = {
-		id: "config-checkout-1",
-		versionSeq: 1,
-		state: "published",
-		createdAt: now,
-		publishedAt: now,
-		digest: "sha256:checkout-config",
-		parserVersion: "1",
-		schemaVersion: "1",
-		systemKey: "checkout",
-		displayName: checkout.displayName,
-		enabled: true,
-		labelContractVersionId: "label-1",
-		yamlBody:
-			'apiVersion: quoin/v1\nkind: BusinessSystem\nmetadata:\n  name: checkout\n  displayName: 结算系统\n  description: 结算工作负载\nspec:\n  metrics:\n    connectionRef: thanos-primary\n    matchLabels: {service: checkout}\n    resources:\n      - name: pods\n        displayName: 结算工作负载\n        matchLabels: {app: checkout}\n        discoveryMetric: up\n        identityLabels: [namespace, pod]\n        allowedMetrics: [up, checkout_latency]\n  alerts:\n    sourceRefs: [demo-alertmanager]\n    matchLabels: {service: checkout}\n  inspections:\n    - name: checkout-health\n      displayName: 结算健康检查\n      schedule: "*/5 * * * *"\n      timezone: Asia/Shanghai\n      checks:\n        - name: latency\n          resourceRef: pods\n          expression: checkout_latency\n          question: 延迟是否异常？\n  discovery:\n    refresh: 5m\n',
-		timezone: "Asia/Shanghai",
-		resourceRefreshIntervalSeconds: 300,
-		discoveries: checkout.discoveries,
-		plans: checkout.plans,
 	};
 	const run: InspectionRunDetail = {
 		id: "inspection-run-1",
@@ -844,31 +682,6 @@ function baseState(scenario: MockScenario): MockState {
 				},
 			],
 		},
-		systems: [checkout],
-		configVersions: { checkout: [config] },
-		refreshRuns: { checkout: [] },
-		verifications: {
-			"checkout/config-checkout-1": [
-				{
-					id: "verification-1",
-					purpose: "prepublish",
-					configVersionId: config.id,
-					labelContractVersionId: "label-1",
-					state: "Passed",
-					rowVersion: 1,
-					evidenceAt: now,
-					createdAt: now,
-					checkResults: [
-						{
-							planKey: "checkout-health",
-							checkKey: "latency",
-							status: "ok",
-							evidenceId: evidence.id,
-						},
-					],
-				},
-			],
-		},
 		labels: [
 			{
 				id: "label-1",
@@ -881,6 +694,7 @@ function baseState(scenario: MockScenario): MockState {
 				activatedAt: now,
 			},
 		],
+		businessContext: [{ key: "checkout", displayName: "结算系统" }],
 		businessViews: [checkoutView, catalogView],
 		inspectionPlans: [latencyPlan],
 		inspectionRuns: [activeRun, run],
@@ -919,16 +733,6 @@ function baseState(scenario: MockScenario): MockState {
 			rowVersion: index + 1,
 		}));
 	}
-	if (scenario === "business-boundary") {
-		state.systems = Array.from({ length: 50 }, (_, index) => ({
-			...checkout,
-			key: `business-system-${String(index + 1).padStart(2, "0")}`,
-			displayName:
-				index === 49
-					? "业务系统名称非常长用于验证左侧列表项目截断、悬停和箭头布局的边界预览二零二六零九一零"
-					: `业务系统 ${String(index + 1).padStart(2, "0")}`,
-		}));
-	}
 	// Empty mode keeps a signed-in identity but removes every domain projection and its linked history.
 	if (scenario === "empty") {
 		state.adminInitialized = false;
@@ -949,11 +753,8 @@ function baseState(scenario: MockScenario): MockState {
 		state.connections = [];
 		state.probes = {};
 		state.probeResults = {};
-		state.systems = [];
-		state.configVersions = {};
-		state.refreshRuns = {};
-		state.verifications = {};
 		state.labels = [];
+		state.businessContext = [];
 		state.businessViews = [];
 		state.inspectionPlans = [];
 		state.inspectionRuns = [];

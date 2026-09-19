@@ -67,9 +67,6 @@ describe("workspace history router", () => {
 		expect(consolidatedRouteTarget("/admin/audit")).toBe(
 			"/settings/platform/audit",
 		);
-		expect(consolidatedRouteTarget("/admin/runtime")).toBe(
-			"/settings/platform/runtime",
-		);
 		expect(consolidatedRouteTarget("/admin/model_provider")).toBe(
 			"/settings/platform/model-providers",
 		);

@@ -33,7 +33,6 @@ export function consolidatedRouteTarget(pathname: string): string | undefined {
 	if (pathname === "/admin/about") return "/settings/platform/about";
 	if (pathname === "/admin/backups") return "/settings/platform/backups";
 	if (pathname === "/admin/audit") return "/settings/platform/audit";
-	if (pathname === "/admin/runtime") return "/settings/platform/runtime";
 	if (pathname === "/admin/labels") return "/settings/platform/users";
 	if (pathname.startsWith("/inspections/runs/")) {
 		const runId = pathname.slice("/inspections/runs/".length);

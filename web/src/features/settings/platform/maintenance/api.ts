@@ -48,7 +48,6 @@ const drainRoutes: Record<string, (params: string[]) => string> = {
   inspection_run: params => `/api/v1/inspections/runs/${params[0]}/cancel`,
   knowledge_batch: params => `/api/v1/knowledge/import-batches/${params[0]}/cancel`,
   connection_probe: params => `/api/v1/connections/${params[0]}/probe-attempts/${params[1]}/cancel`,
-  config_verification: params => `/api/v1/business-systems/${params[0]}/config/${params[1]}/verifications/${params[2]}/cancel`,
 }
 
 export interface DrainTarget {

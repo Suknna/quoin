@@ -1,7 +1,6 @@
 import { ConfirmAction } from "@/features/settings/platform/controls";
 import { formatDateTime } from "@/lib/format";
 import { parseRoute } from "@/lib/parse-route";
-import { IntegrationResources } from "./resources";
 /* eslint-disable react-refresh/only-export-components -- This route module intentionally colocates its view factory with route components. */
 
 import {
@@ -803,12 +802,10 @@ function MetricsDetail({
 	id,
 	navigate,
 	suspended,
-	resourceId,
 }: {
 	id: string;
 	navigate: (to: string) => void;
 	suspended: boolean;
-	resourceId?: string;
 }) {
 	const [item, setItem] = useState<MetricsInstance>();
 	const [loading, setLoading] = useState(true);
@@ -976,14 +973,6 @@ function MetricsDetail({
 					</div>
 				</CardContent>
 			</Card>
-			<IntegrationResources
-				connectionName={item.displayName}
-				navigate={navigate}
-				suspended={suspended}
-				enabled={item.status === "active"}
-				platform={item.platform}
-				resourceId={resourceId}
-			/>
 		</section>
 	);
 }
@@ -1749,7 +1738,6 @@ export function useIntegrationsModule(
 							/>
 						) : (
 							<MetricsDetail
-								resourceId={routeQuery.get("resource") ?? undefined}
 								id={decodeURIComponent(sheetInstance)}
 								navigate={props.navigate}
 								suspended={props.suspended}

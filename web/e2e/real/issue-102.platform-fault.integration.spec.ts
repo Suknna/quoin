@@ -107,10 +107,14 @@ test("A controlled Plinth disconnect/reconnect becomes a platform-only Operator 
 	await expect
 		.poll(
 			async () =>
-				(await adminContext.request.get(`${baseURL}/api/v1/runtime`)).json(),
+				(
+					(await adminContext.request.get(`${baseURL}/api/v1/admin/about`)).json() as {
+						components: Array<{ slot: string; connected: boolean }>;
+					}
+				).components.some((slot) => slot.slot === "plinth" && slot.connected),
 			{ timeout: 30_000 },
 		)
-		.toMatchObject({ plinth: { connected: true } });
+		.toBe(true);
 
 	const suffix = Date.now();
 	const operatorUsername = `operator102${suffix}`;
@@ -187,7 +191,7 @@ test("A controlled Plinth disconnect/reconnect becomes a platform-only Operator 
 	await expect(
 		operatorPage.getByRole("button", { name: /运行时|维护/ }),
 	).toHaveCount(0);
-	for (const path of ["/api/v1/admin/about", "/api/v1/runtime"]) {
+	for (const path of ["/api/v1/admin/about"]) {
 		const denied = await operatorContext.request.get(`${baseURL}${path}`);
 		expect(denied.status(), path).toBe(403);
 	}
@@ -196,10 +200,14 @@ test("A controlled Plinth disconnect/reconnect becomes a platform-only Operator 
 	await expect
 		.poll(
 			async () =>
-				(await adminContext.request.get(`${baseURL}/api/v1/runtime`)).json(),
+				(
+					(await adminContext.request.get(`${baseURL}/api/v1/admin/about`)).json() as {
+						components: Array<{ slot: string; connected: boolean }>;
+					}
+				).components.some((slot) => slot.slot === "plinth" && slot.connected),
 			{ timeout: 20_000 },
 		)
-		.toMatchObject({ plinth: { connected: true } });
+		.toBe(true);
 	await expect
 		.poll(
 			async () => {

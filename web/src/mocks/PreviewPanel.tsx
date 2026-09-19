@@ -31,11 +31,6 @@ export const previewScenarios = [
 		label: "指标边界",
 		description: "50 个指标接入与超长名称预览",
 	},
-	{
-		id: "business-boundary",
-		label: "业务边界",
-		description: "50 个业务系统与超长名称预览",
-	},
 	{ id: "empty", label: "空数据", description: "无业务记录的工作台" },
 	{ id: "slow", label: "慢响应", description: "延迟返回的模拟接口" },
 	{ id: "conflict", label: "并发冲突", description: "写入返回冲突" },

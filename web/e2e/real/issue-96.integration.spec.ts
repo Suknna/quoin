@@ -226,9 +226,7 @@ test("Admin creates Alertmanager, Stele persists its alert, and Operator is rest
 
 	for (const path of [
 		"/api/v1/alert-sources",
-		"/api/v1/business-systems",
 		"/api/v1/label-contracts",
-		"/api/v1/runtime",
 	]) {
 		const denied = await operatorContext.request.get(`${baseURL}${path}`);
 		expect(denied.status(), path).toBe(403);

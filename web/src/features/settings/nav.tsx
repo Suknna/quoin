@@ -66,12 +66,6 @@ export const platformGroup: SettingsNavGroup = {
 			route: "/settings/platform/about",
 			adminOnly: true,
 		},
-		{
-			key: "runtime",
-			label: "运行时",
-			route: "/settings/platform/runtime",
-			adminOnly: true,
-		},
 	],
 };
 

@@ -113,9 +113,6 @@ function adminRequired({
 function detailFor(name: string) {
 	return getMockState().connections.find((item) => item.name === name);
 }
-function systemFor(key: string) {
-	return getMockState().systems.find((item) => item.key === key);
-}
 function viewFor(viewKey: string) {
 	return getMockState().businessViews.find((view) => view.viewKey === viewKey);
 }
@@ -1082,71 +1079,9 @@ export const domainHandlers = [
 		return (
 			denied ??
 			page(
-				getMockState().systems.map(({ key, displayName }) => ({
-					key,
-					displayName,
-				})),
+				getMockState().businessContext,
 			)
 		);
-	}),
-	http.get("*/api/v1/business-systems", () => {
-		const denied = required();
-		return denied ?? page(getMockState().systems);
-	}),
-	http.get("*/api/v1/business-systems/:key/resources", ({ params }) => {
-		const denied = required();
-		return (
-			denied ??
-			page(
-				systemFor(String(params.key))
-					? [
-							{
-								id: "resource-checkout-1",
-								discoveryKey: "checkout-pods",
-								identityLabels: { namespace: "checkout", pod: "checkout-7db6" },
-								observedAt: "2026-09-09T09:30:00.000Z",
-								current: true,
-								stale: false,
-								lastSuccessfulRefreshAt: "2026-09-09T09:30:00.000Z",
-							},
-						]
-					: [],
-			)
-		);
-	}),
-	// Retired with the old business-declaration write mainline: the mock keeps
-	// mapping/refresh/publish history readable but no longer simulates those
-	// writes, so preview can never masquerade as the removed active model.
-	http.get(
-		"*/api/v1/business-systems/:key/resource-refresh-runs/:runId",
-		({ params }) => {
-			const denied = required();
-			if (denied) return denied;
-			const run = (getMockState().refreshRuns[String(params.key)] ?? []).find(
-				(item) => item.id === params.runId,
-			);
-			return run ? json(run) : problem(404, "未找到资源刷新运行。");
-		},
-	),
-	http.get("*/api/v1/business-systems/:key/config/:versionId", ({ params }) => {
-		const denied = required();
-		if (denied) return denied;
-		const item = (getMockState().configVersions[String(params.key)] ?? []).find(
-			(version) => version.id === params.versionId,
-		);
-		return item ? json(item) : problem(404, "未找到配置版本。");
-	}),
-	http.get("*/api/v1/business-systems/:key/config", ({ params }) => {
-		const denied = required();
-		return (
-			denied ?? page(getMockState().configVersions[String(params.key)] ?? [])
-		);
-	}),
-	http.get("*/api/v1/business-systems/:key", ({ params }) => {
-		const denied = required();
-		if (denied) return denied;
-		const item = systemFor(String(params.key));
-		return item ? json(item) : problem(404, "未找到业务系统。");
 	}),
 	http.get("*/api/v1/label-contracts", () => {
 		const denied = required();
@@ -1713,21 +1648,6 @@ export const domainHandlers = [
 			})
 		);
 	}),
-	http.get("*/api/v1/runtime", () => {
-		const denied = required();
-		return (
-			denied ??
-			json({
-				plinth: {
-					slot: "plinth",
-					connected: true,
-					bootId: "mock-plinth",
-					connectionEpoch: 1,
-					lastSeenAt: "2026-09-09T09:30:00.000Z",
-				},
-			})
-		);
-	}),
 	http.get("*/api/v1/maintenance", () => {
 		const scenario = getMockScenario();
 		const denied = scenario === "maintenance" ? null : required();
@@ -2079,61 +1999,6 @@ export const domainHandlers = [
 		retention.generatedRetentionDays = input.generatedRetentionDays;
 		retention.rowVersion += 1;
 		return json(retention);
-	}),
-	http.get(
-		"*/api/v1/business-systems/:key/config/:versionId/verifications",
-		({ params }) => {
-			const denied = required();
-			return (
-				denied ??
-				page(
-					(
-						getMockState().verifications[`${params.key}/${params.versionId}`] ??
-						[]
-					).map((item) => ({
-						id: item.id,
-						purpose: item.purpose,
-						configVersionId: item.configVersionId,
-						labelContractVersionId: item.labelContractVersionId,
-						state: item.state,
-						rowVersion: item.rowVersion,
-						evidenceAt: item.evidenceAt,
-						createdAt: item.createdAt,
-					})),
-				)
-			);
-		},
-	),
-	http.get(
-		"*/api/v1/business-systems/:key/config/:versionId/verifications/:runId",
-		({ params }) => {
-			const denied = required();
-			if (denied) return denied;
-			const item = (
-				getMockState().verifications[`${params.key}/${params.versionId}`] ?? []
-			).find((run) => run.id === params.runId);
-			return item ? json(item) : problem(404, "未找到配置验证运行。");
-		},
-	),
-	http.get("*/api/v1/label-contracts/:version", ({ params }) => {
-		const denied = adminRequired();
-		if (denied) return denied;
-		const item = getMockState().labels.find(
-			(label) => label.version === Number(params.version),
-		);
-		return item
-			? json({
-					...item,
-					yamlBody: "version: 1\nidentityLabels: [namespace, pod]\n",
-				})
-			: problem(404, "未找到标签契约。");
-	}),
-	http.post("*/api/v1/backups", () => {
-		const denied = adminRequired();
-		return (
-			denied ??
-			problem(501, "离线演示不执行真实备份。", "mock_unsupported_operation")
-		);
 	}),
 	http.get("*/api/v1/backups/:id/download", () => {
 		const denied = adminRequired();

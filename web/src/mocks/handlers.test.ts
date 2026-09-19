@@ -222,7 +222,6 @@ describe('offline domain mock handlers', () => {
     expect((await response('/api/v1/backups', { method: 'POST' })).status).toBe(501)
     setMockScenario('empty')
     expect((await (await response('/api/v1/connections')).json() as { items: unknown[] }).items).toEqual([])
-    expect((await (await response('/api/v1/business-systems')).json() as { items: unknown[] }).items).toEqual([])
     expect((await (await response('/api/v1/business-views')).json() as { items: unknown[] }).items).toEqual([])
     expect((await (await response('/api/v1/inspections/plans')).json() as { items: unknown[] }).items).toEqual([])
     expect((await (await response('/api/v1/alert-intake-issues')).json() as { items: unknown[] }).items).toEqual([])
