@@ -80,7 +80,7 @@ Plinth 本地机器契约：[contracts/quoin/plinth/worker/v1/agent_worker.proto
 - **ARCH-CHAT-006a —** `tool_calls.preflight_error_code/detail` 是 accepted Tool Call 的不可变路由事实：两者必须同时为空或同时为受限非空值；仅可在 pending 期间从空成对写入一次，任何 terminal closure 或 replay 都不得改写、清空或重新推导。（来源：[Issue #42](https://github.com/Suknna/quoin/issues/42)）
 
 > **目录版本注记（2026-09-13）：** 当前 frozen catalog 为 `initial-analysis-tools-v5`（调查代为 `investigation-tools-v3`）；历史代目录按其冻结文档解释，不按当前启用重推导。
-- **ARCH-CHAT-007 —** Chat 页的持久工具时间线 **MUST** 从权威 `model_calls`/`tool_calls` 重建，不依赖瞬态 token delta、worker 内存或 `task_change_log`；HTTP 以 Investigation Attempt 下的独立游标分页 Tool Call 子资源返回工具名、参数、状态、模型可见有界结果/Artifact 引用与时间，避免详情响应嵌入无界历史。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、`http-api.md` HTTP-PAGE-005）
+- **ARCH-CHAT-007 —** Chat 页的持久工具时间线 **MUST** 从权威 `model_calls`/`tool_calls` 重建，不依赖瞬态 token delta、worker 内存或任何派生变更日志；HTTP 以 Investigation Attempt 下的独立游标分页 Tool Call 子资源返回工具名、参数、状态、模型可见有界结果/Artifact 引用与时间，避免详情响应嵌入无界历史。（来源：[Issue #13](https://github.com/Suknna/quoin/issues/13)、`http-api.md` HTTP-PAGE-005）
 
 ## 8. 非破坏性上下文投影
 

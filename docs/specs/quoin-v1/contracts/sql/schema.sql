@@ -594,22 +594,6 @@ CREATE TABLE alert_change_log (
 ) STRICT;
 CREATE INDEX idx_alert_change_log_occurrence ON alert_change_log (occurrence_id);
 
--- 有界派生任务变更日志：id 即单调递增 task_change_seq（AUTOINCREMENT，同事务分配、永不复用）；
--- 与权威对象的状态/阶段变化同一事务写入；可清理（保留窗口由部署配置）、可丢弃、可重建，
--- 不是任务历史权威源（DATA-SSE-004/005/006）。object_type/object_id 为多态引用，由应用类型化校验。
-CREATE TABLE task_change_log (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  object_type  TEXT NOT NULL CHECK (object_type IN
-     ('initial_analysis','execution_attempt','inspection_run','inspection_report',
-      'tool_call','knowledge_import_batch','knowledge_candidate',
-      'config_verification_run','resource_refresh_run')),
-  object_id    INTEGER NOT NULL,
-  change_type  TEXT NOT NULL CHECK (change_type IN ('created','state_changed')),
-  row_version  INTEGER NOT NULL CHECK (row_version >= 1),
-  committed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-) STRICT;
-CREATE INDEX idx_task_change_log_object ON task_change_log (object_type, object_id);
-
 -- ============================================================================
 -- 4. 初步分析、调查与附件
 -- ============================================================================
@@ -2673,7 +2657,7 @@ WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'runtime_artifact_uploads row_version must increase exactly by 1'); END;
 
 -- 12.23c 既有可观察/可取消对象：应用在同一条 UPDATE 中递增 row_version（SQLite 触发器无法 SET NEW），
--- 触发器强制恰好 +1（DATA-ROWVER-001 / DATA-SSE-005）。变更日志表（alert_change_log/task_change_log）
+-- 触发器强制恰好 +1（DATA-ROWVER-001 / DATA-SSE-005）。变更日志表（alert_change_log）
 -- 的 row_version 列是事件载荷（记录事件时对象版本），日志本身不可变，不适用本规则。
 CREATE TRIGGER trg_alert_occurrences_row_version_increment BEFORE UPDATE ON alert_occurrences
 WHEN NEW.row_version <> OLD.row_version + 1
@@ -2756,10 +2740,6 @@ BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer cannot be unset (no deac
 CREATE TRIGGER trg_alert_change_log_no_delete_latest BEFORE DELETE ON alert_change_log
 WHEN OLD.id = (SELECT MAX(id) FROM alert_change_log)
 BEGIN SELECT RAISE(ABORT, 'alert_change_log latest row is the replay high-water and cannot be deleted'); END;
-CREATE TRIGGER trg_task_change_log_no_delete_latest BEFORE DELETE ON task_change_log
-WHEN OLD.id = (SELECT MAX(id) FROM task_change_log)
-BEGIN SELECT RAISE(ABORT, 'task_change_log latest row is the replay high-water and cannot be deleted'); END;
-
 -- 12.24 持久历史禁止物理删除（tombstone-only；可清理的派生/会话表除外）
 CREATE TRIGGER trg_users_no_delete BEFORE DELETE ON users
 BEGIN SELECT RAISE(ABORT, 'users are tombstone-only (disable, never delete)'); END;
@@ -3345,84 +3325,6 @@ BEGIN SELECT RAISE(ABORT, 'config version system_key must equal the business sys
 CREATE TRIGGER trg_label_contracts_retired_terminal BEFORE UPDATE OF state ON label_contracts
 WHEN OLD.state = 'retired' AND NEW.state <> 'retired'
 BEGIN SELECT RAISE(ABORT, 'retired label_contract is terminal'); END;
-
--- 12.29 任务变更日志：与权威对象状态/阶段变化同一事务派生（可丢弃、可重建；
--- DELETE 允许保留窗口 GC，但最新行（MAX(id)，回放 high-water）不可删除
--- （trg_task_change_log_no_delete_latest，DATA-SSE-009）；UPDATE 禁止。
--- row_version 由应用在同一 UPDATE 中递增（SQLite 触发器不支持 SET NEW；DATA-SSE-005）。
-CREATE TRIGGER trg_task_change_log_no_update BEFORE UPDATE ON task_change_log
-BEGIN SELECT RAISE(ABORT, 'task_change_log is append-only (deletion allowed for retention GC)'); END;
-CREATE TRIGGER trg_task_change_log_initial_analysis_insert AFTER INSERT ON initial_analyses
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('initial_analysis', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_initial_analysis_state AFTER UPDATE OF state ON initial_analyses
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('initial_analysis', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_attempt_insert AFTER INSERT ON execution_attempts
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('execution_attempt', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_attempt_state AFTER UPDATE OF state ON execution_attempts
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('execution_attempt', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_run_insert AFTER INSERT ON inspection_runs
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('inspection_run', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_run_state AFTER UPDATE OF state ON inspection_runs
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('inspection_run', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_report_insert AFTER INSERT ON inspection_reports
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('inspection_report', NEW.id, 'created', 1);
-END;
-CREATE TRIGGER trg_task_change_log_tool_insert AFTER INSERT ON tool_calls
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('tool_call', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_tool_status AFTER UPDATE OF status ON tool_calls
-WHEN NEW.status <> OLD.status
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('tool_call', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_batch_insert AFTER INSERT ON knowledge_import_batches
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('knowledge_import_batch', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_batch_state AFTER UPDATE OF state ON knowledge_import_batches
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('knowledge_import_batch', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_candidate_insert AFTER INSERT ON knowledge_candidates
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('knowledge_candidate', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_candidate_state AFTER UPDATE OF state ON knowledge_candidates
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('knowledge_candidate', NEW.id, 'state_changed', NEW.row_version);
-END;
 
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt

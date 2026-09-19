@@ -213,6 +213,12 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return verifyUnifiedAuthHistory(ctx, conn, true)
 	}
+	if stored == taskChangeLogRetirePredecessorSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyUnifiedAuthHistory(ctx, conn, true)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -321,6 +327,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == verifyRetirePredecessorSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateVerifyRetireOn)
+	}
+	if digest == taskChangeLogRetirePredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateTaskChangeLogRetireOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

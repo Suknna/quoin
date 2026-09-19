@@ -2267,7 +2267,7 @@ export interface components {
         /** @description 可空 locator；null 表示“当前无该对象”（如新调查无 head、首次发布无当前已发布版本）。JSON Schema 2020-12 表达，不使用已废弃的 nullable 关键字。 */
         NullableLocatorId: components["schemas"]["LocatorId"] | null;
         /**
-         * @description 单调递增序列（alert_change_log.id / task_change_log.id）的十进制字符串表示；"0" 表示日志为空（空库/无任务），事件中的 seq 恒 ≥1；词法范围限定为有符号 64-bit 非负整数 0..9223372036854775807。超出 JS 安全整数仍必须按字符串处理（HTTP-SCOPE-002）。
+         * @description 单调递增序列（alert_change_log.id）的十进制字符串表示；"0" 表示日志为空，事件中的 seq 恒 ≥1；词法范围限定为有符号 64-bit 非负整数 0..9223372036854775807。超出 JS 安全整数仍必须按字符串处理（HTTP-SCOPE-002）。
          * @example 0
          */
         ChangeSeq: string;
