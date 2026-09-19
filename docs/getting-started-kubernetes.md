@@ -1,6 +1,6 @@
 # 从零构建部署 Quoin（Kubernetes）
 
-推荐使用 Kubernetes 部署 Quoin。如果环境不具备 Kubernetes，可使用 [Docker Compose 安装指南](getting-started.md)。本文从镜像构建开始，完成首次启动、管理员初始化、Plinth 注册和监控接入。
+推荐使用 Kubernetes 部署 Quoin。如果环境不具备 Kubernetes，可使用 [Docker Compose 安装指南](getting-started.md)。本文从镜像构建开始，完成首次启动、管理员初始化、Plinth 自动连接和监控接入。
 
 当前可用插件为 **Prometheus、Thanos、Alertmanager**，浏览器与 Kubernetes 资源接入插件计划后续提供。将 Quoin 部署在 Kubernetes 上不依赖 Kubernetes 资源接入插件。
 
@@ -126,7 +126,7 @@ docker run --rm --user 65532:65532 \
   quoin/quoin:v0.1.0-dev secrets bootstrap --config /etc/quoin/component.yaml
 ```
 
-预期生成 `root-key`、`stele-service-token`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`。根密钥和内部 Stele token 为 32 字节原始二进制；Runtime 服务端证书覆盖 `quoin`。全套秘密已存在时命令验证而不覆盖，部分存在则拒绝。
+预期生成 `root-key`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`、`stele-client.crt/key`、`plinth-client.crt/key`。根密钥为 32 字节原始二进制；Runtime 服务端证书覆盖 `quoin`；组件客户端证书由同一 CA 签发（CN=stele / CN=plinth，ADR-0009）。全套秘密已存在时命令验证而不覆盖，部分存在则拒绝。
 
 #### 确认密钥已生成
 
@@ -135,10 +135,10 @@ docker run --rm --user 65532:65532 \
 ```bash
 sudo ls -lh "$HOME/quoin-k8s/secrets/runtime"
 sudo stat -c '%n | %s bytes | mode=%a | uid=%u gid=%g' \
-  "$HOME/quoin-k8s/secrets/runtime/"{root-key,stele-service-token,runtime-ca.pem,runtime-ca.key,runtime-tls.crt,runtime-tls.key}
+  "$HOME/quoin-k8s/secrets/runtime/"{root-key,runtime-ca.pem,runtime-ca.key,runtime-tls.crt,runtime-tls.key,stele-client.crt,stele-client.key,plinth-client.crt,plinth-client.key}
 ```
 
-检查上述六个文件均存在，属主 UID 为 `65532`，文件权限为 `600`；`root-key` 和 `stele-service-token` 应各为 **32 字节**。证书和 PEM 私钥大小可能随生成结果变化，不要求固定字节数。
+检查上述九个文件均存在，属主 UID 为 `65532`，文件权限为 `600`；`root-key` 应为 **32 字节**。证书和 PEM 私钥大小可能随生成结果变化，不要求固定字节数。
 
 **普通用户看不到文件不等于生成失败。** 本步骤将目录属主设为容器用户 `65532`、目录权限设为 `0700`，因此普通宿主用户可能无法展开目录或收到 `Permission denied`。这是密钥保护措施，应通过上述 sudo 命令检查，不要因此重新生成密钥，也不要将目录或文件改成所有用户可读。
 
@@ -190,7 +190,10 @@ kubectl -n quoin create secret generic quoin-secrets \
   --from-file=runtime-ca.pem=<(sudo cat secrets/runtime/runtime-ca.pem) \
   --from-file=runtime-tls.crt=<(sudo cat secrets/runtime/runtime-tls.crt) \
   --from-file=runtime-tls.key=<(sudo cat secrets/runtime/runtime-tls.key) \
-  --from-file=stele-service-token=<(sudo cat secrets/runtime/stele-service-token)
+  --from-file=stele-client.crt=<(sudo cat secrets/runtime/stele-client.crt) \
+  --from-file=stele-client.key=<(sudo cat secrets/runtime/stele-client.key) \
+  --from-file=plinth-client.crt=<(sudo cat secrets/runtime/plinth-client.crt) \
+  --from-file=plinth-client.key=<(sudo cat secrets/runtime/plinth-client.key)
 ```
 
 该命令需 **Bash**，不要加 `set -x`。核对文件确实存在、可读且 sudo 认证已就绪后再执行；导入失败时停止检查，不继续启动。不要把 Secret 输出为 YAML 提交到仓库。
@@ -207,7 +210,7 @@ kubectl -n quoin rollout status deployment/gateway --timeout=180s
 
 Quoin 使用 SQLite，保持 **一个副本**；Plinth 也保持单副本和原状态卷。清单已配置非 root 用户和 `fsGroup`，不要为了启动临时加 privileged。若存储驱动不支持预期的卷权限，检查 PVC、驱动和挂载权限，而不是删除数据。
 
-首次 Plinth 尚未注册，可能未 Ready；**此时不要求所有 Pod Ready**。先完成管理员初始化，再进行第 6 步。
+首次 Plinth 需等待 Quoin 接受其 Hello 才 Ready；**此时不要求所有 Pod Ready**。先完成管理员初始化，再看第 6 步的确认。
 
 `ops-services.yaml` 是可选的内部运维 Service，不需要对外发布，也不是登录入口。
 
@@ -233,92 +236,16 @@ curl --fail --cacert private-ca/ca.crt \
 
 没有投递渠道时应先准备渠道，不能绕过初始化。测试夹具只适合隔离演练，不是生产邮件/短信服务；Compose 指南中的 Docker 网络地址也不能直接照搬为 Kubernetes 地址。
 
-## 6. 注册 Plinth
+## 6. Plinth 自动连接
 
-注册需要同一个 `plinth-state` PVC 和 Runtime CA。为避免两个进程同时操作状态卷，先停长期 Deployment：
-
-```bash
-kubectl -n quoin scale deployment/plinth --replicas=0
-kubectl -n quoin wait --for=delete pod \
-  -l app.kubernetes.io/name=quoin,app.kubernetes.io/component=plinth --timeout=180s
-```
-
-在 `$HOME/quoin-k8s/plinth-register.yaml` 保存以下临时 Pod，镜像替换为与你的 Deployment **完全一致**的引用，私有镜像也需配置相同的 `imagePullSecrets`：
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: plinth-register
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 65532
-    fsGroup: 65532
-    fsGroupChangePolicy: OnRootMismatch
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: register
-      image: quoin/plinth:v0.1.0-dev
-      command: [/bin/sh, -c, 'sleep 3600']
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop: [ALL]
-      volumeMounts:
-        - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
-        - {name: state, mountPath: /var/lib/plinth}
-        - {name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true}
-        - {name: tmp, mountPath: /tmp}
-  volumes:
-    - name: config
-      configMap:
-        name: plinth-config
-    - name: state
-      persistentVolumeClaim:
-        claimName: plinth-state
-    - name: runtime-ca
-      secret:
-        secretName: quoin-secrets
-        items:
-          - {key: runtime-ca.pem, path: runtime-ca.pem}
-    - {name: tmp, emptyDir: {}}
-```
-
-此 Pod 不启动长期 Plinth。确保没有旧同名注册 Pod，再执行：
-
-```bash
-kubectl -n quoin apply -f "$HOME/quoin-k8s/plinth-register.yaml"
-kubectl -n quoin wait --for=condition=Ready pod/plinth-register --timeout=180s
-```
-
-待临时 Pod Ready 后，在 Web 的“管理 → 运行时”准备首次注册，取得一次性 `{slot,generation,token}` JSON。立刻运行：
-
-```bash
-kubectl -n quoin exec -i plinth-register -- \
-  /plinth register --config /etc/quoin/component.yaml
-```
-
-命令直接等待标准输入，无额外提示。粘贴完整 JSON 为一行并回车；不要将令牌放入 YAML、参数、环境变量或工单。成功后删除**仅本步骤创建的临时 Pod**，不删除 PVC，再恢复 Deployment：
-
-```bash
-kubectl -n quoin delete pod plinth-register --wait=true
-kubectl -n quoin scale deployment/plinth --replicas=1
-kubectl -n quoin rollout status deployment/plinth --timeout=180s
-```
-
-回到 Web 检查 registered、已连接、Ready。失败时保留卷，根据错误修正；短时令牌过期应重新准备，不创建额外运行时身份。
+Plinth 无注册步骤：组件身份是 bootstrap 签发的客户端证书（CN=plinth），已随 `quoin-secrets` 挂载到 Deployment。管理员初始化完成后，在「设置 → 平台状态」确认 Plinth 显示**已连接**即可。若未连接，按顺序核对：`plinth-client.crt/key` 已进入 Secret 并被 Deployment 挂载、Runtime CA 一致、quoin Pod 健康；Plinth 每 2 秒自动重连。
 
 ## 7. 接入监控并完成首次巡检
 
 按[使用手册](user-guide.md)进行：
 
 - 创建 Prometheus/Thanos 接入，真实验证后启用；从观测资源核对目标。
-- 创建 Alertmanager 告警源，保存一次性 receiver 配置。告警源 bearer 与内部 `stele-service-token` 不同。
+- 创建 Alertmanager 告警源，保存一次性 receiver 配置。告警源 bearer 是该告警源自己的凭据，与内部组件身份无关。
 - 让 Alertmanager 可解析 Gateway 域名、访问 30443 并信任 Gateway CA；配置 receiver 后验证 firing/resolved。
 - 创建巡检计划并采证；配置并启用模型提供方后使用 AI SRE 和分析报告。
 
@@ -340,7 +267,7 @@ kubectl -n quoin logs deployment/plinth --tail=100
 | PVC Pending | StorageClass、容量、绑定模式、节点调度；不要先删除 PVC |
 | CrashLoopBackOff / permission denied | Secret 键名、文件内容、PVC 驱动对 fsGroup 的支持；查看日志 |
 | Gateway 502 | quoin/stele/frontend 是否 Ready，内部 Service 是否有 endpoints |
-| Plinth 未 Ready | 先完成注册，核对 Runtime CA、Service 名 quoin 与 DNS；不扩大副本数 |
+| Plinth 未 Ready | 核对客户端证书挂载、Runtime CA、Service 名 quoin 与 DNS；不扩大副本数 |
 | 证书或登录 Origin 错误 | 域名、端口、SAN、publicOrigin、stelePublicURL 是否一致 |
 | 收不到验证码 | Pod 出站网络、TLS、私网 CIDR 和投递渠道真实可用性 |
 | 配置修改未生效 | 多处配置/Secret 使用 subPath 挂载；应用更新后需受控重启相应 Deployment |
@@ -354,7 +281,7 @@ kubectl -n quoin logs deployment/plinth --tail=100
 - [ ] 镜像可拉取，三个 PVC 正常绑定，五个服务运行正常。
 - [ ] HTTPS 证书可信，浏览器 Origin 与配置一致。
 - [ ] 管理员初始化完成，正式密码加二级验证可登录。
-- [ ] Plinth 注册且 Ready。
+- [ ] Plinth 已连接且 Ready。
 - [ ] 指标接入验证成功，观测目标可见。
 - [ ] Alertmanager 新告警源能收到 firing 与 resolved。
 - [ ] 首次巡检能查看真实 Evidence；启用模型后可查看分析报告。

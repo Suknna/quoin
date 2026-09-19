@@ -97,7 +97,7 @@ docker run --rm --user 65532:65532 \
 
 此命令挂载了正常服务的**同一数据卷**，不能在已有实例恢复时省略它。空数据库且秘密目录为空才生成；全套秘密已存在时只校验；部分秘密存在或已有数据库但缺秘密时拒绝。运行中的实例不得用这个流程重置身份。
 
-生成文件为 `root-key`、`stele-service-token`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`。根密钥与 Stele token 是恰好 **32 字节原始二进制**，不是 Base64 或十六进制文本，文件权限 `0600`。Runtime 服务端证书包含 SAN `quoin`、`localhost`，与内部地址相符。不要手搓根密钥或复用历史验收秘密。
+生成文件为 `root-key`、`runtime-ca.pem`、`runtime-ca.key`、`runtime-tls.crt`、`runtime-tls.key`、`stele-client.crt/key`、`plinth-client.crt/key`。根密钥是恰好 **32 字节原始二进制**，不是 Base64 或十六进制文本，文件权限 `0600`。Runtime 服务端证书包含 SAN `quoin`、`localhost`；两张组件客户端证书由同一 CA 签发（CN=stele / CN=plinth，ADR-0009）。不要手搓根密钥或复用历史验收秘密。
 
 `root-key` 必须与数据库匹配备份。密钥丢失后的受控重新绑定会使旧连接秘密不可用，需要重新录入；不能靠生成新密钥恢复旧秘密。
 
@@ -143,7 +143,7 @@ curl --fail --cacert private-ca/ca.crt \
   https://quoin.lab.example.com:8443/ -o /dev/null
 ```
 
-预期 Quoin/Stele/Plinth 的 liveness 检查通过，gateway 提供登录页面。不是每个服务都有 healthcheck；Plinth 容器活着也不等于已注册/Ready。上述 curl 用正确域名校验证书，不使用 `-k` 跳过 TLS。
+预期 Quoin/Stele/Plinth 的 liveness 检查通过，gateway 提供登录页面。Plinth 以部署 CA 签发的客户端证书自动连接（ADR-0009，无注册步骤）；readiness 在 Quoin 接受其 Hello 后翻绿。上述 curl 用正确域名校验证书，不使用 `-k` 跳过 TLS。
 
 ## 6. 人工完成管理员初始化
 
@@ -154,32 +154,16 @@ curl --fail --cacert private-ca/ca.crt \
 
 SMTP 必须使用 STARTTLS 或 implicit TLS；webhook 必须 HTTPS。私网接收方要显式允许其最小 CIDR，并提供其 CA，不能全局关闭 TLS 校验。初始化不能省略投递测试或收码验证；如果没有真实邮件服务，使用下方演练 fixture。
 
-## 7. 首次注册 Plinth
+## 7. Plinth 自动连接
 
-先停长期 Plinth，再在“管理 → 运行时”选择“准备首次注册”。页面一次性展示完整 `{slot,generation,token}` JSON；不要放到命令参数、环境变量或日志。
-
-```bash
-cd "$HOME/quoin-mall-user"
-docker compose stop plinth
-# 此命令启动后立即等待输入，不会另打印输入提示。
-docker compose run --rm --no-deps -T plinth \
-  register --config /etc/quoin/component.yaml
-```
-
-启动后把完整 JSON 作为**一行**粘贴并回车。CLI 读取一行后自行完成，不必 Ctrl-D。一次性容器复用 Compose 的镜像、网络、配置、Runtime CA 与状态卷，避免手写卷名前缀出错。
-
-```bash
-docker compose up -d plinth
-```
-
-回到运行时页面检查 `registered`、已连接和 Ready。短时令牌过期则重新准备，不修改数据库。长期凭据保存在 Plinth 状态卷中的 `0600` 文件。
+Plinth 无注册步骤：组件身份是 secrets bootstrap 签发的客户端证书（CN=plinth），随配置挂载启动即连。管理员初始化完成后，在「设置 → 平台状态」确认 Plinth 显示**已连接**即可。若未连接，按顺序核对：组件配置的 `quoinRuntimeClientCertificateFile`/`quoinRuntimeClientPrivateKeyFile` 挂载、Runtime CA 一致、quoin 服务健康；Plinth 每 2 秒自动重连。
 
 ## 8. 接入 mall-shop
 
 继续[使用手册](user-guide.md)：
 
 - Prometheus 地址填写 **`http://192.168.1.200:30090`**（本机演练参数，`authType=none`），真实验证后启用。不要填写容器里的 `localhost`。
-- 创建新的 Alertmanager 告警源，将其一次性 receiver 配置合入上游。告警源 bearer **不是** `stele-service-token`。Alertmanager 必须能解析 Gateway 域名、访问 8443 并信任 Gateway CA。
+- 创建新的 Alertmanager 告警源，将其一次性 receiver 配置合入上游。告警源 bearer 是该告警源自己的凭据，与内部组件身份无关。Alertmanager 必须能解析 Gateway 域名、访问 8443 并信任 Gateway CA。
 - 数据库、Java、Nginx 通过现有 exporter 指标接入；当前使用 Prometheus 插件查询这些指标；Kubernetes 资源直接接入将在后续插件中提供。
 
 ## 常见问题与停止
@@ -190,7 +174,7 @@ docker compose up -d plinth
 | bootstrap 拒绝 | 核对同一数据卷与完整原秘密，不能重建数据库解决 |
 | 证书错误 | SAN、实际域名与 CA 信任是否一致；不要默认跳过验证 |
 | 登录卡在初始化 | 投递必须 TLS、私网 CIDR 允许且真实收码 |
-| Plinth 未 Ready | liveness 不等于注册完成，核对一次性注册结果 |
+| Plinth 未 Ready | 核对客户端证书挂载与 Runtime CA；Plinth 每 2 秒自动重连 |
 | 指标验证失败 | 从容器到上游的路由、DNS、端口及认证；查看实际 probe 结果 |
 
 暂时停止而不删除数据：`docker compose stop`；恢复：`docker compose up -d`。**不要 `down -v`**。离线管理员恢复、根密钥重新绑定、备份与恢复见[部署参考](deployment.md)，均不得绕过其停机/独占 SQLite 前提。

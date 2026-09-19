@@ -1,6 +1,6 @@
 # Quoin v1 — HTTP 与实时 API 规格（http-api.md）
 
-> **受控浏览器退役（2026-09）：** 全部浏览器身份/人工登录/浏览器 WebSocket 路由与 `/api/v1/journey-catalog` 已从活动面拆除（旧 URL 一律 404）；`GET /api/v1/runtime` 只返回 plinth 槽位，lintel slot 的注册命令返回 404。文中浏览器端点仅作历史解读，活动路由以 [`contracts/openapi.yaml`](contracts/openapi.yaml) 当前版本为准。
+> **受控浏览器退役（2026-09）：** 全部浏览器身份/人工登录/浏览器 WebSocket 路由与 `/api/v1/journey-catalog` 已从活动面拆除（旧 URL 一律 404）；`GET /api/v1/runtime` 只返回 plinth 槽位；注册制命令（prepare/reveal/retire）已随统一 mTLS 认证整体移除（ADR-0009），旧 URL 一律 404。文中浏览器端点仅作历史解读，活动路由以 [`contracts/openapi.yaml`](contracts/openapi.yaml) 当前版本为准。
 
 **状态：Draft**
 

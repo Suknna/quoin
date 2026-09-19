@@ -4,7 +4,7 @@
 
 > **受控浏览器退役（2026-09）：** `RUNTIME_SLOT_LINTEL` 不再被 Quoin 服务端映射：Register/Connect 对 lintel 返回 unsupported slot，长期 Lintel 凭据无法重连；BrowserTunnel gRPC 服务不再挂载。协议文件与文中浏览器会话语义保留作历史与恢复解读。
 
-**Non-normative：** 本文件（CATEGORY=`RUNTIME`）承载 Quoin、Plinth、Lintel、Stele 四组件之间的 gRPC 协议语义：身份、Proto 契约指纹握手、控制流、任务派发与调和、lease/fencing、Plinth 模型/工具调用、浏览器会话隧道、Artifact 上传与按需读取、连接凭据 grant、token 注册与轮换、吊销与告警接入。机器可表达的 service、RPC、message、stream 与 wire-level 枚举由 [`contracts/runtime.proto`](contracts/runtime.proto)（package `quoin.runtime.v1`，SPEC-VERSION-002）唯一拥有（SPEC-AUTHORITY-001/002）；本文件只通过相对路径与稳定符号引用它，不复制字段清单。持久化权威为 `persistence.md` 与 `contracts/sql/schema.sql`；前端→Quoin 的 HTTP 面（含 reveal 流程）为 `http-api.md` 与 `contracts/openapi.yaml`（HTTP-SCOPE-003）。
+**Non-normative：** 本文件（CATEGORY=`RUNTIME`）承载 Quoin、Plinth、Lintel、Stele 四组件之间的 gRPC 协议语义：组件 mTLS 身份、Proto 契约指纹握手、控制流、任务派发与调和、lease/fencing、Plinth 模型/工具调用、浏览器会话隧道、Artifact 上传与按需读取、连接凭据 grant 与告警接入。机器可表达的 service、RPC、message、stream 与 wire-level 枚举由 [`contracts/runtime.proto`](contracts/runtime.proto)（package `quoin.runtime.v1`，SPEC-VERSION-002）唯一拥有（SPEC-AUTHORITY-001/002）；本文件只通过相对路径与稳定符号引用它，不复制字段清单。持久化权威为 `persistence.md` 与 `contracts/sql/schema.sql`；前端→Quoin 的 HTTP 面（含 reveal 流程）为 `http-api.md` 与 `contracts/openapi.yaml`（HTTP-SCOPE-003）。
 
 > **现状与迁移：** #97 已同步替换冲突的指标执行输入：版本化业务声明的显式指标接入引用决定 grant，Config Verification discovery 使用 `config_verification_discovery_execution_v1`，而 `resource_refresh_run` 已移除。独立 Browser Identity 输入与其余 #95 目标仍由后续切片交付；所有切片继续保留非秘密 grant、冻结版本、取消和审计边界。
 
@@ -18,11 +18,11 @@
 ## 2. 身份与认证
 
 - **RUNTIME-AUTH-001 —** Plinth、Lintel **MUST** 主动出站拨号 Quoin gRPC server（维持只出站部署，Q2 冻结）；TLS **MUST** 只承担服务端身份与传输保护，**MUST NOT** 建立 mTLS 客户端身份。（来源：CONTEXT「服务身份」、架构记忆 #5860）
-- **RUNTIME-AUTH-002 —** 长期服务 token **MUST** 经 gRPC metadata（`authorization: Bearer <token文本>`）认证，**MUST NOT** 出现在任何消息体（唯一受保护例外：`RegisterRuntimeResponse.long_term_token` 与 `IssueToken.token` 是下发路径，只经已认证/已注册 TLS 通道出现一次）；raw token 只存在于 supervisor 内存、权限 `0600` 的专用持久状态卷与认证瞬间；数据库只存 digest（DATA-RUNTIME-002、CONTEXT「模型调用边界」）。
-- **RUNTIME-AUTH-003 —** 连接认证裁决 **MUST** 满足：token digest 等于该 slot `runtime_slots.current_credential_id` 或 `retiring_credential_id` 指向的 `runtime_credentials.token_digest`，且命中的 credential `confirmed_at` 非空、`retired_at` 为空（DATA-RUNTIME-001/002）。`retiring` 只在 pending 已提升为 current 后、等待新 current 首次认证并由 Admin 显式退休旧 generation 的轮换窗口内继续认证；Attempt 派发永远只绑定 current。`state='revoked'` 期间两者一律拒绝，未被 current/retiring 指针选中的已确认历史行 **MUST NOT** 被接受。
+- **RUNTIME-AUTH-002 —（ADR-0009 重写）** 内部组件身份 **MUST** 由部署 CA 签发的 mTLS 客户端证书建立：TLS 握手验证双方，组件身份取自已验证链叶证书 CN（plinth/stele）。不存在注册、一次性令牌、长期 Bearer 或其下发路径；证书由部署密钥 bootstrap 签发、经部署 Secret 挂载，**MUST NOT** 进入任何消息体、日志或数据库。
+- **RUNTIME-AUTH-003 —（ADR-0009 重写）** 服务授权按 CN 硬映射：`RuntimeControl`/`ArtifactService` 仅接受 CN=plinth，`SteleRelay` 仅接受 CN=stele；客户端证书 **MUST** 携带 ClientAuth EKU 且由部署 CA 签名（监听器 `RequireAndVerifyClientCert` 强制）。Attempt 派发绑定当前活动控制流（boot/epoch），不再存在 slot 注册状态或凭据指针。
 - **RUNTIME-AUTH-004 —** 认证失败（令牌无效、slot 吊销、Proto 契约指纹缺失/无效/不匹配、epoch 回退）**MUST** 在握手阶段以 `HelloAck{accepted=false, reject_reason}` 拒绝并关闭流；组件 **MUST NOT** 进入 Ready。（来源：CONTEXT「服务身份」「健康语义」）
 - **RUNTIME-AUTH-005 —** 连接凭据与模型供应商凭据 **MUST** 只由 supervisor 持有并注入类型化工具；Plinth/Lintel worker **MUST NOT** 读取状态卷、环境变量或任何凭据文件；`FetchCredentialGrant` 是 supervisor-only RPC（RUNTIME-GRANT-002），worker 进程不得持有该调用能力（CONTEXT「模型调用边界」、架构记忆 #5868）。
-- **RUNTIME-AUTH-006 —** 全部 token 的文本编码 **MUST** 是 32 随机字节的 base64url（无填充）ASCII 文本：长期 token、一次性注册令牌与 HTTP reveal 产出的注册令牌都是同一编码；metadata 的 `authorization: Bearer` 值、0600 状态卷文件内容与 `RegisterRuntimeRequest.one_time_token`/`RegisterRuntimeResponse.long_term_token`/`IssueToken.token` 均为该文本。数据库 `runtime_credentials.token_digest`/`alert_source_credentials.digest` **MUST** 是解码后原始 32 字节的 SHA-256（`length(token_digest)=32`，DATA-RUNTIME-002）。内容 digest（`AttemptInputSnapshot.content_digest`/`ResultPayload.content_digest`/`ArtifactUploadHeader.sha256`）是原始 32 字节二进制，用 `bytes` 承载，**MUST NOT** 做文本编码。（来源：CONTEXT「服务身份」、Issue #11 第一轮审阅）
+- **RUNTIME-AUTH-006 —（ADR-0009 收窄）** 注册制 token 家族（一次性注册令牌、长期 Bearer、IssueToken 轮换消息）已整体退役；`alert_source_credentials.digest` 仍是告警源接入 bearer 的 SHA-256（32 字节原始二进制）。内容 digest（`AttemptInputSnapshot.content_digest`/`ResultPayload.content_digest`/`ArtifactUploadHeader.sha256`）是原始 32 字节二进制，用 `bytes` 承载，**MUST NOT** 做文本编码。（来源：CONTEXT「服务身份」、Issue #11 第一轮审阅、ADR-0009）
 
 ## 3. 连接与握手（`RuntimeControl.Connect`）
 
@@ -30,7 +30,7 @@
 - **RUNTIME-CTRL-002 —** 连接首帧 **MUST** 为 `Hello`（slot、boot_id、connection_epoch、统一 Proto 契约指纹；Lintel 另带 catalog digest/version、固定 browser capacity 与精确 Chromium revision）；Quoin **MUST** 先完成认证与握手校验再回 `HelloAck`；握手完成前任何其他消息 **MUST** 被忽略或拒绝。
 - **RUNTIME-CTRL-003 —** 统一 Proto 契约指纹 MUST 与 Quoin 按固定排序、无歧义编码计算的完整权威 protobuf 文件集合指纹严格相等（`==`）；缺失、无效或不匹配时 MUST 以明确的契约不匹配拒绝并使组件不 Ready。发布版本不同本身不得拒绝连接；不提供协商、降级或跨契约混跑（RUNTIME-VERSION-001）。
 - **RUNTIME-CTRL-004 —** `boot_id` **MUST** 在每次进程启动时重新生成；`connection_epoch` 是 boot-local 计数器，**MUST** 在该 boot 的每次连接时递增（首条 >= 1）。Quoin 只在同一 `(slot, boot_id)` 内拒绝非单调（<= 该 boot 上次接受值）的连接（`EPOCH_STALE`）；新 boot 的首个 epoch 可重新从 1 开始，接受新 boot 后旧 boot 的全部流按 RUNTIME-CTRL-009 失效。（来源：Issue #11、RUNTIME-CTRL-009）
-- **RUNTIME-CTRL-005 —** `Heartbeat` **MUST NOT** 改写任何持久状态：只更新内存瞬时投影，**MUST NOT** 递增 `runtime_slots.row_version`；通用 Attempt `Capacity` 只作提示。Lintel 浏览器总 slot 数由该 boot 的 `Hello.browser_capacity_slots` 冻结，连接存续期间不得改变；Quoin 是唯一 `WaitingForCapacity` 全局 FIFO 队列，manual login/Journey/Exploration 各占一 slot，authentication probe 使用同一 slot 预算。（来源：CONTEXT「健康语义」、Issue #14）
+- **RUNTIME-CTRL-005 —** `Heartbeat` **MUST NOT** 改写任何持久状态：只更新内存瞬时投影，不写任何持久状态；通用 Attempt `Capacity` 只作提示。Lintel 浏览器总 slot 数由该 boot 的 `Hello.browser_capacity_slots` 冻结，连接存续期间不得改变；Quoin 是唯一 `WaitingForCapacity` 全局 FIFO 队列，manual login/Journey/Exploration 各占一 slot，authentication probe 使用同一 slot 预算。（来源：CONTEXT「健康语义」、Issue #14）
 - **RUNTIME-CTRL-006 —** 每条流的每一端 **MUST** 使用单一 send loop / recv loop；发往对端的消息 **MUST** 进入有界队列，队列溢出 **MUST** 可观察（部署内部指标）且 **MUST NOT** 静默丢弃领域消息（派发、取消、结果）。
 - **RUNTIME-CTRL-007 —** `GoAway` 是 Quoin 结束连接的尽力而为通知；实际关闭以 RPC 结束为准，客户端 **MUST NOT** 依赖 `GoAway` 送达；`SHUTTING_DOWN` 表示可重试的暂时不可用，`REVOKED`/`ROTATED`/`REPLACED` 表示必须按 RUNTIME-REVOKE-001 处理。
 - **RUNTIME-CTRL-008 —** 物理消息重复投递 **MUST** 是幂等的：领域事实按 `attempt_id`+`boot_id`+`connection_epoch` 去重；对端不重复提交。
@@ -119,15 +119,13 @@
 - **RUNTIME-ARTIFACT-003 —** Read/Grep 的行数、匹配数、上下文行和响应字节数使用服务端固定上限；`start_line` 1-based，Grep 使用 RE2 语义以避免不受控回溯。响应必须回传完整 Artifact 的 size/hash/media type 与 eof/truncated，使模型能判断是否继续读取，**MUST NOT** 暗示已返回完整正文。（来源：Issue #13 用户定案、ARCH-INPUT-005、DATA-ARTIFACT-007）
 - **RUNTIME-ARTIFACT-004 —** generated Artifact 到期由现有 GC 只清理正文；Artifact owner/hash/media type/大小/来源历史继续保留。正文已过期时 Read/Grep 返回 `FAILED_PRECONDITION`（detail=`ARTIFACT_BODY_EXPIRED`），若它是当前 Attempt 不可替代的必要输入则 Attempt 失败为同名结构化原因，**MUST NOT** 从非权威本地缓存继续。（来源：Issue #13 用户定案、ARCH-OUTPUT-004、DATA-ARTIFACT-003/004）
 
-## 11. 注册与轮换
+## 11. 组件身份（mTLS，ADR-0009）
 
-- **RUNTIME-REG-001 —** 一次性注册令牌只存在于进程内存，固定 60 秒、单次成功消费、绑定发起 Admin Session、slot 与 generation；HTTP `prepareRuntimeRegistration` + `revealRuntimeRegistrationToken` 遵循 SEC-REVEAL-*。令牌/handle 不得进入 SQLite、日志、审计、Artifact 或命令持久结果。（来源：Issue #16、HTTP-COMMAND-012、RUNTIME-AUTH-006）
-- **RUNTIME-REG-002 —** `RuntimeControl.Register` **MUST** 只接受注册窗口中的请求：验证内存令牌的 slot/generation、单次消费和统一 Proto 契约指纹；同一事务创建已确认 credential、设置 current、slot 转 registered，返回长期 token/generation。supervisor 原子持久化到 0600 状态卷。响应丢失后令牌不得重放，恢复必须由 Admin 再次 replace。（来源：DATA-RUNTIME-001/002、SEC-REVEAL-*）
-- **RUNTIME-REG-003 —** slot 已 registered、generation/slot 不匹配、token 过期/消费等拒绝映射保持封闭 canonical gRPC status；detail 只含非秘密说明。（来源：RUNTIME-ERROR-001）
-- **RUNTIME-REG-004 —** 长期 token 两阶段轮换只走已认证控制流：① Quoin 创建未确认 credential 并设 pending，发送 `IssueToken`；② Runtime 原子持久化新 token 后回 `TokenPersisted`；③ Quoin写 `confirmed_at`，单条 UPDATE 把 pending 提升为 current、原 current 移入 retiring；④ Quoin 以 `GoAway{ROTATED}` 关闭旧 epoch，Runtime 用新 token 重连；⑤ 新 current 首次成功认证时写 `first_authenticated_at`，旧 generation 进入用户可见 Pending Retirement；⑥ 只有 Admin 的 `retireRuntimeCredential` 才清 retiring 并永久退休旧 generation。步骤⑤ **MUST NOT** 自动执行步骤⑥，也不设 TTL。（来源：CONTEXT「服务身份」「安全、身份与恢复」、Issue #16、DATA-RUNTIME-002）
-- **RUNTIME-REG-005 —** 轮换期间认证只接受 registered slot 的 current 或 retiring 指针；pending 永不接受。若 retiring token 重连成功，它获得新的唯一 connection epoch 并使旧 epoch 失效，但不得把该 generation 自动恢复为 current。Admin 退休后对应全部流立即关闭且禁止重连。（来源：Issue #16、SEC-SERVICE-003、RUNTIME-CTRL-003）
-- **RUNTIME-REG-006 —** 轮换中止必须先清 pending（SQL 自动退休未提升 generation），随后继续 current 连接；已退休凭据不得确认、复活或重新设为任一角色指针。（来源：DATA-RUNTIME-002）
-- **RUNTIME-REG-007 —** `Register` 失败 **MUST** 使用 canonical gRPC status（RUNTIME-ERROR-001）：`INVALID_ARGUMENT`（请求缺字段/generation=0/token 文本非 base64url 或解码非 32 字节）、`UNAUTHENTICATED`（令牌未知/过期/已消费）、`FAILED_PRECONDITION`（slot 不在注册窗口——含 `ALREADY_REGISTERED`——或 generation 与令牌记录不一致）、`PERMISSION_DENIED`（令牌绑定 slot 与请求 slot 不一致）、`NOT_FOUND`（未知 slot，不应发生）、`INTERNAL`（瞬态内部错误）。detail 只含非秘密说明。
+注册与轮换制已整体退役（[ADR-0009](../../adr/0009-unified-mtls-component-auth.md)）：`RuntimeControl.Register` RPC、一次性注册令牌、长期 token 两阶段轮换（IssueToken/TokenPersisted）、`retireRuntimeCredential` 与 `runtime_slots`/`runtime_credentials` 持久权威全部移除，对应 wire 字段编号 reserved。
+
+- **RUNTIME-REG-001 —（ADR-0009 重述）** 组件身份 **MUST** 由部署 CA 签发的客户端证书供给：`quoin secrets bootstrap` 签发 CN=stele / CN=plinth 证书，存量部署经 `quoin secrets issue-client-certs` 从既有 CA 补签；证书与 CA 同寿命，轮换是显式运维操作（重新签发 → 更新 Secret → 重启组件）。
+- **RUNTIME-REG-002 —（ADR-0009 重述）** Plinth/Stele 启动即认证：无注册步骤、无持久凭据状态；Plinth 状态卷丢失后以同一证书直接重连。
+- **RUNTIME-REG-003 —（ADR-0009 重述）** 凭据类 Hello 拒绝原因（TOKEN_INVALID/SLOT_REVOKED）与 GoAway 原因（REVOKED/ROTATED/REPLACED）已删除：mTLS 握手失败的连接到达不了 Hello；剩余拒绝原因为 CONTRACT_MISMATCH/EPOCH_STALE/CATALOG_MISMATCH。
 
 ## 12. 吊销与关闭
 
@@ -143,7 +141,7 @@
 
 ## 14. Stele 告警接入（`SteleRelay`）
 
-- **RUNTIME-STELE-001 —** Stele **MUST NOT** 注册为 Runtime（无 slot、不持有 Runtime 凭据）；其 service token 由部署 Secret 文件提供（CONTEXT「服务身份」），经 metadata 认证 `SteleRelay` 两个 unary RPC。
+- **RUNTIME-STELE-001 —（ADR-0009 重写）** Stele 以部署 CA 签发的客户端证书（CN=stele）经 mTLS 认证 `SteleRelay` 两个 unary RPC；无注册、无 slot、无 service token。
 - **RUNTIME-STELE-002 —** Stele **MUST** 经 `GetCredentialSnapshot` 获取版本化只读凭据 digest 快照并仅内存缓存；快照只包含 SQL 中 `Active|PendingRetirement` 的可认证 generation，Retired 必须消失。未成功加载快照拒绝接收 Delivery；快照版本单调递增，Stele 提交时回传（DATA-ALERT-008）。
 - **RUNTIME-STELE-003 —** `Deliver` **MUST** 携带 `relay_id`（每次外部请求生成，内部重试复用）、`source_id`、`credential_id`、`credential_snapshot_version`（>= 1）、`protocol`、精确原始 `body` 与 `received_at`；Quoin **MUST** 在 Delivery 事务内重验来源启用、凭据有效性与归属，relay_id 幂等（DATA-ALERT-001/008）。
 - **RUNTIME-STELE-004 —** Delivery 使用新 generation 首次成功提交时，同一 SQLite 事务写该 generation `first_used_at` 并把其 supersedes 指向的旧 generation转为 PendingRetirement；Stele 后续快照继续包含新旧两个 generation，直到 Admin 显式退休旧值。系统不得以墙钟或首次成功自动移除旧 digest。（来源：Issue #16、SEC-SERVICE-002、DATA-ALERT-009）
@@ -158,7 +156,7 @@
 
 ## 16. 错误与边界验证
 
-- **RUNTIME-ERROR-001 —** unary RPC（`Register`/`FetchCredentialGrant`/`ReadText`/`GrepText`/`GetCredentialSnapshot`/`Deliver`）失败 **MUST** 使用 canonical gRPC status：`INVALID_ARGUMENT`（缺字段/越界/格式错误）、`UNAUTHENTICATED`（令牌缺失或无效）、`PERMISSION_DENIED`（身份有效但无权，如 lintel 请求 grant）、`NOT_FOUND`（未知资源）、`FAILED_PRECONDITION`（状态前提不满足，如注册窗口外、Attempt 非 Running、Proto 契约指纹不匹配）、`INTERNAL`（瞬态内部错误）。流内拒绝使用封闭枚举（`HelloRejectReason`/`AttemptRejectReason`/`UploadRejectReason`/`BrowserCloseReason`/`BrowserSubExecutionRejectReason`）；`*_UNSPECIFIED=0` 在请求/拒绝响应需要原因时一律无效（RUNTIME-VALIDATION-004）。detail **MUST NOT** 含秘密。（来源：Issue #13、RUNTIME-AUTH-004）
+- **RUNTIME-ERROR-001 —** unary RPC（`FetchCredentialGrant`/`ReadText`/`GrepText`/`GetCredentialSnapshot`/`Deliver`）失败 **MUST** 使用 canonical gRPC status：`INVALID_ARGUMENT`（缺字段/越界/格式错误）、`UNAUTHENTICATED`（令牌缺失或无效）、`PERMISSION_DENIED`（身份有效但无权，如 lintel 请求 grant）、`NOT_FOUND`（未知资源）、`FAILED_PRECONDITION`（状态前提不满足，如 Attempt 非 Running、Proto 契约指纹不匹配）、`INTERNAL`（瞬态内部错误）。流内拒绝使用封闭枚举（`HelloRejectReason`/`AttemptRejectReason`/`UploadRejectReason`/`BrowserCloseReason`/`BrowserSubExecutionRejectReason`）；`*_UNSPECIFIED=0` 在请求/拒绝响应需要原因时一律无效（RUNTIME-VALIDATION-004）。detail **MUST NOT** 含秘密。（来源：Issue #13、RUNTIME-AUTH-004）
 - **RUNTIME-VALIDATION-001 —** `contracts/runtime.proto` **MUST** 通过 proto 编译与 lint（buf STANDARD；本规格显式声明的例外：`SERVICE_SUFFIX`/`RPC_REQUEST_STANDARD_NAME`/`RPC_RESPONSE_STANDARD_NAME`（bidi 流用 envelope 而非 Request/Response 命名）、`RPC_REQUEST_RESPONSE_UNIQUE`（`Connect`/`Open` 双向同一信封类型）、`PACKAGE_DIRECTORY_MATCH`（既有 `runtime.proto` 固定在 `contracts/` 根目录；worker 独立 package 已按 package path 位于 `contracts/quoin/plinth/worker/v1/`，不使用该例外）），并生成 descriptor 检查：service/method 数量与 streaming 方向、字段编号唯一且不复用、oneof/reserved 合法、枚举值与 `schema.sql` 对应 CHECK 枚举一致（含 `ScopeType.SCOPE_TYPE_CONFIG_VERIFICATION_RUN` 与 `execution_attempts.scope_type` 的 `config_verification_run`）、`Hello.journey_catalog_digest` 与 `HelloRejectReason.HELLO_REJECT_REASON_CATALOG_MISMATCH` 存在、`DispatchAttempt.plan_key` 存在且与 config_verification_run 的复合检查身份对应、新增字段（envelope `message_id`/`connection_epoch`/`correlation_id`/`boot_id`、`AttemptInputSnapshot`、`ResultPayload`、Agent Model/Tool 消息、Artifact Read/Grep、子执行与 grant 消息、统一 Proto 契约指纹字段）存在；`contracts/quoin/plinth/worker/v1/agent_worker.proto` 必须独立编译并检查 stdio envelope、WorkMode、共享的 ModelInputItemKind/ModelInputRole/ToolExecutionMode/ToolFailureMode、显式最终引用与字段号唯一。（来源：Issue #8「机器契约目录」、Issue #11 交付纪律、Issue #12 前置审计）
 - **RUNTIME-VALIDATION-002 —** 协议交错用例 **MUST** 登记并覆盖：握手拒绝矩阵（令牌/slot/Proto 契约指纹/epoch/catalog digest）、派发→Accept/Reject、同 boot 重连调和、新 boot Interrupted、结果与取消提交顺序、迟到结果只审计、轮换与替换 fence、上传 commit 的 ABA/epoch 拒绝；浏览器面另覆盖固定 slot FIFO、IdentityBusy 不排队、profile inventory 缺失/manifest 损坏/revision 不符、manual login 单 attachment 与同用户重附着、发布 probe 三态及命令重放、Journey 双 probe、跨多个子 Attempt 的 Exploration Session、可恢复动作失败不关 Session、父终态/lease/new boot 关闭、complete/incomplete trace 与强制 Artifact commit；Stele relay 幂等与 204/4xx/5xx 分类继续覆盖（DATA-TX-016）。（来源：Issue #14、Issue #13）
 - **RUNTIME-VALIDATION-003 —** 生产验证 **MUST** 覆盖原型未证明的路径：真实 ingress 的 gRPC 缓冲/keepalive、channel 复用下的流间干扰、noVNC 断线后同用户重附着/第二 attachment 冲突/登出关闭、真实 Chromium profile manifest 与精确 revision 升级失效、Playwright trace 正常/崩溃/incomplete/上传失败、SSO 跨 origin 与 NetworkPolicy 边界、下载阻止、locator/element reference 失效、浏览器进程与 slot 释放；并继续覆盖凭据轮换、grant/Attempt 竞态、Model/Tool/Artifact 与 gRPC 重复投递。（来源：Issue #14、Issue #13、HTTP-VALIDATION-004）
