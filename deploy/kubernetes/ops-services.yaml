@@ -1,7 +1,6 @@
 # Internal-only operational listeners for in-cluster verification and monitoring.
 # They are never routed by gateway and deliberately have no public exposure.
-# Covers the whole default stack; the retired Lintel browser runtime ships its
-# own lintel-ops listener in deploy/retired/browser/kubernetes/lintel.yaml.
+# Covers the whole default stack.
 ---
 apiVersion: v1
 kind: Service

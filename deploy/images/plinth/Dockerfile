@@ -4,7 +4,7 @@
 # the full per-architecture version locked in contracts/plinth-worker-tools.yaml
 # (OPS-IMAGE-003 / OPS-IMAGE-004 / OPS-IMAGE-006). ca-certificates is pinned
 # outside that catalog because the supervisor needs a system trust store for
-# outbound public TLS (model providers, Thanos, Kubernetes APIs); folding it
+# outbound public TLS (model providers, Thanos); folding it
 # into the machine lock belongs to the release-qualification lock amendment.
 ARG DEBIAN_REPO=docker.io/library/debian
 ARG DEBIAN_INDEX_DIGEST=sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258

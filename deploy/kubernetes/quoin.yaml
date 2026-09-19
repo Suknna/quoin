@@ -1,13 +1,10 @@
 # Apply this manifest to an isolated namespace to install the default
-# browser-free stack: gateway, frontend, quoin, plinth and stele. It
+# stack: gateway, frontend, quoin, plinth and stele. It
 # intentionally has no namespace field so the deployer, rather than this
 # repository, selects it. Before applying, create `gateway-tls` (tls.crt/tls.key)
 # and `quoin-secrets` (root-key, runtime-ca.pem, runtime-ca.key, runtime-tls.crt,
 # runtime-tls.key, stele-client.crt/key, plinth-client.crt/key) in that
-# namespace. See docs/deployment.md. The browser
-# plugin and its Lintel browser runtime are retired (historical reference in
-# deploy/retired/browser/); this stack neither depends on, probes, nor
-# provisions any Lintel resource.
+# namespace. See docs/deployment.md.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -62,9 +59,8 @@ data:
   component.yaml: |
     component: quoin
     # Enabled plugins (ADR 0004): the deployment YAML selects the enabled set.
-    # The stack enables exactly the three source plugins; the browser and
-    # kubernetes plugins are retired (listing them fails startup). IDs must
-    # match the well-known IDs in internal/plugins.
+    # The stack enables exactly the three source plugins. Unknown plugin
+    # IDs fail startup; IDs must match the well-known IDs in internal/plugins.
     enabledPlugins: [alertmanager, prometheus, thanos]
     publicOrigin: https://quoin.example.com
     dataDirectory: /var/lib/quoin/data

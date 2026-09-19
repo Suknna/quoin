@@ -1,7 +1,5 @@
 # Local topology: the five services gateway, frontend, quoin, plinth and
-# stele. The browser plugin and its Lintel browser runtime are retired
-# (historical reference in deploy/retired/browser/); no service depends on,
-# probes, or mounts any Lintel resource. Copy the component YAML and supplied
+# stele. Copy the component YAML and supplied
 # secret files as described in docs/deployment.md; Compose never generates or
 # stores credentials.
 name: quoin

@@ -3,11 +3,8 @@
 # compiles its own assets inside Docker, so backend image builds never need host
 # Node tooling or an existing frontend dist directory.
 #
-# The default component set is the browser-free mainline (ADR 0004): Lintel is
-# NOT built by default because its image pulls the Playwright Chromium
-# toolchain. Pass QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,lintel,stele to
-# build the browser runtime explicitly; "all" is available only as this
-# explicit parameter, never as a default.
+# The component set is the mainline (ADR 0004): frontend, quoin, plinth and
+# stele. Pass QUOIN_IMAGE_COMPONENTS=all to also build otp-test.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
@@ -33,7 +30,7 @@ IFS=',' read -ra selected <<< "$components"
 for target in "${selected[@]}"; do
   # otp-test is the test-only OTP delivery receiver used by the disposable
   # e2e-real topology; it is never part of a production component set.
-  case "$target" in frontend|quoin|plinth|lintel|stele|otp-test) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
+  case "$target" in frontend|quoin|plinth|stele|otp-test) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
   image="$image_namespace/$target:$(component_tag "$target")"
   dockerfile="deploy/images/$target/Dockerfile"
   arguments=(docker build -f "$dockerfile")

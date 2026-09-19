@@ -38,9 +38,8 @@ services:
       retries: 30
       start_period: 2s
 
-  # #102 uses the unmodified production Plinth adapter. It is deliberately
-  # not auto-registered: the browser test must prepare/reveal a token through
-  # the Admin About UI, then feed it only to this attached registration CLI.
+  # #102 uses the unmodified production Plinth adapter. The e2e driver
+  # provisions its component credential files before the first boot.
   plinth:
     image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0-dev}
     command: ["--config", "/etc/quoin/component.yaml"]
