@@ -17,7 +17,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
-	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
@@ -48,8 +47,6 @@ type RuntimeService struct {
 	// (T07); nil keeps the T06 handshake-only behaviour for tests that do
 	// not exercise the task slice.
 	Connections *connections.Service
-	// BusinessSystems owns Config Verification PromQL collection attempts.
-	BusinessSystems *businesssystem.Service
 	// Analyses owns initial-analysis attempts (T10); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Analyses *analysis.Service
@@ -222,7 +219,6 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchAllCancellingInspections(context.Background())
 		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedProbes(context.Background())
-		go service.dispatchQueuedVerificationAttempts(context.Background())
 		go service.dispatchQueuedSourceObservationAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedKnowledgeExtractions(context.Background())

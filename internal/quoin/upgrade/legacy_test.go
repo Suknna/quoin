@@ -137,12 +137,13 @@ func TestLegacyMigrationMapsOnlyUniqueConnectionAndRetiresRefreshWork(t *testing
 	if err := db.QueryRow(`SELECT metrics_connection_id,yaml_body FROM business_system_config_versions WHERE id=1`).Scan(&mapped, &yaml); err != nil || mapped != 7 || yaml != "resource_refresh_interval_seconds: 300" {
 		t.Fatalf("config mapping/yaml=%d/%q err=%v", mapped, yaml, err)
 	}
-	var queued string
-	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=21`).Scan(&queued); err != nil {
+	// 2026-09 引擎退役：refresh scope 的行不再保留墓碑，随重建一并清理。
+	var retired int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM execution_attempts WHERE id=21`).Scan(&retired); err != nil {
 		t.Fatal(err)
 	}
-	if queued != "Cancelled" {
-		t.Fatalf("refresh queued state=%s", queued)
+	if retired != 0 {
+		t.Fatalf("refresh attempt survived retirement: %d", retired)
 	}
 	var ledger int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_ledger WHERE migration_id=?`, legacyMetricsBusinessMigrationID).Scan(&ledger); err != nil || ledger != 1 {

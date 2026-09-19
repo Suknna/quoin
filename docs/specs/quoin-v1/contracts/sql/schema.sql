@@ -888,24 +888,6 @@ CREATE TABLE observed_resource_identity_labels (
   UNIQUE (observed_resource_id, name)
 ) STRICT;
 
-CREATE TABLE observed_refresh_log (
-  id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  resource_refresh_run_id INTEGER NOT NULL REFERENCES resource_refresh_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  attempt_id         INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  business_system_id INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  discovery_key      TEXT NOT NULL,
-  started_at         TEXT NOT NULL,
-  completed_at       TEXT,
-  complete           INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0,1)),
-  warnings_json      TEXT CHECK (warnings_json IS NULL OR json_valid(warnings_json)),
-  error_detail       TEXT,
-  result_digest      BLOB,
-  CHECK ((complete = 1 AND completed_at IS NOT NULL AND error_detail IS NULL)
-      OR (complete = 0 AND completed_at IS NOT NULL AND error_detail IS NOT NULL))
-) STRICT;
-CREATE UNIQUE INDEX ux_observed_refresh_log_attempt ON observed_refresh_log (attempt_id)
-  WHERE attempt_id IS NOT NULL;
-
 -- ============================================================================
 -- 6. 连接、凭据与浏览器身份
 -- ============================================================================
@@ -1266,92 +1248,6 @@ BEGIN SELECT RAISE(ABORT, 'business view key is immutable'); END;
 CREATE TRIGGER trg_business_views_no_delete BEFORE DELETE ON business_views
 BEGIN SELECT RAISE(ABORT, 'business views are never deleted; keys are retired, not reused'); END;
 
--- Config Verification Run：prepublish 机械执行模型，只绑定未发布草稿并可被
--- Label Contract 联合激活采用。
-CREATE TABLE config_verification_runs (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  purpose                   TEXT NOT NULL CHECK (purpose = 'prepublish'),
-  business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Passed','Failed','Cancelled','Interrupted')),
-  row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  evidence_at               TEXT,                    -- 真正开始采证时生成
-  result_detail             TEXT,                    -- Failed/Cancelled/Interrupted 的人工可读说明（非秘密）
-  created_by                INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                TEXT NOT NULL,
-  CHECK (
-    (state IN ('Queued','Running','Passed') AND result_detail IS NULL)
-    OR (state IN ('Failed','Cancelled','Interrupted') AND result_detail IS NOT NULL)
-  )
-) STRICT;
-CREATE UNIQUE INDEX ux_config_verification_run_active ON config_verification_runs (purpose, business_system_id, config_version_id)
-  WHERE state IN ('Queued','Running');
-CREATE INDEX idx_config_verification_runs_version ON config_verification_runs (config_version_id, created_at DESC);
-
--- Resource Refresh Run 是已发布配置的一次完整发现采集；它是 scheduler/manual 命令和每项
--- observed_refresh_log 的唯一持久根，不能以 Config Verification Run 或当前配置指针替代。
-CREATE TABLE resource_refresh_runs (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  trigger_kind              TEXT NOT NULL CHECK (trigger_kind IN ('manual','schedule')),
-  scheduled_for             TEXT,
-  state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Completed','CompletedWithWarnings','Failed','Cancelled','Interrupted')),
-  row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  evidence_at               TEXT,
-  result_detail             TEXT,
-  created_by                INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                TEXT NOT NULL,
-  CHECK ((trigger_kind = 'manual' AND scheduled_for IS NULL) OR (trigger_kind = 'schedule' AND scheduled_for IS NOT NULL)),
-  CHECK ((state IN ('Queued','Running','Completed','CompletedWithWarnings') AND result_detail IS NULL)
-      OR (state IN ('Failed','Cancelled','Interrupted') AND result_detail IS NOT NULL))
-) STRICT;
-CREATE UNIQUE INDEX ux_resource_refresh_run_active ON resource_refresh_runs (business_system_id)
-  WHERE state IN ('Queued','Running');
-CREATE UNIQUE INDEX ux_resource_refresh_run_scheduled ON resource_refresh_runs (business_system_id, config_version_id, scheduled_for)
-  WHERE scheduled_for IS NOT NULL;
-CREATE INDEX idx_resource_refresh_runs_system ON resource_refresh_runs (business_system_id, created_at DESC);
-
--- Controlled draft-only discovery evidence. Unlike observed_resources this is
--- scoped to a Config Verification Run and is never a formal resource projection.
-CREATE TABLE config_verification_discovery_results (
-  id                  INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  verification_run_id INTEGER NOT NULL REFERENCES config_verification_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  discovery_key       TEXT NOT NULL,
-  attempt_id          INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  evidence_id         INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  status              TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
-  gap_reason          TEXT CHECK (gap_reason IS NULL OR gap_reason IN ('query_failed','partial_response','no_data','cancelled','interrupted')),
-  result_digest       BLOB CHECK (result_digest IS NULL OR length(result_digest)=32),
-  created_at          TEXT NOT NULL,
-  UNIQUE (verification_run_id, discovery_key),
-  CHECK ((status='ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL) OR (status IN ('error','gap') AND gap_reason IS NOT NULL))
-) STRICT;
-
-CREATE TABLE config_verification_run_check_results (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  verification_run_id INTEGER NOT NULL REFERENCES config_verification_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  plan_key    TEXT NOT NULL,
-  check_key   TEXT NOT NULL,
-  status      TEXT NOT NULL CHECK (status IN ('ok','error','gap')),
-  evidence_id INTEGER REFERENCES evidence(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  attempt_id  INTEGER REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每个机械 check 绑定同 Config Verification Run/check 的 inspection_collection Attempt
-  result_digest BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32), -- ResultProposal 重放摘要
-  gap_reason  TEXT CHECK (gap_reason IS NULL OR gap_reason IN (
-                'runtime_unavailable','authentication_required','authentication_probe_unavailable','identity_busy',
-                'query_failed','partial_response','no_data','cancelled','interrupted')),
-  warnings_json TEXT CHECK (warnings_json IS NULL OR json_valid(warnings_json)),
-  created_at  TEXT NOT NULL,
-  UNIQUE (verification_run_id, plan_key, check_key),
-  CHECK (
-    (status = 'ok' AND evidence_id IS NOT NULL AND gap_reason IS NULL)
-    OR (status IN ('error','gap') AND gap_reason IS NOT NULL)
-  ),
-  CHECK (attempt_id IS NOT NULL OR result_digest IS NULL),
-  CHECK (result_digest IS NULL OR status = 'gap' OR evidence_id IS NOT NULL)
-) STRICT;
 -- Label Contract 激活事件（DATA-CONFIG-002/006）：不可变单行承载 canonical items_json。
 -- 单 INSERT 触发 AFTER INSERT 原子校验并切换全部系统指针、更新 label_contract_state、激活/退休契约。
 -- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用——结构性全有或全无，不存在“只切部分系统”的可提交状态。
@@ -1379,11 +1275,10 @@ CREATE TABLE execution_attempts (
                               ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding',
                                'inspection_collection','connection_probe')),
   scope_type                TEXT NOT NULL CHECK (scope_type IN
-                               ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','config_verification_run','resource_refresh_run','observation_run')),
+                               ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','observation_run')),
   scope_id                  INTEGER NOT NULL,
-  plan_key                  TEXT,   -- config_verification_run 子 Attempt 必填；其它 scope 为空
-  check_key                 TEXT,   -- run_check/config_verification_run 子 Attempt 非空；其它 scope 为空
-  discovery_key             TEXT,   -- resource_refresh_run 子 Attempt 必填；其它 scope 为空
+  check_key                 TEXT,   -- run_check 子 Attempt 非空；其它 scope 为空
+  discovery_key             TEXT,   -- observation_run 子 Attempt 必填；其它 scope 为空
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Assigned','Running','Cancelling','Succeeded','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   runtime_slot              TEXT CHECK (runtime_slot = 'plinth'), -- 派发绑定；一旦绑定不可改
@@ -1416,15 +1311,13 @@ CREATE TABLE execution_attempts (
   ),
   CHECK (connection_epoch IS NULL OR connection_epoch >= 1),
   CHECK (
-    (scope_type = 'config_verification_run' AND ((plan_key IS NOT NULL AND check_key IS NOT NULL AND discovery_key IS NULL) OR (plan_key IS NULL AND check_key IS NULL AND discovery_key IS NOT NULL)))
-    OR (scope_type = 'run_check' AND plan_key IS NULL AND check_key IS NOT NULL AND discovery_key IS NULL)
-    OR (scope_type = 'resource_refresh_run' AND plan_key IS NULL AND check_key IS NULL AND discovery_key IS NOT NULL)
-    OR (scope_type = 'observation_run' AND plan_key IS NULL AND check_key IS NULL AND discovery_key IS NOT NULL)
-    OR (scope_type NOT IN ('run_check','config_verification_run','resource_refresh_run','observation_run') AND plan_key IS NULL AND check_key IS NULL AND discovery_key IS NULL)
+    (scope_type = 'run_check' AND check_key IS NOT NULL AND discovery_key IS NULL)
+    OR (scope_type = 'observation_run' AND check_key IS NULL AND discovery_key IS NOT NULL)
+    OR (scope_type NOT IN ('run_check','observation_run') AND check_key IS NULL AND discovery_key IS NULL)
   ),
   CHECK (
     runtime_slot IS NULL
-    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_verification_run','resource_refresh_run','observation_run') AND runtime_slot = 'plinth')
+    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','observation_run') AND runtime_slot = 'plinth')
     OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','connection_probe') AND runtime_slot = 'plinth')
   ),
   CHECK (
@@ -1434,7 +1327,7 @@ CREATE TABLE execution_attempts (
     OR (attempt_type = 'knowledge_extraction' AND scope_type = 'knowledge_import_batch')
     OR (attempt_type = 'embedding' AND scope_type = 'embedding_generation')
     OR (attempt_type = 'connection_probe' AND scope_type = 'connection')
-    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','config_verification_run','resource_refresh_run','observation_run'))
+    OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','observation_run'))
   )
 ) STRICT;
 CREATE TRIGGER execution_attempts_correlation_immutable BEFORE UPDATE ON execution_attempts
@@ -1445,15 +1338,9 @@ BEGIN SELECT RAISE(ABORT, 'attempt operation association is immutable'); END;
 
 CREATE UNIQUE INDEX ux_execution_attempt_active_scope ON execution_attempts (scope_type, scope_id)
   WHERE state IN ('Queued','Assigned','Running','Cancelling') AND check_key IS NULL
-    AND scope_type NOT IN ('resource_refresh_run','observation_run');
+    AND scope_type <> 'observation_run';
 CREATE UNIQUE INDEX ux_execution_attempt_active_run_check ON execution_attempts (scope_type, scope_id, check_key)
   WHERE scope_type = 'run_check' AND state IN ('Queued','Assigned','Running','Cancelling');
-CREATE UNIQUE INDEX ux_execution_attempt_active_config_verification_check ON execution_attempts (scope_type, scope_id, plan_key, check_key)
-  WHERE scope_type = 'config_verification_run' AND check_key IS NOT NULL AND state IN ('Queued','Assigned','Running','Cancelling');
-CREATE UNIQUE INDEX ux_execution_attempt_active_config_verification_discovery ON execution_attempts (scope_type, scope_id, discovery_key)
-  WHERE scope_type = 'config_verification_run' AND discovery_key IS NOT NULL AND state IN ('Queued','Assigned','Running','Cancelling');
-CREATE UNIQUE INDEX ux_execution_attempt_active_resource_refresh_discovery ON execution_attempts (scope_type, scope_id, discovery_key)
-  WHERE scope_type = 'resource_refresh_run' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE UNIQUE INDEX ux_execution_attempt_active_observation_object ON execution_attempts (scope_type, scope_id, discovery_key)
   WHERE scope_type = 'observation_run' AND state IN ('Queued','Assigned','Running','Cancelling');
 CREATE INDEX idx_execution_attempts_scope ON execution_attempts (scope_type, scope_id);
@@ -2260,7 +2147,7 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
     AND a.attempt_type = 'inspection_collection'
     AND a.state = 'Queued'
     AND (
-      a.scope_type IN ('config_verification_run','resource_refresh_run','observation_run')
+      a.scope_type = 'observation_run'
       OR (a.scope_type = 'run_check' AND EXISTS (
         SELECT 1 FROM inspection_runs r
         JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
@@ -2274,7 +2161,7 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
       ))
     )
 )
-BEGIN SELECT RAISE(ABORT, 'config metrics query grant requires one Queued PromQL Config Verification, Resource Refresh, Observation, or Running Inspection Run collection Attempt'); END;
+BEGIN SELECT RAISE(ABORT, 'config metrics query grant requires one Queued Observation or Running Inspection Run collection Attempt'); END;
 CREATE TRIGGER trg_evidence_no_update BEFORE UPDATE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
 CREATE TRIGGER trg_evidence_no_delete BEFORE DELETE ON evidence
@@ -2293,7 +2180,7 @@ WHEN (NEW.tool_call_id IS NOT NULL AND NEW.attempt_id IS NULL)
        AND a.accepted_at IS NOT NULL
        AND (
          a.runtime_slot = 'plinth' AND a.attempt_type = 'inspection_collection'
-             AND a.scope_type IN ('run_check','config_verification_run','observation_run')
+             AND a.scope_type IN ('run_check','observation_run')
        )
    ))
 BEGIN SELECT RAISE(ABORT, 'Evidence must be Quoin-local, close to one same Running Attempt and running Tool Call, or close to one accepted Runtime collection Attempt'); END;
@@ -2453,10 +2340,6 @@ CREATE TRIGGER trg_inspection_report_knowledge_no_update BEFORE UPDATE ON inspec
 BEGIN SELECT RAISE(ABORT, 'inspection_report_knowledge_versions is append-only'); END;
 CREATE TRIGGER trg_inspection_report_knowledge_no_delete BEFORE DELETE ON inspection_report_knowledge_versions
 BEGIN SELECT RAISE(ABORT, 'inspection_report_knowledge_versions is append-only'); END;
-CREATE TRIGGER trg_observed_refresh_log_no_update BEFORE UPDATE ON observed_refresh_log
-BEGIN SELECT RAISE(ABORT, 'observed_refresh_log is append-only'); END;
-CREATE TRIGGER trg_observed_refresh_log_no_delete BEFORE DELETE ON observed_refresh_log
-BEGIN SELECT RAISE(ABORT, 'observed_refresh_log is append-only'); END;
 CREATE TRIGGER trg_inspection_check_results_no_update BEFORE UPDATE ON inspection_check_results
 BEGIN SELECT RAISE(ABORT, 'inspection_check_results is append-only'); END;
 CREATE TRIGGER trg_inspection_check_results_no_delete BEFORE DELETE ON inspection_check_results
@@ -3254,11 +3137,8 @@ CREATE TRIGGER trg_execution_attempts_state_transition BEFORE UPDATE OF state ON
 WHEN NEW.state <> OLD.state AND NOT (
   (OLD.state = 'Queued' AND NEW.state IN ('Assigned','Failed','Cancelled'))
   OR (OLD.state = 'Queued' AND NEW.state = 'Succeeded' AND OLD.runtime_slot IS NULL AND (
-    OLD.attempt_type = 'inspection_collection' AND (
+    OLD.attempt_type = 'inspection_collection' AND
       EXISTS (SELECT 1 FROM inspection_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
-      OR EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.attempt_id = OLD.id AND r.result_digest IS NOT NULL)
-      OR EXISTS (SELECT 1 FROM observed_refresh_log l WHERE l.attempt_id = OLD.id AND l.result_digest IS NOT NULL)
-    )
   ))
   OR (OLD.state = 'Assigned' AND NEW.state IN ('Running','Failed','Cancelling','Interrupted'))
   OR (OLD.state = 'Running' AND NEW.state IN ('Succeeded','Failed','Cancelling','Interrupted'))
@@ -3611,21 +3491,6 @@ BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are append-only'); END;
 CREATE TRIGGER trg_attempt_artifact_grants_no_delete BEFORE DELETE ON attempt_artifact_grants
 BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are retained as immutable access lineage'); END;
 
--- Config Verification 子 Attempt 的 slot 与 check kind 固定映射（CFG-VERIFYRUN-002、RUNTIME-TASK-003）：
--- PromQL check 只派发 plinth supervisor。表级 CHECK 仅允许
--- inspection_collection 的合法 Runtime 集合；精确映射由各自 scope 的 trigger 闭合。
-CREATE TRIGGER trg_execution_attempts_config_verification_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
-WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'config_verification_run' AND NOT EXISTS (
-  SELECT 1 FROM config_verification_runs t
-  JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-	  WHERE t.id = NEW.scope_id
-	    AND c.kind = 'promql' AND NEW.runtime_slot = 'plinth'
-	  UNION ALL
-	  SELECT 1 FROM config_verification_runs t JOIN config_discoveries d ON d.config_version_id=t.config_version_id AND d.discovery_key=NEW.discovery_key
-	  WHERE t.id=NEW.scope_id AND NEW.discovery_key IS NOT NULL AND NEW.runtime_slot='plinth'
-)
-BEGIN SELECT RAISE(ABORT, 'config verification attempt slot must match its check kind'); END;
 CREATE TRIGGER trg_execution_attempts_run_check_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
 WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check' AND NOT EXISTS (
   SELECT 1 FROM inspection_runs r
@@ -3651,165 +3516,6 @@ WHEN (OLD.runtime_slot IS NOT NULL AND NEW.runtime_slot IS NOT OLD.runtime_slot)
   OR (OLD.accepted_at IS NOT NULL AND NEW.accepted_at IS NOT OLD.accepted_at)
 BEGIN SELECT RAISE(ABORT, 'execution_attempt runtime binding is immutable once set'); END;
 
--- 12.36
--- 终态写 fence：只允许状态变化 UPDATE；evidence_at 必须随进入 Running 首次写入；
--- 终态后禁止任何 UPDATE、子 Attempt、check result。check result 只能在 Running 插入。
--- Passed 必须覆盖绑定配置版本全部 check 且每项 ok+Evidence。
-CREATE TRIGGER trg_config_verification_runs_no_origin_update BEFORE UPDATE OF
-  purpose, business_system_id, config_version_id, label_contract_version_id,
-  created_by, created_at ON config_verification_runs
-BEGIN SELECT RAISE(ABORT, 'config_verification_run origin is immutable'); END;
-CREATE TRIGGER trg_config_verification_runs_no_delete BEFORE DELETE ON config_verification_runs
-BEGIN SELECT RAISE(ABORT, 'config_verification_run history is not deletable'); END;
-CREATE TRIGGER trg_config_verification_runs_row_version_increment BEFORE UPDATE ON config_verification_runs
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'config_verification_run row_version must increment by exactly 1'); END;
--- 闭合：prepublish 只测未发布草稿。
-CREATE TRIGGER trg_config_verification_runs_closure BEFORE INSERT ON config_verification_runs
-WHEN NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  WHERE v.id = NEW.config_version_id
-    AND v.business_system_id = NEW.business_system_id
-    AND v.state = 'draft' AND v.published_at IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'config_verification_run must bind an unpublished draft of the same system'); END;
--- 只能以 Queued 创建；显式前向状态机。
-CREATE TRIGGER trg_config_verification_runs_insert_state BEFORE INSERT ON config_verification_runs
-WHEN NEW.state <> 'Queued' OR NEW.evidence_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'config_verification_run must be created as Queued without evidence_at'); END;
-CREATE TRIGGER trg_config_verification_runs_state_transition BEFORE UPDATE OF state ON config_verification_runs
-WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
-  OR (OLD.state = 'Running' AND NEW.state IN ('Passed','Failed','Cancelled','Interrupted'))
-)
-BEGIN SELECT RAISE(ABORT, 'illegal config_verification_run state transition'); END;
--- 进入 Running 时必须同时写入 evidence_at（同一条 UPDATE）。
-CREATE TRIGGER trg_config_verification_runs_running_requires_evidence_at BEFORE UPDATE OF state ON config_verification_runs
-WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'config_verification_run evidence_at must be set when entering Running'); END;
--- Passed 证据：绑定配置版本的全部 check 与 resource discovery 都有 ok+Evidence
--- 结果行。草稿验证结果绝不写 observed_resources。
-CREATE TRIGGER trg_config_verification_runs_passed_requires_full_ok BEFORE UPDATE OF state ON config_verification_runs
-WHEN NEW.state = 'Passed' AND OLD.state <> 'Passed' AND (
-  EXISTS (SELECT 1 FROM config_checks c JOIN config_plans p ON p.id = c.plan_id
-          WHERE p.config_version_id = OLD.config_version_id
-            AND NOT EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND r.plan_key = p.plan_key AND r.check_key = c.check_key))
-  OR EXISTS (SELECT 1 FROM config_discoveries d WHERE d.config_version_id=OLD.config_version_id
-            AND NOT EXISTS (SELECT 1 FROM config_verification_discovery_results r WHERE r.verification_run_id=OLD.id AND r.discovery_key=d.discovery_key))
-  OR EXISTS (SELECT 1 FROM config_verification_run_check_results r WHERE r.verification_run_id = OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
-  OR EXISTS (SELECT 1 FROM config_verification_discovery_results r WHERE r.verification_run_id=OLD.id AND (r.status <> 'ok' OR r.evidence_id IS NULL))
-)
-BEGIN SELECT RAISE(ABORT, 'config_verification_run can only Pass when every check of the bound config version has an ok result with evidence'); END;
--- 父 Config Verification Run 进入终态前必须在同一事务 fence 子 Attempt；Cancelled 允许已进入 Cancelling 的运行子 Attempt。
-CREATE TRIGGER trg_config_verification_runs_terminal_children_fenced BEFORE UPDATE OF state ON config_verification_runs
-WHEN NEW.state <> OLD.state AND NEW.state IN ('Passed','Failed','Cancelled','Interrupted') AND EXISTS (
-  SELECT 1 FROM execution_attempts a
-  WHERE a.scope_type = 'config_verification_run' AND a.scope_id = NEW.id
-    AND (a.state IN ('Queued','Assigned','Running') OR (NEW.state <> 'Cancelled' AND a.state = 'Cancelling'))
-)
-BEGIN SELECT RAISE(ABORT, 'config_verification_run cannot become terminal before child attempts are fenced'); END;
--- evidence_at/result_detail 是一次性事实。
-CREATE TRIGGER trg_config_verification_runs_evidence_at_once BEFORE UPDATE OF evidence_at ON config_verification_runs
-WHEN (OLD.evidence_at IS NOT NULL AND NEW.evidence_at IS NOT OLD.evidence_at)
-  OR (OLD.evidence_at IS NULL AND NEW.evidence_at IS NOT NULL AND NEW.state <> 'Running')
-BEGIN SELECT RAISE(ABORT, 'config_verification_run evidence_at is a derived one-time fact written only while entering Running'); END;
-CREATE TRIGGER trg_config_verification_runs_result_detail_once BEFORE UPDATE OF result_detail ON config_verification_runs
-WHEN OLD.result_detail IS NOT NULL AND NEW.result_detail IS NOT OLD.result_detail
-BEGIN SELECT RAISE(ABORT, 'config_verification_run result_detail is a one-time fact'); END;
--- 终态写 fence：终态后禁止任何 UPDATE。
-CREATE TRIGGER trg_config_verification_runs_terminal_no_update BEFORE UPDATE ON config_verification_runs
-WHEN OLD.state IN ('Passed','Failed','Cancelled','Interrupted')
-BEGIN SELECT RAISE(ABORT, 'config_verification_run is terminal; no updates allowed'); END;
--- 结果行 append-only：不可 UPDATE/不可 DELETE。
-CREATE TRIGGER trg_config_verification_run_check_results_no_update BEFORE UPDATE ON config_verification_run_check_results
-BEGIN SELECT RAISE(ABORT, 'config_verification_run_check_results is append-only'); END;
-CREATE TRIGGER trg_config_verification_run_check_results_no_delete BEFORE DELETE ON config_verification_run_check_results
-BEGIN SELECT RAISE(ABORT, 'config_verification_run_check_results is append-only'); END;
-
--- Resource Refresh Run：仅当前已发布配置能创建；输入来源、状态和完成事实均不可回写。
-CREATE TRIGGER trg_resource_refresh_runs_no_origin_update BEFORE UPDATE OF
-  business_system_id, config_version_id, label_contract_version_id, trigger_kind, scheduled_for, created_by, created_at ON resource_refresh_runs
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run origin is immutable'); END;
-CREATE TRIGGER trg_resource_refresh_runs_no_delete BEFORE DELETE ON resource_refresh_runs
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run history is not deletable'); END;
-CREATE TRIGGER trg_resource_refresh_runs_row_version_increment BEFORE UPDATE ON resource_refresh_runs
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run row_version must increment by exactly 1'); END;
-CREATE TRIGGER trg_resource_refresh_runs_closure BEFORE INSERT ON resource_refresh_runs
-WHEN NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  JOIN business_systems b ON b.id = v.business_system_id
-  WHERE v.id = NEW.config_version_id AND v.business_system_id = NEW.business_system_id
-    AND v.state = 'published' AND b.current_config_version_id = v.id
-)
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run must freeze the business system current published config and label contract'); END;
-CREATE TRIGGER trg_resource_refresh_runs_insert_state BEFORE INSERT ON resource_refresh_runs
-WHEN NEW.state <> 'Queued' OR NEW.evidence_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run must be created as Queued without evidence_at'); END;
-CREATE TRIGGER trg_resource_refresh_runs_state_transition BEFORE UPDATE OF state ON resource_refresh_runs
-WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'Queued' AND NEW.state IN ('Running','Failed','Cancelled','Interrupted'))
-  OR (OLD.state = 'Running' AND NEW.state IN ('Completed','CompletedWithWarnings','Failed','Cancelled','Interrupted'))
-)
-BEGIN SELECT RAISE(ABORT, 'illegal resource_refresh_run state transition'); END;
-CREATE TRIGGER trg_resource_refresh_runs_running_requires_evidence_at BEFORE UPDATE OF state ON resource_refresh_runs
-WHEN OLD.state <> 'Running' AND NEW.state = 'Running' AND NEW.evidence_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run evidence_at must be set when entering Running'); END;
-CREATE TRIGGER trg_resource_refresh_runs_evidence_at_once BEFORE UPDATE OF evidence_at ON resource_refresh_runs
-WHEN (OLD.evidence_at IS NOT NULL AND NEW.evidence_at IS NOT OLD.evidence_at)
-  OR (OLD.evidence_at IS NULL AND NEW.evidence_at IS NOT NULL AND NEW.state <> 'Running')
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run evidence_at is a one-time fact written only while entering Running'); END;
-CREATE TRIGGER trg_resource_refresh_runs_result_detail_once BEFORE UPDATE OF result_detail ON resource_refresh_runs
-WHEN OLD.result_detail IS NOT NULL AND NEW.result_detail IS NOT OLD.result_detail
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run result_detail is a one-time fact'); END;
-CREATE TRIGGER trg_resource_refresh_runs_terminal_children_fenced BEFORE UPDATE OF state ON resource_refresh_runs
-WHEN NEW.state <> OLD.state AND NEW.state IN ('Completed','CompletedWithWarnings','Failed','Cancelled','Interrupted') AND EXISTS (
-  SELECT 1 FROM execution_attempts a
-  WHERE a.scope_type = 'resource_refresh_run' AND a.scope_id = NEW.id
-    AND (a.state IN ('Queued','Assigned','Running') OR (NEW.state <> 'Cancelled' AND a.state = 'Cancelling'))
-)
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run cannot become terminal before child attempts are fenced'); END;
-CREATE TRIGGER trg_resource_refresh_runs_terminal_no_update BEFORE UPDATE ON resource_refresh_runs
-WHEN OLD.state IN ('Completed','CompletedWithWarnings','Failed','Cancelled','Interrupted')
-BEGIN SELECT RAISE(ABORT, 'resource_refresh_run is terminal; no updates allowed'); END;
--- check result 只能在 Config Verification Run 处于 Running 时插入。
-CREATE TRIGGER trg_config_verification_run_check_results_running_only BEFORE INSERT ON config_verification_run_check_results
-WHEN NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.id = NEW.verification_run_id AND t.state = 'Running')
-BEGIN SELECT RAISE(ABORT, 'config_verification_run check results can only be inserted while the config verification run is Running'); END;
--- check result closure：plan_key+check_key 必须存在于绑定配置版本。PromQL ok 引用唯一完整
--- Evidence；技术 gap 不制造空 Evidence，并以 result_digest 闭合。
-CREATE TRIGGER trg_config_verification_run_check_results_closure BEFORE INSERT ON config_verification_run_check_results
-WHEN NOT EXISTS (
-  SELECT 1 FROM config_verification_runs t
-  JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE t.id = NEW.verification_run_id AND t.state = 'Running' AND (
-    (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL AND NEW.result_digest IS NOT NULL AND EXISTS (
-      SELECT 1 FROM execution_attempts a WHERE a.id=NEW.attempt_id
-        AND a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
-        AND a.scope_id=NEW.verification_run_id AND a.plan_key=NEW.plan_key AND a.check_key=NEW.check_key
-    ) AND (
-      (NEW.status = 'ok' AND EXISTS (
-        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id = NEW.attempt_id
-          AND e.target_type = 'config_verification_run' AND e.target_id = NEW.verification_run_id AND e.integrity = 'complete'
-          AND json_extract(e.params_json, '$.planKey') = NEW.plan_key
-          AND json_extract(e.params_json, '$.checkKey') = NEW.check_key))
-      OR (NEW.status IN ('error','gap') AND (NEW.evidence_id IS NULL OR EXISTS (
-        SELECT 1 FROM evidence e WHERE e.id=NEW.evidence_id AND e.attempt_id=NEW.attempt_id
-          AND e.target_type='config_verification_run' AND e.target_id=NEW.verification_run_id
-      )))))
-    OR (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL AND NEW.result_digest IS NULL
-      AND NEW.evidence_id IS NULL AND NEW.status IN ('error','gap') AND EXISTS (
-        SELECT 1 FROM execution_attempts a WHERE a.id=NEW.attempt_id
-          AND a.attempt_type='inspection_collection' AND a.scope_type='config_verification_run'
-          AND a.scope_id=NEW.verification_run_id AND a.plan_key=NEW.plan_key AND a.check_key=NEW.check_key
-          AND a.state IN ('Failed','Cancelled','Interrupted')
-      ))
-  )
-)
-OR (NEW.evidence_id IS NOT NULL AND EXISTS (
-  SELECT 1 FROM config_verification_run_check_results r WHERE r.evidence_id = NEW.evidence_id))
-BEGIN SELECT RAISE(ABORT, 'config_verification_run result must be one exact PromQL result or a terminal technical gap'); END;
 -- 12.38 Label Contract 原子激活（DATA-CONFIG-002/006）：单个顶层 INSERT 触发 AFTER INSERT，
 -- 在同一 statement 中重验全部前提并原子切换全部系统指针、更新 label_contract_state。
 -- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用。
@@ -3861,8 +3567,9 @@ BEGIN
   OR EXISTS (SELECT 1 FROM json_each(NEW.items_json) je
      JOIN business_systems bs ON bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
      WHERE bs.enabled = 0);
-  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；Config Verification Run Passed；并发前提匹配。
+  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；并发前提匹配。
   --    使用 json_each 遍历 items_json 中的每个 item 进行重验。
+  --    （Config Verification Run Passed 前置已随验证引擎退役。）
   SELECT RAISE(ABORT, 'activation item validation failed')
   WHERE EXISTS (
     SELECT 1 FROM json_each(NEW.items_json) je
@@ -3870,16 +3577,10 @@ BEGIN
       SELECT 1
       FROM business_systems bs
       JOIN business_system_config_versions v ON v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)
-      JOIN config_verification_runs t ON t.id = CAST(je.value ->> '$.verification_run_id' AS INTEGER)
       WHERE bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
         AND v.business_system_id = bs.id
         AND v.published_at IS NULL
         AND v.label_contract_version_id = NEW.contract_id
-        AND t.business_system_id = bs.id
-        AND t.config_version_id = v.id
-        AND t.label_contract_version_id = NEW.contract_id
-        AND t.purpose = 'prepublish'
-        AND t.state = 'Passed'
         AND (CAST(je.value ->> '$.expected_current_config_version_id' AS INTEGER) IS bs.current_config_version_id
              OR (je.value ->> '$.expected_current_config_version_id' IS NULL AND bs.current_config_version_id IS NULL))
         AND CAST(je.value ->> '$.expected_business_system_row_version' AS INTEGER) = bs.row_version
@@ -3974,19 +3675,6 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         SELECT 1 FROM embedding_generations g WHERE g.id = NEW.scope_id))
     OR (NEW.scope_type = 'connection' AND NOT EXISTS (
          SELECT 1 FROM connections c WHERE c.id = NEW.scope_id))
-   OR (NEW.scope_type = 'config_verification_run' AND NOT EXISTS (
-        SELECT 1 FROM config_verification_runs t JOIN config_plans p ON p.config_version_id = t.config_version_id AND p.plan_key = NEW.plan_key
-        JOIN config_checks c ON c.plan_id = p.id
-        WHERE t.id = NEW.scope_id AND t.state = 'Running'
-          AND c.check_key = NEW.check_key AND c.kind = 'promql'
-          AND NEW.plan_key IS NOT NULL AND NEW.check_key IS NOT NULL
-        UNION ALL
-        SELECT 1 FROM config_verification_runs t JOIN config_discoveries d ON d.config_version_id=t.config_version_id AND d.discovery_key=NEW.discovery_key
-        WHERE t.id=NEW.scope_id AND t.state='Running'
-          AND NEW.discovery_key IS NOT NULL AND NEW.plan_key IS NULL AND NEW.check_key IS NULL))
-   OR (NEW.scope_type = 'resource_refresh_run' AND NOT EXISTS (
-        SELECT 1 FROM resource_refresh_runs r JOIN config_discoveries d ON d.config_version_id=r.config_version_id AND d.discovery_key=NEW.discovery_key
-        WHERE r.id=NEW.scope_id AND r.state IN ('Queued','Running') AND NEW.discovery_key IS NOT NULL))
    OR (NEW.scope_type = 'observation_run' AND NOT EXISTS (
         SELECT 1 FROM observation_runs o JOIN observation_run_objects x ON x.observation_run_id = o.id
         WHERE o.id = NEW.scope_id AND o.state IN ('Queued','Running')
@@ -4014,10 +3702,6 @@ WHEN NOT EXISTS (
       WHEN 'knowledge_extraction' THEN 'knowledge_extraction_v1'
       WHEN 'embedding' THEN 'embedding_v1'
       WHEN 'inspection_collection' THEN CASE a.scope_type
-        WHEN 'config_verification_run' THEN CASE
-          WHEN a.discovery_key IS NOT NULL THEN 'config_verification_discovery_execution_v1'
-          ELSE 'config_verification_execution_v1' END
-        WHEN 'resource_refresh_run' THEN 'resource_discovery_execution_v1'
         WHEN 'observation_run' THEN 'source_observation_execution_v1'
         WHEN 'run_check' THEN CASE WHEN EXISTS (
           SELECT 1 FROM inspection_runs r
@@ -4277,7 +3961,7 @@ WHEN NOT EXISTS (
         OR (NEW.purpose = 'thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL)
         OR (NEW.purpose = 'config_thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL
             AND a.attempt_type = 'inspection_collection' AND (
-              a.scope_type IN ('config_verification_run','resource_refresh_run','observation_run')
+              a.scope_type = 'observation_run'
               OR (a.scope_type = 'run_check' AND EXISTS (
                 SELECT 1 FROM inspection_runs r
                 JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
@@ -4390,22 +4074,10 @@ CREATE TRIGGER trg_execution_attempts_success_requires_closed_calls BEFORE UPDAT
 WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   EXISTS (SELECT 1 FROM model_calls mc WHERE mc.attempt_id = NEW.id AND mc.status = 'running')
   OR EXISTS (SELECT 1 FROM tool_calls tc WHERE tc.attempt_id = NEW.id AND tc.status IN ('pending','running'))
-  OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type IN ('run_check','config_verification_run') AND NOT EXISTS (
+  OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check' AND NOT EXISTS (
     SELECT 1 FROM inspection_check_results r
-    WHERE NEW.scope_type = 'run_check' AND r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
-      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
-    UNION ALL
-    SELECT 1 FROM config_verification_run_check_results r
-    WHERE NEW.scope_type = 'config_verification_run' AND r.verification_run_id = NEW.scope_id
-      AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
-      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
-    UNION ALL
-    SELECT 1 FROM config_verification_discovery_results r
-    WHERE NEW.scope_type='config_verification_run' AND r.verification_run_id=NEW.scope_id
-      AND r.discovery_key=NEW.discovery_key AND r.attempt_id=NEW.id AND r.result_digest IS NOT NULL))
-  OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'resource_refresh_run' AND NOT EXISTS (
-    SELECT 1 FROM observed_refresh_log l
-    WHERE l.attempt_id = NEW.id AND l.result_digest IS NOT NULL))
+    WHERE r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
+      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL))
   OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'observation_run' AND NOT EXISTS (
     SELECT 1 FROM observation_run_objects x
     WHERE x.attempt_id = NEW.id AND x.result_digest IS NOT NULL))
@@ -4445,19 +4117,6 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
     SELECT 1 FROM inspection_check_results r
     WHERE NEW.scope_type = 'run_check' AND r.run_id = NEW.scope_id AND r.check_key = NEW.check_key
       AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
-    UNION ALL
-    SELECT 1 FROM config_verification_run_check_results r
-    WHERE NEW.scope_type = 'config_verification_run' AND r.verification_run_id = NEW.scope_id
-      AND r.plan_key = NEW.plan_key AND r.check_key = NEW.check_key
-      AND r.attempt_id = NEW.id AND r.result_digest IS NOT NULL
-    UNION ALL
-    SELECT 1 FROM config_verification_discovery_results r
-    WHERE NEW.scope_type='config_verification_run' AND r.verification_run_id=NEW.scope_id
-      AND r.discovery_key=NEW.discovery_key AND r.attempt_id=NEW.id AND r.result_digest IS NOT NULL
-    UNION ALL
-    SELECT 1 FROM observed_refresh_log l
-    WHERE NEW.scope_type = 'resource_refresh_run' AND l.resource_refresh_run_id = NEW.scope_id
-      AND l.attempt_id = NEW.id AND l.result_digest IS NOT NULL
     UNION ALL
     SELECT 1 FROM observation_run_objects o
     WHERE NEW.scope_type = 'observation_run' AND o.observation_run_id = NEW.scope_id
@@ -4588,55 +4247,28 @@ CREATE TRIGGER trg_config_discoveries_parent_frozen BEFORE INSERT ON config_disc
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = NEW.config_version_id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_discoveries can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_discoveries can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
 CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = NEW.config_version_id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
 CREATE TRIGGER trg_config_checks_parent_frozen BEFORE INSERT ON config_checks
 WHEN NOT EXISTS (
   SELECT 1 FROM config_plans p JOIN business_system_config_versions v ON v.id = p.config_version_id
   WHERE p.id = NEW.plan_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM config_verification_runs t WHERE t.config_version_id = v.id)
     AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = v.id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no config verification runs, no publications, and no inspection runs'); END;
--- check_key 只在其 plan 父作用域内唯一；config_verification_run 以 plan_key+check_key 复合定位，
--- 因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
+BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
+-- check_key 只在其 plan 父作用域内唯一，因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
 CREATE TRIGGER trg_config_discoveries_identity_labels_unique BEFORE INSERT ON config_discoveries
 WHEN (SELECT COUNT(*) FROM json_each(NEW.identity_labels_json)) <> (SELECT COUNT(DISTINCT value) FROM json_each(NEW.identity_labels_json))
 BEGIN SELECT RAISE(ABORT, 'identity_labels must not contain duplicates'); END;
 -- 12.42 配置验证/资源刷新 Run 纳入任务变更日志（DATA-SSE-004）：与权威状态同一事务派生。
-CREATE TRIGGER trg_task_change_log_config_verification_run_insert AFTER INSERT ON config_verification_runs
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('config_verification_run', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_config_verification_run_state AFTER UPDATE OF state ON config_verification_runs
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('config_verification_run', NEW.id, 'state_changed', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_resource_refresh_run_insert AFTER INSERT ON resource_refresh_runs
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('resource_refresh_run', NEW.id, 'created', NEW.row_version);
-END;
-CREATE TRIGGER trg_task_change_log_resource_refresh_run_state AFTER UPDATE OF state ON resource_refresh_runs
-WHEN NEW.state <> OLD.state
-BEGIN
-  INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
-  VALUES ('resource_refresh_run', NEW.id, 'state_changed', NEW.row_version);
-END;
-
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger
 -- are rejected by these fences.

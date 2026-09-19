@@ -155,20 +155,20 @@ func (AttemptType) EnumDescriptor() ([]byte, []int) {
 }
 
 // execution_attempts.scope_type 的 wire 表达（DATA-ATTEMPT-002）。
+// 编号 5（Config Verification Run）与 9（Resource Refresh Run）已随验证/刷新
+// 引擎退役；按 RUNTIME-VERSION-002 保留编号与名称 reserved，永不复用。
 type ScopeType int32
 
 const (
-	ScopeType_SCOPE_TYPE_UNSPECIFIED             ScopeType = 0
-	ScopeType_SCOPE_TYPE_ANALYSIS                ScopeType = 1
-	ScopeType_SCOPE_TYPE_INVESTIGATION           ScopeType = 2
-	ScopeType_SCOPE_TYPE_RUN                     ScopeType = 3
-	ScopeType_SCOPE_TYPE_RUN_CHECK               ScopeType = 4
-	ScopeType_SCOPE_TYPE_CONFIG_VERIFICATION_RUN ScopeType = 5 // Config Verification Run 的机械采集子 Attempt（DATA-CONFIG-007）
-	ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH  ScopeType = 6
-	ScopeType_SCOPE_TYPE_EMBEDDING_GENERATION    ScopeType = 7
-	ScopeType_SCOPE_TYPE_CONNECTION              ScopeType = 8
-	ScopeType_SCOPE_TYPE_RESOURCE_REFRESH_RUN    ScopeType = 9  // 已发布配置的资源发现子 Attempt（DATA-OBSERVED-004）
-	ScopeType_SCOPE_TYPE_OBSERVATION_RUN         ScopeType = 10 // 来源级观测子 Attempt（ADR-0004 接入即有界观测）
+	ScopeType_SCOPE_TYPE_UNSPECIFIED            ScopeType = 0
+	ScopeType_SCOPE_TYPE_ANALYSIS               ScopeType = 1
+	ScopeType_SCOPE_TYPE_INVESTIGATION          ScopeType = 2
+	ScopeType_SCOPE_TYPE_RUN                    ScopeType = 3
+	ScopeType_SCOPE_TYPE_RUN_CHECK              ScopeType = 4
+	ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH ScopeType = 6
+	ScopeType_SCOPE_TYPE_EMBEDDING_GENERATION   ScopeType = 7
+	ScopeType_SCOPE_TYPE_CONNECTION             ScopeType = 8
+	ScopeType_SCOPE_TYPE_OBSERVATION_RUN        ScopeType = 10 // 来源级观测子 Attempt（ADR-0004 接入即有界观测）
 )
 
 // Enum value maps for ScopeType.
@@ -179,25 +179,21 @@ var (
 		2:  "SCOPE_TYPE_INVESTIGATION",
 		3:  "SCOPE_TYPE_RUN",
 		4:  "SCOPE_TYPE_RUN_CHECK",
-		5:  "SCOPE_TYPE_CONFIG_VERIFICATION_RUN",
 		6:  "SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH",
 		7:  "SCOPE_TYPE_EMBEDDING_GENERATION",
 		8:  "SCOPE_TYPE_CONNECTION",
-		9:  "SCOPE_TYPE_RESOURCE_REFRESH_RUN",
 		10: "SCOPE_TYPE_OBSERVATION_RUN",
 	}
 	ScopeType_value = map[string]int32{
-		"SCOPE_TYPE_UNSPECIFIED":             0,
-		"SCOPE_TYPE_ANALYSIS":                1,
-		"SCOPE_TYPE_INVESTIGATION":           2,
-		"SCOPE_TYPE_RUN":                     3,
-		"SCOPE_TYPE_RUN_CHECK":               4,
-		"SCOPE_TYPE_CONFIG_VERIFICATION_RUN": 5,
-		"SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH":  6,
-		"SCOPE_TYPE_EMBEDDING_GENERATION":    7,
-		"SCOPE_TYPE_CONNECTION":              8,
-		"SCOPE_TYPE_RESOURCE_REFRESH_RUN":    9,
-		"SCOPE_TYPE_OBSERVATION_RUN":         10,
+		"SCOPE_TYPE_UNSPECIFIED":            0,
+		"SCOPE_TYPE_ANALYSIS":               1,
+		"SCOPE_TYPE_INVESTIGATION":          2,
+		"SCOPE_TYPE_RUN":                    3,
+		"SCOPE_TYPE_RUN_CHECK":              4,
+		"SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH": 6,
+		"SCOPE_TYPE_EMBEDDING_GENERATION":   7,
+		"SCOPE_TYPE_CONNECTION":             8,
+		"SCOPE_TYPE_OBSERVATION_RUN":        10,
 	}
 )
 
@@ -1984,11 +1980,10 @@ type DispatchAttempt struct {
 	AttemptType            AttemptType            `protobuf:"varint,2,opt,name=attempt_type,json=attemptType,proto3,enum=quoin.runtime.v1.AttemptType" json:"attempt_type,omitempty"`
 	ScopeType              ScopeType              `protobuf:"varint,3,opt,name=scope_type,json=scopeType,proto3,enum=quoin.runtime.v1.ScopeType" json:"scope_type,omitempty"`
 	ScopeId                int64                  `protobuf:"varint,4,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
-	CheckKey               string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                              // run_check/config_verification_run 子 Attempt 时非空；否则空
+	CheckKey               string                 `protobuf:"bytes,5,opt,name=check_key,json=checkKey,proto3" json:"check_key,omitempty"`                                              // run_check 子 Attempt 时非空；否则空
 	LeaseDeadline          *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=lease_deadline,json=leaseDeadline,proto3" json:"lease_deadline,omitempty"`                               // 有限 lease 截止；时长数值为部署配置
 	Input                  *AttemptInputSnapshot  `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`                                                                    // 冻结的非秘密任务执行输入（RUNTIME-TASK-011）
-	PlanKey                string                 `protobuf:"bytes,9,opt,name=plan_key,json=planKey,proto3" json:"plan_key,omitempty"`                                                 // config_verification_run 子 Attempt 必填；其它 scope 为空（DATA-CONFIG-007）
-	DiscoveryKey           string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                 // resource_refresh_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
+	DiscoveryKey           string                 `protobuf:"bytes,10,opt,name=discovery_key,json=discoveryKey,proto3" json:"discovery_key,omitempty"`                                 // observation_run 子 Attempt 必填；其它 scope 为空（DATA-OBSERVED-004）
 	OperationCorrelationId string                 `protobuf:"bytes,11,opt,name=operation_correlation_id,json=operationCorrelationId,proto3" json:"operation_correlation_id,omitempty"` // 业务操作关联标识（ADR-0006）；不透明文本，无关联为空
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
@@ -2071,13 +2066,6 @@ func (x *DispatchAttempt) GetInput() *AttemptInputSnapshot {
 		return x.Input
 	}
 	return nil
-}
-
-func (x *DispatchAttempt) GetPlanKey() string {
-	if x != nil {
-		return x.PlanKey
-	}
-	return ""
 }
 
 func (x *DispatchAttempt) GetDiscoveryKey() string {
@@ -5732,7 +5720,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\bcapacity\x18\x03 \x01(\v2\x1a.quoin.runtime.v1.CapacityR\bcapacityJ\x04\b\x04\x10\x05\"6\n" +
 	"\bCapacity\x12\x18\n" +
 	"\arunning\x18\x01 \x01(\rR\arunning\x12\x10\n" +
-	"\x03max\x18\x02 \x01(\rR\x03max\"\xe7\x03\n" +
+	"\x03max\x18\x02 \x01(\rR\x03max\"\xdc\x03\n" +
 	"\x0fDispatchAttempt\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\x03R\tattemptId\x12@\n" +
@@ -5742,11 +5730,11 @@ const file_runtime_proto_rawDesc = "" +
 	"\bscope_id\x18\x04 \x01(\x03R\ascopeId\x12\x1b\n" +
 	"\tcheck_key\x18\x05 \x01(\tR\bcheckKey\x12A\n" +
 	"\x0elease_deadline\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\rleaseDeadline\x12<\n" +
-	"\x05input\x18\a \x01(\v2&.quoin.runtime.v1.AttemptInputSnapshotR\x05input\x12\x19\n" +
-	"\bplan_key\x18\t \x01(\tR\aplanKey\x12#\n" +
+	"\x05input\x18\a \x01(\v2&.quoin.runtime.v1.AttemptInputSnapshotR\x05input\x12#\n" +
 	"\rdiscovery_key\x18\n" +
 	" \x01(\tR\fdiscoveryKey\x128\n" +
-	"\x18operation_correlation_id\x18\v \x01(\tR\x16operationCorrelationIdJ\x04\b\b\x10\t\"\xc4\x02\n" +
+	"\x18operation_correlation_id\x18\v \x01(\tR\x16operationCorrelationIdJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"R\bplan_key\"\xc4\x02\n" +
 	"\x14AttemptInputSnapshot\x12\x1f\n" +
 	"\vschema_kind\x18\x01 \x01(\tR\n" +
 	"schemaKind\x12%\n" +
@@ -6086,20 +6074,18 @@ const file_runtime_proto_rawDesc = "" +
 	"\"ATTEMPT_TYPE_INSPECTION_COLLECTION\x10\x04\x12%\n" +
 	"!ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION\x10\x06\x12\x1a\n" +
 	"\x16ATTEMPT_TYPE_EMBEDDING\x10\a\x12!\n" +
-	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b\"\x04\b\x05\x10\x05*\xe0\x02\n" +
+	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b\"\x04\b\x05\x10\x05*\xe4\x02\n" +
 	"\tScopeType\x12\x1a\n" +
 	"\x16SCOPE_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SCOPE_TYPE_ANALYSIS\x10\x01\x12\x1c\n" +
 	"\x18SCOPE_TYPE_INVESTIGATION\x10\x02\x12\x12\n" +
 	"\x0eSCOPE_TYPE_RUN\x10\x03\x12\x18\n" +
-	"\x14SCOPE_TYPE_RUN_CHECK\x10\x04\x12&\n" +
-	"\"SCOPE_TYPE_CONFIG_VERIFICATION_RUN\x10\x05\x12%\n" +
+	"\x14SCOPE_TYPE_RUN_CHECK\x10\x04\x12%\n" +
 	"!SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH\x10\x06\x12#\n" +
 	"\x1fSCOPE_TYPE_EMBEDDING_GENERATION\x10\a\x12\x19\n" +
-	"\x15SCOPE_TYPE_CONNECTION\x10\b\x12#\n" +
-	"\x1fSCOPE_TYPE_RESOURCE_REFRESH_RUN\x10\t\x12\x1e\n" +
+	"\x15SCOPE_TYPE_CONNECTION\x10\b\x12\x1e\n" +
 	"\x1aSCOPE_TYPE_OBSERVATION_RUN\x10\n" +
-	"*\xbc\x05\n" +
+	"\"\x04\b\x05\x10\x05\"\x04\b\t\x10\t*\"SCOPE_TYPE_CONFIG_VERIFICATION_RUN*\x1fSCOPE_TYPE_RESOURCE_REFRESH_RUN*\xbc\x05\n" +
 	"\x11TerminationReason\x12\"\n" +
 	"\x1eTERMINATION_REASON_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aTERMINATION_REASON_TIMEOUT\x10\x01\x12#\n" +

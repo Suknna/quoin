@@ -278,6 +278,11 @@ func migrateDirectInvestigationMetricsOn(ctx context.Context, conn *sql.Conn) (L
 }
 
 func rebuildCanonicalSchema(ctx context.Context, conn *sql.Conn, metrics *int64, preserveArchivedDeclarations bool) error {
+	// 2026-09 引擎退役：验证/刷新 scope 的历史 attempt 行无法通过收窄后的
+	// canonical CHECK；每个前身转换路径都在快照前统一清理（含其子行）。
+	if err := retireVerificationRefreshAttempts(ctx, conn); err != nil {
+		return err
+	}
 	objects, err := schemaObjects(ctx, conn, "main")
 	if err != nil {
 		return err
@@ -955,6 +960,89 @@ func retireLegacyRefreshAttempts(ctx context.Context, conn *sql.Conn, report *Le
 	}
 	return rows.Err()
 }
+// retireVerificationRefreshAttempts deletes the retired verification/refresh
+// engine's attempt rows and their children so every canonical rebuild path
+// copies a history the narrowed execution_attempts CHECK accepts. Older
+// predecessor schemas may lack some child tables, so each statement only runs
+// when every table it touches exists; the append-only guards are lifted first
+// (the rebuild reinstalls the canonical trigger set).
+func retireVerificationRefreshAttempts(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !present["execution_attempts"] {
+		return nil
+	}
+	for _, trigger := range []string{
+		"trg_execution_attempts_no_delete",
+		"trg_evidence_no_delete",
+		"trg_attempt_input_snapshots_no_delete",
+		"trg_attempt_input_items_no_delete",
+		"trg_attempt_connection_grants_no_delete",
+		"trg_model_call_outputs_no_delete",
+		"trg_model_call_input_items_no_delete",
+		"trg_model_calls_no_delete",
+		"trg_tool_calls_no_delete",
+		"trg_tool_call_connection_grants_no_delete",
+		"trg_tool_call_execution_inputs_no_delete",
+		"trg_runtime_artifact_uploads_no_delete",
+		"trg_attempt_artifact_grants_no_delete",
+	} {
+		if _, err := conn.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+trigger); err != nil {
+			return err
+		}
+	}
+	const dead = `SELECT id FROM execution_attempts WHERE scope_type IN ('config_verification_run','resource_refresh_run')`
+	statements := []struct {
+		tables []string
+		sql    string
+	}{
+		{[]string{"attempt_artifact_grants"}, `DELETE FROM attempt_artifact_grants WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"evidence"}, `DELETE FROM evidence WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"attempt_input_items", "attempt_input_snapshots"}, `DELETE FROM attempt_input_items WHERE snapshot_id IN (SELECT id FROM attempt_input_snapshots WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"model_call_input_items", "model_calls", "tool_calls", "attempt_input_snapshots"}, `DELETE FROM model_call_input_items WHERE model_call_id IN (SELECT id FROM model_calls WHERE attempt_id IN (` + dead + `)) OR prior_model_call_id IN (SELECT id FROM model_calls WHERE attempt_id IN (` + dead + `)) OR tool_call_id IN (SELECT id FROM tool_calls WHERE attempt_id IN (` + dead + `)) OR attempt_input_snapshot_id IN (SELECT id FROM attempt_input_snapshots WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"attempt_input_snapshots"}, `DELETE FROM attempt_input_snapshots WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"attempt_connection_grants"}, `DELETE FROM attempt_connection_grants WHERE attempt_id IN (` + dead + `) OR created_by_tool_call_id IN (SELECT id FROM tool_calls WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"model_call_outputs", "model_calls"}, `DELETE FROM model_call_outputs WHERE model_call_id IN (SELECT id FROM model_calls WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"model_calls"}, `DELETE FROM model_calls WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"tool_call_execution_inputs", "tool_calls"}, `DELETE FROM tool_call_execution_inputs WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"tool_call_connection_grants", "tool_calls"}, `DELETE FROM tool_call_connection_grants WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE attempt_id IN (` + dead + `))`},
+		{[]string{"tool_calls"}, `DELETE FROM tool_calls WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"pending_attempt_terminals"}, `DELETE FROM pending_attempt_terminals WHERE attempt_id IN (` + dead + `)`},
+		{[]string{"runtime_artifact_uploads"}, `DELETE FROM runtime_artifact_uploads WHERE attempt_id IN (` + dead + `)`},
+		{nil, `DELETE FROM execution_attempts WHERE scope_type IN ('config_verification_run','resource_refresh_run')`},
+	}
+	for _, statement := range statements {
+		available := true
+		for _, table := range statement.tables {
+			if !present[table] {
+				available = false
+				break
+			}
+		}
+		if !available {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, statement.sql); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func legacyMigrationDigest() string { return migrationDigest(legacyMetricsBusinessMigrationID) }
 
 func migrationDigest(migrationID string) string {

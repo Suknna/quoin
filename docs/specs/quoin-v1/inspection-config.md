@@ -43,7 +43,7 @@ Journey Catalog 与浏览器巡检条款已随浏览器运行时一并移除；�
 - **CFG-YAML-001/002/003 —** 严格 YAML 解析规则（单文档、拒绝重复 key/anchor/merge/自定义 tag/尾随内容、超限拒绝、IANA 时区与五字段 cron、稳定名称唯一与退役不复用）只描述既有声明材料的解析事实；该解析管线不再接受新声明。（来源：ADR-0003，已被 ADR-0004 替代）
 - **CFG-CONFIG-001..004、CFG-REFRESH-001 —** 业务声明作为唯一配置权威、`resourceRef` 强绑定检查、`metrics.connectionRef` 必填、独立资源刷新禁止等条款只约束历史数据解读；现行模型中巡检计划独立于任何业务声明，采集由插件模板与计划范围决定。（来源：ADR-0003，已被 ADR-0004 替代）
 - **CFG-CONTRACT-001/002 —** 全局 Label Contract **MUST NOT** 被创建、激活或解析为现行配置；其历史版本、激活与 Run 按既有保留规则可读，**MUST NOT** 被新声明或运行时重新解释。（来源：ADR-0003，已被 ADR-0004 替代）
-- **CFG-PUBLISH-001、CFG-VERIFYRUN-001/002、CFG-EXPORT-001 —** 声明草稿发布顺序、Config Verification Run 绑定草稿、YAML 导出与 `prepublish` 联合激活是历史流程；现行系统对既有 Config Verification Run 只读。`config_verification_runs` 的 `deployment_acceptance` purpose 既有语义继续按其契约执行，不因此节改写。（来源：ADR-0003、#97，已被 ADR-0004 替代）
+- **CFG-PUBLISH-001、CFG-VERIFYRUN-001/002、CFG-EXPORT-001 —** 声明草稿发布顺序、Config Verification Run 绑定草稿、YAML 导出与 `prepublish` 联合激活是历史流程；Config Verification 引擎的全部持久面已随 2026-09 退役迁移删除，本节仅用于解读历史 Release 工件。（来源：ADR-0003、#97，已被 ADR-0004 替代）
 - **CFG-PROMQL-002/003 —** 按声明资源合并 `matchLabels` 强制注入与 `allowedMetrics` 精确名/前缀约束仅适用于历史声明 Attempt 的冻结解释；现行模板参数校验由 CFG-PROMQL-001 与插件模板声明拥有。（来源：ADR-0003，已被 ADR-0004 替代）
 
 ## 6. 验证要求
@@ -51,4 +51,4 @@ Journey Catalog 与浏览器巡检条款已随浏览器运行时一并移除；�
 - **CFG-VALIDATION-001 —** `business-system.schema.json` **MUST** 继续由真实 draft 2020-12 校验器以正反例矩阵守护（有效 `quoin/v1`/`BusinessSystem`、封闭对象、必填 metadata/metrics/alerts/inspections、资源 labels 与允许指标、告警自有 labels、`resourceRef`、instant/range 字段关系及全部反例），作为历史 Schema 的回归门。（来源：Issue #12 交付纪律、ADR-0004 历史保留要求）
 - **CFG-VALIDATION-002 —** strict YAML 解析 **MUST** 以真实 `yaml.v3` `yaml.Node` 行为逐项回归验证：重复 key、anchor/alias/merge、自定义 tag、非字符串字段名、第二文档、尾随内容、超限全部拒绝，合法单文档通过；该管线仅服务于历史材料解析。（来源：Issue #12 交付纪律）
 - **CFG-VALIDATION-003 —** PromQL 校验 **MUST** 以官方 parser 验证现行模板参数与历史声明投影：合法表达式通过；非法语法拒绝；历史投影中 VectorSelector 缺业务系统 label / 非精确 `=` / 值不等于 system key 拒绝；discovery selector 含 `offset`/`@`/聚合/`label_replace`/子查询拒绝；check/template expression 允许 `offset`/`@`/子查询（只需通过 AST 与归属校验）。（来源：Issue #8 交付纪律）
-- **CFG-VALIDATION-004 —** SQL 投影 **MUST** 以 SQLite harness 继续守护历史投影触发器（根投影列与 `system_key` 匹配、发布投影同步、check 类型化 CHECK、`config_verification_runs` 生命周期、`scope_type` 绑定）以及现行 `inspection_plans` 范围 CHECK、`inspection_runs` 新计划必填/历史列禁写约束（DATA-VALIDATION-002）。（来源：Issue #12 交付纪律、ADR-0004）
+- **CFG-VALIDATION-004 —** SQL 投影 **MUST** 以 SQLite harness 继续守护历史投影触发器（根投影列与 `system_key` 匹配、发布投影同步、check 类型化 CHECK、`scope_type` 绑定）以及现行 `inspection_plans` 范围 CHECK、`inspection_runs` 新计划必填/历史列禁写约束（DATA-VALIDATION-002）。（来源：Issue #12 交付纪律、ADR-0004）

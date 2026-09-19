@@ -31,7 +31,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/backup"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
-	"github.com/Suknna/quoin/internal/quoin/businesssystem"
 	"github.com/Suknna/quoin/internal/quoin/businessview"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -72,7 +71,6 @@ type apiServer struct {
 	connections                  *connections.Service
 	analyses                     *analysis.Service
 	investigations               *investigation.Service
-	systems                      *businesssystem.Service
 	inspections                  *inspection.Service
 	views                        *businessview.Service
 	observations                 *observation.Service
@@ -91,7 +89,6 @@ type apiServer struct {
 	knowledgeDispatchFunc        func(ctx context.Context, attemptID int64) error
 	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
 	inspectionDispatchFunc       func(ctx context.Context)
-	verificationDispatchFunc     func(ctx context.Context)
 	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
 	pluginRegistry               *plugins.Registry
 	enabledPlugins               []string
@@ -163,7 +160,6 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		runtime:          qruntime.NewService(),
 		analyses:         analysis.NewService(db),
 		investigations:   investigation.NewService(db),
-		systems:          businesssystem.NewService(db),
 		inspections:      inspection.NewService(db),
 		views:            businessview.NewService(db),
 		feedbackService:  feedback.NewService(db),
@@ -456,7 +452,6 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// boundaries record their durable runtime_unavailable tombstone instead
 	// of creating dispatchable work (OPS-UPGRADE-003).
 	controlService.MaintenanceBlocking = maintenanceAdmissionChecker(ctx, database.SQL)
-	controlService.BusinessSystems = application.systems
 	controlService.Inspections = application.inspections
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations

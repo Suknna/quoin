@@ -386,10 +386,24 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		}
 		finalizeUnbound = func() error { return service.Investigations.CancelAck(ctx, attemptID) }
 	case "inspection_collection":
-		if service.BusinessSystems == nil {
-			return fmt.Errorf("business systems not wired")
+		var scopeType string
+		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType); err != nil {
+			return err
 		}
-		finalizeUnbound = func() error { return service.BusinessSystems.VerificationAttempts().CancelAck(ctx, attemptID) }
+		switch scopeType {
+		case "observation_run":
+			if service.Observations == nil {
+				return fmt.Errorf("source observation service not wired")
+			}
+			finalizeUnbound = func() error { return service.Observations.Attempts().CancelAck(ctx, attemptID) }
+		case "run_check":
+			if service.Inspections == nil {
+				return fmt.Errorf("inspection service not wired")
+			}
+			finalizeUnbound = func() error { return service.Inspections.Attempts().CancelAck(ctx, attemptID) }
+		default:
+			return fmt.Errorf("attempt %d has unsupported inspection collection scope %s", attemptID, scopeType)
+		}
 	case "knowledge_extraction":
 		if service.Knowledge == nil {
 			return fmt.Errorf("knowledge service not wired")
@@ -429,6 +443,7 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		Msg:             &runtimev1.ControlEnvelope_CancelAttempt{CancelAttempt: &runtimev1.CancelAttempt{AttemptId: attemptID}},
 	})
 }
+
 func inputItemKindOf(kind runtimev1.ModelInputItemKind) string {
 	switch kind {
 	case runtimev1.ModelInputItemKind_MODEL_INPUT_ITEM_KIND_ATTEMPT_INPUT_SNAPSHOT:

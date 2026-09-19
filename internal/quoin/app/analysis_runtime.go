@@ -147,10 +147,6 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 			if service.Inspections != nil {
 				owner = service.Inspections.Attempts()
 			}
-		case "config_verification_run", "resource_refresh_run":
-			if service.BusinessSystems != nil {
-				owner = service.BusinessSystems.VerificationAttempts()
-			}
 		}
 		if owner == nil {
 			sharedops.LogEvent("quoin", "error", "accept.scope_unwired", scopeType)
@@ -216,16 +212,23 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 		return
 	}
 	if attemptType == "inspection_collection" {
-		if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "config_verification_discovery_result_v1" {
-			service.handleVerificationDiscoveryResultProposal(ctx, envelope, proposal)
-		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "source_observation_result_v1" {
+		if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "source_observation_result_v1" {
 			service.handleSourceObservationResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_promql_result_v1" {
 			service.handleInspectionPromQLResultProposal(ctx, envelope, proposal)
 		} else if proposal.GetPayload() != nil && proposal.GetPayload().GetSchemaKind() == "inspection_plugin_result_v1" {
 			service.handleInspectionPluginResultProposal(ctx, envelope, proposal)
 		} else {
-			service.handleVerificationResultProposal(ctx, envelope, proposal)
+			// Unknown payload schema: acknowledge with an explicit reject so the
+			// runtime protocol still answers every proposal (the legacy config
+			// verification result kinds no longer have a consumer).
+			ack := &runtimev1.ControlEnvelope{
+				ConnectionEpoch: envelope.GetConnectionEpoch(), CorrelationId: envelope.GetCorrelationId(), BootId: envelope.GetBootId(),
+				Msg: &runtimev1.ControlEnvelope_ResultAck{ResultAck: &runtimev1.ResultAck{AttemptId: proposal.GetAttemptId()}},
+			}
+			ack.GetResultAck().Accepted, ack.GetResultAck().Detail = false, "unsupported inspection collection payload schema"
+			_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+			sharedops.LogEvent("quoin", "error", "inspection_collection.result_rejected", fmt.Sprintf("attempt=%d", proposal.GetAttemptId()))
 		}
 		return
 	}
@@ -343,20 +346,7 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 			}
 			return
 		}
-		if scopeType != "config_verification_run" && scopeType != "resource_refresh_run" {
-			sharedops.LogEvent("quoin", "error", "cancel_ack.unhandled_scope", scopeType)
-			return
-		}
-		if service.BusinessSystems != nil {
-			if err := service.BusinessSystems.VerificationAttempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
-				sharedops.LogEvent("quoin", "error", "config_verification.cancel_ack", err.Error())
-			}
-			// Resource-refresh children converge their parent Run here; config
-			// verification parents converge through their own result path.
-			if err := service.BusinessSystems.ConvergeResourceRefreshCancelAck(ctx, ack.GetAttemptId()); err != nil {
-				sharedops.LogEvent("quoin", "error", "resource_refresh.cancel_ack", err.Error())
-			}
-		}
+		sharedops.LogEvent("quoin", "error", "cancel_ack.unhandled_scope", scopeType)
 	case "inspection_analysis":
 		if service.Inspections != nil {
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {

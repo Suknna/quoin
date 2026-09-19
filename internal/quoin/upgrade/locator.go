@@ -9,13 +9,12 @@ import (
 // (openapi x-quoin-maintenance-access: upgrade-drain). The maintenance UI is
 // the only consumer; maintenance itself never calls these routes.
 const (
-	endpointAnalysis           = "analysis"
-	endpointInvestigation      = "investigation"
-	endpointInspectionRun      = "inspection_run"
-	endpointKnowledgeBatch     = "knowledge_batch"
-	endpointConnectionProbe    = "connection_probe"
-	endpointConfigVerification = "config_verification"
-	directiveConverge          = "converge"
+	endpointAnalysis        = "analysis"
+	endpointInvestigation   = "investigation"
+	endpointInspectionRun   = "inspection_run"
+	endpointKnowledgeBatch  = "knowledge_batch"
+	endpointConnectionProbe = "connection_probe"
+	directiveConverge       = "converge"
 )
 
 // attemptDirective resolves the deterministic drain directive for one active
@@ -76,17 +75,11 @@ func attemptDirective(ctx context.Context, conn projectionExecutor, attemptID in
 			return "", err
 		}
 		return cancelDirective(endpointConnectionProbe, fmt.Sprintf("%s/%d", name, attemptID), rowVersion), nil
-	case "config_verification_run":
-		var systemKey string
-		var versionID, rowVersion int64
-		if err := conn.QueryRowContext(ctx, `SELECT b.key,v.config_version_id,v.row_version FROM config_verification_runs v JOIN business_systems b ON b.id=v.business_system_id WHERE v.id=?`, scopeID).Scan(&systemKey, &versionID, &rowVersion); err != nil {
-			return "", err
-		}
-		return cancelDirective(endpointConfigVerification, fmt.Sprintf("%s/%d/%d", systemKey, versionID, scopeID), rowVersion), nil
 	default:
-		// embedding_generation and resource_refresh_run have no user cancel
-		// command; their queued rows converge through the in-process sweeps
-		// or a Runtime reconnect and must not fabricate a drain button.
+		// Scopes without a user cancel command (embedding_generation and
+		// historical verification/refresh rows among them) converge through
+		// the in-process sweeps or a Runtime reconnect and must not fabricate
+		// a drain button.
 		return directiveConverge, nil
 	}
 }

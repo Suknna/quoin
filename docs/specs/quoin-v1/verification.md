@@ -94,7 +94,7 @@
 
 ## 14. 当前 Config 站点重证
 
-- **VERIFY-CONFIG-001 —** `config_verification_runs` 与相关 API 类型 **MUST** 清洁泛化为唯一 `ConfigVerificationRun`；`purpose=prepublish` **MUST** 保持草稿/联合激活语义，`purpose=deployment_acceptance` **MUST** 只绑定 current published config/current Label Contract 并复用真实 PromQL/probe/Evidence/取消状态机，但 **MUST NOT** 移动发布 pointer 或成为联合激活证据。（来源：Issue #21 Q21.37）
+- **VERIFY-CONFIG-001 —（历史）** `config_verification_runs` 与相关 API 类型曾计划清洁泛化为唯一 `ConfigVerificationRun`：该引擎随后整体退役——`deployment_acceptance` purpose 已随 Deployment Acceptance 空壳移除，全部持久面（表、触发器、scope、执行/结果 schema）已随 `20260919_retire_config_verification_v1` 迁移删除，本条款仅用于解读历史 Release 工件。（来源：Issue #21 Q21.37）
 
 
 ## 16. Validation roots
