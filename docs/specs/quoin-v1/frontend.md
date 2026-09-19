@@ -2,11 +2,11 @@
 
 **状态：Draft**
 
-> **受控浏览器退役（2026-09）：** 浏览器插件配置界面已解除装配（旧 `/integrations/browser`、`/browser-login` 一律 404）；Runtimes 管理只显示 plinth 槽位。文中浏览器相关章节仅作历史解读。
+> **浏览器移除（2026-09）：** 浏览器插件与浏览器身份界面已从代码中彻底移除（旧 `/integrations/browser`、`/browser-login` 一律 404）；Runtimes 管理只显示 plinth 槽位。文中浏览器相关章节仅作历史解读。
 
-> **Kubernetes 插件退役（2026-09）：** `kubernetes` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），`/integrations/kubernetes` 创建/管理入口已拆除（旧路由一律 404），接入目录不再出现 Kubernetes 卡片；历史 Kubernetes 连接与业务系统映射记录由后端保留（连接 API 与凭据 probe 不阻止新建，仅不对前端通告）。文中 Kubernetes 相关章节仅作历史解读。
+> **Kubernetes 插件移除（2026-09）：** `kubernetes` 插件已连同连接类型、凭据 probe 与业务系统映射 API 从代码中彻底移除（`/integrations/kubernetes` 旧路由一律 404）。文中 Kubernetes 相关章节仅作历史解读。
 
-> **现状与迁移（ADR-0004）：** 插件化主线已实施：运维中心子页为告警列表、故障复盘、巡检、业务视图与接入管理；接入验证并启用即获得来源级观测、`sourceRef` 工具与独立巡检计划，业务视图可选，浏览器插件默认停用（独立浏览器身份以 `identity_key` 配置）。`BusinessSystem` 声明写入、配置发布与 Label Contract 界面已退出主线；第 10 节中标注（历史）的条款仅用于解读既有实现与 E2E 记录。真实部署验收进行中，逐项结果见 [docs/plugin-real-deployment-acceptance.md](../../../docs/plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。既有 E2E 文档保留原样，继续说明它们实际验证的历史系统。
+> **现状与迁移（ADR-0004）：** 插件化主线已实施：运维中心子页为告警列表、故障复盘、巡检、业务视图与接入管理；接入验证并启用即获得来源级观测、`sourceRef` 工具与独立巡检计划，业务视图可选。`BusinessSystem` 声明写入、配置发布与 Label Contract 界面已退出主线；第 10 节中标注（历史）的条款仅用于解读既有实现与 E2E 记录。既有 E2E 文档保留原样，继续说明它们实际验证的历史系统。
 
 > **UI 验收：** 所有前端调整必须遵守并记录 [`docs/frontend/ui-acceptance.md`](../../frontend/ui-acceptance.md) 的组件约束和真实浏览器自查；本文档-only 变更无需执行页面检查。
 
@@ -26,7 +26,7 @@
 - **UI-BOUNDARY-003 —** v1 使用简体中文单语言，不建立 i18n 框架。代码、labels、annotations、协议状态、日志与上游错误保留原文，并在其周围提供中文解释。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-BOUNDARY-004 —** 颜色自动跟随 `prefers-color-scheme`，不提供应用内主题或密度设置。布局只把 shadcn Sidebar/Resizable 已有的折叠、隐藏、拖动、键盘调整与基于 `autoSaveId` 的浏览器本地 layout restore 打开，不建设第二套布局系统或服务端个人偏好。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-BOUNDARY-005 —** 不建设 Dashboard、通知中心、铃铛收件箱、已读状态、浏览器通知权限流程、配置卡片墙、通用 JSON 表单或第二套 YAML 编辑器。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-BOUNDARY-006 —** 前端 MUST 独立生产构建并作为静态 HTTP 服务发布；生产容器不得运行开发服务器，也不得将资源复制到共享卷交由入口托管。开发服务器 MAY 仅在开发环境代理同源后端请求。前端深层路由刷新必须由前端静态服务处理，但 SPA fallback MUST NOT 吞掉 `/api/`、认证、SSE、noVNC WebSocket 或告警入口请求。（来源：[Issue #93](https://github.com/Suknna/quoin/issues/93)、ADR-0001）
+- **UI-BOUNDARY-006 —** 前端 MUST 独立生产构建并作为静态 HTTP 服务发布；生产容器不得运行开发服务器，也不得将资源复制到共享卷交由入口托管。开发服务器 MAY 仅在开发环境代理同源后端请求。前端深层路由刷新必须由前端静态服务处理，但 SPA fallback MUST NOT 吞掉 `/api/`、认证、SSE 或告警入口请求。（来源：[Issue #93](https://github.com/Suknna/quoin/issues/93)、ADR-0001）
 
 ## 2. 信息架构与路由
 
@@ -54,8 +54,7 @@
 
 ### 2.3 窄屏退化
 
-- **UI-RESPONSIVE-001 —** 窄屏时第一栏变为 offcanvas drawer，第二栏列表与第三栏详情逐层全屏显示；详情顶部始终提供明确“返回列表”。320 CSS px 宽度不得出现页面级水平滚动，代码块/宽表格/noVNC 画布可在自身区域滚动或缩放。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-RESPONSIVE-002 —** 窄屏 noVNC 显示“复杂登录建议使用桌面”但不得禁用入口；复用 noVNC 触控与虚拟键盘，不增加复制账号、密码或 URL 的替代流程。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-RESPONSIVE-001 —** 窄屏时第一栏变为 offcanvas drawer，第二栏列表与第三栏详情逐层全屏显示；详情顶部始终提供明确“返回列表”。320 CSS px 宽度不得出现页面级水平滚动，代码块/宽表格可在自身区域滚动或缩放。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 
 ## 3. 通用列表、表单与反馈
 
@@ -123,9 +122,8 @@
 - **UI-INSPECTION-001 —** 第二栏使用紧凑两行项：主行计划名、真实状态、关键时间；次行来源接入、触发方式、报告/gap 徽标。顶部只提供计划与状态筛选；`Completed` 不得翻译成“健康”。（来源：[CONTEXT「巡检工作台投影」](../../../CONTEXT.md#巡检工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INSPECTION-002 —** 标题区“运行巡检”打开轻量选择层：选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合）；从接入详情进入则按接入预选。提交后进入新 Run；同计划已有 active Run 时打开已有对象，不重复创建。（来源：[CONTEXT「巡检工作台投影」](../../../CONTEXT.md#巡检工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INSPECTION-003 —** Run 详情是连续事实页：状态/时间、检查结果、Evidence gap、分析状态、报告版本；使用简短页内 section navigation，不拆成互相隐藏的 tabs。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-INSPECTION-004 —** 检查项默认一行显示检查名、`ok/gap`、采证时间和 Evidence 数；展开后显示原始 PromQL/Journey、参数、真实结果、warnings、gap code 与 Attempt。程序不得生成红黄绿健康结论。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+- **UI-INSPECTION-004 —** 检查项默认一行显示检查名、`ok/gap`、采证时间和 Evidence 数；展开后显示原始 PromQL、参数、真实结果、warnings、gap code 与 Attempt。程序不得生成红黄绿健康结论。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-INSPECTION-005 —** “重新分析现有证据”与“重新采集”是两个动作：前者仅对 `Completed|CompletedWithGaps` 且没有 active analysis 的 Run 可用，不访问外部系统并创建新 Report；后者对 `Completed|CompletedWithGaps|Failed|Cancelled|Interrupted` Run 可用，创建新 Run 与 `evidence_at`。两者不弹确认，但提交前用一句话说明影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-INSPECTION-006 —** 历史 Journey Run 的 `AuthenticationRequired` 旁提供“重新登录”，直达对应浏览器身份的 noVNC。发布新 Browser Profile 后回到原 Run；旧 gap 不修改、不自动补跑，页面明确提示重新采集会创建新 Run。（来源：[CONTEXT「巡检工作台投影」](../../../CONTEXT.md#巡检工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 
 ## 9. 知识工作台
 
@@ -138,19 +136,15 @@
 - **UI-KNOWLEDGE-005 —** Knowledge 详情展示 current version、适用范围、来源诊断、反馈、检索资格、相对当前 EmbeddingGeneration 的 index 状态及不可变版本历史。“修订”用 current version 预填新 Candidate，确认后追加版本并切换 current 指针；不得原地覆盖。若本次修订 Candidate 被排除，旧流程保留历史，但同一 current version 仍可重新发起新的修订流程，不能形成永久死路。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-KNOWLEDGE-006 —** “停止复用”必须说明该版本永久退出检索并确认。需要恢复只能从 current Knowledge 发起修订并确认新版本；不得把旧版本开关改回去。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 
-## 10. 业务视图、接入管理与浏览器身份
+## 10. 业务视图与接入管理（历史浏览器条款随浏览器移除）
 
 > **历史（ADR-0004）：** UI-SYSTEM-001..011 描述已被 ADR-0004 替换的旧业务系统/观测/浏览器登录界面契约。业务声明编辑、配置发布、启停发布、业务绑定资源刷新与 `/business-systems/:systemKey/browser-login` 写入口均已移除；这些条款与既有页面记录只用于解读历史实现和 E2E 证据，**MUST NOT** 作为新实现依据。新主线条款见 UI-VIEW-*、UI-INTG-* 与 UI-BID-*。
 
 - **UI-SYSTEM-001 —（历史）** 运维中心提供业务纳管与接入管理两个子页。业务纳管显示业务声明、资源、巡检、访问配置和版本；接入管理展示支持的平台目录与已接入实例，并进入平台专属表单和说明。表单与 YAML 是同一业务声明的编辑视图，不产生第二权威或秘密副本；具体路由和 API 映射待 #95 实施时与机器契约同步确定。（来源：[CONTEXT「业务系统」](../../../CONTEXT.md#业务系统business-system历史模型)、[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
-- **UI-SYSTEM-002 —（历史）** 列表主行显示显示名、Enabled/Disabled；次行显示 current config version、资源新鲜度、Browser Identity 状态及待处理徽标。顶部只提供状态筛选与名称搜索。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-003 —（历史）** 系统详情是连续页：当前状态、配置版本、巡检计划、Observed Resources、Browser Identity，并提供简短 section navigation；不拆为五个 tabs。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-004 —（历史）** 目标态业务纳管必须提供表单和 YAML 两种编辑视图，二者生成、校验和发布同一份 `quoin/v1` `BusinessSystem` 声明。失败保留非秘密输入并给出字段或 YAML path 的修复说明；未知或不支持的内容不得在表单往返中静默丢失。不得建立竞争性元数据保存路径、第二声明或自由 JSON 配置面。该目标尚未部署或验收。（来源：ADR-0003）
 - **UI-SYSTEM-005 —（历史）** 目标态配置历史列出同一声明的全部不可变版本。版本详情展示相对 current published version 的机械 YAML diff、静态校验与 Config Verification Run；“运行测试”创建验证，“发布”确认后原子切换。不存在 Label Contract 兼容性或联合激活界面。实施前，当前页面和 E2E 记录继续按其历史契约解释。（来源：ADR-0003）
 - **UI-SYSTEM-006 —（历史）** 目标态 UI **MUST NOT** 提供 Label Contract 的创建、激活、readiness 或联合切换流程；业务和告警 labels 只在 BusinessSystem 声明编辑视图中显示和校验。（来源：ADR-0003）
 - **UI-SYSTEM-007 —（历史）** Observed Resource 列表明确“当前观测到 / 当前未观测到 / 数据陈旧”，显示 discovery rule、identity labels、最后成功刷新和最后见到；不得把未观测到写成已删除。详情铺满工作台显示完整 labels、discovery rule、观测时间与当前/陈旧状态。v1 没有资源历史引用数据模型，界面不得制造该列表。现行对应能力由 UI-INTG-003 的来源级观测列表承接。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-- **UI-SYSTEM-008 —（历史）** 浏览器身份在接入管理中独立创建或选择，并由业务声明以显式授权引用；默认不得跨业务复用。页面仅展示非秘密状态、revision、profile generation、最近验证和占用；不得编辑或回显 Cookie/profile 文件。只有 Admin 可管理浏览器身份、发起或发布人工登录；Operator 不显示也不得直接访问这些能力，服务端必须强制拒绝。（来源：[CONTEXT「浏览器身份」](../../../CONTEXT.md#浏览器身份browser-identity)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
-- **UI-SYSTEM-009 —（历史）** `/business-systems/:systemKey/browser-login` 的 noVNC 仅 Admin 可打开并铺满工作台；顶部窄工具条显示系统、真实 operation 状态、连接恢复提示、发布登录状态和取消。发布成功自动关闭远程桌面并返回来源详情；关闭浏览器页面不等于取消。服务端必须拒绝 Operator 直接访问。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-010 —（历史）** 不提供独立 enable/disable 开关。Admin 通过 YAML 根 `enabled` 的新不可变版本发布；确认说明对定时巡检、资源刷新和告警展示的影响。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-SYSTEM-011 —（历史）** 不提供独立资源刷新入口或无业务任务归属的扫描。资源观测只能由已声明的定时巡检、告警分析、对话工具调用，或明确标识且与正式资源投影隔离的验证/试运行触发；接入、保存、发布和页面访问不得启动采集。页面显示观测时间、来源任务和配置版本，并将失败或局部观测与完整范围内未再观测区分。现行模型中接入启用即开始来源级观测，手动刷新由 UI-INTG-003 拥有。（来源：[CONTEXT「观测资源」](../../../CONTEXT.md#观测资源observed-resource历史模型)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
 
@@ -160,19 +154,17 @@
 - **UI-INTG-001 —** 接入管理先展示支持的平台目录（Alertmanager、Prometheus、Thanos；浏览器卡片仅在 browser 插件启用后出现；Kubernetes 卡片已随插件退役移除）与已接入实例，再进入平台专属配置表单与说明；表单边界沿用 UI-ADMIN-004。浏览器插件停用时页面不提供任何浏览器配置入口。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INTG-002 —** 接入详情分离展示验证（probe Attempt 与结果历史）、启用/停用、凭据代次轮换与观测资源；验证失败保持停用，启用说明将开始默认来源级观测并创建仅人工运行的默认基础巡检计划。（来源：[CONTEXT「接入启用」](../../../CONTEXT.md#接入启用integration-enablement)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-INTG-003 —** 观测资源列表明确“当前观测到 / 当前未观测到”及陈旧标注，显示身份 labels、最后成功观测时间，并提供“刷新观测”；不得把未观测到写成已删除，失败或局部观测与完整范围内未再观测明确区分。观测范围来自当前接入，不显示业务归属。（来源：[CONTEXT「来源级观测」](../../../CONTEXT.md#来源级观测source-scoped-observation)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
-- **UI-BID-001 —** 浏览器身份在接入管理的浏览器卡片中按独立 `identity_key` 创建与配置（显示名、起始 URL、authentication probe 与类型化参数）；旧业务系统绑定的身份以只读引用与显式迁移状态展示。页面仅展示非秘密状态、revision、profile generation、最近验证和占用；不得编辑或回显 Cookie/profile 文件。只有 Admin 可管理浏览器身份、发起或发布人工登录；Operator 不显示也不得直接访问这些能力，服务端必须强制拒绝。（来源：[CONTEXT「浏览器身份」](../../../CONTEXT.md#浏览器身份browser-identity)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
-- **UI-BID-002 —** 浏览器身份人工登录的 noVNC 铺满工作台，顶部窄工具条显示身份、真实 operation 状态、连接恢复提示、发布与取消；发布成功自动关闭远程桌面并返回来源详情，关闭浏览器页面不等于取消。服务端必须拒绝 Operator 直接访问。（来源：[CONTEXT「浏览器身份」](../../../CONTEXT.md#浏览器身份browser-identity)、[Issue #14](https://github.com/Suknna/quoin/issues/14)）
 
 ## 11. Admin 管理工作区
 
-- **UI-ADMIN-001 —** 第二栏按设置清单、用户、Journey Catalog、模型供应商、备份与 Artifact 保留、安全、审计和“关于”分组，第三栏显示内容；不得增加 Label Contract 管理入口、第四栏或卡片墙首页。接入管理和业务视图属于运维中心；模型供应商是唯一独立的 Admin provider 管理对象。（来源：[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
-- **UI-ADMIN-002 —** 设置清单从权威状态派生，展示模型供应商、接入验证与启用、Plinth/Lintel（浏览器插件显式启用）、浏览器身份、Stele 告警源和备份目标的就绪、依赖及修复入口；不得保存人工完成 checkbox、显示活动 Label Contract 或阻塞无关能力。（来源：[CONTEXT「首次设置投影」](../../../CONTEXT.md#首次设置投影)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
+- **UI-ADMIN-001 —** 第二栏按设置清单、用户、模型供应商、备份与 Artifact 保留、安全、审计和“关于”分组，第三栏显示内容；不得增加 Label Contract 管理入口、第四栏或卡片墙首页。接入管理和业务视图属于运维中心；模型供应商是唯一独立的 Admin provider 管理对象。（来源：[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
+- **UI-ADMIN-002 —** 设置清单从权威状态派生，展示模型供应商、接入验证与启用、Plinth、Stele 告警源和备份目标的就绪、依赖及修复入口；不得保存人工完成 checkbox、显示活动 Label Contract 或阻塞无关能力。（来源：[CONTEXT「首次设置投影」](../../../CONTEXT.md#首次设置投影)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-ADMIN-003 —（superseded by ADR-0005 唯一管理员模型）** 用户列表显示用户名、显示名、角色、启用状态、初始化状态和最后登录；创建只产生 Operator 并必须登记一到两个收码渠道（不提供角色选择），详情编辑仅显示名/启用状态——角色不可变更，不存在 Operator 提升；用户管理另提供收码渠道整体替换（携带 row version 前提）、重置密码与撤销全部 Session。内置 Admin 不显示禁用/降级/角色操作；被替换的收码渠道立即失效其 Session 与未决验证。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[统一认证设计 §1](../../authentication-design.md)）
 - **UI-ADMIN-004 —** Alertmanager、Prometheus、Thanos 与浏览器（仅插件启用后；Kubernetes 表单已随插件退役移除）的平台配置表单位于运维中心的接入管理子页，管理员设置不得建立第二写入口。管理员设置只管理模型供应商及其安全/运维规则；模型供应商表单使用类型化字段，不得提供任意 URL + JSON 表单。任何携带秘密的表单首次提交生成用户不可见的 `client_command_id`；仅原请求网络重试复用，用户修改秘密后再提交必须生成新 ID，避免持久化秘密比较 oracle。具体字段和 API 由 [`contracts/openapi.yaml`](./contracts/openapi.yaml) 的连接与接入操作承载。（来源：[CONTEXT「接入」](../../../CONTEXT.md#接入integration)、[CONTEXT「管理工作区」](../../../CONTEXT.md#管理工作区)、[#95](https://github.com/Suknna/quoin/issues/95)、[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **UI-ADMIN-005 —** Model Provider 表单先经 `discoverProviderModels` 探测上游 `/v1/models`。多个 model ID 由 Admin 选择；零项、失败或 metadata 缺失时保留手工输入，不直接禁止保存。保存后状态为“尚未验证”；真实 probe 成功并显示实测 streaming/tool/embedding 能力后才可 enable。失败保留配置及结构化非秘密错误码/允许字段供重试修正，禁止展示供应商原始响应、header 或 request body，不自动删除或宣称能力。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 - **UI-ADMIN-006 —** 一次性 Alert Source Bearer/Runtime token 在创建或轮换响应含 reveal handle 时立即打开全工作台层并消费；原文默认可见，提供复制和“关闭后无法再次查看”。前端不得自行缩短服务端固定 60 秒期限；同 Session 命令重放若仍返回原 handle 应继续同一流程，410 时只说明已过期/消费且必须轮换。秘密只存在当前页面内存，不进路由、toast、日志、下载或浏览器持久化。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-007 —** Alert Source 详情显示全部 credential 的非秘密 ID、Active/Pending Retirement/Retired、创建、首次使用与退休时间。新 generation 首个成功 Delivery 后旧 generation 进入 Pending Retirement；界面持续提示 Admin 更新完成后显式退休，不按时间或一次成功自动消失，退休前说明立即影响。（来源：[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
-- **UI-ADMIN-008 —** Runtime 只显示 Plinth/Lintel 两个固定 slot；每项分别显示已注册、当前在线、current/pending/retiring generation、最后见到与 active 工作阻塞。新 current 首次认证前显示“等待新 token 首次使用”，成功后旧 generation 持续显示 Pending Retirement 并提供 Admin 显式退休；系统不得按时间或一次成功自动退休。替换流程仍说明吊销/中断影响和等待新 Runtime 注册/连接。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
+- **UI-ADMIN-008 —** Runtime 只显示 Plinth 固定 slot，显示已注册（组件证书 CN）、当前在线、最后见到与 active 工作阻塞。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[CONTEXT「认证与服务身份」](../../../CONTEXT.md#认证与服务身份)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-009 —** 备份连续页顶部从 `contracts/openapi.yaml#BackupSettings.backupTarget` 显示 Quoin 进程可见的目标挂载、计划时间/IANA 时区/保留份数与最近成功，显式保存。下方显示 Backup Run 的 `queued|running|succeeded|failed`、真实阶段/错误、由 `BackupSummary.sizeBytes` 投影的 archive-set 大小、checksum 和下载；active 记录原位调和，terminal 后不可变；立即备份受理后可离开等待，已有 active Run 时解释冲突而不重复创建。不得提供在线恢复按钮，只展示停机恢复说明与 manifest。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)、Issue #17 Q17.21）
 - **UI-ADMIN-010 —** `contracts/openapi.yaml` 的 `MaintenanceState` 为恢复、升级和 root-key rebind 后唯一维护投影。登录后 active=true 时应用以全工作台维护页遮蔽普通业务入口：Admin 可看到 reason、逐项 Safe/Blocking、原因、直接修复入口与“退出维护”，点击退出后服务端重验全部条件，冲突刷新当前清单，不提供 force/skip；Operator 不得绕过，但只显示维护不可用说明，不得看到内部清单、原因或修复链接。非维护时不得显示这套内部清单。（来源：[CONTEXT「存储、保留与部署」](../../../CONTEXT.md#存储保留与部署)、[Issue #16](https://github.com/Suknna/quoin/issues/16)）
 - **UI-ADMIN-011 —** Artifact 保留设置只显示一个“生成型 Artifact 在线保留天数”字段（默认 90）及后果说明；保存携带 expected row version，只影响以后创建的 generated Artifact，必须明确告知既有到期时间不会回写。GC 周期、物理路径和部署卷不得暴露为产品设置。（来源：Issue #17 Q17.1、DATA-BACKUP-009）
@@ -190,15 +182,15 @@
 实现阶段必须用真实浏览器完成以下证据，单纯构建成功不等于通过：
 
 1. **UI-TEST-001 路由恢复**：运维中心、AI SRE、管理员设置及其子页的筛选、选中对象和每种持久化全工作台层刷新/深链恢复；后退恢复来源滚动与焦点；秘密/草稿不出现在 URL。（来源：[CONTEXT.md](../../../CONTEXT.md)、[#95](https://github.com/Suknna/quoin/issues/95)、ADR-0002）
-2. **UI-TEST-002 响应式**：至少 320、768、1024、1440 CSS px 覆盖三栏、逐层全屏、noVNC、长 Markdown、代码块与文件列表；无非预期页面级横向滚动。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+2. **UI-TEST-002 响应式**：至少 320、768、1024、1440 CSS px 覆盖三栏、逐层全屏、长 Markdown、代码块与文件列表；无非预期页面级横向滚动。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 3. **UI-TEST-003 键盘/焦点**：只用键盘完成登录、导航、筛选、发送/停止/重试/Undo、打开关闭工作台层、表单错误恢复与高影响确认；自动检查焦点可见/不被遮挡及 24×24 target。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 4. **UI-TEST-004 动效**：普通与 reduced-motion 分别观察进入、退出、列表变化、pending、成功、失败、取消；reduced-motion 必须保持等价静态反馈。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 5. **UI-TEST-005 网络状态**：用可控时钟/网络故障证明 1 s、2 s 重试、同 command ID、10 s 重读、失败回退及刷新/后退取消旧 timer；SSE replay/resync 正常路径不暴露技术术语。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 6. **UI-TEST-006 权限/认证**：Operator/Admin 导航差异、受限 URL 403、Session 失效/撤销立即卸载工作区并进入完整登录、重新登录后全新工作区、认证流程两阶段（密码→收码验证/初始化）和一次性秘密内存边界。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-7. **UI-TEST-007 等待与终态**：对 Initial Analysis、Attempt、Inspection、Config Verification Run、Connection Probe、Browser Login、Backup 覆盖各自领域契约允许的排队、运行、成功、失败、离开后返回与部分完成；只对 OpenAPI 提供 cancellation fence 的对象覆盖取消中/Cancelled（Connection Probe 包含，Backup Run 不包含取消）；不得为不支持的动作制造按钮，也不得伪造百分比或健康结论。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+7. **UI-TEST-007 等待与终态**：对 Initial Analysis、Attempt、Inspection、Config Verification Run、Connection Probe、Backup 覆盖各自领域契约允许的排队、运行、成功、失败、离开后返回与部分完成；只对 OpenAPI 提供 cancellation fence 的对象覆盖取消中/Cancelled（Connection Probe 包含，Backup Run 不包含取消）；不得为不支持的动作制造按钮，也不得伪造百分比或健康结论。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 8. **UI-TEST-008 列表实时性**：cursor 加载更多、新内容缓冲、顶部合并、row-version 原位刷新、对象删除/失效保留阅读与返回入口。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 9. **UI-TEST-009 调查与附件**：首条消息原子创建、附件-only、多附件 >3 折叠、10 MiB aggregate、16 KiB/200 行 paste、Stop/Retry/Undo、Artifact 复用及对话滚动保护。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
-10. **UI-TEST-010 领域工作台**：告警接入问题、诊断反馈/不采纳影响、知识 create-or-return/修订、巡检重新分析/重新采集、Browser Identity/noVNC、模型发现/手工回退/真实 probe、凭据轮换、Runtime 替换与备份下载逐路径验证。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
+10. **UI-TEST-010 领域工作台**：告警接入问题、诊断反馈/不采纳影响、知识 create-or-return/修订、巡检重新分析/重新采集、模型发现/手工回退/真实 probe、凭据轮换、Runtime 替换与备份下载逐路径验证。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 11. **UI-TEST-011 自动化门**：TypeScript typecheck、lint、unit/component tests、OpenAPI client compatibility、`frontend-state.schema.json` 的 Draft 2020-12 正反 fixtures、axe-core（或等价）和生产构建全部退出 0；视觉/动效/焦点人工观察结果必须另行记录，不得由构建替代。（来源：[CONTEXT「工作台投影」](../../../CONTEXT.md#工作台投影)、[Issue #15](https://github.com/Suknna/quoin/issues/15)）
 
 ## 14. 外部依据

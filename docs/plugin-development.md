@@ -6,7 +6,7 @@
 
 ## 1. 一个插件是什么
 
-一个插件 = 一个 `plugins.Descriptor`（描述，含工具/模板目录）+ 按需的执行绑定 `plugins.ExecutionBundle`（真实出站执行）。部署 YAML `quoinConfig.enabledPlugins` 选择启用；未知 ID 启动失败；字段缺省时启用 `DefaultEnabled` 插件。当前可用插件为 Prometheus、Thanos、Alertmanager；浏览器与 Kubernetes 插件计划后续接入。当前版本的启用配置如下：
+一个插件 = 一个 `plugins.Descriptor`（描述，含工具/模板目录）+ 按需的执行绑定 `plugins.ExecutionBundle`（真实出站执行）。部署 YAML `quoinConfig.enabledPlugins` 选择启用；未知 ID 启动失败；字段缺省时启用 `DefaultEnabled` 插件。当前可用插件为 Prometheus、Thanos、Alertmanager。当前版本的启用配置如下：
 
 ```yaml
 component: quoin
@@ -65,7 +65,7 @@ enabledPlugins:            # 显式白名单；缺省 = 上面的默认主线
    if err := worker.RegisterPluginExecutor(descriptor, bundle); err != nil { /* wiring 失败 */ }
    ```
    注册即验证（归属/`execute_tool` 且 ToolExecutor 非 nil/位置=plinth_supervisor/与装配实现逐字段一致/参数 schema 规范化字节相等）；`plugins.Call`（冻结设置 + grant 支撑的秘密解析）由执行宿主 Runner 在装配期接入（`worker.AssembleTypedExecutors` 装配即冻结），秘密只在 supervisor 进程解析，worker 子进程永不持凭据。未注册工具显式失败。
-5. **代际策略**：工具按 `ExecutionLocation` 自动进入接受的 agent 代际目录（initial-analysis：worker_local|plinth_supervisor；investigation 另接受 lintel）。
+5. **代际策略**：工具按 `ExecutionLocation` 自动进入接受的 agent 代际目录（worker_local|plinth_supervisor）。
 6. **授权（必做，不可省略）**：新工具必须在 Quoin 控制面显式实现并接线 `attempt.Service` 的 `ToolGrantResolver`/`ToolGrantValidator`（来源/业务路由、归一化执行入参、TOCTOU 检查——可恢复歧义返回 PreflightCode，如 `target_ambiguous`；连接禁用/轮换在 FulfillGrant 事务内拒绝）。没有 resolver 的工具调用会 fail 整个 model call，这是设计行为。
 7. **巡检模板（可选）**：`Descriptor.InspectionTemplates` 声明版本化模板，(ID, Version) 是 Run 冻结身份；`Collector.Collect` 执行确定性采证——`CollectRequest.Params` 携带冻结模板参数（metrics 插件为 PromQL 表达式与窗口秒数）、`EvidenceAt` 为观测点、`Targets` 为冻结目标集；采证成功不等于业务健康。巡检运行经 `ExecutionBundle.Collector` 真实消费该契约；宣称 `inspection_templates`/`collect` 前必须先绑定 Collector。
 

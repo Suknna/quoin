@@ -2,7 +2,7 @@
 
 面向已完成初次部署（[Kubernetes](getting-started-kubernetes.md) / [Docker Compose](getting-started.md)）的管理员（Admin）与普通用户（Operator）：告警、来源观测、AI SRE 与巡检的日常使用。角色边界由服务端逐请求强制——Operator 只使用告警与 AI SRE，不进入管理页面。
 
-能力与接入模型的总说明见 [docs/integration-inspection-guide.md](integration-inspection-guide.md)（当前可用插件为 Prometheus、Thanos、Alertmanager，浏览器与 Kubernetes 插件计划后续接入）。本文以当前 HEAD（含巡检证据上下文与可自定义报告，commit `0ebde26`）为准。
+能力与接入模型的总说明见 [docs/integration-inspection-guide.md](integration-inspection-guide.md)（当前可用插件为 Prometheus、Thanos、Alertmanager）。本文以当前 HEAD（含巡检证据上下文与可自定义报告，commit `0ebde26`）为准。
 
 ## 界面总览
 
@@ -14,7 +14,7 @@
 
 ## 接入管理
 
-入口：运维中心 → **接入管理**。活动平台目录为 **Alertmanager、Prometheus、Thanos**（浏览器与 Kubernetes 插件计划后续接入）。同一平台可有多个接入。
+入口：运维中心 → **接入管理**。活动平台目录为 **Alertmanager、Prometheus、Thanos**。同一平台可有多个接入。
 
 以下创建、验证、启用步骤针对 **Prometheus/Thanos 指标接入**；Alertmanager 使用下一节的告警源凭据与 receiver 流程，不套用指标 probe。
 
@@ -120,7 +120,7 @@ mall-shop 的 mall-tiny（JVM）、MySQL、Redis 以 lab Prometheus 已抓取的
 
 ## 能力边界（不要期待不存在的功能）
 
-- 当前可用插件为 Prometheus、Thanos、Alertmanager；浏览器与 Kubernetes 插件计划后续接入，尚不属于当前版本的接入能力。
+- 当前可用插件为 Prometheus、Thanos、Alertmanager；浏览器与 Kubernetes 插件已移除。
 - 无 SSH、无 MySQL/Redis 直连连接类型：数据库类对象经 Prometheus exporter 指标 + Alertmanager 告警观测。
 - 故障复盘入口与知识库"整理为知识候选"按钮尚未开放（界面明确标注"开发中"）。
 - `quoin-faultfs` 等故障工具是**验证专用**（存储故障路径验证容器内使用），不是面向巡检演练的产品功能；巡检演练依靠 lab 侧真实故障或 Alertmanager 规则触发。

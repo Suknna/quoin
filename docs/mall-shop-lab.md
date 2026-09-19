@@ -24,7 +24,7 @@ Prometheus → JVM / node / nginx / mysql / redis exporters
                               用户安装 Quoin 后另配置 Stele receiver
 ```
 
-MySQL、Redis 位于 Kubernetes 并不要求 Quoin 使用 Kubernetes 来源插件：当前主线通过 Prometheus 观察 exporter 指标，通过 Alertmanager 接收告警。浏览器与 Kubernetes 插件计划后续接入；本演练使用当前可用的 Prometheus 和 Alertmanager 插件即可。
+MySQL、Redis 位于 Kubernetes 并不要求 Quoin 使用 Kubernetes 来源插件：当前主线通过 Prometheus 观察 exporter 指标，通过 Alertmanager 接收告警；本演练使用当前可用的 Prometheus 和 Alertmanager 插件即可。
 
 ## 2. 数据与网络边界
 

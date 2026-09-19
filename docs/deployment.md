@@ -4,7 +4,7 @@
 
 Quoin 默认交付五个独立服务：入口 `gateway`（stock Caddy）、`frontend`、`quoin`、`plinth` 与 `stele`。浏览器、API、SSE 共用一个 HTTPS Origin；告警发送方使用同一 Origin 的 `/stele/` 路径。Caddy 优先转发 `/api/*` 到 Quoin、`/stele/*` 到 Stele，其他请求到前端，因此 SPA fallback 不会吞掉 API、SSE 或 WebSocket。
 
-Quoin 采用插件体系扩展平台接入。当前可用插件为 **Prometheus、Thanos、Alertmanager**，`enabledPlugins` 使用 `prometheus`、`thanos`、`alertmanager`。**浏览器与 Kubernetes 插件计划后续接入**，当前部署按上述五服务和三个插件配置。将 Quoin 部署在 Kubernetes 上与通过插件接入集群资源是不同能力。
+Quoin 采用插件体系扩展平台接入。当前可用插件为 **Prometheus、Thanos、Alertmanager**，`enabledPlugins` 使用 `prometheus`、`thanos`、`alertmanager`。浏览器与 Kubernetes 插件已移除，当前部署按上述五服务和三个插件配置。将 Quoin 部署在 Kubernetes 上与通过插件接入集群资源是不同能力。
 
 Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Quoin 不包含 `quoin-deploy`，不会创建、更新或删除 Kubernetes 工作负载、PVC、Secret、实例，也不会编排 Compose 安装、升级、备份或恢复。运维人员负责清单应用、镜像替换、扩缩容、数据卷和 Secret 生命周期。
 

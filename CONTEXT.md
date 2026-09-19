@@ -2,16 +2,14 @@
 
 Quoin 帮助内部运维团队基于监控证据调查告警、执行巡检并沉淀经过确认的运维知识。它面向单一组织，不承担 CMDB 或事故管理系统的职责。
 
-> **受控浏览器退役（2026-09）：** 受控浏览器业务已整体下线：`browser` 插件从活动目录移除（描述符以 Retired 留在注册机制中，配置中显式列出即启动失败）、Lintel slot 不再接受 Register/Connect（长期凭据一律被拒）、浏览器 HTTP/WebSocket 路由与 journey-catalog 已拆除（旧 URL 一律 404）。Lintel 相关实现代码保留作恢复参考；部署工件历史见 `deploy/retired/browser`。本文其余涉及浏览器的条款仅作历史解读，不再描述活动行为。
+> **浏览器与 Kubernetes 插件移除（2026-09）：** 受控浏览器业务（Lintel 运行时、Browser Identity/Operation、journey）与 kubernetes 插件已从代码与契约中彻底移除；历史冻结 attempt 与旧库中的浏览器数据不再保证可解析。本文其余涉及浏览器/Kubernetes 插件的条款仅作历史解读。
 
 > **统一 mTLS 组件认证（2026-09，ADR-0009）：** 内部组件认证收敛为单一 PKI：部署 CA（runtime-ca）签发 Stele/Plinth 客户端证书（CN=stele / CN=plinth），quoin:8443 强制 mTLS 并按 CN 授权服务。注册制（一次性注册令牌、长期 Bearer、两阶段轮换、`runtime_slots`/`runtime_credentials` 权威）与 Stele service token 整体退役；组件启动即认证，无注册步骤。本文其余涉及注册/token 轮换的条款仅作历史解读，现行权威见 [ADR-0009](docs/adr/0009-unified-mtls-component-auth.md)。
-
-> **Kubernetes 插件退役（2026-09）：** `kubernetes` 插件描述符已从活动目录移除（描述符以 Retired 留在注册机制中，配置中显式列出即启动失败），前端不再提供 Kubernetes 接入的创建/管理入口。底层能力保留：`kubernetes` 连接类型与连接/凭据 probe API 未封禁（后端不阻止新建），仅不再对前端通告；`kubernetes_read` 编译表保留用于历史冻结目录与执行入口校验。本文其余涉及 Kubernetes 插件接线的条款仅作历史解读。
 
 ## 契约术语
 
 **Proto 权威契约**：
-Quoin、Plinth、Lintel 和 Stele 共同遵循的统一组件通信契约，由项目权威 protobuf 文件集合定义；它不同于组件各自的发布版本。
+Quoin、Plinth 和 Stele 共同遵循的统一组件通信契约，由项目权威 protobuf 文件集合定义；它不同于组件各自的发布版本。
 _Avoid_: probe、连接探测、组件发布版本、各接口独立兼容版本
 
 **Proto 契约指纹**：
@@ -22,15 +20,11 @@ _Avoid_: 发布版本号、兼容性版本号、单个接口版本
 
 **Quoin**：
 运维系统的控制面，拥有用户配置、任务状态、历史、反馈和知识等权威记录。
-_Avoid_: Agent Runtime、浏览器 Runtime
+_Avoid_: Agent Runtime
 
 **Plinth**：
 一个 Quoin 部署所使用的唯一 Agent Runtime，通过主动建立的运行通道领取调查和分析任务，并在每次 Execution Attempt 的全新可丢弃工作区中调用模型与工具。输入只从 Quoin 当前有效历史和 Artifact 重建；只有显式返回并提交到 Quoin 的消息、Evidence 和 Artifact 可以跨 Attempt 存活。
-_Avoid_: Quoin、浏览器 Runtime、跨轮持久工作区、第二份调查历史
-
-**Lintel**（已退役）：
-一个 Quoin 部署所使用的唯一浏览器 Runtime，通过主动建立的运行通道接收任务，拥有独占 `lintel-state` 持久卷中的浏览器身份和长期 service token，并执行人工登录、确定性巡检和可审计探索。它声明可同时承载的浏览器操作总容量；人工登录、Journey 和 Exploration 共享该容量，同一身份仍严格独占，容量不足只在 Quoin 排队。Trace、staging 和 Attempt 工作区可丢弃，需长期保存的结果上传 Quoin。受控浏览器退役后 Lintel 不再部署或连接，本定义仅作历史与恢复解读。
-_Avoid_: Quoin、Agent Runtime、Quoin 数据卷、浏览器 profile 备份源
+_Avoid_: Quoin、跨轮持久工作区、第二份调查历史
 
 **Stele**：
 独立、无状态的告警协议入口。第一版负责 Alertmanager Webhook 的 HTTP 监听、来源认证、请求体限制以及精确原始请求转交，后续可以增加其他告警接收协议；它不解析告警领域语义，不拥有数据库、持久队列、告警历史或诊断等权威业务状态。每次外部 HTTP 请求生成一个 `relay_id`，同一次 Stele→Quoin 内部转交重试必须复用该 ID，Quoin 对其幂等。Quoin 只有在一个 SQLite 事务中保存 Delivery、处理结果并更新全部正常 Occurrence 后，Stele 才向 Alertmanager 返回 `204`；提交失败或结果不确定时返回非 2xx。Alertmanager 自己发起的重试是新的外部请求和新的 Delivery，不按正文去重。
@@ -41,11 +35,11 @@ _Avoid_: Quoin、告警存储、Agent Runtime、消息队列、先返回 2xx 再
 ## 人类角色
 
 **Operator**：
-普通用户只使用告警与 AI SRE（对话和知识）：可在这些上下文中使用已获授权的业务信息和工具，但不得直接管理接入、业务系统、巡检配置、浏览器身份、凭据、用户、Runtime 或任何配置发布；没有人工登录例外。服务端必须逐请求强制此边界，前端隐藏导航不能代替授权。
+普通用户只使用告警与 AI SRE（对话和知识）：可在这些上下文中使用已获授权的业务信息和工具，但不得直接管理接入、业务系统、巡检配置、凭据、用户、Runtime 或任何配置发布；没有人工登录例外。服务端必须逐请求强制此边界，前端隐藏导航不能代替授权。
 _Avoid_: 只读观察者、系统管理员、按业务系统隔离的角色、人工登录例外
 
 **Admin**：
-管理员负责全部接入、凭据、浏览器登录、巡检配置、业务视图、平台维护及用户/角色/Session、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。业务声明管理与配置发布已随 ADR 0004 退出主线，历史记录只读保留；活动的全局标签契约已退役，业务范围由来源接入与业务视图组织。系统始终必须保留至少一个有效 Admin。
+管理员负责全部接入、凭据、巡检配置、业务视图、平台维护及用户/角色/Session、模型供应商、Runtime、逻辑告警源凭据、备份和安全设置；同时仍可使用业务功能，包括告警与 AI SRE。业务声明管理与配置发布已随 ADR 0004 退出主线，历史记录只读保留；活动的全局标签契约已退役，业务范围由来源接入与业务视图组织。系统始终必须保留至少一个有效 Admin。
 _Avoid_: 超级租户、外部身份提供方、日常任务专属角色
 
 ## 认证与服务身份
@@ -54,13 +48,13 @@ _Avoid_: 超级租户、外部身份提供方、日常任务专属角色
 用户使用本地用户名和密码登录；User 使用稳定 ID，登录名稳定、显示名可改，只禁用不物理删除。密码按 NFC 规范化后使用 Argon2id PHC 哈希保存，接受 15–128 个 Unicode 字符，不使用字符组合规则或周期改密。创建、修改、临时密码转正式密码和离线重置时，使用随 Quoin Release 固定 SecLists `100k-most-used-passwords-NCSC.txt` 上游 commit 与 checksum、运行期不联网的常见/已泄漏密码 blocklist，并追加产品名、用户名和显示名等上下文值；登录时不再做 blocklist 检查。登录统一返回失败信息；单 Quoin 进程在有界内存中按规范化用户名执行 15 分钟内失败 5 次后冷却 15 分钟，不存在用户走同一路径，进程重启清零可接受；同一进程还限制全局登录速率与 Argon2 并发。不提供自助注册、邮件找回、CAPTCHA 或第一版 MFA。User 保存递增 `auth_revision`，Session 记录签发 revision 而不永久快照角色；禁用、角色变化和 Admin 重置密码在事务中递增 revision 并撤销该用户全部 Session。用户自行改密撤销其他 Session并更新当前 Session revision。所有入口读取当前 User 状态；权限写事务提交前再次核对 enabled、role 和 auth_revision，账号变更与业务写按 SQLite 提交顺序裁决。已受理后台任务不因 Session 失效而取消，并继续保留原操作者引用。
 
 **同源 Web 会话**：
-React、HTTP API、SSE 和 noVNC WebSocket 由同一 Quoin Origin 提供。浏览器只持有 32-byte 随机 opaque Session ID 的 Secure、HttpOnly、SameSite=Lax、Path=/ `__Host-quoin-session` Cookie；服务端 SQLite Session 记录承担空闲 12 小时、绝对 7 天、登出、用户禁用和强制撤销。允许同账号多个浏览器 Session，用户可查看和退出自己的其他 Session，Admin 可撤销某用户全部 Session；用户自行改密撤销除当前外的其他 Session。写请求受 Go CrossOriginProtection 保护；携带 Session Cookie 的非安全方法若同时缺少 `Sec-Fetch-Site` 与 `Origin` 则拒绝，存在 `Origin` 时必须精确等于公共 Origin；`POST /auth/login` 另在认证前执行同源门：有 `Origin` 时必须精确相等，没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`，两者都缺失以及 `same-site|cross-site` 均拒绝；WebSocket 另校验 Origin，不支持带凭据的跨域 CORS，也不提供 Cookie CLI 兼容入口。Quoin 负责与应用内容相关的 CSP、`frame-ancestors`、`nosniff`、Referrer Policy、敏感响应 `no-store` 与登出 `Clear-Site-Data`，实际 TLS 终止层独占 HSTS。Session 登出、撤销或账号禁用时立即关闭对应 SSE 和 WebSocket，但不自动取消此前已经受理的后台任务。
+React、HTTP API 和 SSE 由同一 Quoin Origin 提供。浏览器只持有 32-byte 随机 opaque Session ID 的 Secure、HttpOnly、SameSite=Lax、Path=/ `__Host-quoin-session` Cookie；服务端 SQLite Session 记录承担空闲 12 小时、绝对 7 天、登出、用户禁用和强制撤销。允许同账号多个浏览器 Session，用户可查看和退出自己的其他 Session，Admin 可撤销某用户全部 Session；用户自行改密撤销除当前外的其他 Session。写请求受 Go CrossOriginProtection 保护；携带 Session Cookie 的非安全方法若同时缺少 `Sec-Fetch-Site` 与 `Origin` 则拒绝，存在 `Origin` 时必须精确等于公共 Origin；`POST /auth/login` 另在认证前执行同源门：有 `Origin` 时必须精确相等，没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`，两者都缺失以及 `same-site|cross-site` 均拒绝；WebSocket 另校验 Origin，不支持带凭据的跨域 CORS，也不提供 Cookie CLI 兼容入口。Quoin 负责与应用内容相关的 CSP、`frame-ancestors`、`nosniff`、Referrer Policy、敏感响应 `no-store` 与登出 `Clear-Site-Data`，实际 TLS 终止层独占 HSTS。Session 登出、撤销或账号禁用时立即关闭对应 SSE 和 WebSocket，但不自动取消此前已经受理的后台任务。
 
 **管理员离线恢复**：
 唯一内置 Admin 的找回只能通过停止长期 Quoin 后独占数据库的 `quoin admin recover` 完成，凭据只经 attached TTY：`--mode password` 由操作者在 TTY 输入新的临时密码，`--mode factors` 额外重置全部收码因素并生成只在 TTY 打印一次的临时密码。临时密码不进入参数、环境变量、Secret、history、日志或数据库明文，不设单独有效期，再次执行恢复会取代先前的临时密码。恢复后服务重启，管理员以该临时密码正常登录，进入与首次安装完全一致的统一初始化流程（设置正式密码并验证收码渠道），完成前不建立工作台会话；不恢复默认密码、不创建第二管理员、不提供网络 bootstrap 或邮件找回。
 
 **服务身份**：
-Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端证书（CN=plinth / CN=stele），内部 gRPC 全部 mTLS：quoin:8443 以 `RequireAndVerifyClientCert` 校验客户端证书并按已验证链叶证书 CN 授权服务——RuntimeControl/ArtifactService 仅 CN=plinth，SteleRelay 仅 CN=stele（ADR-0009）。证书由 `quoin secrets bootstrap` 签发、经部署 Secret 只读挂载，与 CA 同寿命；轮换经 `quoin secrets issue-client-certs --force` 重新签发后更新 Secret 并重启组件，属显式运维操作。不存在注册流程、一次性令牌或持久凭据状态：Plinth 状态卷丢失后以同一证书自动重连；Plinth worker 不接触证书私钥之外的部署秘密。持有 CA 私钥即可签发任意组件身份，该私钥只存在于部署 secrets 目录/Kubernetes Secret，与数据卷同等级保管；普通 SQLite 备份恢复不改变这些部署身份。
+Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端证书（CN=plinth / CN=stele），内部 gRPC 全部 mTLS：quoin:8443 以 `RequireAndVerifyClientCert` 校验客户端证书并按已验证链叶证书 CN 授权服务——RuntimeControl/ArtifactService 仅 CN=plinth，SteleRelay 仅 CN=stele（ADR-0009）。证书由 `quoin secrets bootstrap` 签发、经部署 Secret 只读挂载，与 CA 同寿命；轮换经 `quoin secrets issue-client-certs --force` 重新签发后更新 Secret 并重启组件，属显式运维操作。不存在注册流程、一次性令牌或持久凭据状态：Plinth 状态卷丢失后以同一证书自动重连；Plinth worker 不接触证书私钥之外的部署秘密。持有 CA 私钥即可签发任意组件身份，该私钥只存在于部署 secrets 目录（Compose）或 Kubernetes Secret（K8s 部署），与数据卷同等级保管；普通 SQLite 备份恢复不改变这些部署身份。
 
 **告警源凭据投影**：
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 以自身客户端证书经 mTLS 认证后获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多同时保留新旧两个有效凭据；新值首次成功使用后进入 Pending Retirement，由 Admin 显式吊销旧值，不设自动 TTL，并持续显示与审计未收口状态。
@@ -69,10 +63,10 @@ Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵
 创建或轮换告警 Bearer 等一次性秘密时（Runtime 注册 token 已随 ADR-0009 退役），命令响应只返回绑定发起 Session 的 reveal handle。handle 固定存活 60 秒、仅内存保存、最多成功消费一次；消费时必须是同一仍有效且当前仍为 Admin 的 Session。同一 Session 以同一 `client_command_id` 重放创建命令时，若内存 handle 仍有效且未消费则返回同一个 handle；过期、Session 改变或进程重启后只返回 `revealAvailable=false`，不创建新凭据。reveal 一旦在服务端消费，即使响应丢失也不能再次读取，只能创建替代 generation。登出、Session 撤销、账号禁用或降级以及 Quoin 重启都立即使关联 handle 失效；handle 与原始秘密都不进入数据库、审计、URL、toast、日志、模型上下文或命令持久结果。
 
 **根密钥与可逆秘密**：
-部署提供单一 32-byte 根密钥，只通过只读文件或 Kubernetes Secret 挂载，不进入 SQLite、备份或日志。连接凭据使用 AES-256-GCM envelope 保存，envelope 携带格式版本、随机 nonce、root-key binding revision 与 ciphertext/tag，AAD 绑定 Credential Generation 的稳定身份和类型；SQLite 另保存不含秘密的 AEAD verifier。Quoin 启动只加载一次根密钥；文件缺失、长度错误或 verifier 不匹配时保持 Not Ready，只提供无秘密健康诊断。确认密钥永久丢失后，部署操作者必须停止 Quoin 并独占 SQLite 执行离线 rebind：绑定新密钥、递增 binding revision、把全部 Connection 置为不可派发且需重新录入，并直接进入 `RootKeyRebind` 维护状态；旧密文只保留历史、不再尝试解密。运行期单条 envelope 认证失败只隔离对应 Connection 并审计，不回退为空值、明文或旧 revision。v1 不提供多 key keyring、在线重加密或外部 Vault/KMS 集成。
+部署提供单一 32-byte 根密钥，只通过部署 Secret（K8s 部署为 Kubernetes Secret，Compose 为只读文件）挂载，不进入 SQLite、备份或日志。连接凭据使用 AES-256-GCM envelope 保存，envelope 携带格式版本、随机 nonce、root-key binding revision 与 ciphertext/tag，AAD 绑定 Credential Generation 的稳定身份和类型；SQLite 另保存不含秘密的 AEAD verifier。Quoin 启动只加载一次根密钥；文件缺失、长度错误或 verifier 不匹配时保持 Not Ready，只提供无秘密健康诊断。确认密钥永久丢失后，部署操作者必须停止 Quoin 并独占 SQLite 执行离线 rebind：绑定新密钥、递增 binding revision、把全部 Connection 置为不可派发且需重新录入，并直接进入 `RootKeyRebind` 维护状态；旧密文只保留历史、不再尝试解密。运行期单条 envelope 认证失败只隔离对应 Connection 并审计，不回退为空值、明文或旧 revision。v1 不提供多 key keyring、在线重加密或外部 Vault/KMS 集成。
 
 **模型调用边界**：
-模型供应商是 supervisor 持有的类型化外部连接。配置时先真实请求 OpenAI-compatible `/v1/models`；返回多个 ID 时由 Admin 明确选择 Chat 与 Embedding model，不自动取第一项，接口缺失、空列表或目标未列出时允许手工填写 model ID。上下文容量等未声明且无法可靠实测的元数据允许手工补充，缺少能力声明不阻止保存为“尚未验证”；流式输出、native/multi Tool Call、取消与 Embedding dimension 等可实测能力仍由最小真实请求验证，成功后才能启用普通 Agent 任务，失败保留配置以及结构化非秘密错误码和允许字段，不复制供应商原始响应。Plinth worker 通过本地 framed protobuf ChatModel 协议提交 messages、固定 tool schema 与可复核的非秘密请求摘要；模型 ID、输出预算和 generation 参数由 Quoin 当前 capability/grant 与固定 Agent 契约决定，worker/模型不得选择或覆盖。supervisor 先经 Quoin 持久化物理 Model Call，再只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Kubernetes Secret/kubeconfig、Browser profile/storage state、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。模型 Provider revision 在启用前必须由 Plinth supervisor 真实执行 Chat streaming、native/multi Tool Call、取消、usage/request ID 与 Embedding/dimension 探测；Embedding 和 provider probe 不启动 Agent worker。Provider SDK 隐式重试关闭；同一逻辑调用的自动物理重试只允许无任何响应的 `timeout|rate_limited|transport_error`，以及增加旧回合淘汰后的无响应 `context_overflow`，不对 provider unavailable、取消/终态 fence、invalid response 或 Artifact 提交失败自动重试。
+模型供应商是 supervisor 持有的类型化外部连接。配置时先真实请求 OpenAI-compatible `/v1/models`；返回多个 ID 时由 Admin 明确选择 Chat 与 Embedding model，不自动取第一项，接口缺失、空列表或目标未列出时允许手工填写 model ID。上下文容量等未声明且无法可靠实测的元数据允许手工补充，缺少能力声明不阻止保存为“尚未验证”；流式输出、native/multi Tool Call、取消与 Embedding dimension 等可实测能力仍由最小真实请求验证，成功后才能启用普通 Agent 任务，失败保留配置以及结构化非秘密错误码和允许字段，不复制供应商原始响应。Plinth worker 通过本地 framed protobuf ChatModel 协议提交 messages、固定 tool schema 与可复核的非秘密请求摘要；模型 ID、输出预算和 generation 参数由 Quoin 当前 capability/grant 与固定 Agent 契约决定，worker/模型不得选择或覆盖。supervisor 先经 Quoin 持久化物理 Model Call，再只在内存注入 endpoint credential 并调用内部供应商。Provider API key、Authorization/Cookie、客户端私钥、Quoin 根密钥、密码 hash、Session/token digest 和可逆连接密文不得进入 worker 环境、工作区、模型上下文、Evidence、Artifact 或普通日志。用户主动上传文本、外部日志和页面正文不做通用猜测式秘密扫描。模型 Provider revision 在启用前必须由 Plinth supervisor 真实执行 Chat streaming、native/multi Tool Call、取消、usage/request ID 与 Embedding/dimension 探测；Embedding 和 provider probe 不启动 Agent worker。Provider SDK 隐式重试关闭；同一逻辑调用的自动物理重试只允许无任何响应的 `timeout|rate_limited|transport_error`，以及增加旧回合淘汰后的无响应 `context_overflow`，不对 provider unavailable、取消/终态 fence、invalid response 或 Artifact 提交失败自动重试。
 
 **Plinth worker 隔离边界**：
 v1 的 supervisor 与每 Attempt 新 worker 同容器、同 uid；worker 在处理 Attempt 输入前必须 fail-closed 建立 `no_new_privs`、Landlock ABI >= 6 与进程内 seccomp，只能访问既定只读运行时路径、当前一次性工作区和 framed stdio，不能读取 supervisor 的敏感 `/proc` 文件、发域外信号、建立外部网络连接、写工作区外路径或继承非 stdio FD。Plinth readiness 与每个 worker Ack 前都实际执行这些对抗检查，任一失败即 `sandbox_unavailable`，不得静默降级。v1 接受同 PID namespace 下世界可读的非秘密进程元数据可见，不引入 user namespace、bubblewrap、额外 worker daemon 或第二套本地协议。
@@ -88,12 +82,12 @@ _Avoid_: 权限凭据、会话 ID、幂等键、把所有用户活动合并为�
 > **审计目标更新（已确认、未实施）：** [ADR-0006](docs/adr/0006-automatic-audit-and-operation-correlation.md) 规定操作默认自动审计、集中受控例外、全生命周期关联，以及系统管理中的统一审计入口；默认且最低保留六个自然月，可延长。它替代下文无期限保留及“账号、Session 与审计投影”中的旧头像菜单入口约定；旧条文不表示新机制已经实现。
 
 **审计与执行溯源**：
-领域对象及其不可变版本仍是业务历史权威；另保存窄的 append-only Audit Event，只记录 actor 类型/ID、action、target 类型/ID/版本、client command/request ID、提交时间、成功或确定性拒绝结果及领域记录引用，不复制消息、Evidence、附件、Prompt 正文或秘密。持久审计覆盖登录成功、登出与 Session 生命周期、全部已认证领域写成功及确定性拒绝、用户/角色/密码、秘密 reveal/轮换、Runtime、维护/恢复/离线命令，以及敏感下载的授权和已认证权限拒绝；匿名登录失败、CSRF/畸形匿名请求、无效 Runtime/Stele token 与 429 只进入有界指标和不含密码/完整用户名/credential 的运维日志，不写 SQLite。强制 Audit Event 与领域状态写同事务，审计失败则领域写回滚；敏感下载必须先提交访问审计再发送响应头和首字节；基础设施提交结果未知只记诊断，不伪造权威失败。Audit Event 防御应用用户和 Web Admin，不声称防御拥有 PVC/数据目录 root 权限的部署操作者；v1 不建本地 hash chain 或外部 WORM。每个 Execution Attempt 和低层 Model/Tool Call 保存实际供应商连接 revision/credential generation、模型 ID、Prompt/renderer/agent/tool-schema 版本或 digest、有序输入对象及 revision/digest、Quoin/Plinth/Lintel/Journey Catalog 版本、开始结束时间、usage、延迟、重试序号、规范可见模型响应和结构化终止原因；最终领域输出正文继续由消息、Report、Candidate 和 Evidence 等记录承担。不得保存或展示隐藏思维链。结构化审计长期保留并进入备份。
+领域对象及其不可变版本仍是业务历史权威；另保存窄的 append-only Audit Event，只记录 actor 类型/ID、action、target 类型/ID/版本、client command/request ID、提交时间、成功或确定性拒绝结果及领域记录引用，不复制消息、Evidence、附件、Prompt 正文或秘密。持久审计覆盖登录成功、登出与 Session 生命周期、全部已认证领域写成功及确定性拒绝、用户/角色/密码、秘密 reveal/轮换、Runtime、维护/恢复/离线命令，以及敏感下载的授权和已认证权限拒绝；匿名登录失败、CSRF/畸形匿名请求、无效 Runtime/Stele token 与 429 只进入有界指标和不含密码/完整用户名/credential 的运维日志，不写 SQLite。强制 Audit Event 与领域状态写同事务，审计失败则领域写回滚；敏感下载必须先提交访问审计再发送响应头和首字节；基础设施提交结果未知只记诊断，不伪造权威失败。Audit Event 防御应用用户和 Web Admin，不声称防御拥有 PVC/数据目录 root 权限的部署操作者；v1 不建本地 hash chain 或外部 WORM。每个 Execution Attempt 和低层 Model/Tool Call 保存实际供应商连接 revision/credential generation、模型 ID、Prompt/renderer/agent/tool-schema 版本或 digest、有序输入对象及 revision/digest、Quoin/Plinth 版本、开始结束时间、usage、延迟、重试序号、规范可见模型响应和结构化终止原因；最终领域输出正文继续由消息、Report、Candidate 和 Evidence 等记录承担。不得保存或展示隐藏思维链。结构化审计长期保留并进入备份。
 
 ## 告警与调查
 
 **稳定身份保留**：
-任何已经发布、执行过 Config Verification Run 或被历史记录引用的稳定 ID/key 永远不能重新分配给另一个逻辑对象，包括 Business System、Logical Alert Source、Browser Identity、Connection 以及 discovery、plan、check。停用或从已发布 YAML 移除只形成 Disabled/Retired tombstone，不释放身份；以后再次出现同一 key 表示恢复原逻辑对象及其历史，新业务含义必须使用新 key。显示名称可以修改或复用。只有从未发布、从未运行且从未被引用的草稿/staging 对象可以物理清理。
+任何已经发布、执行过 Config Verification Run 或被历史记录引用的稳定 ID/key 永远不能重新分配给另一个逻辑对象，包括 Business System、Logical Alert Source、Connection 以及 discovery、plan、check。停用或从已发布 YAML 移除只形成 Disabled/Retired tombstone，不释放身份；以后再次出现同一 key 表示恢复原逻辑对象及其历史，新业务含义必须使用新 key。显示名称可以修改或复用。只有从未发布、从未运行且从未被引用的草稿/staging 对象可以物理清理。
 _Avoid_: 退役后复用 key、隐藏 UUID 与用户 key 双重身份、因显示名变化切断历史
 
 **逻辑告警源（Logical Alert Source）**：
@@ -155,18 +149,18 @@ _Avoid_: 事实、告警、整个调查、可覆盖的当前结论
 ## 工作台投影
 
 **三栏工作台**：
-第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；全局入口只有运维中心、AI SRE 和管理员设置。运维中心包含告警列表、故障复盘、巡检、业务视图和接入管理子页，不建设独立全局接入中心；AI SRE 包含对话和知识子页；管理员设置仅对 Admin 可见。告警列表以 URL query `id` 选中统一告警读模型中的对象时在右侧覆盖式详情中打开；上游 Alertmanager Occurrence 与平台故障保留各自来源和生命周期，不能混淆。业务视图提供表单和 YAML 编辑同一对象的可选范围组织；接入管理先展示支持的平台目录与已接入实例，进入平台专属配置表单及说明。内部组件管理不面向普通用户；管理员在设置“关于”查看组件版本和连接状态，平台故障仍在统一告警中可见。页面位置不放宽服务端权限。工作台直接启用所选 shadcn `sidebar-09`/Sidebar 与 Resizable primitives 已有的展开、折叠、隐藏、拖动调整、键盘调整和浏览器本地布局恢复能力，不另造平行布局系统；第一栏保持图标导航语义，第二栏可折叠或调整宽度，第三栏使用剩余空间。URL 未选择对象时不自动选择列表第一项，第三栏使用 shadcn `Empty` 的图标、标题、自然语言描述和至多一个主操作说明当前可做什么；不得留白或伪装成 Dashboard。窄屏时第一栏变抽屉，告警详情及列表在需要时分别全屏显示且详情内容独立滚动；复杂 noVNC 登录明确提示优先使用桌面，但不禁用入口，也不增加复制秘密的替代流程。
+第一栏是默认只显示图标的全局导航，hover/focus 时解释用途；全局入口只有运维中心、AI SRE 和管理员设置。运维中心包含告警列表、故障复盘、巡检、业务视图和接入管理子页，不建设独立全局接入中心；AI SRE 包含对话和知识子页；管理员设置仅对 Admin 可见。告警列表以 URL query `id` 选中统一告警读模型中的对象时在右侧覆盖式详情中打开；上游 Alertmanager Occurrence 与平台故障保留各自来源和生命周期，不能混淆。业务视图提供表单和 YAML 编辑同一对象的可选范围组织；接入管理先展示支持的平台目录与已接入实例，进入平台专属配置表单及说明。内部组件管理不面向普通用户；管理员在设置“关于”查看组件版本和连接状态，平台故障仍在统一告警中可见。页面位置不放宽服务端权限。工作台直接启用所选 shadcn `sidebar-09`/Sidebar 与 Resizable primitives 已有的展开、折叠、隐藏、拖动调整、键盘调整和浏览器本地布局恢复能力，不另造平行布局系统；第一栏保持图标导航语义，第二栏可折叠或调整宽度，第三栏使用剩余空间。URL 未选择对象时不自动选择列表第一项，第三栏使用 shadcn `Empty` 的图标、标题、自然语言描述和至多一个主操作说明当前可做什么；不得留白或伪装成 Dashboard。窄屏时第一栏变抽屉，告警详情及列表在需要时分别全屏显示且详情内容独立滚动。
 
 **工作台展示约定**：
 界面使用紧凑但不拥挤的运维信息密度，列表优先展示状态、对象名、关键时间和业务系统，完整内容进入详情，不提供密度设置。颜色跟随系统明暗偏好，不提供应用内主题设置。v1 界面使用简体中文，代码、labels、annotations、协议状态、日志和上游错误保留原文，不建立无实际消费者的 i18n 机制。业务筛选与实际存在的可切换排序进入 URL query，形成可刷新和可分享的确定性视图；v1 当前列表排序由领域契约固定，不暴露没有服务端契约的统一排序控件。分页游标、滚动位置、临时展开和选中状态属于当前浏览器历史项，返回时恢复并用服务端快照/SSE 调和。cursor 列表首次只读取一页，底部由明确的“加载更多”触发下一页，不伪造页码、不自动无限滚动；加载后仍是同一连续列表。实时新项目到达且用户不在顶部时，保持当前可视内容与焦点不动并显示“有 N 条新内容”，用户触发后合并并回到顶部；已在顶部时可直接合并，但不得抢焦点或自动打开详情。跨模块关联跳转使用浏览器原生历史，返回到来源详情，不维护第二套面包屑栈，也不默认新开标签页。
 _Avoid_: 大卡片列表、密度/主题配置页、把滚动像素写进可分享 URL、自定义导航历史、自动无限滚动、实时插入导致阅读位置跳动
 
 **首次设置投影**：
-空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、接入验证与启用、Plinth/Lintel（浏览器插件显式启用）、浏览器身份登录、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可在管理模块直接处理；Operator 不显示管理入口，只在告警等相关模块看到“需要管理员完成”的结果与影响，不暴露不可进入的配置清单。设置清单始终由权威状态派生且保留：全部就绪时折叠为一行“核心能力已就绪”，有故障或未完成依赖时自动展开受影响项并直达对应接入、Runtime、浏览器身份、告警源或备份详情；不保存用户勾选的完成状态。
+空告警页根据实际状态说明缺少什么并提供“完成初始设置”入口；管理模块提供可跳过、依赖驱动的设置清单，不建设阻塞使用的线性 Wizard。清单从权威状态派生并分别展示模型供应商、接入验证与启用、Plinth、Stele 告警源和备份目标的就绪状态、依赖及直接修复入口；告警接入可用与巡检可用分别计算，不要求一次配齐全部能力。Admin 可在管理模块直接处理；Operator 不显示管理入口，只在告警等相关模块看到“需要管理员完成”的结果与影响，不暴露不可进入的配置清单。设置清单始终由权威状态派生且保留：全部就绪时折叠为一行“核心能力已就绪”，有故障或未完成依赖时自动展开受影响项并直达对应接入、Runtime、告警源或备份详情；不保存用户勾选的完成状态。
 _Avoid_: 空页面、强制线性向导、把内部对象依赖留给用户推导、所有能力全配齐才允许使用
 
 **管理工作区**：
-管理模块只对 Admin 出现在全局导航中；第二栏按设置清单、用户、Journey Catalog、模型供应商、备份、安全、审计和“关于”分组，第三栏显示所选列表、详情或设置，不增加第四栏或卡片墙管理首页。“关于”向管理员展示平台及内部组件的版本、连接状态和受保护维护入口；它不是独立平台异常中心。运维中心的业务视图和接入管理承担视图组织、接入及浏览器身份的操作入口；权限始终由服务端裁决，前端隐藏不是权限边界。
+管理模块只对 Admin 出现在全局导航中；第二栏按设置清单、用户、模型供应商、备份、安全、审计和“关于”分组，第三栏显示所选列表、详情或设置，不增加第四栏或卡片墙管理首页。“关于”向管理员展示平台及内部组件的版本、连接状态和受保护维护入口；它不是独立平台异常中心。运维中心的业务视图和接入管理承担视图组织与接入的操作入口；权限始终由服务端裁决，前端隐藏不是权限边界。
 _Avoid_: Operator 管理入口、普通用户内部组件管理、独立平台异常中心、第四栏、管理 Dashboard 卡片墙
 
 **操作、表单与反馈**：
@@ -190,10 +184,10 @@ _Avoid_: 瞬时秘密深链、本地伪造 Cancelled、统一 partial-success、
 影响告警列表的事务在同一 SQLite 事务中产生单调递增 `alert_change_seq`；HTTP 快照返回 `snapshot_seq`，每个 Occurrence 返回 `row_version`。客户端首次建立 SSE 时携带 `after=snapshot_seq`，重连使用 `Last-Event-ID`；Quoin 回放其后的有界派生变更。断线、重连、回放和游标过期后的完整快照刷新均在前端静默完成，不向普通用户暴露 SSE、sequence、cursor、resync 等无可操作价值的技术名词，不清空当前阅读位置或抢焦点；多次恢复失败后统一进入普通内部错误恢复流程。SSE 可重复投递，客户端按 sequence 与 row version 幂等应用；游标过期时重新读取完整快照。事件只携带 Occurrence ID、变化类型和版本，选中详情发现版本变化后重新读取。Resolved 从 Firing 列表移除，但已打开 URL 继续显示并标记已恢复。新告警非阻塞提示不打断当前详情；该变更流可丢弃、可重建，不是告警历史权威源。
 
 **调查与巡检工作区**：
-调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，既有调查 URL 为 `/investigations/:investigation`。列表标题由程序从当前分支第一条有效用户消息机械生成，空白时回退为关联来源或“新调查 + 创建时间”，不持久化独立标题、不调用模型；列表按当前分支最后消息/Attempt 活动时间倒序。点击新建先进入 `/investigations/new` 空白对话，第一条消息被服务端接受时才原子创建 Investigation、消息和 Attempt；未发送即离开不产生空记录，也不先要求标题、业务系统、告警、模型或工具。从告警进入时在发送框上方显示当前 Occurrence 与用户选中 Initial Analysis 的不可变来源项并直接聚焦输入，第一条消息提交时与来源原子写入。用户位于底部时跟随新 token/message；用户向上阅读后停止自动滚动并显示“查看新回复”，不得抢焦点或改变阅读位置。失败 Attempt 对应的用户消息左侧显示环形重试按钮，点击后按既有消息创建新 Attempt；active Attempt 期间发送按钮变为方形停止按钮，点击提交 cancellation fence，终态后恢复发送按钮。Tool Call 在对话中显示为可折叠状态卡片，默认展示工具名、真实阶段、耗时或终态与人类可读摘要，原始参数、输出和诊断详情原位展开；窄屏不为工具调用增加第二页面或上下分屏。点击 Evidence 引用后，内容从右向左渐入并铺满整个工作台，关闭后恢复原消息与滚动位置；Initial Analysis 完整正文与 Inspection Report 也使用同一全工作台阅读层，详情只保留状态、摘要和版本入口；减少动态效果模式直接切换到同一终态。巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。noVNC 瞬断进入短暂 `AwaitingReconnect`，同一 Session 可重附着，宽限期后关闭 BrowserSession 释放身份锁，且不自动发布 profile generation。
+调查模块第二栏显示 Investigation 列表，第三栏使用 assistant-ui 对话工作区，既有调查 URL 为 `/investigations/:investigation`。列表标题由程序从当前分支第一条有效用户消息机械生成，空白时回退为关联来源或“新调查 + 创建时间”，不持久化独立标题、不调用模型；列表按当前分支最后消息/Attempt 活动时间倒序。点击新建先进入 `/investigations/new` 空白对话，第一条消息被服务端接受时才原子创建 Investigation、消息和 Attempt；未发送即离开不产生空记录，也不先要求标题、业务系统、告警、模型或工具。从告警进入时在发送框上方显示当前 Occurrence 与用户选中 Initial Analysis 的不可变来源项并直接聚焦输入，第一条消息提交时与来源原子写入。用户位于底部时跟随新 token/message；用户向上阅读后停止自动滚动并显示“查看新回复”，不得抢焦点或改变阅读位置。失败 Attempt 对应的用户消息左侧显示环形重试按钮，点击后按既有消息创建新 Attempt；active Attempt 期间发送按钮变为方形停止按钮，点击提交 cancellation fence，终态后恢复发送按钮。Tool Call 在对话中显示为可折叠状态卡片，默认展示工具名、真实阶段、耗时或终态与人类可读摘要，原始参数、输出和诊断详情原位展开；窄屏不为工具调用增加第二页面或上下分屏。点击 Evidence 引用后，内容从右向左渐入并铺满整个工作台，关闭后恢复原消息与滚动位置；Initial Analysis 完整正文与 Inspection Report 也使用同一全工作台阅读层，详情只保留状态、摘要和版本入口；减少动态效果模式直接切换到同一终态。巡检运行 URL 为 `/inspections/runs/:run`。进行中的初步分析、调查和巡检立即显示已受理与真实执行阶段，用户可离开页面，完成或失败后在列表和详情持续可见。任务创建命令先在 Quoin 事务中保存业务对象和 Attempt，SSE 只是观察通道，断线不取消任务；任务变化使用单调 sequence 与对象 row version，进入页面先读 HTTP 快照再建立 SSE，重连有界回放，游标过期 `resync_required`。事件只传状态、工具阶段和版本，token delta/高频动画不持久化。最终消息、Report 或 Candidate 必须先原子持久化，任务随后才能 Succeeded。Tool Call 执行前创建记录并以真实时间戳单调推进，返回页面从 Attempt 快照恢复完整时间线；不伪造百分比、不展示或声称保存隐藏思维。
 
 **巡检工作台投影**：
-巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示来源接入、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的计划和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合），从接入详情进入时按接入预选；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，先展示状态与时间、分析状态及最新可读报告，再展示检查结果、Evidence 缺口和运行资料；报告不存在或分析失败时如实展示状态，不生成替代结论。提供简短页内 section navigation，不拆成隐藏上下文的多 tab，报告生成要求与执行详情按需展开。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL/Journey、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。历史 Journey Run 的 `AuthenticationRequired` 直达对应浏览器身份的 noVNC；发布新 profile 后返回旧 Run，旧 gap 不改写、不自动补跑，用户显式重新采集。
+巡检模块第二栏使用紧凑两行 Run 列表：主行显示计划名、真实采证状态和关键时间，次行显示来源接入、人工/调度触发方式、报告与缺口徽标；顶部只提供服务端支持的计划和状态筛选，`Completed` 不翻译为“健康”。标题区的“运行巡检”通过轻量选择层选择独立巡检计划（范围覆盖整个接入、业务视图或显式对象集合），从接入详情进入时按接入预选；同计划已有 active Run 时直接打开，不创建重复项。Run 详情为一个连续页面，先展示状态与时间、分析状态及最新可读报告，再展示检查结果、Evidence 缺口和运行资料；报告不存在或分析失败时如实展示状态，不生成替代结论。提供简短页内 section navigation，不拆成隐藏上下文的多 tab，报告生成要求与执行详情按需展开。每个检查默认显示名称、`ok/gap`、采证时间与 Evidence 数量，展开后显示原始 PromQL、类型化参数、真实结果、warnings、gap code 和相关 Attempt；程序不生成系统健康结论。页面分开显示“重新分析现有证据”和“重新采集”：前者只创建新 Report 版本，后者创建新 Run 与 `evidence_at`；根据当前失败/缺口推荐其一，但都不弹确认框，也不合并成含糊的“重试”。
 _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试、登录后改写或自动补跑旧 Run
 
 **知识工作台投影**：
@@ -203,7 +197,7 @@ _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试�
 _Avoid_: 混排正式知识与候选、索引实现选择器、程序融合排名、窄弹窗编辑长正文、模型自动写入、逐条跨页面确认
 
 **业务纳管历史投影**：
-业务系统模块已退出运维中心导航，其运维职责由接入管理与业务视图承接；既有业务系统、配置版本、验证 Run 与 Observed Resource 经只读入口保留，用于追溯旧声明与旧 Run 的绑定关系，不提供新的声明编辑、发布或启停操作，也不发明“当前草稿”。Observed Resource 历史列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，不把未观测到解释为删除；新的观测事实由来源级观测拥有，观测范围来自接入。浏览器身份改由接入管理按独立 `identity_key` 配置：只有 Admin 可配置显示名、起始 URL、authentication probe 与类型化参数、创建新 revision，并发起和发布人工浏览器登录。noVNC 铺满工作台，顶部固定窄工具条显示业务系统或身份、真实 operation 状态、重连提示、发布与取消；发布成功关闭远程桌面并回到来源详情，关闭页面不隐式取消，窄屏保留入口并提示桌面体验更可靠。Operator 不得进入或调用该流程，服务端必须强制拒绝。
+业务系统模块已退出运维中心导航，其运维职责由接入管理与业务视图承接；既有业务系统、配置版本、验证 Run 与 Observed Resource 经只读入口保留，用于追溯旧声明与旧 Run 的绑定关系，不提供新的声明编辑、发布或启停操作，也不发明“当前草稿”。Observed Resource 历史列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，不把未观测到解释为删除；新的观测事实由来源级观测拥有，观测范围来自接入。
 
 **Label Contract 激活投影（历史）**：
 全局契约的联合激活界面已随业务声明一同退出主线；既有激活记录与相关 Run 只读保留，用于解读历史配置切换，不得作为新配置或标签语义的入口。
@@ -213,7 +207,7 @@ _Avoid_: 双配置入口、Business System 卡片墙、latest draft、上传即�
 全局导航底部头像菜单只包含当前身份/角色、修改密码、我的 Session、审计记录和退出；低频账号操作不占主导航。我的 Session 使用全工作台层列出设备/浏览器、创建时间、最后活动并标记当前 Session，其他 Session 可逐个撤销，确认明确说明对应 SSE/WebSocket 会立即断开。Admin 用户管理列表显示用户名、显示名、角色、启用状态和最后登录；详情原位修改显示名/角色/状态，并提供重置密码和撤销全部 Session。禁用、降级、重置密码与撤销 Session 均说明现有登录影响；最后一个有效 Admin 的服务端冲突原样解释，不通过隐藏按钮冒充不可能。仅 Admin 可从头像菜单进入 `/audit` 全工作台审计列表，按 actor type、action 与时间筛选并查看结构化事件；它不是第七个常驻模块，返回恢复原业务页面。
 
 **连接、凭据与 Runtime 管理投影**：
-管理页按 Thanos、Kubernetes、模型供应商等真实 Connection kind 使用类型化表单，只收集该类型真实的非秘密字段和凭据，不提供任意 URL+JSON 编辑器。详情分开显示当前 ConnectionRevision、CredentialGeneration、启用/重验状态、最近真实测试与不可变历史；Operator 只在相关业务页面看到非秘密连接状态与影响。模型供应商创建/轮换后显示“尚未验证”：先列出 `/v1/models` 返回 ID 供 Admin 选择，列表缺失时提供手工 model ID 与未声明元数据输入；真实 capability probe 可后台运行，成功后显示实测能力并允许启用，失败保留 revision/generation、手工输入和结构化非秘密错误码/允许字段，不复制供应商原始响应，已启用供应商轮换时先停用且不在 probe 前自动恢复。Alert Source 详情显示凭据的非秘密 ID、Active/Pending Retirement/Retired、创建/首次使用/退休时间；轮换后新旧两个 generation 可认证，新值首次成功使用后旧值进入 Pending Retirement，并提示“更新 Alertmanager → 确认新凭据已使用 → 显式吊销旧凭据”，程序不自动猜测切换完成或自动吊销。创建/轮换返回 reveal handle 时，前端立即调用一次 reveal 并打开铺满工作台的一次性秘密层：原文可见且可复制，明确关闭后不能再次查看；秘密只在当前页面内存存在，不进入 URL、toast、日志、下载或浏览器持久存储，关闭后只能通过新轮换取得。
+管理页按 Thanos、模型供应商等真实 Connection kind 使用类型化表单，只收集该类型真实的非秘密字段和凭据，不提供任意 URL+JSON 编辑器。详情分开显示当前 ConnectionRevision、CredentialGeneration、启用/重验状态、最近真实测试与不可变历史；Operator 只在相关业务页面看到非秘密连接状态与影响。模型供应商创建/轮换后显示“尚未验证”：先列出 `/v1/models` 返回 ID 供 Admin 选择，列表缺失时提供手工 model ID 与未声明元数据输入；真实 capability probe 可后台运行，成功后显示实测能力并允许启用，失败保留 revision/generation、手工输入和结构化非秘密错误码/允许字段，不复制供应商原始响应，已启用供应商轮换时先停用且不在 probe 前自动恢复。Alert Source 详情显示凭据的非秘密 ID、Active/Pending Retirement/Retired、创建/首次使用/退休时间；轮换后新旧两个 generation 可认证，新值首次成功使用后旧值进入 Pending Retirement，并提示“更新 Alertmanager → 确认新凭据已使用 → 显式吊销旧凭据”，程序不自动猜测切换完成或自动吊销。创建/轮换返回 reveal handle 时，前端立即调用一次 reveal 并打开铺满工作台的一次性秘密层：原文可见且可复制，明确关闭后不能再次查看；秘密只在当前页面内存存在，不进入 URL、toast、日志、下载或浏览器持久存储，关闭后只能通过新轮换取得。
 
 组件状态页展示 Plinth 的当前在线状态（boot、最后见到时间、对端版本）；不存在注册状态或凭据轮换展示（ADR-0009）。备份页为连续页面：顶部显示目标挂载状态、计划时间、IANA 时区、保留份数与最近成功，并显式保存设置；下方展示不可变备份记录、真实阶段/错误、大小、checksum 和下载，“立即备份”受理后可离开。失败在告警页/管理徽标持续提示并可重试；Web UI 不提供在线恢复，只提供停机恢复说明与所选备份 manifest 信息。
 _Avoid_: 个人设置全局模块、通用连接 JSON、秘密持久化、自动吊销旧凭据、健康/异常单灯、动态 Runtime slot、在线覆盖恢复
@@ -222,10 +216,10 @@ _Avoid_: 个人设置全局模块、通用连接 JSON、秘密持久化、自动
 
 ### 插件化接入、观测与巡检（ADR 0004，主线已实施）
 
-[ADR 0004](docs/adr/0004-plugin-capability-registry.md) 把接入、自动观测、模型工具、巡检与可选业务视图从业务声明前置中解耦。主线链路——接入验证并启用→启用接入的默认来源级观测→Agent 工具按冻结授权与 `sourceRef` 定来源→独立巡检计划按整个接入／显式对象／业务视图定范围→基于 Evidence 的不可变报告——已随实现落地并由主线集成验证覆盖；真实部署验收进行中，实际点击记录与遗留缺陷见 [docs/plugin-real-deployment-acceptance.md](docs/plugin-real-deployment-acceptance.md)，该记录未全通过前不宣称部署验收完成。旧声明、Run 与 Evidence 保持其历史解释，禁止按新模型重写过去事实。
+[ADR 0004](docs/adr/0004-plugin-capability-registry.md) 把接入、自动观测、模型工具、巡检与可选业务视图从业务声明前置中解耦。主线链路——接入验证并启用→启用接入的默认来源级观测→Agent 工具按冻结授权与 `sourceRef` 定来源→独立巡检计划按整个接入／显式对象／业务视图定范围→基于 Evidence 的不可变报告——已随实现落地并由主线集成验证覆盖。旧声明、Run 与 Evidence 保持其历史解释，禁止按新模型重写过去事实。
 
-**插件（Plugin）**：随组件构建发布的可信能力实现，以稳定 ID、版本、封闭配置和能力描述显式注册。插件在自己包内同时拥有能力描述与编译工具实现，描述声明由实现派生，二者不可漂移；插件按需提供 Probe、Discover、模型 Tools、ExecuteTool、巡检模板及 Collect，控制面描述与运行时执行经同一插件注册机制的执行绑定连接。部署 YAML 选择启用集合；缺省启用 prometheus、thanos、alertmanager。退役插件（browser、kubernetes）的描述符仍注册为其编译实现的声明权威，用于历史冻结解析，但永不通告、永不启用，显式列出即启动失败（缺省字段与空数组是不同的部署事实：空数组表示全部停用）。不提供动态 `.so`、在线安装任意代码或另一套插件 RPC（[ADR 0007](docs/adr/0007-unified-plugin-assembly.md)）。
-_Avoid_: 第二工具表、核心表硬编码插件工具、旁路执行器注册、退役即删除声明、动态插件加载
+**插件（Plugin）**：随组件构建发布的可信能力实现，以稳定 ID、版本、封闭配置和能力描述显式注册。插件在自己包内同时拥有能力描述与编译工具实现，描述声明由实现派生，二者不可漂移；插件按需提供 Probe、Discover、模型 Tools、ExecuteTool、巡检模板及 Collect，控制面描述与运行时执行经同一插件注册机制的执行绑定连接。部署 YAML 选择启用集合；缺省启用 prometheus、thanos、alertmanager。browser 与 kubernetes 插件已连同其描述符与历史兼容层彻底移除，历史冻结 attempt 与旧库中的相关数据不再保证可解析。不提供动态 `.so`、在线安装任意代码或另一套插件 RPC（[ADR 0007](docs/adr/0007-unified-plugin-assembly.md)）。
+_Avoid_: 第二工具表、核心表硬编码插件工具、旁路执行器注册、动态插件加载
 
 **接入启用（Integration Enablement）**：接入先经真实 probe 验证再显式启用；启用是接入从“已配置”进入“可观测、可授权、可巡检”的唯一门槛。启用事务内幂等创建该接入仅人工运行的默认基础巡检计划，失败整体回滚，不会出现“已启用却无即用计划”的中间态；停用只阻止新派发。启用不要求任何业务声明。
 
@@ -253,12 +247,8 @@ _Avoid_: YAML 与数据库双配置权威、接入即扫描、租户、Kubernete
 旧模型中由具有业务身份声明的已发布任务产生、稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map` 的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。独立资源刷新调度已随 ADR 0004 移除，新的观测一律写入来源级观测对象；既有 Observed Resource 及其观测时间、来源任务与配置版本保持只读历史，不按来源身份合并或改写。“只有完整范围成功观测才能表达未再观测到，失败或缺口不得清空资源或推断物理删除”的规则继续适用于新模型。
 _Avoid_: 资产、CMDB 条目、Kubernetes 对象快照、独立周期资源刷新、用 `/series` 元数据证明当前资源状态、完整 labels fingerprint 身份
 
-**Kubernetes 运行时状态（Kubernetes Runtime State）**：
-人工调查时由模型通过只读类型化工具按需获取的当前对象、状态、事件和受控日志，不作为长期资产权威源，也不作为第一版定时巡检 YAML 的检查类型。
-_Avoid_: CMDB 资产、观测资源身份、定时 Kubernetes 巡检项
-
 **连接（Connection）**：
-Quoin 访问一个外部运行系统时使用的稳定命名身份与访问边界，由系统中的多个用户和任务共享。第一版使用明确类型的 Prometheus/Thanos、Kubernetes 和模型供应商连接；Runtime、Stele 告警源、Browser Identity 和 Business System 不是 Connection。地址、TLS、CA、用户名等非秘密配置形成不可变 `ConnectionRevision`；密码、API key、kubeconfig 等秘密独立形成加密 `CredentialGeneration`。修改或轮换创建新 revision/generation 并原子切换当前指针，不原地覆盖。Attempt 派发前在事务中检查连接启用并绑定实际 revision/generation，Attempt、Evidence 和审计只记 ID。普通切换不影响已经被 Runtime 接受的 Attempt，它使用内存旧快照完成；停用连接时阻止新派发，等待任务以 `ConnectionDisabled` 结束，已接受的只读 Attempt 可完成并允许用户取消。历史保留非秘密 generation 元数据，旧秘密不再下发。
+Quoin 访问一个外部运行系统时使用的稳定命名身份与访问边界，由系统中的多个用户和任务共享。第一版使用明确类型的 Prometheus/Thanos 和模型供应商连接；Runtime、Stele 告警源和 Business System 不是 Connection。地址、TLS、CA、用户名等非秘密配置形成不可变 `ConnectionRevision`；密码、API key 等秘密独立形成加密 `CredentialGeneration`。修改或轮换创建新 revision/generation 并原子切换当前指针，不原地覆盖。Attempt 派发前在事务中检查连接启用并绑定实际 revision/generation，Attempt、Evidence 和审计只记 ID。普通切换不影响已经被 Runtime 接受的 Attempt，它使用内存旧快照完成；停用连接时阻止新派发，等待任务以 `ConnectionDisabled` 结束，已接受的只读 Attempt 可完成并允许用户取消。历史保留非秘密 generation 元数据，旧秘密不再下发。
 _Avoid_: 无类型 URL+凭据、可覆盖配置、长期可下发旧秘密、用户凭据、巡检计划、Runtime 身份
 
 **指标接入（Metrics Integration）**：
@@ -266,39 +256,23 @@ Prometheus 或 Thanos 类型的接入（Connection），保存访问能力而不
 _Avoid_: 全局唯一 Thanos、缺失或歧义引用时回退、每业务系统私有凭据、Grafana 数据源、Thanos StoreAPI、字符串改写 PromQL
 
 **接入（Integration）**：
-用户从支持的平台目录配置并管理的访问能力，当前主线包括 Alertmanager、Prometheus 和 Thanos；Kubernetes 与浏览器接入已退役，前端不再通告。Kubernetes 底层连接 API 与凭据 probe 保留（不阻止新建），历史连接与记录保留可查。接入本身是配置、验证、启用、观测与授权的直接对象。接入的保存和浏览不采集业务资源；验证并启用后按其插件能力开始来源级观测，并进入 Agent 工具授权与巡检计划范围。Run/Attempt 冻结实际使用的接入修订。
+用户从支持的平台目录配置并管理的访问能力，当前包括 Alertmanager、Prometheus 和 Thanos（浏览器与 Kubernetes 接入已移除，历史连接与记录仅按旧库解读，不再保证可解析）。接入本身是配置、验证、启用、观测与授权的直接对象。接入的保存和浏览不采集业务资源；验证并启用后按其插件能力开始来源级观测，并进入 Agent 工具授权与巡检计划范围。Run/Attempt 冻结实际使用的接入修订。
 _Avoid_: 全局接入中心、业务配置中的秘密副本、接入即扫描、强行统一的存储类型
 
 **巡检项（Inspection Check）**：
-一次 Run 中由计划按其范围确定性展开并冻结的独立检查，具有跨版本稳定 key 和真实采证结果。模板参数（如 PromQL 表达式与窗口秒数）是封闭字面量并经 AST 静态校验，不支持模板变量、环境变量、循环或按对象动态展开；多个目标必须显式展开为多条 check。程序机械执行检查并形成 Evidence，模型统一分析全部证据；range 查询以真实开始采证的 `evidence_at` 为终点并保存实际 start/end/step。YAML 不提供 `expect` 或断言规则；Journey 只保留完成浏览器动作所必需的内部检查。浏览器 Journey 检查只在显式启用的浏览器能力下可用，历史声明 Run 的 Journey 检查按其冻结绑定解读。Kubernetes 只供人工调查按需查询，不进入定时配置。
+一次 Run 中由计划按其范围确定性展开并冻结的独立检查，具有跨版本稳定 key 和真实采证结果。模板参数（如 PromQL 表达式与窗口秒数）是封闭字面量并经 AST 静态校验，不支持模板变量、环境变量、循环或按对象动态展开；多个目标必须显式展开为多条 check。程序机械执行检查并形成 Evidence，模型统一分析全部证据；range 查询以真实开始采证的 `evidence_at` 为终点并保存实际 start/end/step。YAML 不提供 `expect` 或断言规则。
 _Avoid_: 诊断、巡检报告、由程序猜测的检查、健康阈值规则引擎、动态 fan-out、通用模板或 DSL
 
 **业务系统配置版本（Business System Configuration Version，历史模型）**：
 旧模型中每个业务系统的完整版本化权威声明，原子包含业务系统 name/enabled、接入引用、指标与资源范围、资源身份规则、告警来源和告警 labels、以及全部巡检计划；每个系统只有一个当前已发布版本，机器形状由 `business-system.schema.json` 拥有。该写入、发布与联合激活主面已随 ADR 0004 移除；既有版本及其 Schema、严格 YAML 解析与 Config Verification Run 记录仍用于解读历史声明、历史 Run 和迁移映射，不接受新草稿或发布，也不得被当作新配置的权威。
 _Avoid_: 页面隐式归属、缺失指标引用、共享可覆盖草稿、运行时重新解析、表单与 YAML 双权威、要求用户先读内部 Schema
 
-**浏览器身份（Browser Identity）**：
-受控浏览器运行侧保存的持久登录身份，保存稳定身份和当前配置 revision/profile generation/状态指针；它作为浏览器接入的独立配置以稳定 `identity_key` 定位创建，不要求业务系统存在。浏览器插件默认停用，显式启用并部署 Lintel 后才能配置身份。旧模型中业务系统对身份的显式授权引用保留为只读历史与显式迁移状态，身份复用默认不跨对象，旧引用关系不因迁移自动扩大。Revision 包含起始 URL、版本化 authentication probe 与类型化参数；每个 Browser Operation 冻结实际 revision。人工登录仅 Admin 可发起、操作及发布，绑定发起用户和 Web Session，单一身份互斥，其他用户不得旁观或接管；Operator 没有重新登录或其他浏览器身份管理例外，服务端必须拒绝其直接请求。关闭操作页不保存也不隐式取消，只有仍有效会话经 probe 成功后的显式保存才能发布新 Profile Generation，失败不覆盖旧有效版本。Cookie、storage state 与 profile 字节只保存在受控浏览器侧，不进入前端、数据库、模型、Artifact、日志或备份；Quoin 只保留引用、清单、状态、时间和运行引用。技术故障与明确未登录仍须区分，且不将前者伪造成凭据失效。
-_Avoid_: 用户密码、业务配置中的 profile/Cookie、任意 YAML 绝对 URL、Playwright 脚本、Runtime 管理页登录、每次运行回滚状态、把 profile 当 Artifact、默认全局共享身份、跨 Runtime 重启恢复登录会话
-
-**浏览器探索会话（Browser Exploration Session）**：
-一次 Investigation 中由 Plinth 模型通过多轮 Browser Tool Call 驱动的有状态浏览器交互。首个调用创建会话并取得 Browser Identity 独占权，后续调用携带同一会话身份，每次 Tool Call 仍分别形成一个 Lintel 子 Attempt。v1 封闭动作只有 session/page open/close/switch、goto/back/forward/reload、click/fill/select/check/uncheck/press/scroll、read/screenshot/wait_for 与 dialog accept/dismiss；禁止任意 JavaScript、Playwright 代码、CDP、raw HTTP、文件上传和下载，意外下载被阻止并返回 `DownloadBlocked`。`ElementNotFound`、`ElementNotUnique`、`ActionTimeout`、`NavigationFailed`、`DialogBlocked`、`DownloadBlocked` 与短期 element reference 失效是返回模型且不结束 Session 的可恢复 Tool Result；明确未登录、profile/Chromium 崩溃、Runtime/协议失效、trace 提交失败、取消、父 Attempt 终态或 lease 丢失才结束 Session，分类由固定 Tool 契约拥有，模型不得覆盖。每个动作返回有界结构化观察：当前 URL/origin/title、page 列表、可访问性树与可见文本投影、短期 element reference/role/name/state、导航/重定向/popup/dialog 事件以及明确的 truncation/原始大小/观察版本；不返回完整 HTML/DOM、storage state、Cookie、网络正文或浏览器内部对象，Screenshot 只由显式动作取得。Browser Identity 必须使用业务系统自身的只读账号，外部系统权限是禁止业务写入的权威边界；Lintel 不从 DOM 文案、控件类型或 HTTP method 猜测副作用。Exploration 可导航到基础设施网络边界内任意可达 origin，所有顶层导航、重定向链与新窗口 origin 都进入结构化日志；应用层不维护重复的 origin allowlist。显式关闭、父 Investigation Attempt 准备终态、取消、lease 到期或 Runtime 断开触发会话收口；显式取消时父 Attempt 先进入 `Cancelling` 并在会话 trace/operation 终局后进入 `Cancelled`；自然成功、失败或中断时父 Attempt 保持 `Running`，先收口会话再直接进入目标终态。身份锁仍须等物理停止确认后释放。Lintel 只机械执行动作，不拥有第二个模型或自主探索目标。
-_Avoid_: 每次 Tool Call 从起始 URL 重开、一个自然语言目标交给 Lintel 自主探索、跨父 Attempt 复用会话、把瞬时页面会话当持久 profile generation、用 DOM/按钮名猜测是否只读、应用层 origin allowlist
-
-**Journey Catalog**：
-由 Lintel 中版本化 Playwright Journey 的同一机器可验证来源生成，并在构建时同时嵌入 Quoin 和 Lintel。每个 Journey 同源声明类型化参数 Schema、不可变步骤定义/version、类型化 output Schema、允许产出的文本事实/截图/结构化 Evidence kind；authentication probe 另声明专用三态结果且 Evidence kind 集合为空，结果只进入 probe ledger。Journey ID 是稳定行为契约；兼容实现修复可保持 ID 并递增 version，参数、步骤业务语义或输出/Evidence 契约变化必须使用新 ID。Identity Revision 与配置版本记录创建时静态校验所用 Catalog provenance，但不永久 pin 整份 Catalog；协调升级后，新 Browser Operation 对同一稳定 ID 自动采用当前 ready Catalog 的兼容实现 version，并冻结本次实际 digest/version。Lintel 只能返回 Catalog 声明的输出：success 必须恰有一个 structured primary Evidence proposal，其正文是 typed output 的唯一权威实例；业务 gap 的 Evidence 列表固定为空，只携带封闭 gap 事实。Quoin 按 operation 实际冻结的 catalog digest、Journey ID/version 与 output Schema 验证 success payload，并以不可变 Journey Result ledger 保存完整结果摘要与 outcome（success 另引用 primary Evidence），单次 INSERT 原子派生 check result 并收口 operation/Attempt；禁止通用 HTML dump、自由 JSON 或空占位 Evidence。Quoin 可在 Lintel 离线时静态校验 YAML；实际 catalog binding 只由每个 Browser Operation 保存，Run/Config Verification Run 不复制第二份执行权威。Journey 不自动整单重跑或从中间步骤恢复；Playwright locator 在固定 deadline 内等待不算重试，失败后重新采证必须创建新的 Run/Config Verification Run 与 Attempt。
-_Avoid_: 任意 Journey 字符串、Quoin 分发用户代码、旧配置绑定旧 Runtime
-
-**浏览器操作记录**：
-三类浏览器操作采用不同记录边界：人工登录只保存操作者、业务系统、起止时间、结果和新 generation，不记录键盘、不截图、不生成 trace；一个模型 Browser Exploration Session 保存逐 Tool Call 的结构化动作与结果日志；日志只含动作类型、locator 的非秘密描述、page/origin、时间、结果、错误码、观察摘要 hash/大小和 Artifact 引用，不保存实际输入值或复制页面正文，模型看到的有界观察只由对应 Tool Result/Evidence 持有。Session 形成一份由全部子 Attempt 共同引用的连续敏感 trace，只把模型引用或失败诊断需要的截图单独保存为 Artifact，不重复保存完整 HTML、全量网络响应和逐动作截图；正常结束提交完整 trace，取消、崩溃或断流时尽力提交并明确标记 `incomplete`，不得伪装完整。完整 trace 是 Exploration 成功的强制审计 Artifact，提交失败使 Session 以 `ArtifactCommitFailed` 结束，已提交历史仍保留。确定性 Journey 的 success 以 primary structured Evidence 保存类型化结果正文；业务 gap 不制造 Evidence，只由 check result 与 operation 唯一的不可变 Journey Result ledger 保存 gap code、诊断和完整结果重放身份。失败时必须保留 trace，成功时只保留 Journey 声明产出或报告引用的截图；失败 trace 也提交失败时 check 记录 `ArtifactCommitFailed`，不能只显示原步骤错误。
-_Avoid_: 三种操作共用全量录制、录制人工登录秘密、同一页面多份重复正文
-
 **巡检运行（Inspection Run）**：
-一个独立巡检计划在调度时刻或人工触发下产生的不可变机械采证记录，Run 创建时冻结计划绑定与接入修订；旧业务声明计划的 Run 以其冻结声明版本解释，新 Run 一律来自独立计划。权威状态只描述采证：`Queued | Running | Completed | CompletedWithGaps | Failed | Cancelled | Interrupted | SkippedOverlap`。Completed 表示全部检查形成完整 Evidence，不表示系统健康；CompletedWithGaps 表示采证已结束并冻结结果，但存在 RuntimeUnavailable、AuthenticationRequired、部分响应或检查失败等缺口，即使没有成功检查，只要完整记录每项缺口仍属此状态；Failed 只表示无法形成并提交有效冻结结果集合。模型分析 Attempt/Report 使用独立状态，分析失败不回写 Run，页面可显示“采证部分完成/分析失败”。同一计划不并发：重叠定时周期 SkippedOverlap且不补跑，人工触发展示当前 active Run。定时创建时 Runtime 离线则相应检查 RuntimeUnavailable、其他继续；在线无浏览器容量时 Run 已进入 `Running` 并生成 `evidence_at`，只有对应 Browser Operation 进入 `WaitingForCapacity`，队列只在 Quoin。重试分析引用同一 Run，重新采证创建新 Run/evidence_at并以 rerun_of 引用旧 Run。
+一个独立巡检计划在调度时刻或人工触发下产生的不可变机械采证记录，Run 创建时冻结计划绑定与接入修订；旧业务声明计划的 Run 以其冻结声明版本解释，新 Run 一律来自独立计划。权威状态只描述采证：`Queued | Running | Completed | CompletedWithGaps | Failed | Cancelled | Interrupted | SkippedOverlap`。Completed 表示全部检查形成完整 Evidence，不表示系统健康；CompletedWithGaps 表示采证已结束并冻结结果，但存在 RuntimeUnavailable、AuthenticationRequired、部分响应或检查失败等缺口，即使没有成功检查，只要完整记录每项缺口仍属此状态；Failed 只表示无法形成并提交有效冻结结果集合。模型分析 Attempt/Report 使用独立状态，分析失败不回写 Run，页面可显示“采证部分完成/分析失败”。同一计划不并发：重叠定时周期 SkippedOverlap且不补跑，人工触发展示当前 active Run。定时创建时 Runtime 离线则相应检查 RuntimeUnavailable、其他继续。重试分析引用同一 Run，重新采证创建新 Run/evidence_at并以 rerun_of 引用旧 Run。
 _Avoid_: 巡检计划、巡检报告、混合采证/分析状态、Succeeded=健康、离线补跑、Runtime 队列、跨时间追加
 
 **执行尝试（Execution Attempt）**：
-Plinth 或 Lintel 对同一个任务或 Run 的一次底层执行。Quoin 派发前持久化 attempt ID；Runtime 有 boot ID、递增 connection epoch、明确接受和有限 lease。lease 内同 boot 重连上报 active Attempt 调和而不重派；新 boot、lease 到期、身份吊销、崩溃或替换使 Attempt `Interrupted`。结果按 attempt ID 幂等，旧 epoch 迟到结果只审计。用户取消携带 command ID 与 expected version，Quoin 先事务提交 cancellation fence；Queued/Assigned 直接 `Cancelled`，Running 先 `Cancelling`，Runtime 确认或取消 lease 到期后 Cancelled。成功与取消按 SQLite 提交顺序裁决：成功先提交则取消返回已完成；取消先提交则迟到结果不产生有效消息、Report 或 Candidate。取消前已提交 Evidence/Tool/Artifact 保留为部分结果；取消 Run 停止未开始及运行子 Attempt但不删除已完成检查，页面/SSE断线/登出不隐式取消。第一版不设 Agent Attempt 总时长、调用数或产物限制；每次模型/API 调用有部署内部有限 deadline。幂等只读 API 对瞬态错误有界重试并记录物理尝试；模型只在明确可重试且未收到输出时自动重试，不切换模型/供应商。部分 token 后失败不得成为有效输出，Attempt `Failed` 并保存 Timeout/RateLimited/ProviderUnavailable/InvalidResponse/ToolError/ArtifactCommitFailed 等原因。Tool 失败可成为 Evidence 缺口，模型失败不生成成功结果。每次 Attempt 用干净工作区，成功前所有引用 Artifact 必须上传校验提交。
+Plinth 对同一个任务或 Run 的一次底层执行。Quoin 派发前持久化 attempt ID；Runtime 有 boot ID、递增 connection epoch、明确接受和有限 lease。lease 内同 boot 重连上报 active Attempt 调和而不重派；新 boot、lease 到期、身份吊销、崩溃或替换使 Attempt `Interrupted`。结果按 attempt ID 幂等，旧 epoch 迟到结果只审计。用户取消携带 command ID 与 expected version，Quoin 先事务提交 cancellation fence；Queued/Assigned 直接 `Cancelled`，Running 先 `Cancelling`，Runtime 确认或取消 lease 到期后 Cancelled。成功与取消按 SQLite 提交顺序裁决：成功先提交则取消返回已完成；取消先提交则迟到结果不产生有效消息、Report 或 Candidate。取消前已提交 Evidence/Tool/Artifact 保留为部分结果；取消 Run 停止未开始及运行子 Attempt但不删除已完成检查，页面/SSE断线/登出不隐式取消。第一版不设 Agent Attempt 总时长、调用数或产物限制；每次模型/API 调用有部署内部有限 deadline。幂等只读 API 对瞬态错误有界重试并记录物理尝试；模型只在明确可重试且未收到输出时自动重试，不切换模型/供应商。部分 token 后失败不得成为有效输出，Attempt `Failed` 并保存 Timeout/RateLimited/ProviderUnavailable/InvalidResponse/ToolError/ArtifactCommitFailed 等原因。Tool 失败可成为 Evidence 缺口，模型失败不生成成功结果。每次 Attempt 用干净工作区，成功前所有引用 Artifact 必须上传校验提交。
 _Avoid_: 无限离线执行、前端取消标记、透明无限重试、部分模型输出成功、Agent 总预算规则引擎、恢复未提交工作区
 
 **巡检报告（Inspection Report）**：
@@ -314,7 +288,7 @@ _Avoid_: 诊断、推测、用户上传材料、文件载体
 _Avoid_: 工具采集证据、已验证知识
 
 **产物（Artifact）**：
-Quoin 管理的持久字节载体，例如附件正文、截图、Playwright trace 和大型工具响应；它不是独立结论或可编辑文件实体。每份内容只有一个规范持久副本，逻辑对象通过 Artifact ID 引用；Artifact 的访问和保留继承逻辑所有者，不建设文件管理中心。Alert Delivery 原始 body 继续直接存 SQLite，以维持接入单事务语义。Raw Playwright trace 固定继承敏感诊断 Artifact 的访问与保留规则。
+Quoin 管理的持久字节载体，例如附件正文、截图和大型工具响应；它不是独立结论或可编辑文件实体。每份内容只有一个规范持久副本，逻辑对象通过 Artifact ID 引用；Artifact 的访问和保留继承逻辑所有者，不建设文件管理中心。Alert Delivery 原始 body 继续直接存 SQLite，以维持接入单事务语义。
 _Avoid_: Evidence、Source Material、模型结论、Runtime 本地路径、重复 BLOB
 
 ## 知识沉淀
@@ -341,28 +315,28 @@ _Avoid_: 知识候选、知识导入批次、原地覆盖、混合 embedding gen
 Artifact 的临时文件与最终文件必须位于同一文件系统：完成写入与 hash/大小校验后 `fsync` 临时文件，按 SHA-256 原子 rename 为不可变文件，再 `fsync` 最终父目录；只有父目录同步成功后 SQLite 事务才提交引用。引用事务失败后该文件作为无权威记录引用的孤立文件清理。未完成上传、校验、目录同步或引用事务的文件不能被成功 Attempt 引用；工作区、staging 和失败上传可自动清理。
 
 **在线保留**：
-结构化告警、调查、消息、诊断、报告、反馈、知识、Text Attachment 和 Knowledge Import Batch 原文长期保留。截图、Playwright trace 与大型工具响应正文等生成型大 Artifact 默认保留 90 天，使用一个由 Admin Web UI 管理并持久化在 SQLite 的部署共享设置；到期后保留元数据、SHA-256、来源、时间和“正文已过期”状态。Raw Playwright trace 固定为敏感诊断 Artifact：官方 Trace Viewer 可查看完整 DOM snapshot、console、request/response headers 与 body，因此 trace 不进入模型上下文、普通附件、FTS 或通用 read/grep；Operator 只看结构化动作日志、错误和显式截图，raw trace 仅 Admin 经审计下载。实现验收必须在锁定版本注入 sentinel Cookie、Authorization header、DOM token 和响应内容，生成真实 trace 检查 ZIP。撤回消息、停用系统或停止复用知识不删除来源历史。备份保留 30 份是独立规则。
+结构化告警、调查、消息、诊断、报告、反馈、知识、Text Attachment 和 Knowledge Import Batch 原文长期保留。截图与大型工具响应正文等生成型大 Artifact 默认保留 90 天，使用一个由 Admin Web UI 管理并持久化在 SQLite 的部署共享设置；到期后保留元数据、SHA-256、来源、时间和“正文已过期”状态。撤回消息、停用系统或停止复用知识不删除来源历史。备份保留 30 份是独立规则。
 
 **敏感内容下载**：
-`sensitive=1` Artifact、raw trace 与备份只接受当前有效 Admin Session，不重复要求同一密码、不签发预签名或分享 URL。服务端在响应头和首字节前重验当前 User/Session/role 并提交非秘密访问审计，审计失败即拒绝；活动流绑定该 Session，Session 撤销、账号禁用或降级时立即中止剩余发送。每次 Range/续传请求都重新认证并审计，响应使用 `no-store`、`nosniff` 与 attachment disposition。
+`sensitive=1` Artifact 与备份只接受当前有效 Admin Session，不重复要求同一密码、不签发预签名或分享 URL。服务端在响应头和首字节前重验当前 User/Session/role 并提交非秘密访问审计，审计失败即拒绝；活动流绑定该 Session，Session 撤销、账号禁用或降级时立即中止剩余发送。每次 Range/续传请求都重新认证并审计，响应使用 `no-store`、`nosniff` 与 attachment disposition。
 
 **秘密与日志**：
-普通日志、指标标签、审计、持久诊断和 UI 技术详情使用字段白名单，默认不记录请求/响应 body、headers、gRPC metadata、完整 URL query 或任意对象 dump。秘密类型不可被普通字符串化，只能输出固定 `[REDACTED]`；外部适配器先映射稳定错误码与允许字段，再进入日志或数据库。验收向 Cookie、Authorization、密码、API key、kubeconfig、根密钥标记、provider 回显和浏览器 sentinel 注入唯一值，并扫描四组件 stdout/stderr、结构化日志与 telemetry，任一命中失败。用户主动上传文本与明确标为敏感的 raw trace 不做通用猜测式扫描，但不得被普通 logger 复制。四组件只向 stdout/stderr 输出 UTF-8 JSON Lines，不写或轮转容器内日志文件；固定字段至少包含 UTC timestamp、level、component、release、稳定 code 与 message，可带非秘密 correlation ID。
+普通日志、指标标签、审计、持久诊断和 UI 技术详情使用字段白名单，默认不记录请求/响应 body、headers、gRPC metadata、完整 URL query 或任意对象 dump。秘密类型不可被普通字符串化，只能输出固定 `[REDACTED]`；外部适配器先映射稳定错误码与允许字段，再进入日志或数据库。验收向 Cookie、Authorization、密码、API key、根密钥标记和 provider 回显注入唯一值，并扫描四组件 stdout/stderr、结构化日志与 telemetry，任一命中失败。用户主动上传文本不做通用猜测式扫描，但不得被普通 logger 复制。四组件只向 stdout/stderr 输出 UTF-8 JSON Lines，不写或轮转容器内日志文件；固定字段至少包含 UTC timestamp、level、component、release、稳定 code 与 message，可带非秘密 correlation ID。
 
 **运行配置权威**：
 Admin 可理解的运维设置由 Admin Web UI + SQLite 作为唯一权威，包括备份时间、时区、保留份数与生成型 Artifact 保留天数；部署与每进程配置只保存启动时不可推导的非秘密基础设施事实，二者字段不得重叠。镜像选择是 Release manifest 中不可变 digest 的投影，不是部署者可随意改写的配置。配置在进程启动时读取且整个进程生命周期不可变；变更以显式零重叠重启生效，不提供 watcher 或 SIGHUP reload。
 
 **进程配置输入**：
-`contracts/schemas/deployment-config.schema.json` 继续是 Quoin、Plinth、Lintel、Stele 各自非秘密进程配置的机器权威；每个进程使用固定只读 YAML 配置和独立的只读秘密文件路径，拒绝未知字段。该 Schema 不再规定 Helm 安装投影或复杂部署生成流程；不得为同一字段建立环境变量、重复 CLI flag 或优先级。
+`contracts/schemas/deployment-config.schema.json` 继续是 Quoin、Plinth、Stele 各自非秘密进程配置的机器权威；每个进程使用固定只读 YAML 配置和独立的只读秘密文件路径，拒绝未知字段。该 Schema 不再规定 Helm 安装投影或复杂部署生成流程；不得为同一字段建立环境变量、重复 CLI flag 或优先级。
 
 **公开入口与运维端点**：
-Caddy 是唯一公共入口，加载部署者提供的 TLS Secret（Compose 使用等价只读证书文件）并终止 TLS；不强制 Ingress Controller、cert-manager、ACME 或公网证书。Caddy 在单一 public Origin 下按明确优先级转发前端页面、Quoin API/SSE/noVNC 与 Stele 入口，SPA fallback 不得吞掉 API、认证、实时或告警请求。Quoin、Plinth、Lintel、Stele 仍分别提供不进入 OpenAPI、不做应用认证的内部 `/livez`、`/readyz`、`/metrics`；运维端口不得公开。
+Caddy 是唯一公共入口，加载部署者提供的 TLS Secret（Compose 使用等价只读证书文件）并终止 TLS；不强制 Ingress Controller、cert-manager、ACME 或公网证书。Caddy 在单一 public Origin 下按明确优先级转发前端页面、Quoin API/SSE 与 Stele 入口，SPA fallback 不得吞掉 API、认证、实时或告警请求。Quoin、Plinth、Stele 仍分别提供不进入 OpenAPI、不做应用认证的内部 `/livez`、`/readyz`、`/metrics`；运维端口不得公开。
 
 **服务暴露拓扑**：
-六个服务角色为入口 Caddy、前端静态服务、Quoin、Plinth、Lintel、Stele。前端独立构建、发布并实际提供生产静态文件，不运行开发服务器，也不通过共享卷把资源交给 Caddy 托管；开发服务器仅可在开发环境代理后端请求。Kubernetes 以直接可审阅、可应用的普通 YAML 交付，入口 Service 的暴露类型由集群网络条件决定；Compose 作为简单辅助部署提供同一服务角色。Plinth/Lintel 只主动出站连接 Quoin，Runtime gRPC 与所有 ops 端口不进入公共入口。既有内部端口、卷、Secret、健康检查与数据归属边界保持不变。
+五个服务角色为入口 Caddy、前端静态服务、Quoin、Plinth、Stele。前端独立构建、发布并实际提供生产静态文件，不运行开发服务器，也不通过共享卷把资源交给 Caddy 托管；开发服务器仅可在开发环境代理后端请求。Kubernetes 以直接可审阅、可应用的普通 YAML 交付，入口 Service 的暴露类型由集群网络条件决定；Compose 作为简单辅助部署提供同一服务角色。Plinth 只主动出站连接 Quoin，Runtime gRPC 与所有 ops 端口不进入公共入口。既有内部端口、卷、Secret、健康检查与数据归属边界保持不变。
 
 **指标机器契约**：
-`contracts/metrics.yaml` 是 Quoin、Plinth、Lintel、Stele 自定义 metric family 的唯一机器权威，定义 family name、type、HELP、label names 与封闭 label values；只由 metrics 拥有的枚举可以在其中定义，maintenance reason、Runtime outcome、Attempt kind 等已有机器权威的集合必须引用 `schema.sql`/`runtime.proto` 等所有者，并由 fixture 断言投影集合严格相等。HTTP 指标只使用封闭 `route_group`、`method`、`status_class`，gRPC 只使用封闭 `rpc_group` 与 canonical status code；完整 URL、path/query 值、用户、对象 ID、每个 OpenAPI operation 与动态错误文本不得成为 label。每组件从启动起导出无 label 的 `<component>_ready`；Quoin 另导出无 label 的 `quoin_accepting_work` 与 `quoin_maintenance{reason=<schema.sql 权威集合>}`，精确 not-ready reason 只在 `/readyz` 固定 JSON 与 JSON 日志中出现。所有预知序列启动即显式导出 0。`*_total` 是允许进程重启归零的内存 counter，不扫描 SQLite 历史或增加指标持久表；active/in-progress/firing/slot/ready 等 gauge 才从当前 SQLite 或内存权威投影。
+`contracts/metrics.yaml` 是 Quoin、Plinth、Stele 自定义 metric family 的唯一机器权威，定义 family name、type、HELP、label names 与封闭 label values；只由 metrics 拥有的枚举可以在其中定义，maintenance reason、Runtime outcome、Attempt kind 等已有机器权威的集合必须引用 `schema.sql`/`runtime.proto` 等所有者，并由 fixture 断言投影集合严格相等。HTTP 指标只使用封闭 `route_group`、`method`、`status_class`，gRPC 只使用封闭 `rpc_group` 与 canonical status code；完整 URL、path/query 值、用户、对象 ID、每个 OpenAPI operation 与动态错误文本不得成为 label。每组件从启动起导出无 label 的 `<component>_ready`；Quoin 另导出无 label 的 `quoin_accepting_work` 与 `quoin_maintenance{reason=<schema.sql 权威集合>}`，精确 not-ready reason 只在 `/readyz` 固定 JSON 与 JSON 日志中出现。所有预知序列启动即显式导出 0。`*_total` 是允许进程重启归零的内存 counter，不扫描 SQLite 历史或增加指标持久表；active/in-progress/firing/slot/ready 等 gauge 才从当前 SQLite 或内存权威投影。
 
 **Prometheus 告警规则**：
 `operations.md` 定义最小推荐规则；普通 Kubernetes YAML 和 Compose 不创建 Grafana dashboard、通知器或 Alertmanager 路由，也不强制 Prometheus Operator。通知与路由继续由部署者现有监控栈拥有。
@@ -371,7 +345,7 @@ Caddy 是唯一公共入口，加载部署者提供的 TLS Secret（Compose 使�
 锁定的 SQLite 构建使用 WAL 与 `synchronous=FULL`；FULL/NORMAL 不暴露为部署开关。每条连接仍必须在执行领域 SQL 前设置并读回 `foreign_keys=ON` 与 `recursive_triggers=ON`。恢复首先以完整发布的 manifest + checksum 为门禁，再附加执行 `integrity_check` 与 `foreign_key_check`；PRAGMA 成功不能替代 manifest 完整性。
 
 **一致备份**：
-自动备份通过独立空闲 SQLite 连接执行 `VACUUM INTO` 生成单文件一致快照，再从快照枚举精确 Artifact hash 集合；Artifact GC 与复制阶段互斥。备份复制校验快照引用的 Artifact，最后以“临时文件写入并 `fsync` → 原子 rename → rename 后 `fsync` 父目录”的顺序耐久发布 DB/Artifact SHA-256 manifest；任一引用缺失或目录同步失败整次失败，新备份校验成功后才清理超出 30 份旧备份。FTS5 与 embedding 不是恢复业务事实所必需的权威数据；采用同库布局时，FTS5 shadow tables 与 embedding BLOB 会随 `VACUUM INTO` 物理进入快照，恢复后可校验、丢弃并重建。Attempt 工作区、临时文件和 Browser profile 不进入备份。备份归档不做应用层整体加密；其中连接凭据字段仍保持自身 AEAD envelope，其余内容的机密性由独立 PV/目录权限、存储层加密、传输与 Admin 下载边界负责，manifest/checksum 只负责完整性。Admin 可浏览、显式下载和立即触发备份，下载审计；恢复只由拥有 PVC/数据目录和根密钥 Secret 权限的部署操作者在 Quoin 停机时执行，Web Admin Session 不是恢复权限。恢复实现只复用同一 Release 的 Quoin 镜像与二进制中的 `quoin restore` 子命令：Kubernetes YAML 用一次性 Pod/Job 包装，Compose 用 `docker compose run --rm` 包装；不要求宿主机安装第二套 CLI，也不维护独立 restore 镜像。操作者先停止业务工作负载，再挂载数据卷、备份卷和根密钥文件；TTY 只承担已定案的恢复 Admin 选择与临时密码一次显示。备份目录只允许 Quoin UID 与部署操作者访问，Artifact 路径仅由 hash 推导。恢复、升级和根密钥 rebind 复用 SQLite 中的单行维护状态与按对象维护清单；离线工具在发布恢复库前的最后事务写入，恢复事务同时清除全部 Web Session、retire 全部告警源 Bearer、禁用除 TTY 选定恢复 Admin 外的用户并给该 Admin 设置强制改密的临时密码、把全部 Connection 置为不可派发的 `RevalidationRequired`、Browser Identity 置为 `AuthenticationRequired`，并写 system Audit Event；数据库外的组件客户端证书与 CA 不因普通恢复改变。维护期间只开放登录/登出/当前用户/改密、维护与健康诊断读取、Admin 信任重建操作及退出维护，普通任务、告警接入、调度、SSE 与业务下载上传统一拒绝。恢复退出按“安全收口”而非“全部能力 Ready”裁决：用户必须已重新启用或保持禁用，Connection 必须重验/重录或保持 disabled，告警源必须有新凭据或保持 disabled，Browser Identity 保持 `AuthenticationRequired` 即为安全；这些隔离状态由恢复事务先建立，因此不强迫恢复可选能力。升级使用独立版本/迁移清单，不重做恢复身份清单。退出由 Admin 以 command ID 与 expected maintenance row version 显式提交并在同一事务重验全部阻塞项，不提供通用绕过。
+自动备份通过独立空闲 SQLite 连接执行 `VACUUM INTO` 生成单文件一致快照，再从快照枚举精确 Artifact hash 集合；Artifact GC 与复制阶段互斥。备份复制校验快照引用的 Artifact，最后以“临时文件写入并 `fsync` → 原子 rename → rename 后 `fsync` 父目录”的顺序耐久发布 DB/Artifact SHA-256 manifest；任一引用缺失或目录同步失败整次失败，新备份校验成功后才清理超出 30 份旧备份。FTS5 与 embedding 不是恢复业务事实所必需的权威数据；采用同库布局时，FTS5 shadow tables 与 embedding BLOB 会随 `VACUUM INTO` 物理进入快照，恢复后可校验、丢弃并重建。Attempt 工作区与临时文件不进入备份。备份归档不做应用层整体加密；其中连接凭据字段仍保持自身 AEAD envelope，其余内容的机密性由独立 PV/目录权限、存储层加密、传输与 Admin 下载边界负责，manifest/checksum 只负责完整性。Admin 可浏览、显式下载和立即触发备份，下载审计；恢复只由拥有 PVC/数据目录和根密钥 Secret 权限的部署操作者在 Quoin 停机时执行，Web Admin Session 不是恢复权限。恢复实现只复用同一 Release 的 Quoin 镜像与二进制中的 `quoin restore` 子命令：Kubernetes YAML 用一次性 Pod/Job 包装，Compose 用 `docker compose run --rm` 包装；不要求宿主机安装第二套 CLI，也不维护独立 restore 镜像。操作者先停止业务工作负载，再挂载数据卷、备份卷和根密钥文件；TTY 只承担已定案的恢复 Admin 选择与临时密码一次显示。备份目录只允许 Quoin UID 与部署操作者访问，Artifact 路径仅由 hash 推导。恢复、升级和根密钥 rebind 复用 SQLite 中的单行维护状态与按对象维护清单；离线工具在发布恢复库前的最后事务写入，恢复事务同时清除全部 Web Session、retire 全部告警源 Bearer、禁用除 TTY 选定恢复 Admin 外的用户并给该 Admin 设置强制改密的临时密码、把全部 Connection 置为不可派发的 `RevalidationRequired`，并写 system Audit Event；数据库外的组件客户端证书与 CA 不因普通恢复改变。维护期间只开放登录/登出/当前用户/改密、维护与健康诊断读取、Admin 信任重建操作及退出维护，普通任务、告警接入、调度、SSE 与业务下载上传统一拒绝。恢复退出按“安全收口”而非“全部能力 Ready”裁决：用户必须已重新启用或保持禁用，Connection 必须重验/重录或保持 disabled，告警源必须有新凭据或保持 disabled 即为安全；这些隔离状态由恢复事务先建立，因此不强迫恢复可选能力。升级使用独立版本/迁移清单，不重做恢复身份清单。退出由 Admin 以 command ID 与 expected maintenance row version 显式提交并在同一事务重验全部阻塞项，不提供通用绕过。
 
 **备份运行状态**：
 `backups` 是可查询的受限状态机聚合，而不是只能在结束时追加的终态记录：状态为 `queued|running|succeeded|failed`，阶段为 `queued|preflight|database_snapshot|artifact_copy|manifest_publish|completed`，触发来源为 `manual|scheduled|upgrade`；只允许相邻前向迁移，终态后不可修改且任何状态均禁止 DELETE，失败必须记录稳定 `error_code`、`retryable` 与有界详情；任一时刻最多一个 active backup。立即备份先持久化 active row 再返回 202，同一 `client_command_id` 重试返回同一 row，其它手动触发返回携带 active ID 的冲突；定时触发与 active run 合并，不排第二份；升级前备份使用同一聚合并标记 `trigger_kind=upgrade`。Quoin 启动时必须先把上一进程遗留的 `queued|running` 行收敛为 `failed`，记录稳定的进程中断错误码和结束时间，然后才开放新触发。停机错过多个计划时最多补最新一份，不逐个回放；失败不删除旧成功备份，下一个正常周期继续；第一版不提供取消备份。
@@ -380,10 +354,10 @@ Caddy 是唯一公共入口，加载部署者提供的 TLS Secret（Compose 使�
 唯一 Quoin 进程内有一个 artifact-storage coordinator；备份从快照枚举到复制完成期间独占，GC 只执行有界小批次，备份到达后完成当前批次即让出。GC 在启动后和固定周期唤醒，健康运行时保证到期对象 24 小时内处理；周期与 batch size 是内部调优，不进入 Admin 或部署配置。单 Quoin + 数据目录进程锁已经排除第二 writer，不增加 SQLite lease、独立 GC 进程或 sidecar。
 
 **单组件拓扑**：
-第一版固定 Quoin、Plinth、Lintel、Stele 各一个 active replica，不提供 replicas 或 HPA。Kubernetes YAML 与 Compose 均采用零重叠替换；Quoin、Plinth、Lintel 的既有状态目录锁、卷隔离、SQLite 存储限制与 Artifact 同文件系统原子发布边界保持不变。Caddy 与前端的独立服务角色不改变这些有状态组件的单实例约束。
+第一版固定 Quoin、Plinth、Stele 各一个 active replica，不提供 replicas 或 HPA。Kubernetes YAML 与 Compose 均采用零重叠替换；Quoin、Plinth 的既有状态目录锁、卷隔离、SQLite 存储限制与 Artifact 同文件系统原子发布边界保持不变。Caddy 与前端的独立服务角色不改变这些有状态组件的单实例约束。
 
 **发布架构与镜像运行时**：
-Quoin、Plinth、Lintel、Stele、前端是五个应用镜像；Caddy 使用固定版本的第三方镜像。发布版本、镜像 digest 与来源信息继续用于展示、审计与溯源，但不是 Runtime 通信准入条件。任一 Proto 权威契约文件变化必须重建五个应用；OpenAPI 变化必须重建 Quoin 与前端；仅应用实现变化且契约不变时可只重建受影响应用。双架构、镜像锁、浏览器锁、非 root 运行、持久卷、`/dev/shm`、工具隔离及供应链验证要求继续适用。
+Quoin、Plinth、Stele、前端是四个应用镜像；Caddy 使用固定版本的第三方镜像。发布版本、镜像 digest 与来源信息继续用于展示、审计与溯源，但不是 Runtime 通信准入条件。任一 Proto 权威契约文件变化必须重建全部应用；OpenAPI 变化必须重建 Quoin 与前端；仅应用实现变化且契约不变时可只重建受影响应用。双架构、镜像锁、非 root 运行、持久卷、工具隔离及供应链验证要求继续适用。
 
 **首次秘密引导**：
 普通 Kubernetes YAML 的一次性 bootstrap Job 与 Compose 的一次性 bootstrap service 只可在确认空白首次安装时生成根密钥、Stele token 和所需内部 TLS 材料；已有持久状态而秘密缺失、部分存在或无效时必须 fail closed，升级不得自动重建。秘密只写入受控 Kubernetes Secret 或权限受限文件，正常容器只读挂载；不得进入镜像、前端资产、部署 YAML、环境变量、发布记录或日志。
@@ -392,31 +366,31 @@ Quoin、Plinth、Lintel、Stele、前端是五个应用镜像；Caddy 使用固�
 Plinth 与 Stele 的客户端证书/私钥经部署 Secret 只读挂载，配置文件指向挂载路径；`quoin secrets bootstrap` 首装签发，`quoin secrets issue-client-certs` 为存量部署补签或 `--force` 轮换。证书不得进入镜像、版本控制、日志或模型上下文。组件启动即认证，无注册流程（ADR-0009）。
 
 **发布工件权威与分发**：
-`release-manifest.json` 记录五个应用镜像的独立发布版本、不可变 digest、来源、浏览器/依赖锁、Compose 与离线资产、签名和验收摘要。发布运行清单只消费 digest，不使用 `latest`；删除 Helm/Chart 工件不移除适用的镜像、Compose、离线、SBOM、provenance 或 Sigstore 完整性校验。
+`release-manifest.json` 记录四个应用镜像的独立发布版本、不可变 digest、来源、依赖锁、Compose 与离线资产、签名和验收摘要。发布运行清单只消费 digest，不使用 `latest`；删除 Helm/Chart 工件不移除适用的镜像、Compose、离线、SBOM、provenance 或 Sigstore 完整性校验。
 
 **安装、运维与恢复操作者路径**：
-主要安装路径是普通 Kubernetes YAML，Compose 为辅助路径；两者提供同一六服务角色，且不要求 Helm、Chart、values 或复杂生成器。Kubernetes 生命周期由部署者使用普通 `kubectl` 管理清单，并按需运行同一 Release Quoin 镜像的一次性 `quoin admin create`、`quoin backup --offline`、`quoin restore`、`quoin migrate` 或 `quoin maintenance recover-lintel`；不承诺 `quoin-deploy kubernetes install|backup|restore|upgrade|recover-lintel`。在线备份和其他产品写操作仍由已登录 Admin 通过 UI 发起。现有 `quoin-deploy kubernetes verify` 仅是 catalog 驱动的 qualification 入口；Compose 的辅助命令面不扩展为 Kubernetes DSL。
+主要安装路径是普通 Kubernetes YAML，Compose 为辅助路径；两者提供同一五服务角色，且不要求 Helm、Chart、values 或复杂生成器。Kubernetes 生命周期由部署者使用普通 `kubectl` 管理清单，并按需运行同一 Release Quoin 镜像的一次性 `quoin admin create`、`quoin backup --offline`、`quoin restore` 或 `quoin migrate`；不承诺 `quoin-deploy kubernetes install|backup|restore|upgrade`。在线备份和其他产品写操作仍由已登录 Admin 通过 UI 发起。现有 `quoin-deploy kubernetes verify` 仅是 catalog 驱动的 qualification 入口；Compose 的辅助命令面不扩展为 Kubernetes DSL。
 
 **协调升级**：
-跨 Proto 契约升级必须协调更新，不承诺零停机滚动升级；发布版本不同本身不阻止已满足其他前提的组件通信。Kubernetes 升级由部署者以 `kubectl` 按维护、备份、迁移和 rollout 的既有安全顺序执行；新 Quoin 启动后，只有 Proto 契约指纹一致且认证/安全前提满足的 Plinth、Lintel、Stele 才能 Ready。接受新写入后的回退必须显式恢复升级前备份，不得只回滚镜像。
+跨 Proto 契约升级必须协调更新，不承诺零停机滚动升级；发布版本不同本身不阻止已满足其他前提的组件通信。Kubernetes 升级由部署者以 `kubectl` 按维护、备份、迁移和 rollout 的既有安全顺序执行；新 Quoin 启动后，只有 Proto 契约指纹一致且认证/安全前提满足的 Plinth、Stele 才能 Ready。接受新写入后的回退必须显式恢复升级前备份，不得只回滚镜像。
 
 **Compose 生命周期**：
-Compose 提供 Caddy、前端、Quoin、Plinth、Lintel、Stele 六服务的简单配置。后端服务可使用 `restart: unless-stopped`；运行中 Quoin 重启仍只依赖各组件自己的重连与 Ready 契约，不得隐式传播为全栈重启。前端生产服务不运行开发服务器。
+Compose 提供 Caddy、前端、Quoin、Plinth、Stele 五服务的简单配置。后端服务可使用 `restart: unless-stopped`；运行中 Quoin 重启仍只依赖各组件自己的重连与 Ready 契约，不得隐式传播为全栈重启。前端生产服务不运行开发服务器。
 
 **健康语义**：
-Quoin 取得数据目录锁并完成 migration 前不 Ready；maintenance 时仍以 `mode=maintenance`、`acceptingWork=false` 表达安全隔离。Plinth/Lintel 只有在 token、Proto 契约指纹和控制流被 Quoin 接受后 Ready；Stele 只有在同一指纹握手及告警凭据 digest 快照加载成功后 Ready。`/livez` 只检查本进程可推进性，`/readyz` 检查组件职责；其固定响应形状由 `contracts/schemas/readiness-response.schema.json` 独占。
+Quoin 取得数据目录锁并完成 migration 前不 Ready；maintenance 时仍以 `mode=maintenance`、`acceptingWork=false` 表达安全隔离。Plinth 只有在 token、Proto 契约指纹和控制流被 Quoin 接受后 Ready；Stele 只有在同一指纹握手及告警凭据 digest 快照加载成功后 Ready。`/livez` 只检查本进程可推进性，`/readyz` 检查组件职责；其固定响应形状由 `contracts/schemas/readiness-response.schema.json` 独占。
 
 **优雅关停**：
-Kubernetes `terminationGracePeriodSeconds` 与 Compose `stop_grace_period` 统一为 60 秒。四组件收到 SIGTERM 后立即停止新准入并进入 draining，最多使用前 45 秒完成当前 SQLite 事务、Artifact 原子发布、in-flight HTTP/Stele 请求、Runtime GoAway/结果确认与 Browser stop/incomplete trace 收口，至少留下 15 秒关闭连接和退出。不得等待任意长的模型或浏览器工作自然完成；未完成工作按既有 fence/reconcile 语义收口，满足续走条件的调和继续，否则才进入 Interrupted/技术终止，不得强制打断可调和 Attempt或伪装成 Cancelled/Success。清单不使用 sleep 型 preStop hook，核心关停只由幂等 SIGTERM handler 实现。
+Kubernetes `terminationGracePeriodSeconds` 与 Compose `stop_grace_period` 统一为 60 秒。四组件收到 SIGTERM 后立即停止新准入并进入 draining，最多使用前 45 秒完成当前 SQLite 事务、Artifact 原子发布、in-flight HTTP/Stele 请求、Runtime GoAway/结果确认，至少留下 15 秒关闭连接和退出。不得等待任意长的模型工作自然完成；未完成工作按既有 fence/reconcile 语义收口，满足续走条件的调和继续，否则才进入 Interrupted/技术终止，不得强制打断可调和 Attempt或伪装成 Cancelled/Success。清单不使用 sleep 型 preStop hook，核心关停只由幂等 SIGTERM handler 实现。
 
 **资源边界**：
 第一版不默认设置 CPU/内存 limits，Kubernetes YAML requests/limits 可选且默认空；Compose named volume 不施加应用层容量限制。Kubernetes PVC 容量直接影响数据安全，必须由部署操作者显式填写。Quoin 不以任务数、Artifact 大小或静默删历史实现应用层资源配额，也不定义统一剩余百分比阈值。已知大小的 Artifact/备份操作必须针对目标目录和所需字节做精确 preflight；任何 `ENOSPC`、`EDQUOT`、`EROFS` 或持久化 `fsync`/rename 失败都把对应 storage health 置为不可写、使 Quoin `/readyz` 失败、令 `quoin_storage_writable` 为 0，并在 SQLite 仍可写时把当前领域任务或 Backup Run 持久化为稳定失败。恢复必须在同一目标目录通过真实 create→write→fsync→rename→父目录 fsync→unlink probe，且当前操作的精确 preflight 通过；不得靠百分比自动清除、静默删历史、预留隐藏文件或自动扩容。
 
 **部署、恢复与升级验收**：
-CI 必须在一次性真实 Docker Compose 环境和真实 Kubernetes 测试集群（kind 或等价）分别完成安装与运行验收，不能用 template/lint/build 替代。最小矩阵必须在原生 amd64 与原生 arm64 各自覆盖：五个应用镜像按多平台 index digest 启动、探针与 metrics scrape、首次自动秘密引导及既有数据缺秘密 fail-closed、首次 Admin 登录、Plinth Bash/固定工具目录与 Landlock/seccomp 对抗自检、Lintel 真浏览器/noVNC/身份卷/trace、Stele Delivery、含 Artifact 的成功备份、停机恢复、恢复后的 Session/Runtime/告警凭据失效、从上一正式 Release 动态生成数据后升级、接受新写入前回滚、容器/Deployment/Compose service 重建并复用既有 PVC/named volume 后数据仍在、SIGTERM 关停、存储故障与 metrics sentinel 泄漏扫描；另必须实际验证离线归档签名、解包、registry 导入和 digest 读回。普通 Kubernetes YAML 解析/应用、Compose config、OpenAPI/SQL/proto 校验继续作为更低层门禁，但不能据此声称真实安装、恢复或升级通过。
+CI 必须在一次性真实 Docker Compose 环境和真实 Kubernetes 测试集群（kind 或等价）分别完成安装与运行验收，不能用 template/lint/build 替代。最小矩阵必须在原生 amd64 与原生 arm64 各自覆盖：四个应用镜像按多平台 index digest 启动、探针与 metrics scrape、首次自动秘密引导及既有数据缺秘密 fail-closed、首次 Admin 登录、Plinth Bash/固定工具目录与 Landlock/seccomp 对抗自检、Stele Delivery、含 Artifact 的成功备份、停机恢复、恢复后的 Session/Runtime/告警凭据失效、从上一正式 Release 动态生成数据后升级、接受新写入前回滚、容器/Deployment/Compose service 重建并复用既有 PVC/named volume 后数据仍在、SIGTERM 关停、存储故障与 metrics sentinel 泄漏扫描；另必须实际验证离线归档签名、解包、registry 导入和 digest 读回。普通 Kubernetes YAML 解析/应用、Compose config、OpenAPI/SQL/proto 校验继续作为更低层门禁，但不能据此声称真实安装、恢复或升级通过。
 
 **验证声明分层**：
-验证结论严格分为 Contract Gate、Release Qualification 与 Deployment Acceptance。Contract Gate 只证明机器契约、Schema、静态规则和确定性状态机/集成断言；Release Qualification 只证明某一组不可变 Release 工件在项目控制的真实 Compose、Kubernetes、浏览器和原生双架构环境中通过发布矩阵；Deployment Acceptance 才证明该工件在具体站点的真实 ingress、存储、网络、Thanos、Model Provider 等部署事实。每层只能声明实际覆盖范围，低层通过不得推导高层通过，项目控制的协议 fixture 也不得被表述为任意真实外部系统兼容。
+验证结论严格分为 Contract Gate、Release Qualification 与 Deployment Acceptance。Contract Gate 只证明机器契约、Schema、静态规则和确定性状态机/集成断言；Release Qualification 只证明某一组不可变 Release 工件在项目控制的真实 Compose、Kubernetes 和原生双架构环境中通过发布矩阵；Deployment Acceptance 才证明该工件在具体站点的真实 ingress、存储、网络、Thanos、Model Provider 等部署事实。每层只能声明实际覆盖范围，低层通过不得推导高层通过，项目控制的协议 fixture 也不得被表述为任意真实外部系统兼容。
 
 **验证规范与目录权威**：
 各领域稳定条款继续独占行为断言；`verification.md` 只拥有执行层级、环境矩阵、故障编排、证据规则与 verdict 聚合的规范语义，并按稳定条款 ID 引用所有者，不复制字段、枚举或行为正文。`contracts/verification-catalog.yaml` 及其 Schema 是跨域 scenario 登记的唯一机器权威，只拥有条款组合、前置条件、环境能力、故障原语、可观察断言、必需证据与清理要求；测试实现必须声明 scenario ID，CI 机械检查 required scenario 无缺失、重复或悬空引用。
@@ -425,31 +399,31 @@ CI 必须在一次性真实 Docker Compose 环境和真实 Kubernetes 测试集�
 发布结果复用 in-toto Statement v1 与 Test Result predicate v0.1 的一次 suite invocation 语义，并由严格 Quoin profile 约束。subject 只绑定被验收的不可变 Release 输出，不把随后生成且反向引用证据的 Release manifest 自身列为 subject；configuration 绑定验证目录、环境描述与工具锁；passed/warned/failed 名单只接受 scenario ID。DSSE 信封签名及 Sigstore bundle 复用现有发布链，Release manifest 通过既有 `validation.<category>.evidence_sha256` 逐分类单向绑定对应证据 bundle，禁止建立哈希自引用、顶层竞争字段或第二发布索引。JUnit、HTML、CI annotation、日志和截图都只是同一权威结果的投影或 digest 附件。
 
 **验证 verdict 与证据纪律**：
-Suite 状态为 `PASSED | WARNED | FAILED`，发布门只接受 PASSED：本 invocation 的全部 applicable required scenario 必须首次执行通过且无跳过/警告；基础设施中断、结果不确定、诊断重跑后才通过或必需人工观察未完成均为 WARNED；产品/契约断言失败为 FAILED。每次重跑创建新 invocation，旧结果不可覆盖；不适用只能由 catalog 前置条件机械判定并记录理由。每个 scenario 的结构化 evidence index 记录 invocation、时间、环境 digest、工具版本、脱敏 argv、exit code、逐断言 expected/actual/result、附件 SHA-256 与清理结果。人工观察使用 typed observation，经确定性 verdict 程序校验后仍以同一 scenario ID 进入统一结果列表并绑定 observation digest，不建立人工 checklist verdict。
+Suite 状态为 `PASSED | WARNED | FAILED`，发布门只接受 PASSED：本 invocation 的全部 applicable required scenario 必须首次执行通过且无跳过/警告；基础设施中断、结果不确定或诊断重跑后才通过均为 WARNED；产品/契约断言失败为 FAILED。每次重跑创建新 invocation，旧结果不可覆盖；不适用只能由 catalog 前置条件机械判定并记录理由。每个 scenario 的结构化 evidence index 记录 invocation、时间、环境 digest、工具版本、脱敏 argv、exit code、逐断言 expected/actual/result、附件 SHA-256 与清理结果。v1 catalog 不再包含人工观察 scenario；历史 UI 观测条款随浏览器运行时移除，不建立人工 checklist verdict。
 
 **验证环境与职责边界**：
-Release Qualification 只使用合成数据、短期测试凭据与唯一 sentinel，禁止生产凭据和生产数据进入流水线；公开 evidence 必须通过 sentinel/秘密扫描，敏感 trace 只留受限存储并在公开报告记录 digest、分类和受限 locator。纯状态机、SQL 约束与 HTTP/Proto framing 可以由确定性 harness 证明；调度、Pod/PV/NetworkPolicy/Ingress/Compose 生命周期必须真实运行；DOM、render、noVNC、WebSocket 与 accessibility tree 必须使用真实浏览器；双架构声明必须来自原生 amd64/arm64，QEMU 只能作为构建或辅助诊断证据。确定性程序收集事实、校验契约、计算 scenario/suite verdict 并生成签名报告；人工只提交 catalog 要求的 typed observation；Agent/模型只做失败分析、汇总和建议，不得改写结果、降低 required 门或把 WARNED/FAILED 改成 PASSED。
+Release Qualification 只使用合成数据、短期测试凭据与唯一 sentinel，禁止生产凭据和生产数据进入流水线；公开 evidence 必须通过 sentinel/秘密扫描，敏感 trace 只留受限存储并在公开报告记录 digest、分类和受限 locator。纯状态机、SQL 约束与 HTTP/Proto framing 可以由确定性 harness 证明；调度、Pod/PV/NetworkPolicy/Ingress/Compose 生命周期必须真实运行；双架构声明必须来自原生 amd64/arm64，QEMU 只能作为构建或辅助诊断证据。确定性程序收集事实、校验契约、计算 scenario/suite verdict 并生成签名报告；Agent/模型只做失败分析、汇总和建议，不得改写结果、降低 required 门或把 WARNED/FAILED 改成 PASSED。
 
 **验证触发与支持矩阵**：
-PR 阻塞执行完整 Contract Gate（含全部确定性状态机/集成 scenario），v1 不建设 source-to-scenario 影响选择器；main 定时任务执行完整自动化矩阵；annotated SemVer tag 只针对该 tag 构建的不可变工件重新执行完整 Release Qualification 并补齐人工 observation，PR/nightly 结果不能成为 tag 发布证据，不同 tag/release manifest digest 之间也禁止复用通过证据。每次 qualification 启动时解析 Kubernetes 官方当时维护的最近三个 minor 的最新 patch，并在 evidence statement configuration 的环境描述/工具锁中冻结精确版本；三个版本都在原生 amd64/arm64 上执行完整 Kubernetes 矩阵，只声明这六个精确 cell，不外推 EOL minor、未执行 patch 或中间版本区间。Compose 每个 tag 同样只冻结一个当时 stable 的 Docker Engine+Compose CLI 精确版本对并在双架构完整验证，不外推兼容区间；这些测试环境版本都不进入产品供应链 `release-inputs.yaml`。Web UI 只声明双架构 Release 锁定 Playwright Chromium 与 amd64 上解析后冻结的精确 branded Chrome version/build；Lintel/noVNC 只声明 Release 锁定 Chromium，v1 不声明 Firefox、Firefox ESR、Playwright WebKit 或真实 Safari 支持。
+PR 阻塞执行完整 Contract Gate（含全部确定性状态机/集成 scenario），v1 不建设 source-to-scenario 影响选择器；main 定时任务执行完整自动化矩阵；annotated SemVer tag 只针对该 tag 构建的不可变工件重新执行完整 Release Qualification 并补齐人工 observation，PR/nightly 结果不能成为 tag 发布证据，不同 tag/release manifest digest 之间也禁止复用通过证据。每次 qualification 启动时解析 Kubernetes 官方当时维护的最近三个 minor 的最新 patch，并在 evidence statement configuration 的环境描述/工具锁中冻结精确版本；三个版本都在原生 amd64/arm64 上执行完整 Kubernetes 矩阵，只声明这六个精确 cell，不外推 EOL minor、未执行 patch 或中间版本区间。Compose 每个 tag 同样只冻结一个当时 stable 的 Docker Engine+Compose CLI 精确版本对并在双架构完整验证，不外推兼容区间；这些测试环境版本都不进入产品供应链 `release-inputs.yaml`。
 
 **外部系统与故障执行**：
 Release Qualification 使用官方 digest-pinned Prometheus、Alertmanager、Thanos 镜像验证真实协议 happy path、查询语义和 webhook；错误码、半响应、畸形响应及应用层响应超时由 deterministic protocol fixture 拥有，传输层 TCP timeout/reset 由网络故障原语拥有；Model Provider 继续只使用 deterministic fixture，真实客户系统、生产凭据和真实模型供应商只属于 Deployment Acceptance。catalog 只声明工具无关的封闭故障原语：已有执行路径的进程、资源与网络原语映射到 Docker/Kubernetes 原生 stop/kill/pod delete/NetworkPolicy/重建操作，TCP 原语映射到 digest-pinned Toxiproxy 的 latency/timeout/reset_peer/bandwidth/limit_data；v1 不引入通用 Chaos 平台。ENOSPC、EDQUOT、EROFS、指定 fsync 失败和指定 rename 失败是互不替代的精确 required 原语；冻结 catalog 前必须通过一次性 Compose+Kubernetes 原型逐项证明 operation、注入点、所需 privilege、expected errno 与清理路径，未证明项不得以聚合“原子写失败”或 mock 冒充。
 
 **Invocation 隔离、执行与清理**：
-每次 invocation 使用唯一 Kubernetes namespace/Compose project、独立业务卷和测试身份；共享宿主只为 host-published ports 分配唯一值，内部容器端口固定，普通场景共享只读不可变 image digest，只有离线导入场景创建 invocation-local 临时 registry 及独立数据卷并整体销毁。teardown 前只内容寻址持久化会随环境销毁的原始附件；teardown 与资源归零检查完成后才计算 verdict、生成并签名该 invocation 唯一最终 Test Result bundle。正常 teardown 后 invocation 拥有的 Pod、Job、Service、Secret、PVC、volume、network、container、browser process、临时文件和临时 registry 数据必须机械证明归零；产品/helper 遗留为 FAILED，CI/集群故障导致无法判断清理结果为 WARNED。runner 不 fail-fast：失败后继续所有相互独立的 required scenario，依赖失败项以稳定 causal ID 记录 not_run；required 断言失败为 FAILED，因环境或前置失败不能执行为 WARNED，teardown 始终执行，失败自动重试不得隐藏先前结果。diagnostic scenario 只由已持久化的 FAILED/WARNED/not_run（未完成统一表示为 not_run）触发并携带 causal result ID；它不进入 required 分母或 suite verdict，不得改写触发结果，新 invocation 才能重验。
+每次 invocation 使用唯一 Kubernetes namespace/Compose project、独立业务卷和测试身份；共享宿主只为 host-published ports 分配唯一值，内部容器端口固定，普通场景共享只读不可变 image digest，只有离线导入场景创建 invocation-local 临时 registry 及独立数据卷并整体销毁。teardown 前只内容寻址持久化会随环境销毁的原始附件；teardown 与资源归零检查完成后才计算 verdict、生成并签名该 invocation 唯一最终 Test Result bundle。正常 teardown 后 invocation 拥有的 Pod、Job、Service、Secret、PVC、volume、network、container、临时文件和临时 registry 数据必须机械证明归零；产品/helper 遗留为 FAILED，CI/集群故障导致无法判断清理结果为 WARNED。runner 不 fail-fast：失败后继续所有相互独立的 required scenario，依赖失败项以稳定 causal ID 记录 not_run；required 断言失败为 FAILED，因环境或前置失败不能执行为 WARNED，teardown 始终执行，失败自动重试不得隐藏先前结果。diagnostic scenario 只由已持久化的 FAILED/WARNED/not_run（未完成统一表示为 not_run）触发并携带 causal result ID；它不进入 required 分母或 suite verdict，不得改写触发结果，新 invocation 才能重验。
 
 **证据保留、人工观察与非功能门**：
-与 verdict 有关的脱敏、签名、digest 绑定 evidence bundle 与 manifest 随 tag/Release 永久保留，runner 本机原始目录在所需附件上传成功后删除；敏感原始 trace 不得成为 verdict 唯一证据，需要短期保留时先上传受限私有 CI artifact storage 并按部署方策略到期删除，判定所需事实必须先提取为脱敏结构化证据。同一确定性 verifier 从 catalog 生成交互式 observation 表单/向导，强制绑定 tag、invocation ID、scenario ID、该 invocation subject 的不可变 Release 输出 digest、观察者 OIDC 身份、开始/结束时间和封闭 typed 字段，再生成同一 DSSE/Sigstore evidence statement；PR checklist、自由文本评论或单纯 Approve 不能替代。v1 required 非功能集只包含既有契约明确的 deadline/队列/并发不变量、确定性竞争交错以及 invocation 所有资源精确归零；goroutine、FD、延迟、吞吐、CPU、内存先按固定采样点记录趋势，不阻塞发布，只有后续明确固定 workload、pinned runner、静默窗口、采样规则和数值预算后才能升级为 required gate。catalog 使用封闭 capability 词表（至少 deployment、architecture、Kubernetes exact version、Docker/Compose exact versions、browser evidence kind、privilege/fault backend、external stack），scenario 声明 required cells 与合法不适用条件；mandatory cell 缺能力在 preflight 形成 WARNED，禁止运行时自由字符串 skip，catalog 明确排除的无意义组合不进入分母。
+与 verdict 有关的脱敏、签名、digest 绑定 evidence bundle 与 manifest 随 tag/Release 永久保留，runner 机原始目录在所需附件上传成功后删除；敏感原始 trace 不得成为 verdict 唯一证据，需要短期保留时先上传受限私有 CI artifact storage 并按部署方策略到期删除，判定所需事实必须先提取为脱敏结构化证据。v1 required 非功能集只包含既有契约明确的 deadline/队列/并发不变量、确定性竞争交错以及 invocation 所有资源精确归零；goroutine、FD、延迟、吞吐、CPU、内存先按固定采样点记录趋势，不阻塞发布，只有后续明确固定 workload、pinned runner、静默窗口、采样规则和数值预算后才能升级为 required gate。catalog 使用封闭 capability 词表（至少 deployment、architecture、Kubernetes exact version、Docker/Compose exact versions、privilege/fault backend、external stack），scenario 声明 required cells 与合法不适用条件；mandatory cell 缺能力在 preflight 形成 WARNED，禁止运行时自由字符串 skip，catalog 明确排除的无意义组合不进入分母。
 
 **验证执行图与覆盖根**：
-catalog scenario 是最小可独立裁决、重试、留证和清理的原子；只允许 `setup/action/assert/teardown` 四阶段，同层 `depends_on` 形成 DAG，低层 `proof_refs` 只能引用严格更低层且同一 tag qualification invocation、同一 source/catalog/contract/Release subject 闭包的结果。上层 scenario 仍必须真实执行自身 action/assert；已声明的 proof_ref 在同 tag 闭包缺失只能使上层 WARNED，空 proof_refs 表示没有下层 prerequisite、不是证明缺失；低层 FAILED 则上层 FAILED。稳定 validation root 只扫描 `*-VALIDATION-*`、`OPS-VERIFY-*`、`UI-TEST-*`，catalog 必须覆盖全部 declared root；构建门机械拒绝未覆盖/悬空/重复 ID、无实现、依赖环、跨层同级依赖、非法 proof、cell applicability 不闭合以及 Deployment Acceptance timeout 超过 freshness budget。scenario ID 一旦发布只能退休，语义变化必须新 ID，禁止旧 ID 换实现或换断言后继续复用。
+catalog scenario 是最小可独立裁决、重试、留证和清理的原子；只允许 `setup/action/assert/teardown` 四阶段，同层 `depends_on` 形成 DAG，低层 `proof_refs` 只能引用严格更低层且同一 tag qualification invocation、同一 source/catalog/contract/Release subject 闭包的结果。上层 scenario 仍必须真实执行自身 action/assert；已声明的 proof_ref 在同 tag 闭包缺失只能使上层 WARNED，空 proof_refs 表示没有下层 prerequisite、不是证明缺失；低层 FAILED 则上层 FAILED。稳定 validation root 只扫描 `*-VALIDATION-*`、`OPS-VERIFY-*`，catalog 必须覆盖全部 declared root；构建门机械拒绝未覆盖/悬空/重复 ID、无实现、依赖环、跨层同级依赖、非法 proof、cell applicability 不闭合以及 Deployment Acceptance timeout 超过 freshness budget。scenario ID 一旦发布只能退休，语义变化必须新 ID，禁止旧 ID 换实现或换断言后继续复用。
 
 **验证故障与竞争执行**：
 事务竞争必须由显式 barrier、fence 和 scheduler trace 精确执行已声明 interleaving；固定 seed 状态机生成只作诊断补充，不能替代显式 required 交错。存储故障必须分别精确注入 ENOSPC、EDQUOT、EROFS、指定 fsync 失败和指定 rename 失败；v1 使用直接基于 go-fuse v2.9.0 loopback API 的最小 verification-only `quoin-faultfs`，只提供 path-scoped write/fsync/rename→errno 与 mount/unmount，不建设通用故障平台。原生 linux/arm64 原型已观察五种故障与解除注入后的恢复；最终双架构 Compose/Kubernetes required cell 仍各自重跑。上游 toda v0.2.4 无 arm64 维护或工件，不得作为执行器/fallback；未证明项不得 required。网络故障使用项目控制的 Toxiproxy/NetworkPolicy，DNS、TLS 与 HTTP/SSE/gRPC framing 使用各自 fixture，禁止所有权重叠。session、cooldown、lease、scheduler、expiry 与前端 timer 使用模块内部 Clock/Timer 接缝，确定性测试禁止 wall-clock sleep；真实 timer smoke 只留 Release Qualification。
 
-**发布高层场景与 UI 观察**：
-Release Qualification 以真实业务旅程为高层 scenario；普通 happy-path 不重复执行已经由 tag invocation Contract Gate 证明的状态机、权限和竞态，只通过严格闭包的 `proof_refs` 绑定。交互式表单、noVNC、typed reconnection、视觉/减少动态效果 observation 与真实浏览器过程仍必须在高层执行。Release Qualification 与每次 Deployment Acceptance 的 UI required observation 都固定为 3 个 browser/arch cell（Chromium amd64、Chromium arm64、branded Chrome amd64）× 4 个 viewport（320、768、1024、1440 CSS px）× 2 个 motion 模式，共 24 条；每条绑定实际 viewport、browser build、架构和 observer 身份，不乘 Compose/Kubernetes 后端，也不得向未观察的 browser/viewport 外推；Deployment Acceptance 将这 24 个 backend-independent `always` cell 冻结成 `ui_observation` items，并只允许发起 Admin Session 经 typed observation 路由提交。
+**发布高层场景**：
+Release Qualification 以真实业务旅程为高层 scenario；普通 happy-path 不重复执行已经由 tag invocation Contract Gate 证明的状态机、权限和竞态，只通过严格闭包的 `proof_refs` 绑定。浏览器自动化与 UI 观测场景已随浏览器运行时一并移除，v1 不再声明任何 browser evidence 或 `ui_observation` 要求。
 
 **Deployment Acceptance invocation**：
 每次站点验收由 Quoin 在一个 SQLite 事务创建不可变、只有 append 的 invocation manifest/items；它冻结 Release、catalog/profile/schema、部署配置、public Origin、principal、开始时间、applicable-set digest 以及服务端从权威 FK 生成的封闭 typed locator。manifest 没有可变状态机/current pointer，启动后不得增加、删除或替换 scope；current binding 漂移追加 subject-drift marker 并使 item/suite 至少 WARNED，重验必须新 invocation；若 item 已有 immutable passed result，保留该执行事实但 marker 禁止 PASSED，不追加伪造第二 result 或误造 verifier conflict。command 幂等与 result 幂等分离；同 item 同 canonical input/result 返回原结果，异结果写幂等 conflict marker 并 FAILED，禁止 first/latest/绿色项获胜。active/unclassified item 只能返回 `verification_in_progress`，不得生成最终证据。唯一 append-only finalization receipt 在 Artifact 耐久 staging 后以单 writer 事务复核全部集合 digest 并冻结唯一 Test Result；receipt 是该 invocation 所有 evidence 写入的终止栅栏，之后只允许返回原 Artifact，晚到非法提交只进通用审计。功能断言/cleanup residue/verifier conflict 为 FAILED；subject drift、环境不可用、人工取消、基础设施中断、cleanup indeterminate/not_run 为 WARNED；未知类别是 verifier invariant failure/FAILED。
@@ -458,13 +432,7 @@ Release Qualification 以真实业务旅程为高层 scenario；普通 happy-pat
 v1 全部 required 站点 scenario 的 `max_observation_age` 与 suite observation/snapshot span 固定不超过 8 小时且不可配置；`snapshot_at` 与保存真实提交时间的 `finalized_at` 都不得晚于 manifest deadline，所有结果 commit/received time 也必须在窗口内；未能在 deadline 前完成 Artifact staging 与 receipt commit 时不得迟到定案，重验必须新建 invocation。verdict 只比较 Quoin 持久化的 commit/received 时间，helper 主机 wall-clock 只作 provenance。报告保存真实 observation window，但不含 `validUntil` 或持续健康承诺。manifest/items/results/conflicts/receipt、canonical Test Result、typed observations、精确 helper report 与 evidence index 使用既有 `long_term` retention class 并随备份恢复；截图、trace、视频和其它大型字节仍是独立 generated Artifact，继承 Admin 共享保留设置（默认 90 天），长期报告只保存 digest、locator、retention/expiry 与正文是否已到期。外部 OIDC/WORM/签名系统可以包装报告，Quoin 不为 Deployment Acceptance 新增长期签名密钥。
 
 **Connection Probe 与资格选择**：
-Model Provider 探测清洁重构为唯一 `connection_probe` Execution Attempt；`contracts/connection-probes.yaml` 及其 Schema 是三类 action-set/version 的唯一机器权威，catalog 只引用 digest。probe 使用封闭 grant purpose，冻结 current revision/credential generation/root binding，由 Plinth supervisor 直接执行，不启动 worker/Agent/ReAct；`connection_probe_results` header 与按类型 typed child 拥有事实，不另建 Run 生命周期，旧 `model_provider_capabilities` 删除且不保留兼容层。Model Provider probe 保留完整 streaming/tool/cancel/usage/request-id/embedding 序列，并且只有 Model Provider Connection 使用显式 `qualified_probe_result_id` 作为 enable 和普通 Model/Embedding grant 的强制资格闭包，任何 pair/root/probe-contract 语义变化都 fail-closed 并要求重验。Thanos/Kubernetes 不建立长期资格 pointer，也不增加普通派发前置；其 fresh probe 主要是 invocation-scoped 站点证据，当前 root revalidation 可显式引用成功结果。Thanos Plinth probe 只证明 Plinth Tool 的固定 `vector(1)` 路径，Quoin PromQL 路径由 Config Verification 单独证明；Kubernetes probe 固定验证 discovery 与 effective namespace 内 pods get/list、events list、pods/log get 的 SelfSubjectAccessReview，不外推其它权限或 Business System mapping。
-
-**当前配置与 Browser 站点重证**：
-`config_verification_runs` 清洁泛化为唯一 `ConfigVerificationRun`：`prepublish` 继续服务草稿联合激活，`deployment_acceptance` 只绑定 current published config/current Label Contract，复用真实 PromQL/Journey/probe/Evidence/取消状态机但绝不成为发布证据或移动发布 pointer。`browser_operations` 新增 `deployment_verification` kind，冻结 manifest item、发起 Admin Session、identity revision 与 current generation marker，持有既有 identity/capacity fence；Lintel 从 marker 对应的当前物理 profile 建立 deterministic disposable clone，不声称重现历史字节。它复用同一 BrowserTunnel/noVNC、只允许发起 Session 单 active attachment 和宽限内顺序重附着，双侧拒绝 profile publish；功能 observation 与 cleanup 分开。每个 operation 在 timeout 内产生唯一 typed result，cleanup 为 `clean|residue|indeterminate`；clean 必须以 operation-scoped process/browser/tunnel/clone/temp/runtime/slot 逐项归零和 Stop fence 证明，residue 为 FAILED，indeterminate 为 WARNED，后二者保留锁并继续调和，之后清理成功不得把旧结果转绿。新 Lintel boot 必须在 Browser Ready 前 sweep deterministic clone namespace；正常在线/boot 路径只有 `new_boot_cleanup_confirmed` 可释放该 kind 的锁。
-
-**Lintel cleanup 离线恢复**：
-当未确认 Browser cleanup 与旧 Lintel token/state 损坏形成 replacement 互锁时，唯一恢复入口是 deployment operator：Compose 可使用 `quoin-deploy compose recover-lintel`，Kubernetes 使用普通 `kubectl` 运行一次性 `quoin maintenance recover-lintel`；普通 Admin/Web UI 没有 force unlock。Deployment Acceptance 的 required recovery scenario 由 helper setup 在隔离 disposable identity/slot 上注入故障并真实产生 indeterminate/residual cleanup fence 后执行，不要求健康站点已有事故，也不触碰业务 Browser Identity。helper 停止全部组件，取得封闭 `LintelRecovery` maintenance state 与状态目录应用锁，机械证明旧 workload/process 已 fence，旧存储为 `exclusively_reattached` 或 `retired`，再用同 Release Quoin 镜像的一次性 `quoin maintenance recover-lintel` 挂载权威状态并在最后事务撤销旧 token、写幂等 recovery receipt/audit。reattached 只解除 Runtime replacement fence，原 Browser locks/result 不变，新 Lintel 必须独占挂载并以 `new_boot_cleanup_confirmed` sweep 后释放；retired 以封闭 `externally_fenced_storage_retired` stop basis 释放受影响 operation/locks、把 Browser Identity 降为 `AuthenticationRequired`，但旧 verification result 永不转绿。任何 workload/storage/token/slot/app-lock 证明不足都在事务前稳定拒绝并要求完整离线恢复或重建。
+Model Provider 探测清洁重构为唯一 `connection_probe` Execution Attempt；`contracts/connection-probes.yaml` 及其 Schema 是三类 action-set/version 的唯一机器权威，catalog 只引用 digest。probe 使用封闭 grant purpose，冻结 current revision/credential generation/root binding，由 Plinth supervisor 直接执行，不启动 worker/Agent/ReAct；`connection_probe_results` header 与按类型 typed child 拥有事实，不另建 Run 生命周期，旧 `model_provider_capabilities` 删除且不保留兼容层。Model Provider probe 保留完整 streaming/tool/cancel/usage/request-id/embedding 序列，并且只有 Model Provider Connection 使用显式 `qualified_probe_result_id` 作为 enable 和普通 Model/Embedding grant 的强制资格闭包，任何 pair/root/probe-contract 语义变化都 fail-closed 并要求重验。Thanos 不建立长期资格 pointer，也不增加普通派发前置；其 fresh probe 主要是 invocation-scoped 站点证据，当前 root revalidation 可显式引用成功结果。Thanos Plinth probe 只证明 Plinth Tool 的固定 `vector(1)` 路径，Quoin PromQL 路径由 Config Verification 单独证明。
 
 ## 任务终态提示
 

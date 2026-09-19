@@ -18,7 +18,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 
 ## 1. 范围与威胁边界
 
-- **SEC-SCOPE-001 —** Quoin **MUST** 把未认证 HTTP/gRPC 输入、普通 User/Operator、Web Admin、模型输出、Plinth worker、上游 Provider/业务系统响应和浏览器页面内容视为不可信；任何一方都 **MUST NOT** 仅凭其自述扩大权限、选择凭据、改写审计或绕过领域状态机。（来源：Issue #16、CONTEXT「权限」「模型调用边界」「Plinth worker 隔离边界」）
+- **SEC-SCOPE-001 —** Quoin **MUST** 把未认证 HTTP/gRPC 输入、普通 User/Operator、Web Admin、模型输出、Plinth worker、上游 Provider/业务系统响应和受控页面内容视为不可信；任何一方都 **MUST NOT** 仅凭其自述扩大权限、选择凭据、改写审计或绕过领域状态机。（来源：Issue #16、CONTEXT「权限」「模型调用边界」「Plinth worker 隔离边界」）
 - **SEC-SCOPE-002 —** 部署操作者对 Quoin 数据目录/PVC、只读根密钥挂载、Runtime 状态卷、部署 CA 与组件客户端证书、TLS 终止层拥有基础设施权限。v1 的应用审计 **MUST** 防御应用用户和 Web Admin，**MUST NOT** 声称能够阻止拥有这些基础设施权限的操作者离线读取或改写本地数据。（来源：Issue #16 Q16.2/Q16.18、CONTEXT「审计与执行溯源」「一致备份」）
 - **SEC-SCOPE-003 —** v1 **MUST NOT** 建设本地 Audit hash chain、外部 WORM、强制 KMS/Vault、应用层网络 allowlist 或通用 DLP；这些机制只有在存在独立外部信任锚或真实执行路径时才可由后续版本引入。（来源：Issue #16 Q16.1/Q16.17/Q16.18）
 - **SEC-SCOPE-004 —** 网络可达性、TLS 私钥、HSTS、PV/目录权限、存储层加密和反向代理访问日志由实际部署层拥有；Quoin **MUST** 对自己产生的身份、授权、秘密、Cookie、响应头、审计和日志承担完整契约，**MUST NOT** 以“可由 ingress 处理”为由省略应用知道且能裁决的安全事实。（来源：Issue #16 Q16.2/Q16.9）
@@ -40,17 +40,15 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-SESSION-003 —** 受保护请求 **MUST** 每次读取当前 User 的 enabled、role 与 auth revision；前端隐藏入口、Session 创建时角色快照和已经建立的长连接 **MUST NOT** 替代当前授权检查。写事务 **MUST** 在提交前与业务写同事务复核。（来源：CONTEXT「本地账号认证」「权限」、HTTP-AUTH-003、DATA-TX-002）
 - **SEC-CSRF-001 —** 全部浏览器写请求 **MUST** 先经过 Go `CrossOriginProtection`。携带 Session Cookie 的非安全方法若 `Sec-Fetch-Site` 与 `Origin` 同时缺失，或 `Origin` 存在但不精确等于规范公共 Origin，**MUST** 在读取业务正文前返回 403；v1 **MUST NOT** 提供 Cookie CLI 例外或同步 CSRF token。（来源：Issue #16 Q16.8、CONTEXT「同源 Web 会话」）
 - **SEC-CSRF-002 —** 认证入口（现行 `startAuthentication`，即原 `login` 路由）**MUST** 另执行认证前同源门：`Origin` 存在时只接受精确公共 Origin；没有 `Origin` 时只接受 `Sec-Fetch-Site: same-origin`；两者都缺失以及 `same-site|cross-site|none` **MUST** 返回 403，且 **MUST NOT** 执行 Argon2id 或建立 Session/流程。该门 **MUST** 同样覆盖后续可能新增的认证入口（管理员恢复为离线 CLI，不提供恢复 HTTP 入口）。（来源：Issue #16 Q16.14）
-- **SEC-CSRF-003 —** noVNC WebSocket 升级 **MUST** 校验规范公共 Origin、当前 Session、当前 User 与 operation 发起者；带凭据跨域 CORS 与跨域 SSE **MUST NOT** 启用。公共 Origin **MUST** 来自单一部署配置，**MUST NOT** 由不可信 Host/Forwarded 头临时推导。（来源：CONTEXT「同源 Web 会话」、HTTP-NOVNC-002）
-- **SEC-HEADER-001 —** Quoin 受保护响应与前端静态页面响应 **MUST** 设置应用拥有的 CSP、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`；CSP **MUST** 以 `default-src 'self'` 和 `frame-ancestors 'none'` 为基线，只按锁定前端/noVNC 的真实资源需要显式放行，**MUST NOT** 使用 wildcard、`unsafe-eval` 或内联 script。（来源：Issue #16 Q16.9、OWASP HTTP Headers）
+- **SEC-HEADER-001 —** Quoin 受保护响应与前端静态页面响应 **MUST** 设置应用拥有的 CSP、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`；CSP **MUST** 以 `default-src 'self'` 和 `frame-ancestors 'none'` 为基线，只按锁定前端的真实资源需要显式放行，**MUST NOT** 使用 wildcard、`unsafe-eval` 或内联 script。（来源：Issue #16 Q16.9、OWASP HTTP Headers）
 - **SEC-HEADER-002 —** Session、秘密、敏感 Artifact、raw trace、备份及其错误响应 **MUST** 设置 `Cache-Control: no-store`；登出成功响应 **MUST** 清除 Session Cookie 并发送 `Clear-Site-Data`，实际 TLS 终止层 **MUST** 独占 HSTS 配置。（来源：Issue #16 Q16.9）
 
 ## 4. 权限与服务身份
 
 - **SEC-AUTHZ-001 —** 权限矩阵 **MUST** 以 CONTEXT「权限」和 HTTP-PERM-* 为唯一人类/HTTP 语义；所有 HTTP 与 gRPC 入口都 **MUST** 服务端检查主体类型、当前状态、操作权限和对象归属，**MUST NOT** 依赖前端、模型、worker 或调用方隐藏字段。（来源：CONTEXT「权限」、Issue #16）
 - **SEC-AUTHZ-002 —（superseded by ADR-0005 唯一管理员模型）** 历史的“多个 Admin + 最后有效 Admin 保护 + 离线 `quoin admin create`/`reset-password`”叙述不再适用：一个部署固定一个内置 `admin`（schema 唯一索引与触发器强制：不可禁用、降级或删除，Operator **MUST NOT** 经创建或更新路径提升为 Admin）；其凭据生命周期只经引导初始化、恢复命令（`quoin admin recover`，CLI-only，`--mode password|factors`）与备份恢复的 TTY 恢复通道，**MUST NOT** 提供网络 bootstrap、邮件找回、安全问题或第二个管理员。（来源：CONTEXT「权限」「管理员离线恢复」、[统一认证设计 §1/§6](../../authentication-design.md)、`contracts/sql/schema.sql#idx_users_single_admin`）
-- **SEC-SERVICE-001 —** Plinth、Lintel 与 Stele token **MUST** 使用封闭主体类型和最小 RPC scope；Plinth/Lintel 长期 token 只保存 32-byte digest，Stele token 只由部署 Secret 文件提供。服务 token **MUST NOT** 被 Web Admin Session、worker 或模型复用。（来源：CONTEXT「服务身份」、RUNTIME-AUTH-*）
-- **SEC-SERVICE-002 —** 每个 gRPC 请求和 stream 建立 MUST 复核 token、slot/service 类型、统一 Proto 契约指纹与当前吊销状态；发布版本仅保留为非准入溯源信息；吊销、slot 替换或凭据退休 **MUST** 立即关闭对应控制流、浏览器流与上传流并禁止旧 token 重连。（来源：CONTEXT「服务身份」、RUNTIME-REVOKE-001）
-- **SEC-SERVICE-002a —** Lintel Runtime token 的 Artifact scope 仅为 `Upload(trace|screenshot)`，且仅限其当前 fence 下 `browser_operation` owner 的生成物；它没有 `ReadText`、`GrepText`、通用 Artifact owner 或其他 Artifact kind 权限。敏感 trace 的保密与下载授权仍由 Artifact 的 `sensitive` 事实及 SEC-DOWNLOAD-* 裁决，不因 Lintel 上传而降级。（来源：Issue #45）
+- **SEC-SERVICE-001 —** 组件身份 **MUST** 使用部署 CA 签发的 mTLS 客户端证书（ADR-0009）；Plinth 与 Stele 按 CN 授权服务，Stele 侧凭据只由部署 Secret 文件提供。服务 token **MUST NOT** 被 Web Admin Session、worker 或模型复用。（来源：CONTEXT「服务身份」、RUNTIME-AUTH-*）
+- **SEC-SERVICE-002 —** 每个 gRPC 请求和 stream 建立 MUST 复核组件身份、统一 Proto 契约指纹；发布版本仅保留为非准入溯源信息；凭据更换 **MUST** 立即关闭对应控制流与上传流并禁止旧身份重连。（来源：CONTEXT「服务身份」、RUNTIME-REVOKE-001）
 - **SEC-SERVICE-003 —** Runtime token 轮换在新 token 已持久化确认并提升为 current 的同一原子切换中，旧 generation **MUST** 立即进入可认证的 `retiring` 角色，保证新 token 首次认证前仍可恢复；此时用户态显示“等待新 token 首次使用”。新 current 首次成功认证后才把该旧 generation 标示为 Pending Retirement，并允许 Admin 显式退休。同一 slot 始终只有一个 active connection epoch，新连接按 Runtime 协议替代旧 epoch。系统 **MUST NOT** 按时间或一次成功自动退休旧 token；retiring 角色、Pending Retirement 状态与首次使用时间 **MUST** 持久可见并审计。（来源：Issue #16 Q16.10、CONTEXT「服务身份」）
 - **SEC-SERVICE-004 —** 告警源 Bearer 轮换期间 **MUST** 最多存在两个可认证 generation；新 generation 首次成功 Delivery 后，其 supersedes 指向的旧 generation **MUST** 进入 Pending Retirement；旧 generation 只有 Admin 显式命令才可退休，**MUST NOT** 使用墙钟 TTL 自动中断 Alertmanager。（来源：Issue #16 Q16.10、CONTEXT「告警源凭据投影」）
 
@@ -80,7 +78,7 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-AUDIT-002 —** 匿名登录失败、CSRF/畸形匿名请求、无效 Runtime/Stele token、未认证 403/401 与 429 **MUST NOT** 逐条写入 SQLite；它们 **MUST** 只进入有界计数器和速率受限的非秘密运维日志，且不得保存密码、完整用户名、token/digest 或请求 body。（来源：Issue #16 Q16.5/Q16.15）
 - **SEC-AUDIT-003 —** 强制 Audit Event 与领域状态变化 **MUST** 在同一 SQLite 事务提交；Audit INSERT 失败时领域写 **MUST** 回滚。确定性拒绝可在零领域变化的短事务写入；基础设施提交结果未知 **MUST NOT** 被另行写成权威 success/failure。（来源：Issue #16 Q16.15、DATA-AUDIT-004）
 - **SEC-AUDIT-004 —（DELETE 语义 superseded by 审计保留机制）** `audit_events` 与 targets **MUST** 由 SQL 禁止 UPDATE；Web API **MUST NOT** 提供单条删除、任意批量删除、改写或清空入口；v1 **MUST NOT** 用同一 SQLite 内的 hash chain 产生无法兑现的防部署操作者篡改承诺。历史的“审计无限保留、一切 DELETE 一律禁止”叙述已被受控保留清理替代（ADR-0006/审计设计 §7）：过期事件及 targets **MAY** 仅在单例 cleanup permit 被 armed 时删除，permit 的 cutoff 由 schema 触发器对照 `audit_retention`（默认且最短 6 个自然月）与受信时钟机械裁决，批次与结果持久留痕；保留期内的记录 **MUST NOT** 被删除。清理控制器/保留设置的运营验收仍在进行。（来源：Issue #16 Q16.18、[审计设计 §7](../../audit-design.md)、`contracts/sql/schema.sql#trg_audit_events_no_delete`）
-- **SEC-LOG-001 —** Quoin、Plinth、Lintel 与 Stele 的普通日志、指标标签、持久诊断、Audit Event 和 UI 技术详情 **MUST** 使用字段白名单；默认 **MUST NOT** 记录请求/响应 body、HTTP headers、gRPC metadata、完整 URL query、protobuf/raw JSON dump、Provider 原始错误或任意对象格式化结果。（来源：Issue #16 Q16.17、CONTEXT「秘密与日志」）
+- **SEC-LOG-001 —** Quoin、Plinth 与 Stele 的普通日志、指标标签、持久诊断、Audit Event 和 UI 技术详情 **MUST** 使用字段白名单；默认 **MUST NOT** 记录请求/响应 body、HTTP headers、gRPC metadata、完整 URL query、protobuf/raw JSON dump、Provider 原始错误或任意对象格式化结果。（来源：Issue #16 Q16.17、CONTEXT「秘密与日志」）
 - **SEC-LOG-002 —** 秘密值 **MUST** 使用不能被普通字符串化的封装类型；其格式化、JSON/Proto debug 或 error wrapping 结果只能是固定 `[REDACTED]`。外部适配器 **MUST** 先把上游失败映射为稳定错误码和允许字段，再写日志、数据库或 HTTP problem。（来源：Issue #16 Q16.17）
 - **SEC-LOG-003 —** 用户主动上传的日志/文本和明确标为敏感的 raw trace **MAY** 包含用户提供的秘密且不做通用猜测式扫描；普通 logger、审计、搜索索引和模型输入 **MUST NOT** 自动复制 raw trace，用户上传正文只按其显式业务路径保留。（来源：CONTEXT「模型调用边界」「在线保留」、Issue #16 Q16.17）
 
@@ -95,12 +93,12 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 
 - **SEC-RESTORE-001 —** 备份归档 **MUST NOT** 做应用层整体加密；连接 secret 字段继续保持自身 AEAD envelope。备份介质机密性由目录/PV 权限、存储层加密、传输与 Admin 下载边界承担，manifest/checksum **MUST** 只表示完整性，不得被描述为保密。（来源：Issue #16 Q16.2、CONTEXT「一致备份」）
 - **SEC-RESTORE-002 —** 恢复工具 **MUST** 在临时位置校验 manifest、checksum、SQLite integrity/foreign keys 与 Artifact 集合；发布恢复库前的最后一个离线事务 **MUST** 建立隔离状态，旧快照 **MUST NOT** 先作为可服务数据库启动再异步清理身份。（来源：Issue #16 Q16.7/Q16.13）
-- **SEC-RESTORE-003 —** 恢复隔离事务 **MUST** 清除全部 Web Session、retire 全部 Runtime credential 与 Active 告警 Bearer、把固定 Runtime slot 置 revoked、禁用除 TTY 选定恢复 Admin 外的用户并要求该 Admin 改临时密码、把全部 Connection 置 RevalidationRequired、把 Browser Identity 置 AuthenticationRequired，并写入维护状态、逐对象清单与 system Audit Event。（来源：Issue #16 Q16.13、CONTEXT「一致备份」）
+- **SEC-RESTORE-003 —** 恢复隔离事务 **MUST** 清除全部 Web Session、retire 全部 Runtime credential 与 Active 告警 Bearer、把固定 Runtime slot 置 revoked、禁用除 TTY 选定恢复 Admin 外的用户并要求该 Admin 改临时密码、把全部 Connection 置 RevalidationRequired，并写入维护状态、逐对象清单与 system Audit Event。（来源：Issue #16 Q16.13、CONTEXT「一致备份」）
 - **SEC-RESTORE-004 —（ADR-0009 更新）** 普通 SQLite 恢复 **MUST NOT** 轮换数据库外的组件客户端证书或根密钥；它们只有在部署 Secret 泄漏或安全事件响应时经 `quoin secrets issue-client-certs --force` 轮换。恢复期间 Stele Delivery **MUST** 返回可重试 unavailable，**MUST NOT** 使用旧快照中的告警 Bearer接入。（来源：Issue #16 Q16.6、CONTEXT「服务身份」）
 - **SEC-MAINT-001 —** 恢复、协调升级与根密钥 rebind **MUST** 复用 `maintenance_state` 单行聚合，并以封闭 reason 区分各自清单；状态与逐对象项目的机器字段、约束由 `contracts/sql/schema.sql` 拥有。维护进入和退出 **MUST** 审计，状态 **MUST NOT** 由进程重启自动清除。（来源：Issue #16 Q16.7/Q16.13）
 - **SEC-MAINT-002 —** OpenAPI operation 默认在维护中拒绝；只有机器标记允许的登录、登出、当前用户、改密、维护/健康诊断与审计读取、Admin 信任重建与 `exitMaintenance` **MAY** 执行。`reason=Upgrade` 时还只允许 `prepareUpgrade` 调和预检与显式 `upgrade-drain` 取消既有工作；不得用该例外创建新任务或调用通用备份 API。SSE、业务上传下载、任务、调度和告警接入 **MUST** 拒绝；HTTP 使用 503，Stele 使用可重试 unavailable，Runtime 只允许连接认证与状态重建而不得派发工作。（来源：Issue #16 Q16.7/Q16.13、Issue #17 Q17.10/Q17.21）
-- **SEC-MAINT-003 —（ADR-0009 更新）** 恢复清单 **MUST** 按“已重建或明确不可用”判定安全：User 已重新启用或保持 disabled；Connection 已重验/重录或保持 disabled（组件身份来自部署 Secret，无需重建）；告警源已有新凭据或保持 disabled；Browser Identity 的 AuthenticationRequired 本身是安全状态。退出 **MUST NOT** 强迫所有可选集成 Ready。（来源：Issue #16 Q16.13）
-- **SEC-MAINT-004 —** 升级清单 **MUST** 包含 active Attempt、active Browser Operation、升级前 Backup Run、版本、迁移和协调升级条件，**MUST NOT** 错误要求恢复身份；进入 Upgrade maintenance 后活动工作必须自然结束或由 Admin 显式取消，完整验证升级前备份成功后才允许停机。RootKeyRebind 清单 **MUST** 要求全部旧 binding Connection 已重新录入或保持 disabled。（来源：Issue #16 Q16.11/Q16.13、Issue #17 Q17.10/Q17.21）
+- **SEC-MAINT-003 —（ADR-0009 更新）** 恢复清单 **MUST** 按“已重建或明确不可用”判定安全：User 已重新启用或保持 disabled；Connection 已重验/重录或保持 disabled（组件身份来自部署 Secret，无需重建）；告警源已有新凭据或保持 disabled。退出 **MUST NOT** 强迫所有可选集成 Ready。（来源：Issue #16 Q16.13）
+- **SEC-MAINT-004 —** 升级清单 **MUST** 包含 active Attempt、升级前 Backup Run、版本、迁移和协调升级条件，**MUST NOT** 错误要求恢复身份；进入 Upgrade maintenance 后活动工作必须自然结束或由 Admin 显式取消，完整验证升级前备份成功后才允许停机。RootKeyRebind 清单 **MUST** 要求全部旧 binding Connection 已重新录入或保持 disabled。（来源：Issue #16 Q16.11/Q16.13、Issue #17 Q17.10/Q17.21）
 - **SEC-MAINT-005 —** `exitMaintenance` **MUST** 是 Admin 领域写命令，携带 `client_command_id` 与当前 maintenance row version；同一事务 **MUST** 重验当前 Admin、reason 对应的非空清单、全部阻塞项目和并发版本，成功后退出并审计。active maintenance 的 row version 在进入后至退出事务前 **MUST** 冻结，禁止用空转版本推进脱离清单 revision。v1 **MUST NOT** 提供 force、skip、仅 UI checkbox 或自动退出路径。（来源：Issue #16 Q16.7/Q16.13）
 
 ## 10. 验证门
@@ -109,9 +107,9 @@ Runtime 机器契约：[contracts/runtime.proto](contracts/runtime.proto)
 - **SEC-VALIDATION-002 —** Session/CSRF fixtures **MUST** 覆盖 same-origin、same-site、cross-site、缺失 Fetch Metadata、缺失 Origin、两者缺失、错误公共 Origin、login 无 Cookie、WebSocket Origin、Session revision 变化与长连接即时关闭；每个允许/拒绝结果 **MUST** 与 OpenAPI/HTTP 条款一致。（来源：Issue #16 Q16.8/Q16.14）
 - **SEC-VALIDATION-003 —** 根密钥验证 **MUST** 以真实 AES-256-GCM 工件覆盖正确 key、缺失/短 key、错误 key、verifier 损坏、nonce/tag/AAD/binding revision 篡改、单条密文损坏、随机源失败、离线 rebind 与旧 binding 不可下发；任何失败 **MUST NOT** 泄漏 plaintext 或把 Connection 继续派发。（来源：Issue #16 Q16.1/Q16.11）
 - **SEC-VALIDATION-004 —** reveal 对抗测试 **MUST** 构造创建响应丢失、同命令重放、并发双消费、审计失败、Session 撤销/降级、过期、进程重启和消费后响应丢失；只有同 Session 的仍有效未消费 handle 可重放，raw secret **MUST** 最多成功读取一次。（来源：Issue #16 Q16.3/Q16.12）
-- **SEC-VALIDATION-005 —** 恢复验证 **MUST** 从包含 active Session、告警 Bearer、enabled User/Connection、Ready Browser Identity 的真实备份恢复，并在任何服务入口开放前证明旧身份全部被隔离、组件客户端证书保持外部有效、维护清单与退出事务符合 SEC-RESTORE-*/SEC-MAINT-*。（来源：Issue #16 Q16.6/Q16.7/Q16.13）
+- **SEC-VALIDATION-005 —** 恢复验证 **MUST** 从包含 active Session、告警 Bearer、enabled User/Connection 的真实备份恢复，并在任何服务入口开放前证明旧身份全部被隔离、组件客户端证书保持外部有效、维护清单与退出事务符合 SEC-RESTORE-*/SEC-MAINT-*。（来源：Issue #16 Q16.6/Q16.7/Q16.13）
 - **SEC-VALIDATION-006 —** 敏感下载验证 **MUST** 覆盖审计写失败前零字节、Operator 403、Admin 成功、Session 在首字节前和传输中被撤销、账号降级、Range 重认证、缓存/Disposition 头与无分享 URL。（来源：Issue #16 Q16.15/Q16.16）
-- **SEC-VALIDATION-007 —** 秘密泄漏验证 **MUST** 向 Cookie、Authorization、密码、API key、kubeconfig、根密钥标记、Provider 错误回显、reveal handle/raw secret 与浏览器 trace 注入唯一 sentinel，并扫描 Quoin/Plinth/Lintel/Stele stdout、stderr、结构化日志、Audit Event、problem response 与 telemetry；普通输出任一命中 **MUST** 失败。明确敏感 raw trace 和用户主动上传正文只验证不被普通 logger/索引复制。（来源：Issue #16 Q16.17）
+- **SEC-VALIDATION-007 —** 秘密泄漏验证 **MUST** 向 Cookie、Authorization、密码、API key、根密钥标记、Provider 错误回显、reveal handle/raw secret 注入唯一 sentinel，并扫描 Quoin/Plinth/Stele stdout、stderr、结构化日志、Audit Event、problem response 与 telemetry；普通输出任一命中 **MUST** 失败。用户主动上传正文只验证不被普通 logger/索引复制。（来源：Issue #16 Q16.17）
 - **SEC-VALIDATION-008 —** 安全机器契约 **MUST** 通过 OpenAPI 零警告 lint、完整 SQLite Schema 装载、foreign key/integrity check、状态机反例、Markdown↔机器契约一致性和独立威胁复审；构建或单个 happy-path 测试成功 **MUST NOT** 代替上述证据。（来源：Issue #16、SPEC-AUTHORITY-003）
 
 ## 11. 上游依据与明确取舍

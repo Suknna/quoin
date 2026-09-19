@@ -1,6 +1,6 @@
 # BusinessSystem 声明指南
 
-> **⚠️ 历史文档（只读保留，2026-09-13）：** [ADR-0004](adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即可获得来源级观测、`sourceRef` 工具与独立巡检计划，业务视图可选；**BusinessSystem 声明的创建、编辑、发布与 Label Contract 界面已从产品中移除**。本文只用于解读既有声明、历史 Run 与迁移映射，下文"目标态/唯一配置权威"等表述不再是现行规范。现行操作请使用 **[接入、观测与巡检使用指南](integration-inspection-guide.md)**；真实部署验收状态见 [plugin-real-deployment-acceptance.md](plugin-real-deployment-acceptance.md)。
+> **⚠️ 历史文档（只读保留，2026-09-13）：** [ADR-0004](adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即可获得来源级观测、`sourceRef` 工具与独立巡检计划，业务视图可选；**BusinessSystem 声明的创建、编辑、发布与 Label Contract 界面已从产品中移除**。本文只用于解读既有声明、历史 Run 与迁移映射，下文"目标态/唯一配置权威"等表述不再是现行规范。现行操作请使用 **[接入、观测与巡检使用指南](integration-inspection-guide.md)**。
 
 **状态：历史目标态指南。** 本指南记录 ADR-0003 批准的统一声明来源设计；它不表示当前 Quoin API、存储、运行时或现有 E2E 环境采用该模型（该模型在部署前已被 ADR-0004 替换）。现有 E2E 文档继续记录其执行当时验证的契约和结果。
 

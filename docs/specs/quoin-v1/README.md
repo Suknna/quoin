@@ -10,7 +10,7 @@
 
 > **状态提示（2026-09-14，Kubernetes 插件退役）：** `kubernetes` 插件描述符已从活动目录移除（以 Retired 留在注册机制中），默认启用主线为 alertmanager/prometheus/thanos；`enabledPlugins` 显式列出 `kubernetes` 即启动失败，前端 `/integrations/kubernetes` 入口已拆除。`kubernetes` 连接类型、OpenAPI 连接变体与连接/凭据 probe 保留且不阻止新建（仅不再对前端通告），历史连接/映射记录与 `kubernetes_read` 实现表保留用于历史数据与执行入口校验；各主题文件中涉及 Kubernetes 插件接线的条款仅作历史解读。
 
-> **状态提示（2026-09-13，ADR-0004 主线）：** [ADR-0004](../../adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即获得来源级观测、`sourceRef` 授权工具与独立巡检计划（scope integration/objects/businessView），业务视图可选，浏览器插件默认停用（独立浏览器身份 `identity_key`）。`BusinessSystem` 声明写入、配置发布、Label Contract 与独立资源刷新界面及 OpenAPI 操作已退役，仅保留只读历史资源；相关条款在各主题文件中以「历史」标注。真实部署验收进行中，逐项结果见 [docs/plugin-real-deployment-acceptance.md](../../../docs/plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。
+> **状态提示（2026-09-13，ADR-0004 主线）：** [ADR-0004](../../adr/0004-plugin-capability-registry.md) 的插件化主线已实施：接入验证并启用即获得来源级观测、`sourceRef` 授权工具与独立巡检计划（scope integration/objects/businessView），业务视图可选。`BusinessSystem` 声明写入、配置发布、Label Contract 与独立资源刷新界面及 OpenAPI 操作已退役，仅保留只读历史资源；相关条款在各主题文件中以「历史」标注。
 
 > **状态提示（2026-09-10）：** [GitHub #95](https://github.com/Suknna/quoin/issues/95) 与 ADR-0002 按切片实施。`6b62904` 已交付管理员关于页、平台故障独立来源、权限边界，以及复用既有 Alertmanager 服务的接入入口和真实 E2E 基础；相关 OpenAPI、SQL 与部署配置契约已同步。#97 已交付以 `metrics_connection_id` 显式引用 Prometheus/Thanos 接入的版本化业务声明、`none`/HTTP Basic/Bearer 认证、受控 Config Verification 查询和 discovery，以及独立刷新退役与历史保留；机器契约、迁移与运行实现同步更新。独立浏览器接入等其余 #95 目标并未因该切片自动交付。平台故障仍沿用首版 fresh-v1/zero-history Schema 门，不支持旧库原地迁移。#97 最终真实测试仍待记录；手调边界见 [Issue #97 手调说明](../../issue-97-validation.md)。本条记录 #97 切片当时状态；其中业务声明写面已随后续 ADR-0004 切片退役，仅作历史解读。
 
@@ -23,8 +23,8 @@
 1. `architecture.md`：系统边界、五个应用与入口职责、跨组件不变量和全局状态模型。
 2. `persistence.md`：SQLite 数据模型、聚合关系、唯一约束、事务、迁移、Artifact 与派生索引。
 3. `http-api.md`：Huma HTTP API、认证授权、命令幂等、错误、分页、快照、SSE 与对话流。
-4. `runtime-protocol.md`：Quoin、Plinth、Lintel、Stele 的身份、Proto 契约指纹握手、控制流、任务、lease、fencing、浏览器会话、文件上传与告警接入。
-5. `inspection-config.md`：独立巡检计划、来源级观测、Journey Catalog，以及历史业务声明 YAML、Label Contract 与 Config Verification Run 材料的解读边界。
+4. `runtime-protocol.md`：Quoin、Plinth、Stele 的身份、Proto 契约指纹握手、控制流、任务、lease、fencing、文件上传与告警接入。
+5. `inspection-config.md`：独立巡检计划、来源级观测，以及历史业务声明 YAML、Label Contract 与 Config Verification Run 材料的解读边界。
 6. `frontend.md`：三栏工作台、URL、核心流程、状态反馈、可访问性和可执行 UI 验收场景。
 7. `security.md`：威胁路径、用户与服务身份、Session、CSRF、权限、秘密、审计和恢复后的信任重建。
 8. `operations.md`：Kubernetes YAML 与 Compose、存储卷、锁、健康检查、备份恢复、保留、升级、配置与可观测性。
@@ -62,18 +62,18 @@ contracts/
 | 路径 | 拥有的机器契约 |
 | --- | --- |
 | `contracts/openapi.yaml` | HTTP 路由、方法、输入输出结构、状态码和可机械表达的 HTTP 契约 |
-| `contracts/runtime.proto` | Quoin、Plinth、Lintel、Stele 的 gRPC service、RPC、message、stream 与 wire-level 枚举 |
+| `contracts/runtime.proto` | Quoin、Plinth、Stele 的 gRPC service、RPC、message、stream 与 wire-level 枚举 |
 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | Plinth supervisor ↔ worker 本地 stdio framed protobuf message 与 wire-level 枚举 |
-| `contracts/metrics.yaml` | Quoin、Plinth、Lintel、Stele 的 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
+| `contracts/metrics.yaml` | Quoin、Plinth、Stele 的 Prometheus family、type、help、classic histogram bucket、封闭 label 与跨契约枚举投影 |
 | `contracts/plinth-worker-tools.yaml` | Plinth worker 的 Bash 调用、固定工具包/版本、可执行路径与 Landlock 只读运行时路径 |
-| `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 |
+| `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest 与 apt 锁 |
 | `contracts/verification-catalog.yaml` | Scenario ID、验证层、cell/capability、依赖、低层证明引用、实现绑定、故障原语、证据与 cleanup 要求 |
 | `contracts/verification-result-profile.yaml` | PASSED/WARNED/FAILED 分类、冲突与聚合规则的唯一机器权威 |
 | `contracts/connection-probes.yaml` | Model Provider、Thanos 与 Kubernetes Connection Probe 的 action-set/version 和封闭机械动作 |
 | `contracts/examples/` | 历史部署输入示例与 Deployment Acceptance helper request/report 示例；当前部署交付以普通 Kubernetes YAML 和简单 Compose 为准，不是独立权威源 |
 | `contracts/schemas/deployment-config.schema.json` | 历史生成式部署配置契约；已由 ADR-0001 替换，不得作为当前 Kubernetes 或 Compose 交付要求 |
-| `contracts/schemas/release-manifest.schema.json` | Release 应用镜像/双架构 digest、浏览器、Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
-| `contracts/schemas/readiness-response.schema.json` | Quoin、Plinth、Lintel、Stele `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
+| `contracts/schemas/release-manifest.schema.json` | Release 应用镜像/双架构 digest、Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
+| `contracts/schemas/readiness-response.schema.json` | Quoin、Plinth、Stele `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
 | `contracts/schemas/verification-catalog.schema.json` | Scenario catalog、cell、capability、fault primitive 与 execution profile 的文档形状 |
 | `contracts/schemas/verification-result.schema.json` | in-toto Statement v1 + Test Result v0.1 的严格 Quoin profile |
 | `contracts/schemas/verification-result-profile.schema.json` | 验证结果分类与聚合 profile 的严格文档形状 |
@@ -94,15 +94,15 @@ contracts/
 | HTTP 字段、类型、路由和状态码 | `contracts/openapi.yaml` | `http-api.md` 解释跨请求语义、事务和状态转换 |
 | 跨组件 gRPC service、message、字段、枚举与 stream 形状 | `contracts/runtime.proto` | `runtime-protocol.md` 解释握手、lease、fencing、重连和调和 |
 | Plinth supervisor ↔ worker 本地 stdio message、字段与枚举 | `contracts/quoin/plinth/worker/v1/agent_worker.proto` | `architecture.md` 解释 framing、sandbox、执行顺序和故障语义 |
-| Quoin、Plinth、Lintel、Stele Prometheus family/type/help/bucket/label 与枚举投影 | `contracts/metrics.yaml` | `contracts/schemas/metrics.schema.json` 校验目录；`operations.md` 解释可达性、语义、告警与验证 |
+| Quoin、Plinth、Stele Prometheus family/type/help/bucket/label 与枚举投影 | `contracts/metrics.yaml` | `contracts/schemas/metrics.schema.json` 校验目录；`operations.md` 解释可达性、语义、告警与验证 |
 | Plinth worker 本地 Bash/Debian package/工具路径与只读运行时路径 | `contracts/plinth-worker-tools.yaml` | `contracts/schemas/plinth-worker-tools.schema.json` 校验目录；`architecture.md` 与 `operations.md` 解释执行和镜像边界 |
 | 历史生成式部署输入 | `contracts/schemas/deployment-config.schema.json` | 仅保留为历史机器资产；当前普通 Kubernetes YAML 与 Compose 交付由 `operations.md` 定义 |
-| 基础镜像、Playwright/Chromium 双架构工件/源码与 Lintel Debian runtime package 锁 | `contracts/release-inputs.yaml` | `contracts/schemas/release-inputs.schema.json` 校验锁；`operations.md` 解释镜像与供应链边界 |
+| 基础镜像与 apt 锁 | `contracts/release-inputs.yaml` | `contracts/schemas/release-inputs.schema.json` 校验锁；`operations.md` 解释镜像与供应链边界 |
 | Scenario、验证层、环境 cell/capability、依赖/证明引用、实现绑定、故障与 cleanup 要求 | `contracts/verification-catalog.yaml` | `contracts/schemas/verification-catalog.schema.json` 校验目录；`verification.md` 解释执行与聚合语义 |
 | Connection Probe 的三类 action-set/version 与机械动作 | `contracts/connection-probes.yaml` | `contracts/schemas/connection-probes.schema.json` 校验目录；架构、持久化、HTTP 与 Runtime 规格引用 digest，不复制动作正文 |
 | Release/Deployment 验证证据与 helper 交换文档形状 | `contracts/schemas/verification-result.schema.json`、`verification-evidence.schema.json`、`deployment-verification.schema.json` | `verification.md` 解释签名、幂等、时间闭包和证据保留；helper request/report 不另建平行 Schema |
 | Release digest、在线/离线资产名、工件、Sigstore bundle 映射、契约版本与验收摘要 | `contracts/schemas/release-manifest.schema.json` | `operations.md` 解释发布、离线包、升级与回滚 |
-| Quoin、Plinth、Lintel、Stele `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
+| Quoin、Plinth、Stele `/readyz` 响应字段、mode/reason 与字段关系 | `contracts/schemas/readiness-response.schema.json` | `operations.md` 解释 HTTP 状态码、职责判断与探针语义 |
 | 其他 YAML/JSON 文档字段、类型和结构约束 | `contracts/schemas/*.schema.json` | 对应主题 Markdown 解释发布、兼容、运行和错误语义 |
 | SQLite 表、列、索引、外键和数据库约束 | `contracts/sql/schema.sql` | `persistence.md` 解释聚合、事务、生命周期和迁移约束 |
 | 跨协议不变量、事务边界、状态转换、权限、运行行为和无法由单份机器契约表达的约束 | 对应主题 Markdown | 机器契约只承载其可机械表达部分 |

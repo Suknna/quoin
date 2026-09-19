@@ -16,4 +16,4 @@ An AI SRE workbench connecting Alertmanager, Prometheus, and Thanos for alert an
 
 `ai-sre` · `observability` · `prometheus` · `alertmanager` · `thanos` · `incident-management` · `golang` · `react`
 
-入口文档：[中文 README](../README.md)、[English README](../README.en.md)。当前活动插件与产品边界以 README 及[使用手册](user-guide.md)为准，目前可用插件为 Prometheus、Thanos、Alertmanager，浏览器与 Kubernetes 插件计划后续接入。
+入口文档：[中文 README](../README.md)、[English README](../README.en.md)。当前活动插件与产品边界以 README 及[使用手册](user-guide.md)为准，目前可用插件为 Prometheus、Thanos、Alertmanager，浏览器与 Kubernetes 插件已移除。

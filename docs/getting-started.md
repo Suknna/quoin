@@ -2,7 +2,7 @@
 
 > 推荐使用 [Kubernetes 启动指南](getting-started-kubernetes.md)。如果环境不具备 Kubernetes，可按本文采用 Docker Compose 部署。
 
-本文供首次使用者**自己安装和初始化 Quoin**。业务环境已单独准备，参数见 [mall-shop 演练](mall-shop-lab.md)。默认五服务为 gateway、frontend、quoin、plinth、stele；当前可用插件为 Prometheus、Thanos、Alertmanager，浏览器与 Kubernetes 插件计划后续接入。
+本文供首次使用者**自己安装和初始化 Quoin**。业务环境已单独准备，参数见 [mall-shop 演练](mall-shop-lab.md)。默认五服务为 gateway、frontend、quoin、plinth、stele；当前可用插件为 Prometheus、Thanos、Alertmanager，浏览器与 Kubernetes 插件已移除。
 
 本手册对应当前源码。认证/审计整体切换在领域文档中仍标记为进行中，不等于安全全验收。[本轮验证记录](acceptance/mall-shop-handbook-20260916.md)区分了已验证的构建与未替用户执行的初始化。
 

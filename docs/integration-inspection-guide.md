@@ -1,6 +1,6 @@
 # 接入、观测与巡检使用指南
 
-**状态：** 面向管理员（Admin）的主线使用指南，对应 [ADR-0004](adr/0004-plugin-capability-registry.md) 的插件化模型。主线链路已实现并由集成验证覆盖；真实部署验收进行中，逐项点击结果见 [plugin-real-deployment-acceptance.md](plugin-real-deployment-acceptance.md)，未全通过前不宣称完成。普通用户（Operator）只使用告警与 AI SRE，不进入本指南描述的管理页面；该边界由服务端逐请求强制。
+**状态：** 面向管理员（Admin）的主线使用指南，对应 [ADR-0004](adr/0004-plugin-capability-registry.md) 的插件化模型。主线链路已实现并由集成验证覆盖。普通用户（Operator）只使用告警与 AI SRE，不进入本指南描述的管理页面；该边界由服务端逐请求强制。
 
 ## 总览
 
@@ -16,7 +16,7 @@
 
 ## 接入管理
 
-入口：运维中心 → **接入管理**（仅 Admin）。页面先展示支持的平台目录与已接入实例；当前活动目录为 Alertmanager、Prometheus、Thanos。浏览器与 Kubernetes 插件计划后续接入。首次部署请从[部署指南](deployment.md)开始，具体操作见[使用手册](user-guide.md)。
+入口：运维中心 → **接入管理**（仅 Admin）。页面先展示支持的平台目录与已接入实例；当前活动目录为 Alertmanager、Prometheus、Thanos。首次部署请从[部署指南](deployment.md)开始，具体操作见[使用手册](user-guide.md)。
 
 1. **创建**：选择平台后进入该平台专属配置表单。地址、TLS、认证模式（`none`／HTTP Basic／Bearer）等按类型收集；秘密只提交一次，不回显、不进入 URL 或日志。同一平台可以有多个接入。
 2. **验证**：新建接入先保持停用，点击验证会创建真实 probe Attempt；首次验证失败不会自动启用或触发该接入的采集。模型供应商的验证还会实测 streaming、tool call 与取消；配置了 Embedding 模型时，还会验证 Embedding 及维度，通过后才允许启用。已启用接入的后续探测结果与启停状态是不同事实，不应将一次探测失败误写成自动停用。
@@ -63,7 +63,7 @@
 
 ## 插件扩展计划
 
-当前可用插件为 Prometheus、Thanos、Alertmanager。浏览器与 Kubernetes 插件计划后续接入，具体能力与配置方式以后续版本为准。当前使用本指南列出的指标与告警接入即可；插件开发机制见[插件开发指南](plugin-development.md)。
+当前可用插件为 Prometheus、Thanos、Alertmanager。浏览器与 Kubernetes 插件已移除。当前使用本指南列出的指标与告警接入即可；插件开发机制见[插件开发指南](plugin-development.md)。
 
 ## 历史数据
 
@@ -72,4 +72,3 @@
 ## 验收边界
 
 - 机器契约、状态机与集成行为由 Contract Gate 与主线集成验证覆盖。
-- 真实部署验收（真实镜像、Kubernetes 部署与浏览器点击链路）进行中，结论以 [plugin-real-deployment-acceptance.md](plugin-real-deployment-acceptance.md) 为准；该记录未全通过前，请勿引用本指南宣称站点验收完成。

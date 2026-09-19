@@ -27,10 +27,8 @@ Quoin uses plugins to extend platform integrations, bringing alerts, metric quer
 | Prometheus | Available | Metric queries, scrape target observation, and inspection evidence collection |
 | Thanos | Available | Prometheus-compatible queries, target observation, and inspection evidence collection |
 | Alertmanager | Available | Alert ingestion and source management |
-| Browser | Planned | Browser integration |
-| Kubernetes (K8s) | Planned | Cluster resource integration |
 
-Current plugins are built and shipped with Quoin. See [plugin development](docs/plugin-development.md) for the extension model. Planned plugins are not available in the current release; their capabilities will be defined in future versions.
+Current plugins are built and shipped with Quoin. See [plugin development](docs/plugin-development.md) for the extension model.
 
 ## How it works
 
@@ -96,6 +94,6 @@ make images
 
 ## Project status
 
-Quoin is under active development, with additional plugin integrations planned. Before production use, evaluate the chosen version and verify access control, certificate trust, verification delivery, and backup and recovery procedures. Assess AI-generated analysis against its underlying evidence.
+Quoin is under active development. Before production use, evaluate the chosen version and verify access control, certificate trust, verification delivery, and backup and recovery procedures. Assess AI-generated analysis against its underlying evidence.
 
 Report bugs and request features through [GitHub Issues](https://github.com/Suknna/quoin/issues). Include the version, reproduction steps, and redacted logs.
