@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 const adminCredentials = { username: "admin", password: "demo-admin-password" };
+// Fixed second-factor code the mock "delivers" for every challenge.
+const demoOtp = "654321";
 const nextPassword = "local-preview-password-2026";
 
 type Guard = {
@@ -60,7 +62,7 @@ test("route matrix renders actual data without unhandled APIs or external transp
 		["/investigations", "调查", "结算延迟调查"],
 		["/inspections", "巡检", "计划绑定接入与模板"],
 		["/knowledge", "知识库", "结算延迟排查"],
-		["/admin", "管理", "关于"],
+		["/settings/platform/about", "设置", "关于平台"],
 	] as const;
 	for (const [route, , data] of routes) {
 		await page.goto(route);
@@ -98,36 +100,59 @@ test("login and first-password scenarios submit errors and successful auth", asy
 	await expect(page.getByText("演示账号或密码不正确")).toBeVisible();
 	await page.getByLabel("密码").fill(adminCredentials.password);
 	await page.getByRole("button", { name: "登录" }).click();
+	// A correct password still owes the second factor: pick the email contact,
+	// have the mock deliver the fixed code, then verify.
+	await page
+		.getByRole("button", { name: /邮箱验证码/ })
+		.first()
+		.click();
+	await page.getByRole("button", { name: "发送验证码" }).click();
+	await page.getByLabel("验证码").fill(demoOtp);
+	await page.getByRole("button", { name: "验证并继续" }).click();
 	await expect(
 		page.getByRole("button", { name: /演示管理员 admin/ }),
 	).toBeVisible();
 
+	// The first-password scenario remounts signed in as an operator whose
+	// stored credential is temporary: sign out, then run the initialization
+	// flow that replaces it — a wrong confirmation first, then the full
+	// password + second-factor walk, which ends back at the login form
+	// because completing an initialization never starts a session.
 	await selectScenario(page, "first-password");
+	await page.getByRole("button", { name: "演示操作员" }).click();
+	await page.getByRole("menuitem", { name: "退出登录" }).click();
+	await expect(page.getByRole("heading", { name: "登录工作台" })).toBeVisible();
+	await page.getByLabel("用户名").fill("operator");
+	await page.getByLabel("密码").fill("demo-operator-password");
+	await page.getByRole("button", { name: "登录" }).click();
 	await expect(
-		page.getByRole("heading", { name: "先设置你自己的密码" }),
+		page.getByRole("heading", { name: "设置你的新密码" }),
 	).toBeVisible();
-	await page.getByLabel("当前临时密码").fill("wrong-current-password");
 	await page
 		.getByRole("textbox", { name: "新密码", exact: true })
 		.fill(nextPassword);
+	await page.getByLabel("再次输入新密码").fill("a-different-password");
+	await page.getByRole("button", { name: "保存并继续" }).click();
+	await expect(page.getByText("两次输入的新密码不一致。")).toBeVisible();
 	await page.getByLabel("再次输入新密码").fill(nextPassword);
-	await page.getByRole("button", { name: "保存并进入工作台" }).click();
-	await expect(page.getByText("当前演示密码不正确")).toBeVisible();
-	await expect(
-		page.getByRole("heading", { name: "先设置你自己的密码" }),
-	).toBeVisible();
-	await page.getByLabel("当前临时密码").fill("demo-operator-password");
+	await page.getByRole("button", { name: "保存并继续" }).click();
 	await page
-		.getByRole("textbox", { name: "新密码", exact: true })
-		.fill(nextPassword);
-	await page.getByLabel("再次输入新密码").fill(nextPassword);
-	await page.getByRole("button", { name: "保存并进入工作台" }).click();
+		.getByRole("button", { name: /邮箱验证码/ })
+		.first()
+		.click();
+	await page.getByRole("button", { name: "发送验证码" }).click();
+	await page.getByLabel("验证码").fill(demoOtp);
+	await page.getByRole("button", { name: "验证并继续" }).click();
 	await expect(
-		page.getByRole("heading", { name: "先设置你自己的密码" }),
+		page.getByRole("heading", { name: "准备完成初始化" }),
+	).toBeVisible();
+	await page.getByRole("button", { name: "完成初始化" }).click();
+	await expect(
+		page.getByText("初始化完成，请使用你的用户名和新密码登录。"),
+	).toBeVisible();
+	await expect(
+		page.getByRole("heading", { name: "设置你的新密码" }),
 	).toHaveCount(0);
-	await expect(
-		page.getByRole("button", { name: /演示操作员 operator/ }),
-	).toBeVisible();
 	await expectHealthy(page, guard);
 });
 
