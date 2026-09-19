@@ -23,9 +23,7 @@ func TestOperatorCannotCallManagementAPIs(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/admin/about",
 		"/api/v1/connections",
-		"/api/v1/business-systems",
 		"/api/v1/inspections/runs?businessSystemKey=anything",
-		"/api/v1/runtime",
 		"/api/v1/audit-events",
 		"/api/v1/integrations/plugins",
 		"/api/v1/inspections/plans",

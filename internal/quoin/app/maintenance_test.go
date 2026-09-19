@@ -113,13 +113,6 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	// The new password again only opens a flow: the second-factor login issues
 	// the session used for the remaining route checks.
 	cookie = scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "replacement-password-456", sender)
-	runtimeRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runtime", nil)
-	runtimeRequest.AddCookie(cookie)
-	runtimeResponse := httptest.NewRecorder()
-	handler.ServeHTTP(runtimeResponse, runtimeRequest)
-	if runtimeResponse.Code != http.StatusOK {
-		t.Fatalf("runtime status=%d body=%s", runtimeResponse.Code, runtimeResponse.Body.String())
-	}
 	auditRequest := httptest.NewRequest(http.MethodGet, "/api/v1/audit-events", nil)
 	auditRequest.AddCookie(cookie)
 	auditResponse := httptest.NewRecorder()
@@ -179,7 +172,6 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	}
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/admin/users"},
-		{http.MethodGet, "/api/v1/runtime"},
 		{http.MethodGet, "/api/v1/alert-sources"},
 	} {
 		request := httptest.NewRequest(route.method, route.path, nil)

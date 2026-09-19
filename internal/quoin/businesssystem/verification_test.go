@@ -29,7 +29,7 @@ spec:
 func TestRunVerificationZeroCheckDraftPassesInCommand(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, zeroCheckSystemYAML, 1, "cmd-t17-zero-0001")
-	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0001", "checks-free", versionID(t, draft))
+	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0001", "checks-free", draft)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -66,13 +66,13 @@ func TestRunVerificationZeroCheckDraftPassesInCommand(t *testing.T) {
 		t.Fatalf("state_changed rows wrong: %d", taskRows)
 	}
 	// Command replay returns the stored run.
-	replayed, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0001", "checks-free", versionID(t, draft))
+	replayed, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0001", "checks-free", draft)
 	if err != nil || replayed.ID != detail.ID {
 		t.Fatalf("replay must return the original run: %#v %v", replayed, err)
 	}
 	// A second distinct command creates a second Passed run (the fence only
 	// applies while a run is active).
-	again, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0002", "checks-free", versionID(t, draft))
+	again, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0002", "checks-free", draft)
 	if err != nil || again.State != "Passed" || again.ID == detail.ID {
 		t.Fatalf("second run after Passed must be allowed: %#v %v", again, err)
 	}
@@ -89,7 +89,7 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttemptsForPrometheus(t *tes
 	}
 	yaml := strings.Replace(validSystemYAML, `connectionRef: main-thanos`, `connectionRef: main-prometheus`, 1)
 	draft := h.mustUpload(t, yaml, 1, "cmd-t17-prometheus-0001")
-	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-prometheus-0002", "payments", versionID(t, draft))
+	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-prometheus-0002", "payments", draft)
 	if err != nil {
 		t.Fatalf("Prometheus verification grant creation: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttemptsForPrometheus(t *tes
 func TestRunVerificationPromQLDraftCreatesSupervisorAttempts(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-checks-0001")
-	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0003", "payments", versionID(t, draft))
+	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0003", "payments", draft)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttempts(t *testing.T) {
 		t.Fatalf("declared discovery must have one standalone verification attempt: count=%d err=%v", discoveries, err)
 	}
 	// The active fence rejects a second run over the same draft.
-	_, err = h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0004", "payments", versionID(t, draft))
+	_, err = h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0004", "payments", draft)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || conflict.Code != "active_conflict" {
 		t.Fatalf("active run must conflict, got %#v %v", conflict, err)
@@ -137,18 +137,18 @@ func TestRunVerificationPromQLDraftCreatesSupervisorAttempts(t *testing.T) {
 func TestCancelVerificationFence(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-cancel-0001")
-	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0005", "payments", versionID(t, draft))
+	detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0005", "payments", draft)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	id := verificationRunID(t, detail)
 	// Stale expectedRowVersion conflicts.
-	_, err = h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0002", "payments", versionID(t, draft), id, 99)
+	_, err = h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0002", "payments", draft, id, 99)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || conflict.Code != "row_version_conflict" {
 		t.Fatalf("stale cancel must conflict: %#v %v", conflict, err)
 	}
-	cancelled, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0003", "payments", versionID(t, draft), id, 2)
+	cancelled, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0003", "payments", draft, id, 2)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
@@ -157,15 +157,15 @@ func TestCancelVerificationFence(t *testing.T) {
 	}
 	// Cancel replay is idempotent; a second distinct cancel command hits the
 	// terminal fence.
-	if _, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0003", "payments", versionID(t, draft), id, 2); err != nil {
+	if _, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0003", "payments", draft, id, 2); err != nil {
 		t.Fatalf("cancel replay must be idempotent: %v", err)
 	}
-	_, err = h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0004", "payments", versionID(t, draft), id, 2)
+	_, err = h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-cancel-0004", "payments", draft, id, 2)
 	if !errors.As(err, &conflict) || conflict.Code != "row_version_conflict" {
 		t.Fatalf("terminal cancel must conflict: %#v %v", conflict, err)
 	}
 	// After the terminal run a fresh run may be created.
-	fresh, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0006", "payments", versionID(t, draft))
+	fresh, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0006", "payments", draft)
 	if err != nil || fresh.State != "Running" {
 		t.Fatalf("run after cancel must be allowed: %#v %v", fresh, err)
 	}
@@ -174,7 +174,7 @@ func TestCancelVerificationFence(t *testing.T) {
 func TestCommitVerificationProposalWritesEvidenceAndClosesRun(t *testing.T) {
 	h := newHarness(t)
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t18-result-0001")
-	run, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t18-result-0002", "payments", versionID(t, draft))
+	run, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t18-result-0002", "payments", draft)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,12 +225,16 @@ func TestCommitVerificationProposalWritesEvidenceAndClosesRun(t *testing.T) {
 			}
 		}
 	}
-	final, err := h.systems.GetVerification(context.Background(), "payments", versionID(t, draft), verificationRunID(t, run))
-	if err != nil {
+	var finalState string
+	if err := h.db.QueryRow(`SELECT state FROM config_verification_runs WHERE id=?`, verificationRunID(t, run)).Scan(&finalState); err != nil {
 		t.Fatal(err)
 	}
-	if final.State != "Passed" || len(final.CheckResults) != 2 || len(final.IdentitySamples) != 1 {
-		t.Fatalf("final=%#v", final)
+	var checkResults, identitySamples int
+	if err := h.db.QueryRow(`SELECT (SELECT COUNT(*) FROM config_verification_run_check_results WHERE verification_run_id=?),(SELECT COUNT(*) FROM config_verification_discovery_results WHERE verification_run_id=? AND status='ok')`, verificationRunID(t, run), verificationRunID(t, run)).Scan(&checkResults, &identitySamples); err != nil {
+		t.Fatal(err)
+	}
+	if finalState != "Passed" || checkResults != 2 || identitySamples != 1 {
+		t.Fatalf("state=%q checkResults=%d identitySamples=%d", finalState, checkResults, identitySamples)
 	}
 	var evidence int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM evidence WHERE target_type='config_verification_run'`).Scan(&evidence); err != nil {
@@ -246,100 +250,12 @@ func TestRunVerificationRejectsPublishedVersion(t *testing.T) {
 	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-pub-0001")
 	// The publish command is retired; the published state arrives through the
 	// test-only SQL fixture and the admission fence must still refuse it.
-	h.publishFixture(t, "payments", versionID(t, draft))
-	_, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0007", "payments", versionID(t, draft))
+	h.publishFixture(t, "payments", draft)
+	_, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-run-0007", "payments", draft)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || !strings.Contains(conflict.Detail, "未发布草稿") {
 		t.Fatalf("published version must refuse verification: %#v %v", conflict, err)
 	}
-}
-
-func TestListVerificationsHistory(t *testing.T) {
-	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-hist-0001")
-	first, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-hist-0002", "payments", versionID(t, draft))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-hist-0003", "payments", versionID(t, draft), verificationRunID(t, first), 2); err != nil {
-		t.Fatal(err)
-	}
-	second, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-hist-0004", "payments", versionID(t, draft))
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, more, err := h.systems.ListVerifications(context.Background(), "payments", versionID(t, draft), "", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if more || len(items) != 2 || items[0].ID != second.ID || items[1].ID != first.ID {
-		t.Fatalf("history order wrong: %#v more=%v", items, more)
-	}
-	oneMore, more2, err := h.systems.ListVerifications(context.Background(), "payments", versionID(t, draft), items[0].CreatedAt+"\x00"+items[0].ID, 10)
-	if err != nil || more2 || len(oneMore) != 1 || oneMore[0].ID != first.ID {
-		t.Fatalf("cursor page wrong: %#v %v", oneMore, err)
-	}
-}
-
-func TestListVerificationsUsesCreatedAtAndIDKeysetOrder(t *testing.T) {
-	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 1, "cmd-t17-page-0001")
-	version := versionID(t, draft)
-	// Give later IDs deliberately older timestamps. The existing service clock
-	// is the proper test seam; config verification run origin is immutable.
-	// Each command consumes exactly one clock value since the runner owns the
-	// ledger and audit timestamps (the manual cancel audit insert is gone).
-	clockValues := []time.Time{
-		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
-	}
-	clockIndex := 0
-	h.systems.now = func() time.Time {
-		value := clockValues[clockIndex]
-		clockIndex++
-		return value
-	}
-	runs := make([]VerificationRunDetail, 3)
-	for index := range runs {
-		detail, err := h.systems.RunVerification(h.adminContext(t), h.principal, "cmd-t17-page-000"+strconv.Itoa(index+2), "payments", version)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := h.systems.CancelVerification(h.adminContext(t), h.principal, "cmd-t17-page-cancel-000"+strconv.Itoa(index+2), "payments", version, verificationRunID(t, detail), 2); err != nil {
-			t.Fatal(err)
-		}
-		runs[index] = detail
-	}
-
-	var received []string
-	cursor := ""
-	for page := 0; page < 3; page++ {
-		items, more, err := h.systems.ListVerifications(context.Background(), "payments", version, cursor, 1)
-		if err != nil || len(items) != 1 {
-			t.Fatalf("page %d: items=%#v more=%v err=%v", page, items, more, err)
-		}
-		received = append(received, items[0].ID)
-		cursor = items[0].CreatedAt + "\x00" + items[0].ID
-		if more != (page < 2) {
-			t.Fatalf("page %d more=%v", page, more)
-		}
-	}
-	// Runs 0 and 2 share a timestamp, so the secondary ID order must decide
-	// their order; run 1 is older despite its middle ID.
-	want := []string{runs[2].ID, runs[0].ID, runs[1].ID}
-	if strings.Join(received, ",") != strings.Join(want, ",") {
-		t.Fatalf("created-at/id keyset pages=%v want=%v", received, want)
-	}
-}
-
-func versionID(t *testing.T, detail ConfigVersionDetail) int64 {
-	t.Helper()
-	id, err := strconv.ParseInt(detail.ID, 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
 }
 
 func verificationRunID(t *testing.T, detail VerificationRunDetail) int64 {

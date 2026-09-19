@@ -15,19 +15,15 @@ import (
 func TestRuntimeSlotGateHidesLintelWhenBrowserDisabled(t *testing.T) {
 	surface := newStandaloneSurface(t, nil)
 
-	status, body := surface.request(t, http.MethodGet, "/api/v1/runtime", "")
+	status, body := surface.request(t, http.MethodGet, "/api/v1/admin/about", "")
 	if status != http.StatusOK {
-		t.Fatalf("runtime read must stay available: %d %s", status, body)
+		t.Fatalf("about read must stay available: %d %s", status, body)
 	}
-	if !strings.Contains(body, `"plinth"`) {
+	if !strings.Contains(body, `"slot":"plinth"`) {
 		t.Fatalf("plinth slot must stay projected: %s", body)
 	}
 	if strings.Contains(body, `"lintel"`) {
 		t.Fatalf("retired browser business must not project a lintel slot: %s", body)
-	}
-	status, body = surface.request(t, http.MethodGet, "/api/v1/admin/about", "")
-	if status != http.StatusOK || strings.Contains(body, `"slot":"lintel"`) {
-		t.Fatalf("about components must omit lintel: %d %s", status, body)
 	}
 	// The registration-era commands behave as absent routes on every slot:
 	// there is nothing left to register through the HTTP surface.

@@ -57,7 +57,6 @@ func (handler *Handler) Register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/undo", OperationID: "undoInvestigationMessage"}, handler.undoInvestigationMessage)
 	handler.RegisterUpgradeDrain(api)
 	huma.Register(api, huma.Operation{Method: "POST", Path: "/api/v1/investigations/{investigationId}/attempts/{attemptId}/retry", OperationID: "retryInvestigationAttempt", DefaultStatus: 202}, handler.retryInvestigationAttempt)
-	huma.Register(api, huma.Operation{Method: "GET", Path: "/api/v1/investigation-attachments/{attachmentId}", OperationID: "getInvestigationAttachment"}, handler.getInvestigationAttachment)
 }
 
 func (handler *Handler) principal(ctx context.Context, cookie string) (int64, error) {
@@ -159,7 +158,8 @@ func (handler *Handler) listInvestigations(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Cursor  string `query:"cursor"`
 	Limit   int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*investigationListBody, error) {
+},
+) (*investigationListBody, error) {
 	if _, err := handler.principal(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -192,7 +192,8 @@ func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 		Sources           []sourceInputWire `json:"sources,omitempty"`
 		BusinessSystemKey string            `json:"businessSystemKey,omitempty"`
 	}
-}) (*investigationDetailBody, error) {
+},
+) (*investigationDetailBody, error) {
 	principalID, err := handler.principal(ctx, input.Session)
 	if err != nil {
 		return nil, err
@@ -230,7 +231,8 @@ func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 func (handler *Handler) getInvestigation(ctx context.Context, input *struct {
 	Session         string `cookie:"__Host-quoin-session"`
 	InvestigationID string `path:"investigationId"`
-}) (*investigationDetailBody, error) {
+},
+) (*investigationDetailBody, error) {
 	if _, err := handler.principal(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -254,7 +256,8 @@ func (handler *Handler) listInvestigationMessages(ctx context.Context, input *st
 	InvestigationID string `path:"investigationId"`
 	Cursor          string `query:"cursor"`
 	Limit           int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*messageListBody, error) {
+},
+) (*messageListBody, error) {
 	if _, err := handler.principal(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -296,7 +299,8 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 		AttachmentIDs         []string `json:"attachmentIds,omitempty"`
 		ExpectedHeadMessageID *string  `json:"expectedHeadMessageId"`
 	}
-}) (*messageBody, error) {
+},
+) (*messageBody, error) {
 	principalID, err := handler.principal(ctx, input.Session)
 	if err != nil {
 		return nil, err
@@ -344,7 +348,8 @@ func (handler *Handler) listInvestigationAttempts(ctx context.Context, input *st
 	InvestigationID string `path:"investigationId"`
 	Cursor          string `query:"cursor"`
 	Limit           int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*attemptListBody, error) {
+},
+) (*attemptListBody, error) {
 	if _, err := handler.principal(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -379,7 +384,8 @@ func (handler *Handler) listAttemptToolCalls(ctx context.Context, input *struct 
 	AttemptID       string `path:"attemptId"`
 	Cursor          string `query:"cursor"`
 	Limit           int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*toolCallListBody, error) {
+},
+) (*toolCallListBody, error) {
 	if _, err := handler.principal(ctx, input.Session); err != nil {
 		return nil, err
 	}

@@ -99,7 +99,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	add(
 		declaration("getMaintenanceState", http.MethodGet, "/api/v1/maintenance", operations.LevelSession, operations.KindQuery, "maintenance"),
 		declaration("exitMaintenance", http.MethodPost, "/api/v1/maintenance/exit", operations.LevelAdmin, operations.KindCommand, "maintenance"),
-		declaration("getRuntimeStatus", http.MethodGet, "/api/v1/runtime", operations.LevelAdmin, operations.KindQuery, "runtime"),
 		declaration("getAdminAbout", http.MethodGet, "/api/v1/admin/about", operations.LevelAdmin, operations.KindQuery, "platform"),
 		declaration("prepareUpgrade", http.MethodPost, "/api/v1/maintenance/upgrade/prepare", operations.LevelAdmin, operations.KindCommand, "maintenance"),
 	)
@@ -141,11 +140,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 
 	// 观测与插件（Admin）。
 	add(
-		declaration("listSourceObservedResources", http.MethodGet, "/api/v1/integrations/{connectionName}/resources", operations.LevelAdmin, operations.KindQuery, "connection"),
-		declaration("getSourceObservedResource", http.MethodGet, "/api/v1/integrations/{connectionName}/resources/{resourceId}", operations.LevelAdmin, operations.KindQuery, "connection"),
-		declaration("listSourceObservationRuns", http.MethodGet, "/api/v1/integrations/{connectionName}/observation-runs", operations.LevelAdmin, operations.KindQuery, "observation_run"),
-		declaration("getSourceObservationRun", http.MethodGet, "/api/v1/integrations/{connectionName}/observation-runs/{observationRunId}", operations.LevelAdmin, operations.KindQuery, "observation_run"),
-		declaration("refreshIntegrationResources", http.MethodPost, "/api/v1/integrations/{connectionName}/resources:refresh", operations.LevelAdmin, operations.KindCommand, "connection"),
 		declaration("listIntegrationPlugins", http.MethodGet, "/api/v1/integrations/plugins", operations.LevelAdmin, operations.KindQuery, "plugin"),
 	)
 
@@ -160,15 +154,12 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("listInitialAnalysisAttempts", http.MethodGet, "/api/v1/alerts/{occurrenceId}/analyses/{analysisId}/attempts", operations.LevelFull, operations.KindQuery, "attempt"),
 		declaration("retryInitialAnalysis", http.MethodPost, "/api/v1/alerts/{occurrenceId}/analyses/{analysisId}/retry", operations.LevelFull, operations.KindCommand, "analysis"),
 		declaration("cancelInitialAnalysis", http.MethodPost, "/api/v1/alerts/{occurrenceId}/analyses/{analysisId}/cancel", operations.LevelFull, operations.KindCommand, "analysis"),
-		declaration("getTaskSnapshot", http.MethodGet, "/api/v1/tasks/snapshot", operations.LevelFull, operations.KindQuery, "attempt"),
 	)
 
 	// 证据与敏感内容。
 	add(
 		declaration("getEvidence", http.MethodGet, "/api/v1/evidence/{evidenceId}", operations.LevelFull, operations.KindQuery, "evidence"),
 		declaration("getArtifactMetadata", http.MethodGet, "/api/v1/artifacts/{artifactId}", operations.LevelFull, operations.KindQuery, "artifact"),
-		declaration("getSourceMaterial", http.MethodGet, "/api/v1/source-materials/{materialId}", operations.LevelFull, operations.KindQuery, "source_material"),
-		declaration("downloadSourceMaterialContent", http.MethodGet, "/api/v1/source-materials/{materialId}/content", operations.LevelFull, operations.KindSensitiveRead, "source_material"),
 	)
 
 	// 备份（Admin）。
@@ -195,20 +186,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("undoInvestigationMessage", http.MethodPost, "/api/v1/investigations/{investigationId}/undo", operations.LevelFull, operations.KindCommand, "message"),
 		declaration("retryInvestigationAttempt", http.MethodPost, "/api/v1/investigations/{investigationId}/attempts/{attemptId}/retry", operations.LevelFull, operations.KindCommand, "attempt"),
 		declaration("cancelInvestigationAttempt", http.MethodPost, "/api/v1/investigations/{investigationId}/attempts/{attemptId}/cancel", operations.LevelFull, operations.KindCommand, "attempt"),
-		declaration("getInvestigationAttachment", http.MethodGet, "/api/v1/investigation-attachments/{attachmentId}", operations.LevelFull, operations.KindQuery, "attachment"),
-	)
-
-	// 历史业务系统（Admin，只读解释）。
-	add(
-		declaration("listBusinessSystems", http.MethodGet, "/api/v1/business-systems", operations.LevelAdmin, operations.KindQuery, "business_system"),
-		declaration("getBusinessSystem", http.MethodGet, "/api/v1/business-systems/{systemKey}", operations.LevelAdmin, operations.KindQuery, "business_system"),
-		declaration("listBusinessSystemConfigs", http.MethodGet, "/api/v1/business-systems/{systemKey}/config", operations.LevelAdmin, operations.KindQuery, "business_system"),
-		declaration("getBusinessSystemConfig", http.MethodGet, "/api/v1/business-systems/{systemKey}/config/{versionId}", operations.LevelAdmin, operations.KindQuery, "business_system"),
-		declaration("listConfigVerificationRuns", http.MethodGet, "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications", operations.LevelAdmin, operations.KindQuery, "config_verification_run"),
-		declaration("getConfigVerificationRun", http.MethodGet, "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}", operations.LevelAdmin, operations.KindQuery, "config_verification_run"),
-		declaration("getResourceRefreshRun", http.MethodGet, "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}", operations.LevelAdmin, operations.KindQuery, "resource_refresh_run"),
-		declaration("listObservedResources", http.MethodGet, "/api/v1/business-systems/{systemKey}/resources", operations.LevelAdmin, operations.KindQuery, "observed_resource"),
-		declaration("getObservedResource", http.MethodGet, "/api/v1/business-systems/{systemKey}/resources/{resourceId}", operations.LevelAdmin, operations.KindQuery, "observed_resource"),
 	)
 
 	// 巡检（Admin）。
@@ -263,7 +240,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	// 原生 mux 路由（正常面）：SSE、下载与上传经 Wrap 包装，不缓冲响应。
 	add(
 		raw(declaration("streamAlertEvents", http.MethodGet, "/api/v1/alerts/events", operations.LevelSession, operations.KindStream, "alert")),
-		raw(declaration("streamTaskEvents", http.MethodGet, "/api/v1/tasks/events", operations.LevelSession, operations.KindStream, "attempt")),
 		raw(declaration("downloadArtifactContent", http.MethodGet, "/api/v1/artifacts/{artifactId}/content", operations.LevelSession, operations.KindSensitiveRead, "artifact")),
 		raw(declaration("downloadBackup", http.MethodGet, "/api/v1/backups/{backupId}/download", operations.LevelAdmin, operations.KindSensitiveRead, "backup")),
 		raw(declaration("uploadInvestigationAttachment", http.MethodPost, "/api/v1/investigation-attachments", operations.LevelFull, operations.KindCommand, "attachment")),
@@ -314,7 +290,6 @@ var maintenanceReasonAllowlists = map[string][]string{
 		"getConnectionProbeAttempt", "listConnectionProbeResults", "listConnectionRevisions", "listCredentialGenerations",
 	},
 	"Restore": {
-		"getRuntimeStatus",
 		"listUsers", "createUser", "updateUser", "resetUserPassword", "revokeUserSessions",
 		"listConnections", "getConnection", "rotateConnectionCredential", "disableConnection",
 		"getConnectionProbeAttempt", "listConnectionProbeResults", "listConnectionRevisions", "listCredentialGenerations",

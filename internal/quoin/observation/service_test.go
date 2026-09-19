@@ -302,6 +302,75 @@ func resourceStates(t *testing.T, h *harness) map[string]map[string]any {
 	return states
 }
 
+// runObjectRows asserts the per-object projection rows directly (the HTTP
+// read surface is retired; the DB rows remain the authority).
+func (h *harness) runObjectRows(t *testing.T, runID int64) []struct {
+	ObjectType string
+	Status     string
+	GapReason  *string
+	EvidenceID *string
+} {
+	t.Helper()
+	rows, err := h.db.Query(`SELECT object_type,status,gap_reason,evidence_id FROM observation_run_objects WHERE observation_run_id=? ORDER BY object_type`, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type row = struct {
+		ObjectType string
+		Status     string
+		GapReason  *string
+		EvidenceID *string
+	}
+	out := []row{}
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.ObjectType, &item.Status, &item.GapReason, &item.EvidenceID); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// observedResourceRows reads the projected identity table for assertions,
+// decoding the label payload the projection persists.
+func (h *harness) observedResourceRows(t *testing.T) []struct {
+	Current bool
+	Labels  map[string]string
+} {
+	t.Helper()
+	rows, err := h.db.Query(`SELECT current,labels_json FROM observed_source_objects ORDER BY identity_key`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type row = struct {
+		Current bool
+		Labels  map[string]string
+	}
+	out := []row{}
+	for rows.Next() {
+		var current int
+		var labelsJSON string
+		if err := rows.Scan(&current, &labelsJSON); err != nil {
+			t.Fatal(err)
+		}
+		labels := map[string]string{}
+		if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, row{Current: current == 1, Labels: labels})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func TestStartRunFreezesRunningRootWithPluginOwnedChildren(t *testing.T) {
 	h := newHarness(t, "prometheus")
 	run := h.startRun(t, "cmd-obs-start-0001", "manual", nil)
@@ -549,30 +618,6 @@ func gapReason(reason string) *string { return &reason }
 
 // TestSetReaderServesReads pins the composition seam: after SetReader the
 // read models are served through the injected (read-only) query surface.
-func TestSetReaderServesReads(t *testing.T) {
-	h := newHarness(t, "prometheus")
-	run := h.startRun(t, "cmd-obs-reader-0001", "manual", nil)
-
-	readOnly, err := execution.OpenReadOnly(h.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { readOnly.Close() })
-	if err := h.service.SetReader(readOnly); err != nil {
-		t.Fatal(err)
-	}
-
-	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, run.ID)))
-	if err != nil {
-		t.Fatalf("read through the injected reader: %v", err)
-	}
-	if detail.ID != run.ID || detail.State != "Running" {
-		t.Fatalf("read through reader returned wrong run: %#v", detail)
-	}
-	if _, _, err := h.service.ListResources(context.Background(), "main-prometheus", "", "", 0, 50); err != nil {
-		t.Fatalf("resource reads through the injected reader: %v", err)
-	}
-}
 
 func TestCommitProposalSuccessProjectsAndCompletes(t *testing.T) {
 	h := newHarness(t, "prometheus")
@@ -587,22 +632,21 @@ func TestCommitProposalSuccessProjectsAndCompletes(t *testing.T) {
 		map[string]string{"job": "web", "instance": "two:80"},
 	), nil)
 
-	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, run.ID)))
-	if err != nil {
+	var runState string
+	runID := int64(parseID(t, run.ID))
+	if err := h.db.QueryRow(`SELECT state FROM observation_runs WHERE id=?`, runID).Scan(&runState); err != nil {
 		t.Fatal(err)
 	}
-	if detail.State != "Completed" || len(detail.Objects) != 1 || detail.Objects[0].Status != "ok" || detail.Objects[0].EvidenceID == nil {
-		t.Fatalf("run after success wrong: %#v", detail)
+	objects := h.runObjectRows(t, runID)
+	if runState != "Completed" || len(objects) != 1 || objects[0].Status != "ok" || objects[0].EvidenceID == nil {
+		t.Fatalf("run after success wrong: state=%q objects=%v", runState, objects)
 	}
-	items, _, err := h.service.ListResources(context.Background(), "main-prometheus", "", "", 0, 50)
-	if err != nil {
-		t.Fatal(err)
+	resources := h.observedResourceRows(t)
+	if len(resources) != 2 {
+		t.Fatalf("projected resources = %d, want 2", len(resources))
 	}
-	if len(items) != 2 {
-		t.Fatalf("projected resources = %d, want 2", len(items))
-	}
-	for _, item := range items {
-		if item.State != "observed" || item.Labels["job"] != "web" || item.IdentityLabels["job"] != "web" {
+	for _, item := range resources {
+		if !item.Current || item.Labels["job"] != "web" {
 			t.Fatalf("projected resource wrong: %#v", item)
 		}
 	}
@@ -685,12 +729,13 @@ func TestCommitProposalGapNeverClearsObservedResources(t *testing.T) {
 	gap := "query_failed"
 	h.commitProposal(t, second.ID, queued[0], "error", nil, &gap)
 
-	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, second.ID)))
-	if err != nil {
+	var failedState string
+	var failedDetail sql.NullString
+	if err := h.db.QueryRow(`SELECT state,result_detail FROM observation_runs WHERE id=?`, int64(parseID(t, second.ID))).Scan(&failedState, &failedDetail); err != nil {
 		t.Fatal(err)
 	}
-	if detail.State != "Failed" || detail.ResultDetail == nil || detail.Objects[0].Status != "error" {
-		t.Fatalf("failed run wrong: %#v", detail)
+	if failedState != "Failed" || !failedDetail.Valid || h.runObjectRows(t, int64(parseID(t, second.ID)))[0].Status != "error" {
+		t.Fatalf("failed run wrong: state=%q detail=%v", failedState, failedDetail.Valid)
 	}
 	states := resourceStates(t, h)
 	if len(states) != 2 {
@@ -710,14 +755,15 @@ func TestCommitProposalGapNeverClearsObservedResources(t *testing.T) {
 	h.bindChildToRunning(t, queued[0])
 	partial := "partial_response"
 	h.commitProposal(t, third.ID, queued[0], "gap", nil, &partial)
-	detail, err = h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, third.ID)))
-	if err != nil {
+	var warnedState string
+	if err := h.db.QueryRow(`SELECT state FROM observation_runs WHERE id=?`, int64(parseID(t, third.ID))).Scan(&warnedState); err != nil {
 		t.Fatal(err)
 	}
 	// The schema keeps the warned Run header detail-free: the object row
 	// carries the exact frozen gap reason.
-	if detail.State != "CompletedWithWarnings" || detail.Objects[0].Status != "gap" || detail.Objects[0].GapReason == nil {
-		t.Fatalf("warned run wrong: %#v", detail)
+	warnedObjects := h.runObjectRows(t, int64(parseID(t, third.ID)))
+	if warnedState != "CompletedWithWarnings" || len(warnedObjects) != 1 || warnedObjects[0].Status != "gap" || warnedObjects[0].GapReason == nil {
+		t.Fatalf("warned run wrong: state=%q objects=%v", warnedState, warnedObjects)
 	}
 	if len(resourceStates(t, h)) != 2 {
 		t.Fatal("gap pass changed the projection")
@@ -749,24 +795,25 @@ func TestCompleteSuccessExpressesAbsenceAsNotObserved(t *testing.T) {
 		map[string]string{"job": "web", "instance": "one:80", "pod": "one-v2"},
 	), nil)
 
-	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, second.ID)))
-	if err != nil {
+	var secondState string
+	if err := h.db.QueryRow(`SELECT state FROM observation_runs WHERE id=?`, int64(parseID(t, second.ID))).Scan(&secondState); err != nil {
 		t.Fatal(err)
 	}
-	if detail.State != "Completed" {
-		t.Fatalf("second complete run = %s", detail.State)
+	if secondState != "Completed" {
+		t.Fatalf("second complete run = %s", secondState)
 	}
-	items, _, err := h.service.ListResources(context.Background(), "main-prometheus", "", "not_observed", 0, 50)
-	if err != nil {
-		t.Fatal(err)
+	projected := h.observedResourceRows(t)
+	if len(projected) != 2 {
+		t.Fatalf("projection must keep both identities: %#v", projected)
 	}
-	if len(items) != 1 || items[0].IdentityLabels["instance"] != "two:80" {
-		t.Fatalf("absent identity not expressed: %#v", items)
-	}
-	// The updated identity keeps its full label refresh.
-	resources, _, err := h.service.ListResources(context.Background(), "main-prometheus", "", "observed", 0, 50)
-	if err != nil || len(resources) != 1 || resources[0].Labels["pod"] != "one-v2" {
-		t.Fatalf("label refresh wrong: %#v %v", resources, err)
+	for _, item := range projected {
+		if item.Labels["instance"] == "two:80" && item.Current {
+			t.Fatalf("absent identity not expressed: %#v", item)
+		}
+		// The updated identity keeps its full label refresh.
+		if item.Labels["instance"] == "one:80" && (!item.Current || item.Labels["pod"] != "one-v2") {
+			t.Fatalf("label refresh wrong: %#v", item)
+		}
 	}
 }
 
@@ -839,12 +886,13 @@ func TestAdmitDueScheduleTicksAndCancellationReconcile(t *testing.T) {
 	if err != nil || len(cancelled) == 0 {
 		t.Fatalf("cancel unobservable = %v, %v; want fenced children", cancelled, err)
 	}
-	detail, err := h.service.GetRun(context.Background(), "main-prometheus", int64(parseID(t, run.ID)))
-	if err != nil {
+	var cancelledState string
+	var cancelledDetail sql.NullString
+	if err := h.db.QueryRow(`SELECT state,result_detail FROM observation_runs WHERE id=?`, int64(parseID(t, run.ID))).Scan(&cancelledState, &cancelledDetail); err != nil {
 		t.Fatal(err)
 	}
-	if detail.State != "Cancelled" || detail.ResultDetail == nil {
-		t.Fatalf("cancelled run wrong: %#v", detail)
+	if cancelledState != "Cancelled" || !cancelledDetail.Valid {
+		t.Fatalf("cancelled run wrong: state=%q detail=%v", cancelledState, cancelledDetail.Valid)
 	}
 	reEnableConnection(t, h, "main-prometheus")
 	// Scheduling: the first pass admits immediately, the second within the
@@ -855,15 +903,9 @@ func TestAdmitDueScheduleTicksAndCancellationReconcile(t *testing.T) {
 	}
 	countRuns := func(trigger string) int {
 		t.Helper()
-		runs, _, err := h.service.ListRuns(context.Background(), "main-prometheus", 0, 50)
-		if err != nil {
+		var n int
+		if err := h.db.QueryRow(`SELECT COUNT(*) FROM observation_runs WHERE trigger_kind=?`, trigger).Scan(&n); err != nil {
 			t.Fatal(err)
-		}
-		n := 0
-		for _, run := range runs {
-			if run.TriggerKind == trigger {
-				n++
-			}
 		}
 		return n
 	}

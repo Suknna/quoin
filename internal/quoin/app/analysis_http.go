@@ -8,6 +8,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -17,6 +18,26 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/danielgtaylor/huma/v2"
 )
+
+// cursorToken encodes the keyset cursor (plain base64url of the last id;
+// the analysis list cursors carry no snapshot binding because terminal
+// histories are immutable).
+func cursorToken(after int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(after, 10)))
+}
+
+// decodeCursorToken reverses cursorToken.
+func decodeCursorToken(token string) (int64, error) {
+	body, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return 0, fmt.Errorf("malformed cursor")
+	}
+	id, err := strconv.ParseInt(string(body), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("malformed cursor")
+	}
+	return id, nil
+}
 
 type analysisDetailBody struct {
 	Body analysis.Detail `json:"body"`
@@ -54,7 +75,8 @@ func (application *apiServer) createInitialAnalysis(ctx context.Context, input *
 	Body         struct {
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
-}) (*analysisDetailBody, error) {
+},
+) (*analysisDetailBody, error) {
 	session, err := application.authenticateFull(ctx, input.Session, "发起初步分析")
 	if err != nil {
 		return nil, err
@@ -100,7 +122,8 @@ func (application *apiServer) listInitialAnalyses(ctx context.Context, input *st
 	OccurrenceID string `path:"occurrenceId"`
 	Cursor       string `query:"cursor"`
 	Limit        int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*analysisListBody, error) {
+},
+) (*analysisListBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取初步分析"); err != nil {
 		return nil, err
 	}
@@ -128,7 +151,8 @@ func (application *apiServer) getInitialAnalysis(ctx context.Context, input *str
 	Session      string `cookie:"__Host-quoin-session"`
 	OccurrenceID string `path:"occurrenceId"`
 	AnalysisID   string `path:"analysisId"`
-}) (*analysisDetailBody, error) {
+},
+) (*analysisDetailBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取初步分析"); err != nil {
 		return nil, err
 	}
@@ -162,7 +186,8 @@ func (application *apiServer) listInitialAnalysisAttempts(ctx context.Context, i
 	AnalysisID   string `path:"analysisId"`
 	Cursor       string `query:"cursor"`
 	Limit        int    `query:"limit" minimum:"1" maximum:"200" default:"50"`
-}) (*analysisAttemptsBody, error) {
+},
+) (*analysisAttemptsBody, error) {
 	if _, err := application.authenticateFull(ctx, input.Session, "读取执行 Attempt"); err != nil {
 		return nil, err
 	}
@@ -205,7 +230,8 @@ func (application *apiServer) retryInitialAnalysis(ctx context.Context, input *s
 	Body         struct {
 		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	}
-}) (*analysisDetailBody, error) {
+},
+) (*analysisDetailBody, error) {
 	session, err := application.authenticateFull(ctx, input.Session, "重试初步分析")
 	if err != nil {
 		return nil, err
@@ -261,7 +287,8 @@ func (application *apiServer) cancelInitialAnalysis(ctx context.Context, input *
 		ClientCommandID    string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 		ExpectedRowVersion int64  `json:"expectedRowVersion" minimum:"1"`
 	}
-}) (*analysisDetailBody, error) {
+},
+) (*analysisDetailBody, error) {
 	session, err := application.authenticateFull(ctx, input.Session, "取消初步分析")
 	if err != nil {
 		return nil, err

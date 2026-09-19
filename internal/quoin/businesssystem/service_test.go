@@ -216,7 +216,7 @@ func businessSystemAdminContext(t *testing.T) context.Context {
 // frozen triggers stay in force. Call sites keep their historical command IDs;
 // the fixture persists no command ledger row because retained reads never
 // consult one.
-func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) ConfigVersionDetail {
+func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) int64 {
 	t.Helper()
 	declaration, fields := config.ParseBusinessSystem([]byte(body), config.Limits{})
 	if len(fields) != 0 {
@@ -270,11 +270,7 @@ func (h *harness) mustUpload(t *testing.T, body string, arguments ...any) Config
 	if err := seedFixtureProjections(t, h.db, versionID, document); err != nil {
 		t.Fatal(err)
 	}
-	detail, err := h.systems.GetVersion(context.Background(), document.SystemKey, versionID)
-	if err != nil {
-		t.Fatalf("read back historical fixture draft: %v", err)
-	}
-	return detail
+	return versionID
 }
 
 // seedFixtureProjections writes the same typed projection rows the retired
@@ -345,7 +341,7 @@ func seedFixtureProjections(t *testing.T, db *sql.DB, versionID int64, document 
 // root projection travels in the same UPDATE, so the frozen pointer,
 // projection, and derived-state triggers validate the mutation and write the
 // published/superseded history. No trigger or constraint is disabled.
-func (h *harness) publishFixture(t *testing.T, systemKey string, versionID int64) BusinessSystemDetail {
+func (h *harness) publishFixture(t *testing.T, systemKey string, versionID int64) {
 	t.Helper()
 	var displayName, timezone string
 	var enabled int64
@@ -354,57 +350,6 @@ func (h *harness) publishFixture(t *testing.T, systemKey string, versionID int64
 	}
 	if _, err := h.db.Exec(`UPDATE business_systems SET current_config_version_id=?, display_name=?, enabled=?, timezone=?, row_version=row_version+1 WHERE key=? AND current_config_version_id IS NULL`, versionID, displayName, enabled, timezone, systemKey); err != nil {
 		t.Fatalf("publish fixture pointer move: %v", err)
-	}
-	detail, err := h.systems.GetSystem(context.Background(), systemKey)
-	if err != nil {
-		t.Fatalf("publish fixture readback: %v", err)
-	}
-	return detail
-}
-
-func TestListAndGetProjections(t *testing.T) {
-	h := newHarness(t)
-	draft := h.mustUpload(t, validSystemYAML, 0, "cmd-upload-0050")
-	items, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 50)
-	if err != nil || nextCursor != "" || len(items) != 1 || items[0].Key != "payments" || items[0].ConfigVersionCount != 1 {
-		t.Fatalf("list wrong: %v %q %#v", err, nextCursor, items)
-	}
-	enabledOnly := true
-	if items, _, err := h.systems.ListSystems(context.Background(), &enabledOnly, "", "", 50); err != nil || len(items) != 0 {
-		t.Fatalf("enabled filter wrong: %v %#v", err, items)
-	}
-	detail, err := h.systems.GetSystem(context.Background(), "payments")
-	if err != nil || len(detail.Discoveries) != 0 {
-		t.Fatalf("unpublished system detail wrong: %v %#v", err, detail)
-	}
-	versions, _, err := h.systems.ListVersions(context.Background(), "payments", "", 50)
-	if err != nil || len(versions) != 1 || versions[0].ID != draft.ID {
-		t.Fatalf("version list wrong: %v %#v", err, versions)
-	}
-	if _, err := h.systems.GetSystem(context.Background(), "nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing system must be NotFound: %v", err)
-	}
-	if _, err := h.systems.GetVersion(context.Background(), "payments", 999); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing version must be NotFound: %v", err)
-	}
-}
-
-func TestListSystemsReturnsIDKeysetCursor(t *testing.T) {
-	h := newHarness(t)
-	h.mustUpload(t, validSystemYAML, 0, "cmd-list-cursor-001")
-	billingYAML := strings.ReplaceAll(strings.ReplaceAll(validSystemYAML, "payments", "billing"), "支付系统", "账单系统")
-	h.mustUpload(t, billingYAML, 0, "cmd-list-cursor-002")
-
-	firstPage, nextCursor, err := h.systems.ListSystems(context.Background(), nil, "", "", 1)
-	if err != nil || len(firstPage) != 1 || nextCursor == "" {
-		t.Fatalf("first page must have an ID cursor: err=%v cursor=%q items=%#v", err, nextCursor, firstPage)
-	}
-	secondPage, finalCursor, err := h.systems.ListSystems(context.Background(), nil, "", nextCursor, 1)
-	if err != nil || len(secondPage) != 1 || finalCursor != "" {
-		t.Fatalf("second page wrong: err=%v cursor=%q items=%#v", err, finalCursor, secondPage)
-	}
-	if firstPage[0].Key == secondPage[0].Key {
-		t.Fatalf("keyset cursor replayed the first row: %q", firstPage[0].Key)
 	}
 }
 

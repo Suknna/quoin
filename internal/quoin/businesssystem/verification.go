@@ -13,7 +13,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -328,97 +327,6 @@ func (service *Service) cancelVerificationOn(ctx context.Context, conn execution
 	return detail, nil
 }
 
-// GetVerification returns one run detail bound to (system, version). It is a
-// pure read: it runs on the injected read-only reader seam, never the write
-// pool.
-func (service *Service) GetVerification(ctx context.Context, systemKey string, versionID, runID int64) (VerificationRunDetail, error) {
-	reader, err := service.readReader()
-	if err != nil {
-		return VerificationRunDetail{}, err
-	}
-	systemID, _, err := ownedVersion(ctx, reader, systemKey, versionID)
-	if err != nil {
-		return VerificationRunDetail{}, err
-	}
-	return verificationDetailOn(ctx, reader, systemID, versionID, runID)
-}
-
-// readReader returns the configured read-only reader. The injected reader is
-// authoritative; falling back to the write pool is a composition gap, not a
-// license for reads to keep write capability.
-func (service *Service) readReader() (audit.Reader, error) {
-	if service.reader != nil {
-		return service.reader, nil
-	}
-	return nil, errors.New("businesssystem: read-only reader is not configured")
-}
-
-// ListVerifications returns the run history for one config version, newest
-// first with a (created_at, id) keyset cursor.
-func (service *Service) ListVerifications(ctx context.Context, systemKey string, versionID int64, cursor string, limit int) ([]VerificationRunSummary, bool, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	reader, err := service.readReader()
-	if err != nil {
-		return nil, false, err
-	}
-	systemID, _, err := ownedVersion(ctx, reader, systemKey, versionID)
-	if err != nil {
-		return nil, false, err
-	}
-	query := `
-		SELECT id,purpose,config_version_id,label_contract_version_id,state,row_version,evidence_at,created_at
-		FROM config_verification_runs WHERE business_system_id=? AND config_version_id=?`
-	args := []any{systemID, versionID}
-	if cursor != "" {
-		createdAt, lastID, parseErr := parseVerificationCursor(cursor)
-		if parseErr != nil {
-			return nil, false, parseErr
-		}
-		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
-		args = append(args, createdAt, createdAt, lastID)
-	}
-	// HTTP-PAGE-005 freezes (created_at DESC, id DESC); cursor comparison uses
-	// that exact composite order so timestamps shared by multiple rows are safe.
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
-	args = append(args, limit+1)
-	rows, err := reader.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, false, err
-	}
-	defer rows.Close()
-	items := []VerificationRunSummary{}
-	for rows.Next() {
-		summary, scanErr := scanVerificationSummary(rows)
-		if scanErr != nil {
-			return nil, false, scanErr
-		}
-		items = append(items, summary)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
-	more := false
-	if len(items) > limit {
-		items = items[:limit]
-		more = true
-	}
-	return items, more, nil
-}
-
-func parseVerificationCursor(cursor string) (string, int64, error) {
-	createdAt, id, found := strings.Cut(cursor, "\x00")
-	if !found || createdAt == "" {
-		return "", 0, fmt.Errorf("invalid verification cursor")
-	}
-	value, err := strconv.ParseInt(id, 10, 64)
-	if err != nil || value <= 0 {
-		return "", 0, fmt.Errorf("invalid verification cursor")
-	}
-	return createdAt, value, nil
-}
-
 // --- internal plumbing ------------------------------------------------------
 
 // commandDigestOf wraps auth.DigestCommand for the verification commands.
@@ -535,29 +443,6 @@ func verificationRow(ctx context.Context, conn audit.Reader, systemID, versionID
 		return 0, ErrNotFound
 	}
 	return id, err
-}
-
-func scanVerificationSummary(rows *sql.Rows) (VerificationRunSummary, error) {
-	var (
-		summary    VerificationRunSummary
-		id         int64
-		versionID  int64
-		contractID sql.NullInt64
-		evidenceAt sql.NullString
-	)
-	if err := rows.Scan(&id, &summary.Purpose, &versionID, &contractID, &summary.State, &summary.RowVersion, &evidenceAt, &summary.CreatedAt); err != nil {
-		return VerificationRunSummary{}, err
-	}
-	summary.ID = strconv.FormatInt(id, 10)
-	summary.ConfigVersionID = strconv.FormatInt(versionID, 10)
-	if contractID.Valid {
-		summary.LabelContractVersionID = strconv.FormatInt(contractID.Int64, 10)
-	}
-	if evidenceAt.Valid {
-		value := evidenceAt.String
-		summary.EvidenceAt = &value
-	}
-	return summary, nil
 }
 
 func verificationDetailOn(ctx context.Context, conn audit.Reader, systemID, versionID, runID int64) (VerificationRunDetail, error) {

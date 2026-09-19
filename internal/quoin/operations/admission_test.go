@@ -653,7 +653,7 @@ func TestPublicOperationProceedsWithoutAudit(t *testing.T) {
 }
 
 func TestRawWrapFailsClosedAndStreamsUnbuffered(t *testing.T) {
-	declaration := Declaration{ID: "streamTaskEvents", Method: http.MethodGet, Path: "/api/v1/tasks/events", Level: LevelSession, Kind: KindStream}
+	declaration := Declaration{ID: "streamAlertEvents", Method: http.MethodGet, Path: "/api/v1/alerts/events", Level: LevelSession, Kind: KindStream}
 	registry := newTestRegistry(t, declaration)
 	newServer := func(sink Sink) *httptest.Server {
 		wrapped, err := mustAdmission(t, registry, sink).Wrap(declaration.ID, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -770,7 +770,7 @@ func TestUnknownOperationFailsClosedAtRuntime(t *testing.T) {
 
 func TestAssertRawSurfaceRequiresEveryDeclaredRawRouteWrapped(t *testing.T) {
 	rawDeclarations := []Declaration{
-		{ID: "streamTaskEvents", Method: http.MethodGet, Path: "/api/v1/tasks/events", Level: LevelSession, Kind: KindStream, Raw: true},
+		{ID: "streamAlertEvents", Method: http.MethodGet, Path: "/api/v1/alerts/events", Level: LevelSession, Kind: KindStream, Raw: true},
 		{ID: "downloadBackup", Method: http.MethodGet, Path: "/api/v1/backups/{backupId}/download", Level: LevelAdmin, Kind: KindSensitiveRead, ObjectType: "backup", Raw: true},
 	}
 	registry := newTestRegistry(t, rawDeclarations...)
@@ -779,7 +779,7 @@ func TestAssertRawSurfaceRequiresEveryDeclaredRawRouteWrapped(t *testing.T) {
 
 	// A forgotten wrapper must fail the construction assertion by name.
 	err := admission.AssertRawSurface()
-	if err == nil || !strings.Contains(err.Error(), "streamTaskEvents") || !strings.Contains(err.Error(), "downloadBackup") {
+	if err == nil || !strings.Contains(err.Error(), "streamAlertEvents") || !strings.Contains(err.Error(), "downloadBackup") {
 		t.Fatalf("unwrapped raw routes must fail the assertion, got %v", err)
 	}
 
@@ -792,7 +792,7 @@ func TestAssertRawSurfaceRequiresEveryDeclaredRawRouteWrapped(t *testing.T) {
 		server := httptest.NewServer(wrapped)
 		t.Cleanup(server.Close)
 	}
-	wrap("streamTaskEvents")
+	wrap("streamAlertEvents")
 	if err := admission.AssertRawSurface(); err == nil || !strings.Contains(err.Error(), "downloadBackup") {
 		t.Fatalf("partially wrapped raw surface must fail, got %v", err)
 	}

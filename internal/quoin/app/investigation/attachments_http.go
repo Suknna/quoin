@@ -3,18 +3,15 @@ package appinvestigation
 // Attachment HTTP surface (T14): the multipart upload streams the file part
 // straight into the staging writer (HTTP-FILE-001 forbids buffering the
 // body whole), so it owns the response head like the artifact download
-// route instead of going through Huma's body readers. The GET metadata
-// route is a plain Huma handler.
+// route instead of going through Huma's body readers.
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"strconv"
 
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 )
@@ -179,32 +176,4 @@ func writeAttachmentProblemJSON(writer http.ResponseWriter, status int, code, me
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(status)
 	writer.Write(body)
-}
-
-// getInvestigationAttachment returns one staging attachment's metadata for
-// the uploading principal (foreign attachments behave as not found).
-func (handler *Handler) getInvestigationAttachment(ctx context.Context, input *struct {
-	Session      string `cookie:"__Host-quoin-session"`
-	AttachmentID string `path:"attachmentId"`
-}) (*attachmentBody, error) {
-	principalID, err := handler.principal(ctx, input.Session)
-	if err != nil {
-		return nil, err
-	}
-	attachmentID, err := strconv.ParseInt(input.AttachmentID, 10, 64)
-	if err != nil || attachmentID <= 0 {
-		return nil, problem(http.StatusNotFound, "not_found", "附件不存在。")
-	}
-	summary, err := handler.Service.AttachmentFor(ctx, principalID, attachmentID)
-	if err != nil {
-		if errors.Is(err, investigation.ErrNotFound) {
-			return nil, problem(http.StatusNotFound, "not_found", "附件不存在。")
-		}
-		return nil, problem(http.StatusInternalServerError, "unavailable", "暂时无法读取附件，请重试。")
-	}
-	return &attachmentBody{Body: summary}, nil
-}
-
-type attachmentBody struct {
-	Body investigation.AttachmentView `json:"body"`
 }

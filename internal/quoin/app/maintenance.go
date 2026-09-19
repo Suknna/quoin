@@ -98,7 +98,6 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 	case "RootKeyRebind":
 		application.registerMaintenanceConnectionRoutes(api)
 	case "Restore":
-		huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 		application.registerMaintenanceTrustRebuildRoutes(api)
 	case "Upgrade":
 		// The continue/re-arm command plus the frozen drain allowlist

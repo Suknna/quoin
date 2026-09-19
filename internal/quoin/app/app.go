@@ -23,7 +23,6 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
-	appconfig "github.com/Suknna/quoin/internal/quoin/app/config"
 	appinspection "github.com/Suknna/quoin/internal/quoin/app/inspection"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
 	appknowledge "github.com/Suknna/quoin/internal/quoin/app/knowledge"
@@ -80,7 +79,6 @@ type apiServer struct {
 	feedbackService              *feedback.Service
 	knowledgeService             *knowledge.Service
 	investigationUpload          *appinvestigation.Handler
-	configHandler                *appconfig.Handler
 	artifacts                    *artifact.Store
 	backups                      *backup.Service
 	maintenance                  *maintenance.Service
@@ -94,8 +92,6 @@ type apiServer struct {
 	investigationDispatchFunc    func(ctx context.Context, attemptID int64) error
 	inspectionDispatchFunc       func(ctx context.Context)
 	verificationDispatchFunc     func(ctx context.Context)
-	resourceRefreshDispatchFunc  func(ctx context.Context)
-	observationDispatchFunc      func(ctx context.Context)
 	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
 	pluginRegistry               *plugins.Registry
 	enabledPlugins               []string
@@ -241,12 +237,6 @@ type runtimeSlot struct {
 	ReleaseVersion  string  `json:"releaseVersion,omitempty"`
 }
 
-type runtimeStatus struct {
-	// The browser business is retired (受控浏览器退役): only the Plinth slot
-	// exists; there is no Lintel slot to project.
-	Plinth runtimeSlot `json:"plinth"`
-}
-
 // aboutStatus is the admin-only product projection of real runtime and
 // maintenance facts. Unknown values stay empty at the transport boundary and
 // are rendered explicitly as Unknown by the UI rather than guessed healthy.
@@ -260,10 +250,6 @@ type aboutStatus struct {
 	ReleaseVersion string           `json:"releaseVersion"`
 	Maintenance    aboutMaintenance `json:"maintenance"`
 	Components     []runtimeSlot    `json:"components"`
-}
-
-type runtimeOutput struct {
-	Body runtimeStatus `json:"body"`
 }
 
 // runtimeRelayCredentials builds the Runtime gRPC server's mTLS transport
@@ -506,9 +492,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.InvestigationRuntime = investigationRuntime
 	application.investigationDispatchFunc = investigationRuntime.Dispatch
 	application.inspectionDispatchFunc = controlService.dispatchQueuedInspections
-	application.verificationDispatchFunc = controlService.dispatchQueuedVerificationAttempts
 	controlService.Observations = application.observations
-	application.observationDispatchFunc = controlService.dispatchQueuedSourceObservationAttempts
 	application.inspectionCancelDispatchFunc = controlService.dispatchInspectionCancellation
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
@@ -593,12 +577,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	if err != nil {
 		return nil, err
 	}
-	taskStream, err := admission.Wrap("streamTaskEvents", http.HandlerFunc(newTaskEventStream(application).serve))
-	if err != nil {
-		return nil, err
-	}
 	mux.Handle("GET /api/v1/alerts/events", alertStream)
-	mux.Handle("GET /api/v1/tasks/events", taskStream)
 	// The artifact download streams raw bytes with the frozen security
 	// headers (HTTP-FILE-003), so it owns the response head directly.
 	artifactDownload, err := admission.Wrap("downloadArtifactContent", http.HandlerFunc(application.downloadArtifactContent))
@@ -636,7 +615,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	return securityHeaders(gated), nil
 }
 
-func (application *apiServer) register(api huma.API) *appconfig.Handler {
+func (application *apiServer) register(api huma.API) {
 	application.registerAuthenticationFlows(api)
 	application.registerAuthDeliveryRoutes(api)
 	application.registerAuthContactRoutes(api)
@@ -647,16 +626,13 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	// T36: the maintenance projection and the coordinated-upgrade entry.
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/maintenance", OperationID: "getMaintenanceState"}, application.getMaintenanceState)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
-	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/runtime", OperationID: "getRuntimeStatus"}, application.runtimeStatus)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/admin/about", OperationID: "getAdminAbout"}, application.aboutPlatform)
 	application.registerBusinessContextRoute(api)
-	application.registerObservationRoutes(api)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)
 	application.registerConnectionRoutes(api)
 	application.registerPluginRoutes(api)
 	application.registerAnalysisRoutes(api)
-	application.registerTaskSnapshot(api)
 	application.registerEvidenceRoutes(api)
 	application.registerBackupRoutes(api)
 	investigationHandler := &appinvestigation.Handler{
@@ -693,18 +669,6 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 		},
 	}
 	investigationHandler.Register(api)
-	configHandler := &appconfig.Handler{
-		Systems: application.systems,
-		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
-			session, err := application.authenticateAdmin(ctx, cookie, "查看历史业务配置")
-			if err != nil {
-				return 0, err
-			}
-			return session.User.ID, nil
-		},
-	}
-
-	configHandler.Register(api)
 	inspectionHandler := &appinspection.Handler{
 		Inspections: application.inspections,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
@@ -760,10 +724,8 @@ func (application *apiServer) register(api huma.API) *appconfig.Handler {
 	}
 	knowledgeHandler.Register(api)
 	// The raw multipart upload routes (NewHandler) reuse this handler's
-	// authentication seams; returning it keeps the mux wiring after the
-	// full registration completes.
+	// authentication seams.
 	application.investigationUpload = investigationHandler
-	return configHandler
 }
 
 func (application *apiServer) me(ctx context.Context, input *authInput) (*userOutput, error) {
@@ -832,23 +794,6 @@ func runtimeSlotProjection(view qruntime.SlotView) runtimeSlot {
 		rendered.ReleaseVersion = view.ReleaseVersion
 	}
 	return rendered
-}
-
-func (application *apiServer) runtimeStatus(ctx context.Context, input *authInput) (*runtimeOutput, error) {
-	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Runtime 状态"); err != nil {
-		return nil, err
-	}
-	views, err := application.runtimeSlotViews(ctx)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("无法读取 Runtime 状态", err)
-	}
-	output := &runtimeOutput{}
-	for i := range views {
-		if views[i].Slot == qruntime.SlotPlinth {
-			output.Body.Plinth = views[i]
-		}
-	}
-	return output, nil
 }
 
 // aboutPlatform exposes only real, non-secret platform facts and existing
