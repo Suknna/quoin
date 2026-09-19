@@ -45,6 +45,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/business-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 当前用户可用的业务上下文（已发布配置的业务系统键与名称） */
+        get: operations["listBusinessContext"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/business-views": {
         parameters: {
             query?: never;
@@ -80,103 +97,6 @@ export interface paths {
          */
         put: operations["updateBusinessView"];
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/integrations/{connectionName}/resources": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        /** 来源观测对象列表 */
-        get: operations["listSourceObservedResources"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/integrations/{connectionName}/resources/{resourceId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-                resourceId: string;
-            };
-            cookie?: never;
-        };
-        /** 来源观测对象详情 */
-        get: operations["getSourceObservedResource"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/integrations/{connectionName}/observation-runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        /** 来源观测执行列表 */
-        get: operations["listSourceObservationRuns"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/integrations/{connectionName}/observation-runs/{observationRunId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-                observationRunId: string;
-            };
-            cookie?: never;
-        };
-        /** 来源观测执行详情 */
-        get: operations["getSourceObservationRun"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/integrations/{connectionName}/resources:refresh": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** 手工触发来源观测 */
-        post: operations["refreshIntegrationResources"];
         delete?: never;
         options?: never;
         head?: never;
@@ -696,26 +616,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/setup": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 依赖驱动的首次设置清单与能力就绪状态
-         * @description 从权威状态派生；Admin 看到全部项目，Operator 只看到需要 Operator 处理的项目（CONTEXT「首次设置投影」）。
-         */
-        get: operations["getSetupStatus"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/maintenance": {
         parameters: {
             query?: never;
@@ -774,23 +674,6 @@ export interface paths {
          * @description 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip（SEC-MAINT-003..005）。
          */
         post: operations["exitMaintenance"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Plinth Runtime slot 状态 */
-        get: operations["getRuntimeStatus"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -861,26 +744,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/alerts/{occurrenceId}/matched-resources": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 当前 Label Contract 下匹配的 Observed Resource 候选（游标分页；可为零个或多个）
-         * @description 这是从当前完整 labels 与已发布配置机械计算的可重建投影，不是历史身份事实；不得任意选一个候选冒充唯一匹配。游标绑定当前 Label Contract 与相关已发布配置版本，版本变化后继续翻页返回 410 resource_expired（CONTEXT「告警与 Observed Resource 关联」）。
-         */
-        get: operations["listAlertMatchedResources"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/alerts/{occurrenceId}/observations": {
         parameters: {
             query?: never;
@@ -890,23 +753,6 @@ export interface paths {
         };
         /** Occurrence 观测时间线（不可变追加；游标分页，按 committedAt 倒序） */
         get: operations["listAlertObservations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/alerts/{occurrenceId}/investigations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 关联该 Occurrence 的调查列表（游标分页） */
-        get: operations["listOccurrenceInvestigations"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1027,23 +873,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/alerts/{occurrenceId}/reanalyze": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** 成功后重新分析（创建新的 Initial Analysis，旧结果保留） */
-        post: operations["reanalyzeAlert"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/alert-intake-issues": {
         parameters: {
             query?: never;
@@ -1056,40 +885,6 @@ export interface paths {
          * @description 默认只返回未确认问题；acknowledged=true 用于查看已处理历史，省略或 false 返回待处理列表。
          */
         get: operations["listAlertIntakeIssues"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/alert-intake-issues/{issueId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 告警接入问题详情 */
-        get: operations["getAlertIntakeIssue"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/alert-intake-issues/{issueId}/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 告警接入问题不可变发生历史 */
-        get: operations["listAlertIntakeIssueEvents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1323,23 +1118,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/investigation-attachments/{attachmentId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 当前用户上传的附件元数据 */
-        get: operations["getInvestigationAttachment"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/investigations/{investigationId}/knowledge-candidates": {
         parameters: {
             query?: never;
@@ -1374,7 +1152,7 @@ export interface paths {
          * 人工触发巡检 Run（同一计划最多一个 active Run）
          * @description 重复触发返回当前 active Run 或 409（DATA-INSPECT-001）；定时创建由调度器使用确定性键（DATA-COMMAND-006）。
          */
-        post: operations["triggerManualInspectionRun"];
+        post: operations["createInspectionRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1709,6 +1487,23 @@ export interface paths {
         /** 知识候选详情 */
         get: operations["getKnowledgeCandidate"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** 编辑候选草稿（递增 draft_revision；携带 expected revision） */
+        patch: operations["editKnowledgeCandidateDraft"];
+        trace?: never;
+    };
+    "/api/v1/knowledge/candidates/{candidateId}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
         /**
          * 确认单个候选（携带 client_command_id 与 expected revision）
          * @description 普通来源 Candidate 创建一个 Reusable Knowledge 的首版本；knowledge_version 修订 Candidate 则向原 Knowledge 追加版本并原子切换 current 指针。每个 Candidate 最多确认一次；相同命令重试返回原结果（DATA-KNOWLEDGE-001/004）。
@@ -1717,8 +1512,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** 编辑候选草稿（递增 draft_revision；携带 expected revision） */
-        patch: operations["editKnowledgeCandidateDraft"];
+        patch?: never;
         trace?: never;
     };
     "/api/v1/knowledge/candidates/{candidateId}/exclude": {
@@ -1753,171 +1547,6 @@ export interface paths {
          * @description 目标精确指向 Initial Analysis 成功输出、Inspection Report 版本或 Investigation 的 assistant Message；不得指向整个 Investigation 或 user Message（DATA-KNOWLEDGE-008）。
          */
         post: operations["appendDiagnosisFeedback"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 业务系统列表 */
-        get: operations["listBusinessSystems"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 业务系统详情（当前配置、discovery、plan） */
-        get: operations["getBusinessSystem"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/config": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 业务系统配置版本历史 */
-        get: operations["listBusinessSystemConfigs"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/config/{versionId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 配置版本详情/导出（原文 YAML 与解析元数据） */
-        get: operations["getBusinessSystemConfig"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 指定不可变配置版本的 Config Verification Run 历史
-         * @description 按 `(created_at DESC, id DESC)` 游标分页；用于配置版本详情在刷新或深链后重建完整测试历史（HTTP-PAGE-005、UI-SYSTEM-005）。
-         */
-        get: operations["listConfigVerificationRuns"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/config/{versionId}/verifications/{verificationRunId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 配置 Verification Run 详情（含逐 check 结果与 resultDetail）
-         * @description 独立持久化执行的权威详情重读（DATA-CONFIG-007）；状态/结果变化经 streamTaskEvents 推送（objectType=config_verification_run，HTTP-SSE-006）。
-         */
-        get: operations["getConfigVerificationRun"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/resource-refresh-runs/{resourceRefreshRunId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Resource Refresh Run 权威详情
-         * @description 读取某次手动或调度资源发现运行的持久化事实。
-         */
-        get: operations["getResourceRefreshRun"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/resources": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 观测资源列表（当前与历史） */
-        get: operations["listObservedResources"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/resources/{resourceId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 单个 Observed Resource 的完整当前/历史详情
-         * @description 返回完整 labels、发现项和新鲜度；资源 identity 与历史行不可改写。v1 不存在资源历史引用集合（UI-SYSTEM-007、DATA-OBSERVED-001）。
-         */
-        get: operations["getObservedResource"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2179,43 +1808,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/model-providers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 模型供应商连接列表（/v1/models 能力由 ConnectionRevision 实测） */
-        get: operations["listModelProviders"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/model-providers/{connectionName}/models": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 从当前 disabled Model Provider revision 的上游 /v1/models 发现模型 ID
-         * @description 用于创建向导的自动发现；零项、503 或上游缺少能力 metadata 均不得禁止 Admin 手工填写模型 ID。返回列表只辅助选择，不构成能力证明；能力仍按 ConnectionRevision 真实 probe。
-         */
-        get: operations["listProviderModels"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/alert-sources": {
         parameters: {
             query?: never;
@@ -2360,26 +1952,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/alert-sources/{sourceKey}/enable": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 重新启用告警源（Admin；不改变 source_id）
-         * @description 停用后重新启用不改变 source_id（CONTEXT「稳定身份保留」）。
-         */
-        post: operations["enableAlertSource"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/alert-sources/{sourceKey}/disable": {
         parameters: {
             query?: never;
@@ -2505,26 +2077,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/artifacts": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 流式上传文件到 staging（multipart；登记 Artifact 元数据）
-         * @description 完成写入与 hash/大小校验后 fsync→rename→dir-fsync→同一事务登记（DATA-ARTIFACT-001）；随后由引用命令（消息附件、配置上传等）原子消费。失败上传可自动清理。
-         */
-        post: operations["uploadArtifactStaging"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/artifacts/{artifactId}": {
         parameters: {
             query?: never;
@@ -2554,66 +2106,6 @@ export interface paths {
          * @description Raw Playwright trace 固定 sensitive=1，仅 Admin 经审计下载（DATA-ARTIFACT-003）。正文已过期返回 410；下载不经由 hash/path 授权入口。
          */
         get: operations["downloadArtifactContent"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/source-materials/{materialId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 来源材料元数据（字节/来源/上传者/时间） */
-        get: operations["getSourceMaterial"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/source-materials/{materialId}/content": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 下载来源材料原文
-         * @description 仅 knowledge_import 来源材料有正文（直接存 SQLite）；text_attachment 正文经 Artifact 下载（DATA-ATTACH-001）。
-         */
-        get: operations["downloadSourceMaterialContent"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks/snapshot": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 后台 active 任务快照（有界；游标绑定快照 seq）
-         * @description 进入任务页面先读本快照再建立 streamTaskEvents（after=snapshotSeq），消除 T1/T2/T3 漏更新（DATA-SSE-006/HTTP-SSE-008）。
-         *     有界集合（HTTP-PAGE-007）：只包含 active 任务对象；终态结果由所属领域对象、模块列表与详情长期提供，
-         *     不建立通知、已读/未读或 per-user 未查看投影。items 按游标分页遍历；snapshotSeq 取当前最大 task_change_log.id（最新行由触发器保留，DATA-SSE-009），
-         *     全部页回传同一值；游标过期返回 410（resource_expired），客户端重新从首页读取。
-         */
-        get: operations["getTaskSnapshot"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2652,39 +2144,16 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tasks/events": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 后台任务变更 SSE（快照后建立；after 查询参数；重连使用 Last-Event-ID）
-         * @description SSE 事件格式（HTTP-SSE-006）：
-         *     event: change
-         *     id: <task_change_seq>
-         *     data: {"seq":"123","objectType":"execution_attempt","objectId":"7","changeType":"created|state_changed","rowVersion":2}
-         *
-         *     游标过期分两种边界（HTTP-SSE-002/003）：
-         *     1) 游标在响应头写出前已判定过期 → 直接返回 410 problem+json，不写流；
-         *     2) 流已建立后才判定过期 → 发送 event: resync_required 与 data: {"type":"resync_required"} 后关闭连接，不返回 410。
-         *
-         *     token delta/高频动画不持久化、不进入事件（HTTP-SSE-007）。
-         */
-        get: operations["streamTaskEvents"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        BusinessContextItem: {
+            /** @description 业务系统键 */
+            key: string;
+            /** @description 展示名 */
+            displayName: string;
+        };
         PluginInspectionScope: {
             /** @constant */
             kind: "integration";
@@ -2739,43 +2208,6 @@ export interface components {
             rowVersion: number;
             createdAt: components["schemas"]["Timestamp"];
             updatedAt: components["schemas"]["Timestamp"];
-        };
-        SourceObservedResource: {
-            id: components["schemas"]["LocatorId"];
-            connectionName?: string;
-            objectType: string;
-            identityKey: string;
-            displayName?: string;
-            labels: {
-                [key: string]: string;
-            };
-            identityLabels: {
-                [key: string]: string;
-            };
-            /** @enum {string} */
-            state: "observed" | "not_observed" | "stale";
-            lastObservedAt?: components["schemas"]["Timestamp"];
-            lastSuccessfulRefreshAt?: components["schemas"]["Timestamp"];
-        };
-        SourceObservationRun: {
-            id: components["schemas"]["LocatorId"];
-            connectionName?: string;
-            /** @enum {string} */
-            triggerKind?: "manual" | "schedule" | "enablement";
-            /** @enum {string} */
-            state: "Queued" | "Running" | "Completed" | "CompletedWithWarnings" | "Failed" | "Cancelled" | "Interrupted";
-            rowVersion: number;
-            evidenceAt?: components["schemas"]["Timestamp"];
-            createdAt?: components["schemas"]["Timestamp"];
-            resultDetail?: string;
-            objects?: {
-                objectType: string;
-                /** @enum {string} */
-                status: "ok" | "error" | "gap";
-                gapReason?: string;
-                attemptId?: components["schemas"]["LocatorId"];
-                evidenceId?: components["schemas"]["LocatorId"];
-            }[];
         };
         PluginInspectionPlanInput: {
             planKey: components["schemas"]["StableKey"];
@@ -2862,11 +2294,6 @@ export interface components {
         /** @description model_provider 必须显式提供同 current binding 的 passed probe result；其它连接类型必须省略该字段。 */
         EnableConnectionRequest: components["schemas"]["VersionedCommandRequest"] & {
             qualifiedProbeResultId?: components["schemas"]["LocatorId"];
-        };
-        /** @description Web 配置页面只创建 prepublish；deployment_acceptance 由 Deployment Acceptance manifest 编排器内部创建。 */
-        ConfigVerificationRunRequest: components["schemas"]["CommandRequest"] & {
-            /** @constant */
-            purpose: "prepublish";
         };
         CancelRequest: components["schemas"]["CommandBase"] & components["schemas"]["ExpectedRowVersion"];
         LoginRequest: {
@@ -3147,21 +2574,6 @@ export interface components {
             /** @description 人类可读冲突说明（HTTP-ERROR-004）。 */
             detail?: string;
         };
-        SetupResponse: {
-            items: components["schemas"]["SetupItem"][];
-            alertingAvailable: boolean;
-            inspectionAvailable: boolean;
-        };
-        SetupItem: {
-            /** @description 稳定项目 ID（如 model-provider、thanos-connection、plinth、label-contract、business-system、alert-source、backup-target）。 */
-            id: string;
-            label: string;
-            /** @enum {string} */
-            state: "ready" | "missing" | "pending" | "error";
-            dependencies?: string[];
-            /** @description 直接修复入口（路由或操作引用）。 */
-            action?: string;
-        };
         MaintenanceState: {
             active: boolean;
             /** @enum {string|null} */
@@ -3202,10 +2614,6 @@ export interface components {
             lastSeenAt?: components["schemas"]["Timestamp"];
             /** @description 瞬时连接投影：对端 Hello 携带的信息性构建版本，不参与准入。 */
             releaseVersion?: string;
-        };
-        /** @description 唯一固定 Runtime 槽位是 Plinth。 */
-        RuntimeStatus: {
-            plinth: components["schemas"]["RuntimeSlot"];
         };
         AlertSnapshot: {
             /** @description 快照绑定的 alert_change_seq（首页取当前最大 alert_change_log.id；全部页回传同一值，DATA-SSE-009）；客户端以它建立 SSE（after），分页期间的变更经事件回放补齐（HTTP-PAGE-006）。 */
@@ -3373,24 +2781,6 @@ export interface components {
             rowVersion?: number;
         };
         IntakeIssueSummary: WithRequired<components["schemas"]["IntakeIssueFields"], "id" | "sourceId" | "sourceKey" | "kind" | "firstSeenAt" | "lastSeenAt" | "occurrenceCount" | "rowVersion" | "createdAt">;
-        IntakeIssueDetail: {
-            /** @description 服务端从首个事件 detail_json 解析的人类诊断所需结构化事实；不得包含凭据或请求秘密。 */
-            detail: {
-                [key: string]: unknown;
-            };
-            /** @description 完整历史经 listAlertIntakeIssueEvents 游标分页读取。 */
-            eventCount: number;
-        } & WithRequired<components["schemas"]["IntakeIssueFields"], "id" | "sourceId" | "sourceKey" | "kind" | "firstSeenAt" | "lastSeenAt" | "occurrenceCount" | "rowVersion" | "createdAt">;
-        IntakeIssueEvent: {
-            id: components["schemas"]["LocatorId"];
-            issueId: components["schemas"]["LocatorId"];
-            deliveryId?: components["schemas"]["LocatorId"];
-            deliveryItemId?: components["schemas"]["LocatorId"];
-            observedAt: components["schemas"]["Timestamp"];
-            detail: {
-                [key: string]: unknown;
-            };
-        } | unknown | unknown;
         InvestigationSourceInput: {
             /** @enum {string} */
             type: "occurrence" | "initial_analysis" | "evidence" | "inspection_report";
@@ -3764,182 +3154,6 @@ export interface components {
             latestValue?: "adopted" | "executed" | "verified_effective" | "rejected";
             items: components["schemas"]["FeedbackSummary"][];
             nextCursor?: components["schemas"]["Cursor"];
-        };
-        TaskSnapshot: {
-            /** @description 快照绑定的 task_change_seq（首页取当前最大 task_change_log.id；全部页回传同一值，DATA-SSE-009）；建立 streamTaskEvents 时作为 after。 */
-            snapshotSeq: components["schemas"]["ChangeSeq"];
-            /** @description 有界集合（HTTP-PAGE-007）：只包含 active 任务；终态由所属领域对象长期提供；按 nextCursor 分页遍历。 */
-            items: components["schemas"]["TaskObjectRef"][];
-            /** @description 绑定首页 snapshotSeq 的短有效期快照游标（HTTP-PAGE-006）；过期返回 410。 */
-            nextCursor?: components["schemas"]["Cursor"];
-        };
-        TaskObjectRef: {
-            /** @enum {string} */
-            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "config_verification_run" | "resource_refresh_run";
-            objectId: components["schemas"]["LocatorId"];
-            /** @description 快照时该对象的权威 row_version；客户端按 rowVersion 幂等应用事件（HTTP-SSE-003）。 */
-            rowVersion: number;
-        };
-        BusinessSystemSummary: {
-            key: components["schemas"]["StableKey"];
-            displayName: string;
-            enabled: boolean;
-            /** @description 系统行并发前提（HTTP-COMMAND-002）。 */
-            rowVersion: number;
-            currentConfigVersionId?: components["schemas"]["LocatorId"];
-            /** @description 已发布配置版本的根投影；首次发布后存在（DATA-CONFIG-001）。 */
-            timezone?: string | null;
-            /** @description 已发布配置版本的根投影；首次发布后存在（DATA-CONFIG-001）。 */
-            resourceRefreshIntervalSeconds?: number | null;
-        };
-        BusinessSystemDetail: components["schemas"]["BusinessSystemSummary"] & {
-            /** @description 配置版本总数；历史经 listBusinessSystemConfigs 游标分页读取（HTTP-PAGE-005）。 */
-            configVersionCount?: number;
-            discoveries?: components["schemas"]["DiscoverySummary"][];
-            plans?: components["schemas"]["PlanSummary"][];
-        };
-        DiscoverySummary: {
-            discoveryKey: components["schemas"]["StableKey"];
-            displayName: string;
-            /** @description 单个 instant vector selector（上传时经 Prometheus 官方 AST 校验，CFG-PROMQL-002）。 */
-            selector: string;
-            identityLabels: string[];
-        };
-        PlanSummary: {
-            planKey: components["schemas"]["StableKey"];
-            displayName: string;
-            /** @description 标准五字段 cron；缺省表示仅人工运行。时区由配置根节点统一提供（DATA-CONFIG-004）。 */
-            cron?: string;
-            checks?: components["schemas"]["CheckSummary"][];
-        };
-        CheckSummary: components["schemas"]["PromqlCheckSummary"];
-        /** @description PromQL 巡检项按查询模式封闭判别（DATA-CONFIG-003）。 */
-        PromqlCheckSummary: components["schemas"]["PromqlInstantCheck"] | components["schemas"]["PromqlRangeCheck"];
-        PromqlInstantCheck: {
-            checkKey: components["schemas"]["StableKey"];
-            displayName: string;
-            analysisQuestion: string;
-            /** @constant */
-            kind: "promql";
-            /** @constant */
-            queryMode: "instant";
-            /** @description PromQL 字面量表达式（官方 AST 校验；每个 VectorSelector 必须等于目标 Label Contract 业务系统 label 精确 = 当前 system key，CFG-PROMQL-002）。 */
-            expression: string;
-        };
-        PromqlRangeCheck: {
-            checkKey: components["schemas"]["StableKey"];
-            displayName: string;
-            analysisQuestion: string;
-            /** @constant */
-            kind: "promql";
-            /** @constant */
-            queryMode: "range";
-            /** @description PromQL 字面量表达式（官方 AST 校验；每个 VectorSelector 必须等于目标 Label Contract 业务系统 label 精确 = 当前 system key，CFG-PROMQL-002）。 */
-            expression: string;
-            /** @description range 查询窗口；以真实 evidence_at 为终点（DATA-CONFIG-003）。 */
-            rangeSeconds: number;
-            /** @description range 查询步长。 */
-            stepSeconds: number;
-        };
-        ConfigVersionSummary: {
-            id: components["schemas"]["LocatorId"];
-            versionSeq: number;
-            /** @enum {string} */
-            state: "draft" | "published" | "superseded";
-            createdAt: components["schemas"]["Timestamp"];
-            publishedAt?: components["schemas"]["Timestamp"];
-            digest: string;
-            parserVersion: string;
-            schemaVersion: string;
-            /** @description 解析一次的类型化根投影；必须等于业务系统稳定 key（DATA-CONFIG-003）。 */
-            systemKey: components["schemas"]["StableKey"];
-            displayName: string;
-            enabled: boolean;
-            /** @description 上传时显式目标 Label Contract 版本（DATA-CONFIG-003）。 */
-            labelContractVersionId: components["schemas"]["LocatorId"];
-        } & unknown;
-        ConfigVersionDetail: components["schemas"]["ConfigVersionSummary"] & {
-            /** @description 上传的原始 YAML 正文（可导出；运行只使用类型结构）。 */
-            yamlBody: string;
-            /** @description IANA 时区（根节点统一提供，DATA-CONFIG-004）。 */
-            timezone: string;
-            resourceRefreshIntervalSeconds: number;
-            discoveries: components["schemas"]["DiscoverySummary"][];
-            plans: components["schemas"]["PlanSummary"][];
-        };
-        PublishConfigRequest: components["schemas"]["CommandBase"] & {
-            /** @description 并发前提；null 表示当前无已发布版本（首次发布），其余情况必须为当前已发布版本 ID；不匹配返回 409（DATA-CONFIG-001）。 */
-            expectedCurrentPublishedVersionId: components["schemas"]["NullableLocatorId"];
-        };
-        ResourceRefreshRunRequest: components["schemas"]["CommandBase"];
-        ResourceRefreshRunDetail: {
-            id: components["schemas"]["LocatorId"];
-            businessSystemId: components["schemas"]["LocatorId"];
-            configVersionId: components["schemas"]["LocatorId"];
-            labelContractVersionId: components["schemas"]["LocatorId"];
-            /** @enum {unknown} */
-            triggerKind: "manual" | "schedule";
-            scheduledFor?: components["schemas"]["Timestamp"];
-            /** @enum {unknown} */
-            state: "Queued" | "Running" | "Completed" | "CompletedWithWarnings" | "Failed" | "Cancelled" | "Interrupted";
-            rowVersion: number;
-            evidenceAt?: components["schemas"]["Timestamp"];
-            resultDetail?: string;
-            createdAt: components["schemas"]["Timestamp"];
-        };
-        ObservedResourceSummary: {
-            id: components["schemas"]["LocatorId"];
-            discoveryKey: components["schemas"]["StableKey"];
-            /** @description 身份 labels 的排序键值（identity_key 是相等性权威；DATA-OBSERVED-001）。 */
-            identityLabels: {
-                [key: string]: string;
-            };
-            displayName?: string;
-            observedAt?: components["schemas"]["Timestamp"];
-            current: boolean;
-            stale?: boolean;
-            lastSuccessfulRefreshAt?: components["schemas"]["Timestamp"];
-        };
-        ObservedResourceDetail: components["schemas"]["ObservedResourceSummary"] & {
-            /** @description 最近一次观测保存的完整 labels；identityLabels 只是相等性子集（DATA-OBSERVED-001）。 */
-            labels: {
-                [key: string]: string;
-            };
-            createdAt: components["schemas"]["Timestamp"];
-        };
-        ConfigVerificationRunSummary: {
-            id: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            purpose: "prepublish" | "deployment_acceptance";
-            /** @description 仅 deployment_acceptance 存在；精确指向冻结 manifest config item。 */
-            verificationManifestItemId?: components["schemas"]["LocatorId"];
-            configVersionId: components["schemas"]["LocatorId"];
-            labelContractVersionId: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            state: "Queued" | "Running" | "Passed" | "Failed" | "Cancelled" | "Interrupted";
-            rowVersion: number;
-            evidenceAt?: components["schemas"]["Timestamp"];
-            createdAt: components["schemas"]["Timestamp"];
-        } & (unknown & unknown & unknown);
-        ConfigVerificationRunDetail: components["schemas"]["ConfigVerificationRunSummary"] & {
-            checkResults: components["schemas"]["ConfigVerificationRunCheckResult"][];
-            /** @description Failed/Cancelled/Interrupted 的人类可读失败或中止原因（非秘密）。 */
-            resultDetail?: string;
-        } & unknown;
-        /** @description planKey+checkKey 精确定位绑定配置版本中的检查；ok 携带 Evidence locator，error/gap 携带缺口原因，两种联合不得混合（DATA-CONFIG-007）。 */
-        ConfigVerificationRunCheckResult: {
-            planKey: string;
-            checkKey: string;
-            /** @constant */
-            status: "ok";
-            evidenceId: components["schemas"]["LocatorId"];
-        } | {
-            planKey: string;
-            checkKey: string;
-            /** @enum {string} */
-            status: "error" | "gap";
-            /** @enum {string} */
-            gapReason: "runtime_unavailable" | "query_failed" | "partial_response" | "no_data" | "cancelled" | "interrupted";
         };
         /** @description 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。 */
         ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"];
@@ -4393,14 +3607,6 @@ export interface components {
             expiresAt?: components["schemas"]["Timestamp"];
             createdAt: components["schemas"]["Timestamp"];
         };
-        SourceMaterialSummary: {
-            id: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            kind: "text_attachment" | "knowledge_import";
-            digest: string;
-            sizeBytes: number;
-            createdAt: components["schemas"]["Timestamp"];
-        };
         /** @description 一条审计事件；correlationId 仅在合并前历史为空，phase 缺省为 execute。 */
         AuditEventSummary: {
             id: components["schemas"]["LocatorId"];
@@ -4479,50 +3685,10 @@ export interface components {
             occurrenceId: components["schemas"]["LocatorId"];
             rowVersion: number;
         };
-        TaskChangeEvent: {
-            /** @description task_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。 */
-            seq: components["schemas"]["ChangeSeq"];
-            /** @enum {string} */
-            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "config_verification_run" | "resource_refresh_run";
-            objectId: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            changeType: "created" | "state_changed";
-            rowVersion: number;
-        };
         ResyncRequiredEvent: {
             /** @constant */
             type: "resync_required";
         };
-        VerificationInvocationItem: {
-            id: components["schemas"]["LocatorId"];
-            itemSeq: number;
-            scenarioId: string;
-            cellId: string;
-            /** @enum {string} */
-            objectKind: "deployment" | "connection" | "config";
-            inputDigest: string;
-            /** @description 按 objectKind 的 typed non-secret locator；交换文档的封闭形状由 deployment-verification.schema.json 唯一拥有。 */
-            locator?: {
-                [key: string]: unknown;
-            };
-        };
-        VerificationResultConflict: {
-            id: components["schemas"]["LocatorId"];
-            itemId: components["schemas"]["LocatorId"];
-            firstResultId: components["schemas"]["LocatorId"];
-            conflictingResultId: components["schemas"]["LocatorId"];
-            createdAt: components["schemas"]["Timestamp"];
-        };
-        VerificationSubjectDrift: {
-            /** @enum {string} */
-            objectKind: "deployment" | "connection" | "config";
-            /** @enum {string} */
-            driftField: "release_subject_digest" | "deployment_config_digest" | "public_origin_digest" | "connection_revision" | "credential_generation" | "root_binding_revision" | "probe_contract_digest" | "config_version" | "label_contract_version";
-            itemId: components["schemas"]["LocatorId"];
-            frozenDigest: string;
-            currentDigest: string;
-            observedAt: components["schemas"]["Timestamp"];
-        } & (unknown & unknown & unknown);
     };
     responses: {
         /** @description 请求语法错误（400）。 */
@@ -4617,15 +3783,6 @@ export interface components {
                 "application/problem+json": components["schemas"]["ErrorModel"];
             };
         };
-        /** @description 已受理操作的强制 Artifact/profile 提交失败（500；code=artifact_commit_failed）。 */
-        InternalError: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["ErrorModel"];
-            };
-        };
         /** @description 服务不可用/维护中（503）。 */
         ServiceUnavailable: {
             headers: {
@@ -4647,24 +3804,19 @@ export interface components {
         InvestigationId: components["schemas"]["LocatorId"];
         MessageId: components["schemas"]["LocatorId"];
         AttemptId: components["schemas"]["LocatorId"];
-        InvocationId: components["schemas"]["LocatorId"];
         RunId: components["schemas"]["LocatorId"];
         ReportVersion: number;
         KnowledgeId: components["schemas"]["LocatorId"];
         VersionId: components["schemas"]["LocatorId"];
         BatchId: components["schemas"]["LocatorId"];
         CandidateId: components["schemas"]["LocatorId"];
-        SystemKey: components["schemas"]["StableKey"];
         ConnectionName: components["schemas"]["StableKey"];
         SourceKey: components["schemas"]["StableKey"];
         CredentialId: components["schemas"]["LocatorId"];
         ArtifactId: components["schemas"]["LocatorId"];
-        AttachmentId: components["schemas"]["LocatorId"];
         BackupId: components["schemas"]["LocatorId"];
-        MaterialId: components["schemas"]["LocatorId"];
         UserId: components["schemas"]["LocatorId"];
         SessionId: components["schemas"]["LocatorId"];
-        RuntimeSlot: "plinth";
     };
     requestBodies: never;
     headers: {
@@ -4678,11 +3830,10 @@ export interface components {
     };
     pathItems: never;
 }
+export type BusinessContextItem = components['schemas']['BusinessContextItem'];
 export type PluginInspectionScope = components['schemas']['PluginInspectionScope'];
 export type PluginInspectionPlan = components['schemas']['PluginInspectionPlan'];
 export type BusinessView = components['schemas']['BusinessView'];
-export type SourceObservedResource = components['schemas']['SourceObservedResource'];
-export type SourceObservationRun = components['schemas']['SourceObservationRun'];
 export type PluginInspectionPlanInput = components['schemas']['PluginInspectionPlanInput'];
 export type BusinessViewInput = components['schemas']['BusinessViewInput'];
 export type UpdateBusinessViewRequest = components['schemas']['UpdateBusinessViewRequest'];
@@ -4697,7 +3848,6 @@ export type ExpectedRowVersion = components['schemas']['ExpectedRowVersion'];
 export type CommandRequest = components['schemas']['CommandRequest'];
 export type VersionedCommandRequest = components['schemas']['VersionedCommandRequest'];
 export type EnableConnectionRequest = components['schemas']['EnableConnectionRequest'];
-export type ConfigVerificationRunRequest = components['schemas']['ConfigVerificationRunRequest'];
 export type CancelRequest = components['schemas']['CancelRequest'];
 export type LoginRequest = components['schemas']['LoginRequest'];
 export type UserSummary = components['schemas']['UserSummary'];
@@ -4729,13 +3879,10 @@ export type CommandIdReuseConflict = components['schemas']['CommandIdReuseConfli
 export type RowVersionConflict = components['schemas']['RowVersionConflict'];
 export type HeadConflict = components['schemas']['HeadConflict'];
 export type CurrentPointerConflict = components['schemas']['CurrentPointerConflict'];
-export type SetupResponse = components['schemas']['SetupResponse'];
-export type SetupItem = components['schemas']['SetupItem'];
 export type MaintenanceState = components['schemas']['MaintenanceState'];
 export type MaintenanceItem = components['schemas']['MaintenanceItem'];
 export type ExitMaintenanceRequest = components['schemas']['ExitMaintenanceRequest'];
 export type RuntimeSlot = components['schemas']['RuntimeSlot'];
-export type RuntimeStatus = components['schemas']['RuntimeStatus'];
 export type AlertSnapshot = components['schemas']['AlertSnapshot'];
 export type AdminAbout = components['schemas']['AdminAbout'];
 export type AlertOccurrenceSummary = components['schemas']['AlertOccurrenceSummary'];
@@ -4750,8 +3897,6 @@ export type AttemptSummary = components['schemas']['AttemptSummary'];
 export type ToolCallSummary = components['schemas']['ToolCallSummary'];
 export type IntakeIssueFields = components['schemas']['IntakeIssueFields'];
 export type IntakeIssueSummary = components['schemas']['IntakeIssueSummary'];
-export type IntakeIssueDetail = components['schemas']['IntakeIssueDetail'];
-export type IntakeIssueEvent = components['schemas']['IntakeIssueEvent'];
 export type InvestigationSourceInput = components['schemas']['InvestigationSourceInput'];
 export type InvestigationSourceSummary = components['schemas']['InvestigationSourceSummary'];
 export type CreateInvestigationRequest = components['schemas']['CreateInvestigationRequest'];
@@ -4791,26 +3936,6 @@ export type ConfirmCandidatesRequest = components['schemas']['ConfirmCandidatesR
 export type FeedbackRequest = components['schemas']['FeedbackRequest'];
 export type FeedbackSummary = components['schemas']['FeedbackSummary'];
 export type FeedbackTimeline = components['schemas']['FeedbackTimeline'];
-export type TaskSnapshot = components['schemas']['TaskSnapshot'];
-export type TaskObjectRef = components['schemas']['TaskObjectRef'];
-export type BusinessSystemSummary = components['schemas']['BusinessSystemSummary'];
-export type BusinessSystemDetail = components['schemas']['BusinessSystemDetail'];
-export type DiscoverySummary = components['schemas']['DiscoverySummary'];
-export type PlanSummary = components['schemas']['PlanSummary'];
-export type CheckSummary = components['schemas']['CheckSummary'];
-export type PromqlCheckSummary = components['schemas']['PromqlCheckSummary'];
-export type PromqlInstantCheck = components['schemas']['PromqlInstantCheck'];
-export type PromqlRangeCheck = components['schemas']['PromqlRangeCheck'];
-export type ConfigVersionSummary = components['schemas']['ConfigVersionSummary'];
-export type ConfigVersionDetail = components['schemas']['ConfigVersionDetail'];
-export type PublishConfigRequest = components['schemas']['PublishConfigRequest'];
-export type ResourceRefreshRunRequest = components['schemas']['ResourceRefreshRunRequest'];
-export type ResourceRefreshRunDetail = components['schemas']['ResourceRefreshRunDetail'];
-export type ObservedResourceSummary = components['schemas']['ObservedResourceSummary'];
-export type ObservedResourceDetail = components['schemas']['ObservedResourceDetail'];
-export type ConfigVerificationRunSummary = components['schemas']['ConfigVerificationRunSummary'];
-export type ConfigVerificationRunDetail = components['schemas']['ConfigVerificationRunDetail'];
-export type ConfigVerificationRunCheckResult = components['schemas']['ConfigVerificationRunCheckResult'];
 export type ConnectionSummary = components['schemas']['ConnectionSummary'];
 export type PrometheusConnectionSummary = components['schemas']['PrometheusConnectionSummary'];
 export type ThanosConnectionSummary = components['schemas']['ThanosConnectionSummary'];
@@ -4853,7 +3978,6 @@ export type EvidenceDetail = components['schemas']['EvidenceDetail'];
 export type EvidenceProducer = components['schemas']['EvidenceProducer'];
 export type EvidenceBody = components['schemas']['EvidenceBody'];
 export type ArtifactSummary = components['schemas']['ArtifactSummary'];
-export type SourceMaterialSummary = components['schemas']['SourceMaterialSummary'];
 export type AuditEventSummary = components['schemas']['AuditEventSummary'];
 export type AuditCleanupStatus = components['schemas']['AuditCleanupStatus'];
 export type AuditSettings = components['schemas']['AuditSettings'];
@@ -4861,11 +3985,7 @@ export type AuditSettingsPatchRequest = components['schemas']['AuditSettingsPatc
 export type AuditSettingsPreviewRequest = components['schemas']['AuditSettingsPreviewRequest'];
 export type AuditSettingsPreview = components['schemas']['AuditSettingsPreview'];
 export type AlertChangeEvent = components['schemas']['AlertChangeEvent'];
-export type TaskChangeEvent = components['schemas']['TaskChangeEvent'];
 export type ResyncRequiredEvent = components['schemas']['ResyncRequiredEvent'];
-export type VerificationInvocationItem = components['schemas']['VerificationInvocationItem'];
-export type VerificationResultConflict = components['schemas']['VerificationResultConflict'];
-export type VerificationSubjectDrift = components['schemas']['VerificationSubjectDrift'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
 export type ResponseUnauthorized = components['responses']['Unauthorized'];
 export type ResponseForbidden = components['responses']['Forbidden'];
@@ -4876,7 +3996,6 @@ export type ResponsePayloadTooLarge = components['responses']['PayloadTooLarge']
 export type ResponseUnsupportedMedia = components['responses']['UnsupportedMedia'];
 export type ResponseUnprocessable = components['responses']['Unprocessable'];
 export type ResponseRateLimited = components['responses']['RateLimited'];
-export type ResponseInternalError = components['responses']['InternalError'];
 export type ResponseServiceUnavailable = components['responses']['ServiceUnavailable'];
 export type ParameterCursor = components['parameters']['Cursor'];
 export type ParameterLimit = components['parameters']['Limit'];
@@ -4886,24 +4005,19 @@ export type ParameterIssueId = components['parameters']['IssueId'];
 export type ParameterInvestigationId = components['parameters']['InvestigationId'];
 export type ParameterMessageId = components['parameters']['MessageId'];
 export type ParameterAttemptId = components['parameters']['AttemptId'];
-export type ParameterInvocationId = components['parameters']['InvocationId'];
 export type ParameterRunId = components['parameters']['RunId'];
 export type ParameterReportVersion = components['parameters']['ReportVersion'];
 export type ParameterKnowledgeId = components['parameters']['KnowledgeId'];
 export type ParameterVersionId = components['parameters']['VersionId'];
 export type ParameterBatchId = components['parameters']['BatchId'];
 export type ParameterCandidateId = components['parameters']['CandidateId'];
-export type ParameterSystemKey = components['parameters']['SystemKey'];
 export type ParameterConnectionName = components['parameters']['ConnectionName'];
 export type ParameterSourceKey = components['parameters']['SourceKey'];
 export type ParameterCredentialId = components['parameters']['CredentialId'];
 export type ParameterArtifactId = components['parameters']['ArtifactId'];
-export type ParameterAttachmentId = components['parameters']['AttachmentId'];
 export type ParameterBackupId = components['parameters']['BackupId'];
-export type ParameterMaterialId = components['parameters']['MaterialId'];
 export type ParameterUserId = components['parameters']['UserId'];
 export type ParameterSessionId = components['parameters']['SessionId'];
-export type ParameterRuntimeSlot = components['parameters']['RuntimeSlot'];
 export type HeaderAttachmentDisposition = components['headers']['AttachmentDisposition'];
 export type HeaderNoStoreCacheControl = components['headers']['NoStoreCacheControl'];
 export type HeaderNoCachePragma = components['headers']['NoCachePragma'];
@@ -5025,6 +4139,37 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    listBusinessContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 业务上下文条目（无业务系统时为空数组） */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["BusinessContextItem"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 读取失败（problem 详情） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listBusinessViews: {
         parameters: {
             query?: never;
@@ -5127,159 +4272,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BusinessView"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    listSourceObservedResources: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-                objectType?: string;
-                state?: "observed" | "not_observed" | "stale";
-            };
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 实际持久化的结果。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["SourceObservedResource"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getSourceObservedResource: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-                resourceId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 实际持久化的结果。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceObservedResource"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listSourceObservationRuns: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 实际持久化的结果。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["SourceObservationRun"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getSourceObservationRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-                observationRunId: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 实际持久化的结果。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceObservationRun"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    refreshIntegrationResources: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                connectionName: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CommandBase"];
-            };
-        };
-        responses: {
-            /** @description 实际持久化的结果。 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceObservationRun"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -6103,28 +5095,6 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
-    getSetupStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 设置清单。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SetupResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-        };
-    };
     getMaintenanceState: {
         parameters: {
             query?: never;
@@ -6206,28 +5176,6 @@ export interface operations {
             429: components["responses"]["RateLimited"];
         };
     };
-    getRuntimeStatus: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 固定 Runtime slot 的状态。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeStatus"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-        };
-    };
     getAdminAbout: {
         parameters: {
             query?: never;
@@ -6307,40 +5255,6 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    listAlertMatchedResources: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                occurrenceId: components["parameters"]["OccurrenceId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 匹配候选分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["ObservedResourceSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            410: components["responses"]["Gone"];
-        };
-    };
     listAlertObservations: {
         parameters: {
             query?: {
@@ -6365,39 +5279,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         items: components["schemas"]["ObservationSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listOccurrenceInvestigations: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                occurrenceId: components["parameters"]["OccurrenceId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 关联调查分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["InvestigationSummary"][];
                         nextCursor?: components["schemas"]["Cursor"];
                     };
                 };
@@ -6645,39 +5526,6 @@ export interface operations {
             429: components["responses"]["RateLimited"];
         };
     };
-    reanalyzeAlert: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                occurrenceId: components["parameters"]["OccurrenceId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CommandRequest"];
-            };
-        };
-        responses: {
-            /** @description 新的 Initial Analysis 已创建。 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InitialAnalysisDetail"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
     listAlertIntakeIssues: {
         parameters: {
             query?: {
@@ -6707,64 +5555,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-        };
-    };
-    getAlertIntakeIssue: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                issueId: components["parameters"]["IssueId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 接入问题、来源、Delivery/项目定位与结构化诊断详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IntakeIssueDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listAlertIntakeIssueEvents: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                issueId: components["parameters"]["IssueId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 发生事件按 observedAt 倒序分页返回。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["IntakeIssueEvent"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
         };
     };
     acknowledgeIntakeIssue: {
@@ -7200,31 +5990,6 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    getInvestigationAttachment: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                attachmentId: components["parameters"]["AttachmentId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 附件元数据。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TextAttachmentSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
     createInvestigationKnowledgeCandidate: {
         parameters: {
             query?: never;
@@ -7299,7 +6064,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
-    triggerManualInspectionRun: {
+    createInspectionRun: {
         parameters: {
             query?: never;
             header?: never;
@@ -7950,38 +6715,6 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    confirmKnowledgeCandidate: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                candidateId: components["parameters"]["CandidateId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConfirmCandidateRequest"];
-            };
-        };
-        responses: {
-            /** @description 确认结果。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CandidateSummary"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            429: components["responses"]["RateLimited"];
-        };
-    };
     editKnowledgeCandidateDraft: {
         parameters: {
             query?: never;
@@ -8012,6 +6745,38 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
+            429: components["responses"]["RateLimited"];
+        };
+    };
+    confirmKnowledgeCandidate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidateId: components["parameters"]["CandidateId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmCandidateRequest"];
+            };
+        };
+        responses: {
+            /** @description 确认结果。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateSummary"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
         };
     };
@@ -8105,271 +6870,6 @@ export interface operations {
             409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
             429: components["responses"]["RateLimited"];
-        };
-    };
-    listBusinessSystems: {
-        parameters: {
-            query?: {
-                /** @description 按当前启用状态筛选。 */
-                enabled?: boolean;
-                /** @description 按显示名称做服务端大小写不敏感的包含搜索；筛选值绑定分页游标。 */
-                q?: string;
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 业务系统分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["BusinessSystemSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-        };
-    };
-    getBusinessSystem: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 业务系统详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BusinessSystemDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listBusinessSystemConfigs: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 配置版本分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["ConfigVersionSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getBusinessSystemConfig: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-                versionId: components["parameters"]["VersionId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 配置版本详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConfigVersionDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listConfigVerificationRuns: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-                versionId: components["parameters"]["VersionId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Config Verification Run 历史分页。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["ConfigVerificationRunSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getConfigVerificationRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-                versionId: components["parameters"]["VersionId"];
-                verificationRunId: components["schemas"]["LocatorId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Verification Run 详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConfigVerificationRunDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getResourceRefreshRun: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-                resourceRefreshRunId: components["schemas"]["LocatorId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Resource Refresh Run 详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResourceRefreshRunDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listObservedResources: {
-        parameters: {
-            query?: {
-                current?: boolean;
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 观测资源分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["ObservedResourceSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getObservedResource: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-                resourceId: components["schemas"]["LocatorId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Observed Resource 详情。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ObservedResourceDetail"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
         };
     };
     listIntegrationPlugins: {
@@ -8810,70 +7310,6 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    listModelProviders: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 模型供应商连接分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["ConnectionSummary"][];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-        };
-    };
-    listProviderModels: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path: {
-                connectionName: components["parameters"]["ConnectionName"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 模型 ID 分页列表。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: string[];
-                        nextCursor?: components["schemas"]["Cursor"];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
     listAlertSources: {
         parameters: {
             query?: {
@@ -9105,38 +7541,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             410: components["responses"]["Gone"];
-            429: components["responses"]["RateLimited"];
-        };
-    };
-    enableAlertSource: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                sourceKey: components["parameters"]["SourceKey"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VersionedCommandRequest"];
-            };
-        };
-        responses: {
-            /** @description 来源已重新启用。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AlertSourceDetail"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
         };
     };
@@ -9423,47 +7827,6 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    uploadArtifactStaging: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "multipart/form-data": {
-                    /** Format: binary */
-                    file: string;
-                    /** @description 客户端生成的幂等命令 ID（HTTP-COMMAND-001）。 */
-                    clientCommandId: string;
-                    /** @enum {string} */
-                    kind?: "attachment" | "screenshot" | "trace" | "tool_result" | "report_file";
-                    /** @description 仅作审计元数据；不得拼入存储路径。 */
-                    filename?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description staging Artifact 已登记。 */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ArtifactSummary"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            409: components["responses"]["Conflict"];
-            413: components["responses"]["PayloadTooLarge"];
-            415: components["responses"]["UnsupportedMedia"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
     getArtifactMetadata: {
         parameters: {
             query?: never;
@@ -9523,84 +7886,6 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    getSourceMaterial: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                materialId: components["parameters"]["MaterialId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 来源材料元数据。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SourceMaterialSummary"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    downloadSourceMaterialContent: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                materialId: components["parameters"]["MaterialId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 来源材料原文（UTF-8 文本）。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/plain": string;
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    getTaskSnapshot: {
-        parameters: {
-            query?: {
-                /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
-                cursor?: components["parameters"]["Cursor"];
-                /** @description 页大小上限（默认 50，最大 200；HTTP-PAGE-002）。 */
-                limit?: components["parameters"]["Limit"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 当前可观察任务对象引用与 snapshot_seq。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskSnapshot"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            410: components["responses"]["Gone"];
-        };
-    };
     streamAlertEvents: {
         parameters: {
             query?: {
@@ -9626,39 +7911,6 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": components["schemas"]["AlertChangeEvent"] | components["schemas"]["ResyncRequiredEvent"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            410: components["responses"]["Gone"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    streamTaskEvents: {
-        parameters: {
-            query?: {
-                /** @description 上次收到的最大 task_change_seq（十进制字符串，可为 0）；与 Last-Event-ID 同时存在时以 Last-Event-ID 为准（HTTP-SSE-003）。游标在响应头写出前已判定过期时返回 410；流建立后过期则发送 resync_required 事件并关闭连接（HTTP-SSE-002）。 */
-                after?: components["schemas"]["ChangeSeq"];
-            };
-            header?: {
-                /** @description 原生 EventSource 重连自动携带的上次事件 id（HTTP-SSE-003）；存在时优先于 after 查询参数；游标过期语义与 after 相同。 */
-                "Last-Event-ID"?: components["schemas"]["ChangeSeq"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description text/event-stream 变更流。 */
-            200: {
-                headers: {
-                    "Content-Type"?: "text/event-stream";
-                    "Cache-Control"?: "no-cache";
-                    "X-Accel-Buffering"?: "no";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/event-stream": components["schemas"]["TaskChangeEvent"] | components["schemas"]["ResyncRequiredEvent"];
                 };
             };
             401: components["responses"]["Unauthorized"];
