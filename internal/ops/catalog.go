@@ -51,7 +51,7 @@ type catalogDocument struct {
 // catalog's transform rules. TestMetricsLabelProjection fails when any real
 // machine source drifts from this table.
 var enumLabelValues = map[string][]string{
-	"openapi_route_group": {"admin", "adminops", "alerts", "auth", "config", "files", "inspections", "investigations", "knowledge", "maintenance", "realtime", "setup", "verification"},
+	"openapi_route_group": {"admin", "adminops", "alerts", "auth", "config", "files", "inspections", "investigations", "knowledge", "maintenance", "realtime", "setup"},
 	"openapi_method":      {"get", "patch", "post", "put"},
 	"runtime_slot":        {"plinth"},
 	"attempt_type": {

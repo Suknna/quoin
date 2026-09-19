@@ -37,7 +37,6 @@ func TestEmbeddedContractsMatchDocsAuthority(t *testing.T) {
 		{"MetricsYAML", gen.MetricsYAML, "metrics.yaml"},
 		{"ConnectionProbesYAML", gen.ConnectionProbesYAML, "connection-probes.yaml"},
 		{"PlinthWorkerToolsYAML", gen.PlinthWorkerToolsYAML, "plinth-worker-tools.yaml"},
-		{"DeploymentVerificationSchema", gen.DeploymentVerificationSchema, "schemas/deployment-verification.schema.json"},
 	}
 	for _, projection := range projections {
 		t.Run(projection.name, func(t *testing.T) {

@@ -408,52 +408,6 @@ func TestListSystemsReturnsIDKeysetCursor(t *testing.T) {
 	}
 }
 
-// TestVerificationConfigLocatorBindsCanonicalDeclarationWithoutContract proves
-// that deployment verification freezes the exact configuration version, not a
-// retired Label Contract. The second insert deliberately pairs one system with
-// another system's declaration and must remain rejected.
-func TestVerificationConfigLocatorBindsCanonicalDeclarationWithoutContract(t *testing.T) {
-	h := newHarness(t)
-	payments := h.mustUpload(t, validSystemYAML, "cmd-locator-payments-001")
-	billingYAML := strings.ReplaceAll(strings.ReplaceAll(validSystemYAML, "payments", "billing"), "支付系统", "账单系统")
-	billing := h.mustUpload(t, billingYAML, "cmd-locator-billing-001")
-
-	const now = "2026-01-01T00:00:00Z"
-	if _, err := h.db.Exec(`INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,?,1,'locator test',?,?,?,?)`, make([]byte, 32), now, now, "2026-01-02T00:00:00Z", "2026-01-08T00:00:00Z"); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := h.db.Exec(`INSERT INTO verification_invocation_manifests(admin_session_id,principal_user_id,release_subject_digest,catalog_digest,result_profile_digest,deployment_config_digest,public_origin_digest,applicable_set_digest,item_count,item_set_digest,manifest_digest,canonical_input_digest,started_at,deadline_at,created_at) VALUES(1,1,?,?,?,?,?,?,2,?,?,?,?,?,?)`, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64), strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("0", 64), strings.Repeat("1", 64), strings.Repeat("2", 64), now, "2026-01-01T08:00:00Z", now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifestID, _ := manifest.LastInsertId()
-	insertItem := func(sequence int64) int64 {
-		t.Helper()
-		item, err := h.db.Exec(`INSERT INTO verification_invocation_items(invocation_id,item_seq,scenario_id,cell_id,object_kind,input_digest,created_at) VALUES(?,?,?,'default','config',?,?)`, manifestID, sequence, "config-locator", strings.Repeat(strconv.FormatInt(sequence, 10), 64), now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, _ := item.LastInsertId()
-		return id
-	}
-
-	paymentsItem := insertItem(1)
-	var paymentsSystemID, billingConfigID int64
-	if err := h.db.QueryRow(`SELECT business_system_id FROM business_system_config_versions WHERE id=?`, mustID(t, payments.ID)).Scan(&paymentsSystemID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.db.Exec(`INSERT INTO verification_config_item_locators(item_id,business_system_id,config_version_id,label_contract_version_id) VALUES(?,?,?,NULL)`, paymentsItem, paymentsSystemID, mustID(t, payments.ID)); err != nil {
-		t.Fatalf("canonical declaration locator with NULL contract: %v", err)
-	}
-	billingItem := insertItem(2)
-	if err := h.db.QueryRow(`SELECT id FROM business_system_config_versions WHERE id=?`, mustID(t, billing.ID)).Scan(&billingConfigID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.db.Exec(`INSERT INTO verification_config_item_locators(item_id,business_system_id,config_version_id,label_contract_version_id) VALUES(?,?,?,NULL)`, billingItem, paymentsSystemID, billingConfigID); err == nil || !strings.Contains(err.Error(), "exact frozen declaration") {
-		t.Fatalf("mismatched canonical configuration must be rejected, err=%v", err)
-	}
-}
-
 func mustID(t *testing.T, locator string) int64 {
 	t.Helper()
 	parsed, err := strconv.ParseInt(locator, 10, 64)

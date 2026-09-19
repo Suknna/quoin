@@ -43,7 +43,4 @@ var (
 
 	//go:embed plinth-worker-tools.yaml
 	PlinthWorkerToolsYAML []byte
-
-	//go:embed deployment-verification.schema.json
-	DeploymentVerificationSchema []byte
 )

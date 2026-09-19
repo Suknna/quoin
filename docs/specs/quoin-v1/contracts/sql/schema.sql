@@ -1266,16 +1266,14 @@ BEGIN SELECT RAISE(ABORT, 'business view key is immutable'); END;
 CREATE TRIGGER trg_business_views_no_delete BEFORE DELETE ON business_views
 BEGIN SELECT RAISE(ABORT, 'business views are never deleted; keys are retired, not reused'); END;
 
--- Config Verification Run：prepublish 与 deployment_acceptance 共用唯一机械执行模型。
--- prepublish 只绑定未发布草稿并可被 Label Contract 联合激活采用；deployment_acceptance 只绑定
--- manifest 创建时的 current published config/Label Contract，绝不移动发布指针或成为激活证据。
+-- Config Verification Run：prepublish 机械执行模型，只绑定未发布草稿并可被
+-- Label Contract 联合激活采用。
 CREATE TABLE config_verification_runs (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  purpose                   TEXT NOT NULL CHECK (purpose IN ('prepublish','deployment_acceptance')),
+  purpose                   TEXT NOT NULL CHECK (purpose = 'prepublish'),
   business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   config_version_id         INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  verification_manifest_item_id INTEGER REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   state                     TEXT NOT NULL CHECK (state IN ('Queued','Running','Passed','Failed','Cancelled','Interrupted')),
   row_version               INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   evidence_at               TEXT,                    -- 真正开始采证时生成
@@ -1285,9 +1283,7 @@ CREATE TABLE config_verification_runs (
   CHECK (
     (state IN ('Queued','Running','Passed') AND result_detail IS NULL)
     OR (state IN ('Failed','Cancelled','Interrupted') AND result_detail IS NOT NULL)
-  ),
-  CHECK ((purpose = 'prepublish' AND verification_manifest_item_id IS NULL)
-      OR (purpose = 'deployment_acceptance' AND verification_manifest_item_id IS NOT NULL))
+  )
 ) STRICT;
 CREATE UNIQUE INDEX ux_config_verification_run_active ON config_verification_runs (purpose, business_system_id, config_version_id)
   WHERE state IN ('Queued','Running');
@@ -1368,148 +1364,6 @@ CREATE TABLE label_contract_activations (
   items_json                TEXT NOT NULL CHECK (json_valid(items_json) AND json_type(items_json) = 'array'),
   applied_at                TEXT,
   created_at                TEXT NOT NULL
-) STRICT;
-
--- Deployment Acceptance：manifest/items/results/conflicts/receipt 是唯一持久证据闭包；
--- 不建立可变 invocation status 或 current acceptance pointer。
-CREATE TABLE verification_invocation_manifests (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  admin_session_id           INTEGER NOT NULL REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  principal_user_id          INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  release_subject_digest     TEXT NOT NULL CHECK (length(release_subject_digest) = 64 AND release_subject_digest NOT GLOB '*[^0-9a-f]*'),
-  catalog_digest             TEXT NOT NULL CHECK (length(catalog_digest) = 64 AND catalog_digest NOT GLOB '*[^0-9a-f]*'),
-  result_profile_digest      TEXT NOT NULL CHECK (length(result_profile_digest) = 64 AND result_profile_digest NOT GLOB '*[^0-9a-f]*'),
-  deployment_config_digest   TEXT NOT NULL CHECK (length(deployment_config_digest) = 64 AND deployment_config_digest NOT GLOB '*[^0-9a-f]*'),
-  public_origin_digest       TEXT NOT NULL CHECK (length(public_origin_digest) = 64 AND public_origin_digest NOT GLOB '*[^0-9a-f]*'),
-  applicable_set_digest      TEXT NOT NULL CHECK (length(applicable_set_digest) = 64 AND applicable_set_digest NOT GLOB '*[^0-9a-f]*'),
-  item_count                 INTEGER NOT NULL CHECK (item_count >= 1),
-  item_set_digest            TEXT NOT NULL CHECK (length(item_set_digest) = 64 AND item_set_digest NOT GLOB '*[^0-9a-f]*'),
-  manifest_digest            TEXT NOT NULL UNIQUE CHECK (length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'),
-  canonical_input_digest     TEXT NOT NULL CHECK (length(canonical_input_digest) = 64 AND canonical_input_digest NOT GLOB '*[^0-9a-f]*'),
-  started_at                 TEXT NOT NULL,
-  deadline_at                TEXT NOT NULL,
-  created_at                 TEXT NOT NULL,
-  CHECK (julianday(deadline_at) = julianday(started_at, '+8 hours'))
-) STRICT;
-
-CREATE TABLE verification_invocation_items (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  item_seq                   INTEGER NOT NULL CHECK (item_seq >= 1),
-  scenario_id                TEXT NOT NULL CHECK (length(scenario_id) > 0),
-  cell_id                    TEXT NOT NULL CHECK (length(cell_id) > 0),
-  object_kind                TEXT NOT NULL CHECK (object_kind IN ('deployment','connection','config')),
-  input_digest               TEXT NOT NULL CHECK (length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'),
-  created_at                 TEXT NOT NULL,
-  UNIQUE (invocation_id, item_seq),
-  UNIQUE (invocation_id, scenario_id, cell_id, object_kind, input_digest)
-) STRICT;
-
-CREATE TABLE verification_deployment_item_locators (
-  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  release_subject_digest     TEXT NOT NULL CHECK (length(release_subject_digest) = 64 AND release_subject_digest NOT GLOB '*[^0-9a-f]*'),
-  deployment_config_digest   TEXT NOT NULL CHECK (length(deployment_config_digest) = 64 AND deployment_config_digest NOT GLOB '*[^0-9a-f]*'),
-  public_origin_digest       TEXT NOT NULL CHECK (length(public_origin_digest) = 64 AND public_origin_digest NOT GLOB '*[^0-9a-f]*'),
-  backend                    TEXT NOT NULL CHECK (backend IN ('compose','kubernetes')),
-  architecture               TEXT NOT NULL CHECK (architecture IN ('linux/amd64','linux/arm64'))
-) STRICT;
-CREATE TABLE verification_connection_item_locators (
-  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  connection_id              INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  connection_revision_id     INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  credential_generation_id   INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  root_binding_revision      INTEGER NOT NULL CHECK (root_binding_revision >= 1),
-  probe_contract_digest      TEXT NOT NULL CHECK (length(probe_contract_digest) = 64 AND probe_contract_digest NOT GLOB '*[^0-9a-f]*')
-) STRICT;
-CREATE TABLE verification_config_item_locators (
-  item_id                    INTEGER PRIMARY KEY REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  business_system_id         INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  config_version_id          INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  -- New declarations are self-contained, so their locator carries no Label
-  -- Contract. A non-NULL value is retained solely as exact provenance for a
-  -- pre-declaration historical configuration.
-  label_contract_version_id  INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE verification_item_results (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  input_digest               TEXT NOT NULL CHECK (length(input_digest) = 64 AND input_digest NOT GLOB '*[^0-9a-f]*'),
-  result_digest              TEXT NOT NULL CHECK (length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'),
-  producer_type              TEXT NOT NULL CHECK (producer_type IN ('quoin','runtime','deployment_helper','admin_observation')),
-  outcome                    TEXT NOT NULL CHECK (outcome IN ('passed','warned','failed')),
-  category                   TEXT NOT NULL CHECK (category IN ('passed','functional_assertion_failed','cleanup_residue','verifier_conflict','subject_drift','environment_unavailable','operator_cancelled','infrastructure_interrupted','cleanup_indeterminate','not_run','verifier_invariant_violation')),
-  observed_at                TEXT NOT NULL,
-  committed_at               TEXT NOT NULL,
-  evidence_index_digest      TEXT NOT NULL CHECK (length(evidence_index_digest) = 64 AND evidence_index_digest NOT GLOB '*[^0-9a-f]*'),
-  artifact_id                INTEGER REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE (item_id, input_digest, result_digest),
-  CHECK (julianday(committed_at) >= julianday(observed_at)),
-  CHECK ((outcome = 'passed' AND category = 'passed')
-      OR (outcome = 'failed' AND category IN ('functional_assertion_failed','cleanup_residue','verifier_conflict','verifier_invariant_violation'))
-      OR (outcome = 'warned' AND category IN ('subject_drift','environment_unavailable','operator_cancelled','infrastructure_interrupted','cleanup_indeterminate','not_run')))
-) STRICT;
-
-CREATE TABLE verification_result_conflicts (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  first_result_id            INTEGER NOT NULL REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  conflicting_result_id      INTEGER NOT NULL REFERENCES verification_item_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                 TEXT NOT NULL,
-  UNIQUE (item_id, first_result_id, conflicting_result_id),
-  CHECK (first_result_id <> conflicting_result_id)
-) STRICT;
-
-CREATE TABLE verification_helper_imports (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  request_digest             TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
-  report_digest              TEXT NOT NULL CHECK (length(report_digest) = 64 AND report_digest NOT GLOB '*[^0-9a-f]*'),
-  helper_reported_started_at TEXT NOT NULL,
-  helper_reported_finished_at TEXT NOT NULL,
-  received_at                TEXT NOT NULL,
-  artifact_id                INTEGER NOT NULL REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE (invocation_id, request_digest, report_digest),
-  CHECK (julianday(helper_reported_finished_at) >= julianday(helper_reported_started_at))
-) STRICT;
-
-
-CREATE TABLE verification_subject_drifts (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  invocation_id              INTEGER NOT NULL REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  object_kind                TEXT NOT NULL CHECK (object_kind IN ('deployment','connection','config')),
-  drift_field                TEXT NOT NULL CHECK (drift_field IN ('release_subject_digest','deployment_config_digest','public_origin_digest','connection_revision','credential_generation','root_binding_revision','probe_contract_digest','config_version','label_contract_version')),
-  item_id                    INTEGER NOT NULL REFERENCES verification_invocation_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  frozen_digest              TEXT NOT NULL CHECK (length(frozen_digest) = 64 AND frozen_digest NOT GLOB '*[^0-9a-f]*'),
-  current_digest             TEXT NOT NULL CHECK (length(current_digest) = 64 AND current_digest NOT GLOB '*[^0-9a-f]*'),
-  observed_at                TEXT NOT NULL,
-  UNIQUE (invocation_id, object_kind, item_id, current_digest),
-  CHECK (frozen_digest <> current_digest),
-  CHECK ((object_kind = 'deployment' AND drift_field IN ('release_subject_digest','deployment_config_digest','public_origin_digest'))
-      OR (object_kind = 'connection' AND drift_field IN ('connection_revision','credential_generation','root_binding_revision','probe_contract_digest'))
-      OR (object_kind = 'config' AND drift_field IN ('config_version','label_contract_version')))
-) STRICT;
-
-CREATE TABLE verification_finalization_receipts (
-  id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  invocation_id              INTEGER NOT NULL UNIQUE REFERENCES verification_invocation_manifests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  manifest_digest            TEXT NOT NULL CHECK (length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'),
-  applicable_set_digest      TEXT NOT NULL CHECK (length(applicable_set_digest) = 64 AND applicable_set_digest NOT GLOB '*[^0-9a-f]*'),
-  item_set_digest            TEXT NOT NULL CHECK (length(item_set_digest) = 64 AND item_set_digest NOT GLOB '*[^0-9a-f]*'),
-  result_set_digest          TEXT NOT NULL CHECK (length(result_set_digest) = 64 AND result_set_digest NOT GLOB '*[^0-9a-f]*'),
-  helper_import_set_digest   TEXT NOT NULL CHECK (length(helper_import_set_digest) = 64 AND helper_import_set_digest NOT GLOB '*[^0-9a-f]*'),
-  typed_observation_set_digest TEXT NOT NULL CHECK (length(typed_observation_set_digest) = 64 AND typed_observation_set_digest NOT GLOB '*[^0-9a-f]*'),
-  conflict_set_digest        TEXT NOT NULL CHECK (length(conflict_set_digest) = 64 AND conflict_set_digest NOT GLOB '*[^0-9a-f]*'),
-  subject_drift_digest       TEXT NOT NULL CHECK (length(subject_drift_digest) = 64 AND subject_drift_digest NOT GLOB '*[^0-9a-f]*'),
-  overall_outcome            TEXT NOT NULL CHECK (overall_outcome IN ('passed','warned','failed')),
-  final_result_digest        TEXT NOT NULL CHECK (length(final_result_digest) = 64 AND final_result_digest NOT GLOB '*[^0-9a-f]*'),
-  canonical_artifact_id      INTEGER NOT NULL UNIQUE REFERENCES artifacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  snapshot_at                TEXT NOT NULL,
-  finalized_at               TEXT NOT NULL CHECK (julianday(finalized_at) >= julianday(snapshot_at)),
-  finalized_by_type          TEXT NOT NULL CHECK (finalized_by_type IN ('initiating_admin_session','system_deadline')),
-  finalized_by_session_id    INTEGER REFERENCES sessions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  CHECK ((finalized_by_type = 'initiating_admin_session' AND finalized_by_session_id IS NOT NULL)
-      OR (finalized_by_type = 'system_deadline' AND finalized_by_session_id IS NULL))
 ) STRICT;
 
 -- ============================================================================
@@ -2690,10 +2544,6 @@ WHEN NOT (
   OR (NEW.kind = 'report_file' AND NEW.owner_type = 'inspection_report' AND EXISTS (SELECT 1 FROM inspection_reports r WHERE r.id = NEW.owner_id))
   OR (NEW.kind = 'report_file' AND NEW.owner_type = 'backup' AND EXISTS (SELECT 1 FROM backups b WHERE b.id = NEW.owner_id))
   OR (NEW.kind = 'attachment' AND NEW.owner_type = 'source_material' AND EXISTS (SELECT 1 FROM source_materials s WHERE s.id = NEW.owner_id))
-  OR (NEW.kind = 'verification_bundle' AND NEW.owner_type = 'verification_invocation' AND NEW.retention_kind = 'long_term'
-    AND EXISTS (SELECT 1 FROM verification_invocation_manifests v WHERE v.id = NEW.owner_id))
-  OR (NEW.kind = 'verification_attachment' AND NEW.owner_type = 'verification_invocation'
-    AND EXISTS (SELECT 1 FROM verification_invocation_manifests v WHERE v.id = NEW.owner_id))
 )
 BEGIN SELECT RAISE(ABORT, 'artifact kind/owner_type/owner_id must reference an existing compatible authority row'); END;
 
@@ -3806,7 +3656,7 @@ BEGIN SELECT RAISE(ABORT, 'execution_attempt runtime binding is immutable once s
 -- 终态后禁止任何 UPDATE、子 Attempt、check result。check result 只能在 Running 插入。
 -- Passed 必须覆盖绑定配置版本全部 check 且每项 ok+Evidence。
 CREATE TRIGGER trg_config_verification_runs_no_origin_update BEFORE UPDATE OF
-  purpose, business_system_id, config_version_id, label_contract_version_id, verification_manifest_item_id,
+  purpose, business_system_id, config_version_id, label_contract_version_id,
   created_by, created_at ON config_verification_runs
 BEGIN SELECT RAISE(ABORT, 'config_verification_run origin is immutable'); END;
 CREATE TRIGGER trg_config_verification_runs_no_delete BEFORE DELETE ON config_verification_runs
@@ -3814,27 +3664,15 @@ BEGIN SELECT RAISE(ABORT, 'config_verification_run history is not deletable'); E
 CREATE TRIGGER trg_config_verification_runs_row_version_increment BEFORE UPDATE ON config_verification_runs
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'config_verification_run row_version must increment by exactly 1'); END;
--- 闭合：prepublish 只测未发布草稿；deployment_acceptance 只测 manifest 冻结时 current published 指针。
+-- 闭合：prepublish 只测未发布草稿。
 CREATE TRIGGER trg_config_verification_runs_closure BEFORE INSERT ON config_verification_runs
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id
     AND v.business_system_id = NEW.business_system_id
-    AND (
-      (NEW.purpose = 'prepublish' AND v.state = 'draft' AND v.published_at IS NULL)
-      OR (NEW.purpose = 'deployment_acceptance' AND v.state = 'published' AND v.published_at IS NOT NULL
-        AND EXISTS (SELECT 1 FROM business_systems b WHERE b.id = NEW.business_system_id AND b.current_config_version_id = v.id)
-        AND EXISTS (
-          SELECT 1 FROM verification_invocation_items i
-          JOIN verification_invocation_manifests m ON m.id = i.invocation_id
-          JOIN verification_config_item_locators l ON l.item_id = i.id
-          WHERE i.id = NEW.verification_manifest_item_id AND i.object_kind = 'config'
-            AND l.business_system_id = NEW.business_system_id
-            AND l.config_version_id = NEW.config_version_id
-            AND julianday(NEW.created_at) <= julianday(m.deadline_at)
-            AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts fr WHERE fr.invocation_id = m.id))))
+    AND v.state = 'draft' AND v.published_at IS NULL
 )
-BEGIN SELECT RAISE(ABORT, 'config_verification_run purpose must bind the corresponding draft or manifest-frozen current published config'); END;
+BEGIN SELECT RAISE(ABORT, 'config_verification_run must bind an unpublished draft of the same system'); END;
 -- 只能以 Queued 创建；显式前向状态机。
 CREATE TRIGGER trg_config_verification_runs_insert_state BEFORE INSERT ON config_verification_runs
 WHEN NEW.state <> 'Queued' OR NEW.evidence_at IS NOT NULL
@@ -4040,7 +3878,7 @@ BEGIN
         AND t.business_system_id = bs.id
         AND t.config_version_id = v.id
         AND t.label_contract_version_id = NEW.contract_id
-        AND t.purpose = 'prepublish' AND t.verification_manifest_item_id IS NULL
+        AND t.purpose = 'prepublish'
         AND t.state = 'Passed'
         AND (CAST(je.value ->> '$.expected_current_config_version_id' AS INTEGER) IS bs.current_config_version_id
              OR (je.value ->> '$.expected_current_config_version_id' IS NULL AND bs.current_config_version_id IS NULL))
@@ -4798,211 +4636,6 @@ BEGIN
   INSERT INTO task_change_log (object_type, object_id, change_type, row_version)
   VALUES ('resource_refresh_run', NEW.id, 'state_changed', NEW.row_version);
 END;
-
--- 12.43 Deployment Acceptance 不可变闭包与 finalize receipt。
-CREATE TRIGGER trg_verification_manifest_admin_session BEFORE INSERT ON verification_invocation_manifests
-WHEN NOT EXISTS (
-  SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
-  WHERE s.id = NEW.admin_session_id AND s.user_id = NEW.principal_user_id
-    AND s.revoked_at IS NULL AND u.role = 'admin' AND u.enabled = 1
-    AND s.auth_revision_at_issue = u.auth_revision
-    AND julianday(NEW.created_at) < julianday(s.idle_expires_at)
-    AND julianday(NEW.created_at) < julianday(s.absolute_expires_at))
-BEGIN SELECT RAISE(ABORT, 'verification manifest requires the initiating active Admin Session'); END;
-
-CREATE TRIGGER trg_verification_items_manifest_open BEFORE INSERT ON verification_invocation_items
-WHEN EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = NEW.invocation_id)
-  OR NOT EXISTS (
-    SELECT 1 FROM verification_invocation_manifests m
-    WHERE m.id = NEW.invocation_id AND NEW.item_seq <= m.item_count
-      AND (SELECT COUNT(*) FROM verification_invocation_items i WHERE i.invocation_id = m.id) < m.item_count)
-BEGIN SELECT RAISE(ABORT, 'verification manifest item set is closed by its immutable item_count'); END;
-CREATE TRIGGER trg_verification_results_manifest_open BEFORE INSERT ON verification_item_results
-WHEN EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN verification_finalization_receipts r ON r.invocation_id = i.invocation_id
-  WHERE i.id = NEW.item_id)
-  OR NOT EXISTS (
-    SELECT 1 FROM verification_invocation_items i
-    JOIN verification_invocation_manifests m ON m.id = i.invocation_id
-    WHERE i.id = NEW.item_id
-      AND (SELECT COUNT(*) FROM verification_invocation_items all_items WHERE all_items.invocation_id = m.id) = m.item_count)
-BEGIN SELECT RAISE(ABORT, 'verification results require the complete immutable manifest item set and no final receipt'); END;
-CREATE TRIGGER trg_verification_result_input_closure BEFORE INSERT ON verification_item_results
-WHEN NOT EXISTS (SELECT 1 FROM verification_invocation_items i WHERE i.id = NEW.item_id AND i.input_digest = NEW.input_digest)
-BEGIN SELECT RAISE(ABORT, 'verification result input digest must match its frozen manifest item'); END;
-CREATE TRIGGER trg_verification_result_artifact_closure BEFORE INSERT ON verification_item_results
-WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN artifacts a ON a.id = NEW.artifact_id AND a.kind = 'verification_attachment'
-    AND a.owner_type = 'verification_invocation' AND a.owner_id = i.invocation_id
-    AND a.retention_kind = 'long_term' AND a.body_expired = 0
-  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.result_digest
-  WHERE i.id = NEW.item_id)
-BEGIN SELECT RAISE(ABORT, 'verification result artifact must be its long-term canonical Test Result under the same invocation'); END;
-CREATE TRIGGER trg_verification_result_deadline_closure BEFORE INSERT ON verification_item_results
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
-  WHERE i.id = NEW.item_id
-    AND julianday(NEW.observed_at) >= julianday(m.started_at)
-    AND julianday(NEW.observed_at) <= julianday(m.deadline_at)
-    AND julianday(NEW.committed_at) >= julianday(m.started_at)
-    AND julianday(NEW.committed_at) <= julianday(m.deadline_at))
-BEGIN SELECT RAISE(ABORT, 'verification result is outside the fixed eight-hour point-in-time closure'); END;
-CREATE TRIGGER trg_verification_result_conflict_record AFTER INSERT ON verification_item_results
-BEGIN
-  INSERT OR IGNORE INTO verification_result_conflicts (item_id, first_result_id, conflicting_result_id, created_at)
-  SELECT NEW.item_id, prior.id, NEW.id, NEW.committed_at
-  FROM verification_item_results prior
-  WHERE prior.item_id = NEW.item_id AND prior.id < NEW.id AND prior.result_digest <> NEW.result_digest;
-END;
-CREATE TRIGGER trg_verification_result_conflict_closure BEFORE INSERT ON verification_result_conflicts
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_item_results a
-  JOIN verification_item_results b ON b.id = NEW.conflicting_result_id
-  JOIN verification_invocation_items i ON i.id = NEW.item_id
-  WHERE a.id = NEW.first_result_id AND a.item_id = NEW.item_id AND b.item_id = NEW.item_id
-    AND a.result_digest <> b.result_digest
-    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = i.invocation_id))
-BEGIN SELECT RAISE(ABORT, 'verification conflict must bind two different results of the same open invocation item'); END;
-
-CREATE TRIGGER trg_verification_helper_import_closure BEFORE INSERT ON verification_helper_imports
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_manifests m
-  JOIN artifacts a ON a.id = NEW.artifact_id AND a.kind = 'verification_attachment'
-    AND a.owner_type = 'verification_invocation' AND a.owner_id = m.id
-    AND a.retention_kind = 'long_term' AND a.body_expired = 0
-  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.report_digest
-  WHERE m.id = NEW.invocation_id AND m.canonical_input_digest = NEW.request_digest
-    AND julianday(NEW.received_at) >= julianday(m.started_at)
-    AND julianday(NEW.received_at) <= julianday(m.deadline_at)
-    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = m.id))
-BEGIN SELECT RAISE(ABORT, 'helper import must bind the open manifest request and its exact long-term report artifact'); END;
-
-CREATE TRIGGER trg_verification_subject_drift_closure BEFORE INSERT ON verification_subject_drifts
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN verification_invocation_manifests m ON m.id = i.invocation_id
-  WHERE i.id = NEW.item_id AND i.invocation_id = NEW.invocation_id AND i.object_kind = NEW.object_kind
-    AND julianday(NEW.observed_at) >= julianday(m.started_at)
-    AND julianday(NEW.observed_at) <= julianday(m.deadline_at)
-    AND NOT EXISTS (SELECT 1 FROM verification_finalization_receipts r WHERE r.invocation_id = m.id))
-BEGIN SELECT RAISE(ABORT, 'subject drift must bind one matching item in an open invocation observation window'); END;
-
-CREATE TRIGGER trg_verification_deployment_locator_kind BEFORE INSERT ON verification_deployment_item_locators
-WHEN NOT EXISTS (SELECT 1 FROM verification_invocation_items i WHERE i.id = NEW.item_id AND i.object_kind = 'deployment')
-BEGIN SELECT RAISE(ABORT, 'deployment locator requires a deployment item'); END;
-CREATE TRIGGER trg_verification_connection_locator_kind BEFORE INSERT ON verification_connection_item_locators
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN connection_revisions r ON r.id = NEW.connection_revision_id AND r.connection_id = NEW.connection_id
-  JOIN credential_generations g ON g.id = NEW.credential_generation_id AND g.connection_id = NEW.connection_id
-  WHERE i.id = NEW.item_id AND i.object_kind = 'connection' AND g.key_binding_revision = NEW.root_binding_revision)
-BEGIN SELECT RAISE(ABORT, 'connection locator requires one exact connection binding'); END;
--- A config locator freezes its exact configuration version. Label Contract
--- identity is historical provenance only: canonical declarations require NULL,
--- while a pre-declaration row may retain its matching historical contract.
-CREATE TRIGGER trg_verification_config_locator_kind BEFORE INSERT ON verification_config_item_locators
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_items i
-  JOIN business_system_config_versions v ON v.id = NEW.config_version_id
-  WHERE i.id = NEW.item_id AND i.object_kind = 'config'
-    AND v.business_system_id = NEW.business_system_id
-    AND (
-      (v.declaration_json IS NOT NULL AND NEW.label_contract_version_id IS NULL)
-      OR (v.declaration_json IS NULL
-          AND NEW.label_contract_version_id IS NOT NULL
-          AND v.label_contract_version_id = NEW.label_contract_version_id)
-    ))
-BEGIN SELECT RAISE(ABORT, 'config locator requires one exact frozen declaration or historical contract binding'); END;
-
-
-CREATE TRIGGER trg_verification_finalization_closure BEFORE INSERT ON verification_finalization_receipts
-WHEN NOT EXISTS (
-  SELECT 1 FROM verification_invocation_manifests m
-  JOIN artifacts a ON a.id = NEW.canonical_artifact_id AND a.kind = 'verification_bundle'
-    AND a.owner_type = 'verification_invocation' AND a.owner_id = m.id
-    AND a.retention_kind = 'long_term' AND a.body_expired = 0
-  JOIN artifact_blobs b ON b.id = a.blob_id AND b.sha256 = NEW.final_result_digest
-  WHERE m.id = NEW.invocation_id
-    AND julianday(NEW.snapshot_at) >= julianday(m.started_at)
-    AND julianday(NEW.snapshot_at) <= julianday(m.deadline_at)
-    AND julianday(NEW.finalized_at) >= julianday(NEW.snapshot_at)
-    AND julianday(NEW.finalized_at) <= julianday(m.deadline_at)
-    AND julianday(a.created_at) <= julianday(NEW.finalized_at)
-    AND ((NEW.finalized_by_type = 'initiating_admin_session' AND m.admin_session_id = NEW.finalized_by_session_id
-        AND EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
-          WHERE s.id = NEW.finalized_by_session_id AND s.revoked_at IS NULL
-            AND u.enabled = 1 AND u.role = 'admin' AND s.auth_revision_at_issue = u.auth_revision
-            AND julianday(NEW.finalized_at) < julianday(s.idle_expires_at)
-            AND julianday(NEW.finalized_at) < julianday(s.absolute_expires_at)))
-      OR (NEW.finalized_by_type = 'system_deadline' AND NEW.finalized_by_session_id IS NULL
-        AND julianday(NEW.finalized_at) <= julianday(m.deadline_at)))
-    AND m.applicable_set_digest = NEW.applicable_set_digest
-    AND m.manifest_digest = NEW.manifest_digest
-    AND m.item_set_digest = NEW.item_set_digest
-    AND NOT EXISTS (
-      SELECT 1 FROM verification_invocation_items i
-      WHERE i.invocation_id = m.id AND (
-        NOT EXISTS (SELECT 1 FROM verification_item_results r WHERE r.item_id = i.id)
-        OR (i.object_kind = 'deployment' AND NOT EXISTS (SELECT 1 FROM verification_deployment_item_locators l WHERE l.item_id = i.id))
-        OR (i.object_kind = 'connection' AND NOT EXISTS (SELECT 1 FROM verification_connection_item_locators l WHERE l.item_id = i.id))
-        OR (i.object_kind = 'config' AND NOT EXISTS (SELECT 1 FROM verification_config_item_locators l WHERE l.item_id = i.id))
-      ))
-    AND NOT EXISTS (
-      SELECT 1 FROM verification_invocation_items i
-      JOIN verification_item_results r ON r.item_id = i.id
-      WHERE i.invocation_id = m.id AND julianday(r.observed_at) > julianday(NEW.snapshot_at))
-    AND NOT EXISTS (
-      SELECT 1 FROM verification_helper_imports h
-      WHERE h.invocation_id = m.id AND julianday(h.received_at) > julianday(NEW.snapshot_at))
-    AND NOT EXISTS (
-      SELECT 1 FROM verification_subject_drifts d
-      WHERE d.invocation_id = m.id AND julianday(d.observed_at) > julianday(NEW.snapshot_at))
-    AND NOT EXISTS (
-      SELECT 1 FROM verification_invocation_items i
-      JOIN verification_item_results r ON r.item_id = i.id
-      WHERE i.invocation_id = m.id AND r.category = 'subject_drift'
-        AND NOT EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id AND d.item_id = i.id))
-    AND (
-      (NEW.overall_outcome = 'failed' AND (
-        EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'failed')
-        OR EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)))
-      OR (NEW.overall_outcome = 'warned'
-        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'failed')
-        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)
-        AND (EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_item_results r ON r.item_id = i.id WHERE i.invocation_id = m.id AND r.outcome = 'warned')
-          OR EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id)))
-      OR (NEW.overall_outcome = 'passed'
-        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i LEFT JOIN verification_item_results r ON r.item_id = i.id AND r.outcome = 'passed' WHERE i.invocation_id = m.id AND r.id IS NULL)
-        AND NOT EXISTS (SELECT 1 FROM verification_invocation_items i JOIN verification_result_conflicts c ON c.item_id = i.id WHERE i.invocation_id = m.id)
-        AND NOT EXISTS (SELECT 1 FROM verification_subject_drifts d WHERE d.invocation_id = m.id))
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'verification receipt requires complete typed items and deterministic severity aggregation'); END;
-
--- Deployment Acceptance tables are append-only; only the receipt constitutes finalization.
-CREATE TRIGGER trg_verification_manifests_no_update BEFORE UPDATE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
-CREATE TRIGGER trg_verification_manifests_no_delete BEFORE DELETE ON verification_invocation_manifests BEGIN SELECT RAISE(ABORT, 'verification manifests are immutable'); END;
-CREATE TRIGGER trg_verification_items_no_update BEFORE UPDATE ON verification_invocation_items BEGIN SELECT RAISE(ABORT, 'verification items are immutable'); END;
-CREATE TRIGGER trg_verification_items_no_delete BEFORE DELETE ON verification_invocation_items BEGIN SELECT RAISE(ABORT, 'verification items are immutable'); END;
-CREATE TRIGGER trg_verification_deployment_locators_no_update BEFORE UPDATE ON verification_deployment_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_deployment_locators_no_delete BEFORE DELETE ON verification_deployment_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_connection_locators_no_update BEFORE UPDATE ON verification_connection_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_connection_locators_no_delete BEFORE DELETE ON verification_connection_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_config_locators_no_update BEFORE UPDATE ON verification_config_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_config_locators_no_delete BEFORE DELETE ON verification_config_item_locators BEGIN SELECT RAISE(ABORT, 'verification locators are immutable'); END;
-CREATE TRIGGER trg_verification_item_results_no_update BEFORE UPDATE ON verification_item_results BEGIN SELECT RAISE(ABORT, 'verification results are immutable'); END;
-CREATE TRIGGER trg_verification_item_results_no_delete BEFORE DELETE ON verification_item_results BEGIN SELECT RAISE(ABORT, 'verification results are immutable'); END;
-CREATE TRIGGER trg_verification_conflicts_no_update BEFORE UPDATE ON verification_result_conflicts BEGIN SELECT RAISE(ABORT, 'verification conflicts are immutable'); END;
-CREATE TRIGGER trg_verification_conflicts_no_delete BEFORE DELETE ON verification_result_conflicts BEGIN SELECT RAISE(ABORT, 'verification conflicts are immutable'); END;
-CREATE TRIGGER trg_verification_helper_imports_no_update BEFORE UPDATE ON verification_helper_imports BEGIN SELECT RAISE(ABORT, 'verification helper imports are immutable'); END;
-CREATE TRIGGER trg_verification_helper_imports_no_delete BEFORE DELETE ON verification_helper_imports BEGIN SELECT RAISE(ABORT, 'verification helper imports are immutable'); END;
-CREATE TRIGGER trg_verification_subject_drifts_no_update BEFORE UPDATE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
-CREATE TRIGGER trg_verification_subject_drifts_no_delete BEFORE DELETE ON verification_subject_drifts BEGIN SELECT RAISE(ABORT, 'verification subject drift is immutable'); END;
-CREATE TRIGGER trg_verification_receipts_no_update BEFORE UPDATE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
-CREATE TRIGGER trg_verification_receipts_no_delete BEFORE DELETE ON verification_finalization_receipts BEGIN SELECT RAISE(ABORT, 'verification finalization receipt is immutable'); END;
 
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger

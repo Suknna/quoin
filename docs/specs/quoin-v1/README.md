@@ -66,12 +66,10 @@ contracts/
 | `contracts/plinth-worker-tools.yaml` | Plinth worker 的 Bash 调用、固定工具包/版本、可执行路径与 Landlock 只读运行时路径 |
 | `contracts/release-inputs.yaml` | 基础镜像 index/per-platform digest 与 apt 锁 |
 | `contracts/connection-probes.yaml` | Model Provider、Thanos 与 Kubernetes Connection Probe 的 action-set/version 和封闭机械动作 |
-| `contracts/examples/` | 历史部署输入示例与 Deployment Acceptance helper request/report 示例；当前部署交付以普通 Kubernetes YAML 和简单 Compose 为准，不是独立权威源 |
+| `contracts/examples/` | 历史部署输入示例；当前部署交付以普通 Kubernetes YAML 和简单 Compose 为准，不是独立权威源 |
 | `contracts/schemas/deployment-config.schema.json` | 历史生成式部署配置契约；已由 ADR-0001 替换，不得作为当前 Kubernetes 或 Compose 交付要求 |
 | `contracts/schemas/release-manifest.schema.json` | Release 应用镜像/双架构 digest、Compose/helper 工件、Sigstore bundle 映射、契约版本与验收证据结构 |
 | `contracts/schemas/readiness-response.schema.json` | Quoin、Plinth、Stele `/readyz` 固定字段、封闭 mode/reason 与字段关系 |
-| `contracts/schemas/verification-evidence.schema.json` | Scenario/cell 结果、断言、附件、cleanup 与 typed observation 的结构化证据索引 |
-| `contracts/schemas/deployment-verification.schema.json` | Deployment Acceptance helper request/report 与服务端生成 typed locator 的唯一交换格式；OpenAPI 直接引用其中 `helperRequest` / `helperReport` 定义 |
 | `contracts/schemas/connection-probes.schema.json` | Connection Probe action catalog 的严格文档形状 |
 | `contracts/schemas/business-system.schema.json` | 历史 `quoin/v1` `BusinessSystem` 声明的机器格式（ADR-0003）；声明写入与发布已随 ADR-0004 退役，仅保留以解读既有声明、Run 与迁移映射，不是现行配置权威 |
 | `contracts/schemas/*.schema.json` | 其他独立 JSON 文档格式；历史 `business-system-config.schema.json` 与 `label-contract.schema.json` 仅保留以解读既有记录，不是现行配置权威 |
