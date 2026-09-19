@@ -1732,9 +1732,6 @@ export const domainHandlers = [
 			json({
 				plinth: {
 					slot: "plinth",
-					state: "registered",
-					currentGeneration: 1,
-					rowVersion: 1,
 					connected: true,
 					bootId: "mock-plinth",
 					connectionEpoch: 1,
@@ -1843,50 +1840,6 @@ export const domainHandlers = [
 		const denied = required();
 		return denied ?? json({ revokedSessionCount: 1 });
 	}),
-	http.post(
-		"*/api/v1/runtime-slots/:slot/registration/prepare",
-		({ params }) => {
-			const denied = required();
-			return (
-				denied ??
-				json({
-					slot: params.slot,
-					state: "unregistered",
-					currentGeneration: 1,
-					rowVersion: 1,
-					registrationTokenAvailable: true,
-					registrationTokenHandle: "mock-runtime-token",
-				})
-			);
-		},
-	),
-	http.post("*/api/v1/runtime-slots/registration-token/reveal", () => {
-		const denied = required();
-		return (
-			denied ??
-			json({
-				slot: "plinth",
-				generation: 1,
-				registrationToken: "mock-registration-token-not-real",
-			})
-		);
-	}),
-	http.post(
-		"*/api/v1/runtime-slots/:slot/retiring-credential/retire",
-		({ params }) => {
-			const denied = required();
-			return (
-				denied ??
-				json({
-					slot: params.slot,
-					state: "registered",
-					currentGeneration: 2,
-					rowVersion: 2,
-					connected: true,
-				})
-			);
-		},
-	),
 	http.get("*/api/v1/connections/:name/revisions", ({ params }) => {
 		const denied = required();
 		if (denied) return denied;

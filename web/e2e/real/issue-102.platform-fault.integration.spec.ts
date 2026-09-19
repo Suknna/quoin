@@ -4,16 +4,10 @@ import { expect, test } from "@playwright/test";
 const adminUsername = process.env.QUOIN_E2E_ADMIN_USERNAME;
 const adminPassword = process.env.QUOIN_E2E_ADMIN_PASSWORD;
 const adminFinalPassword = process.env.QUOIN_E2E_ADMIN_FINAL_PASSWORD;
-const registerPlinth = process.env.QUOIN_E2E_REGISTER_PLINTH_HELPER;
 
-if (
-	!adminUsername ||
-	!adminPassword ||
-	!adminFinalPassword ||
-	!registerPlinth
-) {
+if (!adminUsername || !adminPassword || !adminFinalPassword) {
 	throw new Error(
-		"#102 real E2E requires generated credentials and the attached-stdin Plinth helper.",
+		"#102 real E2E requires generated credentials.",
 	);
 }
 
@@ -98,47 +92,15 @@ function compose(args: string[]) {
 		);
 }
 
-/** Real Admin UI registration plus production Plinth adapter lifecycle; no seed or fake health projection. */
-test("About registration and a controlled Plinth disconnect/reconnect become a platform-only Operator alert", async ({
+/** Production Plinth adapter lifecycle over its deployment mTLS identity; no seed or fake health projection. */
+test("A controlled Plinth disconnect/reconnect becomes a platform-only Operator alert", async ({
 	browser,
 	baseURL,
 }) => {
 	const adminContext = await browser.newContext({ ignoreHTTPSErrors: true });
 	await activateAdmin(adminContext, baseURL!);
-	const adminPage = await adminContext.newPage();
-	await adminPage.goto("/admin/about");
-	await expect(
-		adminPage.getByRole("heading", { name: "关于平台" }),
-	).toBeVisible();
-	await expect(
-		adminPage.getByRole("heading", { name: "运行时注册与轮换" }),
-	).toBeVisible();
-	await expect(adminPage.getByRole("heading", { name: "维护" })).toBeVisible();
-
-	const runtimeBefore = (await (
-		await adminContext.request.get(`${baseURL}/api/v1/runtime`)
-	).json()) as { plinth: { state: string; connected: boolean } };
-	if (runtimeBefore.plinth.state !== "registered") {
-		// Registration is a protected one-time credential action and therefore
-		// stays behind the About confirmation dialog before revealing its token.
-		await adminPage
-			.getByRole("button", { name: "准备首次注册" })
-			.first()
-			.click();
-		await adminPage.getByRole("button", { name: "确认" }).click();
-		const registrationToken = await adminPage
-			.getByText("一次性注册令牌：")
-			.locator("xpath=..")
-			.locator("code")
-			.textContent();
-		expect(registrationToken).toBeTruthy();
-		const registered = spawnSync(registerPlinth!, ["--stdin"], {
-			input: `${registrationToken}\n`,
-			encoding: "utf8",
-			env: process.env,
-		});
-		expect(registered.status, registered.stderr).toBe(0);
-	}
+	// Plinth connects automatically through its deployment CA-signed mTLS
+	// client identity (ADR-0009): there is no registration flow to drive.
 	// A failed prior run can leave the intentionally controlled container down;
 	// restore it before asserting this run's independent lifecycle transition.
 	compose(["start", "plinth"]);
@@ -146,9 +108,9 @@ test("About registration and a controlled Plinth disconnect/reconnect become a p
 		.poll(
 			async () =>
 				(await adminContext.request.get(`${baseURL}/api/v1/runtime`)).json(),
-			{ timeout: 20_000 },
+			{ timeout: 30_000 },
 		)
-		.toMatchObject({ plinth: { state: "registered", connected: true } });
+		.toMatchObject({ plinth: { connected: true } });
 
 	const suffix = Date.now();
 	const operatorUsername = `operator102${suffix}`;
@@ -225,16 +187,8 @@ test("About registration and a controlled Plinth disconnect/reconnect become a p
 	await expect(
 		operatorPage.getByRole("button", { name: /运行时|维护/ }),
 	).toHaveCount(0);
-	for (const path of [
-		"/api/v1/admin/about",
-		"/api/v1/runtime",
-		"/api/v1/runtime-slots/plinth/registration/prepare",
-	]) {
-		const denied = path.endsWith("prepare")
-			? await operatorContext.request.post(`${baseURL}${path}`, {
-					data: { clientCommandId: `deny-${suffix}`, expectedRowVersion: 1 },
-				})
-			: await operatorContext.request.get(`${baseURL}${path}`);
+	for (const path of ["/api/v1/admin/about", "/api/v1/runtime"]) {
+		const denied = await operatorContext.request.get(`${baseURL}${path}`);
 		expect(denied.status(), path).toBe(403);
 	}
 

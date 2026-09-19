@@ -100,88 +100,23 @@ async function activateAdmin(
 async function ensurePlinthRegistered(
 	context: import("@playwright/test").BrowserContext,
 	baseURL: string,
-	suffix: number,
 ) {
-	const runtime = await context.request.get(`${baseURL}/api/v1/runtime`);
-	expect(runtime.status()).toBe(200);
-	const before = (await runtime.json()) as {
-		plinth: { state: string; connected: boolean; rowVersion: number };
-	};
-	if (before.plinth.state === "registered") {
-		await expect
-			.poll(
-				async () => {
-					const response = await context.request.get(
-						`${baseURL}/api/v1/runtime`,
-					);
-					return (
-						response.status() === 200 &&
-						((await response.json()) as { plinth: { connected: boolean } })
-							.plinth.connected
-					);
-				},
-				{ timeout: 20_000 },
-			)
-			.toBe(true);
-		return;
-	}
-	const prepared = await context.request.post(
-		`${baseURL}/api/v1/runtime-slots/plinth/registration/prepare`,
-		{
-			headers: { Origin: baseURL },
-			data: {
-				clientCommandId: `plinth-prepare-${suffix}`,
-				expectedRowVersion: before.plinth.rowVersion,
-			},
-		},
-	);
-	expect(prepared.status()).toBe(200);
-	const preparation = (await prepared.json()) as {
-		registrationTokenAvailable: boolean;
-		registrationTokenHandle: string;
-	};
-	expect(preparation.registrationTokenAvailable).toBe(true);
-	const revealed = await context.request.post(
-		`${baseURL}/api/v1/runtime-slots/registration-token/reveal`,
-		{
-			headers: { Origin: baseURL },
-			data: { registrationTokenHandle: preparation.registrationTokenHandle },
-		},
-	);
-	expect(revealed.status()).toBe(200);
-	const token = (await revealed.json()) as { registrationToken: string };
-	// The production CLI consumes the one-time token only through attached stdin.
-	// It never becomes a test log, YAML value, environment variable, or argv.
-	execFileSync(
-		"bash",
-		[`${repoRoot}scripts/e2e-real/register-plinth.sh`, "--stdin"],
-		{
-			input: `${token.registrationToken}\n`,
-			encoding: "utf8",
-			env: {
-				...process.env,
-				QUOIN_E2E_RUNTIME: runtimeRoot,
-				QUOIN_E2E_PORT: e2ePort,
-				QUOIN_E2E_PROJECT: composeProject,
-			},
-		},
-	);
+	// Plinth connects automatically through its deployment CA-signed mTLS
+	// client identity (ADR-0009): waiting for the live projection is all the
+	// registration this stack still has.
 	await expect
 		.poll(
 			async () => {
 				const response = await context.request.get(`${baseURL}/api/v1/runtime`);
 				return (
 					response.status() === 200 &&
-					(
-						(await response.json()) as {
-							plinth: { state: string; connected: boolean };
-						}
-					).plinth
+					((await response.json()) as { plinth: { connected: boolean } })
+						.plinth.connected
 				);
 			},
-			{ timeout: 20_000 },
+			{ timeout: 30_000 },
 		)
-		.toMatchObject({ state: "registered", connected: true });
+		.toBe(true);
 }
 
 async function createAndActivateLabelContract(
@@ -344,7 +279,7 @@ test("real Prometheus and Thanos adapters verify selected business declaration w
 	const prometheusName = `prometheus-basic-${suffix}`;
 	const prometheusTLSName = `prometheus-noauth-tls-${suffix}`;
 	const thanosName = `thanos-bearer-${suffix}`;
-	await ensurePlinthRegistered(admin, baseURL!, suffix);
+	await ensurePlinthRegistered(admin, baseURL!);
 	const contractVersion = await createAndActivateLabelContract(
 		admin,
 		baseURL!,

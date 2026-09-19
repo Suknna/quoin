@@ -16,7 +16,6 @@ import { SettingsNavigation, settingsNavGroups } from "../nav";
 import { About } from "../platform/about/About";
 import { Backups } from "../platform/backups/Backups";
 import { ModelProviderPage } from "../platform/model-providers/ModelProviderModule";
-import { Runtimes } from "../platform/runtimes/Runtimes";
 import { Users } from "../platform/users/Users";
 import { Profile } from "../profile/Profile";
 import { Security } from "../security/Security";
@@ -62,9 +61,6 @@ export function useSettingsModule(
 	}
 	if (pathname.startsWith("/settings/platform/about")) {
 		return platform(<About suspended={props.suspended} />, "平台状态");
-	}
-	if (pathname.startsWith("/settings/platform/runtime")) {
-		return platform(<Runtimes suspended={props.suspended} />, "运行时");
 	}
 	if (pathname.startsWith("/settings/platform/model-providers")) {
 		const providersBase = "/settings/platform/model-providers";

@@ -817,78 +817,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runtime-slots/{slot}/registration/prepare": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 准备 Runtime 首次注册或替换注册（Admin）
-         * @description 幂等领域写命令（携带 clientCommandId + expectedRowVersion，HTTP-COMMAND-012）。slot 为 unregistered 时不得要求
-         *     replace 既有凭据，保持 unregistered 并直接准备 generation=1 的一次性注册令牌。slot 已注册或 revoked 时，命令先确认
-         *     DATA-RUNTIME-001b fence：目标 slot 无绑定该 slot 的 active Execution Attempt（Assigned/Running/Cancelling），且 lintel
-         *     另无 active Browser Operation（非终态，或虽终态但 stopConfirmedAt 仍为空）；冲突返回 409 且不得先吊销。通过后把 slot
-         *     置 revoked 并清空 current/pending/retiring 指针，触发器 retire 该 slot 全部未退休凭据。事务提交后创建内存 60 秒、同
-         *     Session、单次成功消费的 reveal handle；registrationTokenAvailable=true 时携带 registrationTokenHandle，由
-         *     revealRuntimeRegistrationToken 换取绑定 slot 与下一个 generation 的 raw 注册令牌。同 Session 同 clientCommandId 重放时，
-         *     原 handle 仍有效且未消费才返回同一 handle，否则 registrationTokenAvailable=false，绝不重新生成。长期 token 只经 TLS
-         *     Register RPC 下发并由一次性注册子命令原子写入 Runtime 状态卷，不进入 HTTP、部署 YAML、Secret 或日志。
-         */
-        post: operations["prepareRuntimeRegistration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime-slots/registration-token/reveal": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 一次性显示 Runtime 注册令牌（Admin；消费单次 reveal handle）
-         * @description 非领域写命令（HTTP-COMMAND-012）：不携带 clientCommandId；路由无 slot 路径参数，只接受
-         *      prepareRuntimeRegistration 返回的内存 60 秒、同 Session、单次成功消费的 registrationTokenHandle，
-         *      不接受 slot 本身。消费前重验当前 Session 与 Admin；授权成功先写不含 handle/raw 的 Audit Event。
-         *      handle 与 raw 注册令牌均不落盘（SQLite、client_commands、日志、审计、Artifact、响应快照均禁止）；
-         *      handle 无效、已消费或过期返回 410；会话无效 401；角色不足 403（SEC-REVEAL-*）。
-         */
-        post: operations["revealRuntimeRegistrationToken"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime-slots/{slot}/retiring-credential/retire": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 显式退休 Runtime 旧 token（Admin）
-         * @description 仅当新 current generation 已首次成功认证、slot 持有 retiring generation 时允许；同一事务清空 retiring 指针并永久退休旧 generation。不存在 force、TTL 或自动退休（SEC-SERVICE-003、DATA-RUNTIME-002）。
-         */
-        post: operations["retireRuntimeCredential"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/alerts": {
         parameters: {
             query?: never;
@@ -3300,7 +3228,7 @@ export interface components {
         };
         /** @description 409 冲突响应的专用包络：conflict 块按 code 判别联合（HTTP-ERROR-004/007）。 */
         ConflictErrorModel: components["schemas"]["ErrorModel"] & {
-            conflict: components["schemas"]["CommandIdReuseConflict"] | components["schemas"]["RowVersionConflict"] | components["schemas"]["HeadConflict"] | components["schemas"]["CurrentPointerConflict"] | components["schemas"]["RuntimeSlotConflict"] | components["schemas"]["IdentityBusyConflict"] | components["schemas"]["AuthenticationRequiredConflict"];
+            conflict: components["schemas"]["CommandIdReuseConflict"] | components["schemas"]["RowVersionConflict"] | components["schemas"]["HeadConflict"] | components["schemas"]["CurrentPointerConflict"] | components["schemas"]["IdentityBusyConflict"] | components["schemas"]["AuthenticationRequiredConflict"];
         };
         FieldError: {
             /** @description 字段路径（如 config.discoveries[0].identityLabels）。 */
@@ -3323,28 +3251,13 @@ export interface components {
             /** @description 人类可读冲突说明（HTTP-ERROR-004）。 */
             detail?: string;
         };
-        /** @description 通用聚合 row_version/active 冲突；objectType 为 runtime_slot 的冲突必须使用 RuntimeSlotConflict（slot 是稳定 key 而非数字 locator）。 */
+        /** @description 通用聚合 row_version/active 冲突。 */
         RowVersionConflict: {
             /** @enum {string} */
             code: "row_version_conflict" | "active_conflict";
             objectType: string;
             objectId: components["schemas"]["LocatorId"];
             /** @description 当前权威 row_version（供客户端重试回填）。 */
-            rowVersion: number;
-            /** @description 人类可读冲突说明（HTTP-ERROR-004）。 */
-            detail?: string;
-        };
-        RuntimeSlotConflict: {
-            /** @enum {string} */
-            code: "row_version_conflict" | "active_conflict";
-            /** @constant */
-            objectType: "runtime_slot";
-            /**
-             * @description 冲突的 Runtime slot 稳定 key（替代通用 objectId，HTTP-ERROR-004）。
-             * @enum {string}
-             */
-            slot: "plinth" | "lintel";
-            /** @description 当前权威 runtime_slots.row_version（供客户端重试回填）。 */
             rowVersion: number;
             /** @description 人类可读冲突说明（HTTP-ERROR-004）。 */
             detail?: string;
@@ -3414,7 +3327,7 @@ export interface components {
         } & unknown;
         MaintenanceItem: {
             /** @enum {string} */
-            kind: "AdminPassword" | "User" | "Connection" | "RuntimeSlot" | "AlertSource" | "BrowserIdentity" | "ActiveAttempt" | "ActiveBrowserOperation" | "BackupPreflight" | "SchemaMigration" | "ReleaseVersion" | "Integrity" | "SearchProjection" | "LintelRecoveryFence";
+            kind: "AdminPassword" | "User" | "Connection" | "AlertSource" | "BrowserIdentity" | "ActiveAttempt" | "ActiveBrowserOperation" | "BackupPreflight" | "SchemaMigration" | "ReleaseVersion" | "Integrity" | "SearchProjection";
             objectKey: string;
             /** @enum {string} */
             safeState: "Safe" | "Blocking";
@@ -3432,24 +3345,7 @@ export interface components {
         RuntimeSlot: {
             /** @enum {string} */
             slot: "plinth" | "lintel";
-            /**
-             * @description 持久注册/凭据状态（DATA-RUNTIME-001）；registered 表示 current 指针非空且指向本 slot 未退休凭据，不代表当前在线。
-             * @enum {string}
-             */
-            state: "unregistered" | "registered" | "revoked";
-            /** @description 从 runtime_slots.current_credential_id 指向的 runtime_credentials.generation 投影（指针是唯一权威，DATA-RUNTIME-001）；0 = 无 current 指针。 */
-            currentGeneration: number;
-            /** @description 从 runtime_slots.pending_credential_id 指向的 runtime_credentials.generation 投影；两阶段轮换中待确认持久化的 generation（DATA-RUNTIME-002）。 */
-            pendingGeneration?: number;
-            /** @description 从 runtime_slots.retiring_credential_id 投影；新 current 首次认证前为 AwaitingFirstUse，之后为 PendingRetirement，直到 Admin 显式退休。 */
-            retiringGeneration?: number;
-            /** @enum {string} */
-            retirementState?: "AwaitingFirstUse" | "PendingRetirement";
-            /** @description current generation 首次成功认证时间；一经设置不可修改。 */
-            currentFirstAuthenticatedAt?: components["schemas"]["Timestamp"];
-            /** @description 注册/替换/轮换命令并发前提与响应版本（HTTP-COMMAND-002）。 */
-            rowVersion: number;
-            /** @description 瞬时连接投影（内存，非持久权威）：控制流当前是否在线。必填；false 时不得携带 bootId/connectionEpoch/lastSeenAt。 */
+            /** @description 瞬时连接投影（内存，非持久权威）：控制流当前是否在线。组件身份是部署 CA 签发的 mTLS 客户端证书（ADR-0009），不存在注册状态。必填；false 时不携带 bootId/connectionEpoch/lastSeenAt。 */
             connected: boolean;
             /** @description 瞬时连接投影：当前控制流 Runtime boot ID（仅 connected=true 时存在）。 */
             bootId?: string;
@@ -3460,40 +3356,6 @@ export interface components {
             /** @description 当前连接 Runtime Hello 声明的非准入构建版本；未连接或未声明时省略，不得推测。 */
             releaseVersion?: string;
         } & (unknown & unknown & unknown & unknown & unknown & unknown);
-        RuntimeRegistrationPreparation: {
-            /** @enum {string} */
-            slot: "plinth" | "lintel";
-            /**
-             * @description 首次准备保持 unregistered；替换准备进入 revoked，二者都等待 Runtime 用注册令牌注册（DATA-RUNTIME-001）。
-             * @enum {string}
-             */
-            state: "unregistered" | "revoked";
-            /**
-             * @description 替换后 current/pending/retiring 指针皆空，恒为 0。
-             * @constant
-             */
-            currentGeneration: 0;
-            rowVersion: number;
-            /** @description 当前命令结果是否仍有可读取 handle；同 Session 同 clientCommandId 重放时，原 handle 在 60 秒内且未消费仍为 true，否则为 false（SEC-REVEAL-003）。 */
-            registrationTokenAvailable: boolean;
-            /** @description 不透明、内存 60 秒、绑定发起 Session、单次成功消费的 reveal 句柄；仅 registrationTokenAvailable=true 时存在；不落盘（SEC-REVEAL-*）。 */
-            registrationTokenHandle?: string;
-        } & unknown;
-        RuntimeRegistrationTokenRevealRequest: {
-            /** @description prepareRuntimeRegistration 返回的 60 秒同 Session 一次性句柄；不接受 slot 本身（SEC-REVEAL-*）。 */
-            registrationTokenHandle: string;
-        };
-        RuntimeRegistrationTokenRevealResult: {
-            /**
-             * @description handle 绑定的 slot（reveal 路由无 slot 路径参数，slot 由 handle 携带）。
-             * @enum {string}
-             */
-            slot: "plinth" | "lintel";
-            /** @description 注册令牌绑定的 credential generation；Register 请求必须回显同一值（HTTP-COMMAND-012、RUNTIME-REG-002）。 */
-            generation: number;
-            /** @description 一次性注册令牌（32 随机字节 base64url 无填充文本）；仅此一次返回，绑定 slot 与 generation；不进入日志、审计或命令结果（SEC-REVEAL-*、RUNTIME-AUTH-006）。 */
-            registrationToken: string;
-        };
         /** @description 受控浏览器业务已退役（受控浏览器退役）：只有 Plinth 槽位，不存在 Lintel 运行时投影。 */
         RuntimeStatus: {
             plinth: components["schemas"]["RuntimeSlot"];
@@ -5446,7 +5308,6 @@ export type ConflictErrorModel = components['schemas']['ConflictErrorModel'];
 export type FieldError = components['schemas']['FieldError'];
 export type CommandIdReuseConflict = components['schemas']['CommandIdReuseConflict'];
 export type RowVersionConflict = components['schemas']['RowVersionConflict'];
-export type RuntimeSlotConflict = components['schemas']['RuntimeSlotConflict'];
 export type IdentityBusyConflict = components['schemas']['IdentityBusyConflict'];
 export type AuthenticationRequiredConflict = components['schemas']['AuthenticationRequiredConflict'];
 export type HeadConflict = components['schemas']['HeadConflict'];
@@ -5457,9 +5318,6 @@ export type MaintenanceState = components['schemas']['MaintenanceState'];
 export type MaintenanceItem = components['schemas']['MaintenanceItem'];
 export type ExitMaintenanceRequest = components['schemas']['ExitMaintenanceRequest'];
 export type RuntimeSlot = components['schemas']['RuntimeSlot'];
-export type RuntimeRegistrationPreparation = components['schemas']['RuntimeRegistrationPreparation'];
-export type RuntimeRegistrationTokenRevealRequest = components['schemas']['RuntimeRegistrationTokenRevealRequest'];
-export type RuntimeRegistrationTokenRevealResult = components['schemas']['RuntimeRegistrationTokenRevealResult'];
 export type RuntimeStatus = components['schemas']['RuntimeStatus'];
 export type AlertSnapshot = components['schemas']['AlertSnapshot'];
 export type AdminAbout = components['schemas']['AdminAbout'];
@@ -7021,99 +6879,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-        };
-    };
-    prepareRuntimeRegistration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                slot: components["parameters"]["RuntimeSlot"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VersionedCommandRequest"];
-            };
-        };
-        responses: {
-            /** @description slot 已进入首次注册或替换注册准备；首次实时响应可能携带 registrationTokenHandle。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeRegistrationPreparation"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            409: components["responses"]["Conflict"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    revealRuntimeRegistrationToken: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RuntimeRegistrationTokenRevealRequest"];
-            };
-        };
-        responses: {
-            /** @description 一次性返回 raw 注册令牌；消费后 handle 立即失效。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeRegistrationTokenRevealResult"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            410: components["responses"]["Gone"];
-            429: components["responses"]["RateLimited"];
-        };
-    };
-    retireRuntimeCredential: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                slot: components["parameters"]["RuntimeSlot"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VersionedCommandRequest"];
-            };
-        };
-        responses: {
-            /** @description 旧 generation 已退休。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RuntimeSlot"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            429: components["responses"]["RateLimited"];
         };
     };
     listAlerts: {
