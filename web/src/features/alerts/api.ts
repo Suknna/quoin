@@ -33,7 +33,7 @@ export interface AlertOccurrenceSummary {
   businessSystemKey?: string
   attribution?: AttributionDiagnostic
   viewAttribution?: ViewAttributionDiagnostic
-  component?: 'plinth' | 'lintel'
+  component?: 'plinth'
   reason?: string
   firstSeenAt: string
   lastStateChangeAt: string

@@ -748,7 +748,7 @@ export interface paths {
         /**
          * 进入升级维护并调和到可安全停机（Admin）
          * @description 幂等版本化命令。首次调用在单个事务中进入 reason=Upgrade 的 maintenance、阻止新业务工作并创建当前 revision
-         *     的非空确定性清单。后台调和器持续把 active Attempt/Browser Operation 项投影为 Blocking；全部活动工作结束后，
+         *     的非空确定性清单。后台调和器持续把 active Attempt 项投影为 Blocking；全部活动工作结束后，
          *     自动创建并完整验证一个升级前 Backup Run，成功才把 BackupPreflight 标为 Safe。失败保留维护状态和失败 Backup Run；
          *     Admin 修复原因后用新 clientCommandId 重试本操作。维护期间仅本操作、getMaintenanceState、exitMaintenance 和明确标记
          *     upgrade-drain 的取消命令可用；不存在强制跳过备份或活动工作 fence 的参数。
@@ -771,7 +771,7 @@ export interface paths {
         put?: never;
         /**
          * 验证全部安全条件并退出维护（Admin）
-         * @description 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip。`LintelRecovery` 对本端点稳定返回 409，只能由 deployment helper 以不可变 recovery receipt finalize/exit（SEC-MAINT-003..005）。
+         * @description 幂等领域写命令；同一事务重验当前 Admin、expectedRowVersion 与 reason 对应的非空清单；active revision 在进入后到退出前冻结。不存在 force/skip（SEC-MAINT-003..005）。
          */
         post: operations["exitMaintenance"];
         delete?: never;
@@ -787,7 +787,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Plinth/Lintel Runtime slot 状态 */
+        /** Plinth Runtime slot 状态 */
         get: operations["getRuntimeStatus"];
         put?: never;
         post?: never;
@@ -1783,25 +1783,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 业务系统详情（当前配置、discovery、plan、浏览器身份） */
+        /** 业务系统详情（当前配置、discovery、plan） */
         get: operations["getBusinessSystem"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/business-systems/{systemKey}/kubernetes-connections": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 读取业务系统 Kubernetes 连接绑定历史 */
-        get: operations["listBusinessSystemKubernetesConnections"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2070,7 +2053,7 @@ export interface paths {
         put?: never;
         /**
          * 对当前 Connection revision/generation 执行固定真实动作集（Admin）
-         * @description 适用于 model_provider、thanos 与 kubernetes。Quoin supervisor 直接执行 `connection-probes.yaml` 按 type 声明的固定动作集，不启动普通 agent worker；Attempt 与 typed result 1:1，绑定 current revision/generation/root binding 与 action-set digest。模型连接成功结果可被显式选为后续正常模型调用的 qualification；其它类型结果只作配置验证证据。
+         * @description 适用于 model_provider 与 thanos。Quoin supervisor 直接执行 `connection-probes.yaml` 按 type 声明的固定动作集，不启动普通 agent worker；Attempt 与 typed result 1:1，绑定 current revision/generation/root binding 与 action-set digest。模型连接成功结果可被显式选为后续正常模型调用的 qualification；其它类型结果只作配置验证证据。
          */
         post: operations["probeConnection"];
         delete?: never;
@@ -2150,7 +2133,7 @@ export interface paths {
         put?: never;
         /**
          * 启用连接并清除 RevalidationRequired（Admin）
-         * @description 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）。model_provider 必须在请求中显式选择同 current revision/generation 的 passed Connection Probe result；该不可变 qualification ID 进入后续 Attempt grant。Thanos/Kubernetes 不建立全局 qualification 指针。
+         * @description 恢复流程置 RevalidationRequired 后，新派发被阻断直到显式成功重验（DATA-CONN-003）。model_provider 必须在请求中显式选择同 current revision/generation 的 passed Connection Probe result；该不可变 qualification ID 进入后续 Attempt grant。Thanos 不建立全局 qualification 指针。
          */
         post: operations["enableConnection"];
         delete?: never;
@@ -2710,7 +2693,7 @@ export interface paths {
         put?: never;
         /**
          * 以当前 Release/部署配置/公开 Origin 与对象集合创建不可变验收 manifest（Admin）
-         * @description 同一事务冻结 applicable set 与每项 inputDigest；固定 `startedAt`，硬截止为 startedAt+8h。配置项绑定 current published Config/Label Contract，连接绑定当前 revision/generation/root binding，Browser 绑定当前 identity revision/profile generation。之后对象变化只追加 SubjectDrift，不改写 manifest。
+         * @description 同一事务冻结 applicable set 与每项 inputDigest；固定 `startedAt`，硬截止为 startedAt+8h。配置项绑定 current published Config/Label Contract，连接绑定当前 revision/generation/root binding。之后对象变化只追加 SubjectDrift，不改写 manifest。
          */
         post: operations["startDeploymentVerification"];
         delete?: never;
@@ -2807,7 +2790,7 @@ export interface paths {
         put?: never;
         /**
          * 由启动该 invocation 的同一 Admin Session 提交一个 typed UI observation
-         * @description observation 只接受 manifest 内尚无结果的精确 browser/arch/viewport/motion cell；同 inputDigest+resultDigest 重试返回原结果，不同 payload 形成 conflict 并使总结果 FAILED。
+         * @description observation 只接受 manifest 内尚无结果的精确 item；同 inputDigest+resultDigest 重试返回原结果，不同 payload 形成 conflict 并使总结果 FAILED。
          */
         post: operations["submitDeploymentVerificationObservation"];
         delete?: never;
@@ -3228,7 +3211,7 @@ export interface components {
         };
         /** @description 409 冲突响应的专用包络：conflict 块按 code 判别联合（HTTP-ERROR-004/007）。 */
         ConflictErrorModel: components["schemas"]["ErrorModel"] & {
-            conflict: components["schemas"]["CommandIdReuseConflict"] | components["schemas"]["RowVersionConflict"] | components["schemas"]["HeadConflict"] | components["schemas"]["CurrentPointerConflict"] | components["schemas"]["IdentityBusyConflict"] | components["schemas"]["AuthenticationRequiredConflict"];
+            conflict: components["schemas"]["CommandIdReuseConflict"] | components["schemas"]["RowVersionConflict"] | components["schemas"]["HeadConflict"] | components["schemas"]["CurrentPointerConflict"];
         };
         FieldError: {
             /** @description 字段路径（如 config.discoveries[0].identityLabels）。 */
@@ -3262,24 +3245,6 @@ export interface components {
             /** @description 人类可读冲突说明（HTTP-ERROR-004）。 */
             detail?: string;
         };
-        IdentityBusyConflict: {
-            /** @constant */
-            code: "identity_busy";
-            identityId: components["schemas"]["LocatorId"];
-            browserOperationId: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            operationKind: "manual_login" | "authentication_probe" | "journey" | "exploration" | "deployment_verification";
-            occupiedSince: components["schemas"]["Timestamp"];
-            detail?: string;
-        };
-        AuthenticationRequiredConflict: {
-            /** @constant */
-            code: "authentication_required";
-            identityId: components["schemas"]["LocatorId"];
-            currentRevisionId: components["schemas"]["LocatorId"];
-            currentProfileGenerationId: components["schemas"]["NullableLocatorId"];
-            detail?: string;
-        };
         HeadConflict: {
             /** @constant */
             code: "head_conflict";
@@ -3306,7 +3271,7 @@ export interface components {
             inspectionAvailable: boolean;
         };
         SetupItem: {
-            /** @description 稳定项目 ID（如 model-provider、thanos-connection、kubernetes-connection、plinth、lintel、label-contract、business-system、browser-identity、alert-source、backup-target）。 */
+            /** @description 稳定项目 ID（如 model-provider、thanos-connection、plinth、label-contract、business-system、alert-source、backup-target）。 */
             id: string;
             label: string;
             /** @enum {string} */
@@ -3318,7 +3283,7 @@ export interface components {
         MaintenanceState: {
             active: boolean;
             /** @enum {string|null} */
-            reason: "Restore" | "Upgrade" | "RootKeyRebind" | "LintelRecovery" | null;
+            reason: "Restore" | "Upgrade" | "RootKeyRebind" | null;
             /** @description maintenance_state.row_version；同时是当前清单 revision。active=true 时冻结，只有退出事务可推进。 */
             rowVersion: number;
             enteredAt: components["schemas"]["Timestamp"] | null;
@@ -3327,7 +3292,7 @@ export interface components {
         } & unknown;
         MaintenanceItem: {
             /** @enum {string} */
-            kind: "AdminPassword" | "User" | "Connection" | "AlertSource" | "BrowserIdentity" | "ActiveAttempt" | "ActiveBrowserOperation" | "BackupPreflight" | "SchemaMigration" | "ReleaseVersion" | "Integrity" | "SearchProjection";
+            kind: "AdminPassword" | "User" | "Connection" | "AlertSource" | "ActiveAttempt" | "BackupPreflight" | "SchemaMigration" | "ReleaseVersion" | "Integrity" | "SearchProjection";
             objectKey: string;
             /** @enum {string} */
             safeState: "Safe" | "Blocking";
@@ -3337,26 +3302,26 @@ export interface components {
             /** @description Blocking 项可直接前往的显式 trust-rebuild 操作；不得指向普通业务路由。 */
             action?: string;
         };
-        /** @description expectedRowVersion/expectedReason 必须与当前 active maintenance_state 一致；expectedReason 不接受 LintelRecovery；不存在 force/skip。 */
+        /** @description expectedRowVersion/expectedReason 必须与当前 active maintenance_state 一致；不存在 force/skip。 */
         ExitMaintenanceRequest: components["schemas"]["VersionedCommandRequest"] & {
             /** @enum {string} */
             expectedReason: "Restore" | "Upgrade" | "RootKeyRebind";
         };
         RuntimeSlot: {
             /** @enum {string} */
-            slot: "plinth" | "lintel";
+            slot: "plinth";
             /** @description 瞬时连接投影（内存，非持久权威）：控制流当前是否在线。组件身份是部署 CA 签发的 mTLS 客户端证书（ADR-0009），不存在注册状态。必填；false 时不携带 bootId/connectionEpoch/lastSeenAt。 */
             connected: boolean;
             /** @description 瞬时连接投影：当前控制流 Runtime boot ID（仅 connected=true 时存在）。 */
             bootId?: string;
             /** @description 瞬时连接投影：当前控制流递增 connection epoch（仅 connected=true 时存在）。 */
             connectionEpoch?: number;
-            /** @description 瞬时连接投影：最近心跳时间（内存，非持久权威；仅 connected=true 时存在）。 */
+            /** @description 瞬时连接投影：最近一次心跳时间（仅 connected=true 时存在）。 */
             lastSeenAt?: components["schemas"]["Timestamp"];
-            /** @description 当前连接 Runtime Hello 声明的非准入构建版本；未连接或未声明时省略，不得推测。 */
+            /** @description 瞬时连接投影：对端 Hello 携带的信息性构建版本，不参与准入。 */
             releaseVersion?: string;
-        } & (unknown & unknown & unknown & unknown & unknown & unknown);
-        /** @description 受控浏览器业务已退役（受控浏览器退役）：只有 Plinth 槽位，不存在 Lintel 运行时投影。 */
+        };
+        /** @description 唯一固定 Runtime 槽位是 Plinth。 */
         RuntimeStatus: {
             plinth: components["schemas"]["RuntimeSlot"];
         };
@@ -3382,7 +3347,7 @@ export interface components {
             /** @enum {string} */
             source: "alertmanager" | "platform";
             /** @enum {string} */
-            component?: "plinth" | "lintel";
+            component?: "plinth";
             reason?: string;
             /** @enum {string} */
             state: "Firing" | "Resolved";
@@ -3469,7 +3434,7 @@ export interface components {
         AttemptSummary: {
             id: components["schemas"]["LocatorId"];
             /** @enum {string} */
-            type: "initial_analysis" | "investigation" | "inspection_analysis" | "inspection_collection" | "browser_exploration" | "knowledge_extraction" | "embedding" | "connection_probe";
+            type: "initial_analysis" | "investigation" | "inspection_analysis" | "inspection_collection" | "knowledge_extraction" | "embedding" | "connection_probe";
             /** @enum {string} */
             state: "Queued" | "Assigned" | "Running" | "Cancelling" | "Succeeded" | "Failed" | "Cancelled" | "Interrupted";
             rowVersion: number;
@@ -3493,7 +3458,7 @@ export interface components {
                 [key: string]: unknown;
             };
             /** @enum {string} */
-            executionMode: "worker_local" | "supervisor_typed" | "quoin_browser";
+            executionMode: "worker_local" | "supervisor_typed";
             /** @enum {string} */
             failureMode: "return_to_model" | "fail_attempt";
             /** @enum {string} */
@@ -3719,7 +3684,7 @@ export interface components {
             /** @enum {string} */
             status: "error" | "gap";
             /** @enum {string} */
-            gapReason: "runtime_unavailable" | "authentication_required" | "authentication_probe_unavailable" | "identity_busy" | "artifact_commit_failed" | "journey_failed" | "query_failed" | "partial_response" | "no_data" | "cancelled" | "interrupted";
+            gapReason: "runtime_unavailable" | "query_failed" | "partial_response" | "no_data" | "cancelled" | "interrupted";
         } | {
             checkKey: components["schemas"]["StableKey"];
             /** @constant */
@@ -3928,32 +3893,10 @@ export interface components {
         };
         TaskObjectRef: {
             /** @enum {string} */
-            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "browser_operation" | "config_verification_run";
+            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "config_verification_run" | "resource_refresh_run";
             objectId: components["schemas"]["LocatorId"];
             /** @description 快照时该对象的权威 row_version；客户端按 rowVersion 幂等应用事件（HTTP-SSE-003）。 */
             rowVersion: number;
-        };
-        KubernetesConnectionMapping: {
-            id: components["schemas"]["LocatorId"];
-            connectionId: components["schemas"]["LocatorId"];
-            connectionName: string;
-            /** @enum {string} */
-            state: "Active" | "Retired";
-            rowVersion: number;
-            createdBy: components["schemas"]["LocatorId"];
-            /** Format: date-time */
-            createdAt: string;
-            retiredBy: components["schemas"]["LocatorId"] | null;
-            /** Format: date-time */
-            retiredAt?: string;
-        };
-        KubernetesConnectionMappingCreate: {
-            clientCommandId: string;
-            connectionId: components["schemas"]["LocatorId"];
-        };
-        KubernetesConnectionMappingRetire: {
-            clientCommandId: string;
-            expectedRowVersion: number;
         };
         BusinessSystemSummary: {
             key: components["schemas"]["StableKey"];
@@ -3966,15 +3909,12 @@ export interface components {
             timezone?: string | null;
             /** @description 已发布配置版本的根投影；首次发布后存在（DATA-CONFIG-001）。 */
             resourceRefreshIntervalSeconds?: number | null;
-            /** @enum {string} */
-            browserIdentityState?: "Ready" | "AuthenticationRequired" | "none";
         };
         BusinessSystemDetail: components["schemas"]["BusinessSystemSummary"] & {
             /** @description 配置版本总数；历史经 listBusinessSystemConfigs 游标分页读取（HTTP-PAGE-005）。 */
             configVersionCount?: number;
             discoveries?: components["schemas"]["DiscoverySummary"][];
             plans?: components["schemas"]["PlanSummary"][];
-            browserIdentity?: components["schemas"]["BrowserIdentitySummary"];
         };
         DiscoverySummary: {
             discoveryKey: components["schemas"]["StableKey"];
@@ -3990,8 +3930,7 @@ export interface components {
             cron?: string;
             checks?: components["schemas"]["CheckSummary"][];
         };
-        /** @description 巡检项按 kind 封闭判别；promql 与 browser 字段互相排斥（DATA-CONFIG-003）。 */
-        CheckSummary: components["schemas"]["PromqlCheckSummary"] | components["schemas"]["BrowserCheckSummary"];
+        CheckSummary: components["schemas"]["PromqlCheckSummary"];
         /** @description PromQL 巡检项按查询模式封闭判别（DATA-CONFIG-003）。 */
         PromqlCheckSummary: components["schemas"]["PromqlInstantCheck"] | components["schemas"]["PromqlRangeCheck"];
         PromqlInstantCheck: {
@@ -4020,17 +3959,6 @@ export interface components {
             /** @description range 查询步长。 */
             stepSeconds: number;
         };
-        BrowserCheckSummary: {
-            checkKey: components["schemas"]["StableKey"];
-            displayName: string;
-            analysisQuestion: string;
-            /** @constant */
-            kind: "browser";
-            /** @description Journey Catalog 中的稳定 ID（DATA-CONFIG-008）。 */
-            journeyId: string;
-            /** @description 与 journey_id 对应的封闭参数；YAML 缺省时规范化为 {}，上传时按嵌入 catalog 的 params_schema 校验（schema 由 catalog 生成持有，不在此复制字段，CFG-JOURNEY-003）。 */
-            journeyParams: Record<string, never>;
-        };
         ConfigVersionSummary: {
             id: components["schemas"]["LocatorId"];
             versionSeq: number;
@@ -4047,8 +3975,6 @@ export interface components {
             enabled: boolean;
             /** @description 上传时显式目标 Label Contract 版本（DATA-CONFIG-003）。 */
             labelContractVersionId: components["schemas"]["LocatorId"];
-            journeyCatalogDigest: string;
-            journeyCatalogVersion: string;
         } & unknown;
         ConfigVersionDetail: components["schemas"]["ConfigVersionSummary"] & {
             /** @description 上传的原始 YAML 正文（可导出；运行只使用类型结构）。 */
@@ -4099,128 +4025,6 @@ export interface components {
             };
             createdAt: components["schemas"]["Timestamp"];
         };
-        AuthenticationProbeConfig: {
-            /** @description Journey Catalog 中 purpose=authentication_probe 的稳定版本化 ID。 */
-            journeyId: string;
-            journeyVersion: number;
-            /** @description 按该 Journey 的封闭 params_schema 校验；未知字段拒绝。 */
-            params: Record<string, never>;
-        };
-        BrowserIdentityRevisionSummary: {
-            id: components["schemas"]["LocatorId"];
-            revision: number;
-            name: string;
-            /** Format: uri */
-            startUrl: string;
-            authenticationProbe: components["schemas"]["AuthenticationProbeConfig"];
-            catalogDigest: string;
-            catalogVersion: string;
-            createdAt: components["schemas"]["Timestamp"];
-        };
-        BrowserProfileGenerationSummary: {
-            id: components["schemas"]["LocatorId"];
-            generation: number;
-            identityRevisionId: components["schemas"]["LocatorId"];
-            chromiumRevision: string;
-            profileManifestDigest: string;
-            probeJourneyId: string;
-            probeJourneyVersion: number;
-            probeCatalogDigest: string;
-            probeCatalogVersion: string;
-            publishedAt: components["schemas"]["Timestamp"];
-        };
-        AuthenticationProbeResultSummary: {
-            /** @enum {string} */
-            phase: "revision_change" | "admission" | "completion" | "publish" | "mid_operation";
-            /** @enum {string} */
-            result: "Authenticated" | "Unauthenticated" | "Indeterminate";
-            journeyId: string;
-            journeyVersion: number;
-            catalogDigest: string;
-            catalogVersion: string;
-            reasonCode?: string;
-            observedAt: components["schemas"]["Timestamp"];
-        } & unknown;
-        BrowserOperationSummary: {
-            id: components["schemas"]["LocatorId"];
-            identityId: components["schemas"]["LocatorId"];
-            identityRevisionId: components["schemas"]["LocatorId"];
-            profileGenerationId?: components["schemas"]["NullableLocatorId"];
-            /** @enum {string} */
-            kind: "manual_login" | "authentication_probe" | "journey" | "exploration" | "deployment_verification";
-            verificationManifestItemId?: components["schemas"]["LocatorId"];
-            cloneIdentity?: string;
-            /** @enum {string} */
-            state: "Queued" | "WaitingForCapacity" | "Starting" | "Running" | "AwaitingReconnect" | "Succeeded" | "Failed" | "Cancelled" | "Interrupted";
-            /** @enum {string} */
-            terminalReason?: "client_closed_without_publish" | "grace_expired" | "session_revoked" | "new_boot" | "shutdown" | "slot_revoked" | "slot_replaced" | "profile_missing" | "profile_manifest_invalid" | "chromium_revision_mismatch" | "authentication_required" | "authentication_probe_unavailable" | "artifact_commit_failed" | "journey_failed" | "cancelled" | "parent_terminal" | "lease_expired" | "runtime_unavailable" | "browser_crashed" | "protocol_error";
-            rowVersion: number;
-            requestedAt: components["schemas"]["Timestamp"];
-            /** @description StartBrowserOperation 已派发；本字段存在但 startedAt 缺失时，Starting 表示 Ack 未知，WaitingForCapacity 表示明确 NO_CAPACITY 后按原 FIFO 等待重发；两者都保留身份 fence。 */
-            startDispatchedAt?: components["schemas"]["Timestamp"];
-            startedAt?: components["schemas"]["Timestamp"];
-            reconnectDeadline?: components["schemas"]["Timestamp"];
-            endedAt?: components["schemas"]["Timestamp"];
-            /** @description Lintel 已确认该 operation 的 Chromium/隧道不存在；领域终态存在但本字段缺失时身份仍被占用。 */
-            stopConfirmedAt?: components["schemas"]["Timestamp"];
-            /**
-             * @description 物理停止确认的唯一审计依据；必须与 stopConfirmedAt 成对出现。
-             * @enum {string}
-             */
-            stopConfirmationBasis?: "not_dispatched" | "start_rejected" | "stop_ack" | "same_boot_cleanup_ack" | "inventory_absent" | "new_boot" | "new_boot_cleanup_confirmed" | "externally_fenced_storage_retired";
-            /** @description same_boot_cleanup_ack 或 new_boot_cleanup_confirmed 的规范 typed cleanup observation SHA-256。 */
-            cleanupStateHash?: string;
-            startedByUsername?: string;
-            probeResults?: components["schemas"]["AuthenticationProbeResultSummary"][];
-            canAttach: boolean;
-            canPublish: boolean;
-            canCancel: boolean;
-        } & (unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown & unknown);
-        BrowserIdentitySummary: {
-            id: components["schemas"]["LocatorId"];
-            /** @description 独立插件身份稳定键，历史业务绑定身份可无此字段。 */
-            identityKey?: string;
-            /** @enum {string} */
-            state: "Ready" | "AuthenticationRequired";
-            rowVersion: number;
-            currentRevision: components["schemas"]["BrowserIdentityRevisionSummary"];
-            currentProfile: components["schemas"]["BrowserProfileGenerationSummary"] | null;
-            /** @description 当前身份最近一次持久化 authentication probe 三态事实；从未执行时为 null。 */
-            lastProbe: components["schemas"]["AuthenticationProbeResultSummary"] | null;
-            /** @description 当前身份锁持有者；领域已终态但 stopConfirmedAt 缺失的 operation 仍在此返回，只有物理停止确认后才为 null。 */
-            currentOperation: components["schemas"]["BrowserOperationSummary"] | null;
-        } & unknown;
-        /** @description 创建形态无 expectedRowVersion；更新形态必须携带当前 BrowserIdentitySummary.rowVersion。 */
-        BrowserIdentityConfig: components["schemas"]["BrowserIdentityCreate"] | components["schemas"]["BrowserIdentityUpdate"];
-        BrowserIdentityCreate: components["schemas"]["CommandBase"] & {
-            name: string;
-            /** Format: uri */
-            startUrl: string;
-            authenticationProbe: components["schemas"]["AuthenticationProbeConfig"];
-        };
-        BrowserIdentityUpdate: components["schemas"]["CommandBase"] & components["schemas"]["ExpectedRowVersion"] & {
-            name: string;
-            /** Format: uri */
-            startUrl: string;
-            authenticationProbe: components["schemas"]["AuthenticationProbeConfig"];
-        };
-        BrowserIdentityConfigResponse: {
-            identity: components["schemas"]["BrowserIdentitySummary"];
-            /** @description 已有 current profile 时为立即创建的 revision_change probe；尚无 profile 时为 null。 */
-            probeOperation: components["schemas"]["BrowserOperationSummary"] | null;
-        };
-        StartBrowserManualLoginRequest: components["schemas"]["CommandBase"] & components["schemas"]["ExpectedRowVersion"];
-        PublishBrowserProfileRequest: components["schemas"]["CommandBase"] & {
-            expectedOperationRowVersion: number;
-        };
-        CancelBrowserOperationRequest: components["schemas"]["CommandBase"] & {
-            expectedOperationRowVersion: number;
-        };
-        BrowserProfilePublishResponse: {
-            identity: components["schemas"]["BrowserIdentitySummary"];
-            operation: components["schemas"]["BrowserOperationSummary"];
-            generation: components["schemas"]["BrowserProfileGenerationSummary"];
-        };
         ConfigVerificationRunSummary: {
             id: components["schemas"]["LocatorId"];
             /** @enum {string} */
@@ -4253,18 +4057,10 @@ export interface components {
             /** @enum {string} */
             status: "error" | "gap";
             /** @enum {string} */
-            gapReason: "runtime_unavailable" | "authentication_required" | "authentication_probe_unavailable" | "identity_busy" | "artifact_commit_failed" | "journey_failed" | "query_failed" | "partial_response" | "no_data" | "cancelled" | "interrupted";
-        };
-        JourneyCatalogView: {
-            version: string;
-            digest: string;
-            /** @description 嵌入的生成产物 catalog 文档；形状由 contracts/schemas/journey-catalog.schema.json 唯一拥有（DATA-CONFIG-008）。 */
-            catalogJson: {
-                [key: string]: unknown;
-            };
+            gapReason: "runtime_unavailable" | "query_failed" | "partial_response" | "no_data" | "cancelled" | "interrupted";
         };
         /** @description 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。 */
-        ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["KubernetesConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"];
+        ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"];
         PrometheusConnectionSummary: {
             name: components["schemas"]["StableKey"];
             /** @constant */
@@ -4288,17 +4084,6 @@ export interface components {
             currentCredentialGenerationId?: components["schemas"]["LocatorId"];
             config: components["schemas"]["ThanosConnectionNonSecret"];
         };
-        KubernetesConnectionSummary: {
-            name: components["schemas"]["StableKey"];
-            /** @constant */
-            type: "kubernetes";
-            enabled: boolean;
-            rowVersion: number;
-            revalidationRequired?: boolean;
-            currentRevisionId?: components["schemas"]["LocatorId"];
-            currentCredentialGenerationId?: components["schemas"]["LocatorId"];
-            config: components["schemas"]["KubernetesConnectionNonSecret"];
-        };
         ModelProviderConnectionSummary: {
             name: components["schemas"]["StableKey"];
             /** @constant */
@@ -4319,7 +4104,7 @@ export interface components {
             id: components["schemas"]["LocatorId"];
             attemptId: components["schemas"]["LocatorId"];
             /** @enum {string} */
-            connectionType: "model_provider" | "prometheus" | "thanos" | "kubernetes";
+            connectionType: "model_provider" | "prometheus" | "thanos";
             connectionRevisionId: components["schemas"]["LocatorId"];
             credentialGenerationId: components["schemas"]["LocatorId"];
             rootBindingRevision: number;
@@ -4331,7 +4116,7 @@ export interface components {
             resultDigest: string;
             startedAt: components["schemas"]["Timestamp"];
             finishedAt: components["schemas"]["Timestamp"];
-            details: components["schemas"]["ModelProviderConnectionProbeDetails"] | components["schemas"]["PrometheusConnectionProbeDetails"] | components["schemas"]["ThanosConnectionProbeDetails"] | components["schemas"]["KubernetesConnectionProbeDetails"];
+            details: components["schemas"]["ModelProviderConnectionProbeDetails"] | components["schemas"]["PrometheusConnectionProbeDetails"] | components["schemas"]["ThanosConnectionProbeDetails"];
         };
         PrometheusConnectionProbeDetails: {
             /** @constant */
@@ -4354,18 +4139,6 @@ export interface components {
             /** @constant */
             sampleCount: 1;
             sampleValue: string;
-        };
-        KubernetesConnectionProbeDetails: {
-            /** @constant */
-            kind: "kubernetes";
-            effectiveNamespace: string;
-            versionOk: boolean;
-            coreDiscoveryOk: boolean;
-            groupedDiscoveryOk: boolean;
-            podsGetAllowed: boolean;
-            podsListAllowed: boolean;
-            eventsListAllowed: boolean;
-            podsLogGetAllowed: boolean;
         };
         ModelProviderConnectionProbeDetails: {
             /** @constant */
@@ -4397,7 +4170,7 @@ export interface components {
             id: components["schemas"]["LocatorId"];
             revisionSeq: number;
             /** @description 该 revision 的服务端生成类型化非秘密投影（DATA-CONN-005）；不得包含秘密。 */
-            config: components["schemas"]["PrometheusConnectionNonSecret"] | components["schemas"]["ThanosConnectionNonSecret"] | components["schemas"]["KubernetesConnectionNonSecret"] | components["schemas"]["ModelProviderConnectionNonSecret"];
+            config: components["schemas"]["PrometheusConnectionNonSecret"] | components["schemas"]["ThanosConnectionNonSecret"] | components["schemas"]["ModelProviderConnectionNonSecret"];
             createdAt: components["schemas"]["Timestamp"];
         };
         /** @description 凭据 generation 的非秘密标识投影；密文与内部元数据永不下发、永不返回（DATA-CONN-001/004）。 */
@@ -4445,14 +4218,6 @@ export interface components {
             authType: "none" | "basic" | "bearer";
             /** @description HTTP Basic Auth 用户名（非秘密）。 */
             username?: string;
-        };
-        KubernetesConnectionNonSecret: {
-            /** @constant */
-            type: "kubernetes";
-            /** @description kubeconfig 中使用的 context 名（非秘密；缺省使用当前 context）。 */
-            contextName?: string;
-            /** @description 只读调查的默认命名空间（非秘密）。 */
-            defaultNamespace?: string;
         };
         ModelProviderConnectionNonSecret: {
             /** @constant */
@@ -4503,14 +4268,6 @@ export interface components {
             /** @description HTTP Bearer token (secret; request-only). */
             bearerToken?: string;
         };
-        KubernetesConnectionInput: {
-            /** @constant */
-            type: "kubernetes";
-            contextName?: string;
-            defaultNamespace?: string;
-            /** @description kubeconfig 正文（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。 */
-            kubeconfig: string;
-        };
         ModelProviderConnectionInput: {
             /** @constant */
             type: "model_provider";
@@ -4542,7 +4299,7 @@ export interface components {
             detail?: string;
         };
         /** @description 按 type 封闭的判别联合（additionalProperties 为 false）：非秘密配置字段与秘密字段在同一变体内声明，未知字段与跨类型字段被拒绝（DATA-CONN-005）。 */
-        ConnectionInput: components["schemas"]["PrometheusConnectionInput"] | components["schemas"]["ThanosConnectionInput"] | components["schemas"]["KubernetesConnectionInput"] | components["schemas"]["ModelProviderConnectionInput"];
+        ConnectionInput: components["schemas"]["PrometheusConnectionInput"] | components["schemas"]["ThanosConnectionInput"] | components["schemas"]["ModelProviderConnectionInput"];
         CreateConnectionRequest: components["schemas"]["CommandBase"] & {
             name: components["schemas"]["StableKey"];
             connection: components["schemas"]["ConnectionInput"];
@@ -4706,7 +4463,7 @@ export interface components {
             connections: {
                 key: components["schemas"]["StableKey"];
                 /** @enum {string} */
-                type: "thanos" | "kubernetes" | "model_provider";
+                type: "thanos" | "model_provider";
             }[];
             body: components["schemas"]["EvidenceBody"];
             createdAt: components["schemas"]["Timestamp"];
@@ -4724,10 +4481,6 @@ export interface components {
         } | {
             /** @constant */
             kind: "plinth_promql";
-            attemptId: components["schemas"]["LocatorId"];
-        } | {
-            /** @constant */
-            kind: "lintel_browser";
             attemptId: components["schemas"]["LocatorId"];
         };
         EvidenceBody: {
@@ -4750,7 +4503,7 @@ export interface components {
              * @description 逻辑所有者类型；与 ownerId 的权威表由 DATA-ARTIFACT-003 机械闭合。
              * @enum {string}
              */
-            ownerType: "investigation_message" | "evidence" | "tool_call" | "browser_operation" | "inspection_report" | "backup" | "source_material" | "verification_invocation";
+            ownerType: "investigation_message" | "evidence" | "tool_call" | "inspection_report" | "backup" | "source_material" | "verification_invocation";
             ownerId: components["schemas"]["LocatorId"];
             sizeBytes: number;
             sha256: string;
@@ -4848,7 +4601,7 @@ export interface components {
             /** @description task_change_seq（与 SSE id: 行一致）；事件中恒 ≥1。 */
             seq: components["schemas"]["ChangeSeq"];
             /** @enum {string} */
-            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "browser_operation" | "config_verification_run";
+            objectType: "initial_analysis" | "execution_attempt" | "inspection_run" | "inspection_report" | "tool_call" | "knowledge_import_batch" | "knowledge_candidate" | "config_verification_run" | "resource_refresh_run";
             objectId: components["schemas"]["LocatorId"];
             /** @enum {string} */
             changeType: "created" | "state_changed";
@@ -4893,7 +4646,7 @@ export interface components {
             scenarioId: string;
             cellId: string;
             /** @enum {string} */
-            objectKind: "deployment" | "connection" | "config" | "browser_identity" | "ui_observation";
+            objectKind: "deployment" | "connection" | "config";
             inputDigest: string;
             /** @description 按 objectKind 的 typed non-secret locator；交换文档的封闭形状由 deployment-verification.schema.json 唯一拥有。 */
             locator?: {
@@ -4925,14 +4678,14 @@ export interface components {
         };
         VerificationSubjectDrift: {
             /** @enum {string} */
-            objectKind: "deployment" | "connection" | "config" | "browser_identity" | "ui_observation";
+            objectKind: "deployment" | "connection" | "config";
             /** @enum {string} */
-            driftField: "release_subject_digest" | "deployment_config_digest" | "public_origin_digest" | "connection_revision" | "credential_generation" | "root_binding_revision" | "probe_contract_digest" | "config_version" | "label_contract_version" | "browser_identity_revision" | "browser_profile_generation" | "browser_inventory_observation" | "browser_artifact_digest" | "browser_artifact_version";
+            driftField: "release_subject_digest" | "deployment_config_digest" | "public_origin_digest" | "connection_revision" | "credential_generation" | "root_binding_revision" | "probe_contract_digest" | "config_version" | "label_contract_version";
             itemId: components["schemas"]["LocatorId"];
             frozenDigest: string;
             currentDigest: string;
             observedAt: components["schemas"]["Timestamp"];
-        } & (unknown & unknown & unknown & unknown & unknown);
+        } & (unknown & unknown & unknown);
         DeploymentVerificationReceipt: {
             id: components["schemas"]["LocatorId"];
             manifestDigest: string;
@@ -4950,7 +4703,7 @@ export interface components {
             snapshotAt: components["schemas"]["Timestamp"];
             finalizedAt: components["schemas"]["Timestamp"];
         };
-        /** @description item 已冻结 browser artifact/version/arch/viewport/motion；服务端按 typed 字段生成 resultDigest，不接受用户提交结论摘要或原始页面内容。 */
+        /** @description item 已冻结输入摘要；服务端按 typed 字段生成 resultDigest，不接受用户提交结论摘要或原始页面内容。 */
         SubmitVerificationObservationRequest: components["schemas"]["CommandRequest"] & {
             itemId: components["schemas"]["LocatorId"];
             inputDigest: string;
@@ -4984,7 +4737,7 @@ export interface components {
             kind: "connection";
             connectionId: components["schemas"]["positiveId"];
             /** @enum {unknown} */
-            connectionType: "model_provider" | "thanos" | "kubernetes";
+            connectionType: "model_provider" | "thanos";
             revisionId: components["schemas"]["positiveId"];
             credentialGenerationId: components["schemas"]["positiveId"];
             rootBindingRevision: number;
@@ -4997,29 +4750,7 @@ export interface components {
             configVersionId: components["schemas"]["positiveId"];
             labelContractVersionId: components["schemas"]["positiveId"];
         };
-        browserIdentityLocator: {
-            /** @constant */
-            kind: "browser_identity";
-            browserIdentityId: components["schemas"]["positiveId"];
-            identityRevisionId: components["schemas"]["positiveId"];
-            currentGenerationId: components["schemas"]["positiveId"];
-            currentInventoryDigest: components["schemas"]["sha256"];
-        };
-        nonEmpty: string;
-        uiObservationLocator: {
-            /** @constant */
-            kind: "ui_observation";
-            /** @enum {unknown} */
-            browserArtifact: "playwright_chromium" | "branded_chrome";
-            browserVersion: components["schemas"]["nonEmpty"];
-            /** @enum {unknown} */
-            architecture: "linux/amd64" | "linux/arm64";
-            /** @enum {unknown} */
-            viewportCssPx: 320 | 768 | 1024 | 1440;
-            /** @enum {unknown} */
-            motion: "normal" | "reduced";
-        } & unknown;
-        typedLocator: components["schemas"]["deploymentLocator"] | components["schemas"]["connectionLocator"] | components["schemas"]["configLocator"] | components["schemas"]["browserIdentityLocator"] | components["schemas"]["uiObservationLocator"];
+        typedLocator: components["schemas"]["deploymentLocator"] | components["schemas"]["connectionLocator"] | components["schemas"]["configLocator"];
         requestItem: {
             itemId: components["schemas"]["positiveId"];
             scenarioId: components["schemas"]["scenarioId"];
@@ -5055,6 +4786,7 @@ export interface components {
             /** @enum {unknown} */
             result: "passed" | "failed";
         };
+        nonEmpty: string;
         attachment: {
             /** @enum {unknown} */
             kind: "stdout" | "stderr" | "log" | "other";
@@ -5235,7 +4967,6 @@ export interface components {
         BatchId: components["schemas"]["LocatorId"];
         CandidateId: components["schemas"]["LocatorId"];
         SystemKey: components["schemas"]["StableKey"];
-        BrowserOperationId: components["schemas"]["LocatorId"];
         ConnectionName: components["schemas"]["StableKey"];
         SourceKey: components["schemas"]["StableKey"];
         CredentialId: components["schemas"]["LocatorId"];
@@ -5245,7 +4976,7 @@ export interface components {
         MaterialId: components["schemas"]["LocatorId"];
         UserId: components["schemas"]["LocatorId"];
         SessionId: components["schemas"]["LocatorId"];
-        RuntimeSlot: "plinth" | "lintel";
+        RuntimeSlot: "plinth";
     };
     requestBodies: never;
     headers: {
@@ -5308,8 +5039,6 @@ export type ConflictErrorModel = components['schemas']['ConflictErrorModel'];
 export type FieldError = components['schemas']['FieldError'];
 export type CommandIdReuseConflict = components['schemas']['CommandIdReuseConflict'];
 export type RowVersionConflict = components['schemas']['RowVersionConflict'];
-export type IdentityBusyConflict = components['schemas']['IdentityBusyConflict'];
-export type AuthenticationRequiredConflict = components['schemas']['AuthenticationRequiredConflict'];
 export type HeadConflict = components['schemas']['HeadConflict'];
 export type CurrentPointerConflict = components['schemas']['CurrentPointerConflict'];
 export type SetupResponse = components['schemas']['SetupResponse'];
@@ -5376,9 +5105,6 @@ export type FeedbackSummary = components['schemas']['FeedbackSummary'];
 export type FeedbackTimeline = components['schemas']['FeedbackTimeline'];
 export type TaskSnapshot = components['schemas']['TaskSnapshot'];
 export type TaskObjectRef = components['schemas']['TaskObjectRef'];
-export type KubernetesConnectionMapping = components['schemas']['KubernetesConnectionMapping'];
-export type KubernetesConnectionMappingCreate = components['schemas']['KubernetesConnectionMappingCreate'];
-export type KubernetesConnectionMappingRetire = components['schemas']['KubernetesConnectionMappingRetire'];
 export type BusinessSystemSummary = components['schemas']['BusinessSystemSummary'];
 export type BusinessSystemDetail = components['schemas']['BusinessSystemDetail'];
 export type DiscoverySummary = components['schemas']['DiscoverySummary'];
@@ -5387,7 +5113,6 @@ export type CheckSummary = components['schemas']['CheckSummary'];
 export type PromqlCheckSummary = components['schemas']['PromqlCheckSummary'];
 export type PromqlInstantCheck = components['schemas']['PromqlInstantCheck'];
 export type PromqlRangeCheck = components['schemas']['PromqlRangeCheck'];
-export type BrowserCheckSummary = components['schemas']['BrowserCheckSummary'];
 export type ConfigVersionSummary = components['schemas']['ConfigVersionSummary'];
 export type ConfigVersionDetail = components['schemas']['ConfigVersionDetail'];
 export type PublishConfigRequest = components['schemas']['PublishConfigRequest'];
@@ -5395,44 +5120,25 @@ export type ResourceRefreshRunRequest = components['schemas']['ResourceRefreshRu
 export type ResourceRefreshRunDetail = components['schemas']['ResourceRefreshRunDetail'];
 export type ObservedResourceSummary = components['schemas']['ObservedResourceSummary'];
 export type ObservedResourceDetail = components['schemas']['ObservedResourceDetail'];
-export type AuthenticationProbeConfig = components['schemas']['AuthenticationProbeConfig'];
-export type BrowserIdentityRevisionSummary = components['schemas']['BrowserIdentityRevisionSummary'];
-export type BrowserProfileGenerationSummary = components['schemas']['BrowserProfileGenerationSummary'];
-export type AuthenticationProbeResultSummary = components['schemas']['AuthenticationProbeResultSummary'];
-export type BrowserOperationSummary = components['schemas']['BrowserOperationSummary'];
-export type BrowserIdentitySummary = components['schemas']['BrowserIdentitySummary'];
-export type BrowserIdentityConfig = components['schemas']['BrowserIdentityConfig'];
-export type BrowserIdentityCreate = components['schemas']['BrowserIdentityCreate'];
-export type BrowserIdentityUpdate = components['schemas']['BrowserIdentityUpdate'];
-export type BrowserIdentityConfigResponse = components['schemas']['BrowserIdentityConfigResponse'];
-export type StartBrowserManualLoginRequest = components['schemas']['StartBrowserManualLoginRequest'];
-export type PublishBrowserProfileRequest = components['schemas']['PublishBrowserProfileRequest'];
-export type CancelBrowserOperationRequest = components['schemas']['CancelBrowserOperationRequest'];
-export type BrowserProfilePublishResponse = components['schemas']['BrowserProfilePublishResponse'];
 export type ConfigVerificationRunSummary = components['schemas']['ConfigVerificationRunSummary'];
 export type ConfigVerificationRunDetail = components['schemas']['ConfigVerificationRunDetail'];
 export type ConfigVerificationRunCheckResult = components['schemas']['ConfigVerificationRunCheckResult'];
-export type JourneyCatalogView = components['schemas']['JourneyCatalogView'];
 export type ConnectionSummary = components['schemas']['ConnectionSummary'];
 export type PrometheusConnectionSummary = components['schemas']['PrometheusConnectionSummary'];
 export type ThanosConnectionSummary = components['schemas']['ThanosConnectionSummary'];
-export type KubernetesConnectionSummary = components['schemas']['KubernetesConnectionSummary'];
 export type ModelProviderConnectionSummary = components['schemas']['ModelProviderConnectionSummary'];
 export type ConnectionProbeResult = components['schemas']['ConnectionProbeResult'];
 export type PrometheusConnectionProbeDetails = components['schemas']['PrometheusConnectionProbeDetails'];
 export type ThanosConnectionProbeDetails = components['schemas']['ThanosConnectionProbeDetails'];
-export type KubernetesConnectionProbeDetails = components['schemas']['KubernetesConnectionProbeDetails'];
 export type ModelProviderConnectionProbeDetails = components['schemas']['ModelProviderConnectionProbeDetails'];
 export type ConnectionDetail = components['schemas']['ConnectionDetail'];
 export type RevisionSummary = components['schemas']['RevisionSummary'];
 export type GenerationSummary = components['schemas']['GenerationSummary'];
 export type PrometheusConnectionNonSecret = components['schemas']['PrometheusConnectionNonSecret'];
 export type ThanosConnectionNonSecret = components['schemas']['ThanosConnectionNonSecret'];
-export type KubernetesConnectionNonSecret = components['schemas']['KubernetesConnectionNonSecret'];
 export type ModelProviderConnectionNonSecret = components['schemas']['ModelProviderConnectionNonSecret'];
 export type PrometheusConnectionInput = components['schemas']['PrometheusConnectionInput'];
 export type ThanosConnectionInput = components['schemas']['ThanosConnectionInput'];
-export type KubernetesConnectionInput = components['schemas']['KubernetesConnectionInput'];
 export type ModelProviderConnectionInput = components['schemas']['ModelProviderConnectionInput'];
 export type DiscoverProviderModelsRequest = components['schemas']['DiscoverProviderModelsRequest'];
 export type ProviderModelDiscoveryResult = components['schemas']['ProviderModelDiscoveryResult'];
@@ -5486,13 +5192,11 @@ export type identifier = components['schemas']['identifier'];
 export type deploymentLocator = components['schemas']['deploymentLocator'];
 export type connectionLocator = components['schemas']['connectionLocator'];
 export type configLocator = components['schemas']['configLocator'];
-export type browserIdentityLocator = components['schemas']['browserIdentityLocator'];
-export type nonEmpty = components['schemas']['nonEmpty'];
-export type uiObservationLocator = components['schemas']['uiObservationLocator'];
 export type typedLocator = components['schemas']['typedLocator'];
 export type requestItem = components['schemas']['requestItem'];
 export type helperRequest = components['schemas']['helperRequest'];
 export type assertion = components['schemas']['assertion'];
+export type nonEmpty = components['schemas']['nonEmpty'];
 export type attachment = components['schemas']['attachment'];
 export type reportItem = components['schemas']['reportItem'];
 export type helperReport = components['schemas']['helperReport'];
@@ -5524,7 +5228,6 @@ export type ParameterVersionId = components['parameters']['VersionId'];
 export type ParameterBatchId = components['parameters']['BatchId'];
 export type ParameterCandidateId = components['parameters']['CandidateId'];
 export type ParameterSystemKey = components['parameters']['SystemKey'];
-export type ParameterBrowserOperationId = components['parameters']['BrowserOperationId'];
 export type ParameterConnectionName = components['parameters']['ConnectionName'];
 export type ParameterSourceKey = components['parameters']['SourceKey'];
 export type ParameterCredentialId = components['parameters']['CredentialId'];
@@ -6846,7 +6549,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 两个固定 Runtime slot 的状态。 */
+            /** @description 固定 Runtime slot 的状态。 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8794,30 +8497,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    listBusinessSystemKubernetesConnections: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                systemKey: components["parameters"]["SystemKey"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 绑定历史（包含已解除记录）。 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["KubernetesConnectionMapping"][];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
         };
     };

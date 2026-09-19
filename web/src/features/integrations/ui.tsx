@@ -1786,8 +1786,7 @@ export function useIntegrationsModule(
 			</>
 		) : platform ? (
 			// Unknown platform segments are ordinary unknown routes and render the
-			// shared not-found view (the retired /integrations/browser and
-			// /integrations/kubernetes land here); only the bare /integrations
+			// shared not-found view; only the bare /integrations
 			// root shows the catalog.
 			<Empty>
 				<EmptyHeader>

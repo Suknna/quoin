@@ -3,18 +3,15 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { chromium } from "playwright-core";
 
-// T41 UI qualification (issue #64). Drives the REAL release browser
-// artifacts (the Playwright-locked Chromium build and the
-// qualification-resolved branded Chrome) through the fixed catalog matrix
-// — every locally-native browser/arch × viewport × motion cell — against
-// the live Compose-qualified Quoin site, and records one typed result per
-// catalog cell for the ci/verify-ui-automation assert phase.
+// T41 UI qualification (issue #64). Drives the local release browser
+// builds through the fixed catalog matrix — every locally-native
+// arch × viewport × motion cell — against the live Compose-qualified
+// Quoin site, and records one typed result per catalog cell.
 //
 // Aspect mapping onto the frozen ui.automated ids: dom-contracts covers
 // routing/deep-link/landmarks plus the login contract; domain-behavior
 // covers seeded alert flows and real waiting states; the rest are as
-// named. Never via the Lintel runtime, Journeys or the Explorer path
-// (VERIFY-OBSERVATION-003: plain UI automation only).
+// named. Plain UI automation only.
 
 const stackDir = join(import.meta.dirname, "..", "..", ".artifacts", "e2e-stack");
 //The coordinator phases pass QUOIN_UI_MATRIX_DIR explicitly; the
@@ -120,7 +117,7 @@ async function login(page: import("@playwright/test").Page, password: string): P
 test.use({ trace: "off", screenshot: "off", video: "off" })
 
 test.describe("T41 固定矩阵 UI 资格 @ticket-41", () => {
-  test("release 浏览器工件跨视口/动效矩阵的七方面证明", async () => {
+  test("跨视口/动效矩阵的七方面 UI 证明", async () => {
     test.setTimeout(60 * 60 * 1000);
     const subjects = loadLocalSubjects();
     expect(subjects.length).toBeGreaterThan(0);
@@ -191,7 +188,7 @@ async function openModules(page: import("@playwright/test").Page) {
 
 //The bootstrap fixture alerts are short-lived: Alertmanager expires
 //amtool-added alerts and send_resolved drains the Firing list. Later
-//cells re-seed a probe alert through the same real journey
+//cells re-seed a probe alert through the same real routing path
 //(Alertmanager v2 -> forwarder -> Stele -> Quoin -> SSE); one fixed
 //startsAt keeps every re-seed the same occurrence.
 const matrixAlertStartsAt = new Date(Date.now() - 60_000).toISOString();

@@ -8,22 +8,12 @@ import { expect, test } from '@playwright/test'
 // run evidence, the explicit candidate selection + atomic activation confirm,
 // and the live alerts list with business-system attribution and filter.
 
-// T17 uses a freshly named fixture project rather than the shared e2e stack.
-// Its non-secret manifest is the only cross-process hand-off; the password
-// remains in that manifest's private run directory.
-const fixtureManifest = join(import.meta.dirname, '..', '..', '.artifacts', 'tickets', 'T17', 'ticket17-browser-fixture.json')
-
-function readFixture(): { stack: string } {
-  if (!existsSync(fixtureManifest)) throw new Error(`T17 browser fixture manifest missing: ${fixtureManifest}`)
-  const fixture = JSON.parse(readFileSync(fixtureManifest, 'utf-8')) as { stack?: unknown }
-  if (typeof fixture.stack !== 'string' || !fixture.stack.startsWith(join(import.meta.dirname, '..', '..', '.artifacts', 'e2e-t17-'))) {
-    throw new Error('T17 browser fixture manifest has an unsafe stack path')
-  }
-  return { stack: fixture.stack }
-}
+// T17 uses the shared e2e stack; the admin password fixture is the only
+// cross-process hand-off.
+const stackDir = join(import.meta.dirname, '..', '..', '.artifacts', 'e2e-stack')
 
 function readAdminPassword(): string {
-  const path = join(readFixture().stack, 'admin-new-password')
+  const path = join(stackDir, 'admin-new-password')
   if (!existsSync(path)) throw new Error(`admin password fixture missing: ${path}`)
   return readFileSync(path, 'utf-8').trim()
 }
@@ -50,7 +40,7 @@ inspection_plans: []
 `
 
 test.describe('T17 Label Contract 激活与告警归属 @ticket-17', () => {
-  test('就绪视图、原子激活与告警归属筛选的真实浏览器路径', async ({ page, browser }) => {
+  test('就绪视图、原子激活与告警归属筛选的真实浏览器路径', async ({ page }) => {
     test.slow()
     await page.goto('/')
     await page.fill('#username', 'admin')
@@ -205,25 +195,13 @@ test.describe('T17 Label Contract 激活与告警归属 @ticket-17', () => {
     const evidenceDir = process.env.QUOIN_EVIDENCE_DIR
     if (evidenceDir) {
       mkdirSync(evidenceDir, { recursive: true })
-      await page.screenshot({ path: join(evidenceDir, 'ticket17-browser-final.png'), fullPage: true })
-      const fixturePath = join(evidenceDir, 'ticket17-browser-fixture.json')
-      const fixture = existsSync(fixturePath) ? JSON.parse(readFileSync(fixturePath, 'utf-8')) : null
-      const browserEvidence = {
+      await page.screenshot({ path: join(evidenceDir, 'ticket17-final.png'), fullPage: true })
+      const evidence = {
         url: page.url(),
         setup,
-        browser: { version: browser.version(), userAgent: await page.evaluate(() => navigator.userAgent) },
-        fixture,
         verified: ['readiness blocker', 'verification run', 'atomic activation', 'attribution filter', 'URL reload', 'SSE update', 'detail attribution'],
       }
-      writeFileSync(join(evidenceDir, 'ticket17-browser-final.json'), JSON.stringify(browserEvidence, null, 2))
-      // The ticket's Go acceptance writes the root evidence first; attach the
-      // real Chromium result rather than creating a parallel, competing proof.
-      const runtimePath = join(evidenceDir, 'runtime-evidence.json')
-      if (existsSync(runtimePath)) {
-        const runtime = JSON.parse(readFileSync(runtimePath, 'utf-8'))
-        runtime.browserAcceptance = browserEvidence
-        writeFileSync(runtimePath, JSON.stringify(runtime, null, 2))
-      }
+      writeFileSync(join(evidenceDir, 'ticket17-final.json'), JSON.stringify(evidence, null, 2))
     }
   })
 })

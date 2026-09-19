@@ -3,7 +3,7 @@
 
 export interface ConnectionSummaryView {
   name: string
-  type: 'prometheus' | 'thanos' | 'kubernetes' | 'model_provider'
+  type: 'prometheus' | 'thanos' | 'model_provider'
   enabled: boolean
   revalidationRequired: boolean
   currentRevisionId?: string
@@ -32,7 +32,7 @@ export interface ProbeAttemptView {
 export interface ProbeResultView {
   id: string
   attemptId: string
-  connectionType: 'thanos' | 'kubernetes' | 'model_provider'
+  connectionType: 'thanos' | 'model_provider'
   outcome: 'passed' | 'failed' | 'cancelled' | 'interrupted'
   actionSetId: string
   actionSetVersion: number
@@ -96,13 +96,10 @@ export async function fetchConnection(name: string): Promise<ConnectionDetailVie
 }
 
 export interface CreateConnectionInput {
-  type: 'thanos' | 'kubernetes'
+  type: 'thanos'
   baseUrl?: string
   username?: string
   password?: string
-  contextName?: string
-  defaultNamespace?: string
-  kubeconfig?: string
 }
 
 export async function createConnection(name: string, connection: CreateConnectionInput): Promise<ConnectionSummaryView> {

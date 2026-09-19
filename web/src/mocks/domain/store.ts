@@ -5,8 +5,8 @@ import type {
 } from "../../api/generated/types";
 
 // Business-system payload shapes used by the mock domain state. The former
-// features/admin/business-systems API client was retired with the browser
-// plugin surface; these local DTOs keep the mock state typed without it.
+// features/admin/business-systems API client was retired with its plugin
+// surface; these local DTOs keep the mock state typed without it.
 interface CheckView {
 	checkKey: string;
 	displayName: string;
@@ -261,20 +261,6 @@ export interface MockState {
 			createdAt: string;
 		}>
 	>;
-	mappings: Record<
-		string,
-		Array<{
-			id: string;
-			connectionId: string;
-			connectionName: string;
-			state: "Active" | "Retired";
-			rowVersion: number;
-			createdBy: string;
-			createdAt: string;
-			retiredBy: string | null;
-			retiredAt?: string;
-		}>
-	>;
 	feedback: Array<{
 		id: string;
 		targetType: string;
@@ -443,23 +429,6 @@ function baseState(scenario: MockScenario): MockState {
 		revisionCount: 1,
 		generationCount: 1,
 	};
-	const kubernetes: ConnectionDetailView & { id: string } = {
-		id: "connection-kubernetes-prod",
-		name: "kubernetes-prod",
-		type: "kubernetes",
-		enabled: true,
-		revalidationRequired: false,
-		currentRevisionId: "revision-k8s-1",
-		currentCredentialGenerationId: "generation-k8s-1",
-		rowVersion: 2,
-		config: {
-			type: "kubernetes",
-			contextName: "production",
-			defaultNamespace: "checkout",
-		},
-		revisionCount: 1,
-		generationCount: 1,
-	};
 	const model: ConnectionDetailView & { id: string } = {
 		id: "connection-model-provider",
 		name: "model-provider",
@@ -588,21 +557,6 @@ function baseState(scenario: MockScenario): MockState {
 		cron: "*/5 * * * *",
 		timezone: "Asia/Shanghai",
 		rowVersion: 2,
-		createdAt: now,
-		updatedAt: now,
-	};
-	const clusterPlan: PluginInspectionPlan = {
-		planKey: "kubernetes-prod-overview",
-		displayName: "生产集群概览",
-		enabled: false,
-		connectionName: "kubernetes-prod",
-		pluginId: "kubernetes",
-		templateId: "cluster-overview",
-		params: {},
-		scope: { kind: "integration" },
-		cron: null,
-		timezone: "Asia/Shanghai",
-		rowVersion: 1,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -814,20 +768,6 @@ function baseState(scenario: MockScenario): MockState {
 				},
 			],
 		},
-		mappings: {
-			checkout: [
-				{
-					id: "mapping-k8s-1",
-					connectionId: kubernetes.id,
-					connectionName: kubernetes.name,
-					state: "Active",
-					rowVersion: 1,
-					createdBy: adminUser.id,
-					createdAt: now,
-					retiredBy: null,
-				},
-			],
-		},
 		feedback: [
 			{
 				id: "feedback-1",
@@ -886,7 +826,7 @@ function baseState(scenario: MockScenario): MockState {
 			],
 		},
 		attachments: new Map(),
-		connections: [thanos, kubernetes, model],
+		connections: [thanos, model],
 		probes: {},
 		probeResults: {
 			[thanos.name]: [
@@ -942,7 +882,7 @@ function baseState(scenario: MockScenario): MockState {
 			},
 		],
 		businessViews: [checkoutView, catalogView],
-		inspectionPlans: [latencyPlan, clusterPlan],
+		inspectionPlans: [latencyPlan],
 		inspectionRuns: [activeRun, run],
 		reports: {
 			[run.id]: [
@@ -1023,7 +963,6 @@ function baseState(scenario: MockScenario): MockState {
 		state.versions = {};
 		state.imports = [];
 		state.evidence = {};
-		state.mappings = {};
 		state.feedback = [];
 		state.backups = [];
 	}

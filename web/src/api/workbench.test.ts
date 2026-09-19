@@ -114,12 +114,12 @@ describe("workbench API boundary", () => {
 		});
 	});
 
-	it("sends kubernetes secret fields only in the typed create command", async () => {
+	it("sends thanos secret fields only in the typed create command", async () => {
 		const fetchMock = vi.fn().mockResolvedValue(response({}));
 		vi.stubGlobal("fetch", fetchMock);
-		await workbenchApi.createConnection("cluster/main", { type: "kubernetes", contextName: "production", defaultNamespace: "apps", kubeconfig: "apiVersion: v1" });
+		await workbenchApi.createConnection("thanos/main", { type: "thanos", baseUrl: "https://thanos.example", password: "secret" });
 		expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/connections");
-		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ clientCommandId: expect.any(String), name: "cluster/main", connection: { type: "kubernetes", contextName: "production", defaultNamespace: "apps", kubeconfig: "apiVersion: v1" } });
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ clientCommandId: expect.any(String), name: "thanos/main", connection: { type: "thanos", baseUrl: "https://thanos.example", password: "secret" } });
 	});
 
 	it("uses exact disable, rotate, and cancellation fences", async () => {
@@ -145,7 +145,7 @@ describe("workbench API boundary", () => {
 	it("keeps a model qualification identifier out of non-model enable commands", async () => {
 		const fetchMock = vi.fn().mockResolvedValue(response({}));
 		vi.stubGlobal("fetch", fetchMock);
-		await workbenchApi.enableConnection("cluster/main", 10);
+		await workbenchApi.enableConnection("thanos/main", 10);
 		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty("qualifiedProbeResultId");
 	});
 

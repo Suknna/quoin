@@ -49,7 +49,6 @@ const drainRoutes: Record<string, (params: string[]) => string> = {
   knowledge_batch: params => `/api/v1/knowledge/import-batches/${params[0]}/cancel`,
   connection_probe: params => `/api/v1/connections/${params[0]}/probe-attempts/${params[1]}/cancel`,
   config_verification: params => `/api/v1/business-systems/${params[0]}/config/${params[1]}/verifications/${params[2]}/cancel`,
-  browser_operation: params => `/api/v1/browser-login/${params[0]}/operations/${params[1]}/cancel`,
 }
 
 export interface DrainTarget {
@@ -71,14 +70,9 @@ export function drainTargetOf(item: MaintenanceItem): DrainTarget | null {
 }
 
 export async function cancelDrainTarget(target: DrainTarget, clientCommandId = commandID()): Promise<void> {
-  // The browser login fence carries its own expectedOperationRowVersion field
-  // (CancelBrowserOperationRequest); every other drain command shares
-  // CancelRequest's expectedRowVersion.
-  const body = target.endpointKey === 'browser_operation'
-    ? { clientCommandId, expectedOperationRowVersion: target.rowVersion }
-    : { clientCommandId, expectedRowVersion: target.rowVersion }
+  // Every drain command shares CancelRequest's expectedRowVersion.
   await request<unknown>(target.route, {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify({ clientCommandId, expectedRowVersion: target.rowVersion }),
   })
 }

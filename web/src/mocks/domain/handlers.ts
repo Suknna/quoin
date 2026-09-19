@@ -314,8 +314,6 @@ export const domainHandlers = [
 					"collect",
 				],
 			},
-			// The kubernetes plugin is retired (Kubernetes 插件退役) and no
-			// longer appears in the server catalog.
 		]);
 	}),
 	http.get("*/api/v1/auth/me", async () => {
@@ -974,7 +972,6 @@ export const domainHandlers = [
 		if (
 			input.connection.type !== "prometheus" &&
 			input.connection.type !== "thanos" &&
-			input.connection.type !== "kubernetes" &&
 			input.connection.type !== "model_provider"
 		)
 			return problem(422, "连接类型无效。", "validation_error");
@@ -984,7 +981,6 @@ export const domainHandlers = [
 			type: input.connection.type as
 				| "prometheus"
 				| "thanos"
-				| "kubernetes"
 				| "model_provider",
 			enabled: false,
 			revalidationRequired: false,
@@ -993,7 +989,6 @@ export const domainHandlers = [
 				...input.connection,
 				password: undefined,
 				apiKey: undefined,
-				kubeconfig: undefined,
 			},
 			revisionCount: 1,
 			generationCount: 1,
@@ -1119,13 +1114,6 @@ export const domainHandlers = [
 			)
 		);
 	}),
-	http.get(
-		"*/api/v1/business-systems/:key/kubernetes-connections",
-		({ params }) => {
-			const denied = required();
-			return denied ?? json(getMockState().mappings[String(params.key)] ?? []);
-		},
-	),
 	// Retired with the old business-declaration write mainline: the mock keeps
 	// mapping/refresh/publish history readable but no longer simulates those
 	// writes, so preview can never masquerade as the removed active model.
@@ -2092,8 +2080,6 @@ export const domainHandlers = [
 		retention.rowVersion += 1;
 		return json(retention);
 	}),
-	// The browser business is retired (受控浏览器退役): the former
-	// browser-identity read mock is gone with its route, so old URLs 404.
 	http.get(
 		"*/api/v1/business-systems/:key/config/:versionId/verifications",
 		({ params }) => {

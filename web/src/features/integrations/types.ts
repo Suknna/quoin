@@ -1,6 +1,4 @@
-/** Platform form identities are independent of server-authoritative plugin enablement.
- * The browser entry was removed with its configuration surface (浏览器插件退役);
- * the kubernetes entry was removed with its descriptor (Kubernetes 插件退役). */
+/** Platform form identities are independent of server-authoritative plugin enablement. */
 export type IntegrationPlatform = "alertmanager" | "prometheus" | "thanos";
 
 export interface IntegrationCatalogItem {

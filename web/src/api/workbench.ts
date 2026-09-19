@@ -4,7 +4,7 @@ import type {
 	UserSummary,
 } from "@/api/generated/types";
 
-export type ConnectionType = "thanos" | "kubernetes" | "model_provider";
+export type ConnectionType = "thanos" | "model_provider";
 
 export interface ConnectionSummaryView {
 	name: string;
@@ -367,13 +367,6 @@ export interface ThanosConnectionInput {
 	tlsSkipVerify?: boolean;
 }
 
-export interface KubernetesConnectionInput {
-	type: "kubernetes";
-	contextName: string;
-	defaultNamespace: string;
-	kubeconfig: string;
-}
-
 export interface ModelProviderConnectionInput {
 	type: "model_provider";
 	baseUrl: string;
@@ -387,7 +380,6 @@ export interface ModelProviderConnectionInput {
 
 export type ConnectionInput =
 	| ThanosConnectionInput
-	| KubernetesConnectionInput
 	| ModelProviderConnectionInput;
 
 export interface ProviderDiscoveryResult {

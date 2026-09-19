@@ -88,23 +88,6 @@ function ConnectionFields({
 			/>
 		</Field>
 	);
-	if (type === "kubernetes")
-		return (
-			<>
-				{input("contextName", "Context 名称", { required: true })}
-				{input("defaultNamespace", "默认 Namespace", { required: true })}
-				<Field>
-					<FieldLabel htmlFor="kubeconfig">Kubeconfig</FieldLabel>
-					<Textarea
-						id="kubeconfig"
-						value={value.kubeconfig ?? ""}
-						onChange={(event) => onChange("kubeconfig", event.target.value)}
-						disabled={disabled}
-						required
-					/>
-				</Field>
-			</>
-		);
 	if (type === "model_provider")
 		return (
 			<>
@@ -171,13 +154,6 @@ function toInput(
 	type: EditableConnectionType,
 	fields: Record<string, string>,
 ): ConnectionInput {
-	if (type === "kubernetes")
-		return {
-			type,
-			contextName: fields.contextName,
-			defaultNamespace: fields.defaultNamespace,
-			kubeconfig: fields.kubeconfig,
-		};
 	if (type === "model_provider")
 		return {
 			type,
@@ -782,9 +758,7 @@ export function ModelProviderPage({
 							description={`${
 								selected.type === "model_provider"
 									? "模型提供方"
-									: selected.type === "kubernetes"
-										? "Kubernetes"
-										: "Thanos"
+									: "Thanos"
 							} · ${selected.enabled ? "已启用" : "未启用"} · 版本 ${selected.rowVersion}`}
 						>
 							<div className="min-h-0 flex-1 overflow-y-auto">

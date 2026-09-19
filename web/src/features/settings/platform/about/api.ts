@@ -1,5 +1,5 @@
 export interface AboutComponent {
-  slot: 'plinth' | 'lintel'
+  slot: 'plinth'
   state: 'unregistered' | 'registered' | 'revoked'
   currentGeneration: number
   rowVersion: number

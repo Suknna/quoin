@@ -297,12 +297,7 @@ export function statusBadgeClass(
 			: undefined;
 }
 export const inspectionGapReasonText: Record<string, string> = {
-	runtime_unavailable: "浏览器运行时不可用",
-	authentication_required: "需要人工登录",
-	authentication_probe_unavailable: "登录探测不可用",
-	identity_busy: "浏览器身份正忙",
-	artifact_commit_failed: "诊断材料提交失败",
-	journey_failed: "浏览器巡检失败",
+	runtime_unavailable: "运行时不可用",
 	query_failed: "指标查询失败",
 	partial_response: "部分响应",
 	no_data: "无数据",

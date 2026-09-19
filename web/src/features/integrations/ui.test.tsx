@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 describe("integration workbench", () => {
-	it("renders the server plugin catalog without exposing disabled browser capabilities", async () => {
+	it("renders the server plugin catalog without exposing unknown plugin capabilities", async () => {
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			Response.json({
 				items: [
@@ -68,9 +68,9 @@ describe("integration workbench", () => {
 						capabilities: ["discover", "tools"],
 					},
 					{
-						id: "browser",
-						displayName: "受控浏览器",
-						description: "可选浏览器",
+						id: "unknown",
+						displayName: "未知插件",
+						description: "服务端新增的未知插件",
 						enabled: false,
 						version: "1",
 						capabilities: ["tools"],
@@ -86,7 +86,7 @@ describe("integration workbench", () => {
 			"/api/v1/integrations/plugins",
 			expect.anything(),
 		);
-		expect(screen.queryByText("受控浏览器")).not.toBeInTheDocument();
+		expect(screen.queryByText("未知插件")).not.toBeInTheDocument();
 		expect(screen.queryByText("Thanos")).not.toBeInTheDocument();
 	});
 

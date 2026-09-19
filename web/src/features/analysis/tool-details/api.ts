@@ -2,7 +2,7 @@
 // (frozen getEvidence / getArtifactMetadata / downloadArtifactContent).
 export interface EvidenceConnection {
 	key: string;
-	type: "thanos" | "kubernetes" | "model_provider";
+	type: "thanos" | "model_provider";
 }
 
 export interface ArtifactSummary {
@@ -37,8 +37,7 @@ export interface EvidenceDetail {
 				toolName: string;
 				toolVersion: string;
 		  }
-		| { kind: "plinth_promql"; attemptId: string }
-		| { kind: "lintel_browser"; attemptId: string };
+		| { kind: "plinth_promql"; attemptId: string };
 	connections: EvidenceConnection[];
 	body:
 		| { kind: "inline_json"; value: unknown }
