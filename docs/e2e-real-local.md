@@ -66,7 +66,7 @@ make e2e-real QUOIN_E2E_RUNTIME="$PWD/.artifacts/my-e2e" QUOIN_E2E_PORT=9444 QUO
    ```
 
    Its real control stream reconnects and resolves the same platform-fault lifecycle. Refresh About and Alerts; allow up to 20 seconds for the controlled state transition.
-8. Create an Operator using the existing Admin users page, sign in in a separate browser profile, and confirm that platform fault alert reads work but `/admin/about`, `/api/v1/runtime`, and runtime registration commands return `403`. Operators have no runtime/maintenance URL entry.
+8. Create an Operator using the existing Admin users page, sign in in a separate browser profile, and confirm that platform fault alert reads work but `/admin/about` and runtime registration commands return `403`. Operators have no runtime/maintenance URL entry.
 
 ## #96 intake path
 
@@ -89,7 +89,7 @@ make e2e-real QUOIN_E2E_RUNTIME="$PWD/.artifacts/my-e2e" QUOIN_E2E_PORT=9444 QUO
 
 4. Expect `204` only after gateway → Stele → Quoin commits the Delivery. Open the current alert list and find `ManualAlertmanagerIntake`; the source detail should show its latest valid event. With no matching Label Contract, retain the existing unassigned/intake result rather than inventing business ownership. Before the first valid event, the source is waiting, not faulty.
 5. Repeat the same event with the same labels and `startsAt`. This is another upstream delivery, not another active Occurrence. Send a resolved event with the same labels and `startsAt`, `status: "resolved"` at both levels, and an `endsAt` after `startsAt` to end that lifecycle.
-6. Create an **Operator** through the Admin users page (not SQL), then sign in in a separate browser profile and finish its forced password change. Confirm the alert remains readable, management navigation is absent, and direct `/integrations`, business-management, inspection-management, and administrator URLs show access denied. In that authenticated session, `/api/v1/alert-sources`, `/api/v1/business-systems`, `/api/v1/label-contracts`, and `/api/v1/runtime` must return `403`; `/api/v1/business-context` remains readable without management secrets.
+6. Create an **Operator** through the Admin users page (not SQL), then sign in in a separate browser profile and finish its forced password change. Confirm the alert remains readable, management navigation is absent, and direct `/integrations`, business-management, inspection-management, and administrator URLs show access denied. In that authenticated session, `/api/v1/alert-sources` and `/api/v1/label-contracts` must return `403`; `/api/v1/business-context` remains readable without management secrets.
 
 ### Receiver setup and failure recovery
 

@@ -4,8 +4,8 @@
 
 ## 活动入口
 
-- 正常 Huma API：约130个操作，以既有 OperationID 为稳定标识。
-- 原生 mux：alerts/events、tasks/events 两个 SSE，Artifact内容、备份下载，调查附件上传，共5个。
+- 正常 Huma API：128 个操作（2026-09 精简后），以既有 OperationID 为稳定标识。
+- 原生 mux：alerts/events SSE、Artifact内容、备份下载、调查附件上传，共4个。
 - 维护 API：固定认证/审计/维护状态与退出，Restore/RootKeyRebind/Upgrade按原因白名单。未允许入口不能默认公开。
 - 服务入口：RuntimeControl、SteleRelay、ArtifactService实际注册方法；精确方法以 protobuf service 定义与注册代码为准。
 - 后台：Artifact GC、备份调度、升级调和、lease sweeper、巡检调度、来源观测。
@@ -19,19 +19,19 @@
 | 用户 | listUsers/createUser/updateUser/resetUserPassword/revokeUserSessions | Admin | 统一准入及命令执行器 | 已转换 |
 | 会话 | listOwnSessions/revokeOwnSession | User且自己的会话 | 自动访问/命令 | 已转换 |
 | 审计 | listAuditEvents、新设置/预览 | Admin | 访问一次，不递归 | 已转换 |
-| 系统 | getMaintenanceState/getRuntimeStatus/getAdminAbout/prepareUpgrade/exitMaintenance | 状态读取按现有边界，其余Admin | 自动访问/命令 | 已转换 |
+| 系统 | getMaintenanceState/getAdminAbout/prepareUpgrade/exitMaintenance | 状态读取按现有边界，其余Admin | 自动访问/命令 | 已转换 |
 | 告警查询 | listAlerts/getAlertOccurrence/listAlertObservations | User | 默认查询元信息 | 已转换 |
 | 接入问题 | listIntakeIssues/acknowledgeIntakeIssue | Admin | 查询/命令 | 已转换 |
 | 告警源 | listAlertSources/getAlertSource/getAlertmanagerReceiverConfig/createAlertSource/listAlertSourceCredentials/rotateAlertSourceCredential/retireAlertSourceCredential/disableAlertSource/revealAlertSourceCredential | Admin | 持久命令取代内存重放，敏感读取前审计 | 已转换 |
 | Runtime | prepareRuntimeRegistration/revealRuntimeRegistrationToken/retireRuntimeCredential | Admin | 命令及敏感读取 | 已转换 |
 | 连接 | listConnections/createConnection/getConnection/probeConnection/enableConnection/disableConnection/discoverProviderModels/rotateConnectionCredential/getConnectionProbeAttempt/cancelConnectionProbeAttempt/listConnectionProbeResults/listConnectionRevisions/listCredentialGenerations | Admin | 统一操作；外部调用不能冒充同库事务 | 已转换 |
-| 观测/插件 | listSourceObservedResources/getSourceObservedResource/listSourceObservationRuns/getSourceObservationRun/refreshIntegrationResources/listIntegrationPlugins | Admin | 查询/刷新命令，遥测例外集中 | 已转换 |
+| 插件 | listIntegrationPlugins | Admin | 查询 | 已转换 |
 | 业务上下文 | listBusinessContext | User | 查询 | 已转换 |
-| 分析 | createInitialAnalysis/listInitialAnalyses/getInitialAnalysis/listInitialAnalysisAttempts/retryInitialAnalysis/cancelInitialAnalysis/getTaskSnapshot | User | 访问/命令/任务关联 | 已转换 |
-| 证据 | getEvidence/getArtifactMetadata/getSourceMaterial/downloadSourceMaterialContent及原生Artifact下载 | User，敏感对象另需Admin | 输出前审计并保留对象约束 | 已转换 |
+| 分析 | createInitialAnalysis/listInitialAnalyses/getInitialAnalysis/listInitialAnalysisAttempts/retryInitialAnalysis/cancelInitialAnalysis | User | 访问/命令 | 已转换 |
+| 证据 | getEvidence/getArtifactMetadata及原生Artifact下载 | User，敏感对象另需Admin | 输出前审计并保留对象约束 | 已转换 |
 | 备份 | listBackups/triggerBackup/getBackup/getBackupSettings/updateBackupSettings/getArtifactRetentionSettings/updateArtifactRetentionSettings及下载 | Admin | 共享执行器，开始/完成分开 | 已转换 |
-| 调查 | listInvestigations/createInvestigation/getInvestigation/listInvestigationMessages/sendInvestigationMessage/streamInvestigationMessage/listInvestigationAttempts/listAttemptToolCalls/undoInvestigationMessage/retryInvestigationAttempt/cancelInvestigationAttempt/getInvestigationAttachment及上传 | User | 持久命令、流访问、任务关联 | 已转换 |
-| 历史业务系统 | listBusinessSystems/getBusinessSystem/listBusinessSystemKubernetesConnections/listBusinessSystemConfigs/getBusinessSystemConfig/listConfigVerificationRuns/getConfigVerificationRun/getResourceRefreshRun/listObservedResources/getObservedResource | Admin | 只读解释仍审计，不重新启用退役写入口 | 已转换 |
+| 调查 | listInvestigations/createInvestigation/getInvestigation/listInvestigationMessages/sendInvestigationMessage/streamInvestigationMessage/listInvestigationAttempts/listAttemptToolCalls/undoInvestigationMessage/retryInvestigationAttempt/cancelInvestigationAttempt及上传 | User | 持久命令、流访问、任务关联 | 已转换 |
+| 历史业务系统 | （HTTP 只读解释面已于 2026-09 精简整体移除；`business_systems` 表仍作为告警/分析/调查的业务维度被现行 SQL 读取） | Admin | — | 已退役 |
 | 巡检 | cancelInspectionRun/listInspectionRuns/createInspectionRun/getInspectionRun/listInspectionReports/getInspectionReport/retryInspectionAnalysis/rerunInspection/listPluginInspectionPlans/getPluginInspectionPlan/createPluginInspectionPlan/updatePluginInspectionPlan | Admin | 访问/命令/后台关联 | 已转换 |
 | 业务视图 | listBusinessViews/createBusinessView/getBusinessView/updateBusinessView | Admin | 访问/命令 | 已转换 |
 | 知识/反馈 | cancelKnowledgeImportBatch/appendDiagnosisFeedback/listDiagnosisFeedback/createAnalysisKnowledgeCandidate/createInvestigationKnowledgeCandidate/createReportKnowledgeCandidate/listKnowledgeCandidates/getKnowledgeCandidate/editKnowledgeCandidateDraft/confirmKnowledgeCandidate/excludeKnowledgeCandidate/searchKnowledge/getKnowledge/listKnowledgeVersions/getKnowledgeVersion/importKnowledgeBatch/listKnowledgeImportBatches/getKnowledgeImportBatch/confirmKnowledgeBatch/createKnowledgeRevisionCandidate/stopKnowledgeReuse | User | 访问/命令/任务关联 | 已转换 |
