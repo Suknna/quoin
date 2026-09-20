@@ -158,18 +158,14 @@ const (
 )
 
 // normalizeFrozenExecutionMode 把冻结目录携带的执行模式词表归一到 Plinth
-// 侧仅有的两个合法值(ADR-0011):
-//   - worker_local 保持(worker 沙箱自执行);
-//   - quoin_routed 保持(Quoin 编排执行并推送 ExternalToolResult);
-//   - supervisor_typed 是历史目录冻结的旧词(协议中 SUPERVISOR_TYPED 已
-//     reserved、共享契约文件不可改):Plinth 对这类工具同样只转发不执行,
-//     语义等同 quoin_routed,这是迁移期的显式词表映射;
-//   - 其他未知值返回空串,由调用方 fail fast。
+// 侧仅有的两个合法值(ADR-0011):worker_local 保持(worker 沙箱自执行);
+// quoin_routed 保持(Quoin 编排执行并推送 ExternalToolResult)。其他值返回
+// 空串,由调用方 fail fast。
 func normalizeFrozenExecutionMode(mode string) string {
 	switch mode {
 	case "worker_local":
 		return executionModeWorkerLocal
-	case "quoin_routed", "supervisor_typed":
+	case "quoin_routed":
 		return executionModeQuoinRouted
 	default:
 		return ""

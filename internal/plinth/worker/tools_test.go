@@ -15,8 +15,7 @@ import (
 )
 
 // fixtureCatalogInput 构造一个内嵌冻结目录的 canonical input 文档
-// ({toolCatalog:{tools:[...]}}),覆盖 worker_local 与 quoin_routed 两种
-// 模式及一个历史 supervisor_typed 条目。
+// ({toolCatalog:{tools:[...]}}),覆盖 worker_local 与 quoin_routed 两种模式。
 func fixtureCatalogInput(t *testing.T) []byte {
 	t.Helper()
 	catalog := map[string]any{
@@ -24,8 +23,7 @@ func fixtureCatalogInput(t *testing.T) []byte {
 		"agentVersion":  WorkerAgentVersion,
 		"tools": []map[string]any{
 			{"name": "bash", "version": "1", "executionMode": "worker_local", "failureMode": "return_to_model", "description": "在工作区执行一条 bash 命令。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}}, "required": []string{"command"}}},
-			{"name": "artifact_read", "version": "2", "executionMode": "quoin_routed", "failureMode": "return_to_model", "description": "按范围读取一个 Artifact 的文本片段。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"artifactId": map[string]any{"type": "string"}}, "required": []string{"artifactId"}}},
-			{"name": "thanos_query", "version": "3", "executionMode": "supervisor_typed", "failureMode": "return_to_model", "description": "执行一条 PromQL 即时/区间查询。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}}},
+			{"name": "thanos_query", "version": "4", "executionMode": "quoin_routed", "failureMode": "return_to_model", "description": "执行一条 PromQL 即时查询。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}}},
 		},
 	}
 	body, err := json.Marshal(map[string]any{"toolCatalog": catalog})
@@ -47,8 +45,8 @@ func TestProviderToolsJSONForInputRendersFrozenCatalog(t *testing.T) {
 	if err := json.Unmarshal(rendered, &tools); err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 3 {
-		t.Fatalf("rendered %d tools, want 3", len(tools))
+	if len(tools) != 2 {
+		t.Fatalf("rendered %d tools, want 2", len(tools))
 	}
 	first := tools[0]["function"].(map[string]any)
 	if first["name"] != "bash" || tools[0]["type"] != "function" {
@@ -84,13 +82,8 @@ func TestExecutionModesForInputNormalizesVocabulary(t *testing.T) {
 	if modes["bash"] != "TOOL_EXECUTION_MODE_WORKER_LOCAL" {
 		t.Fatalf("bash must be worker_local, got %q", modes["bash"])
 	}
-	// ADR-0011:quoin_routed 保持;历史 supervisor_typed 词映射为
-	// quoin_routed(Plinth 对这两类工具都只转发不执行)。
-	if modes["artifact_read"] != "TOOL_EXECUTION_MODE_QUOIN_ROUTED" {
-		t.Fatalf("artifact_read must be quoin_routed, got %q", modes["artifact_read"])
-	}
 	if modes["thanos_query"] != "TOOL_EXECUTION_MODE_QUOIN_ROUTED" {
-		t.Fatalf("legacy supervisor_typed must map to quoin_routed, got %q", modes["thanos_query"])
+		t.Fatalf("thanos_query must be quoin_routed, got %q", modes["thanos_query"])
 	}
 }
 
