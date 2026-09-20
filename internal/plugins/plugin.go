@@ -65,6 +65,11 @@ type Plugin struct {
 	// EventSource is the optional inbound capability: Stele's webhook layer
 	// dispatches POST /webhook/{source} requests here.
 	EventSource EventSource
+	// AlertNormalizer is the optional alert-normalization capability
+	// (ADR-0012): it maps this source's EventSource payload onto the unified
+	// alert semantics (severity/title/annotations). It requires EventSource
+	// (the payload comes from the source); Quoin's intake executes it.
+	AlertNormalizer AlertNormalizer
 	// Tools is the optional outbound capability: Quoin aggregates every
 	// provider's entries into the tool catalog and the dispatch table.
 	Tools ToolProvider

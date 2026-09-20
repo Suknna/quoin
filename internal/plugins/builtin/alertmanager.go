@@ -70,13 +70,60 @@ func (alertmanagerSource) VerifyAndParse(_ context.Context, req plugins.InboundR
 	}}, nil
 }
 
+// alertmanagerSeverity maps the Alertmanager (Prometheus convention)
+// severity label onto the unified vocabulary. Values outside the mapping
+// degrade to info; the raw value travels alongside for audit.
+func alertmanagerSeverity(raw string) plugins.Severity {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "critical", "crit", "page", "severe":
+		return plugins.SeverityCritical
+	case "high", "error":
+		return plugins.SeverityHigh
+	case "warning", "warn":
+		return plugins.SeverityWarning
+	default:
+		// info / none / empty and every unmapped value.
+		return plugins.SeverityInfo
+	}
+}
+
+// alertmanagerNormalizer maps the alertmanager event payload (this source's
+// normalized wire projection) onto the unified alert semantics: severity
+// from labels.severity, title from labels.alertname, the full annotations
+// map frozen verbatim, and the resource inferred from instance/job.
+type alertmanagerNormalizer struct{}
+
+func (alertmanagerNormalizer) NormalizeAlert(payload []byte) ([]plugins.NormalizedAlert, error) {
+	var document alertmanagerEventPayload
+	if err := json.Unmarshal(payload, &document); err != nil {
+		return nil, fmt.Errorf("alertmanager payload is not valid JSON: %w", err)
+	}
+	alerts := make([]plugins.NormalizedAlert, 0, len(document.Alerts))
+	for _, alert := range document.Alerts {
+		resource := alert.Labels["instance"]
+		if resource == "" {
+			resource = alert.Labels["job"]
+		}
+		raw := alert.Labels["severity"]
+		alerts = append(alerts, plugins.NormalizedAlert{
+			Severity:    alertmanagerSeverity(raw),
+			SeverityRaw: raw,
+			Title:       alert.Labels["alertname"],
+			Annotations: alert.Annotations,
+			Resource:    resource,
+		})
+	}
+	return alerts, nil
+}
+
 func init() {
 	plugins.Register(plugins.Plugin{
-		ID:             plugins.AlertmanagerID,
-		Version:        "1",
-		DisplayName:    "Alertmanager",
-		Description:    "接收上游 Alertmanager 告警来源：Stele 网关按来源认证并归一化入队，Quoin 事务性消费。",
-		DefaultEnabled: true,
-		EventSource:    alertmanagerSource{},
+		ID:              plugins.AlertmanagerID,
+		Version:         "1",
+		DisplayName:     "Alertmanager",
+		Description:     "接收上游 Alertmanager 告警来源：Stele 网关按来源认证并归一化入队，Quoin 事务性消费并归一化告警语义。",
+		DefaultEnabled:  true,
+		EventSource:     alertmanagerSource{},
+		AlertNormalizer: alertmanagerNormalizer{},
 	})
 }

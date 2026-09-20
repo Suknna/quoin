@@ -218,6 +218,20 @@ func (r *Registry) EventSourceKinds() []string {
 	return kinds
 }
 
+// AlertNormalizer resolves the alert-normalization capability for one source
+// kind (the plugin's EventSource kind).
+func (r *Registry) AlertNormalizer(kind string) (AlertNormalizer, string, bool) {
+	r.mu.Lock()
+	r.ensureFrozen()
+	pluginID, ok := r.sources[kind]
+	var normalizer AlertNormalizer
+	if ok {
+		normalizer = r.plugins[pluginID].AlertNormalizer
+	}
+	r.mu.Unlock()
+	return normalizer, pluginID, ok
+}
+
 // validatePlugin checks one registration in isolation.
 func validatePlugin(plugin Plugin) error {
 	if !pluginIDPattern.MatchString(plugin.ID) {
@@ -233,6 +247,9 @@ func validatePlugin(plugin Plugin) error {
 	}
 	if plugin.EventSource != nil && !sourceKindPattern.MatchString(plugin.EventSource.Kind()) {
 		return fmt.Errorf("%w: %s event source kind %q is not [a-z][a-z0-9-]*", ErrInvalidPlugin, plugin.ID, plugin.EventSource.Kind())
+	}
+	if plugin.AlertNormalizer != nil && plugin.EventSource == nil {
+		return fmt.Errorf("%w: %s provides an alert normalizer without its event source", ErrInvalidPlugin, plugin.ID)
 	}
 	return nil
 }
