@@ -24,7 +24,7 @@
 - **CFG-OBS-001 —** 已验证并启用的接入，且其平台类型在部署启用集中恰有一个 Discover 能力插件时，Quoin **MUST** 按自身权威准入有界观测（默认周期调度、接入启用与手动刷新共用同一准入）；不要求任何业务声明或业务视图。两个启用插件声明同一平台类型是部署歧义，**MUST** fail-closed。（来源：[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 - **CFG-OBS-002 —** 观测对象身份 **MUST** 为 `(来源接入, 对象类型, 规范来源身份)`，规范来源身份由插件声明的 identity labels 按名排序规范编码；跨来源同名对象 **MUST NOT** 合并。对象类型、发现查询与每轮预算是插件描述元数据，Quoin 在派发前冻结并在执行端复核，声明 **MUST NOT** 与执行漂移。（来源：[CONTEXT「来源级观测」](../../../CONTEXT.md#来源级观测source-scoped-observation)）
 - **CFG-OBS-003 —** 同一接入同时最多一个 active Run；`scheduled_for` 是定时去重键，手动/启用准入与 active Run 合并而不分叉。失败、截断和局部结果 **MUST NOT** 清空对象或推断物理删除；只有同一冻结范围完整成功才能把未再见到的对象置为未观测，`stale` 是显式事实而 **MUST NOT** 由观测推断。（来源：[CONTEXT「来源级观测」](../../../CONTEXT.md#来源级观测source-scoped-observation)）
-- **CFG-OBS-004 —** 来源级观测 **MUST NOT** 写入历史 `observed_resources`；该表及其业务身份规则只读保留（见第 5 节）。（来源：[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
+- **CFG-OBS-004 —** 来源级观测 **MUST NOT** 产生任何业务声明资源投影：历史 `observed_resources` 表及其身份标签表已随 `20260920_retire_declared_discovery_v1` 迁移整体删除，现行发现事实只落在 `observation_run_objects` 与 `config_resource_scopes`（第 5 节）。（来源：[ADR-0004](../../adr/0004-plugin-capability-registry.md)）
 
 ## 3. Journey Catalog（历史；已随浏览器移除）
 
@@ -37,7 +37,7 @@ Journey Catalog 与浏览器巡检条款已随浏览器运行时一并移除；�
 
 ## 5. 历史模型（只读；不得作为现行配置权威）
 
-**Non-normative：** 本节条款描述已被 ADR-0004 替换的旧模型。相关 Schema、表与记录继续存在，用于解读历史声明、历史 Run、Config Verification Run 与 E2E 证据；任何实现 **MUST NOT** 恢复其写入路径、调度或发布语义。
+**Non-normative：** 本节条款描述已被 ADR-0004 替换的旧模型，用于解读历史声明、历史 Run 与 E2E 证据；Config Verification 引擎及其持久面、`config_discoveries`/`observed_resources`/`observed_resource_identity_labels` 表已随 2026-09 退役迁移物理删除（声明事实仍可从历史版本的 `declaration_json`/`yaml_body` 与 `config_resource_scopes` 读取）。任何实现 **MUST NOT** 恢复其写入路径、调度或发布语义。
 
 - **CFG-SCOPE-001 —** 历史 `BusinessSystem` 声明的机器结构由 [`contracts/schemas/business-system.schema.json`](contracts/schemas/business-system.schema.json)（稳定 `$id`、`apiVersion: quoin/v1`、`kind: BusinessSystem`、draft 2020-12 封闭对象）继续拥有，仅用于解释既有版本。（来源：ADR-0003，已被 ADR-0004 替代）
 - **CFG-YAML-001/002/003 —** 严格 YAML 解析规则（单文档、拒绝重复 key/anchor/merge/自定义 tag/尾随内容、超限拒绝、IANA 时区与五字段 cron、稳定名称唯一与退役不复用）只描述既有声明材料的解析事实；该解析管线不再接受新声明。（来源：ADR-0003，已被 ADR-0004 替代）

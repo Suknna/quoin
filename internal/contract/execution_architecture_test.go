@@ -824,6 +824,7 @@ var executionBaseline = []executionBaselineEntry{
 	{Path: "internal/quoin/upgrade/schemagate.go", Symbol: "upgrade.finishReleasedMigrationOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/verifyretire.go", Symbol: "upgrade.migrateVerifyRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/taskchangelogretire.go", Symbol: "upgrade.migrateTaskChangeLogRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
+	{Path: "internal/quoin/upgrade/declareddiscoveryretire.go", Symbol: "upgrade.migrateDeclaredDiscoveryRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/unifiedmtls.go", Symbol: "upgrade.migrateUnifiedMTLSOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 }
 

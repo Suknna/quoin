@@ -11,7 +11,7 @@
 --     HTTP 十进制字符串表示由 http-api.md (#10) 定义。
 --   * 用户稳定 key（business_system.key、alert_sources.source_key、
 --     connections.name、discovery/plan/check key 等）与复合领域身份
---     （alert_occurrences、observed_resources 的 UNIQUE 约束）是相等性权威；
+--     （alert_occurrences 的 UNIQUE 约束）是相等性权威；
 --     locator 只承担 FK / URL / 审计引用。
 --   * Alertmanager fingerprint 是上游 64-bit 无符号值的大端 8 字节 BLOB，
 --     不是有符号整数、不是 SHA-256。
@@ -784,8 +784,7 @@ CREATE TABLE config_alert_label_conditions (
   UNIQUE (config_version_id, label_name)
 ) STRICT;
 
--- Compiled resource scopes are the execution authority. Legacy discovery rows
--- remain available only to read historic configurations.
+-- Compiled resource scopes are the execution authority.
 -- Durable audit link from immutable predecessor history to its appended
 -- canonical successor. It is intentionally append-only alongside the ledger.
 CREATE TABLE legacy_config_version_mappings (
@@ -806,16 +805,6 @@ CREATE TABLE config_resource_scopes (
   identity_labels_json TEXT NOT NULL CHECK (json_valid(identity_labels_json)),
   allowed_metrics_json TEXT NOT NULL CHECK (json_valid(allowed_metrics_json)),
   UNIQUE (config_version_id, resource_key)
-) STRICT;
-
-CREATE TABLE config_discoveries (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  discovery_key        TEXT NOT NULL,          -- 跨版本稳定 key
-  display_name         TEXT NOT NULL,
-  selector             TEXT NOT NULL,          -- 单个 instant vector selector（上传时经 Prometheus 官方 AST 校验：禁止 offset/@/聚合/label_replace，DATA-CONFIG-003/CFG-PROMQL-002）
-  identity_labels_json TEXT NOT NULL CHECK (json_valid(identity_labels_json)),
-  UNIQUE (config_version_id, discovery_key)
 ) STRICT;
 
 CREATE TABLE config_plans (
@@ -845,31 +834,6 @@ CREATE TABLE config_checks (
       AND ((query_mode = 'instant' AND range_seconds IS NULL AND step_seconds IS NULL)
            OR (query_mode = 'range' AND range_seconds IS NOT NULL AND step_seconds IS NOT NULL)))
   )
-) STRICT;
-
-CREATE TABLE observed_resources (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  business_system_id        INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  discovery_key             TEXT NOT NULL,
-  identity_key              TEXT NOT NULL,          -- 按 label 名排序的 identity label/value 规范编码（相等性权威）
-  identity_digest           TEXT CHECK (identity_digest IS NULL OR length(identity_digest) = 64),
-  display_name              TEXT,
-  labels_json               TEXT NOT NULL CHECK (json_valid(labels_json)),
-  observed_at               TEXT,
-  current                   INTEGER NOT NULL DEFAULT 0 CHECK (current IN (0,1)),
-  last_successful_refresh_at TEXT,
-  stale                     INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0,1)),
-  created_at                TEXT NOT NULL,
-  UNIQUE (business_system_id, discovery_key, identity_key)
-) STRICT;
-CREATE INDEX idx_observed_resources_bs ON observed_resources (business_system_id, discovery_key);
-
-CREATE TABLE observed_resource_identity_labels (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  observed_resource_id INTEGER NOT NULL REFERENCES observed_resources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  name                 TEXT NOT NULL,
-  value                TEXT NOT NULL,
-  UNIQUE (observed_resource_id, name)
 ) STRICT;
 
 -- ============================================================================
@@ -2272,10 +2236,6 @@ BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
 CREATE TRIGGER trg_credential_generations_current_key_binding BEFORE INSERT ON credential_generations
 WHEN NOT EXISTS (SELECT 1 FROM root_key_state k WHERE k.id = 1 AND k.binding_revision = NEW.key_binding_revision)
 BEGIN SELECT RAISE(ABORT, 'credential generation must use the current root key binding revision'); END;
-CREATE TRIGGER trg_config_discoveries_no_update BEFORE UPDATE ON config_discoveries
-BEGIN SELECT RAISE(ABORT, 'config_discoveries is append-only'); END;
-CREATE TRIGGER trg_config_discoveries_no_delete BEFORE DELETE ON config_discoveries
-BEGIN SELECT RAISE(ABORT, 'config_discoveries is append-only'); END;
 CREATE TRIGGER trg_config_plans_no_update BEFORE UPDATE ON config_plans
 BEGIN SELECT RAISE(ABORT, 'config_plans is append-only'); END;
 CREATE TRIGGER trg_config_plans_no_delete BEFORE DELETE ON config_plans
@@ -2386,10 +2346,6 @@ BEGIN SELECT RAISE(ABORT, 'label_contract content is immutable'); END;
 CREATE TRIGGER trg_connections_no_identity_update BEFORE UPDATE OF name, type, created_at ON connections
 BEGIN SELECT RAISE(ABORT, 'connection identity is immutable'); END;
 
--- 12.11 观测资源：身份字段不可变（identity_key 是相等性权威）
-CREATE TRIGGER trg_observed_resources_no_identity_update BEFORE UPDATE OF
-  business_system_id, discovery_key, identity_key, identity_digest, created_at ON observed_resources
-BEGIN SELECT RAISE(ABORT, 'observed_resource identity is immutable'); END;
 
 -- 12.12 Artifact：物理 blob 身份不可改写；逻辑 Artifact 的来源与到期时刻不可改写，
 -- body_expired 只允许由 0 单向收口为 1（DATA-ARTIFACT-003/005）。
@@ -2605,10 +2561,6 @@ CREATE TRIGGER trg_alert_occurrence_labels_no_update BEFORE UPDATE ON alert_occu
 BEGIN SELECT RAISE(ABORT, 'alert_occurrence_labels are immutable'); END;
 CREATE TRIGGER trg_alert_occurrence_labels_no_delete BEFORE DELETE ON alert_occurrence_labels
 BEGIN SELECT RAISE(ABORT, 'alert_occurrence_labels are immutable'); END;
-CREATE TRIGGER trg_observed_resource_identity_labels_no_update BEFORE UPDATE ON observed_resource_identity_labels
-BEGIN SELECT RAISE(ABORT, 'observed_resource_identity_labels are immutable'); END;
-CREATE TRIGGER trg_observed_resource_identity_labels_no_delete BEFORE DELETE ON observed_resource_identity_labels
-BEGIN SELECT RAISE(ABORT, 'observed_resource_identity_labels are immutable'); END;
 
 -- 12.23b 可变聚合行版本：任何 UPDATE 必须恰好递增 row_version（应用在同一条 UPDATE 中递增；
 -- 陈旧 expected 值在 WHERE 中比较后命中 0 行，由应用映射 409；DATA-ROWVER-001）
@@ -2763,8 +2715,6 @@ CREATE TRIGGER trg_legacy_config_version_mappings_no_update BEFORE UPDATE ON leg
 BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
 CREATE TRIGGER trg_legacy_config_version_mappings_no_delete BEFORE DELETE ON legacy_config_version_mappings
 BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
-CREATE TRIGGER trg_observed_resources_no_delete BEFORE DELETE ON observed_resources
-BEGIN SELECT RAISE(ABORT, 'observed_resources history is not deletable'); END;
 CREATE TRIGGER trg_connections_no_delete BEFORE DELETE ON connections
 BEGIN SELECT RAISE(ABORT, 'connections are tombstone-only'); END;
 CREATE TRIGGER trg_artifacts_no_delete BEFORE DELETE ON artifacts
@@ -4145,13 +4095,6 @@ BEGIN
   SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
   WHERE id = NEW.attempt_id AND state = 'Running';
 END;
-CREATE TRIGGER trg_config_discoveries_parent_frozen BEFORE INSERT ON config_discoveries
-WHEN NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
-)
-BEGIN SELECT RAISE(ABORT, 'config_discoveries can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
 CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
@@ -4167,10 +4110,6 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
 -- check_key 只在其 plan 父作用域内唯一，因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
-CREATE TRIGGER trg_config_discoveries_identity_labels_unique BEFORE INSERT ON config_discoveries
-WHEN (SELECT COUNT(*) FROM json_each(NEW.identity_labels_json)) <> (SELECT COUNT(DISTINCT value) FROM json_each(NEW.identity_labels_json))
-BEGIN SELECT RAISE(ABORT, 'identity_labels must not contain duplicates'); END;
--- 12.42 配置验证/资源刷新 Run 纳入任务变更日志（DATA-SSE-004）：与权威状态同一事务派生。
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger
 -- are rejected by these fences.

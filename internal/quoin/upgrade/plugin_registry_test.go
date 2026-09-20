@@ -123,9 +123,10 @@ func TestPluginRegistryMigrationPreservesHistoryAndAddsCapacity(t *testing.T) {
 	if err := conn.QueryRowContext(context.Background(), `SELECT state FROM inspection_runs WHERE id=1`).Scan(&runState); err != nil || runState != "Cancelled" {
 		t.Fatalf("legacy run history lost: %v %v", runState, err)
 	}
-	var identityCurrent int
-	if err := conn.QueryRowContext(context.Background(), `SELECT current FROM observed_resources WHERE id=1`).Scan(&identityCurrent); err != nil || identityCurrent != 1 {
-		t.Fatalf("observed resource history lost: %v %v", identityCurrent, err)
+	// observed_resources 已随 2026-09 退役迁移删除（与 browser_* 同为重建后消失的退役面）。
+	var observedObjects int
+	if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'observed_resource%'`).Scan(&observedObjects); err != nil || observedObjects != 0 {
+		t.Fatalf("retired observed-resource objects must be dropped, found %d: %v", observedObjects, err)
 	}
 	// 浏览器业务已退役：前置版本中的 browser_* 表在重塑后整体消失。
 	var browserObjects int

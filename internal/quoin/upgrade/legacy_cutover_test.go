@@ -164,7 +164,7 @@ func TestDeclarationCutoverPreservesCurrentLegacyHistoryAndAppendsCanonicalSucce
 	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
 		t.Fatal(err)
 	}
-	var historicalYAML, historicalDigest, historicalState, selector string
+	var historicalYAML, historicalDigest, historicalState string
 	var historicalDeclaration sql.NullString
 	if err := db.QueryRow(`SELECT yaml_body,digest,declaration_json,state FROM business_system_config_versions WHERE id=?`, legacyID).Scan(&historicalYAML, &historicalDigest, &historicalDeclaration, &historicalState); err != nil {
 		t.Fatal(err)
@@ -172,12 +172,20 @@ func TestDeclarationCutoverPreservesCurrentLegacyHistoryAndAppendsCanonicalSucce
 	if historicalYAML != originalYAML || historicalDigest != originalDigest || historicalDeclaration.Valid || historicalState != "superseded" {
 		t.Fatalf("legacy changed yaml=%q digest=%q declaration=%v state=%q", historicalYAML, historicalDigest, historicalDeclaration, historicalState)
 	}
-	if err := db.QueryRow(`SELECT selector FROM config_discoveries WHERE config_version_id=?`, legacyID).Scan(&selector); err != nil || selector != originalSelector {
-		t.Fatalf("legacy projection changed selector=%q err=%v", selector, err)
+	// config_discoveries 已随 2026-09 退役迁移删除。
+	_ = originalSelector
+	var retiredDiscoveries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='config_discoveries'`).Scan(&retiredDiscoveries); err != nil || retiredDiscoveries != 0 {
+		t.Fatalf("config_discoveries must be dropped, found %d: %v", retiredDiscoveries, err)
 	}
 	var successorID, currentID int64
 	if err := db.QueryRow(`SELECT canonical_config_version_id FROM legacy_config_version_mappings WHERE legacy_config_version_id=? AND migration_id=?`, legacyID, declarationCutoverMigrationID).Scan(&successorID); err != nil {
 		t.Fatal(err)
+	}
+	// 发现事实由后继的 config_resource_scopes.discovery_metric 存续。
+	var discoveryMetric string
+	if err := db.QueryRow(`SELECT discovery_metric FROM config_resource_scopes WHERE config_version_id=?`, successorID).Scan(&discoveryMetric); err != nil || discoveryMetric != "up" {
+		t.Fatalf("successor discovery metric=%q err=%v", discoveryMetric, err)
 	}
 	if err := db.QueryRow(`SELECT current_config_version_id FROM business_systems WHERE id=1`).Scan(&currentID); err != nil || currentID != successorID {
 		t.Fatalf("pointer=%d successor=%d err=%v", currentID, successorID, err)

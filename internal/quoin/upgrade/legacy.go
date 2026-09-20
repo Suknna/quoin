@@ -209,6 +209,10 @@ func migrateDeclarationCutoverOn(ctx context.Context, conn *sql.Conn) (LegacyMig
 		return LegacyMigrationReport{}, err
 	}
 	report.LegacySchemaDigest = stored
+	discoveries, err := captureLegacyDiscoveryFacts(ctx, conn)
+	if err != nil {
+		return report, err
+	}
 	if err := rebuildCanonicalSchema(ctx, conn, nil, true); err != nil {
 		return report, err
 	}
@@ -217,7 +221,7 @@ func migrateDeclarationCutoverOn(ctx context.Context, conn *sql.Conn) (LegacyMig
 	if _, err := conn.ExecContext(ctx, `INSERT INTO migration_ledger(migration_id,digest,applied_at) VALUES(?,?,?)`, declarationCutoverMigrationID, migrationDigest(declarationCutoverMigrationID), migrationNow()); err != nil {
 		return report, err
 	}
-	if err := cutoverCurrentLegacyConfigurations(ctx, conn); err != nil {
+	if err := cutoverCurrentLegacyConfigurations(ctx, conn, discoveries); err != nil {
 		return report, fmt.Errorf("append declaration successors: %w", err)
 	}
 	digest := sha256.Sum256([]byte(gen.SchemaSQL))
@@ -255,6 +259,10 @@ func migrateDirectInvestigationMetricsOn(ctx context.Context, conn *sql.Conn) (L
 	if err != nil {
 		return LegacyMigrationReport{}, err
 	}
+	discoveries, err := captureLegacyDiscoveryFacts(ctx, conn)
+	if err != nil {
+		return report, err
+	}
 	if err := rebuildCanonicalSchema(ctx, conn, nil, true); err != nil {
 		return report, err
 	}
@@ -267,7 +275,7 @@ func migrateDirectInvestigationMetricsOn(ctx context.Context, conn *sql.Conn) (L
 	if _, err := conn.ExecContext(ctx, `INSERT INTO migration_ledger(migration_id,digest,applied_at) VALUES(?,?,?)`, declarationCutoverMigrationID, migrationDigest(declarationCutoverMigrationID), migrationNow()); err != nil {
 		return report, err
 	}
-	if err := cutoverCurrentLegacyConfigurations(ctx, conn); err != nil {
+	if err := cutoverCurrentLegacyConfigurations(ctx, conn, discoveries); err != nil {
 		return report, fmt.Errorf("append declaration successors: %w", err)
 	}
 	digest := sha256.Sum256([]byte(gen.SchemaSQL))
@@ -418,7 +426,45 @@ func rebuildCanonicalSchema(ctx context.Context, conn *sql.Conn, metrics *int64,
 // current published legacy version. It never writes archive content or projections:
 // their original YAML and digest remain audit facts and the durable mapping explains
 // the active successor.
-func cutoverCurrentLegacyConfigurations(ctx context.Context, conn *sql.Conn) error {
+// legacyDiscoveryFacts is one current legacy version's declared discovery,
+// captured before the canonical rebuild drops the retired config_discoveries
+// projection; the successor persists these facts through
+// config_resource_scopes and declaration_json.
+type legacyDiscoveryFacts struct {
+	selector     string
+	identityJSON string
+}
+
+// captureLegacyDiscoveryFacts reads every current legacy configuration's
+// declared discovery before the rebuild (the table no longer exists in the
+// canonical schema), enforcing the same exactly-one gate per version.
+func captureLegacyDiscoveryFacts(ctx context.Context, conn *sql.Conn) (map[int64]legacyDiscoveryFacts, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT v.id,
+		(SELECT COUNT(*) FROM config_discoveries d WHERE d.config_version_id=v.id),
+		(SELECT d.selector FROM config_discoveries d WHERE d.config_version_id=v.id),
+		(SELECT d.identity_labels_json FROM config_discoveries d WHERE d.config_version_id=v.id)
+		FROM business_systems b JOIN business_system_config_versions v ON v.id=b.current_config_version_id
+		WHERE v.state='published' ORDER BY b.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	facts := map[int64]legacyDiscoveryFacts{}
+	for rows.Next() {
+		var versionID, count int64
+		var fact legacyDiscoveryFacts
+		if err := rows.Scan(&versionID, &count, &fact.selector, &fact.identityJSON); err != nil {
+			return nil, err
+		}
+		if count != 1 {
+			return nil, fmt.Errorf("%w: current config version %d has %d legacy discoveries; upload an explicit declaration", ErrLegacyMigrationBlocked, versionID, count)
+		}
+		facts[versionID] = fact
+	}
+	return facts, rows.Err()
+}
+
+func cutoverCurrentLegacyConfigurations(ctx context.Context, conn *sql.Conn, discoveries map[int64]legacyDiscoveryFacts) error {
 	rows, err := conn.QueryContext(ctx, `SELECT b.id,b.current_config_version_id FROM business_systems b JOIN business_system_config_versions v ON v.id=b.current_config_version_id WHERE v.state='published' ORDER BY b.id`)
 	if err != nil {
 		return err
@@ -437,27 +483,25 @@ func cutoverCurrentLegacyConfigurations(ctx context.Context, conn *sql.Conn) err
 		return err
 	}
 	for _, item := range currents {
-		if err := cutoverCurrentLegacyConfiguration(ctx, conn, item.systemID, item.versionID); err != nil {
+		if err := cutoverCurrentLegacyConfiguration(ctx, conn, item.systemID, item.versionID, discoveries); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func cutoverCurrentLegacyConfiguration(ctx context.Context, conn *sql.Conn, systemID, legacyID int64) error {
-	var discoveries int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM config_discoveries WHERE config_version_id=?`, legacyID).Scan(&discoveries); err != nil {
-		return err
+func cutoverCurrentLegacyConfiguration(ctx context.Context, conn *sql.Conn, systemID, legacyID int64, discoveries map[int64]legacyDiscoveryFacts) error {
+	discovered, captured := discoveries[legacyID]
+	if !captured {
+		return fmt.Errorf("current config version %d has no captured legacy discovery", legacyID)
 	}
-	if discoveries != 1 {
-		return fmt.Errorf("%w: current config version %d has %d legacy discoveries; upload an explicit declaration", ErrLegacyMigrationBlocked, legacyID, discoveries)
-	}
+	selector, identityJSON := discovered.selector, discovered.identityJSON
 
-	var key, display, timezone, selector, identityJSON string
+	var key, display, timezone string
 	var enabled, connectionID int64
 	// The declaration-era schema removed the former root refresh projection. Its
 	// successor owns refresh policy, so read only retained legacy version facts.
-	if err := conn.QueryRowContext(ctx, `SELECT v.system_key,v.display_name,v.timezone,v.enabled,d.selector,d.identity_labels_json FROM business_system_config_versions v JOIN config_discoveries d ON d.config_version_id=v.id WHERE v.id=?`, legacyID).Scan(&key, &display, &timezone, &enabled, &selector, &identityJSON); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT system_key,display_name,timezone,enabled FROM business_system_config_versions WHERE id=?`, legacyID).Scan(&key, &display, &timezone, &enabled); err != nil {
 		return err
 	}
 	if err := conn.QueryRowContext(ctx, `SELECT metrics_connection_id FROM business_system_config_versions WHERE id=?`, legacyID).Scan(&connectionID); err != nil {
@@ -730,12 +774,6 @@ func insertLegacySuccessorProjections(ctx context.Context, conn *sql.Conn, versi
 	}
 	for n, v := range document.AlertSourceLabels {
 		if _, err := conn.ExecContext(ctx, `INSERT INTO config_alert_label_conditions(config_version_id,label_name,label_value) VALUES(?,?,?)`, versionID, n, v); err != nil {
-			return err
-		}
-	}
-	for _, d := range document.Discoveries {
-		ids, _ := json.Marshal(d.IdentityLabels)
-		if _, err := conn.ExecContext(ctx, `INSERT INTO config_discoveries(config_version_id,discovery_key,display_name,selector,identity_labels_json) VALUES(?,?,?,?,?)`, versionID, d.Key, d.DisplayName, d.Selector, string(ids)); err != nil {
 			return err
 		}
 	}

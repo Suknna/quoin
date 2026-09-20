@@ -87,7 +87,7 @@ _Avoid_: 权限凭据、会话 ID、幂等键、把所有用户活动合并为�
 ## 告警与调查
 
 **稳定身份保留**：
-任何已经发布、执行过 Config Verification Run 或被历史记录引用的稳定 ID/key 永远不能重新分配给另一个逻辑对象，包括 Business System、Logical Alert Source、Connection 以及 discovery、plan、check。停用或从已发布 YAML 移除只形成 Disabled/Retired tombstone，不释放身份；以后再次出现同一 key 表示恢复原逻辑对象及其历史，新业务含义必须使用新 key。显示名称可以修改或复用。只有从未发布、从未运行且从未被引用的草稿/staging 对象可以物理清理。
+任何已经发布、执行过 Config Verification Run 或被历史记录引用的稳定 ID/key 永远不能重新分配给另一个逻辑对象，包括 Business System、Logical Alert Source、Connection 以及 plan、check（历史声明中的 discovery key 随声明投影表退役，key 语义仍冻结在历史 declaration_json 中）。停用或从已发布 YAML 移除只形成 Disabled/Retired tombstone，不释放身份；以后再次出现同一 key 表示恢复原逻辑对象及其历史，新业务含义必须使用新 key。显示名称可以修改或复用。只有从未发布、从未运行且从未被引用的草稿/staging 对象可以物理清理。
 _Avoid_: 退役后复用 key、隐藏 UUID 与用户 key 双重身份、因显示名变化切断历史
 
 **逻辑告警源（Logical Alert Source）**：
@@ -197,7 +197,7 @@ _Avoid_: Run 卡片墙、`Completed=健康`、隐藏检查事实、通用重试�
 _Avoid_: 混排正式知识与候选、索引实现选择器、程序融合排名、窄弹窗编辑长正文、模型自动写入、逐条跨页面确认
 
 **业务纳管历史投影**：
-业务系统模块已退出运维中心导航，其运维职责由接入管理与业务视图承接；既有业务系统、配置版本、验证 Run 与 Observed Resource 经只读入口保留，用于追溯旧声明与旧 Run 的绑定关系，不提供新的声明编辑、发布或启停操作，也不发明“当前草稿”。Observed Resource 历史列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，不把未观测到解释为删除；新的观测事实由来源级观测拥有，观测范围来自接入。
+业务系统模块已退出运维中心导航，其运维职责由接入管理与业务视图承接；既有业务系统与配置版本经只读入口保留，用于追溯旧声明的绑定关系，不提供新的声明编辑、发布或启停操作；验证 Run 与 Observed Resource 的持久面已随 2026-09 退役迁移物理删除，也不发明“当前草稿”。Observed Resource 历史列表明确区分“当前观测到 / 当前未观测到 / 数据陈旧”，不把未观测到解释为删除；新的观测事实由来源级观测拥有，观测范围来自接入。
 
 **Label Contract 激活投影（历史）**：
 全局契约的联合激活界面已随业务声明一同退出主线；既有激活记录与相关 Run 只读保留，用于解读历史配置切换，不得作为新配置或标签语义的入口。
@@ -233,7 +233,7 @@ _Avoid_: 第二工具表、核心表硬编码插件工具、旁路执行器注�
 
 **插件巡检模板（Plugin Inspection Template）**：插件贡献的版本化确定性采证定义，参数是封闭字面量并经 AST 静态校验。检查由程序机械执行并形成 Evidence；模型基于持久化 Evidence 与缺口生成不可变报告，不直接写权威报告。定时巡检／模型报告需要明确启用，采证成功不等于业务健康。
 
-下述「历史标签契约」「业务系统」「观测资源」「业务系统配置版本」属于已被替换的旧活动模型条款：BusinessSystem 声明的写入与发布入口、独立资源刷新调度和业务绑定巡检计划均已按 ADR 0004 移除，相关历史数据只读保留；其余既有条款只描述既有记录的解读方式。
+下述「历史标签契约」「业务系统」「观测资源」「业务系统配置版本」属于已被替换的旧活动模型条款：BusinessSystem 声明的写入与发布入口、独立资源刷新调度和业务绑定巡检计划均已按 ADR 0004 移除；Config Verification 引擎与 `config_discoveries`/`observed_resources` 表已随 2026-09 退役迁移物理删除（历史版本正文与 `config_resource_scopes` 仍可读），；其余既有条款只描述既有记录的解读方式。
 
 **历史标签契约（Historical Label Contract）**：
 曾作为部署级、版本化 Prometheus 业务归属 label 语义的配置模型。它及其版本、激活、关联 Run 和 E2E 记录只为解读和保留既有历史而存在，不能充当活动全局标签权威。它先被 ADR 0003 的按声明标签语义取代，随后又被 ADR 0004 的来源级接入与业务视图取代；这些层次只用于按当时模型解读历史记录。
@@ -244,7 +244,7 @@ _Avoid_: 把历史契约当当前权威、从旧记录推断新声明、多个�
 _Avoid_: YAML 与数据库双配置权威、接入即扫描、租户、Kubernetes 集群、自动推断服务、停用删除历史
 
 **观测资源（Observed Resource，历史模型）**：
-旧模型中由具有业务身份声明的已发布任务产生、稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map` 的运行对象事实；它不是人工维护的 CMDB 资产记录或实时资产库存。独立资源刷新调度已随 ADR 0004 移除，新的观测一律写入来源级观测对象；既有 Observed Resource 及其观测时间、来源任务与配置版本保持只读历史，不按来源身份合并或改写。“只有完整范围成功观测才能表达未再观测到，失败或缺口不得清空资源或推断物理删除”的规则继续适用于新模型。
+旧模型中由具有业务身份声明的已发布任务产生、稳定身份为 `BusinessSystem ID + ResourceDiscovery key + 按 label 名排序的 identity label/value map` 的运行对象事实（该投影表已随 2026-09 退役迁移物理删除）；它不是人工维护的 CMDB 资产记录或实时资产库存。独立资源刷新调度已随 ADR 0004 移除，新的观测一律写入来源级观测对象；既有 Observed Resource 及其观测时间、来源任务与配置版本保持只读历史，不按来源身份合并或改写。“只有完整范围成功观测才能表达未再观测到，失败或缺口不得清空资源或推断物理删除”的规则继续适用于新模型。
 _Avoid_: 资产、CMDB 条目、Kubernetes 对象快照、独立周期资源刷新、用 `/series` 元数据证明当前资源状态、完整 labels fingerprint 身份
 
 **连接（Connection）**：
