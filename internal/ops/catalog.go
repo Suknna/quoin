@@ -67,7 +67,7 @@ var enumLabelValues = map[string][]string{
 	},
 	"model_operation":     {"chat", "embedding"},
 	"model_call_status":   {"cancelled", "failed", "running", "succeeded"},
-	"tool_execution_mode": {"quoin_routed", "supervisor_typed", "worker_local"}, // ADR-0011: supervisor_typed 为历史值
+	"tool_execution_mode": {"quoin_routed", "worker_local"},
 	"tool_call_status":    {"cancelled", "failed", "pending", "running", "succeeded"},
 	"rpc_group":           {"artifact_service", "runtime_control", "stele_relay"},
 	"delivery_status":     {"accepted", "rejected", "unavailable"},

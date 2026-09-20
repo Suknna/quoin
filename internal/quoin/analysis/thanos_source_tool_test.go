@@ -74,7 +74,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 	}
 	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
-		attemptID, modelCallID, callSeq, 0, "raw-source-thanos-"+strconv.FormatInt(callSeq, 10), thanos.QueryToolName, thanos.QueryToolVersion, arguments, sha256Hex(arguments), "supervisor_typed", "return_to_model", time.Now().UTC().Format(time.RFC3339Nano))
+		attemptID, modelCallID, callSeq, 0, "raw-source-thanos-"+strconv.FormatInt(callSeq, 10), thanos.QueryToolName, thanos.QueryToolVersion, arguments, sha256Hex(arguments), "quoin_routed", "return_to_model", time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatal(err)
 	}
