@@ -37,11 +37,6 @@ import type {
 } from "../../features/analysis/api";
 import type { EvidenceDetail } from "../../features/analysis/tool-details/api";
 import type {
-	AuthDeliveryConfiguration,
-	AuthFlowContact,
-	AuthFlowKind,
-} from "../../features/authentication/api";
-import type {
 	InspectionReportDetail,
 	InspectionRunDetail,
 } from "../../features/inspection/api";
@@ -71,6 +66,7 @@ export type MockScenario =
 	| "metrics-one"
 	| "metrics-boundary"
 	| "empty"
+	| "oidc"
 	| "slow"
 	| "conflict";
 
@@ -78,21 +74,9 @@ export const DEMO_CREDENTIALS = {
 	admin: { username: "admin", password: "demo-admin-password" },
 	operator: { username: "operator", password: "demo-operator-password" },
 	// Fixed second-factor code the auth flow preview "delivers".
-	otp: "654321",
 } as const;
 
 /** Server-side flow state the HttpOnly cookie points at; one per browser preview. */
-export interface MockAuthFlow {
-	type: AuthFlowKind;
-	userId: string;
-	expiresAt: string;
-	contacts: AuthFlowContact[];
-	passwordSet?: boolean;
-	/** Per-flow verified factor (mirrors auth_flows.verified_contact_id), set by a successful challenge verify. */
-	factorVerified: boolean;
-	/** Applied to the stored password only when the flow completes. */
-	pendingPassword?: string;
-}
 
 const now = "2026-09-09T09:30:00.000Z";
 export const adminUser: UserSummary = {
@@ -129,13 +113,6 @@ export interface MockState {
 	currentUser: UserSummary | null;
 	/** False only for a fresh deployment awaiting first-run admin initialization. */
 	adminInitialized: boolean;
-	authFlow: MockAuthFlow | null;
-	authChallenge: { contactId: string; code: string } | null;
-	authDelivery: {
-		configuration: AuthDeliveryConfiguration;
-		rowVersion: number;
-		source: string;
-	};
 	users: AdminUser[];
 	/** Masked receive targets per user; the mock never holds plaintext targets. */
 	contacts: Record<
@@ -503,9 +480,6 @@ function baseState(scenario: MockScenario): MockState {
 						? null
 						: adminUser,
 		adminInitialized: scenario !== "empty",
-		authFlow: null,
-		authChallenge: null,
-		authDelivery: { configuration: {}, rowVersion: 0, source: "" },
 		users: [adminUser, operatorUser].map((user) => ({ ...user })),
 		contacts: {
 			[adminUser.id]: [

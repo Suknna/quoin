@@ -2,7 +2,6 @@ import { expect, test } from "@playwright/test";
 
 const adminCredentials = { username: "admin", password: "demo-admin-password" };
 // Fixed second-factor code the mock "delivers" for every challenge.
-const demoOtp = "654321";
 const nextPassword = "local-preview-password-2026";
 
 type Guard = {
@@ -100,24 +99,15 @@ test("login and first-password scenarios submit errors and successful auth", asy
 	await expect(page.getByText("演示账号或密码不正确")).toBeVisible();
 	await page.getByLabel("密码").fill(adminCredentials.password);
 	await page.getByRole("button", { name: "登录" }).click();
-	// A correct password still owes the second factor: pick the email contact,
-	// have the mock deliver the fixed code, then verify.
-	await page
-		.getByRole("button", { name: /邮箱验证码/ })
-		.first()
-		.click();
-	await page.getByRole("button", { name: "发送验证码" }).click();
-	await page.getByLabel("验证码").fill(demoOtp);
-	await page.getByRole("button", { name: "验证并继续" }).click();
+	// The single-step login (ADR-0010) issues the session directly.
 	await expect(
 		page.getByRole("button", { name: /演示管理员 admin/ }),
 	).toBeVisible();
 
-	// The first-password scenario remounts signed in as an operator whose
-	// stored credential is temporary: sign out, then run the initialization
-	// flow that replaces it — a wrong confirmation first, then the full
-	// password + second-factor walk, which ends back at the login form
-	// because completing an initialization never starts a session.
+	// The first-password scenario signs in as an operator whose stored
+	// credential is temporary: the restricted session drives the forced
+	// change — a wrong confirmation first, then the successful save lands
+	// in the workbench directly.
 	await selectScenario(page, "first-password");
 	await page.getByRole("button", { name: "演示操作员" }).click();
 	await page.getByRole("menuitem", { name: "退出登录" }).click();
@@ -131,28 +121,14 @@ test("login and first-password scenarios submit errors and successful auth", asy
 	await page
 		.getByRole("textbox", { name: "新密码", exact: true })
 		.fill(nextPassword);
-	await page.getByLabel("再次输入新密码").fill("a-different-password");
-	await page.getByRole("button", { name: "保存并继续" }).click();
+	await page.getByLabel("确认新密码").fill("a-different-password");
+	await page.getByRole("button", { name: "保存并进入工作台" }).click();
 	await expect(page.getByText("两次输入的新密码不一致。")).toBeVisible();
-	await page.getByLabel("再次输入新密码").fill(nextPassword);
-	await page.getByRole("button", { name: "保存并继续" }).click();
-	await page
-		.getByRole("button", { name: /邮箱验证码/ })
-		.first()
-		.click();
-	await page.getByRole("button", { name: "发送验证码" }).click();
-	await page.getByLabel("验证码").fill(demoOtp);
-	await page.getByRole("button", { name: "验证并继续" }).click();
+	await page.getByLabel("确认新密码").fill(nextPassword);
+	await page.getByRole("button", { name: "保存并进入工作台" }).click();
 	await expect(
-		page.getByRole("heading", { name: "准备完成初始化" }),
+		page.getByRole("button", { name: /演示操作员 operator/ }),
 	).toBeVisible();
-	await page.getByRole("button", { name: "完成初始化" }).click();
-	await expect(
-		page.getByText("初始化完成，请使用你的用户名和新密码登录。"),
-	).toBeVisible();
-	await expect(
-		page.getByRole("heading", { name: "设置你的新密码" }),
-	).toHaveCount(0);
 	await expectHealthy(page, guard);
 });
 

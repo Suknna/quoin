@@ -1,6 +1,7 @@
+import { ShieldAlert } from "lucide-react";
 import { lazy, StrictMode, Suspense, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { UserSummary } from "@/api/generated/types";
+import type { AuthConfig, UserSummary } from "@/api/generated/types";
 import {
 	setUnauthorizedHandler,
 	WorkbenchApiError,
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toaster } from "@/components/ui/sonner";
+import { authApi } from "@/features/authentication/api";
 import { AuthScreen } from "@/features/authentication/AuthScreen";
 import { EvidenceReader } from "@/features/evidence/ui";
 import { parseRoute } from "@/lib/parse-route";
@@ -95,14 +97,30 @@ function EvidenceOverlay({
 		</Dialog>
 	);
 }
+/** The emergency-channel notice: a local login while the deployment offers
+ * SSO is an IdP-outage maintenance path, and the operator must see that. */
+function EmergencyChannelBanner() {
+	return (
+		<div
+			role="status"
+			className="flex items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-400"
+		>
+			<ShieldAlert className="size-4 shrink-0" />
+			<span>您正在使用本地应急账号，仅供统一身份平台故障时维护使用。</span>
+		</div>
+	);
+}
+
 function Workspace({
 	user,
 	onLogout,
 	maintenanceActive,
+	authConfig,
 }: {
 	user: UserSummary;
 	onLogout: () => Promise<void>;
 	maintenanceActive: boolean;
+	authConfig: AuthConfig | undefined;
 }) {
 	const [route, setRoute] = useState(() => {
 		migrateLegacyHash();
@@ -175,8 +193,11 @@ function Workspace({
 			returnFocus.current?.focus();
 		});
 	}
+	const emergencyChannel =
+		user.authSource === "local" && authConfig?.oidc.enabled === true;
 	return (
 		<>
+			{emergencyChannel && <EmergencyChannelBanner />}
 			<div
 				hidden={Boolean(evidenceId)}
 				inert={Boolean(evidenceId) || undefined}
@@ -196,21 +217,41 @@ function Workspace({
 	);
 }
 
+/** The retained deep link across a login round-trip: set when the workspace
+ * drops to the login page, consumed by the next successful authentication. */
+const RETAIN_KEY = "quoin.login.retain";
+
 export function App() {
 	const [screen, setScreen] = useState<AuthScreenStage>("loading");
 	const [user, setUser] = useState<UserSummary>();
 	const [maintenance, setMaintenance] = useState(false);
 	const [bootstrapError, setBootstrapError] = useState("");
 	const [retrying, setRetrying] = useState(false);
+	const [authConfig, setAuthConfig] = useState<AuthConfig>();
 	function authenticated(next: UserSummary) {
 		setUser(next);
 		setBootstrapError("");
 		setScreen("workbench");
+		// Leave the login entry behind: return to the retained deep link (or
+		// the workspace root when the login was direct). A bootstrap on a deep
+		// link keeps its URL untouched.
+		if (window.location.pathname === "/login") {
+			const retained = window.sessionStorage.getItem(RETAIN_KEY) ?? "";
+			window.sessionStorage.removeItem(RETAIN_KEY);
+			navigateWorkspace(retained || "/alerts/list", true);
+		}
 	}
 	// Session expiry and logout share this single path: the workspace unmounts
 	// immediately, so every draft and in-memory secret is dropped and any later
 	// login (same user or not) starts from a fresh workspace.
 	function clear() {
+		if (window.location.pathname !== "/login") {
+			window.sessionStorage.setItem(
+				RETAIN_KEY,
+				`${window.location.pathname}${window.location.search}`,
+			);
+		}
+		window.history.replaceState(null, "", "/login");
 		setUser(undefined);
 		setScreen("auth");
 	}
@@ -242,6 +283,12 @@ export function App() {
 	useEffect(() => {
 		setUnauthorizedHandler(clear);
 		let cancelled = false;
+		authApi
+			.config()
+			.then((next) => {
+				if (!cancelled) setAuthConfig(next);
+			})
+			.catch(() => undefined);
 		workbenchApi
 			.currentUser()
 			.then((next) => {
@@ -286,6 +333,12 @@ export function App() {
 			window.removeEventListener("focus", onFocus);
 		};
 	}, [screen, user?.id]);
+	// A still-authenticated visit to /login (bookmark, back button) goes back
+	// to the workspace; the auth screen never renders over a live session.
+	useEffect(() => {
+		if (screen === "workbench" && window.location.pathname === "/login")
+			navigateWorkspace("/alerts/list", true);
+	}, [screen]);
 	// Activity pings keep the server-side idle clock fresh, driven only by real
 	// user events (pointer, key, tab visible) with a five-minute throttle — no
 	// interval runs, so an idle session never renews itself. Ping failures stay
@@ -342,6 +395,7 @@ export function App() {
 					user={user}
 					onLogout={logout}
 					maintenanceActive={maintenance}
+					authConfig={authConfig}
 				/>
 			)}
 		</>

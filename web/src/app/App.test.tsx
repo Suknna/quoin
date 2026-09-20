@@ -14,16 +14,10 @@ import { notify } from "./shared";
 const appApiState = vi.hoisted(() => ({
 	unauthorized: undefined as (() => void) | undefined,
 }));
-const authFlowApiState = vi.hoisted(() => ({
-	start: vi.fn(),
-	resume: vi.fn(),
-	setPassword: vi.fn(),
-	addContact: vi.fn(),
-	sendChallenge: vi.fn(),
-	verify: vi.fn(),
-	complete: vi.fn(),
-	readDelivery: vi.fn(),
-	saveDelivery: vi.fn(),
+const authApiState = vi.hoisted(() => ({
+	config: vi.fn(),
+	login: vi.fn(),
+	changePassword: vi.fn(),
 }));
 vi.mock("@/features/evidence/ui", () => ({
 	EvidenceReader: () => <p>证据正文</p>,
@@ -32,7 +26,7 @@ vi.mock("@/features/evidence/ui", () => ({
 vi.mock("@/features/authentication/api", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("@/features/authentication/api")>();
-	return { ...actual, authFlowApi: authFlowApiState };
+	return { ...actual, authApi: authApiState };
 });
 
 vi.mock("@/api/workbench", async (importOriginal) => {
@@ -70,32 +64,16 @@ beforeEach(() => {
 	vi.stubGlobal("scrollTo", vi.fn());
 	window.history.replaceState(null, "", "/admin/model_provider/new");
 	window.location.hash = "";
-	authFlowApiState.resume.mockRejectedValue(
-		new WorkbenchApiError(404, "没有进行中的认证流程"),
-	);
+	authApiState.config.mockResolvedValue({
+		local: { enabled: true, visible: true },
+		oidc: { enabled: false },
+	});
+	window.sessionStorage.removeItem("quoin.login.retain");
 });
 
-/** Walks the real feature UI from credentials through the second factor. */
+/** Walks the real feature UI through the single-step local login. */
 async function signInThroughFlow(user: UserSummary) {
-	authFlowApiState.start.mockResolvedValue({
-		type: "login",
-		user: {
-			id: user.id,
-			username: user.username,
-			displayName: user.displayName,
-		},
-		expiresAt: "2026-09-15T10:00:00Z",
-		contacts: [
-			{
-				id: "c1",
-				channel: "email",
-				maskedTarget: "a***@quoin.dev",
-				verified: true,
-			},
-		],
-		passwordSet: true,
-	});
-	authFlowApiState.verify.mockResolvedValue({ completed: true, user });
+	authApiState.login.mockResolvedValue({ completed: true, user });
 	fireEvent.change(await screen.findByLabelText("用户名"), {
 		target: { value: user.username },
 	});
@@ -103,15 +81,6 @@ async function signInThroughFlow(user: UserSummary) {
 		target: { value: "a password long enough" },
 	});
 	fireEvent.click(screen.getByRole("button", { name: "登录" }));
-	fireEvent.click(await screen.findByRole("button", { name: /邮箱验证码/ }));
-	fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
-	fireEvent.change(await screen.findByLabelText("验证码"), {
-		target: { value: "012345" },
-	});
-	fireEvent.click(screen.getByRole("button", { name: "验证并继续" }));
-	await waitFor(() =>
-		expect(authFlowApiState.verify).toHaveBeenCalledWith("012345"),
-	);
 }
 afterEach(() => {
 	cleanup();

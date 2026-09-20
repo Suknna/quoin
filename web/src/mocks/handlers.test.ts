@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { setupServer } from 'msw/node'
-import { DEMO_CREDENTIALS, handlers, resetMockState, setMockScenario } from './handlers'
+import { handlers, resetMockState, setMockScenario } from './handlers'
 
 const server = setupServer(...handlers)
 
@@ -34,63 +34,38 @@ describe('offline domain mock handlers', () => {
     expect(await stream.text()).toContain('data: [DONE]')
   })
 
-  test('auth scenarios follow the unified flow contract from login to second factor', async () => {
+  test('auth scenarios follow the single-step login contract', async () => {
     setMockScenario('unauthenticated')
     expect((await response('/api/v1/auth/me')).status).toBe(401)
     const login = await response('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ username: 'operator', password: 'demo-operator-password' }) })
     expect(login.status).toBe(200)
-    const flow = await login.json() as { type: string; user: { id: string }; contacts: Array<{ id: string; verified: boolean }>; passwordSet?: boolean }
-    expect(flow).toMatchObject({ type: 'login', user: { id: 'user-operator' }, passwordSet: true })
-    expect(flow.contacts[0]).toMatchObject({ maskedTarget: 'o***@quoin.demo', verified: true })
-    // A started flow is not a session: /auth/me stays 401 until verify completes.
-    expect((await response('/api/v1/auth/me')).status).toBe(401)
-    // The flow resumes by itself, mirroring a page refresh.
-    expect((await (await response('/api/v1/auth/flow')).json() as { type: string }).type).toBe('login')
-    expect((await response('/api/v1/auth/flow/challenge', { method: 'POST', body: JSON.stringify({ contactId: flow.contacts[0].id }) })).status).toBe(204)
-    const wrong = await response('/api/v1/auth/flow/verify', { method: 'POST', body: JSON.stringify({ code: '000000' }) })
-    expect(wrong.status).toBe(422)
-    expect((await wrong.json() as { code: string }).code).toBe('invalid_code')
-    const verify = await response('/api/v1/auth/flow/verify', { method: 'POST', body: JSON.stringify({ code: DEMO_CREDENTIALS.otp }) })
-    expect(verify.status).toBe(200)
-    expect(await verify.json() as { completed: boolean }).toMatchObject({ completed: true, user: { id: 'user-operator' } })
+    expect(await login.json() as { completed: boolean; user: { id: string; authSource: string } }).toMatchObject({ completed: true, user: { id: 'user-operator', authSource: 'local' } })
+    // The single step issued the session directly (ADR-0010).
     expect((await response('/api/v1/auth/me')).status).toBe(200)
+    // The retired flow surface is gone for good (MSW answers unmatched routes with 501).
+    expect([404, 501]).toContain((await response('/api/v1/auth/flow')).status)
     await response('/api/v1/auth/logout', { method: 'POST' })
-    // Completion consumed the flow; a resume afterwards is flow_expired.
-    const gone = await response('/api/v1/auth/flow')
-    expect(gone.status).toBe(401)
-    expect((await gone.json() as { code: string }).code).toBe('flow_expired')
+    expect((await response('/api/v1/auth/me')).status).toBe(401)
   })
 
-  test('a forced temp credential becomes an operator initialization flow', async () => {
+  test('a forced temp credential lands in the restricted state', async () => {
     setMockScenario('password-change')
     const login = await response('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ username: 'operator', password: 'demo-operator-password' }) })
-    expect(await login.json() as { type: string }).toMatchObject({ type: 'operator_initialize', passwordSet: false, contacts: [{ verified: false }] })
-    // Operators cannot register contacts inside their flow.
-    expect((await response('/api/v1/auth/flow/contacts', { method: 'POST', body: JSON.stringify({ channel: 'email', target: 'root@quoin.demo' }) })).status).toBe(403)
+    expect(login.status).toBe(200)
+    expect(await login.json() as { user: { passwordChangeRequired: boolean } }).toMatchObject({ user: { passwordChangeRequired: true } })
   })
 
-  test('a fresh deployment walks first-install admin initialization without extra credentials', async () => {
+  test('a fresh deployment unlocks the bootstrap admin over the session endpoints', async () => {
     setMockScenario('empty')
-    const started = await response('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'admin' }) })
+    const started = await response('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'demo-admin-password' }) })
     expect(started.status).toBe(200)
-    expect(await started.json() as { type: string }).toMatchObject({ type: 'admin_initialize', passwordSet: false })
-    // Delivery settings are configurable inside the admin initialization flow.
-    expect((await (await response('/api/v1/auth/flow/delivery')).json() as { configured: boolean; rowVersion: number }).configured).toBe(false)
-    const saved = await response('/api/v1/auth/flow/delivery', { method: 'PUT', body: JSON.stringify({ configuration: { email: { kind: 'smtp', host: 'smtp.demo.invalid', port: 587, from: 'quoin@quoin.demo' } }, secrets: { smtp_password: 'demo-secret' }, expectedRowVersion: 0 }) })
-    expect(saved.status).toBe(200)
-    expect(await saved.json() as { rowVersion: number; configured: boolean }).toMatchObject({ rowVersion: 1, configured: true })
-    expect((await response('/api/v1/auth/flow/delivery', { method: 'PUT', body: JSON.stringify({ configuration: { email: { kind: 'smtp' } }, expectedRowVersion: 0 }) })).status).toBe(409)
-    expect((await response('/api/v1/auth/flow/delivery', { method: 'PUT', body: JSON.stringify({ configuration: { sms: { kind: 'smtp' } }, expectedRowVersion: 1 }) })).status).toBe(422)
-    // Password, contact registration, verification, and completion — no session.
-    expect((await response('/api/v1/auth/flow/password', { method: 'PUT', body: JSON.stringify({ newPassword: 'initialized-demo-password' }) })).status).toBe(204)
-    expect((await response('/api/v1/auth/flow/contacts', { method: 'POST', body: JSON.stringify({ channel: 'email', target: 'root@quoin.demo' }) })).status).toBe(204)
-    expect((await response('/api/v1/auth/flow/challenge', { method: 'POST', body: JSON.stringify({ contactId: 'contact-new-1' }) })).status).toBe(204)
-    const verify = await response('/api/v1/auth/flow/verify', { method: 'POST', body: JSON.stringify({ code: DEMO_CREDENTIALS.otp }) })
-    expect(await verify.json() as { completed: boolean }).toMatchObject({ completed: false })
-    expect((await response('/api/v1/auth/flow/complete', { method: 'POST', body: JSON.stringify({}) })).status).toBe(204)
-    expect((await response('/api/v1/auth/flow')).status).toBe(401)
-    // The empty preview keeps a seeded signed-in identity for the domain lists,
-    // so /auth/me cannot mirror the real no-session response here.
+    expect(await started.json() as { user: { passwordChangeRequired: boolean } }).toMatchObject({ user: { passwordChangeRequired: true } })
+    // The restricted session exists but cannot reach the full admission level.
+    expect((await response('/api/v1/auth/me')).status).toBe(200)
+    // The forced change unlocks and finishes the deployment initialization.
+    const changed = await response('/api/v1/auth/password', { method: 'PUT', body: JSON.stringify({ currentPassword: 'demo-admin-password', newPassword: 'initialized-demo-password' }) })
+    expect(changed.status).toBe(204)
+    expect((await (await response('/api/v1/auth/me')).json() as { passwordChangeRequired: boolean }).passwordChangeRequired).toBe(false)
   })
 
   test('persists password changes only after the actual current demo password is verified', async () => {

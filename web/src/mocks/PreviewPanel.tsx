@@ -10,7 +10,12 @@ import { useState } from "react";
 export const previewScenarios = [
 	{ id: "admin", label: "管理员", description: "已登录的管理员工作台" },
 	{ id: "operator", label: "操作员", description: "受限权限的已登录工作台" },
-	{ id: "login", label: "登录", description: "未登录状态" },
+	{ id: "login", label: "登录", description: "未登录状态（本地应急通道）" },
+	{
+		id: "sso-login",
+		label: "SSO 登录",
+		description: "OIDC 启用的配置驱动登录页",
+	},
 	{ id: "first-password", label: "首次改密", description: "需要设置首次密码" },
 	{ id: "expired", label: "会话过期", description: "已登录后会话失效" },
 	{ id: "unavailable", label: "服务不可用", description: "认证服务不可用" },

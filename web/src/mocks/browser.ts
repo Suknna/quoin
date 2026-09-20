@@ -87,12 +87,11 @@ function writeScenario(scenario: PreviewScenario): void {
 
 const handlerScenarioByPreview: Record<PreviewScenario, import("./handlers").MockScenario> = {
 	admin: "administrator", operator: "operator", login: "unauthenticated", "first-password": "password-change",
-		expired: "session-expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", "metrics-one": "metrics-one", "metrics-boundary": "metrics-boundary", empty: "empty", slow: "slow", conflict: "conflict",
+		expired: "session-expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", "metrics-one": "metrics-one", "metrics-boundary": "metrics-boundary", empty: "empty", "sso-login": "oidc", slow: "slow", conflict: "conflict",
 };
 const previewScenarioByHandler: Record<import("./handlers").MockScenario, PreviewScenario> = {
 	administrator: "admin", operator: "operator", unauthenticated: "login", "password-change": "first-password",
-		"session-expired": "expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", "metrics-one": "metrics-one", "metrics-boundary": "metrics-boundary", empty: "empty", slow: "slow", conflict: "conflict",
-
+		"session-expired": "expired", unavailable: "unavailable", maintenance: "maintenance", "platform-one": "platform-one", "platform-boundary": "platform-boundary", "metrics-one": "metrics-one", "metrics-boundary": "metrics-boundary", empty: "empty", oidc: "sso-login", slow: "slow", conflict: "conflict",
 };
 
 function toHandlerScenario(scenario: PreviewScenario): import("./handlers").MockScenario {

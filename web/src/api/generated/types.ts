@@ -113,21 +113,19 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 校验凭据并开启唯一可执行的认证流程
-         * @description 单入口认证：按凭据与账号初始化状态机械分流——未初始化的内置管理员进入
-         *     admin_initialize，其他未初始化用户进入 operator_initialize，
-         *     已初始化用户进入 login 二步验证（无可用收码渠道为 422 contact_required）。
-         *     响应体是认证流程投影；32-byte flow bearer 只通过 Set-Cookie 写入
-         *     __Host-quoin-flow，绝不出现在响应体。
+         * 单步本地登录（应急通道）
+         * @description 密码校验与完整会话签发在同一事务内完成（ADR-0010）：成功即 Set-Cookie 写入
+         *     __Host-quoin-session 并返回用户投影；外部（OIDC）账号与已过期的初始管理员
+         *     密码被确定性拒绝。登录成功与失败各落一行 auth.login.local 审计。
          */
-        post: operations["startAuthentication"];
+        post: operations["loginWithPassword"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/auth/flow": {
+    "/api/v1/auth/config": {
         parameters: {
             query?: never;
             header?: never;
@@ -135,10 +133,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 读取当前认证流程投影（刷新/断线恢复）
-         * @description 按 __Host-quoin-flow 绑定校验（pending、未过期、账号可用、auth_revision 一致、初始化状态与流程类别匹配）后返回最新投影；覆盖全部流程类别（含 contact_change 的暂存目标以 contacts 投影呈现）。flow bearer 不回传。
+         * 公开登录通道投影
+         * @description 登录页的配置驱动渲染来源（ADR-0010）：本地通道的启用/可见状态与 OIDC
+         *     按钮显示名/图标。不携带任何敏感配置——client_secret 与 secretsFile
+         *     路径永不出现。
          */
-        get: operations["readAuthenticationFlow"];
+        get: operations["readAuthConfig"];
         put?: never;
         post?: never;
         delete?: never;
@@ -147,19 +147,21 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/auth/flow/password": {
+    "/api/v1/auth/oidc/login": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
         /**
-         * 在初始化/恢复流程内设置正式密码
-         * @description 仅供初始化与恢复流程推进密码步骤；密码必须满足正式策略（422 validation_failed），失败尝试共享流程的有界冷却。
+         * 发起 OIDC 授权码跳转
+         * @description 生成 state/nonce/PKCE S256 并以 HMAC 签名的短时 __Host-quoin-oidc-state
+         *     cookie 携带往返凭据，302 到 IdP 授权端点；return_to 仅接受站内相对路径。
+         *     IdP 不可达时 302 回 /login?error=idp_unavailable。
          */
-        put: operations["setInitializationPassword"];
+        get: operations["beginOIDCLogin"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -167,112 +169,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/auth/flow/contacts": {
+    "/api/v1/auth/oidc/callback": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * OIDC 回调：换 code、验 ID Token、签发会话
+         * @description 后端完成 code 换 token（PKCE verifier）、ID Token 校验（iss/aud/exp/nonce）
+         *     与 identities(issuer,subject) 解析或 JIT 建档；token 用后即弃。成功 302 到
+         *     return_to 并写入 __Host-quoin-session；失败 302 到 /login?error=<稳定错误码>
+         *     （state_invalid/account_disabled/idp_unavailable/access_denied/login_rejected）。
+         */
+        get: operations["completeOIDCLogin"];
         put?: never;
-        /**
-         * 管理员初始化期间登记收码渠道
-         * @description 仅管理员初始化与 contact_change 流程可用；Operator 的收码渠道由
-         *     管理员经 setUserContacts 指派，流程内不可自行更换。每渠道至多一个目标。
-         *     contact_change 流程内该操作暂存替换目标（candidate）：现有已验证渠道保持
-         *     可用直至原子完成，重新暂存不同目标会使未决挑战失效。
-         */
-        post: operations["registerInitializationContact"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/flow/challenge": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 向指定收码渠道发送一次性验证码
-         * @description 投递未配置为 503；每流程重发冷却为 429。响应只含掩码投影。
-         */
-        post: operations["sendAuthenticationChallenge"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/flow/verify": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 校验一次性验证码
-         * @description login 流程验证成功即在同一事务签发正式 Session（completed=true 且返回
-         *     user），Set-Cookie 同时写入 __Host-quoin-session 并清除 __Host-quoin-flow；
-         *     初始化/恢复/contact_change 流程只标记验证通过（completed=false），会话在
-         *     各自的 complete 路径开启或提交。错误码为 422 invalid_code。
-         */
-        post: operations["verifyInitializationChallenge"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/flow/complete": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 完成初始化流程并开启账号
-         * @description 要求密码与 factorVerified（本流程内已验证收码渠道）齐备（422 initialization_required）；成功后 Set-Cookie 清除 __Host-quoin-flow，用户转为已初始化。contact_change 流程使用专用的 completeContactChange，不经本路径。
-         */
-        post: operations["completeInitialization"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/flow/delivery": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * 读取验证码投递配置
-         * @description 接受完整管理员 Session 或 admin_initialize 流程 Cookie；秘密值永不回传，响应只含引用名与配置。
-         */
-        get: operations["readAuthDelivery"];
-        /**
-         * 配置验证码投递通道与秘密引用
-         * @description 接受完整管理员 Session 或 admin_initialize 流程 Cookie。部署文件
-         *     拥有配置时冲突 409 deployment_owned；rowVersion 不匹配冲突 409
-         *     row_version_conflict。secrets 只写不读：引用名相同而值省略时保留已存值；
-         *     校验失败（通道缺失、sms 非 webhook、秘密引用不存在）为 422。
-         */
-        put: operations["configureAuthDelivery"];
         post?: never;
         delete?: never;
         options?: never;
@@ -314,56 +226,6 @@ export interface paths {
         get: operations["listOwnContacts"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/contact-change": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 管理员以密码证明开启自我换绑收码渠道流程
-         * @description 仅当前有效管理员 Session 可用。验证 currentPassword 后创建 contact_change
-         *     流程并经 Set-Cookie 签发 __Host-quoin-flow；响应体是流程投影（type=
-         *     contact_change）。替换目标随后经 registerInitializationContact 暂存于流程行
-         *     （candidate），sendAuthenticationChallenge/verifyInitializationChallenge 验证
-         *     暂存目标；现有已验证渠道在整个流程内保持可用，投递失败绝不把管理员锁在门外。
-         *     本流程不涉及改密。
-         */
-        post: operations["startContactChange"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/auth/contact-change/complete": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 原子完成换绑并结束当前管理员 Session
-         * @description 需要同一管理员 Session 与待完成 contact_change 流程 Cookie，并再次提交
-         *     currentPassword。验证通过后在同一事务把暂存目标提升为唯一生效收码渠道
-         *     （原渠道退出作用、版本语义按渠道投影呈现）并消费流程；这不是通用
-         *     completeInitialization 路径。成功 Set-Cookie 同时清除 __Host-quoin-session 与
-         *     __Host-quoin-flow：管理员必须重新完成密码与二级验证登录，旧 Session 与
-         *     未决流程立即失效。
-         */
-        post: operations["completeContactChange"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2305,7 +2167,34 @@ export interface components {
              */
             password: string;
         };
+        /** @description 单步本地登录结果（ADR-0010）；密码校验与受限会话语义见 POST /auth/login。 */
+        LoginResponse: {
+            /** @description 单步登录恒为 true；保留字段以与旧两步协议区分。 */
+            completed: boolean;
+            user: components["schemas"]["UserSummary"];
+        };
+        /** @description 登录页配置驱动渲染的公开投影（ADR-0010）；不含任何敏感配置。 */
+        AuthConfig: {
+            local: {
+                /** @description 本地应急通道是否可用。 */
+                enabled: boolean;
+                /** @description 登录页是否渲染本地表单；false 时 /login?local=1 与 POST 接口仍可用。 */
+                visible: boolean;
+            };
+            oidc: {
+                enabled: boolean;
+                /** @description SSO 按钮显示名；缺省用 issuer 主机名。 */
+                label?: string;
+                /** @description SSO 按钮图标 URL；可选。 */
+                iconUrl?: string;
+            };
+        };
         UserSummary: {
+            /**
+             * @description 登录来源——本地（应急通道）或外部 OIDC（identities 行派生，ADR-0010）。
+             * @enum {string}
+             */
+            authSource?: "local" | "oidc";
             id: components["schemas"]["LocatorId"];
             username: string;
             displayName: string;
@@ -2378,35 +2267,7 @@ export interface components {
             /** @description 本事务从有效变为撤销的 Session 数。 */
             revokedSessionCount: number;
         };
-        /** @description 认证流程的客户端投影（auth.Flow）；flow bearer 只经 Set-Cookie 传输，永不进入响应体。 */
-        AuthFlow: {
-            /**
-             * @description 流程类别，由凭据与账号状态机械决定：未初始化的内置管理员进入
-             *     admin_initialize，其他未初始化用户进入 operator_initialize，已初始化
-             *     用户进入 login；contact_change 是管理员的自我换绑流程：密码证明开启
-             *     流程，替换目标在流程内登记并验证（暂存于流程行，不触碰现有已验证目标），
-             *     原子完成后旧目标才失去作用——该流程不涉及改密。管理员找回由离线 CLI
-             *     设置临时密码完成，随后的正常登录按上述规则机械分类，不存在独立流程类别。
-             * @enum {string}
-             */
-            type: "admin_initialize" | "operator_initialize" | "login" | "contact_change";
-            user: components["schemas"]["UserSummary"];
-            /** @description 该用户当前收码渠道的掩码投影；从不含明文目标。 */
-            contacts: components["schemas"]["AuthFlowContact"][];
-            /** @description 流程密码步骤是否已完成；仅初始化流程消费该字段，login/contact_change 流程无语义。 */
-            passwordSet: boolean;
-            /**
-             * @description 本流程内是否已有通过 verify 的收码渠道（派生自 auth_flows.verified_contact_id，
-             *     非账户级渠道的 verified 状态）：初始化流程据此决定 OTP 或完成步骤，完成
-             *     端点同样以此为准（422 initialization_required）。login 流程在 verify 处
-             *     原子完成签发会话，挂起的 login 流程恒为 false；contact_change 恒为 false
-             *     并使用 candidate 判定。
-             */
-            factorVerified: boolean;
-            /** @description 流程与其未决挑战的统一失效时刻；过期后必须重新开始。 */
-            expiresAt: components["schemas"]["Timestamp"];
-        };
-        /** @description 用户收码联系方式的唯一客户端可见形状（auth.MaskedContact）。 */
+        /** @description 用户联系方式的唯一客户端可见形状（auth.MaskedContact）；ADR-0010 后仅作展示。 */
         AuthFlowContact: {
             id: components["schemas"]["LocatorId"];
             /** @enum {string} */
@@ -2415,32 +2276,10 @@ export interface components {
             maskedTarget: string;
             verified: boolean;
         };
-        SetFlowPasswordRequest: {
-            /** @description 初始化/恢复流程内设置的新正式密码；必须满足正式密码策略。 */
-            newPassword: string;
-        };
-        RegisterFlowContactRequest: {
-            /** @enum {string} */
-            channel: "email" | "sms";
-            /** @description 管理员初始化期间登记的收码目标；email 需恰好一个 @，sms 为可选 + 前缀的 5–20 位数字。 */
-            target: string;
-        };
-        SendFlowChallengeRequest: {
-            /** @description 目标 AuthFlowContact.id。 */
-            contactId: components["schemas"]["LocatorId"];
-        };
-        VerifyFlowChallengeRequest: {
-            code: string;
-        };
         VerifyFlowChallengeResult: {
             /** @description login 流程验证成功即完成会话签发（true，附 user）；初始化/恢复流程只标记验证通过（false）。 */
             completed: boolean;
             user?: components["schemas"]["UserSummary"];
-        };
-        /** @description 管理员换绑收码渠道的密码证明；start 与 complete 都必须重新提交当前密码。 */
-        ContactChangeRequest: {
-            /** @description 当前生效密码；按 NFC 规范化后按正式策略验证，错误与登录失败共享统一 401 与进程内冷却。 */
-            currentPassword: string;
         };
         /** @description 一条管理员指派的收码目标（auth.ContactInput）。 */
         ContactInput: {
@@ -2452,60 +2291,6 @@ export interface components {
         /** @description 供给完整的期望渠道集合（每渠道至多一个，重复渠道为 422）。 */
         SetUserContactsRequest: components["schemas"]["CommandBase"] & components["schemas"]["ExpectedRowVersion"] & {
             contacts: components["schemas"]["ContactInput"][];
-        };
-        /** @description 单个验证码投递通道；秘密字段只携带引用名，明文值只写不读。 */
-        AuthDeliveryChannel: {
-            /** @enum {string} */
-            kind: "smtp" | "webhook";
-            host?: string;
-            port?: number;
-            from?: string;
-            username?: string;
-            /** @description SMTP 密码在 secrets 中的引用名。 */
-            passwordRef?: string;
-            tlsMode?: string;
-            url?: string;
-            headers?: {
-                [key: string]: string;
-            };
-            /** @description 值为 secrets 中的引用名；引用必须存在（422）。 */
-            secretHeaders?: {
-                [key: string]: string;
-            };
-            encoding?: string;
-            fields?: {
-                [key: string]: string;
-            };
-            successField?: string;
-            successValue?: string;
-            allowPrivateCIDRs?: string[];
-            rootCaPem?: string;
-        };
-        /** @description 验证码投递配置；至少需要配置一个通道（422）。 */
-        AuthDeliveryConfiguration: {
-            email?: components["schemas"]["AuthDeliveryChannel"];
-            /** @description sms 只支持 webhook 投递。 */
-            sms?: components["schemas"]["AuthDeliveryChannel"];
-        };
-        AuthDeliveryView: {
-            configuration: components["schemas"]["AuthDeliveryConfiguration"];
-            /** @description 乐观并发前提；configureAuthDelivery 必须回传读取到的值。 */
-            rowVersion: number;
-            /**
-             * @description deployment 表示由部署文件拥有（只读，写入冲突 deployment_owned）。
-             * @enum {string}
-             */
-            source: "deployment" | "administrator";
-            /** @description 是否已有持久化配置；false 表示当前值只是部署默认投影。 */
-            configured: boolean;
-        };
-        AuthDeliveryUpdateRequest: {
-            configuration: components["schemas"]["AuthDeliveryConfiguration"];
-            /** @description 引用名 → 明文秘密；只写不读，缺失的引用保持已存值。 */
-            secrets?: {
-                [key: string]: string;
-            };
-            expectedRowVersion: number;
         };
         ErrorModel: {
             /** @description 稳定机器错误码（HTTP-ERROR-002）。 */
@@ -3850,6 +3635,8 @@ export type VersionedCommandRequest = components['schemas']['VersionedCommandReq
 export type EnableConnectionRequest = components['schemas']['EnableConnectionRequest'];
 export type CancelRequest = components['schemas']['CancelRequest'];
 export type LoginRequest = components['schemas']['LoginRequest'];
+export type LoginResponse = components['schemas']['LoginResponse'];
+export type AuthConfig = components['schemas']['AuthConfig'];
 export type UserSummary = components['schemas']['UserSummary'];
 export type PasswordChangeRequest = components['schemas']['PasswordChangeRequest'];
 export type SessionInfo = components['schemas']['SessionInfo'];
@@ -3858,20 +3645,10 @@ export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type ResetPasswordRequest = components['schemas']['ResetPasswordRequest'];
 export type ResetPasswordPayload = components['schemas']['ResetPasswordPayload'];
 export type SessionRevocationPayload = components['schemas']['SessionRevocationPayload'];
-export type AuthFlow = components['schemas']['AuthFlow'];
 export type AuthFlowContact = components['schemas']['AuthFlowContact'];
-export type SetFlowPasswordRequest = components['schemas']['SetFlowPasswordRequest'];
-export type RegisterFlowContactRequest = components['schemas']['RegisterFlowContactRequest'];
-export type SendFlowChallengeRequest = components['schemas']['SendFlowChallengeRequest'];
-export type VerifyFlowChallengeRequest = components['schemas']['VerifyFlowChallengeRequest'];
 export type VerifyFlowChallengeResult = components['schemas']['VerifyFlowChallengeResult'];
-export type ContactChangeRequest = components['schemas']['ContactChangeRequest'];
 export type ContactInput = components['schemas']['ContactInput'];
 export type SetUserContactsRequest = components['schemas']['SetUserContactsRequest'];
-export type AuthDeliveryChannel = components['schemas']['AuthDeliveryChannel'];
-export type AuthDeliveryConfiguration = components['schemas']['AuthDeliveryConfiguration'];
-export type AuthDeliveryView = components['schemas']['AuthDeliveryView'];
-export type AuthDeliveryUpdateRequest = components['schemas']['AuthDeliveryUpdateRequest'];
 export type ErrorModel = components['schemas']['ErrorModel'];
 export type ConflictErrorModel = components['schemas']['ConflictErrorModel'];
 export type FieldError = components['schemas']['FieldError'];
@@ -4283,7 +4060,7 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    startAuthentication: {
+    loginWithPassword: {
         parameters: {
             query?: never;
             header?: never;
@@ -4296,26 +4073,35 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 流程已创建；Set-Cookie 写入 __Host-quoin-flow（Secure HttpOnly SameSite=Lax Path=/，Expires 与流程 expiresAt 一致）。 */
+            /** @description 登录完成；Set-Cookie 写入 __Host-quoin-session（Secure HttpOnly SameSite=Lax Path=/）。passwordChangeRequired=true 的会话受限，须先完成 PUT /auth/password。 */
             200: {
                 headers: {
-                    /** @description 32-byte opaque flow bearer；必须包含 Secure、HttpOnly、SameSite=Lax、Path=/，不得包含 Domain。 */
+                    /** @description 32-byte opaque session bearer；必须包含 Secure、HttpOnly、SameSite=Lax、Path=/，不得包含 Domain。 */
                     "Set-Cookie"?: string;
                     "Cache-Control": components["headers"]["NoStoreCacheControl"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AuthFlow"];
+                    "application/json": components["schemas"]["LoginResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            /** @description 初始管理员密码已过期（initial_password_expired），须运维执行 quoin admin recover。 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
             422: components["responses"]["Unprocessable"];
             429: components["responses"]["RateLimited"];
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    readAuthenticationFlow: {
+    readAuthConfig: {
         parameters: {
             query?: never;
             header?: never;
@@ -4324,222 +4110,60 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 当前流程投影。 */
+            /** @description 登录通道投影。 */
             200: {
                 headers: {
                     "Cache-Control": components["headers"]["NoStoreCacheControl"];
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AuthFlow"];
+                    "application/json": components["schemas"]["AuthConfig"];
                 };
             };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    setInitializationPassword: {
+    beginOIDCLogin: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 登录完成后的站内回跳路径；非站内相对路径一律回退到 /。 */
+                return_to?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SetFlowPasswordRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description 密码步骤已记录；流程继续。 */
-            204: {
+            /** @description 跳转到 IdP 授权端点（或失败时 /login?error=<码>）。 */
+            302: {
                 headers: {
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            503: components["responses"]["ServiceUnavailable"];
         };
     };
-    registerInitializationContact: {
+    completeOIDCLogin: {
         parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RegisterFlowContactRequest"];
+            query?: {
+                code?: string;
+                state?: string;
+                error?: string;
             };
-        };
-        responses: {
-            /** @description 已登记渠道的掩码投影。 */
-            200: {
-                headers: {
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthFlowContact"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    sendAuthenticationChallenge: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SendFlowChallengeRequest"];
-            };
-        };
-        responses: {
-            /** @description 挑战已发送；返回目标渠道的掩码投影。 */
-            200: {
-                headers: {
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthFlowContact"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    verifyInitializationChallenge: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VerifyFlowChallengeRequest"];
-            };
-        };
-        responses: {
-            /** @description 验证结果；login 完成时附带 Set-Cookie（签发 Session 并清除流程 Cookie）。 */
-            200: {
-                headers: {
-                    /** @description login 完成时包含两条：签发 __Host-quoin-session（Secure HttpOnly SameSite=Lax Path=/）与清除 __Host-quoin-flow（已过期）。 */
-                    "Set-Cookie"?: string;
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["VerifyFlowChallengeResult"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    completeInitialization: {
-        parameters: {
-            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description 流程完成；Set-Cookie 清除 __Host-quoin-flow。 */
-            204: {
+            /** @description 成功回跳 return_to（写会话 cookie）；失败回跳 /login?error=<码>（清理 state cookie）。 */
+            302: {
                 headers: {
-                    /** @description 清除 __Host-quoin-flow（已过期；保持 Secure、HttpOnly、SameSite=Lax、Path=/ 且无 Domain）。 */
-                    "Set-Cookie"?: string;
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    readAuthDelivery: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 当前投递配置投影（含 rowVersion 乐观并发前提）。 */
-            200: {
-                headers: {
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthDeliveryView"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    configureAuthDelivery: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AuthDeliveryUpdateRequest"];
-            };
-        };
-        responses: {
-            /** @description 已保存配置的新投影（source=administrator，rowVersion 递增）。 */
-            200: {
-                headers: {
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthDeliveryView"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["Unprocessable"];
-            503: components["responses"]["ServiceUnavailable"];
         };
     };
     touchSessionActivity: {
@@ -4585,70 +4209,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-        };
-    };
-    startContactChange: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ContactChangeRequest"];
-            };
-        };
-        responses: {
-            /** @description contact_change 流程已创建；Set-Cookie 写入 __Host-quoin-flow。 */
-            200: {
-                headers: {
-                    /** @description 32-byte opaque flow bearer；必须包含 Secure、HttpOnly、SameSite=Lax、Path=/，不得包含 Domain。 */
-                    "Set-Cookie"?: string;
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthFlow"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
-        };
-    };
-    completeContactChange: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ContactChangeRequest"];
-            };
-        };
-        responses: {
-            /** @description 换绑已提交；Set-Cookie 清除 __Host-quoin-session 与 __Host-quoin-flow（均已过期）。 */
-            204: {
-                headers: {
-                    /** @description 两条：清除 __Host-quoin-session 与清除 __Host-quoin-flow（均保持 Secure、HttpOnly、SameSite=Lax、Path=/ 且无 Domain）。 */
-                    "Set-Cookie"?: string;
-                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            422: components["responses"]["Unprocessable"];
-            429: components["responses"]["RateLimited"];
-            503: components["responses"]["ServiceUnavailable"];
         };
     };
     logout: {
