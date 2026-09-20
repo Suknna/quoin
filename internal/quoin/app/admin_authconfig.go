@@ -10,6 +10,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -38,6 +39,11 @@ func (application *apiServer) getAdminAuthConfig(ctx context.Context, input *aut
 	}
 	_ = session
 	config := application.authnConfig
+	if config == nil {
+		// The section is optional; the zero value projects the same defaults
+		// (local enabled+visible, OIDC off) as the nil-tolerant resolvers.
+		config = &contract.QuoinAuthenticationConfig{}
+	}
 	yes, no := "已启用", "已关闭"
 	value := func(enabled bool) string {
 		if enabled {
